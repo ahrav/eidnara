@@ -2,6 +2,10 @@
 # Frozen schedule: odd pairs run A then B, even pairs run B then A, where A is the
 # baseline binary and B is the candidate. Every run is a fresh process.
 set -euo pipefail
+# `build_revision` runs inside `$(...)`; without this, bash drops `errexit` in
+# command substitutions and a failed build would go unnoticed until the driver
+# is missing.
+shopt -s inherit_errexit
 
 TOOLCHAIN="${EIDNARA_TOOLCHAIN:-1.98}"
 MICRO_SAMPLES="${EIDNARA_MICRO_SAMPLES:-200}"
@@ -30,23 +34,6 @@ repo_root() {
   git rev-parse --show-toplevel
 }
 
-# x86 exposes `model name`; arm64 exposes only implementer/part codes.
-cpu_model() {
-  local model
-  model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')
-  if [ -n "$model" ]; then
-    echo "$model"
-    return
-  fi
-  awk -F': *' '
-    /^CPU implementer/ && !imp { imp = $2 }
-    /^CPU part/ && !part { part = $2 }
-    /^CPU variant/ && !var { var = $2 }
-    /^CPU revision/ && !rev { rev = $2 }
-    END { printf "implementer %s part %s variant %s revision %s", imp, part, var, rev }
-  ' /proc/cpuinfo
-}
-
 # The detached worktree and separate target directory keep the caller's working
 # tree and build cache untouched. Prints the built binary path.
 build_revision() {
@@ -54,7 +41,7 @@ build_revision() {
   local tree="$scratch/worktree-$label"
   git worktree add --detach --quiet "$tree" "$sha"
   (
-    cd "$tree"
+    cd "$tree" || exit 1
     cargo "+$TOOLCHAIN" build --release -p daemon --features "$FEATURES" \
       --example "$EXAMPLE" --locked \
       --target-dir "$scratch/target-$label" >&2
@@ -124,7 +111,6 @@ write_provenance() {
     echo "  \"micro_samples\": $MICRO_SAMPLES,"
     echo "  \"transform_samples\": $TRANSFORM_SAMPLES,"
     echo "  \"runs\": $RUNS,"
-    echo "  \"cpu_model\": \"$(cpu_model)\","
     echo "  \"nproc\": $(nproc),"
     echo "  \"kernel\": \"$(uname -sr)\","
     echo "  \"schedule\": $schedule,"

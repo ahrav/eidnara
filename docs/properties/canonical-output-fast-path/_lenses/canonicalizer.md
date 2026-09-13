@@ -46,7 +46,7 @@ at this HEAD. Every check in this inventory has status `unaudited`.
 | [Single-serialization test][once] | Two nested `Counted` values increment one shared counter; the test asserts `count.get() == 2` and literal output bytes. There is no custom assertion message. It does not count root visits or error-prefix visits separately. | unaudited |
 | [Nested-scalar test][scalars] | For each scalar/container fixture, `encode(shell)` equals `to_vec(to_value(shell))`; direct struct serialization must differ. There is no custom assertion message. | unaudited |
 | [Prefix and escaped-key test][keys] | Both the `Value` and reversed-map sources equal the `Value` bytes; direct reversed serialization must differ. Assertion context is `{case}`. It does not inspect a permutation flag. | unaudited |
-| [Allocation test][alloc-check] | For 1 versus 65 retained-original blocks, `(large_events - small_events) / 64 <= 8`, plus value-reference byte equality. The message is `{per_block} allocation events per passthrough block (small {small_events}, large {large_events})`. The [allocator][alloc-counter] counts allocation/reallocation events, not sizes or allocation identity. | unaudited |
+| [Allocation tests][alloc-check] | For 1 versus 65 retained-original blocks, `(large - small) / 64 <= 8` allocation events, plus value-reference byte equality; and for every declared population, returned-buffer provenance by pointer and size, exactly one exact-N allocation, and release of the serialization buffer found by its root allocation. The [recorder][alloc-counter] records pointers and sizes per event and answers growth-chain, release, and root queries. | unaudited |
 | [Literal shell/segment test][shells] | Original, latent-edited, typed, and block-edited shells match literal bytes, SHA-256, identity text, measured length, and actual prepared-segment writes. There are no custom assertion messages. | unaudited |
 | [Frozen-corpus test][corpus] | Retained and fully typed shells match `to_vec(to_value(message))` and prepared-frame bytes. Pairwise block identity digests match structural equality. There are no custom assertion messages. | unaudited |
 | [Constructor source guard][source-guard] | The constructor text excludes `serde_json::to_value`; fallback text requires one lazy index initialization and one receipt-helper call and excludes the listed alternate lookup/receipt expressions. There are no custom assertion messages. It does not inspect traversal count inside `encode`. | unaudited |
@@ -457,31 +457,31 @@ No tests, benchmarks, builds, or implementation verification gates run here.
 [b1]: ../../hot-path-optimization/latency-audit/catalog.md#derived-artifacts-are-ownership-independent
 [b1-evidence]: ../../hot-path-optimization/latency-audit/evidence/derived-artifacts-are-ownership-independent.md#canonical-served-bytes-and-fingerprint-identity
 [b1-checks]: ../../hot-path-optimization/latency-audit/existing-checks.md#shared-input-equivalence
-[span-hooks]: ../../../../crates/daemon/src/served_json.rs#L24-L81
-[copy]: ../../../../crates/daemon/src/served_json.rs#L84-L109
-[entry]: ../../../../crates/daemon/src/served_json.rs#L111-L119
-[encode]: ../../../../crates/daemon/src/served_json.rs#L121-L142
-[sort]: ../../../../crates/daemon/src/served_json.rs#L144-L164
-[once]: ../../../../crates/daemon/src/served_json.rs#L170-L193
-[scalars]: ../../../../crates/daemon/src/served_json.rs#L195-L215
-[keys]: ../../../../crates/daemon/src/served_json.rs#L217-L252
-[alloc-counter]: ../../../../crates/daemon/tests/served_json_passthrough_allocations.rs#L10-L32
-[alloc-check]: ../../../../crates/daemon/tests/served_json_passthrough_allocations.rs#L34-L86
-[constructor]: ../../../../crates/daemon/src/transform.rs#L155-L224
-[transform-entry]: ../../../../crates/daemon/src/transform.rs#L1771-L1819
-[pending-caller]: ../../../../crates/daemon/src/transform.rs#L6690-L6719
-[cache-branch]: ../../../../crates/daemon/src/transform.rs#L10405-L10432
-[rendered-caller]: ../../../../crates/daemon/src/transform.rs#L11263-L11315
-[shells]: ../../../../crates/daemon/src/transform.rs#L13713-L13757
-[corpus]: ../../../../crates/daemon/src/transform.rs#L13759-L13794
-[source-guard]: ../../../../crates/daemon/src/transform.rs#L13942-L13969
-[cache-check]: ../../../../crates/daemon/src/transform.rs#L28295-L28320
-[host-caller]: ../../../../crates/daemon/src/lib.rs#L8424-L8499
-[defaults]: ../../../../crates/daemon/src/config.rs#L116-L125
-[segments]: ../../../../crates/daemon/src/dispatch.rs#L41-L72
-[prepared-checks]: ../../../../crates/daemon/tests/prepared_output.rs#L131-L234
-[message-ser]: ../../../../crates/memory-store/src/lib.rs#L99-L162
-[block-ser]: ../../../../crates/memory-store/src/lib.rs#L232-L279
-[extras]: ../../../../crates/memory-store/src/lib.rs#L55-L56
-[block-types]: ../../../../crates/memory-store/src/lib.rs#L326-L457
-[serde-feature]: ../../../../Cargo.toml#L47
+[span-hooks]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L24-L81
+[copy]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L84-L109
+[entry]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L111-L119
+[encode]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L121-L142
+[sort]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L144-L164
+[once]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L170-L193
+[scalars]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L195-L215
+[keys]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L217-L252
+[alloc-counter]: https://github.com/ahrav/eidnara/blob/073f578efcb1bb08d54eac3b54c0f837d2f0c857/crates/daemon/tests/support/alloc_recorder.rs#L205-L351
+[alloc-check]: https://github.com/ahrav/eidnara/blob/073f578efcb1bb08d54eac3b54c0f837d2f0c857/crates/daemon/tests/served_json_passthrough_allocations.rs#L37-L163
+[constructor]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L155-L224
+[transform-entry]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L1771-L1819
+[pending-caller]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L6690-L6719
+[cache-branch]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L10405-L10432
+[rendered-caller]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L11263-L11315
+[shells]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L13713-L13757
+[corpus]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L13759-L13794
+[source-guard]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L13942-L13969
+[cache-check]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L28295-L28320
+[host-caller]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/lib.rs#L8424-L8499
+[defaults]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/config.rs#L116-L125
+[segments]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/dispatch.rs#L41-L72
+[prepared-checks]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/tests/prepared_output.rs#L131-L234
+[message-ser]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/memory-store/src/lib.rs#L99-L162
+[block-ser]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/memory-store/src/lib.rs#L232-L279
+[extras]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/memory-store/src/lib.rs#L55-L56
+[block-types]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/memory-store/src/lib.rs#L326-L457
+[serde-feature]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/Cargo.toml#L47

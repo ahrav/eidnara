@@ -25,6 +25,7 @@ use memory_store::{MemoryStore, WireMessage};
 use serde_json::{Value, json};
 use served_output_fixtures::{
     Population, declaration_order_equals_canonical, populations, reference_bytes,
+    serialization_buffer_root_bytes,
 };
 
 #[global_allocator]
@@ -38,7 +39,7 @@ const TRANSFORM_WARMUP: usize = 3;
 const USAGE: &str = "\
 canonical_output_evidence [--out PATH] [--label NAME] [--commit SHA]
                           [--micro-samples N] [--transform-samples N]
-Writes one JSON evidence document (kind canonical-output-evidence/v1) to PATH or stdout.";
+Writes one JSON evidence document (kind canonical-output-evidence/v2) to PATH or stdout.";
 
 struct Options {
     out: Option<String>,
@@ -145,29 +146,35 @@ fn percentile(sorted: &[u128], fraction: f64) -> u128 {
 }
 
 /// Per-sample `setup` output and each result's drop stay outside both clocks.
+///
+/// The CPU window encloses the wall window, so `cpu_ns_total` includes
+/// clock-read cost. `clock_overhead_ns` is the mean CPU time of an empty call
+/// measured the same way; `cpu_ns_total - samples * clock_overhead_ns`
+/// estimates `call` alone.
 fn time_cell<I, T>(
     warmup: usize,
     samples: usize,
     mut setup: impl FnMut() -> I,
-    mut call: impl FnMut(I) -> T,
+    mut call: impl FnMut(&mut I) -> T,
 ) -> Value {
     for _ in 0..warmup {
-        black_box(call(setup()));
+        let mut input = setup();
+        black_box(call(&mut input));
     }
     let mut elapsed = Vec::with_capacity(samples);
     let mut cpu_total = 0u128;
     let mut wall_total = 0u128;
     for _ in 0..samples {
-        let input = setup();
-        let cpu_start = process_cpu_ns();
-        let start = Instant::now();
-        let value = call(input);
-        let wall = start.elapsed().as_nanos();
-        cpu_total += process_cpu_ns() - cpu_start;
+        let mut input = setup();
+        let (value, wall, cpu) = timed(|| call(&mut input));
+        cpu_total += cpu;
         wall_total += wall;
         elapsed.push(wall);
         drop(black_box(value));
+        drop(input);
     }
+    let overhead: u128 =
+        (0..samples.max(1)).map(|_| timed(|| ()).2).sum::<u128>() / samples.max(1) as u128;
     let mut sorted = elapsed.clone();
     sorted.sort_unstable();
     let mean = if sorted.is_empty() {
@@ -185,8 +192,19 @@ fn time_cell<I, T>(
         "mean_ns": mean,
         "cpu_ns_total": cpu_total,
         "wall_ns_total": wall_total,
+        "clock_overhead_ns": overhead,
         "elapsed_ns": elapsed,
     })
+}
+
+/// Returns `(value, wall_ns, cpu_ns)`; the CPU clock is read first and last.
+fn timed<T>(f: impl FnOnce() -> T) -> (T, u128, u128) {
+    let cpu_start = process_cpu_ns();
+    let start = Instant::now();
+    let value = f();
+    let wall = start.elapsed().as_nanos();
+    let cpu = process_cpu_ns() - cpu_start;
+    (value, wall, cpu)
 }
 
 fn ledger_json(ledger: &Ledger) -> Value {
@@ -227,9 +245,12 @@ fn allocation_cell(population: Population) -> Value {
         .iter()
         .filter(|event| matches!(event, Event::Alloc { .. }))
         .count();
-    let storage_outside_chain = canonicalizer
-        .allocations_at_least_outside(output_bytes, ptr)
-        .len();
+    let serialization_buffers =
+        canonicalizer.grown_from_root_outside(serialization_buffer_root_bytes(), output_bytes, ptr);
+    let serialization_buffer_released = serialization_buffers
+        .iter()
+        .map(|buffer| canonicalizer.was_released(*buffer))
+        .collect::<Vec<bool>>();
     let logical_reorder_output_bytes = match provenance {
         BufferProvenance::FreshExactSizeAllocation => output_bytes,
         BufferProvenance::GrowthChain | BufferProvenance::Unattributed => 0,
@@ -256,7 +277,8 @@ fn allocation_cell(population: Population) -> Value {
             "return_provenance": format!("{provenance:?}"),
             "return_growth_chain_events": chain.len(),
             "output_sized_allocations": output_sized_allocations,
-            "output_sized_storage_outside_chain": storage_outside_chain,
+            "serialization_buffers_outside_chain": serialization_buffers.len(),
+            "serialization_buffer_released": serialization_buffer_released,
             "logical_reorder_output_bytes": logical_reorder_output_bytes,
         },
         "full_constructor": {
@@ -277,7 +299,7 @@ fn micro_timing_cells(samples: usize) -> Vec<Value> {
                 samples / 10,
                 samples,
                 || &message,
-                |message| daemon::served_json::canonical_served_bytes_for_test(black_box(message)),
+                |message| daemon::served_json::canonical_served_bytes_for_test(black_box(*message)),
             ),
         }));
         cells.push(json!({
@@ -286,8 +308,11 @@ fn micro_timing_cells(samples: usize) -> Vec<Value> {
             "timing": time_cell(
                 samples / 10,
                 samples,
-                || message.clone(),
-                |message| daemon::transform::served_message_for_test(black_box(message)),
+                || Some(message.clone()),
+                |message| {
+                    let message = message.take().expect("one clone per sample");
+                    daemon::transform::served_message_for_test(black_box(message))
+                },
             ),
         }));
     }
@@ -357,7 +382,7 @@ fn transform_cells(samples: usize) -> (Vec<Value>, Vec<Value>) {
                 TRANSFORM_WARMUP.min(samples),
                 samples,
                 bench_internals::OutputCache::default,
-                |cache| transform_pass(&store, &req, &ctx, &cache),
+                |cache| transform_pass(&store, &req, &ctx, cache),
             ),
         }));
 
@@ -388,7 +413,7 @@ fn main() {
     let (transform_timing, frequencies) = transform_cells(options.transform_samples);
     timing.extend(transform_timing);
     let document = json!({
-        "kind": "canonical-output-evidence/v1",
+        "kind": "canonical-output-evidence/v2",
         "label": options.label,
         "provenance": {
             "commit": options.commit,
@@ -400,7 +425,7 @@ fn main() {
             "os": std::env::consts::OS,
             "cpu_model": cpu_model(),
             "available_parallelism": std::thread::available_parallelism().map(|n| n.get()).ok(),
-            "allocator": "System behind a thread-owned recording wrapper; recording is disabled during timing cells, and the wrapper's per-allocation check applies equally to baseline and candidate binaries",
+            "allocator": "System behind a thread-owned recording wrapper; recording is disabled during timing cells, but every allocator call still pays the wrapper's owner check, so a candidate that removes allocator calls also removes that per-call cost; compare only binaries built from the same recorder source",
             "pid": std::process::id(),
             "unix_time_s": std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -434,5 +459,58 @@ fn main() {
     match options.out {
         Some(path) => std::fs::write(&path, text).unwrap_or_else(|err| panic!("{path}: {err}")),
         None => println!("{text}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    const DROP_COST: Duration = Duration::from_millis(20);
+
+    struct SlowDrop;
+
+    impl SlowDrop {
+        fn probe(&self) -> u8 {
+            1
+        }
+    }
+
+    impl Drop for SlowDrop {
+        fn drop(&mut self) {
+            std::thread::sleep(DROP_COST);
+        }
+    }
+
+    #[test]
+    fn time_cell_keeps_the_setup_value_drop_outside_the_clocks() {
+        let cell = time_cell(
+            0,
+            3,
+            || SlowDrop,
+            |input: &mut SlowDrop| black_box(input).probe(),
+        );
+        let max_ns = cell["max_ns"].as_u64().expect("max_ns");
+        assert!(
+            max_ns < DROP_COST.as_nanos() as u64,
+            "a sample took {max_ns} ns, so the setup value dropped inside the clocks"
+        );
+    }
+
+    /// An empty call's per-sample CPU time is the clock overhead itself, so the
+    /// reported calibration must be the same order of magnitude.
+    #[test]
+    fn time_cell_clock_overhead_matches_the_cpu_cost_of_an_empty_sample() {
+        const SAMPLES: u64 = 50;
+        let cell = time_cell(0, SAMPLES as usize, || (), |_: &mut ()| ());
+        let cpu_per_sample = cell["cpu_ns_total"].as_u64().expect("cpu_ns_total") / SAMPLES;
+        let overhead = cell["clock_overhead_ns"]
+            .as_u64()
+            .expect("clock_overhead_ns");
+        assert!(
+            cpu_per_sample <= 4 * overhead.max(50) && overhead <= 4 * cpu_per_sample.max(50),
+            "empty sample cpu {cpu_per_sample} ns and reported clock overhead {overhead} ns disagree"
+        );
     }
 }

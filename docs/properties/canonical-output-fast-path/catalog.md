@@ -34,10 +34,11 @@ harness.
 
 S1 through S5 are **Exercised: yes** after plan U1 landed the copy elision;
 S6 and C2 are **partial**; S7 and C1 remain **not yet**. The U0 harness at
-`c1dafa76` captured the [baseline record](evidence/u0-baseline-measurement.md)
-and the [U1 paired record](evidence/u1-copy-elision-paired-measurement.md)
-compares it against candidate `8a1fb166`. Inspected pre-U0 tests remain
-**unaudited**.
+`073f578e` captured the [baseline record](evidence/u0-baseline-measurement.md).
+The [U1 paired record](evidence/u1-copy-elision-paired-measurement.md)
+compares candidate `8a1fb166` against the earlier harness tip `2a415271`; it
+predates the `073f578e` harness correction and has not been rerun on it.
+Inspected pre-U0 tests remain **unaudited**.
 Confidence describes the evidence for the obligation and its reachability,
 not proof that an implementation satisfies it.
 
@@ -247,15 +248,18 @@ shows zero exact-N allocations for every canonical-miss population, one
 unchanged exact-N B allocation for the unordered `typed_shell` and
 `one_edited_block` populations, and a constructor peak at or below baseline
 for every population, with an always-copy build rejected as a negative control.
+That record was measured on the pre-`073f578e` harness.
 Guarantee: A successful encode with only identity field permutations returns
 A by ownership transfer without B or replacement output-sized scratch.
 Check: `always` - Independently establish identity permutations, then require
 the returned Vec to retain A's allocation lifetime, pointer, length, and
 capacity from the post-serialization boundary, without shrink or reallocation.
 Require zero B allocation attempts and zero logical reorder-output bytes.
-An isolated absolute allocation/size ledger must attribute all output-sized
-allocations to A's growth chain, excluding replacement scratch. Pointer
-equality or the existing allocation slope alone is insufficient.
+An isolated absolute allocation/size ledger must attribute every byte buffer
+that reaches N to A's growth chain, excluding replacement scratch; span
+metadata and sort scratch also reach N for small outputs and are told apart
+by the root allocation their growth chain starts from, not by size alone.
+Pointer equality or the existing allocation slope alone is insufficient.
 Fault/timing angle: Hidden allocate/copy/discard work can preserve bytes and
 the returned pointer while defeating the optimization.
 Required faults and enabling state: A cold canonical miss with a large scalar

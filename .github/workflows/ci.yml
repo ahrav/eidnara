@@ -522,10 +522,12 @@ jobs:
         if: matrix.shard == 2
         # Exercises every allocation-cell assertion and population label so the
         # retained harness cannot drift between its baseline and candidate runs.
-        run: >
-          cargo +1.98 run -p daemon --features bench-internals,test-support --locked
-          --example canonical_output_evidence --
-          --micro-samples 2 --transform-samples 1 --out "${{ runner.temp }}/canonical-output-smoke.json"
+        # `--workspace --all-features` matches the nextest build above, so the
+        # example reuses that dependency graph instead of compiling a second one.
+        run: |
+          cargo +1.98 build --workspace --all-features --locked --example canonical_output_evidence
+          target/debug/examples/canonical_output_evidence \
+            --micro-samples 2 --transform-samples 1 --out "${{ runner.temp }}/canonical-output-smoke.json"
 
   test:
     name: test (1.98)

@@ -18,9 +18,13 @@ canonicalizer change and the constructor's early `Arc` conversion.
 - Schedule: `scripts/perf/canonical-output-paired-runs.sh paired 2a415271 8a1fb166 <dir>`;
   odd pairs run A then B, even pairs run B then A, every run a fresh release
   process built from a detached worktree of its own revision.
-- Baseline record: [u0-baseline-measurement](u0-baseline-measurement.md),
-  captured at `c1dafa76`. The A leg here is rebuilt from `2a415271` so both
-  legs share one recorder; its allocation ledgers equal the `c1dafa76` record.
+- Baseline record: [u0-baseline-measurement](u0-baseline-measurement.md).
+  When this record was made it was the `c1dafa76` capture; the A leg here is
+  rebuilt from `2a415271` so both legs share one recorder, and its allocation
+  ledgers equal that capture. The baseline was later regenerated at `073f578e`
+  on a corrected harness (root-identified serialization buffer, setup drops
+  outside the clocks, `v2` documents); this record predates that correction
+  and has not been rerun on it.
 - Production change: `crates/daemon/src/served_json.rs` (`sort_fields` reports
   change, `sort_all_fields` aggregates without short-circuiting, `finalize`
   returns A or copies into B) and `crates/daemon/src/transform.rs`
@@ -190,9 +194,10 @@ the `Arc` copy, block-receipt strings, and identity formatting; the early
 ## What a test must construct
 
 Later changes to the canonicalizer or constructor rerun
-`scripts/perf/canonical-output-paired-runs.sh paired 2a415271 <candidate> <out-dir>`
-and compare against this record's B column. The A leg must stay on `2a415271`,
-not `c1dafa76`, so both legs share the recorder described above.
+`scripts/perf/canonical-output-paired-runs.sh paired <merge-base> <candidate> <out-dir>`
+with the candidate's merge base as the A leg, so both legs share one harness,
+and compare against this record's B column only after this record itself has
+been rerun on the corrected `073f578e` harness.
 
 ## Investigation log
 
