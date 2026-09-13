@@ -560,8 +560,14 @@ impl SearchSelection {
             open_directory(&home)?;
             return self.remove_family_dirs(&home);
         }
-        let certificate: Bootstrap = serde_json::from_slice(&certificate_bytes(&home)?)
-            .map_err(|_| BuildError::Invalid("bootstrap corrupt"))?;
+        let bytes = match certificate_bytes(&home) {
+            Ok(bytes) => bytes,
+            Err(BuildError::Invalid(_)) => return Ok(Reclaimed::Uncertified),
+            Err(error) => return Err(error),
+        };
+        let Ok(certificate) = serde_json::from_slice::<Bootstrap>(&bytes) else {
+            return Ok(Reclaimed::Uncertified);
+        };
         self.remove_family(digest, &certificate)
     }
 

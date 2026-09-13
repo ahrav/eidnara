@@ -1385,6 +1385,14 @@ fn sweep_reclaims_unreferenced_families_and_retains_selected_protected_and_lease
         root.path().join("search-lifecycle/abandoned-intent.json"),
     )
     .unwrap();
+    // A truncated certificate proves nothing, so the orphan is retained and the sweep goes on.
+    let certificate = family(&partial_digest).join("bootstrap.json");
+    let bytes = std::fs::read(&certificate).unwrap();
+    std::fs::write(&certificate, &bytes[..bytes.len() / 2]).unwrap();
+    let report = selection.sweep().unwrap();
+    assert_eq!((report.removed, report.retained), (0, 2));
+    assert!(family(&partial_digest).is_dir());
+    std::fs::write(&certificate, &bytes).unwrap();
     let report = selection.sweep().unwrap();
     assert_eq!((report.removed, report.retained), (1, 1));
     assert!(!family(&partial_digest).exists());
