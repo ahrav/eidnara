@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use host_runtime::generation::{CurrentProfile, GenerationStore};
@@ -40,6 +41,16 @@ pub struct ReplacementSpec {
     pub capture: SourceHoldBounds,
     pub episode: EpisodeBounds,
     pub seed: SeedBounds,
+    pub retirement: RetirementBounds,
+}
+
+/// `object_registry` is append-only, so the retirement census grows with corpus history.
+/// Size these bounds for the whole corpus, not for one batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetirementBounds {
+    pub max_obligations: NonZeroUsize,
+    /// Encoded kind, identity, and digest bytes; payloads are never read.
+    pub max_obligation_bytes: NonZeroU64,
 }
 
 impl ReplacementSpec {
@@ -98,9 +109,13 @@ impl ReplacementSpec {
         let wait = self
             .seed
             .attempt_wait
-            .as_millis()
-            .checked_mul(u128::from(checkpoints - 1) * u128::from(intent.episodes.allowance))
-            .and_then(|wait| u64::try_from(wait).ok())
+            .checked_mul(checkpoints)
+            .and_then(|wait| wait.checked_mul(intent.episodes.allowance))
+            .and_then(|wait| {
+                // `quiesce` arms the full `Duration` each attempt, so round the total up, never each wait down.
+                let whole = u64::try_from(wait.as_millis()).ok()?;
+                whole.checked_add(u64::from(wait.subsec_nanos() % 1_000_000 != 0))
+            })
             .ok_or(BuildError::Invalid("checkpoint wait"))?;
         let rows = batch
             .max_local_mutations
@@ -111,7 +126,7 @@ impl ReplacementSpec {
         let peak_rows = (batch.persist.max_records.get() as u64)
             .checked_add(page.max_rows.get() as u64)
             .ok_or(BuildError::Invalid("row charge overflow"))?;
-        let pending_width = (2 * 64 + "pending".len() + 3 * std::mem::size_of::<i64>()) as u64;
+        let pending_width = (2 * 64 + "pending".len() + 4 * std::mem::size_of::<i64>()) as u64;
         let pending_bytes = pending_width
             .checked_add(self.generation.generation_id.len() as u64)
             .and_then(|width| width.checked_mul(batch.max_pending.get() as u64))
@@ -234,6 +249,11 @@ pub enum BuildError {
 
 /// Holds the lifecycle transaction lock and any open or closed replacement file lease.
 /// Dropping this owner releases locks, not durable intent or kernel source holds.
+///
+/// The outbox consumer registered by `run` belongs to `intent.consumer`, not to one attempt:
+/// `cleanup` keeps it registered so a replayed registration receipt still names a live consumer.
+/// While registered, its checkpoint bounds `prune_outbox` and descriptor-evidence reclamation,
+/// so the operation that ends the intent must also deregister or abandon the consumer.
 pub struct ReplacementBuilder<'a> {
     kernel: &'a KernelStore,
     gate: &'a HookGate,
@@ -384,9 +404,23 @@ impl<'a> ReplacementBuilder<'a> {
         })
     }
 
+    /// Calls `barrier` at each control-record write barrier of this builder's lifecycle handle.
+    #[cfg(feature = "test-support")]
+    pub fn with_lifecycle_write_barrier_for_test(
+        self,
+        barrier: impl Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            lifecycle: self.lifecycle.with_write_barrier_for_test(barrier),
+            ..self
+        }
+    }
+
     /// Runs one attempt under `budget` and the intent's original allowance and deadline.
     /// On failure, retain the returned owner until cleanup succeeds or ownership is handed off.
     /// Synchronous filesystem and COMMIT completion require healthy I/O; cancellation cannot preempt them.
+    /// The catch-up episode observes a caller interrupt at its next event boundary; only `budget`'s deadline ends a kernel wait inside the episode.
+    /// A revoked gate grant never cancels `budget`.
     pub fn build(
         mut self,
         budget: &EvalBudget,
@@ -680,8 +714,10 @@ impl<'a> ReplacementBuilder<'a> {
             kernel_incarnation_id: mutation.kernel_incarnation_id.clone(),
             generation_id: Some(self.spec.generation.generation_id.clone()),
         };
+        // `EvalBudget::cancel` reaches every clone, so the episode gets its own interrupt.
+        let episode = EvalBudget::new(Some(run.deadline), Arc::new(AtomicBool::new(false)));
         let report = SearchCatchUp::new(self.kernel, projection)
-            .with_budget(run.budget.clone())
+            .with_budget(episode.clone())
             .run_episode_toward(
                 &consumer,
                 &self.spec.episode,
@@ -690,7 +726,7 @@ impl<'a> ReplacementBuilder<'a> {
                 &mut |event| {
                     observer(BuildEvent::CatchUp(event));
                     if run.check().is_err() {
-                        run.budget.cancel();
+                        episode.cancel();
                     }
                 },
             )?;
@@ -817,14 +853,23 @@ impl<'a> ReplacementBuilder<'a> {
         let binding = self.binding()?;
         let capture = self.capture.as_ref().expect("captured hold");
         let mut rows = BTreeMap::<String, SourceRow>::new();
-        let mut remaining_rows = self.spec.episode.batch.persist.max_records.get();
-        let mut remaining_bytes = self.spec.episode.batch.max_source_bytes.get() as u64;
+        // `apply_batch` refuses more mutations than `max_local_mutations`, so the smaller record
+        // or mutation bound caps the rows retained before that write.
+        let batch = &self.spec.episode.batch;
+        let mut remaining_rows = batch
+            .persist
+            .max_records
+            .get()
+            .min(batch.max_local_mutations.get());
+        let mut remaining_bytes = batch.max_source_bytes.get() as u64;
         // The grant reserves the inventory plus one page, including overlays at full capacity.
         for &window in windows {
             if matches!(window, ExportWindow::CatchUp { through } if through == capture.snapshot) {
                 continue;
             }
             let mut cursor = None;
+            // `max_source_encoded_bytes` applies independently to each export window.
+            let mut remaining_encoded = self.spec.episode.max_source_encoded_bytes.get();
             for page_number in 0..self.spec.episode.max_source_pages.get() {
                 run.check()?;
                 self.check_incarnation(&run.budget)?;
@@ -832,6 +877,9 @@ impl<'a> ReplacementBuilder<'a> {
                 bounds.max_decoded_bytes = bounds
                     .max_decoded_bytes
                     .min(NonZeroU64::new(remaining_bytes).unwrap_or(NonZeroU64::MIN));
+                bounds.max_encoded_bytes = bounds
+                    .max_encoded_bytes
+                    .min(NonZeroU64::new(remaining_encoded).unwrap_or(NonZeroU64::MIN));
                 let page = self
                     .kernel
                     .export_source_page_within_budget(
@@ -851,12 +899,22 @@ impl<'a> ReplacementBuilder<'a> {
                         } if bytes <= self.spec.episode.source_page.max_decoded_bytes.get() => {
                             BuildError::InventoryBound
                         }
+                        SourceExportError::OversizedRow {
+                            bound: PageBound::Encoded,
+                            bytes,
+                            ..
+                        } if bytes <= self.spec.episode.source_page.max_encoded_bytes.get() => {
+                            BuildError::InventoryBound
+                        }
                         error => BuildError::Export(error),
                     })?;
                 observer(BuildEvent::Exported {
                     window,
                     rows: page.charge.rows,
                 });
+                remaining_encoded = remaining_encoded
+                    .checked_sub(page.charge.encoded_bytes)
+                    .ok_or(BuildError::InventoryBound)?;
                 for row in page.rows {
                     if let Some(existing) = rows.get_mut(&row.detail.occurrence_id) {
                         if row.text.is_some() || row.detail != existing.detail {
@@ -899,23 +957,31 @@ impl<'a> ReplacementBuilder<'a> {
         if budget.is_exhausted() {
             return Err(BuildError::Expired);
         }
-        self.checked_target(budget)?;
-        if let Some(stage) = self
-            .capture
-            .as_ref()
-            .and_then(|capture| capture.stage.as_deref())
+        let target = self.checked_target(budget)?;
+        let (intent, _) = self.lifecycle.admitted_intent(self.gate)?;
+        if let Some(capture) = &self.capture
+            && let Some(stage) = capture.stage.as_deref()
         {
-            let (intent, _) = self.lifecycle.admitted_intent(self.gate)?;
-            if intent.staged_seed_digest.is_some()
-                || intent.replacement_capture.as_deref() != self.capture.as_ref()
-            {
+            if intent.staged_seed_digest.is_some() {
                 return Err(BuildError::StagingUnresolved);
             }
-            let manifest = stage.stage_manifest();
-            let mut protected = self.protected()?;
-            protected.remove(&manifest.digest());
-            self.store
-                .discard_unselected(&manifest, &self._transaction, &protected)?;
+            let recorded = intent.replacement_capture.as_deref();
+            let unrecorded = ReplacementCapture {
+                stage: None,
+                ..capture.clone()
+            };
+            if recorded == Some(capture) {
+                let manifest = stage.stage_manifest();
+                let mut protected = self.protected()?;
+                protected.remove(&manifest.digest());
+                self.store
+                    .discard_unselected(&manifest, &self._transaction, &protected)?;
+            } else if recorded.is_some() && recorded != Some(&unrecorded) {
+                return Err(BuildError::StagingUnresolved);
+            }
+            // An absent record under this owner's lock is its own earlier clear whose directory sync
+            // did not return; the discard and family removal before that clear already ran.
+            // `stage` writes the certificate before `search_seed::stage`, so an unrecorded certificate left no object to discard.
         }
         self.family = match std::mem::replace(&mut self.family, Family::Unopened) {
             Family::Open(projection) => match Arc::try_unwrap(projection) {
@@ -932,22 +998,29 @@ impl<'a> ReplacementBuilder<'a> {
             },
             family => family,
         };
-        self.lifecycle.delete_replacement_family(
-            self.gate,
-            self.capture
-                .as_ref()
-                .map(|capture| capture.hold_id.as_str()),
-            || self.family = Family::Unopened,
-        )?;
-        if let Some(capture) = &self.capture {
+        let recorded = intent
+            .replacement_capture
+            .as_deref()
+            .map(|capture| capture.hold_id.clone());
+        self.lifecycle
+            .delete_replacement_family(self.gate, recorded.as_deref(), || {
+                self.family = Family::Unopened
+            })?;
+        if let Some(capture) = &self.capture
+            && capture.lease_epoch == self.kernel.lease_epoch()
+        {
             let binding = self.binding()?;
-            if capture.lease_epoch == self.kernel.lease_epoch() {
-                self.kernel.release_source_hold_within_budget(
-                    budget,
-                    &binding,
-                    &capture.hold_id,
-                    wall_ms()?,
-                )?;
+            match self.kernel.release_source_hold_within_budget(
+                budget,
+                &binding,
+                &capture.hold_id,
+                wall_ms()?,
+            ) {
+                Err(SourceHoldError::Invalid(SourceHoldInvalidity::Missing))
+                    if self
+                        .incarnation
+                        .is_some_and(|held| held != target.incarnation) => {}
+                released => released?,
             }
         }
         let binding = self.binding()?;
@@ -956,12 +1029,13 @@ impl<'a> ReplacementBuilder<'a> {
             &binding.consumer_id,
             wall_ms()?,
         )?;
-        if let Some(capture) = &self.capture {
+        if recorded.is_some() || self.capture.is_some() {
+            // `record_capture` only re-syncs the directory when nothing is recorded, making the earlier clear durable.
             self.lifecycle.record_capture(
                 self.gate,
                 &self._transaction,
                 None,
-                Some(capture.hold_id.as_str()),
+                recorded.as_deref(),
             )?;
         }
         self.capture = None;
@@ -982,8 +1056,7 @@ struct Run {
 
 impl Run {
     fn now(&self) -> i64 {
-        self.now
-            .saturating_add(i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX))
+        crate::search_catchup::audit_time(self.now, self.started.elapsed())
     }
     fn check(&self) -> Result<(), BuildError> {
         if self.budget.check().is_err()
@@ -1006,4 +1079,22 @@ fn wall_ms() -> Result<i64, BuildError> {
         .ok()
         .and_then(|time| i64::try_from(time.as_millis()).ok())
         .ok_or(BuildError::Expired)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_now_rounds_a_partial_millisecond_up() {
+        // The kernel refuses a hold at `now >= expires_at`, so elapsed time must never round down.
+        let run = Run {
+            budget: EvalBudget::unbounded(),
+            grants: Vec::new(),
+            deadline: Instant::now() + Duration::from_secs(60),
+            started: Instant::now() - Duration::from_micros(500),
+            now: 1_000,
+        };
+        assert!(run.now() >= 1_001, "{}", run.now());
+    }
 }

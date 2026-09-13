@@ -165,13 +165,27 @@ impl AlignmentScore {
     }
 }
 
-/// Hashes decoded content after removing codec-owned identity metadata.
+/// Hashes decoded content after removing codec-owned identity metadata. The
+/// digest is the hex SHA-256 of the block's canonical bytes; a block that cannot
+/// serialize hashes the JSON text `null`.
 pub(crate) fn decoded_block_fingerprint(block: &WireBlock) -> String {
     let mut canonical = block.clone();
     canonical.provider_extras.remove(BLOCK_IDENTITY_NAMESPACE);
     canonical.mark_modified();
-    stable_hash(&serde_json::to_value(canonical).unwrap_or(Value::Null))
+    let bytes = crate::served_json::canonical_block_bytes(&canonical)
+        .map(String::into_bytes)
+        .unwrap_or_else(|_| serde_json::to_vec(&Value::Null).unwrap_or_default());
+    let digest = Sha256::digest(bytes);
+    hex_prefix(&digest, digest.len())
 }
+
+#[cfg(feature = "test-support")]
+pub fn decoded_block_fingerprint_for_test(block: &WireBlock) -> String {
+    decoded_block_fingerprint(block)
+}
+
+#[cfg(feature = "test-support")]
+pub const BLOCK_IDENTITY_NAMESPACE_FOR_TEST: &str = BLOCK_IDENTITY_NAMESPACE;
 
 /// Stores a block's decoded origin and pre-mutation fingerprint in provider extras.
 pub(crate) fn stamp_block_identity(
@@ -401,15 +415,6 @@ fn optimal_block_metas<'a>(
     by_block
 }
 
-/// Returns the full lowercase SHA-256 digest of `serde_json`-serialized bytes.
-///
-/// Serialization failure hashes an empty byte sequence.
-pub fn stable_hash(value: &Value) -> String {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
-    let digest = Sha256::digest(bytes);
-    hex_prefix(&digest, digest.len())
-}
-
 /// Returns up to `chars` lowercase hexadecimal characters from serialized JSON's SHA-256 digest.
 ///
 /// Serialization failure hashes an empty byte sequence. Requests above 64 characters
@@ -472,6 +477,11 @@ mod tests {
         })
     }
 
+    fn stable_hash(value: &Value) -> String {
+        let digest = Sha256::digest(serde_json::to_vec(value).unwrap());
+        hex_prefix(&digest, digest.len())
+    }
+
     fn text_meta(block_index: usize) -> BlockMeta {
         BlockMeta {
             block_index,
@@ -482,6 +492,69 @@ mod tests {
             content_fingerprint: None,
             raw: Value::Null,
         }
+    }
+
+    /// The fingerprint excludes exactly the codec namespace: stamps never change it,
+    /// other provider namespaces always do, and a serialization failure hashes `null`.
+    #[test]
+    fn decoded_fingerprint_ignores_only_the_codec_namespace() {
+        let mut block = WireBlock::bare(BlockKind::Text {
+            text: "hello".into(),
+        });
+        let bare = decoded_block_fingerprint(&block);
+        assert_eq!(
+            bare,
+            stable_hash(&serde_json::to_value(&block).unwrap()),
+            "typed serialization and canonical bytes agree for a plain block"
+        );
+        stamp_block_identity(&mut block, 3, 7, "fp-1");
+        assert_eq!(decoded_block_fingerprint(&block), bare);
+        stamp_block_identity(&mut block, 4, 8, "fp-2");
+        assert_eq!(
+            decoded_block_fingerprint(&block),
+            bare,
+            "a changed stamp is still excluded"
+        );
+
+        let mut with_opencode = block.clone();
+        with_opencode
+            .provider_extras
+            .entry("opencode".into())
+            .or_default()
+            .insert("metadata".into(), Value::from(1));
+        with_opencode.mark_modified();
+        let mut with_pi = block.clone();
+        with_pi
+            .provider_extras
+            .entry("pi".into())
+            .or_default()
+            .insert("metadata".into(), Value::from(1));
+        with_pi.mark_modified();
+        let opencode = decoded_block_fingerprint(&with_opencode);
+        let pi = decoded_block_fingerprint(&with_pi);
+        assert_ne!(opencode, bare);
+        assert_ne!(pi, bare);
+        assert_ne!(opencode, pi, "provider namespaces are significant");
+
+        // A typed tool block omits its false flag, so it hashes like an ingress block
+        // whose emitter never sent the field.
+        let typed = WireBlock::bare(BlockKind::ToolCall {
+            id: "c".into(),
+            name: "n".into(),
+            input: Value::Null,
+            provider_executed: false,
+        });
+        let ingress: WireBlock = serde_json::from_str(
+            r#"{"kind":{"id":"c","input":null,"name":"n","type":"tool_call"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded_block_fingerprint(&typed),
+            decoded_block_fingerprint(&ingress)
+        );
+
+        let null = stable_hash(&Value::Null);
+        assert_ne!(bare, null);
     }
 
     #[test]

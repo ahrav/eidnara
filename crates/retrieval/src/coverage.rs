@@ -170,9 +170,10 @@ pub fn observe(
 const VALID_VECTOR: &str = "EXISTS(SELECT 1 FROM occurrence_vectors v
     WHERE v.occurrence_id=o.occurrence_id AND v.generation_id=?1 AND v.vector_dimension=?2)";
 
-/// Durable work that still stands for the observed generation.
+/// Durable work the dispatcher would still hand out for the observed generation.
 const CURRENT_PENDING: &str = "EXISTS(SELECT 1 FROM embedding_jobs j
-    WHERE j.occurrence_id=o.occurrence_id AND j.generation_id=?1 AND j.state IN ('pending','admitted'))";
+    WHERE j.occurrence_id=o.occurrence_id AND j.generation_id=?1 AND j.stop_reason IS NULL
+      AND (j.state='pending' OR (j.state='admitted' AND j.host_job_id IS NOT NULL)))";
 
 fn class_coverage(
     conn: &GuardedConn<'_>,
@@ -364,16 +365,7 @@ pub fn verify_construction(
             ))
         },
     )?;
-    let mut excluded_jobs = false;
-    for class in OccurrenceClass::ALL
-        .into_iter()
-        .filter(|class| !dense_eligible(*class))
-    {
-        excluded_jobs |= conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM embedding_jobs j JOIN occurrences o USING(occurrence_id) WHERE o.class=?1)",
-            [class.code()], |row| row.get::<_, bool>(0),
-        )?;
-    }
+    let excluded_jobs = excluded_class_jobs(conn)?;
     let only_generation: bool = conn.query_row(
         "SELECT count(*)=1 AND min(generation_id)=?1 AND min(state)='building' FROM vector_generations",
         [&generation.generation_id], |row| row.get(0),
@@ -411,6 +403,39 @@ pub fn verify_construction(
     Ok(report)
 }
 
+/// Both acceptance gates read this one predicate so the classes that queue work cannot drift
+/// between construction and reopen.
+fn excluded_class_jobs(conn: &GuardedConn<'_>) -> Result<bool, ProjectionError> {
+    let mut statement = conn.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM embedding_jobs j JOIN occurrences o USING(occurrence_id) WHERE o.class=?1)",
+    )?;
+    for class in OccurrenceClass::ALL
+        .into_iter()
+        .filter(|class| !dense_eligible(*class))
+    {
+        if statement.query_row([class.code()], |row| row.get::<_, bool>(0))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `PRAGMA integrity_check` scans the whole database, so its cost grows with file size.
+/// `CoverageBounds` does not bound database-wide integrity checks.
+pub fn verify_pages(conn: &GuardedConn<'_>) -> Result<(), ProjectionError> {
+    let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok"
+        || conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query([])?
+            .next()?
+            .is_some()
+    {
+        return Err(ProjectionError::CorruptRow);
+    }
+    Ok(())
+}
+
 /// Checks mutable state without comparing it to immutable seed bytes. Required dense rows
 /// need valid vectors or current durable work; completed jobs need their vectors.
 pub fn verify_active(
@@ -432,7 +457,7 @@ pub fn verify_active(
                 (SELECT count(*) FROM vector_generations)",
         [&generation.generation_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))
     )?;
-    if foreign_jobs != 0 || vectorless != 0 || generations != 1 {
+    if foreign_jobs != 0 || vectorless != 0 || generations != 1 || excluded_class_jobs(conn)? {
         return Err(ProjectionError::CorruptRow);
     }
     if report.checkpoint.hold_id.is_empty()
@@ -440,16 +465,6 @@ pub fn verify_active(
             .classes
             .iter()
             .any(|class| class.missing_without_pending != 0)
-    {
-        return Err(ProjectionError::CorruptRow);
-    }
-    let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-    if integrity != "ok"
-        || conn
-            .prepare("PRAGMA foreign_key_check")?
-            .query([])?
-            .next()?
-            .is_some()
     {
         return Err(ProjectionError::CorruptRow);
     }

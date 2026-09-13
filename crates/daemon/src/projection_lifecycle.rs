@@ -138,6 +138,27 @@ pub struct LifecycleIntent {
 }
 
 impl LifecycleIntent {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != SCHEMA {
+            return Err(format!("schema {}", self.schema));
+        }
+        check_invariants(
+            &self.consumer.consumer_id,
+            self.transition,
+            self.authorization_ref.as_deref(),
+            self.cause,
+        )
+        .map_err(|refusal| refusal.to_string())?;
+        if !self
+            .replacement_capture
+            .as_deref()
+            .is_none_or(ReplacementCapture::stage_is_bound)
+        {
+            return Err("certificate names another capture".to_owned());
+        }
+        Ok(())
+    }
+
     /// Whether `request` is a replay of this record: the same intent in every field the caller supplies.
     fn is_replay_of(&self, request: &LifecycleRequest) -> bool {
         self.transition == request.transition
@@ -436,45 +457,19 @@ impl ProjectionLifecycle {
                             || e.consumed > e.allowance
                             || e.deadline <= intent.recorded_at
                     })
-                    || intent.handoff.as_deref().is_some_and(|h| {
-                        h.schema != SCHEMA
-                            || check_invariants(
-                                &h.consumer.consumer_id,
-                                h.transition,
-                                h.authorization_ref.as_deref(),
-                                h.cause,
-                            )
-                            .is_err()
-                            || !h
-                                .replacement_capture
-                                .as_deref()
-                                .is_none_or(ReplacementCapture::stage_is_bound)
-                    })
+                    || intent
+                        .handoff
+                        .as_deref()
+                        .is_some_and(|h| h.validate().is_err())
                 {
                     ControlState::Unavailable("invalid disabled record".to_owned())
                 } else {
                     ControlState::Disabled(intent)
                 }
             }
-            Ok(StoredIntent::Active(intent)) if intent.schema != SCHEMA => {
-                ControlState::Unavailable(format!("schema {}", intent.schema))
-            }
-            Ok(StoredIntent::Active(intent)) => match check_invariants(
-                &intent.consumer.consumer_id,
-                intent.transition,
-                intent.authorization_ref.as_deref(),
-                intent.cause,
-            ) {
-                Ok(())
-                    if !intent
-                        .replacement_capture
-                        .as_deref()
-                        .is_none_or(ReplacementCapture::stage_is_bound) =>
-                {
-                    ControlState::Unavailable("certificate names another capture".to_owned())
-                }
+            Ok(StoredIntent::Active(intent)) => match intent.validate() {
                 Ok(()) => ControlState::Intent(intent),
-                Err(refusal) => ControlState::Unavailable(refusal.to_string()),
+                Err(reason) => ControlState::Unavailable(reason),
             },
             Err(_) => ControlState::Unavailable("malformed record".to_owned()),
         })

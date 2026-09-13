@@ -658,6 +658,79 @@ fn missing_rows_and_malformed_ordinals_fail_and_leave_progress_untouched() {
 }
 
 #[test]
+fn verifying_complete_commits_paginates_like_reading_them_without_selecting_payloads() {
+    let fixture = seeded();
+    let tip = fixture.tip();
+    let many = *fixture
+        .ledger
+        .commits
+        .iter()
+        .find(|(_, changes)| changes.len() == 3)
+        .unwrap()
+        .0;
+    let full = fixture
+        .store
+        .read_complete_commits(&fixture.request(many - 1, many), wide())
+        .unwrap();
+    let many_bytes: u64 = full.commits[0]
+        .rows
+        .iter()
+        .map(|row| row.payload.len() as u64)
+        .sum();
+    for (after, through, bounds) in [
+        (0, tip, wide()),
+        (0, tip, bounds(1, 1024, 1 << 20)),
+        (0, tip, bounds(64, 2, 1 << 20)),
+        (many - 1, tip, bounds(1, 3, many_bytes - 1)),
+        (many - 1, many, bounds(1, 3, many_bytes)),
+        (tip, tip, wide()),
+    ] {
+        let request = fixture.request(after, through);
+        let read = fixture
+            .store
+            .read_complete_commits(&request, bounds)
+            .unwrap();
+        let materialized = fixture.store.materialized_outbox_rows_for_test();
+        let span = fixture
+            .store
+            .verify_complete_commits(&request, bounds)
+            .unwrap();
+        assert_eq!(
+            (span.through, span.end),
+            (read.through, read.end),
+            "{request:?}"
+        );
+        assert_eq!(
+            fixture.store.materialized_outbox_rows_for_test(),
+            materialized,
+            "verification selected payload rows for {request:?}"
+        );
+    }
+    assert_eq!(
+        fixture
+            .store
+            .verify_complete_commits(&fixture.request(tip, tip + 1), wide())
+            .unwrap_err(),
+        CommitReadError::TargetBeyondTip
+    );
+
+    fixture
+        .mutate()
+        .execute(
+            "DELETE FROM outbox WHERE commit_seq=?1 AND ordinal=1",
+            [many],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .verify_complete_commits(&fixture.request(0, tip), wide())
+            .unwrap_err(),
+        CommitReadError::MissingHistory { commit_seq: many }
+    );
+}
+
+#[test]
 fn admission_precedes_materialization_and_refusal_moves_nothing() {
     let fixture = seeded();
     let tip = fixture.tip();

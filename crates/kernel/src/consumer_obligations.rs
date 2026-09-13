@@ -16,6 +16,15 @@ pub struct ConsumerObligation {
     pub invalidated_commit_seq: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ConsumerObligationError {
+    /// The census through the target exceeds the caller's row or encoded-byte limit.
+    #[error("consumer obligation inventory exceeds its admitted rows or bytes")]
+    InventoryBound,
+    #[error(transparent)]
+    Kernel(#[from] KernelError),
+}
+
 const INVENTORY: &str = "
  SELECT 'source' AS kind,o.object_id AS identity,e.artifact_digest,
  o.created_commit_seq AS commit_seq,
@@ -37,7 +46,7 @@ impl KernelStore {
     /// Returns the global canonical source census through the fixed target, not a per-consumer source set.
     /// Barriers are consumer-specific and include satisfied memberships through the target.
     /// Whole-family removal applies to every source in the canonical census; missing joined authority indicates corruption.
-    /// Row and encoded-field charges are checked before materialization.
+    /// Row and encoded-field charges are checked before materialization, over at most `max_rows + 1` rows.
     pub fn consumer_obligations_within_budget(
         &self,
         budget: &EvalBudget,
@@ -45,31 +54,35 @@ impl KernelStore {
         target: CommitReadTarget,
         max_rows: NonZeroUsize,
         max_bytes: NonZeroU64,
-    ) -> Result<Vec<ConsumerObligation>, KernelError> {
+    ) -> Result<Vec<ConsumerObligation>, ConsumerObligationError> {
         let limit = budget.acquire_limit();
         limit.run(|| {
             if consumer.is_empty() || target.through_commit < 0 {
-                return Err(KernelError::InvalidInput);
+                return Err(KernelError::InvalidInput.into());
             }
             let mut reader = self.reader_with_limit(&limit)?;
             if self.incarnation() != target.incarnation {
-                return Err(KernelError::InvalidInput);
+                return Err(KernelError::InvalidInput.into());
             }
             let tx = reader.transaction(TransactionBehavior::Deferred)?;
             crate::envelope::check_fence(&tx, self.lease_epoch())?;
             if target.through_commit > crate::commit_read::tip(&tx).map_err(map_sqlite)? {
-                return Err(KernelError::InvalidCheckpoint);
+                return Err(KernelError::InvalidCheckpoint.into());
             }
+            // One row past the bound proves it is exceeded without walking the rest of the census.
+            let row_limit = i64::try_from(max_rows.get())
+                .unwrap_or(i64::MAX - 1)
+                .saturating_add(1);
             let (rows, bytes, missing): (i64, i64, bool) = tx.query_row(
-                &format!("SELECT count(*),coalesce(sum(length(CAST(kind AS BLOB))+length(CAST(identity AS BLOB))+length(artifact_digest)+16),0),count(*)!=count(artifact_digest) FROM ({INVENTORY})"),
-                params![consumer, target.through_commit],
+                &format!("SELECT count(*),coalesce(sum(length(CAST(kind AS BLOB))+length(CAST(identity AS BLOB))+length(artifact_digest)+16),0),count(*)!=count(artifact_digest) FROM ({INVENTORY} LIMIT ?3)"),
+                params![consumer, target.through_commit, row_limit],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).map_err(map_sqlite)?;
-            if missing {
-                return Err(KernelError::CorruptCanonicalRow);
-            }
             if rows as u64 > max_rows.get() as u64 || bytes as u64 > max_bytes.get() {
-                return Err(KernelError::InvalidInput);
+                return Err(ConsumerObligationError::InventoryBound);
+            }
+            if missing {
+                return Err(KernelError::CorruptCanonicalRow.into());
             }
             let mut statement = tx.prepare(&format!("{INVENTORY} ORDER BY kind,identity")).map_err(map_sqlite)?;
             let obligations = statement.query_map(params![consumer, target.through_commit], |row| {
