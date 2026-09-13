@@ -294,7 +294,11 @@ the body, found by a byte scan, before either decode runs, so a pool that
 admits the leading values but not the string refuses before the buffer exists:
 the [prefix-pool test][t-prefix] grants 64 KiB, runs the same 4 MiB body, and
 measures under 64 KiB allocated where the visit-time charge allocated 4194483
-bytes. A transient refusal is no longer classed by a second, count-only parse,
+bytes. `Handler::handle` takes that charge before the lane probe as well, since
+the probe unescapes a sub-cap body's keys and discriminators as it reads them;
+the [probe-pool test][t-probe-pool] runs the entry steps on a body with a
+900 KiB escaped key against a drained reserve and measures under 64 KiB where
+the probe alone allocated 921610 bytes. A transient refusal is no longer classed by a second, count-only parse,
 which unescaped the same strings outside the pool; the [held-pool test][t-held]
 covers that path too, since its refusal now returns `queue_full` with nothing
 parsed. The count-only [`SkippedValue`][skipped-live]
@@ -313,46 +317,47 @@ passed 7 including the ring test;
 `cargo test -p daemon --locked --features test-support --test parse_charge_covers_typed_decode`
 passed.
 
-[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11920-L11935
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12675-L12716
-[refusal-live]: ../../../../../crates/daemon/src/lib.rs#L15856-L15864
-[toolarge-live]: ../../../../../crates/daemon/src/lib.rs#L15872-L15877
-[queuefull-live]: ../../../../../crates/daemon/src/lib.rs#L15879-L15884
-[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L135-L143
-[need]: ../../../../../crates/daemon/src/metered_decode.rs#L238-L298
-[release]: ../../../../../crates/daemon/src/metered_decode.rs#L203-L209
-[decode]: ../../../../../crates/daemon/src/metered_decode.rs#L321-L341
-[floor]: ../../../../../crates/daemon/src/metered_decode.rs#L409-L470
-[visitor]: ../../../../../crates/daemon/src/metered_decode.rs#L783-L892
-[ignored]: ../../../../../crates/daemon/src/metered_decode.rs#L662-L668
+[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11920-L11938
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12678-L12719
+[refusal-live]: ../../../../../crates/daemon/src/lib.rs#L15863-L15871
+[toolarge-live]: ../../../../../crates/daemon/src/lib.rs#L15892-L15897
+[queuefull-live]: ../../../../../crates/daemon/src/lib.rs#L15899-L15904
+[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L135-L144
+[need]: ../../../../../crates/daemon/src/metered_decode.rs#L246-L306
+[release]: ../../../../../crates/daemon/src/metered_decode.rs#L211-L217
+[decode]: ../../../../../crates/daemon/src/metered_decode.rs#L329-L349
+[floor]: ../../../../../crates/daemon/src/metered_decode.rs#L417-L478
+[visitor]: ../../../../../crates/daemon/src/metered_decode.rs#L791-L900
+[ignored]: ../../../../../crates/daemon/src/metered_decode.rs#L670-L676
 [constants]: ../../../../../crates/daemon/src/metered_decode.rs#L58
 [step]: ../../../../../crates/daemon/src/metered_decode.rs#L66
-[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L20027-L20062
-[t-meter]: ../../../../../crates/daemon/src/lib.rs#L20068-L20101
-[t-small]: ../../../../../crates/daemon/src/lib.rs#L20105-L20122
-[t-acquire]: ../../../../../crates/daemon/src/lib.rs#L20127-L20155
-[t-count]: ../../../../../crates/daemon/src/metered_decode.rs#L1055-L1083
-[t-floor]: ../../../../../crates/daemon/src/metered_decode.rs#L1108-L1146
-[t-floor-corpus]: ../../../../../crates/daemon/src/lib.rs#L20263-L20275
-[t-doomed]: ../../../../../crates/daemon/src/lib.rs#L20223-L20258
-[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19934-L19980
-[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20161-L20218
-[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20280-L20328
+[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L20047-L20082
+[t-meter]: ../../../../../crates/daemon/src/lib.rs#L20088-L20121
+[t-small]: ../../../../../crates/daemon/src/lib.rs#L20125-L20142
+[t-acquire]: ../../../../../crates/daemon/src/lib.rs#L20147-L20175
+[t-count]: ../../../../../crates/daemon/src/metered_decode.rs#L1063-L1091
+[t-floor]: ../../../../../crates/daemon/src/metered_decode.rs#L1116-L1154
+[t-floor-corpus]: ../../../../../crates/daemon/src/lib.rs#L20283-L20295
+[t-doomed]: ../../../../../crates/daemon/src/lib.rs#L20243-L20278
+[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19954-L20000
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20181-L20238
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20300-L20348
 [t-ring]: ../../../../../crates/daemon/tests/direct_host.rs#L437-L558
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L103-L163
 [preset]: ../../../../../crates/daemon/src/prompt_surface.rs#L108-L163
 [t-peak-escaped]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L178-L199
 [t-cap-alloc]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L201-L222
-[t-footprint-oracle]: ../../../../../crates/daemon/src/metered_decode.rs#L1085-L1106
+[t-footprint-oracle]: ../../../../../crates/daemon/src/metered_decode.rs#L1093-L1114
 [scratch]: ../../../../../crates/daemon/src/metered_decode.rs#L60-L61
-[escaped]: ../../../../../crates/daemon/src/metered_decode.rs#L807-L814
-[skipped-live]: ../../../../../crates/daemon/src/metered_decode.rs#L472-L601
-[bytecap-live]: ../../../../../crates/daemon/src/lib.rs#L15886-L15909
-[gate]: ../../../../../crates/daemon/src/lib.rs#L15518-L15530
+[escaped]: ../../../../../crates/daemon/src/metered_decode.rs#L815-L822
+[skipped-live]: ../../../../../crates/daemon/src/metered_decode.rs#L480-L609
+[bytecap-live]: ../../../../../crates/daemon/src/lib.rs#L15906-L15929
+[gate]: ../../../../../crates/daemon/src/lib.rs#L15521-L15533
+[t-probe-pool]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L310-L333
 [t-prefix]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L284-L308
-[admit]: ../../../../../crates/daemon/src/lib.rs#L15843-L15854
+[admit]: ../../../../../crates/daemon/src/lib.rs#L15846-L15861
 [t-held]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L237-L261
-[witness]: ../../../../../crates/daemon/src/lib.rs#L15511-L15516
+[witness]: ../../../../../crates/daemon/src/lib.rs#L15514-L15519
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [bytecap]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15472-L15488

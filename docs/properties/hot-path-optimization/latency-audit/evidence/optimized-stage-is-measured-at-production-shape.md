@@ -144,8 +144,8 @@ specification enumerates the stages, and no name is built at run time.
 [fx-2500]: ../../../../../crates/daemon/src/transform.rs#L28083-L28292
 [h-pre]: ../../../../../crates/daemon/src/lib.rs#L8189-L8206
 [h-run]: ../../../../../crates/daemon/src/lib.rs#L8203-L8269
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14516
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14591-L14613
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14519
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14594-L14616
 [tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1207
 [he-payload]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L217-L223
 [he-designated]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214

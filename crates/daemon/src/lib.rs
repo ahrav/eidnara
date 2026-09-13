@@ -11924,9 +11924,12 @@ impl CompositeComponent for Handler {
             Err(outcome) => return settle_prepared(&ctx, outcome).await,
         };
         // The decode charges the scratch pool as it builds values; the meter holds the charges
-        // until the response has settled. A body the cap admitted by its length alone is
-        // probed here, so the probe is the first read of a sub-cap body.
+        // until the response has settled. The admission charge comes before the lane probe,
+        // which unescapes a sub-cap body's keys and discriminators as it reads them.
         let meter = ResidentMeter::new(&ctx);
+        if let Err(outcome) = admit_body(body, &meter) {
+            return settle_prepared(&ctx, outcome).await;
+        }
         let probe = cap_probe.or_else(|| lane_probe(body));
         let (_, outcome) = self
             .dispatch_body(ctx.route, body, probe.as_ref(), &meter)
@@ -15840,11 +15843,15 @@ impl<'de> Deserialize<'de> for RouteName {
     }
 }
 
-/// What the decodes are charged for before either runs. A body whose value count alone
-/// proves its footprint exceeds the capacity is refused from its bytes, so a doomed body
-/// never holds pool bytes while it parses; the unescape buffer for its longest escaped
-/// string is charged next, so the pool refuses before serde_json grows that buffer.
+/// What the reads of the body are charged for before the first of them runs, once per
+/// request. A body whose value count alone proves its footprint exceeds the capacity is
+/// refused from its bytes, so a doomed body never holds pool bytes while it parses; the
+/// unescape buffer for its longest escaped string is charged next, so the pool refuses
+/// before serde_json grows that buffer for the lane probe or either decode.
 fn admit_body(body: &[u8], meter: &ResidentMeter<'_>) -> Result<(), PreparedOutcome> {
+    if !meter.admit_once() {
+        return Ok(());
+    }
     if footprint_floor_exceeds(body, meter.capacity()) {
         return Err(request_too_large_error());
     }
@@ -15867,6 +15874,19 @@ fn resident_refusal(refusal: Refusal) -> PreparedOutcome {
 #[cfg(feature = "test-support")]
 pub fn request_byte_cap_admits_for_test(body: &[u8]) -> bool {
     enforce_request_byte_cap(body).is_ok()
+}
+
+/// The steps `Handler::handle` runs on a sub-cap body before `dispatch_body`, against
+/// `reserve`, for the allocation test: the byte cap, the admission charge, and the lane probe.
+#[cfg(feature = "test-support")]
+pub fn handle_entry_for_test(
+    body: &[u8],
+    reserve: &dyn metered_decode::ResidentReserve,
+) -> Result<bool, PreparedOutcome> {
+    let cap_probe = enforce_request_byte_cap(body)?;
+    let meter = ResidentMeter::new(reserve);
+    admit_body(body, &meter)?;
+    Ok(cap_probe.or_else(|| lane_probe(body)).is_some())
 }
 
 fn request_too_large_error() -> PreparedOutcome {

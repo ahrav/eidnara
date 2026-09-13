@@ -31,6 +31,7 @@ suspiciously quiet, so an omitted category is not mistaken for absent tests.
 | [`byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation`][t-cap-alloc] | A 900 KiB body whose one key holds an escape passes the byte cap allocating less than half its size. | unaudited |
 | [`a_held_pool_stops_the_direct_lane_walk_before_it_unescapes_a_large_string`][t-held] | Against a reserve that grants nothing, the metered walk that gates the direct lane is refused as transient at its first value and allocates under 64 KiB for a body holding a 4 MiB escaped text block. | unaudited |
 | [`a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unescaped`][t-prefix] | With 64 KiB of pool, a body holding a 4 MiB escaped text block is refused as transient by the up-front unescape-buffer charge and allocates under 64 KiB. | unaudited |
+| [`a_held_pool_refuses_before_the_lane_probe_unescapes_a_long_key`][t-probe-pool] | Against a reserve that grants nothing, the handler entry refuses a sub-cap body holding a 900 KiB escaped key as transient before the lane probe reads it, allocating under 64 KiB. | unaudited |
 | [`request_observed_to_handler_ends_before_the_typed_decode`][t-observed] | A typed decode begun ten seconds before the handler is not counted in `request_observed_to_handler`. | unaudited |
 | [`decode_footprint_counts_values_and_retained_string_copies`][t-footprint] | Separators inside strings are not values; a 1 MiB text block is charged three times; a scalar-dense body's footprint is far above its wire size and string bytes are not charged as values; a cut body counts its decoded part. | unaudited |
 | [`metered_decode_charges_incrementally_and_refuses_above_capacity`][t-meter] | A fitting decode holds at least its footprint and under two steps more; a footprint above the capacity is refused as permanent with every byte released; a restarted meter reuses held bytes. | unaudited |
@@ -478,37 +479,38 @@ Production guards go to
 categories above mean no check was identified in the stated inspected scope,
 not a claim that no related check exists anywhere in the repository.
 
-[testentry]: ../../../../crates/daemon/src/lib.rs#L12601-L12608
+[testentry]: ../../../../crates/daemon/src/lib.rs#L12604-L12611
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
-[t-cap]: ../../../../crates/daemon/src/lib.rs#L19316-L19393
-[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L29077-L29132
-[t-shape]: ../../../../crates/daemon/src/lib.rs#L33096-L33113
-[t-shape2]: ../../../../crates/daemon/src/lib.rs#L33116-L33156
+[t-cap]: ../../../../crates/daemon/src/lib.rs#L19336-L19413
+[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L29097-L29152
+[t-shape]: ../../../../crates/daemon/src/lib.rs#L33116-L33133
+[t-shape2]: ../../../../crates/daemon/src/lib.rs#L33136-L33176
 [t-envelope]: ../../../../crates/daemon/src/transform.rs#L16470-L16497
-[t-probe]: ../../../../crates/daemon/src/lib.rs#L19396-L19454
-[t-witness]: ../../../../crates/daemon/src/lib.rs#L19459-L19489
-[t-token]: ../../../../crates/daemon/src/lib.rs#L19494-L19506
-[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L19733-L19864
-[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L19886-L19929
+[t-probe]: ../../../../crates/daemon/src/lib.rs#L19416-L19474
+[t-witness]: ../../../../crates/daemon/src/lib.rs#L19479-L19509
+[t-token]: ../../../../crates/daemon/src/lib.rs#L19514-L19526
+[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L19753-L19884
+[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L19906-L19949
 [t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L103-L163
 [t-peak-escaped]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L178-L199
+[t-probe-pool]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L310-L333
 [t-prefix]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L284-L308
 [t-held]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L237-L261
 [t-cap-alloc]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L201-L222
-[t-observed]: ../../../../crates/daemon/src/lib.rs#L21855-L21883
-[bodyentry]: ../../../../crates/daemon/src/lib.rs#L12675-L12716
-[t-footprint]: ../../../../crates/daemon/src/lib.rs#L20027-L20062
-[t-meter]: ../../../../crates/daemon/src/lib.rs#L20068-L20101
-[t-small]: ../../../../crates/daemon/src/lib.rs#L20105-L20122
-[t-acquire]: ../../../../crates/daemon/src/lib.rs#L20127-L20155
-[t-count]: ../../../../crates/daemon/src/metered_decode.rs#L1055-L1083
-[t-footprint-oracle]: ../../../../crates/daemon/src/metered_decode.rs#L1085-L1106
-[t-floor]: ../../../../crates/daemon/src/metered_decode.rs#L1108-L1146
-[t-floor-corpus]: ../../../../crates/daemon/src/lib.rs#L20263-L20275
-[t-doomed]: ../../../../crates/daemon/src/lib.rs#L20223-L20258
-[t-drain]: ../../../../crates/daemon/src/lib.rs#L20161-L20218
-[t-effect]: ../../../../crates/daemon/src/lib.rs#L20280-L20328
-[t-lanes]: ../../../../crates/daemon/src/lib.rs#L19934-L19980
+[t-observed]: ../../../../crates/daemon/src/lib.rs#L21875-L21903
+[bodyentry]: ../../../../crates/daemon/src/lib.rs#L12678-L12719
+[t-footprint]: ../../../../crates/daemon/src/lib.rs#L20047-L20082
+[t-meter]: ../../../../crates/daemon/src/lib.rs#L20088-L20121
+[t-small]: ../../../../crates/daemon/src/lib.rs#L20125-L20142
+[t-acquire]: ../../../../crates/daemon/src/lib.rs#L20147-L20175
+[t-count]: ../../../../crates/daemon/src/metered_decode.rs#L1063-L1091
+[t-footprint-oracle]: ../../../../crates/daemon/src/metered_decode.rs#L1093-L1114
+[t-floor]: ../../../../crates/daemon/src/metered_decode.rs#L1116-L1154
+[t-floor-corpus]: ../../../../crates/daemon/src/lib.rs#L20283-L20295
+[t-doomed]: ../../../../crates/daemon/src/lib.rs#L20243-L20278
+[t-drain]: ../../../../crates/daemon/src/lib.rs#L20181-L20238
+[t-effect]: ../../../../crates/daemon/src/lib.rs#L20300-L20348
+[t-lanes]: ../../../../crates/daemon/src/lib.rs#L19954-L20000
 [t-ring]: ../../../../crates/daemon/tests/direct_host.rs#L437-L558
 [t-meta]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L21-L96
 [directhost]: ../../../../crates/daemon/tests/direct_host.rs#L49-L128
@@ -520,20 +522,20 @@ not a claim that no related check exists anywhere in the repository.
 [assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2031-L2046
 [t-inc]: ../../../../crates/daemon/src/wire.rs#L1520
 [t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1817
-[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L38600-L38717
+[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L38620-L38737
 [t-reattach]: ../../../../crates/daemon/src/wire.rs#L1707
 [shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1749
 [shell-decode]: ../../../../crates/daemon/src/wire.rs#L1796
 [shell-charge]: ../../../../crates/daemon/src/wire.rs#L958
-[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L24277-L24318
-[t-astro]: ../../../../crates/daemon/src/lib.rs#L22994-L23055
+[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L24297-L24338
+[t-astro]: ../../../../crates/daemon/src/lib.rs#L23014-L23075
 [t-pending]: ../../../../crates/daemon/src/transform.rs#L19406
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27958
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27709
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L25192-L25301
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L25212-L25321
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
 [synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27889
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L24909-L25189
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L24929-L25209
 [t-parked]: ../../../../crates/daemon/src/transform.rs#L13993
 [served-shells]: ../../../../crates/daemon/src/transform.rs#L13714
 [served-corpus]: ../../../../crates/daemon/src/transform.rs#L13760
@@ -544,12 +546,12 @@ not a claim that no related check exists anywhere in the repository.
 [served-source]: ../../../../crates/daemon/src/transform.rs#L13942
 [t-fpids]: ../../../../crates/daemon/src/transform.rs#L13604
 [t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L32-L52
-[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L22314-L22630
-[t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L22632-L22752
-[t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L22754-L22825
-[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L23804-L23851
-[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L23734-L23802
-[t-dup]: ../../../../crates/daemon/src/lib.rs#L24320-L24364
+[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L22334-L22650
+[t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L22652-L22772
+[t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L22774-L22845
+[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L23824-L23871
+[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L23754-L23822
+[t-dup]: ../../../../crates/daemon/src/lib.rs#L24340-L24384
 [t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
 [t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22515
 [t-poison]: ../../../../crates/daemon/src/transform.rs#L22651
@@ -573,7 +575,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-hyg-poison]: ../../../../crates/daemon/src/tail_hygiene.rs#L1855
 [t-hyg-overlap]: ../../../../crates/daemon/src/tail_hygiene.rs#L1905
 [t-hyg-pool-bound]: ../../../../crates/daemon/src/tail_hygiene.rs#L1970
-[t-hyg-status]: ../../../../crates/daemon/src/lib.rs#L21572-L21711
+[t-hyg-status]: ../../../../crates/daemon/src/lib.rs#L21592-L21731
 [t-hyg-production]: ../../../../crates/daemon/src/transform.rs#L22584
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L83-L97
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L161-L199
@@ -581,24 +583,24 @@ not a claim that no related check exists anywhere in the repository.
 
 [hook]: ../../../../crates/daemon/src/lib.rs#L8276-L8284
 [no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5520-L5534
-[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L38176-L38220
-[t-emergency]: ../../../../crates/daemon/src/lib.rs#L37383-L37457
-[t-cas]: ../../../../crates/daemon/src/lib.rs#L24664-L24735
+[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L38196-L38240
+[t-emergency]: ../../../../crates/daemon/src/lib.rs#L37403-L37477
+[t-cas]: ../../../../crates/daemon/src/lib.rs#L24684-L24755
 [t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L18542
 [t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L18596
 [t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L18665
 [t-counter]: ../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
-[t-success]: ../../../../crates/daemon/src/lib.rs#L25801-L25815
-[t-repeat]: ../../../../crates/daemon/src/lib.rs#L25817-L25843
-[t-frozen]: ../../../../crates/daemon/src/lib.rs#L25845-L25883
-[t-status]: ../../../../crates/daemon/src/lib.rs#L26099-L26144
-[t-divergence]: ../../../../crates/daemon/src/lib.rs#L34150-L34243
+[t-success]: ../../../../crates/daemon/src/lib.rs#L25821-L25835
+[t-repeat]: ../../../../crates/daemon/src/lib.rs#L25837-L25863
+[t-frozen]: ../../../../crates/daemon/src/lib.rs#L25865-L25903
+[t-status]: ../../../../crates/daemon/src/lib.rs#L26119-L26164
+[t-divergence]: ../../../../crates/daemon/src/lib.rs#L34170-L34263
 [t-upserts]: ../../../../crates/memory-store/src/lib.rs#L19556
 [t-sched]: ../../../../crates/daemon/src/transform.rs#L13549
 [t-secret]: ../../../../crates/memory-store/src/lib.rs#L16547
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L21046
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20670
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38040-L38098
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38060-L38118
 [t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L21164
 [t-truncate]: ../../../../crates/memory-store/src/lib.rs#L22626
 [t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L16283
@@ -693,8 +695,8 @@ not a claim that no related check exists anywhere in the repository.
 [t-windows]: ../../../../crates/context-core/src/redaction.rs#L827-L856
 [t-only-path]: ../../../../crates/context-core/src/redaction.rs#L857
 [t-chunk-fp]: ../../../../crates/daemon/src/historian.rs#L3925
-[t-boundary-construction]: ../../../../crates/daemon/src/lib.rs#L17928-L18255
-[t-firing-capture]: ../../../../crates/daemon/src/lib.rs#L24908-L25189
+[t-boundary-construction]: ../../../../crates/daemon/src/lib.rs#L17948-L18275
+[t-firing-capture]: ../../../../crates/daemon/src/lib.rs#L24928-L25209
 [diff-prod]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L102-L112
 [diff-exact]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L117-L128
 [diff-small]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L133-L140
@@ -713,10 +715,10 @@ not a claim that no related check exists anywhere in the repository.
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
 [t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15763-L15982
 [t-counters]: ../../../../crates/memory-store/src/lib.rs#L15989-L16017
-[t-load-count]: ../../../../crates/daemon/src/lib.rs#L25932-L25984
-[t-timing]: ../../../../crates/daemon/src/lib.rs#L25988-L26004
-[t-phase]: ../../../../crates/daemon/src/lib.rs#L26008-L26021
-[t-phase-reread]: ../../../../crates/daemon/src/lib.rs#L26076-L26097
+[t-load-count]: ../../../../crates/daemon/src/lib.rs#L25952-L26004
+[t-timing]: ../../../../crates/daemon/src/lib.rs#L26008-L26024
+[t-phase]: ../../../../crates/daemon/src/lib.rs#L26028-L26041
+[t-phase-reread]: ../../../../crates/daemon/src/lib.rs#L26096-L26117
 
 The five checks above were added with the single-load pass (implementation
 base `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the preceding storage
@@ -743,4 +745,4 @@ preparation; their links are to the live tree.
 [t-key-reuse]: ../../../../crates/memory-store/src/lib.rs#L17365-L17432
 [t-reassign]: ../../../../crates/memory-store/src/lib.rs#L24780-L24803
 [t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20883-L21043
-[t-outcome]: ../../../../crates/daemon/src/lib.rs#L26030-L26074
+[t-outcome]: ../../../../crates/daemon/src/lib.rs#L26050-L26094

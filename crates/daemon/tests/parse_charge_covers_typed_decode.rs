@@ -306,3 +306,28 @@ fn a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unesc
         "the short pool refuses the body as transient: {outcome:?}"
     );
 }
+
+#[test]
+fn a_held_pool_refuses_before_the_lane_probe_unescapes_a_long_key() {
+    let _serial = measure();
+    // The lane probe reads a sub-cap body's top-level keys, unescaping an escaped one into
+    // serde_json's buffer, so the admission charge runs before it: a pool with nothing free
+    // refuses the body before the probe reads a 900 KiB escaped key.
+    let key_bytes = 900 * 1024;
+    let mut body = Vec::from(br#"{"\n"#.as_slice());
+    body.resize(body.len() + key_bytes, b'k');
+    body.extend_from_slice(br#"":1,"kind":"transform"}"#);
+    assert!(body.len() <= 1024 * 1024);
+
+    let base = reset_peak();
+    let outcome = daemon::handle_entry_for_test(&body, &Drained);
+    let peak = peak_since(base);
+    assert!(
+        peak < 64 * 1024,
+        "the entry allocated {peak} bytes against a held pool before any charge (outcome: {outcome:?})"
+    );
+    assert!(
+        matches!(&outcome, Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "queue_full"),
+        "the held pool refuses the body before the probe: {outcome:?}"
+    );
+}

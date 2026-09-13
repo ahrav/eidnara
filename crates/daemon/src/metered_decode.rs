@@ -18,7 +18,7 @@
 //! bytes first, and serde_json reuses the buffer across strings.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use host_runtime::handler::RequestCtx;
@@ -140,6 +140,7 @@ pub struct ResidentMeter<'r> {
     refusal: AtomicU8,
     shortfall: Mutex<Option<ShortfallMarker>>,
     longest_escaped: AtomicUsize,
+    admitted: AtomicBool,
 }
 
 const NO_REFUSAL: u8 = 0;
@@ -156,7 +157,14 @@ impl<'r> ResidentMeter<'r> {
             refusal: AtomicU8::new(NO_REFUSAL),
             shortfall: Mutex::new(None),
             longest_escaped: AtomicUsize::new(0),
+            admitted: AtomicBool::new(false),
         }
+    }
+
+    /// `true` on the first call only, so the admission steps run once per request however
+    /// many entry points reach them.
+    pub fn admit_once(&self) -> bool {
+        !self.admitted.swap(true, Ordering::Relaxed)
     }
 
     /// The footprint the decode has reached so far.
