@@ -213,6 +213,11 @@ fn allocation_cell(population: Population) -> Value {
     let (bytes, canonicalizer) =
         record_window(|| daemon::served_json::canonical_served_bytes_for_test(&message));
     assert_eq!(bytes, reference, "{}", population.label());
+    assert!(
+        !canonicalizer.overflow,
+        "{}: ledger overflow",
+        population.label()
+    );
     let ptr = bytes.as_ptr() as usize;
     let return_capacity = bytes.capacity();
     let chain = canonicalizer.growth_chain(ptr);
@@ -233,6 +238,11 @@ fn allocation_cell(population: Population) -> Value {
     let (served, full_constructor) =
         record_window(|| daemon::transform::served_message_for_test(message));
     assert_eq!(served.canonical_bytes_for_test(), reference.as_slice());
+    assert!(
+        !full_constructor.overflow,
+        "{}: ledger overflow",
+        population.label()
+    );
     drop(served);
     json!({
         "population": population.label(),

@@ -42,7 +42,9 @@ fn passthrough_shell_canonicalization_allocates_independently_of_key_count() {
     assert_eq!(small_bytes, reference_bytes(&small));
     assert_eq!(large_bytes, reference_bytes(&large));
     assert!(!small_ledger.overflow && !large_ledger.overflow);
-    let per_block = (large_ledger.allocation_events - small_ledger.allocation_events)
+    let per_block = large_ledger
+        .allocation_events
+        .saturating_sub(small_ledger.allocation_events)
         / (large_blocks - small_blocks);
     assert!(
         per_block <= MAX_EVENTS_PER_BLOCK,
@@ -67,6 +69,11 @@ fn canonical_miss_return_buffer_provenance_is_classified() {
         assert_eq!(bytes, reference, "{label}");
         assert!(!ledger.overflow, "{label}: ledger overflow");
         let ptr = bytes.as_ptr() as usize;
+        assert_eq!(
+            ledger.live_bytes_at_close,
+            bytes.capacity() as isize,
+            "{label}: only the returned buffer survives the canonicalizer"
+        );
         let provenance = ledger.buffer_provenance(ptr, bytes.len(), bytes.capacity());
         let expected = if population.expects_serialization_buffer_return() {
             BufferProvenance::GrowthChain

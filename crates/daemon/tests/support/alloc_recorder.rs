@@ -51,7 +51,8 @@ impl Slot {
 }
 
 static LEDGER: [Slot; LEDGER_CAPACITY] = [const { Slot::empty() }; LEDGER_CAPACITY];
-static ENABLED: AtomicBool = AtomicBool::new(false);
+/// The recording thread's `pthread_self` token, or zero when no window is open. One
+/// atomic carries both facts so a reader can never pair a live flag with a stale owner.
 static OWNER: AtomicUsize = AtomicUsize::new(0);
 static CURSOR: AtomicUsize = AtomicUsize::new(0);
 static OVERFLOW: AtomicBool = AtomicBool::new(false);
@@ -71,7 +72,7 @@ fn current_thread_token() -> usize {
 }
 
 fn recording_here() -> bool {
-    ENABLED.load(Ordering::Relaxed) && OWNER.load(Ordering::Relaxed) == current_thread_token()
+    OWNER.load(Ordering::Acquire) == current_thread_token()
 }
 
 fn record(kind: usize, ptr: usize, old_ptr: usize, size: usize, old_size: usize) {
@@ -102,6 +103,16 @@ fn shrink(bytes: usize) {
 unsafe impl GlobalAlloc for RecordingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() && recording_here() {
+            record(KIND_ALLOC, ptr as usize, 0, layout.size(), 0);
+            REQUESTED_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            grow(layout.size());
+        }
+        ptr
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc_zeroed(layout) };
         if !ptr.is_null() && recording_here() {
             record(KIND_ALLOC, ptr as usize, 0, layout.size(), 0);
             REQUESTED_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
@@ -294,13 +305,13 @@ impl Ledger {
     }
 }
 
-/// Clears `ENABLED` even when `f` panics, so one failing window cannot poison
+/// Clears the owner even when `f` panics, so one failing window cannot poison
 /// every later window in the process.
 struct Disable;
 
 impl Drop for Disable {
     fn drop(&mut self) {
-        ENABLED.store(false, Ordering::SeqCst);
+        OWNER.store(0, Ordering::Release);
     }
 }
 
@@ -324,8 +335,7 @@ pub fn record_window<T>(f: impl FnOnce() -> T) -> (T, Ledger) {
     LIVE_DELTA.store(0, Ordering::Relaxed);
     PEAK_DELTA.store(0, Ordering::Relaxed);
     REQUESTED_BYTES.store(0, Ordering::Relaxed);
-    OWNER.store(current_thread_token(), Ordering::Relaxed);
-    ENABLED.store(true, Ordering::SeqCst);
+    OWNER.store(current_thread_token(), Ordering::Release);
     let value = {
         let _disable = Disable;
         f()

@@ -142,7 +142,8 @@ main() {
   local mode="$1"
   cd "$(repo_root)"
   scratch=$(mktemp -d "${TMPDIR:-/tmp}/eidnara-canonical-output.XXXXXX")
-  trap 'rm -rf "$scratch"' EXIT
+  # A failed build leaves its worktree registered; prune it with the scratch dir.
+  trap 'rm -rf "$scratch"; git worktree prune' EXIT
 
   case "$mode" in
     baseline)
