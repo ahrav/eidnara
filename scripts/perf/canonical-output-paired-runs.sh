@@ -100,7 +100,13 @@ write_provenance() {
   local out_dir="$1" mode="$2" schedule="$3" baseline_sha="$4" candidate_sha="${5:-}"
   local harness_rev dirty
   harness_rev=$(git rev-parse HEAD)
-  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then dirty=true; else dirty=false; fi
+  # Only sources that reach the built binaries decide dirtiness; evidence and
+  # documentation edits do not.
+  if [ -n "$(git status --porcelain --untracked-files=no -- Cargo.toml Cargo.lock crates scripts)" ]; then
+    dirty=true
+  else
+    dirty=false
+  fi
   {
     echo "{"
     echo "  \"kind\": \"canonical-output-paired-runs/v1\","
