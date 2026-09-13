@@ -21,6 +21,7 @@ use cache_stability::CoreState;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use daemon::bench_internals::{self, transform_cached};
 use daemon::canonical_memory::CanonicalMemory;
+use daemon::transform::TransformRequest;
 use daemon::wire::{IngressMessage, IngressMessages, project_messages};
 use std::hint::black_box;
 
@@ -95,6 +96,43 @@ fn reattached_messages(class: ContentClass, count: usize, bytes: usize) -> Ingre
             message
         })
         .collect()
+}
+
+/// Typed request decode from the wire bytes a transform body carries, alone and
+/// followed by projection. The body is built once; each iteration decodes fresh.
+fn bench_decode(c: &mut Criterion) {
+    let mut group = c.benchmark_group("decode");
+    for &count in &[40usize, 200] {
+        let messages = corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED);
+        let body = serde_json::to_vec(&request("bench-decode", &messages, false))
+            .expect("bench request serializes");
+        group.throughput(criterion::Throughput::Bytes(body.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("typed_request", format!("{count}msgs_2KiB_mixed")),
+            &body,
+            |b, body| {
+                b.iter_with_large_drop(|| {
+                    serde_json::from_slice::<TransformRequest>(black_box(body)).expect("decode")
+                })
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new(
+                "typed_request_plus_projection",
+                format!("{count}msgs_2KiB_mixed"),
+            ),
+            &body,
+            |b, body| {
+                b.iter_with_large_drop(|| {
+                    let request = serde_json::from_slice::<TransformRequest>(black_box(body))
+                        .expect("decode");
+                    let projection = project_messages(&request.messages).expect("projection");
+                    (request, projection)
+                })
+            },
+        );
+    }
+    group.finish();
 }
 
 fn bench_projection(c: &mut Criterion) {
@@ -353,6 +391,7 @@ fn bench_e2e_steady_caveman(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_tokenizer,
+    bench_decode,
     bench_projection,
     bench_projection_reattached,
     bench_tail_hygiene,

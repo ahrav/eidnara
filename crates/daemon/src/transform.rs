@@ -200,7 +200,7 @@ impl ServedMessage {
                 if let Some(fp) = reused {
                     return fp;
                 }
-                let serialized = serde_json::to_string(block)
+                let serialized = crate::served_json::canonical_block_bytes(block)
                     .expect("CK wire blocks must always have a JSON representation");
                 (wire::fingerprint(&serialized), serialized.len())
             })
@@ -251,6 +251,11 @@ impl ServedMessage {
     #[cfg(feature = "test-support")]
     pub fn canonical_bytes_for_test(&self) -> &[u8] {
         self.canonical_bytes()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn block_fingerprints_for_test(&self) -> &[(String, usize)] {
+        &self.block_fingerprints
     }
 
     fn retained_bytes(&self) -> usize {
@@ -11855,7 +11860,8 @@ pub(crate) mod tests {
     use storage::{Isolation, StorageBackend, StorageDescriptor};
 
     use memory_store::{
-        ModuleDropSeedRow, ModuleStateSyncRequest, ModuleUsage, StoredCompartment, TagRow,
+        BlockKind, HarnessMeta, ModuleDropSeedRow, ModuleStateSyncRequest, ModuleUsage, OutputKind,
+        ProviderExtras, StoredCompartment, TagRow, ToolOutput,
     };
 
     fn tag_baseline_test_entry() -> TagBaselineCacheEntry {
@@ -13803,6 +13809,244 @@ pub(crate) mod tests {
         assert_eq!(constructed.get(), 4);
         assert_eq!((timings.cache_hits, timings.cache_misses), (1, 4));
         assert_eq!(timings.cache_dirty_skips, 1);
+    }
+
+    /// Daemon-built blocks carry no ingress text, so their canonical bytes come from
+    /// the typed value alone: span-sorted keys, a false `provider_executed` omitted, a
+    /// true one kept, and every payload key retained. The literals are the frozen
+    /// expectation; the sorted `Value` serialization is the independent ordering oracle.
+    #[test]
+    fn typed_only_blocks_canonicalize_by_field_selection_and_sorted_order() {
+        fn oracle(block: &WireBlock) -> String {
+            String::from_utf8(serde_json::to_vec(&serde_json::to_value(block).unwrap()).unwrap())
+                .unwrap()
+        }
+        let cases: Vec<(WireBlock, &str)> = vec![
+            (
+                WireBlock::bare(BlockKind::ToolCall {
+                    id: "todo_1".into(),
+                    name: "todowrite".into(),
+                    input: json!({"todos": [{"content": "a", "status": "pending", "priority": "high"}]}),
+                    provider_executed: false,
+                }),
+                r#"{"kind":{"id":"todo_1","input":{"todos":[{"content":"a","priority":"high","status":"pending"}]},"name":"todowrite","type":"tool_call"}}"#,
+            ),
+            (
+                WireBlock::bare(BlockKind::ToolCall {
+                    id: "web_1".into(),
+                    name: "websearch".into(),
+                    input: json!({"query": "q"}),
+                    provider_executed: true,
+                }),
+                r#"{"kind":{"id":"web_1","input":{"query":"q"},"name":"websearch","provider_executed":true,"type":"tool_call"}}"#,
+            ),
+            (
+                WireBlock::bare(BlockKind::ToolResult {
+                    id: "todo_1".into(),
+                    tool_name: "todowrite".into(),
+                    output: ToolOutput::bare(OutputKind::Json {
+                        value: json!({"ok": true, "n": 42}),
+                    }),
+                    provider_executed: false,
+                }),
+                r#"{"kind":{"id":"todo_1","output":{"kind":{"type":"json","value":{"n":42,"ok":true}}},"tool_name":"todowrite","type":"tool_result"}}"#,
+            ),
+            (
+                WireBlock::bare(BlockKind::ToolResult {
+                    id: "deny_1".into(),
+                    tool_name: "delete".into(),
+                    output: ToolOutput::bare(OutputKind::ExecutionDenied {
+                        reason: Some("policy".into()),
+                    }),
+                    provider_executed: false,
+                }),
+                r#"{"kind":{"id":"deny_1","output":{"kind":{"reason":"policy","type":"execution_denied"}},"tool_name":"delete","type":"tool_result"}}"#,
+            ),
+            (
+                WireBlock::bare(BlockKind::ToolResult {
+                    id: "err_1".into(),
+                    tool_name: "run".into(),
+                    output: ToolOutput::bare(OutputKind::ErrorJson {
+                        value: json!({"code": 7, "-0": -0.0, "big": 18446744073709551615u64}),
+                    }),
+                    provider_executed: false,
+                }),
+                r#"{"kind":{"id":"err_1","output":{"kind":{"type":"error_json","value":{"-0":-0.0,"big":18446744073709551615,"code":7}}},"tool_name":"run","type":"tool_result"}}"#,
+            ),
+            (
+                WireBlock::with_provider_extras(
+                    BlockKind::Text {
+                        text: "typed".into(),
+                    },
+                    ProviderExtras::from([(
+                        "opencode".to_string(),
+                        BTreeMap::from([(
+                            "metadata".to_string(),
+                            json!({"z": 1, "a": [1, {"y": 2, "x": 3}]}),
+                        )]),
+                    )]),
+                ),
+                r#"{"kind":{"text":"typed","type":"text"},"provider_extras":{"opencode":{"metadata":{"a":[1,{"x":3,"y":2}],"z":1}}}}"#,
+            ),
+        ];
+        for (block, literal) in &cases {
+            assert!(block.original().is_none());
+            let canonical = crate::served_json::canonical_block_bytes(block).unwrap();
+            assert_eq!(canonical, *literal);
+            assert_eq!(canonical, oracle(block));
+            // A false flag round-trips as absent; a true flag round-trips as present.
+            let decoded: WireBlock = serde_json::from_str(&canonical).unwrap();
+            assert_eq!(decoded.kind(), block.kind());
+        }
+        // Explicit false on ingress is retained text and stays a distinct identity.
+        let explicit_false: WireBlock = serde_json::from_str(
+            r#"{"kind":{"id":"web_1","input":{"query":"q"},"name":"websearch","provider_executed":false,"type":"tool_call"}}"#,
+        )
+        .unwrap();
+        assert!(explicit_false.original().is_some());
+        assert!(
+            crate::served_json::canonical_block_bytes(&explicit_false)
+                .unwrap()
+                .contains("\"provider_executed\":false")
+        );
+    }
+
+    /// The three fresh-byte consumers must read `canonical_block_bytes`; a consumer
+    /// that serializes a block any other way changes identity silently.
+    #[test]
+    fn fresh_block_byte_consumers_call_the_canonical_producer() {
+        let flatten = include_str!("wire.rs")
+            .split_once("fn flatten_block(")
+            .unwrap()
+            .1
+            .split_once("fn tool_arc_id(")
+            .unwrap()
+            .0;
+        assert_eq!(
+            flatten
+                .matches("served_json::canonical_block_bytes(")
+                .count(),
+            1
+        );
+        assert!(!flatten.contains("serde_json::to_string("));
+        assert!(!flatten.contains("serde_json::to_vec("));
+
+        let constructor = include_str!("transform.rs")
+            .split_once("    fn from_message_reusing(")
+            .unwrap()
+            .1
+            .split_once("    fn with_output_identity(")
+            .unwrap()
+            .0;
+        assert_eq!(
+            constructor
+                .matches("served_json::canonical_block_bytes(")
+                .count(),
+            1
+        );
+        assert!(!constructor.contains("serde_json::to_string("));
+
+        let sidecar = include_str!("codec/sidecar.rs")
+            .split_once("pub(crate) fn decoded_block_fingerprint(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn stamp_block_identity(")
+            .unwrap()
+            .0;
+        assert_eq!(
+            sidecar
+                .matches("served_json::canonical_block_bytes(")
+                .count(),
+            1
+        );
+        assert!(!sidecar.contains("serde_json::to_value("));
+        assert!(!sidecar.contains("stable_hash("));
+    }
+
+    /// Receipt reuse selects by equality digest and position; fresh hashing serializes
+    /// the served block. The two are separate operations with separate oracles.
+    #[test]
+    fn receipt_reuse_is_separate_from_fresh_hashing() {
+        fn call(id: &str, x: f64) -> WireBlock {
+            WireBlock::bare(BlockKind::ToolCall {
+                id: id.into(),
+                name: "f".into(),
+                input: json!({ "x": x }),
+                provider_executed: false,
+            })
+        }
+        let projected_message = wire_message_from_blocks(
+            "assistant",
+            vec![call("a", 0.0), call("b", 1.0), call("b", 1.0)],
+        );
+        let projection = project_messages(&[Arc::new(IngressMessage {
+            mid: "p".into(),
+            ordinal: 1,
+            ck: projected_message.clone(),
+        })])
+        .unwrap();
+        let flats: Vec<&FlatBlock> = projection.blocks.iter().collect();
+
+        // Positional match: served index 0 equals projected index 0 by `PartialEq`
+        // (`-0.0 == 0.0`), so the receipt is reused even though fresh bytes differ.
+        let served = wire_message_from_blocks("assistant", vec![call("a", -0.0)]);
+        let reused = ServedMessage::from_message_reusing(served.clone(), Some(&flats));
+        let fresh = ServedMessage::from_message(served.clone());
+        assert_eq!(
+            reused.block_fingerprints[0].0,
+            wire::fingerprint_digest(&flats[0].content_hash)
+        );
+        assert_eq!(reused.block_fingerprints[0].1, flats[0].bytes.len());
+        assert_ne!(reused.block_fingerprints[0], fresh.block_fingerprints[0]);
+        assert_eq!(
+            reused.canonical_bytes(),
+            fresh.canonical_bytes(),
+            "served bytes never come from receipts"
+        );
+        assert!(
+            std::str::from_utf8(reused.canonical_bytes())
+                .unwrap()
+                .contains("-0.0")
+        );
+
+        // Positional mismatch falls back to the equality index and keeps the first of
+        // two identical candidates.
+        let shifted = wire_message_from_blocks("assistant", vec![call("z", 5.0), call("b", 1.0)]);
+        let reused = ServedMessage::from_message_reusing(shifted.clone(), Some(&flats));
+        let fresh = ServedMessage::from_message(shifted);
+        assert_eq!(
+            reused.block_fingerprints[0], fresh.block_fingerprints[0],
+            "no candidate: fresh hash"
+        );
+        assert_eq!(
+            reused.block_fingerprints[1].0,
+            wire::fingerprint_digest(&flats[1].content_hash)
+        );
+        assert_eq!(flats[1].content_hash, flats[2].content_hash);
+        assert_eq!(
+            reused.block_fingerprints[1], fresh.block_fingerprints[1],
+            "identical typed blocks hash identically"
+        );
+
+        // No receipts: every fingerprint is the fresh canonical hash.
+        let none = ServedMessage::from_message_reusing(projected_message.clone(), None);
+        for (index, block) in projected_message.content().iter().enumerate() {
+            let canonical = crate::served_json::canonical_block_bytes(block).unwrap();
+            assert_eq!(
+                none.block_fingerprints[index],
+                (wire::fingerprint(&canonical), canonical.len())
+            );
+        }
+    }
+
+    fn wire_message_from_blocks(role: &str, blocks: Vec<WireBlock>) -> WireMessage {
+        WireMessage::from_parts(
+            role,
+            blocks,
+            None,
+            ProviderExtras::new(),
+            HarnessMeta::default(),
+        )
     }
 
     #[test]
