@@ -25,7 +25,7 @@ use context_core::redaction::{
 };
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 use rusqlite::{OptionalExtension, functions::FunctionFlags, params, types::Value as SqlValue};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -96,25 +96,13 @@ pub struct MessageOrigin {
     pub api: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One conversation message in CK wire form. Serialization walks the typed fields, so
+/// unknown envelope fields are discarded on decode and every edit reaches the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireMessage {
     pub role: String,
-    /// Reached through [`WireMessage::content`] and [`WireMessage::content_mut`]; the
-    /// mutable accessor drops `original` so an edit reaches the wire.
+    /// Reached through [`WireMessage::content`] and [`WireMessage::content_mut`].
     content: Vec<WireBlock>,
-    pub origin: Option<MessageOrigin>,
-    pub provider_extras: ProviderExtras,
-    pub meta: HarnessMeta,
-    /// Original parsed JSON for pass-through messages. Pass-through MUST stay
-    /// Value-level: serializing this retained value, never a typed-struct round-trip,
-    /// preserves harmless unknown fields and keeps replay lossless as the CK wire evolves.
-    original: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WireMessageData {
-    pub role: String,
-    pub content: Vec<WireBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<MessageOrigin>,
     #[serde(default, skip_serializing_if = "ProviderExtras::is_empty")]
@@ -123,46 +111,8 @@ struct WireMessageData {
     pub meta: HarnessMeta,
 }
 
-impl<'de> Deserialize<'de> for WireMessage {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let original = Value::deserialize(deserializer)?;
-        let data =
-            WireMessageData::deserialize(original.clone()).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            role: data.role,
-            content: data.content,
-            origin: data.origin,
-            provider_extras: data.provider_extras,
-            meta: data.meta,
-            original: Some(original),
-        })
-    }
-}
-
-impl Serialize for WireMessage {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        if let Some(original) = &self.original {
-            return original.serialize(serializer);
-        }
-        WireMessageData {
-            role: self.role.clone(),
-            content: self.content.clone(),
-            origin: self.origin.clone(),
-            provider_extras: self.provider_extras.clone(),
-            meta: self.meta.clone(),
-        }
-        .serialize(serializer)
-    }
-}
-
 impl WireMessage {
-    /// Builds a typed message without retained ingress JSON.
+    /// Builds a typed message.
     pub fn from_parts(
         role: impl Into<String>,
         content: Vec<WireBlock>,
@@ -176,7 +126,6 @@ impl WireMessage {
             origin,
             provider_extras,
             meta,
-            original: None,
         }
     }
 
@@ -200,101 +149,35 @@ impl WireMessage {
         &self.content
     }
 
-    /// Mutable content blocks. Drops the message's retained ingress JSON so serialization
-    /// walks the typed blocks; each block keeps its own retained JSON until its
-    /// [`WireBlock::kind_mut`] runs, so an edit to one block leaves its siblings byte-identical.
+    /// Mutable content blocks.
     pub fn content_mut(&mut self) -> &mut Vec<WireBlock> {
-        self.original = None;
         &mut self.content
     }
-
-    /// Drops the retained ingress JSON so serialization uses the typed fields. `role`,
-    /// `origin`, `provider_extras`, and `meta` are public fields whose edits do not clear it
-    /// on their own.
-    pub fn mark_modified(&mut self) {
-        self.original = None;
-    }
-
-    /// Retained ingress JSON that `Serialize` replays. `None` after `from_parts`,
-    /// `content_mut`, or `mark_modified`.
-    pub fn original(&self) -> Option<&Value> {
-        self.original.as_ref()
-    }
-
-    fn mark_fully_typed(&mut self) {
-        self.original = None;
-        for block in &mut self.content {
-            block.mark_modified();
-        }
-    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One content block. Equality covers the typed payload and provider extras.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireBlock {
-    /// Reached through [`WireBlock::kind`] and [`WireBlock::kind_mut`]; the mutable accessor
-    /// drops `original` so an edit reaches the wire.
+    /// Reached through [`WireBlock::kind`] and [`WireBlock::kind_mut`].
     kind: BlockKind,
-    pub provider_extras: ProviderExtras,
-    /// Original parsed JSON for pass-through blocks. Keep this Value-level for the same
-    /// lossless-pass-through reason as WireMessage::original.
-    original: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WireBlockData {
-    pub kind: BlockKind,
     #[serde(default, skip_serializing_if = "ProviderExtras::is_empty")]
     pub provider_extras: ProviderExtras,
 }
 
-impl<'de> Deserialize<'de> for WireBlock {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let original = Value::deserialize(deserializer)?;
-        let data =
-            WireBlockData::deserialize(original.clone()).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            kind: data.kind,
-            provider_extras: data.provider_extras,
-            original: Some(original),
-        })
-    }
-}
-
-impl Serialize for WireBlock {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        if let Some(original) = &self.original {
-            return original.serialize(serializer);
-        }
-        WireBlockData {
-            kind: self.kind.clone(),
-            provider_extras: self.provider_extras.clone(),
-        }
-        .serialize(serializer)
-    }
-}
-
 impl WireBlock {
-    /// Builds a typed block without provider extras or retained ingress JSON.
+    /// Builds a typed block without provider extras.
     pub fn bare(kind: BlockKind) -> Self {
         Self {
             kind,
             provider_extras: ProviderExtras::new(),
-            original: None,
         }
     }
 
-    /// Builds a typed block with provider extras and no retained ingress JSON.
+    /// Builds a typed block with provider extras.
     pub fn with_provider_extras(kind: BlockKind, provider_extras: ProviderExtras) -> Self {
         Self {
             kind,
             provider_extras,
-            original: None,
         }
     }
 
@@ -303,23 +186,9 @@ impl WireBlock {
         &self.kind
     }
 
-    /// Mutable block payload. Drops the retained ingress JSON so serialization reflects the
-    /// typed fields after the edit.
+    /// Mutable block payload.
     pub fn kind_mut(&mut self) -> &mut BlockKind {
-        self.original = None;
         &mut self.kind
-    }
-
-    /// Drops the retained ingress JSON so serialization uses the typed fields.
-    /// `provider_extras` is a public field whose edits do not clear it on their own.
-    pub fn mark_modified(&mut self) {
-        self.original = None;
-    }
-
-    /// Retained ingress JSON that `Serialize` replays. `None` after `bare`,
-    /// `with_provider_extras`, `kind_mut`, or `mark_modified`.
-    pub fn original(&self) -> Option<&Value> {
-        self.original.as_ref()
     }
 }
 
@@ -1277,7 +1146,7 @@ pub struct BlockIdentity {
 /// The pair is replayed exactly at its stored anchor until the todo content changes.
 /// Rebuilding or moving it would alter the exact prompt bytes seen by the provider,
 /// so both CK messages are stored byte-complete.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrozenSyntheticTodoPair {
     /// Shared synthetic tool-call id used by both the assistant ToolCall and tool result.
     pub call_id: String,
@@ -1289,37 +1158,6 @@ pub struct FrozenSyntheticTodoPair {
     pub assistant_msg: WireMessage,
     /// Frozen tool-role CK message carrying the matching synthetic todowrite ToolResult.
     pub tool_msg: WireMessage,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct FrozenSyntheticTodoPairData {
-    call_id: String,
-    #[serde(default)]
-    anchor_mid: Option<String>,
-    assistant_msg: WireMessage,
-    tool_msg: WireMessage,
-}
-
-impl<'de> Deserialize<'de> for FrozenSyntheticTodoPair {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let data = FrozenSyntheticTodoPairData::deserialize(deserializer)?;
-        let mut assistant_msg = data.assistant_msg;
-        let mut tool_msg = data.tool_msg;
-        // Frozen synthetic todo messages are generated by this crate, not inbound
-        // pass-through messages. Clear the retained Value after loading metadata so
-        // replay uses the same canonical typed serialization as the original freeze.
-        assistant_msg.mark_fully_typed();
-        tool_msg.mark_fully_typed();
-        Ok(Self {
-            call_id: data.call_id,
-            anchor_mid: data.anchor_mid,
-            assistant_msg,
-            tool_msg,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -16095,23 +15933,27 @@ mod tests {
     /// Editing one block through the accessors re-encodes that block and leaves the
     /// sibling's ingress bytes, including an unknown field, as they arrived.
     #[test]
-    fn a_block_edit_leaves_its_sibling_byte_identical() {
+    fn a_block_edit_leaves_its_sibling_unchanged_and_envelope_unknowns_are_discarded() {
         let ingress = serde_json::json!({
             "role": "user",
             "content": [
                 { "kind": { "type": "text", "text": "first" } },
-                { "kind": { "type": "text", "text": "second" }, "sentinel_unknown_field": "kept" },
+                { "kind": { "type": "text", "text": "second" }, "sentinel_unknown_field": "dropped" },
             ],
             "meta": {},
+            "sentinel_unknown_field": "dropped",
         });
         let mut message: WireMessage = serde_json::from_value(ingress).unwrap();
+        let sibling = message.content()[1].clone();
         *message.content_mut()[0].kind_mut() = BlockKind::Text {
             text: "edited".to_string(),
         };
+        assert_eq!(message.content()[1], sibling);
         let serialized = serde_json::to_value(&message).unwrap();
         assert_eq!(serialized["content"][0]["kind"]["text"], "edited");
-        assert_eq!(serialized["content"][1]["sentinel_unknown_field"], "kept");
         assert_eq!(serialized["content"][1]["kind"]["text"], "second");
+        assert_eq!(serialized["content"][1].get("sentinel_unknown_field"), None);
+        assert_eq!(serialized.get("sentinel_unknown_field"), None);
     }
 
     /// One walk decides everything: clean input comes back as the same bytes with

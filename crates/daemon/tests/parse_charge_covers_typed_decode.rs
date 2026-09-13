@@ -331,3 +331,208 @@ fn a_held_pool_refuses_before_the_lane_probe_unescapes_a_long_key() {
         "the held pool refuses the body before the probe: {outcome:?}"
     );
 }
+
+/// A reserve that grants everything up to a stated capacity; the meter's permanent refusal
+/// comes from the capacity alone.
+struct Capped {
+    capacity: usize,
+}
+
+impl ResidentReserve for Capped {
+    fn try_reserve(&self, _bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+        Some(host_runtime::wire::ByteCharge::none())
+    }
+
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+/// The production tree lane: the metered `Value` parse, then the consuming typed conversion.
+/// The peak is read across both steps, with the tree and the request live at the handoff.
+fn tree_lane_peak(body: &[u8], meter: &ResidentMeter<'_>) -> (TransformRequest, usize) {
+    let base = reset_peak();
+    let tree: serde_json::Value = decode_metered(body, meter).expect("tree decode");
+    let request: TransformRequest = serde_json::from_value(tree).expect("typed conversion");
+    (request, peak_since(base))
+}
+
+/// The production direct lane: the metered typed decode from the bytes.
+fn direct_lane_peak(body: &[u8], meter: &ResidentMeter<'_>) -> (TransformRequest, usize) {
+    let base = reset_peak();
+    let request: TransformRequest = decode_metered(body, meter).expect("direct decode");
+    (request, peak_since(base))
+}
+
+#[test]
+fn parse_charge_covers_text_heavy_peaks_on_both_lanes() {
+    let _serial = measure();
+    for (text_bytes, escaped) in [(1usize << 22, true), (1 << 22, false), (1 << 16, true)] {
+        let body = text_body(text_bytes, escaped);
+        for lane in [direct_lane_peak, tree_lane_peak] {
+            let meter = ResidentMeter::new(&Unmetered);
+            meter
+                .reserve_unescape_scratch(&body)
+                .expect("the scratch charge is granted");
+            let (request, peak) = lane(&body, &meter);
+            assert_eq!(request.messages.len(), 1);
+            drop(request);
+            assert!(
+                peak <= meter.needed(),
+                "{text_bytes} text bytes (escaped: {escaped}) peaked at {peak} bytes but the lane \
+                 charged only {}",
+                meter.needed()
+            );
+        }
+    }
+}
+
+/// A body whose typed decode fails at a duplicate key inside its last message, after a text
+/// block of `text_bytes`, so the direct lane falls back to the tree from the same bytes.
+fn late_duplicate_body(text_bytes: usize, escaped: bool) -> Vec<u8> {
+    let mut body = text_body(text_bytes, escaped);
+    let tail = br#"]}"#;
+    assert!(body.ends_with(tail));
+    body.truncate(body.len() - tail.len());
+    body.extend_from_slice(
+        br#",{"mid":"dup","mid":"dup","ordinal":1,"ck":{"role":"user","content":[]}}]}"#,
+    );
+    body
+}
+
+#[test]
+fn parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback() {
+    let _serial = measure();
+    for escaped in [false, true] {
+        let body = late_duplicate_body(1 << 22, escaped);
+        assert!(
+            serde_json::from_slice::<TransformRequest>(&body).is_err(),
+            "the typed decode refuses the duplicate key"
+        );
+        let meter = ResidentMeter::new(&Unmetered);
+        let base = reset_peak();
+        let walked = daemon::direct_lane_admission_for_test(&body, &Unmetered)
+            .expect("the walk is admitted");
+        assert!(walked, "the tree walk accepts the duplicate key");
+        meter
+            .reserve_unescape_scratch(&body)
+            .expect("the scratch charge is granted");
+        let failure = decode_metered::<TransformRequest>(&body, &meter).unwrap_err();
+        assert!(
+            matches!(failure, daemon::metered_decode::DecodeFailure::Invalid(_)),
+            "{failure:?}"
+        );
+        let typed_needed = meter.needed();
+        meter.restart();
+        let tree: serde_json::Value = decode_metered(&body, &meter).expect("tree decode");
+        let request: TransformRequest = serde_json::from_value(tree).expect("typed conversion");
+        let peak = peak_since(base);
+        assert_eq!(request.messages.len(), 2);
+        drop(request);
+        let largest_needed = footprint_of(&body).max(typed_needed).max(meter.needed());
+        assert!(
+            peak <= largest_needed,
+            "escaped {escaped}: the walk, the failed typed prefix, and the tree fallback peaked at \
+             {peak} bytes but the largest count reached was {largest_needed}"
+        );
+    }
+}
+
+/// Many small retained payload `Value`s: tool inputs and provider extras, not text.
+fn payload_heavy_body(block_count: usize) -> Vec<u8> {
+    let mut body = Vec::from(
+        br#"{"kind":"transform","session_id":"s","render_config":"r","messages":[{"mid":"m","ordinal":0,"ck":{"role":"assistant","content":["#
+            .as_slice(),
+    );
+    for index in 0..block_count {
+        if index != 0 {
+            body.push(b',');
+        }
+        body.extend_from_slice(
+            format!(
+                r#"{{"kind":{{"type":"tool_call","id":"c{index}","name":"t","input":{{"a":[1,2,{{"b":null}}],"c":"v{index}"}}}},"provider_extras":{{"p":{{"k":{{"n":{index}}}}}}}}}"#
+            )
+            .as_bytes(),
+        );
+    }
+    body.extend_from_slice(br#"]}}]}"#);
+    body
+}
+
+/// The direct lane owns every payload `Value` once and fits its charge.
+/// The tree lane builds each small object as a `BTreeMap` leaf node of eleven slots before conversion, which the per-value node charge does not cover; that gap is container storage and is independent of the string coefficient.
+/// `docs/properties/typed-wire-decode/resources/evidence/decode-footprint-covers-both-lanes-combined-peak.md` retains the measured tree-lane overshoot.
+#[test]
+fn parse_charge_covers_payload_heavy_direct_decode_peak() {
+    let _serial = measure();
+    for block_count in [64usize, 4096] {
+        let body = payload_heavy_body(block_count);
+        let meter = ResidentMeter::new(&Unmetered);
+        meter
+            .reserve_unescape_scratch(&body)
+            .expect("the scratch charge is granted");
+        let (request, peak) = direct_lane_peak(&body, &meter);
+        assert_eq!(request.messages[0].ck.content().len(), block_count);
+        drop(request);
+        assert!(
+            peak <= meter.needed(),
+            "{block_count} payload blocks peaked at {peak} bytes but the direct lane charged only {}",
+            meter.needed()
+        );
+        let tree_meter = ResidentMeter::new(&Unmetered);
+        tree_meter
+            .reserve_unescape_scratch(&body)
+            .expect("the scratch charge is granted");
+        let (request, tree_peak) = tree_lane_peak(&body, &tree_meter);
+        drop(request);
+        eprintln!(
+            "payload-heavy tree lane: {block_count} blocks, {} body bytes, peak {tree_peak}, charged {}",
+            body.len(),
+            tree_meter.needed()
+        );
+    }
+}
+
+/// The text-heavy admission ceiling under one numeric capacity.
+/// An unescaped text block is charged once, so the largest admissible body approaches the capacity itself.
+/// One escape charges the unescape scratch buffer at twice the block, so that ceiling is a third of the capacity.
+/// With three string copies per byte the same pool admitted a third and a fifth of the capacity respectively.
+#[test]
+fn text_heavy_admission_ceiling_witnesses() {
+    let _serial = measure();
+    const CAPACITY: usize = 8 << 20;
+    let reserve = Capped { capacity: CAPACITY };
+    let margin = 64 * 1024;
+    for (text_bytes, escaped, admitted) in [
+        (CAPACITY - margin, false, true),
+        (CAPACITY + margin, false, false),
+        (CAPACITY / 3 - margin, true, true),
+        (CAPACITY / 3 + margin, true, false),
+        (CAPACITY / 3 + margin, false, true),
+    ] {
+        let body = text_body(text_bytes, escaped);
+        let outcome = daemon::direct_lane_admission_for_test(&body, &reserve);
+        assert_eq!(
+            outcome.is_ok(),
+            admitted,
+            "{text_bytes} text bytes (escaped: {escaped}) against {CAPACITY}: {outcome:?}"
+        );
+        assert_eq!(footprint_of(&body) <= CAPACITY, admitted);
+        if admitted {
+            for lane in [direct_lane_peak, tree_lane_peak] {
+                let meter = ResidentMeter::new(&reserve);
+                meter
+                    .reserve_unescape_scratch(&body)
+                    .expect("the scratch charge is granted");
+                let (request, peak) = lane(&body, &meter);
+                drop(request);
+                assert!(peak <= meter.needed() && meter.needed() <= CAPACITY);
+            }
+        } else {
+            assert!(matches!(
+                outcome,
+                Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "invalid_params"
+            ));
+        }
+    }
+}

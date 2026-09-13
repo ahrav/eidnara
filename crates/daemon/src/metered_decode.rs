@@ -52,10 +52,12 @@ const _: () = assert!(
 /// The fixed headroom covers allocations that do not scale with the body.
 const VALUE_ENVELOPE_BYTES: usize = 4096;
 
-/// Each string byte is charged this many times: the decoded `Value`, plus the `original`
-/// JSON that `WireMessage` retains for lossless pass-through, plus the `original` that each
-/// `WireBlock` retains, all hold their own copy of a block's text at the same time.
-const RETAINED_STRING_COPIES: usize = 3;
+/// Direct lane: serde's tagged-enum buffer moves into the typed field, so a string is owned once.
+/// Tree lane: `from_value` moves each `Value::String` out of the consumed tree, so a string is owned once there too.
+/// The unescape scratch buffer is charged by [`ResidentMeter::escaped_text`], not here.
+/// Text-heavy ceiling against a pool of `C` bytes: a plain text block uses up to about `C`; escaped text uses up to about `C / 3`.
+/// The 32 MiB transform length cap binds before the default pool does.
+pub(crate) const RETAINED_STRING_COPIES: usize = 1;
 
 /// The estimate doubles the longest escaped string for the unescape buffer's growth.
 const UNESCAPE_SCRATCH_SLACK: usize = 2;

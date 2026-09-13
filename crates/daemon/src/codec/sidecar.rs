@@ -171,7 +171,6 @@ impl AlignmentScore {
 pub(crate) fn decoded_block_fingerprint(block: &WireBlock) -> String {
     let mut canonical = block.clone();
     canonical.provider_extras.remove(BLOCK_IDENTITY_NAMESPACE);
-    canonical.mark_modified();
     let bytes = crate::served_json::canonical_block_bytes(&canonical)
         .map(String::into_bytes)
         .unwrap_or_else(|_| serde_json::to_vec(&Value::Null).unwrap_or_default());
@@ -204,7 +203,6 @@ pub(crate) fn stamp_block_identity(
         FINGERPRINT_KEY.to_string(),
         Value::String(fingerprint.to_string()),
     );
-    block.mark_modified();
 }
 
 fn stamped_block_identity(block: &WireBlock) -> Option<(usize, usize, &str)> {
@@ -526,14 +524,12 @@ mod tests {
             .entry("opencode".into())
             .or_default()
             .insert("metadata".into(), Value::from(1));
-        with_opencode.mark_modified();
         let mut with_pi = block.clone();
         with_pi
             .provider_extras
             .entry("pi".into())
             .or_default()
             .insert("metadata".into(), Value::from(1));
-        with_pi.mark_modified();
         let opencode = decoded_block_fingerprint(&with_opencode);
         let pi = decoded_block_fingerprint(&with_pi);
         assert_ne!(opencode, bare);

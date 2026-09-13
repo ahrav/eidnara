@@ -1,4 +1,4 @@
-//! Canonical served serialization of a passthrough shell must not pay per-key heap work,
+//! Canonical served serialization of a decoded shell must not pay per-key heap work,
 //! and every declared served-output population must have an absolute allocation ledger.
 //!
 //! The recorder is thread-owned, so harness threads never enter the ledger.
@@ -33,10 +33,10 @@ const _: () = assert!(MAX_EVENTS_PER_BLOCK < KEYS_PER_ASCII_BLOCK);
 const ARC_HEADER_BYTES: usize = 2 * std::mem::size_of::<usize>();
 
 #[test]
-fn passthrough_shell_canonicalization_allocates_independently_of_key_count() {
+fn decoded_shell_canonicalization_allocates_independently_of_key_count() {
     let [small_blocks, large_blocks] = BLOCK_COUNTS;
-    let small = served_output_fixtures::retained_ascii_message(small_blocks);
-    let large = served_output_fixtures::retained_ascii_message(large_blocks);
+    let small = served_output_fixtures::decoded_ascii_message(small_blocks);
+    let large = served_output_fixtures::decoded_ascii_message(large_blocks);
     let (small_bytes, small_ledger) = canonicalize_recorded(&small);
     let (large_bytes, large_ledger) = canonicalize_recorded(&large);
     assert_eq!(small_bytes, reference_bytes(&small));
@@ -48,22 +48,22 @@ fn passthrough_shell_canonicalization_allocates_independently_of_key_count() {
         / (large_blocks - small_blocks);
     assert!(
         per_block <= MAX_EVENTS_PER_BLOCK,
-        "{per_block} allocation events per passthrough block (small {}, large {})",
+        "{per_block} allocation events per decoded block (small {}, large {})",
         small_ledger.allocation_events,
         large_ledger.allocation_events
     );
 }
 
+/// Every owned typed shell serializes `role` before `content` and each block's tag before its payload, so the canonicalizer takes the reorder-copy path for all of them.
 #[test]
-fn canonical_miss_return_buffer_provenance_is_classified() {
+fn every_population_takes_the_reorder_copy_path() {
     for population in populations() {
         let label = population.label();
         let message = population.build();
         let reference = reference_bytes(&message);
-        assert_eq!(
-            declaration_order_equals_canonical(&message, &reference),
-            population.expects_canonical_miss(),
-            "{label}: canonicality oracle disagrees with the declared population"
+        assert!(
+            !declaration_order_equals_canonical(&message, &reference),
+            "{label}: an owned typed shell never serializes in canonical order"
         );
         let (bytes, ledger) = canonicalize_recorded(&message);
         assert_eq!(bytes, reference, "{label}");
@@ -74,59 +74,34 @@ fn canonical_miss_return_buffer_provenance_is_classified() {
             bytes.capacity() as isize,
             "{label}: only the returned buffer survives the canonicalizer"
         );
-        let provenance = ledger.buffer_provenance(ptr, bytes.len(), bytes.capacity());
-        let expected = if population.expects_serialization_buffer_return() {
-            BufferProvenance::GrowthChain
-        } else {
-            BufferProvenance::FreshExactSizeAllocation
-        };
-        assert_eq!(provenance, expected, "{label}: return-buffer provenance");
-        match provenance {
-            BufferProvenance::FreshExactSizeAllocation => {
-                assert_eq!(
-                    ledger
-                        .allocations_of_size(bytes.len())
-                        .iter()
-                        .filter(|event| matches!(event, Event::Alloc { .. }))
-                        .count(),
-                    1,
-                    "{label}: exactly one exact output-sized allocation"
-                );
-                // The serialization buffer is the last buffer outside the returned
-                // chain that grew to at least N; it must be released before return.
-                let serialization_buffer = ledger
-                    .allocations_at_least_outside(bytes.len(), ptr)
-                    .last()
-                    .map(|event| match event {
-                        Event::Alloc { ptr, .. } | Event::Realloc { new_ptr: ptr, .. } => *ptr,
-                        Event::Dealloc { .. } => unreachable!(),
-                    })
-                    .expect("the copy path grows a serialization buffer to N");
-                assert!(
-                    ledger.was_released(serialization_buffer),
-                    "{label}: the serialization buffer is released after the copy"
-                );
-            }
-            BufferProvenance::GrowthChain => {
-                let chain = ledger.growth_chain(ptr);
-                assert!(
-                    ledger
-                        .allocations_of_size(bytes.len())
-                        .iter()
-                        .all(|event| chain.contains(event)),
-                    "{label}: no exact-size reorder buffer beside the returned chain"
-                );
-                if population.has_small_span_tables() {
-                    assert!(
-                        ledger
-                            .allocations_at_least_outside(bytes.len(), ptr)
-                            .is_empty(),
-                        "{label}: no output-sized storage outside the returned chain"
-                    );
-                }
-            }
-            BufferProvenance::Unattributed => unreachable!("asserted above"),
-        }
+        assert_eq!(
+            ledger.buffer_provenance(ptr, bytes.len(), bytes.capacity()),
+            BufferProvenance::FreshExactSizeAllocation,
+            "{label}: return-buffer provenance"
+        );
+        assert_eq!(
+            ledger
+                .allocations_of_size(bytes.len())
+                .iter()
+                .filter(|event| matches!(event, Event::Alloc { .. }))
+                .count(),
+            1,
+            "{label}: exactly one exact output-sized allocation"
+        );
+        // The serialization buffer is the last buffer outside the returned chain that
+        // grew to at least N; it must be released before return.
+        let serialization_buffer = ledger
+            .allocations_at_least_outside(bytes.len(), ptr)
+            .last()
+            .map(|event| match event {
+                Event::Alloc { ptr, .. } | Event::Realloc { new_ptr: ptr, .. } => *ptr,
+                Event::Dealloc { .. } => unreachable!(),
+            })
+            .expect("the copy path grows a serialization buffer to N");
+        assert!(
+            ledger.was_released(serialization_buffer),
+            "{label}: the serialization buffer is released after the copy"
+        );
         drop(bytes);
     }
 }

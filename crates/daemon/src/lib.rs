@@ -18041,7 +18041,9 @@ mod tests {
     mod blocking_unit_tests;
 
     use super::*;
-    use crate::metered_decode::{ResidentReserve, footprint_floor, footprint_of, shortfall_count};
+    use crate::metered_decode::{
+        RETAINED_STRING_COPIES, ResidentReserve, footprint_floor, footprint_of, shortfall_count,
+    };
     use std::collections::{HashMap, VecDeque};
 
     use std::sync::{
@@ -20570,6 +20572,469 @@ mod tests {
         }
     }
 
+    /// The string coefficient behind `FROZEN_CORPUS_OUTCOMES`: a typed field plus two trees.
+    const FROZEN_STRING_COPIES: usize = 3;
+    /// Each body's footprint at `FROZEN_STRING_COPIES` and its terminal code through both lanes with an unbounded pool, at that footprint, and one byte under it.
+    const FROZEN_CORPUS_OUTCOMES: &[(&str, usize, &str, &str, &str)] = &[
+        ("valid", 9089, "response", "response", "invalid_params"),
+        (
+            "method discriminator",
+            9095,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "unknown top-level field",
+            10030,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "null on an optional field",
+            9411,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "null on a defaulted field",
+            9378,
+            "bad_request",
+            "bad_request",
+            "invalid_params",
+        ),
+        (
+            "wrong type on a defaulted field",
+            9405,
+            "bad_request",
+            "bad_request",
+            "invalid_params",
+        ),
+        (
+            "float on an integer field",
+            9387,
+            "bad_request",
+            "bad_request",
+            "invalid_params",
+        ),
+        (
+            "negative on an unsigned field",
+            9411,
+            "bad_request",
+            "bad_request",
+            "invalid_params",
+        ),
+        (
+            "integer above u64",
+            9411,
+            "bad_request",
+            "bad_request",
+            "invalid_params",
+        ),
+        (
+            "exponent on an integer field",
+            9387,
+            "bad_request",
+            "bad_request",
+            "invalid_params",
+        ),
+        (
+            "negative zero",
+            9408,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "duplicate top-level key",
+            9390,
+            "session_mismatch",
+            "session_mismatch",
+            "invalid_params",
+        ),
+        (
+            "duplicate discriminator",
+            9384,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "duplicate nested key",
+            9360,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "missing required field",
+            8782,
+            "bad_request",
+            "bad_request",
+            "invalid_params",
+        ),
+        (
+            "missing serializer profile",
+            8734,
+            "unknown_serializer_profile",
+            "unknown_serializer_profile",
+            "invalid_params",
+        ),
+        (
+            "unknown serializer profile",
+            9089,
+            "unknown_serializer_profile",
+            "unknown_serializer_profile",
+            "invalid_params",
+        ),
+        (
+            "null page field",
+            9396,
+            "invalid_params",
+            "invalid_params",
+            "invalid_params",
+        ),
+        (
+            "one page field",
+            9408,
+            "invalid_params",
+            "invalid_params",
+            "invalid_params",
+        ),
+        (
+            "non-string discriminator with kind",
+            9363,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "overlong method beside kind",
+            9558,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "invalid_params",
+        ),
+        (
+            "other route",
+            9381,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "trailing bytes",
+            9089,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "invalid_params",
+        ),
+        (
+            "malformed",
+            4677,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "invalid_params",
+        ),
+        (
+            "array body",
+            4379,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "invalid_params",
+        ),
+        (
+            "string body",
+            4251,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "invalid_params",
+        ),
+        (
+            "empty body",
+            0,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+        ),
+        (
+            "messages as an object",
+            9369,
+            "bad_request",
+            "bad_request",
+            "invalid_params",
+        ),
+        (
+            "dense unknown field",
+            2569485,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "object-form preset",
+            9679,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "number out of range under an ignored field",
+            9220,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "invalid_params",
+        ),
+        (
+            "lone surrogate under an ignored field",
+            9220,
+            "unrecognized_request_shape",
+            "invalid_params",
+            "invalid_params",
+        ),
+        (
+            "invalid UTF-8 under an ignored field",
+            9220,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "invalid_params",
+        ),
+        (
+            "raw-value token under an ignored field",
+            9566,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "invalid_params",
+        ),
+        (
+            "raw-value token with a sibling key",
+            9697,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "invalid_params",
+        ),
+        (
+            "raw-value token inside an ignored array",
+            9694,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "invalid_params",
+        ),
+        (
+            "raw-value token under the discriminator",
+            4716,
+            "unrecognized_request_shape",
+            "invalid_params",
+            "invalid_params",
+        ),
+        (
+            "raw-value token holding a document",
+            9703,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "raw-value token not in first position",
+            9953,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "raw-value token after a key under tail_delta",
+            9980,
+            "bad_request",
+            "bad_request",
+            "invalid_params",
+        ),
+        (
+            "raw-value token after a key in a native message",
+            10123,
+            "bad_request",
+            "bad_request",
+            "invalid_params",
+        ),
+        (
+            "escaped discriminator",
+            9107,
+            "response",
+            "invalid_params",
+            "invalid_params",
+        ),
+        (
+            "escaped discriminator beside transform text",
+            9393,
+            "response",
+            "invalid_params",
+            "invalid_params",
+        ),
+        (
+            "raw-value token after a key inside a message",
+            9953,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "nesting at the tree limit",
+            25348,
+            "response",
+            "response",
+            "invalid_params",
+        ),
+        (
+            "nesting past the tree limit",
+            25348,
+            "unrecognized_request_shape",
+            "unrecognized_request_shape",
+            "invalid_params",
+        ),
+    ];
+
+    /// Bodies whose `Value` tree drops a repeated key or collapses a raw-value document.
+    const VALUE_STRING_ORACLE_EXCLUDED: &[&str] = &[
+        "duplicate top-level key",
+        "duplicate discriminator",
+        "duplicate nested key",
+        "messages as an object",
+        "raw-value token holding a document",
+    ];
+
+    fn value_string_bytes(value: &Value) -> usize {
+        match value {
+            Value::String(text) => text.len(),
+            Value::Array(items) => items.iter().map(value_string_bytes).sum(),
+            Value::Object(map) => map
+                .iter()
+                .map(|(key, value)| key.len() + value_string_bytes(value))
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    /// Every body keeps its unbounded-pool terminal and both lanes still agree at every capacity.
+    /// At its frozen footprint and one byte under, a body keeps its frozen terminal unless that terminal was too-large and the body carries string bytes.
+    /// Such a body now takes its unbounded-pool terminal, and its footprint fell by exactly the removed string copies.
+    #[tokio::test(flavor = "current_thread")]
+    async fn frozen_corpus_footprints_replay_with_only_string_charge_changes() {
+        let corpus = transform_decode_corpus();
+        assert_eq!(
+            corpus.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            FROZEN_CORPUS_OUTCOMES
+                .iter()
+                .map(|(name, ..)| *name)
+                .collect::<Vec<_>>(),
+            "the frozen table names every corpus body in order"
+        );
+        let removed_copies = FROZEN_STRING_COPIES - RETAINED_STRING_COPIES;
+        let too_large = comparable_outcome(request_too_large_error()).0;
+        let mut admitted_by_lower_charge = Vec::new();
+        for ((name, body), (_, frozen, unbounded_code, frozen_code, under_code)) in
+            corpus.iter().zip(FROZEN_CORPUS_OUTCOMES)
+        {
+            let footprint = footprint_of(body);
+            assert!(footprint <= *frozen, "{name}: the footprint never rises");
+            let removed = frozen - footprint;
+            assert_eq!(
+                removed % removed_copies,
+                0,
+                "{name}: the removed bytes are whole string copies"
+            );
+            let visited_string_bytes = removed / removed_copies;
+            assert!(
+                visited_string_bytes <= body.len(),
+                "{name}: visited string bytes cannot exceed the body"
+            );
+            if !VALUE_STRING_ORACLE_EXCLUDED.contains(name)
+                && let Ok(value) = serde_json::from_slice::<Value>(body)
+            {
+                assert_eq!(
+                    visited_string_bytes,
+                    value_string_bytes(&value),
+                    "{name}: the removed charge is the tree's string bytes"
+                );
+            }
+
+            let code_at = |capacity: usize| async move {
+                let mut codes = Vec::new();
+                for probe in [probe_request(body), None] {
+                    let (handler, _store, _dir, _project) = handler_with_store(
+                        Arc::new(ProducerState::default()),
+                        default_test_config(),
+                    );
+                    let pool = TestPool::with_capacity(capacity);
+                    let meter = ResidentMeter::new(&pool);
+                    let runner = transform_unit::DetachedRunner::default();
+                    let entry = PassEntry {
+                        core: &handler.core,
+                        route: test_route(7),
+                        probe: probe.as_ref(),
+                        meter: &meter,
+                        runner: &runner,
+                    };
+                    let (_, outcome) = handler.dispatch_body(&entry, body).await;
+                    codes.push(comparable_outcome(outcome).0);
+                }
+                assert_eq!(codes[0], codes[1], "{name}: both lanes agree");
+                codes.pop().unwrap()
+            };
+            assert_eq!(
+                code_at(1 << 30).await,
+                *unbounded_code,
+                "{name}: the unbounded-pool terminal is unchanged"
+            );
+            for (capacity, expected) in [
+                (*frozen, frozen_code),
+                (frozen.saturating_sub(1), under_code),
+            ] {
+                let actual = code_at(capacity).await;
+                if actual == *expected {
+                    continue;
+                }
+                assert_eq!(
+                    *expected, too_large,
+                    "{name} at {capacity}: only a frozen too-large terminal may change"
+                );
+                assert!(
+                    visited_string_bytes > 0,
+                    "{name} at {capacity}: only string bytes lower the charge"
+                );
+                assert_eq!(
+                    actual, *unbounded_code,
+                    "{name} at {capacity}: the lowered charge admits the body to its unbounded-pool terminal"
+                );
+                admitted_by_lower_charge.push((*name, capacity));
+            }
+        }
+        let expected: Vec<(&str, usize)> = corpus
+            .iter()
+            .zip(FROZEN_CORPUS_OUTCOMES)
+            .flat_map(
+                |((name, body), (_, frozen, unbounded_code, frozen_code, under_code))| {
+                    [
+                        (*frozen, *frozen_code),
+                        (frozen.saturating_sub(1), *under_code),
+                    ]
+                    .into_iter()
+                    .filter(|(capacity, code)| {
+                        *code == too_large
+                            && *unbounded_code != too_large
+                            && !footprint_floor_exceeds(body, *capacity)
+                            && footprint_of(body) <= *capacity
+                    })
+                    .map(move |(capacity, _)| (*name, capacity))
+                },
+            )
+            .collect();
+        assert_eq!(
+            admitted_by_lower_charge, expected,
+            "every frozen too-large terminal that the lowered charge now fits becomes an admission, and nothing else changes"
+        );
+    }
+
     pub(crate) struct TestPool {
         budget: host_runtime::wire::ByteBudget,
         capacity: usize,
@@ -20629,8 +21094,8 @@ mod tests {
             r#"{{"kind":"transform","messages":[{{"role":"user","content":[{{"kind":{{"type":"text","text":"{text}"}}}}]}}]}}"#
         );
         assert!(
-            footprint_of(body.as_bytes()) >= 3 * text.len(),
-            "the footprint must cover three copies of {} string bytes",
+            footprint_of(body.as_bytes()) >= RETAINED_STRING_COPIES * text.len(),
+            "the footprint must cover {RETAINED_STRING_COPIES} copies of {} string bytes",
             text.len()
         );
         // Each two wire bytes can produce one value, so the footprint of a scalar-dense body
@@ -23447,7 +23912,7 @@ mod tests {
     fn giant_degraded_snapshot_accepts_tail_delta_and_reuses_projection() {
         const GIANT_MESSAGE_COUNT: usize = 5_001;
         const GIANT_BLOCK_COUNT: usize = GIANT_MESSAGE_COUNT;
-        const GIANT_NATIVE_WIRE_BYTES: usize = 26 * 1024 * 1024;
+        const GIANT_NATIVE_WIRE_BYTES: usize = 40 * 1024 * 1024;
         const SESSION_ID: &str = "native-giant-degraded";
 
         let (request, served) = native_cache_fixture(
@@ -23950,7 +24415,6 @@ mod tests {
                     served[2].content_mut()[0] = WireBlock::bare(BlockKind::Text {
                         text: "[dropped]".to_string(),
                     });
-                    served[2].mark_modified();
                 }
                 "transition_salt" => transition_consumed = true,
                 "render_epoch" => request.render_config = "cfg1".to_string(),
@@ -24035,14 +24499,12 @@ mod tests {
                     changed[0].content_mut()[0] = WireBlock::bare(BlockKind::Text {
                         text: String::new(),
                     });
-                    changed[0].mark_modified();
                 }
                 "unmatched_pair" => {
                     if let BlockKind::ToolResult { id, .. } = changed[2].content_mut()[0].kind_mut()
                     {
                         *id = "call-transition-unmatched".to_string();
                     }
-                    changed[2].mark_modified();
                 }
                 "split_coverage" => {
                     changed.remove(1);
@@ -24057,7 +24519,6 @@ mod tests {
                     changed[0].content_mut()[0] = WireBlock::bare(BlockKind::Text {
                         text: String::new(),
                     });
-                    changed[0].mark_modified();
                     let result = changed.pop().unwrap();
                     let call = changed.pop().unwrap();
                     changed.insert(3, call);
@@ -24093,7 +24554,6 @@ mod tests {
         *output = ToolOutput::bare(OutputKind::Text {
             text: text.to_string(),
         });
-        block.mark_modified();
     }
 
     #[test]
@@ -25591,7 +26051,6 @@ mod tests {
                         text: "replayed synthetic carrier sentinel".into(),
                     }));
                 }
-                ck.mark_modified();
                 suffix.push(IngressMessage {
                     mid: mid.into(),
                     ordinal,
@@ -39319,7 +39778,6 @@ fn compaction_mode_projection_cache_reclassifies_synthetic_prefix() {
     for message in &mut fixture.messages {
         message.ck.meta.synthetic = false;
         message.ck.meta.harness_id = Some(message.mid.clone());
-        message.ck.mark_modified();
     }
     let mut live = FixtureBuilder::session_with_boundary().messages;
     for message in &mut live {
