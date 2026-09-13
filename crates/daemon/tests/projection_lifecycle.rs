@@ -1182,6 +1182,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     // A target-less `record` reserves space for `RecoveryTarget { commit_seq: i64::MAX }` so `fix_target` stays within the 64 KiB intent limit.
     let dir = tempfile::tempdir().unwrap();
     let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    let transaction = LifecycleTransactionLock::acquire_exclusive(Some(dir.path())).unwrap();
     let untargeted = LifecycleRequest {
         recovery_target: None,
         ..base.clone()
