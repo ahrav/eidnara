@@ -107,8 +107,10 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - `every_key_permutation_reports_change_exactly_when_disordered`
-runs all six permutations of raw ASCII, escape-only, prefix/quote, and mixed
-Unicode key triples against the U1 `sort_fields` flag and the byte reference.
+runs all six permutations of raw ASCII, escape-only, prefix/quote, mixed
+Unicode, and raw and escaped equal-key triples against the U1 `sort_fields`
+flag and a stable-sorted byte reference; equal keys carry distinct index
+values so an unstable permutation changes the bytes.
 Guarantee: Sorting reports a change exactly when the stable decoded-key
 permutation differs from the recorded field order.
 Check: `always` - For each object's complete source-ordered field descriptors
@@ -125,10 +127,11 @@ backslash/Unicode keys, and private equal-key probes with distinct value tags.
 Production reaches sorting through [encode][encode]; duplicate emission is
 test-only. Keep the fewer-than-two-fields guard before key decoding.
 Confidence: high - [Evidence](evidence/served-field-change-flag-matches-stable-permutation.md).
-Recording, ordering, and unique starts are source-verified; flag behavior is
-an unimplemented plan obligation at this HEAD.
+Recording, ordering, and unique starts are source-verified; the flag landed
+with plan U1 and is exercised by the test above.
 Existing check: [Key and scalar tests](existing-checks.md#canonicalizer-and-guards)
-are unaudited; no flag or stable duplicate-key check was found.
+are unaudited; the [U1 landing](existing-checks.md#u1-copy-elision-landing)
+adds the flag and stable duplicate-key permutation check.
 Impact: False negatives threaten B1 bytes; false positives defeat plan R1's
 no-B allocation requirement while potentially preserving every byte.
 Open questions:
@@ -207,9 +210,9 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: yes - `serialization_error_returns_before_finalization` fails a
-private source before writing and with an open nested object, requires one
-visit, the same error, and no finalization; canonical and disordered controls
-finalize once each.
+private source before writing and from inside a nested value after its first
+entry, so the nested object is still open, requires one visit, the same error,
+and no finalization; canonical and disordered controls finalize once each.
 Guarantee: Each encode traverses its source once and enters finalization only
 after serialization succeeds.
 Check: `always` - Count root and distinct child emission sites independently.
@@ -241,7 +244,9 @@ Status: active
 Exercised: yes - `canonical_input_returns_the_serialization_buffer_and_disordered_input_does_not`
 checks pointer, length, and capacity identity; the U0 integration oracle
 classifies the returned chain and the [U1 paired record](evidence/u1-copy-elision-paired-measurement.md)
-shows zero exact-N allocations and a constructor peak at or below baseline
+shows zero exact-N allocations for every canonical-miss population, one
+unchanged exact-N B allocation for the unordered `typed_shell` and
+`one_edited_block` populations, and a constructor peak at or below baseline
 for every population, with an always-copy build rejected as a negative control.
 Guarantee: A successful encode with only identity field permutations returns
 A by ownership transfer without B or replacement output-sized scratch.
