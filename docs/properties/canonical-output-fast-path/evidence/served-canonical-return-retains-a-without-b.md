@@ -42,7 +42,12 @@ so hidden work before the captured boundary cannot escape detection.
 
 Use a large scalar with small span tables and short keys, built outside the
 interval. Attribute every output-sized allocation to A's growth chain; no
-other output-sized scratch is allowed. Record actual metadata/key sizes.
+other output-sized scratch is allowed. Record actual metadata/key sizes. For
+small outputs the span tables and sort scratch themselves reach N, so the
+retained harness identifies A by the root allocation its growth chain starts
+from (the capacity `Vec<u8>` gives a one-byte write) and requires no second
+buffer with that root to reach N, rather than counting every allocation of at
+least N bytes.
 Record logical reorder output, including reconstructed braces and commas:
 a full reorder materializes N bytes. This is not a count of physical copies
 caused by allocator growth or Arc conversion.

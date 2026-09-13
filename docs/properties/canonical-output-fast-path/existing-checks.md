@@ -104,7 +104,7 @@ test-only observation cannot be built, stop U0 for seam approval.
 
 ### U0 harness landing
 
-Plan U0 lands the surfaces below at harness revision `c1dafa76`. The [baseline record](evidence/u0-baseline-measurement.md)
+Plan U0 lands the surfaces below at harness revision `073f578e`. The [baseline record](evidence/u0-baseline-measurement.md)
 retains the captured numbers and provenance. Per the method contract every
 check keeps status `unaudited`; the execution column records only that a run
 happened on this revision, not an adequacy verdict.
@@ -113,17 +113,19 @@ happened on this revision, not an adequacy verdict.
 | --- | --- | --- | --- |
 | `crates/daemon/tests/support/alloc_recorder.rs` | Thread-owned, fixed-capacity, non-allocating ledger over `System`: alloc/realloc/dealloc events with pointers and sizes, cumulative requested bytes, peak live bytes, growth-chain, release, and buffer-provenance queries. Windows serialize on a process mutex. | unaudited | used by the tests and driver below |
 | `crates/daemon/tests/support/served_output_fixtures.rs` | Retained ASCII, retained escaped/Unicode/prefix, retained large payload, typed shell, and one-edited-block populations at 1 and 65 blocks, the independent byte and canonicality oracles, and the expected return-buffer kind per population. | unaudited | used by the tests and driver below |
-| `canonical_miss_return_buffer_provenance_is_classified` | Independent canonicality oracle, byte oracle, returned-buffer provenance (fresh exact-N allocation, growth chain, or unattributed), liveness at return, exactly one exact-N allocation for the copy path, and no output-sized storage outside the returned chain for the ownership path. | unaudited | passes on the baseline revision |
-| `full_constructor_observation_covers_receipts_hashing_and_arc_conversion` | Peak and events across the no-projection constructor arm through the `served_message_for_test` test-support entry: the exact padded `Arc<[u8]>` payload allocation, and a peak bound of canonicalizer peak plus receipt strings plus the Arc payload. The projected-receipt-reuse arm is not observed. | unaudited | passes on the baseline revision |
+| `canonical_miss_return_buffer_provenance_is_classified` | Independent canonicality oracle, byte oracle, returned-buffer provenance (fresh exact-N allocation, growth chain, or unattributed), liveness at return, exactly one exact-N allocation and a released serialization buffer for the copy path, and no second A-rooted buffer reaching N outside the returned chain for the ownership path. The serialization buffer is found by the root allocation its growth chain starts from, not by ledger position. | unaudited | passes on the baseline revision |
+| `serialization_buffer_oracle_sees_a_leaked_serialization_buffer` | A leaked A beside a freed metadata buffer of at least N bytes; the oracle must report A unreleased. | unaudited | passes on the baseline revision |
+| `full_constructor_observation_covers_receipts_hashing_and_arc_conversion` | Peak and events across the no-projection constructor arm through the `served_message_for_test` test-support entry: the exact padded `Arc<[u8]>` payload allocation, the exact retained set (message, fingerprint slice, one hex digest per block, identity, payload), and a peak bound derived from the receipt-hashing and Arc-conversion phases. The projected-receipt-reuse arm is not observed. | unaudited | passes on the baseline revision |
 | `recording_excludes_other_threads_and_tracks_growth_chains` | Foreign-thread exclusion with the foreign thread proven to allocate at least 16 times inside the window, an owner-thread positive control, growth-chain attribution, and rejection of a shrunk buffer. | unaudited | passes on the baseline revision |
 | `recorder_aggregates_follow_a_scripted_sequence_and_report_overflow` | Exact requested, peak, and live-at-close bytes for a scripted sequence; negative live delta; overflow flag with truncated events. | unaudited | passes |
-| `crates/daemon/examples/canonical_output_evidence.rs` | Release driver: allocation cells, canonicalizer and full-constructor timing with per-sample setup outside both clocks, cold/warm transform timing and CPU, served-order and cache-counter frequencies, provenance, explicit host-latency-unmeasured status. | unaudited | ran 10 processes on the baseline revision |
-| `scripts/perf/canonical-output-paired-runs.sh` | Frozen ten-run or ten-pair AB/BA process schedule with isolated worktree builds, resolved feature lines, and a provenance sidecar. | unaudited | ran in `baseline` mode |
+| `crates/daemon/examples/canonical_output_evidence.rs` | Release driver: allocation cells, canonicalizer and full-constructor timing with per-sample setup and its drop outside both clocks, a per-cell clock-overhead calibration, cold/warm transform timing and CPU, served-order and cache-counter frequencies, provenance, explicit host-latency-unmeasured status. Unit tests pin the drop boundary and the calibration. | unaudited | ran 10 processes on the baseline revision; CI runs a debug smoke |
+| `scripts/perf/canonical-output-paired-runs.sh` | Frozen ten-run or ten-pair AB/BA process schedule with isolated worktree builds, resolved feature lines, and a provenance sidecar. `scripts/perf/canonical-output-paired-runs.test.ts` drives it with a failing `cargo` shim and checks that a failed build stops the run, plus the schedule order in both modes. | unaudited | ran in `baseline` mode |
 
-Later harness commits on the U0 branch change labels, add recorder self-tests,
-tighten test oracles, and add a CI smoke run of the driver; they do not change
-what the driver measures, so the retained baseline and paired artifacts keep
-citing the exact revisions they were built from.
+The retained baseline was captured at this revision with the driver, recorder,
+and fixtures it ships; the run directory name and every `provenance.commit`
+carry the same hash. A paired comparison must build both sides from the same
+harness sources, so it pairs the candidate against its merge base rather than
+against this revision once the harness moves.
 
 The in-crate `--lib` observer route is infeasible: `crates/daemon/src/lib.rs`
 declares `#![forbid(unsafe_code)]`, so no `GlobalAlloc` can be declared in the

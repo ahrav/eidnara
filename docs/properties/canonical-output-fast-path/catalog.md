@@ -33,7 +33,7 @@ catalog, its evidence, and the specification copy are tracked with the U0
 harness.
 
 Seven records remain **Exercised: not yet**; S5 and C2 are **partial** after
-the plan U0 harness landed at `c1dafa76` and captured the
+the plan U0 harness landed at `073f578e` and captured the
 [baseline record](evidence/u0-baseline-measurement.md) on the unchanged
 canonicalizer. No candidate ran. Inspected pre-U0 tests remain **unaudited**.
 Confidence describes the evidence for the obligation and its reachability,
@@ -229,7 +229,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - The U0 baseline observer records one exact-N B allocation
-and A's release for every population at `c1dafa76`; candidate ownership is
+and A's release for every population at `073f578e`; candidate ownership is
 unmeasured.
 Guarantee: A successful encode with only identity field permutations returns
 A by ownership transfer without B or replacement output-sized scratch.
@@ -237,9 +237,11 @@ Check: `always` - Independently establish identity permutations, then require
 the returned Vec to retain A's allocation lifetime, pointer, length, and
 capacity from the post-serialization boundary, without shrink or reallocation.
 Require zero B allocation attempts and zero logical reorder-output bytes.
-An isolated absolute allocation/size ledger must attribute all output-sized
-allocations to A's growth chain, excluding replacement scratch. Pointer
-equality or the existing allocation slope alone is insufficient.
+An isolated absolute allocation/size ledger must attribute every byte buffer
+that reaches N to A's growth chain, excluding replacement scratch; span
+metadata and sort scratch also reach N for small outputs and are told apart
+by the root allocation their growth chain starts from, not by size alone.
+Pointer equality or the existing allocation slope alone is insufficient.
 Fault/timing angle: Hidden allocate/copy/discard work can preserve bytes and
 the returned pointer while defeating the optimization.
 Required faults and enabling state: A cold canonical miss with a large scalar

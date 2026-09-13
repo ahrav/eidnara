@@ -109,7 +109,7 @@ source observations do not import its historical execution results.
 | [Constructor source guard][source-test] | Lexical checks reject a `to_value` round trip and require the shared fingerprint receipt helper. They do not measure runtime allocation or call counts. | unaudited |
 | [Steady replay][cache-test] | Four reused items, zero serialized items, unchanged token-estimator calls, and equal output bytes are asserted. No independent constructor or encoder observer exists here. | unaudited |
 | [Overlay][overlay-test], [drop/fold][drop-fold-test], and [epoch][epoch-test] | Changed items are rebuilt or entries invalidated while unaffected replay matches fresh output. | unaudited |
-| [Allocation fixture][allocation-test] | Allocation/reallocation events for 1 and 65 unescaped-key blocks are compared. Sizes, copies, peak live bytes, and escaped-key identity return are not measured. | unaudited |
+| [Allocation fixture][allocation-test] | Allocation/reallocation events for 1 and 65 unescaped-key blocks are compared, and every declared population's returned buffer is classified by pointer identity and size with the serialization buffer's release checked. Copies are inferred from provenance, not observed; escaped-key identity return is expected only after the canonicalizer changes. | unaudited |
 | [Retained-cache estimate][retained-test] | Metadata and omitted rows are charged; the manual estimate permits 5% tolerance. It is not a transient constructor-memory bound. | unaudited |
 | [Prepared-output failures][writer-test] | Cap/overflow, positive short writes followed by failure, and length mismatch are checked. These are not direct-ring publication witnesses. | unaudited |
 
@@ -244,48 +244,48 @@ Route the candidate and witnesses to `test-strategy`, existing-check adequacy
 to `invariant-test-review`, and post-implementation correctness to
 `rust-code-reviewer`. Those handoffs are recommendations, not executed reviews.
 
-[message-ser]: ../../../../crates/memory-store/src/lib.rs#L126-L162
-[block-ser]: ../../../../crates/memory-store/src/lib.rs#L250-L280
-[message-edit]: ../../../../crates/memory-store/src/lib.rs#L203-L222
-[block-edit]: ../../../../crates/memory-store/src/lib.rs#L306-L323
-[constructor]: ../../../../crates/daemon/src/transform.rs#L164-L224
-[receipts]: ../../../../crates/daemon/src/wire.rs#L865-L902
-[identity-replace]: ../../../../crates/daemon/src/transform.rs#L226-L237
-[tail-build]: ../../../../crates/daemon/src/transform.rs#L11286-L11315
-[encoder]: ../../../../crates/daemon/src/served_json.rs#L121-L164
-[handler-cache]: ../../../../crates/daemon/src/lib.rs#L8492-L8498
-[cache-entry]: ../../../../crates/daemon/src/transform.rs#L1803-L1817
-[default-config]: ../../../../crates/daemon/src/config.rs#L116-L125
-[snapshot-use]: ../../../../crates/daemon/src/transform.rs#L4789-L4810
-[cache-lifecycle]: ../../../../crates/daemon/src/transform.rs#L406-L463
-[cache-lookup]: ../../../../crates/daemon/src/transform.rs#L10392-L10431
-[tail-hit]: ../../../../crates/daemon/src/transform.rs#L11126-L11135
-[served-owner]: ../../../../crates/daemon/src/transform.rs#L144-L153
-[owned-extraction]: ../../../../crates/daemon/src/transform.rs#L239-L245
-[retention]: ../../../../crates/daemon/src/transform.rs#L252-L279
-[respond]: ../../../../crates/daemon/src/lib.rs#L14835-L14873
-[served-ser]: ../../../../crates/daemon/src/transform.rs#L301-L307
-[segments]: ../../../../crates/daemon/src/dispatch.rs#L17-L72
-[segment-write]: ../../../../crates/daemon/src/dispatch.rs#L325-L370
-[settlement]: ../../../../crates/daemon/src/lib.rs#L12360-L12429
-[page-replay]: ../../../../crates/daemon/src/lib.rs#L9680-L9701
-[metadata-update]: ../../../../crates/daemon/src/transform.rs#L4921-L4930
-[commit-order]: ../../../../crates/daemon/src/transform.rs#L4979-L5029
-[shell-test]: ../../../../crates/daemon/src/transform.rs#L13714-L13756
-[corpus-test]: ../../../../crates/daemon/src/transform.rs#L13760-L13794
-[receipt-test]: ../../../../crates/daemon/src/transform.rs#L13797-L13939
-[once-test]: ../../../../crates/daemon/src/served_json.rs#L171-L193
-[key-test]: ../../../../crates/daemon/src/served_json.rs#L196-L252
-[source-test]: ../../../../crates/daemon/src/transform.rs#L13942-L13969
-[cache-test]: ../../../../crates/daemon/src/transform.rs#L28295-L28320
-[overlay-test]: ../../../../crates/daemon/src/transform.rs#L28323-L28358
-[drop-fold-test]: ../../../../crates/daemon/src/transform.rs#L28361-L28424
-[epoch-test]: ../../../../crates/daemon/src/transform.rs#L28585-L28602
-[allocation-test]: ../../../../crates/daemon/tests/served_json_passthrough_allocations.rs#L10-L86
-[retained-test]: ../../../../crates/daemon/src/transform.rs#L28427-L28581
-[writer-test]: ../../../../crates/daemon/tests/prepared_output.rs#L118-L234
-[test-diff]: ../../../../crates/daemon/src/transform.rs#L4862-L4890
-[bench]: ../../../../crates/daemon/benches/hot_path.rs#L320-L397
+[message-ser]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/memory-store/src/lib.rs#L126-L162
+[block-ser]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/memory-store/src/lib.rs#L250-L280
+[message-edit]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/memory-store/src/lib.rs#L203-L222
+[block-edit]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/memory-store/src/lib.rs#L306-L323
+[constructor]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L164-L224
+[receipts]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/wire.rs#L865-L902
+[identity-replace]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L226-L237
+[tail-build]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L11286-L11315
+[encoder]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L121-L164
+[handler-cache]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/lib.rs#L8492-L8498
+[cache-entry]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L1803-L1817
+[default-config]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/config.rs#L116-L125
+[snapshot-use]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L4789-L4810
+[cache-lifecycle]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L406-L463
+[cache-lookup]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L10392-L10431
+[tail-hit]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L11126-L11135
+[served-owner]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L144-L153
+[owned-extraction]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L239-L245
+[retention]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L252-L279
+[respond]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/lib.rs#L14835-L14873
+[served-ser]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L301-L307
+[segments]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/dispatch.rs#L17-L72
+[segment-write]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/dispatch.rs#L325-L370
+[settlement]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/lib.rs#L12360-L12429
+[page-replay]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/lib.rs#L9680-L9701
+[metadata-update]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L4921-L4930
+[commit-order]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L4979-L5029
+[shell-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L13714-L13756
+[corpus-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L13760-L13794
+[receipt-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L13797-L13939
+[once-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L171-L193
+[key-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L196-L252
+[source-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L13942-L13969
+[cache-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L28295-L28320
+[overlay-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L28323-L28358
+[drop-fold-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L28361-L28424
+[epoch-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L28585-L28602
+[allocation-test]: https://github.com/ahrav/eidnara/blob/073f578efcb1bb08d54eac3b54c0f837d2f0c857/crates/daemon/tests/served_json_passthrough_allocations.rs#L37-L163
+[retained-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L28427-L28581
+[writer-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/tests/prepared_output.rs#L118-L234
+[test-diff]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L4862-L4890
+[bench]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/benches/hot_path.rs#L320-L397
 [b1]: ../../hot-path-optimization/latency-audit/catalog.md#L356-L478
 [b1-evidence]: ../../hot-path-optimization/latency-audit/evidence/derived-artifacts-are-ownership-independent.md#L367-L442
 [b1-checks]: ../../hot-path-optimization/latency-audit/existing-checks.md#L88-L95
