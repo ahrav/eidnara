@@ -8,6 +8,7 @@ use std::io::{self, Write};
 use std::ops::Range;
 
 use serde::Serialize;
+use serde::ser::Error as _;
 use serde_json::ser::{CompactFormatter, Formatter};
 
 #[derive(Default)]
@@ -116,6 +117,20 @@ pub(crate) fn to_vec(message: &memory_store::WireMessage) -> serde_json::Result<
 #[cfg(feature = "test-support")]
 pub fn canonical_served_bytes_for_test(message: &memory_store::WireMessage) -> Vec<u8> {
     to_vec(message).expect("CK wire message values must always serialize")
+}
+
+/// The one canonical text of a block: projection identity, served fingerprint
+/// fallback, and decoded sidecar fingerprints all hash exactly these bytes.
+pub(crate) fn canonical_block_bytes(block: &memory_store::WireBlock) -> serde_json::Result<String> {
+    let bytes = encode(block)?;
+    // serde emits valid UTF-8 and the copier moves whole spans, so this check
+    // cannot fail; it stays because the crate forbids the unchecked conversion.
+    String::from_utf8(bytes).map_err(|error| serde_json::Error::custom(error.to_string()))
+}
+
+#[cfg(feature = "test-support")]
+pub fn canonical_block_bytes_for_test(block: &memory_store::WireBlock) -> String {
+    canonical_block_bytes(block).expect("CK wire blocks must always serialize")
 }
 
 /// Output of the single serialization pass: the compact bytes and every recorded
