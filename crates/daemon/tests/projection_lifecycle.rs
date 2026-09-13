@@ -267,6 +267,29 @@ fn capture_replacement_and_stage_reversal_require_owned_cleanup() {
         ));
         assert_eq!(fs::read(record_path(root.path())).unwrap(), before);
     }
+    // A first certificate is bound to the capture it certifies: another hold or snapshot is refused with the record unchanged.
+    for unbound in [
+        certificate(&"b".repeat(32)),
+        daemon::search_seed::SeedVerification {
+            snapshot_commit_seq: 41,
+            ..certificate(&capture.hold_id)
+        },
+    ] {
+        let before = fs::read(record_path(root.path())).unwrap();
+        assert!(matches!(
+            lifecycle.record_capture(
+                &gate,
+                &transaction,
+                Some(ReplacementCapture {
+                    stage: Some(Box::new(unbound)),
+                    ..capture.clone()
+                }),
+                Some(&capture.hold_id)
+            ),
+            Err(IntentRefusal::Conflict { .. })
+        ));
+        assert_eq!(fs::read(record_path(root.path())).unwrap(), before);
+    }
     let certificate = certificate(&capture.hold_id);
     let staged = ReplacementCapture {
         stage: Some(Box::new(certificate)),
@@ -999,7 +1022,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     );
 
     type Corruption = fn(&Path);
-    let corruptions: [(&str, Corruption); 7] = [
+    let corruptions: [(&str, Corruption); 8] = [
         ("truncated", |path: &Path| {
             let mut bytes = fs::read(path).unwrap();
             bytes.truncate(bytes.len() / 2);
@@ -1029,6 +1052,15 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         ("blank consumer", |path: &Path| {
             let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
             value["consumer"]["consumer_id"] = Value::from(" ");
+            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }),
+        ("certificate of another hold", |path: &Path| {
+            let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            value["replacement_capture"] = serde_json::json!({
+                "hold_id": "b".repeat(32), "snapshot": 40, "lease_epoch": 1,
+                "source_policy_version": "source-policy.v1", "expires_at": NOW + 30_000,
+                "stage": certificate(&"a".repeat(32)),
+            });
             fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
         }),
     ];
@@ -1138,6 +1170,54 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     lifecycle.record(&open, &fits, NOW).unwrap();
     let pinned = lifecycle.pin_seed(&open, &transaction, &digest).unwrap();
     assert_eq!(pinned.staged_seed_digest.as_deref(), Some(digest.as_str()));
+    for _ in 0..base.allowance {
+        lifecycle.consume_episode(&open, NOW).unwrap();
+    }
+
+    // A target-less `record` reserves space for `RecoveryTarget { commit_seq: i64::MAX }` so `fix_target` stays within the 64 KiB intent limit.
+    let dir = tempfile::tempdir().unwrap();
+    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    let untargeted = LifecycleRequest {
+        recovery_target: None,
+        ..base.clone()
+    };
+    let terminal = LifecycleIntent {
+        staged_seed_digest: Some(digest.clone()),
+        recovery_target: Some(RecoveryTarget {
+            commit_seq: i64::MAX,
+        }),
+        ..expected(&untargeted, base.allowance)
+    };
+    let slack = 64 * 1024 + 1 - serde_json::to_vec(&terminal).unwrap().len();
+    let target_cap = LifecycleRequest {
+        attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack)),
+        ..untargeted.clone()
+    };
+    assert_eq!(
+        lifecycle.record(&open, &target_cap, NOW),
+        Err(IntentRefusal::Oversized)
+    );
+    assert_eq!(lifecycle.read(), ControlState::Absent);
+    let fits = LifecycleRequest {
+        attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack - 1)),
+        ..untargeted
+    };
+    lifecycle.record(&open, &fits, NOW).unwrap();
+    let fixed = lifecycle
+        .fix_target(
+            &open,
+            RecoveryTarget {
+                commit_seq: i64::MAX,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fixed.recovery_target,
+        Some(RecoveryTarget {
+            commit_seq: i64::MAX
+        })
+    );
+    lifecycle.pin_seed(&open, &transaction, &digest).unwrap();
     for _ in 0..base.allowance {
         lifecycle.consume_episode(&open, NOW).unwrap();
     }

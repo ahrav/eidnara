@@ -91,6 +91,15 @@ pub struct ReplacementCapture {
     pub stage: Option<Box<crate::search_seed::SeedVerification>>,
 }
 
+impl ReplacementCapture {
+    /// A stage certificate must name this capture's hold and snapshot.
+    fn stage_is_bound(&self) -> bool {
+        self.stage.as_deref().is_none_or(|stage| {
+            stage.hold_id == self.hold_id && stage.snapshot_commit_seq == self.snapshot
+        })
+    }
+}
+
 /// What a caller asks to persist. `attempt_id` is the caller's identity for the request; a replay carries the same one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifecycleRequest {
@@ -380,6 +389,14 @@ impl ProjectionLifecycle {
                 intent.authorization_ref.as_deref(),
                 intent.cause,
             ) {
+                Ok(())
+                    if !intent
+                        .replacement_capture
+                        .as_deref()
+                        .is_none_or(ReplacementCapture::stage_is_bound) =>
+                {
+                    ControlState::Unavailable("certificate names another capture".to_owned())
+                }
                 Ok(()) => ControlState::Intent(intent),
                 Err(refusal) => ControlState::Unavailable(refusal.to_string()),
             },
@@ -715,7 +732,10 @@ impl ProjectionLifecycle {
             // Comparing the clone keeps every non-stage field immutable, including added fields.
             let mut allowed = old.clone();
             allowed.stage = new.stage.clone();
-            if allowed != *new || (old.stage.is_some() && old.stage != new.stage) {
+            if allowed != *new
+                || (old.stage.is_some() && old.stage != new.stage)
+                || !new.stage_is_bound()
+            {
                 return Err(IntentRefusal::Conflict {
                     attempt_id: intent.attempt_id,
                 });
@@ -789,7 +809,7 @@ fn encode(intent: &LifecycleIntent) -> Result<Vec<u8>, IntentRefusal> {
 /// The hex SHA-256 a staged seed's digest takes; the record reserves room for one before any is pinned.
 const DIGEST_HEX_LEN: usize = 64;
 
-/// `consumed` grows to `allowance` and a seed digest may be pinned; every write of the record checks that it still fits with both, so neither a granted episode nor the pin of an accepted intent is refused as [`IntentRefusal::Oversized`].
+/// Reserves space for exhausted `episodes`, a staged seed digest, and a `recovery_target` so later valid updates do not make the intent [`IntentRefusal::Oversized`].
 fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
     let exhausted = LifecycleIntent {
         episodes: EpisodeAccounting {
@@ -802,6 +822,9 @@ fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
                 .clone()
                 .unwrap_or_else(|| "0".repeat(DIGEST_HEX_LEN)),
         ),
+        recovery_target: Some(intent.recovery_target.unwrap_or(RecoveryTarget {
+            commit_seq: i64::MAX,
+        })),
         ..intent.clone()
     };
     if encode(&exhausted)?.len() as u64 > MAX_RECORD_BYTES {
