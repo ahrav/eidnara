@@ -1,7 +1,7 @@
 {
   "kind": "canonical-output-paired-runs/v1",
   "mode": "paired",
-  "harness_revision": "41f665993ce74ca7ea660c423120bc70305cd965",
+  "harness_revision": "5da885cafe5739db075bd6b223b7e8a4add00842",
   "harness_dirty": false,
   "toolchain": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
   "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
@@ -16,7 +16,7 @@
   "nproc": 32,
   "kernel": "Linux 6.12.103-127.188.amzn2023.aarch64",
   "schedule": ["pair-01:AB","pair-02:BA","pair-03:AB","pair-04:BA","pair-05:AB","pair-06:BA","pair-07:AB","pair-08:BA","pair-09:AB","pair-10:BA"],
-  "baseline_commit": "c1dafa760b1b48487476d0663586c7936a53b187",
-  "candidate_commit": "0827d6f00cd5e277214cdcfdfe52534a35e42eb8",
-  "unix_time_s": 1789292004
+  "baseline_commit": "2a4152717d196cafae5eaa0ceb2141a726be3859",
+  "candidate_commit": "8a1fb16632684baa175e13097b4a5f91f944c098",
+  "unix_time_s": 1789295899
 }

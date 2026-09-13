@@ -135,13 +135,13 @@ transform driver is not retained; host latency remains unmeasured.
 
 ### U1 copy-elision landing
 
-Plan U1 lands at candidate `0827d6f0` with the checks below. The
+Plan U1 lands at candidate `8a1fb166` with the checks below. The
 [paired record](evidence/u1-copy-elision-paired-measurement.md) retains the
 ten-pair AB/BA comparison against baseline `c1dafa76`.
 
 | Check | What it observes | Status | Execution evidence |
 | --- | --- | --- | --- |
-| `served_json::tests::every_key_permutation_reports_change_exactly_when_disordered` | Six permutations of four key triples; flag equals disorder; bytes equal reference. | unaudited | passes at `0827d6f0` |
+| `served_json::tests::every_key_permutation_reports_change_exactly_when_disordered` | Six permutations of four key triples; flag equals disorder; bytes equal reference. | unaudited | passes at `8a1fb166` |
 | `served_json::tests::aggregate_order_decision_visits_every_object` | Late, last-object, root-only, and fully ordered documents. | unaudited | passes |
 | `served_json::tests::unchanged_span_copy_is_identity` | Copier over unsorted tables reproduces whole buffer, object ranges, and field ranges. | unaudited | passes |
 | `served_json::tests::canonical_input_returns_the_serialization_buffer_and_disordered_input_does_not` | Pointer, length, capacity identity for A; fresh exact buffer for B; one finalization each. | unaudited | passes |
