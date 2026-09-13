@@ -3,6 +3,9 @@ use daemon::search_replacement::selection::{SearchReader, SearchSelection, Selec
 use host_runtime::generation::{GenerationError, ProfileEvent};
 use retrieval::coverage::CoverageBounds;
 
+#[path = "retirement.rs"]
+pub(super) mod retirement;
+
 fn coverage_bounds() -> CoverageBounds {
     CoverageBounds {
         max_live_per_class: NonZeroUsize::new(256).unwrap(),

@@ -109,7 +109,7 @@ fn sqlite(error: rusqlite::Error) -> CommitReadError {
     CommitReadError::Kernel(map_sqlite(error))
 }
 
-fn tip(tx: &Transaction<'_>) -> rusqlite::Result<i64> {
+pub(crate) fn tip(tx: &Transaction<'_>) -> rusqlite::Result<i64> {
     tx.query_row_cached(
         "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
         [],
@@ -236,7 +236,7 @@ impl KernelStore {
 
     /// Must run under a reader guard because a restore holds every guard while advancing
     /// `restore_generation` and swapping the database.
-    fn incarnation(&self) -> CommitReadIncarnation {
+    pub(crate) fn incarnation(&self) -> CommitReadIncarnation {
         CommitReadIncarnation {
             open_nonce: self.open_nonce,
             restore_generation: self

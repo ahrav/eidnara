@@ -569,14 +569,43 @@ impl KernelStore {
         checkpoint_commit_seq: i64,
         updated_at: i64,
     ) -> Result<(), KernelError> {
-        if checkpoint_commit_seq < 0 || updated_at < 0 {
+        self.acknowledge_outbox_inner(
+            &crate::open::AcquireLimit::default(),
+            consumer_id,
+            checkpoint_commit_seq,
+            updated_at,
+        )
+    }
+
+    /// Callers must release local transactions before acknowledging.
+    pub fn acknowledge_outbox_within_budget(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        consumer: &str,
+        through: i64,
+        now: i64,
+    ) -> Result<(), KernelError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| self.acknowledge_outbox_inner(&limit, consumer, through, now))
+    }
+
+    fn acknowledge_outbox_inner(
+        &self,
+        limit: &crate::open::AcquireLimit,
+        consumer: &str,
+        through: i64,
+        now: i64,
+    ) -> Result<(), KernelError> {
+        if through < 0 || now < 0 {
             return Err(KernelError::InvalidInput);
         }
-        let consumer_id = consumer_identity(consumer_id)?;
-        let mut writer = self.lock_writer()?;
-        let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
-        acknowledge_outbox_in_tx(&tx, &consumer_id, checkpoint_commit_seq, updated_at)?;
-        tx.commit().map_err(map_sqlite)
+        let consumer = consumer_identity(consumer)?;
+        let mut writer = self.writer_with_limit(limit)?;
+        let tx = writer.transaction(TransactionBehavior::Immediate)?;
+        crate::envelope::check_fence(&tx, self.lease_epoch())?;
+        acknowledge_outbox_in_tx(&tx, &consumer, through, now)?;
+        limit.check()?;
+        tx.commit()
     }
 
     /// Registered consumers bound the horizon; publication does not. A publisher that needs its own rows retained registers as a consumer, because `published_at` records progress without holding rows back.

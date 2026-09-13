@@ -1646,6 +1646,10 @@ fn expected_pending(rows: &Rows) -> Vec<String> {
 fn replacement_child() {
     let root = std::path::PathBuf::from(std::env::var("REPLACEMENT_CHILD_ROOT").unwrap());
     let cut = std::env::var("REPLACEMENT_CHILD_CUT").unwrap();
+    if cut.starts_with("retire-") {
+        selection::retirement::retirement_child(&root, &cut);
+        return;
+    }
     if cut.starts_with("select-") || cut.starts_with("active-") {
         selection_child(&root, &cut);
         return;

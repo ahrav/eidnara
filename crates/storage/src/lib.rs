@@ -534,8 +534,25 @@ mod sqlite_backend {
             released?;
             tx.commit()
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
+            #[cfg(feature = "test-support")]
+            AFTER_COMMIT.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().take() {
+                    hook();
+                }
+            });
             Ok(out)
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    thread_local! {
+        static AFTER_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Installs a one-shot barrier after COMMIT while the connection lock is held.
+    #[cfg(feature = "test-support")]
+    pub fn after_commit_for_test(hook: impl FnOnce() + 'static) {
+        AFTER_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
     /// Opens an IMMEDIATE transaction whose wait for another writer ends at `deadline`.
@@ -1960,8 +1977,39 @@ mod sqlite_backend {
             .map_err(StoreError::DurabilityUnknown)
     }
 
-    /// Opens `path` for reading without following a final symlink and without waiting on a
-    /// FIFO; on Windows a reparse point is opened as itself.
+    /// Requires the SQLite database's parent directory to contain no entries except its lease sidecar.
+    pub fn verify_sqlite_family_removed(descriptor: &StorageDescriptor) -> Result<(), StoreError> {
+        let StorageBackend::Sqlite { path } = &descriptor.backend else {
+            return Err(StoreError::UnsupportedBackend(
+                descriptor.backend.label().to_owned(),
+            ));
+        };
+        let path = Path::new(path);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| StoreError::Baseline("invalid database path".to_owned()))?;
+        let key = lease_key(descriptor, name)?;
+        let sidecar = format!("{}.lease", lease::fnv1a_hex(&key.identity()));
+        let entries = match std::fs::read_dir(
+            path.parent()
+                .ok_or_else(|| StoreError::Baseline("missing parent".to_owned()))?,
+        ) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(StoreError::Io(error)),
+        };
+        for entry in entries {
+            if entry.map_err(StoreError::Io)?.file_name() != std::ffi::OsStr::new(&sidecar) {
+                return Err(StoreError::Baseline(
+                    "unreconciled database directory residue".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuses final symlinks and opens without waiting on FIFOs.
     fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
@@ -2802,6 +2850,8 @@ mod sqlite_backend {
     }
 }
 
+#[cfg(all(feature = "sqlite", feature = "test-support"))]
+pub use sqlite_backend::after_commit_for_test;
 #[cfg(all(feature = "sqlite", any(test, feature = "test-support")))]
 pub use sqlite_backend::library_memory_used;
 #[cfg(feature = "sqlite")]
@@ -2809,6 +2859,7 @@ pub use sqlite_backend::{
     APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
     SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject, SqliteStore, USER_VERSION,
     delete_sqlite_family, immutable_uri, open_sqlite, schema_inventory, verify_baseline,
+    verify_sqlite_family_removed,
 };
 
 #[cfg(all(test, feature = "sqlite"))]

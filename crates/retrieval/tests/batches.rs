@@ -391,7 +391,7 @@ fn construction_verification_uses_occurrence_identity_and_shared_content_equalit
                     "DELETE FROM embedding_recovery_authorizations",
                 ),
                 (
-                    "INSERT INTO retirement_receipts SELECT 'r1',generation_id,'retired',NULL,1,1 FROM vector_generations",
+                    "INSERT INTO retirement_receipts(receipt_id,generation_id,reason,operator_id,retired_at,recorded_at) SELECT 'r1',generation_id,'retired',NULL,1,1 FROM vector_generations",
                     "DELETE FROM retirement_receipts",
                 ),
             ] {
@@ -542,6 +542,7 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
             "table:payloads",
             "table:projection_checkpoint",
             "table:projection_identity",
+            "table:retirement_dispositions",
             "table:retirement_receipts",
             "table:vector_generations",
         ]

@@ -90,6 +90,7 @@ harness = false
 required-features = ["test-support"]
 
 [dev-dependencies]
+storage = { workspace = true, features = ["test-support"] }
 criterion = { workspace = true }
 proptest = { workspace = true }
 chrono-tz = "0.10"

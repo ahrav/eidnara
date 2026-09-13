@@ -17,6 +17,7 @@ pub mod dispatch;
 pub mod eligibility;
 pub mod identity_sweep;
 pub mod message_cleanup;
+pub mod retirement;
 pub mod vectors;
 
 use std::collections::HashMap;
@@ -36,7 +37,7 @@ use storage::{CachedStatement, GuardedConn};
 pub const BASELINE: &str = include_str!("../baseline.sql");
 
 /// A schema mismatch requires a rebuild from canonical state.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Connection opening does not compare projection identities.
 /// A matching identity does not establish completeness or authorize search.
