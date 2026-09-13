@@ -100,6 +100,7 @@ fn canonical_miss_return_buffer_provenance_is_classified() {
                 );
             }
             BufferProvenance::GrowthChain => {
+                let chain = ledger.growth_chain(ptr);
                 assert!(
                     ledger
                         .grown_from_root_outside(
@@ -111,8 +112,10 @@ fn canonical_miss_return_buffer_provenance_is_classified() {
                     "{label}: no second serialization buffer reaches N outside the returned chain"
                 );
                 assert!(
-                    ledger.allocations_of_size(bytes.len()).is_empty()
-                        || bytes.capacity() == bytes.len(),
+                    ledger
+                        .allocations_of_size(bytes.len())
+                        .iter()
+                        .all(|event| chain.contains(event)),
                     "{label}: no exact-size reorder buffer beside the returned chain"
                 );
             }
@@ -195,8 +198,7 @@ fn full_constructor_observation_covers_receipts_hashing_and_arc_conversion() {
         let arc_size = arc_layout(reference.len());
         let (canonical, canonicalizer) = canonicalize_recorded(&message);
         let canonicalizer_peak = canonicalizer.peak_live_bytes;
-        // `return_capacity` includes `canonical`'s unused capacity.
-        let return_capacity = canonical.capacity();
+        let returned_capacity = canonical.capacity();
         drop(canonical);
         let (served, ledger) =
             record_window(|| daemon::transform::served_message_for_test(message));
@@ -223,17 +225,30 @@ fn full_constructor_observation_covers_receipts_hashing_and_arc_conversion() {
             ledger.live_bytes_at_close, retained as isize,
             "{label}: the constructor retains the message, fingerprints, identity, and payload"
         );
-        let live_after_canonicalizer = return_capacity + fingerprint_vec + digests;
-        let hashing_peak = live_after_canonicalizer + largest_receipt_capacity(&population);
-        let conversion_peak = live_after_canonicalizer + HEX_DIGEST_BYTES + message_arc + arc_size;
-        let bound = canonicalizer_peak.max(hashing_peak).max(conversion_peak);
+        // The constructor converts the returned buffer to its exact-size `Arc`
+        // before serializing receipts, so the buffer's spare capacity and the
+        // `Arc` overlap only during that conversion.
+        let conversion_peak = returned_capacity + arc_size;
+        let live_after_conversion = arc_size + fingerprint_vec + digests;
+        let hashing_peak = live_after_conversion + largest_receipt_capacity(&population);
+        // Ownership transfer: the identity string and its `Arc` overlap, then the
+        // fingerprint `Vec` and its `Arc` overlap while the identity `Arc` is live.
+        let ownership_peak = live_after_conversion
+            + message_arc
+            + identity_arc
+            + HEX_DIGEST_BYTES.max(fingerprint_arc);
+        let bound = canonicalizer_peak
+            .max(conversion_peak)
+            .max(hashing_peak)
+            .max(ownership_peak);
         assert!(
             ledger.peak_live_bytes <= bound,
-            "{label}: constructor peak {} exceeds max(canonicalizer {}, hashing {}, conversion {})",
+            "{label}: constructor peak {} exceeds max(canonicalizer {}, conversion {}, hashing {}, ownership {})",
             ledger.peak_live_bytes,
             canonicalizer_peak,
+            conversion_peak,
             hashing_peak,
-            conversion_peak
+            ownership_peak
         );
         // `Arc<[u8]>` stores the strong and weak counts ahead of the bytes, so the
         // allocation starts two words before the payload pointer and its layout is

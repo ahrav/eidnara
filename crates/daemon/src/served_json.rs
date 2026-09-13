@@ -118,7 +118,23 @@ pub fn canonical_served_bytes_for_test(message: &memory_store::WireMessage) -> V
     to_vec(message).expect("CK wire message values must always serialize")
 }
 
+/// Output of the single serialization pass: the compact bytes and every recorded
+/// object's field spans in source order.
+struct Encoded {
+    bytes: Vec<u8>,
+    objects: Vec<ObjectSpans>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FINALIZATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
 fn encode(value: &impl Serialize) -> serde_json::Result<Vec<u8>> {
+    Ok(finalize(serialize_with_spans(value)?))
+}
+
+fn serialize_with_spans(value: &impl Serialize) -> serde_json::Result<Encoded> {
     let position = Cell::new(0);
     let mut objects = Vec::new();
     let writer = SpanWriter {
@@ -132,40 +148,367 @@ fn encode(value: &impl Serialize) -> serde_json::Result<Vec<u8>> {
     };
     let mut serializer = serde_json::Serializer::with_formatter(writer, formatter);
     value.serialize(&mut serializer)?;
-    let bytes = serializer.into_inner().bytes;
-    for object in &mut objects {
-        sort_fields(&bytes, &mut object.fields);
+    Ok(Encoded {
+        bytes: serializer.into_inner().bytes,
+        objects,
+    })
+}
+
+/// Returns the serialization buffer itself when every object is already in
+/// canonical order; the reorder copy produces the same bytes, so only a
+/// disordered document pays for a second buffer.
+fn finalize(mut encoded: Encoded) -> Vec<u8> {
+    #[cfg(test)]
+    FINALIZATIONS.with(|count| count.set(count.get() + 1));
+    if !sort_all_fields(&encoded.bytes, &mut encoded.objects) {
+        return encoded.bytes;
     }
-    let mut out = Vec::with_capacity(bytes.len());
-    copy_sorted_range(&bytes, &objects, 0..bytes.len(), &mut out);
-    Ok(out)
+    let mut out = Vec::with_capacity(encoded.bytes.len());
+    copy_sorted_range(
+        &encoded.bytes,
+        &encoded.objects,
+        0..encoded.bytes.len(),
+        &mut out,
+    );
+    out
+}
+
+/// `|=` never short-circuits, so a disordered object late in the document is
+/// sorted and reported even when every earlier object is already ordered.
+fn sort_all_fields(bytes: &[u8], objects: &mut [ObjectSpans]) -> bool {
+    let mut changed = false;
+    for object in objects {
+        changed |= sort_fields(bytes, &mut object.fields);
+    }
+    changed
 }
 
 /// Keys without a backslash compare as raw bytes between the quotes: serde writes non-ASCII
 /// unescaped, and UTF-8 byte order equals `str` order. The quotes are excluded because `"`
 /// sorts after space, which would misorder `"a"` against `"a b"`. Escaped keys decode first:
-/// sorting escaped spellings would misorder control characters.
-fn sort_fields(bytes: &[u8], fields: &mut [(Range<usize>, usize)]) {
+/// sorting escaped spellings would misorder control characters. Returns whether any field
+/// moved.
+fn sort_fields(bytes: &[u8], fields: &mut [(Range<usize>, usize)]) -> bool {
     if fields.len() < 2 {
-        return;
+        return false;
     }
     let raw_key = |(field, key_end): &(Range<usize>, usize)| &bytes[field.start + 1..key_end - 1];
     if fields.iter().all(|field| !raw_key(field).contains(&b'\\')) {
-        if !fields.is_sorted_by_key(raw_key) {
-            fields.sort_by_key(raw_key);
+        if fields.is_sorted_by_key(raw_key) {
+            return false;
         }
-        return;
+        fields.sort_by_key(raw_key);
+        return true;
     }
     let decoded_key = |field: &(Range<usize>, usize)| {
         serde_json::from_slice::<String>(&bytes[field.0.start..field.1])
             .expect("serde emits valid string keys")
     };
     fields.sort_by_cached_key(decoded_key);
+    // Field starts are recorded in source order and are strictly increasing, so a
+    // permutation that keeps them increasing is the identity.
+    !fields.is_sorted_by_key(|(field, _)| field.start)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Emits `pairs` as a map in the given order.
+    struct Ordered<'a>(&'a [(&'a str, serde_json::Value)]);
+
+    impl Serialize for Ordered<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_map(self.0.iter().map(|(key, value)| (*key, value)))
+        }
+    }
+
+    fn reference(value: &impl Serialize) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::to_value(value).unwrap()).unwrap()
+    }
+
+    fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut out = Vec::new();
+        for (index, head) in items.iter().enumerate() {
+            let mut rest = items.to_vec();
+            rest.remove(index);
+            for mut tail in permutations(&rest) {
+                tail.insert(0, head.clone());
+                out.push(tail);
+            }
+        }
+        out
+    }
+
+    fn finalizations() -> usize {
+        FINALIZATIONS.with(Cell::get)
+    }
+
+    #[test]
+    fn every_key_permutation_reports_change_exactly_when_disordered() {
+        // Each triple is listed in decoded order. Values carry the source index,
+        // so a stable sort of equal keys is observable.
+        let triples: [[&str; 3]; 6] = [
+            ["a", "b", "c"],
+            ["\n", "a", "\u{e9}"],
+            ["a", "a b", "a\""],
+            ["\u{1}", "!", "\u{1F600}"],
+            ["a", "a", "b"],
+            ["\n", "\n", "a"],
+        ];
+        for sorted_keys in triples {
+            for permutation in permutations(&sorted_keys) {
+                let pairs: Vec<(&str, serde_json::Value)> = permutation
+                    .iter()
+                    .enumerate()
+                    .map(|(index, key)| (*key, serde_json::json!(index)))
+                    .collect();
+                let source = Ordered(&pairs);
+                // `reference` would collapse duplicate keys; a stable sort keeps them.
+                let mut stable = pairs.clone();
+                stable.sort_by_key(|(key, _)| *key);
+                let expected = serde_json::to_vec(&Ordered(&stable)).unwrap();
+                let mut encoded = serialize_with_spans(&source).unwrap();
+                let changed = sort_all_fields(&encoded.bytes, &mut encoded.objects);
+                let disordered = !permutation.is_sorted();
+                assert_eq!(changed, disordered, "{permutation:?}");
+                assert_eq!(encode(&source).unwrap(), expected, "{permutation:?}");
+                assert_eq!(
+                    serde_json::to_vec(&source).unwrap() == expected,
+                    !disordered,
+                    "{permutation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_order_decision_visits_every_object() {
+        // `serde_json::Value` maps are already sorted, so child disorder needs a
+        // declaration-ordered struct.
+        #[derive(Serialize)]
+        struct Za {
+            z: u8,
+            a: u8,
+        }
+        #[derive(Serialize)]
+        struct Late {
+            a: serde_json::Value,
+            b: Vec<Za>,
+        }
+        let late = Late {
+            a: serde_json::json!({"b": 1}),
+            b: vec![Za { z: 0, a: 0 }, Za { z: 2, a: 3 }],
+        };
+        let mut encoded = serialize_with_spans(&late).unwrap();
+        let ordered_objects: Vec<bool> = encoded
+            .objects
+            .iter()
+            .map(|object| {
+                object
+                    .fields
+                    .is_sorted_by_key(|(field, key_end)| &encoded.bytes[field.start..*key_end])
+            })
+            .collect();
+        assert_eq!(ordered_objects, [true, true, false, false]);
+        assert!(sort_all_fields(&encoded.bytes, &mut encoded.objects));
+        assert_eq!(encode(&late).unwrap(), reference(&late));
+
+        // Only the last object in the document is disordered.
+        #[derive(Serialize)]
+        struct Tail {
+            a: serde_json::Value,
+            b: Vec<serde_json::Value>,
+            c: Za,
+        }
+        let tail = Tail {
+            a: serde_json::json!({"a": 1}),
+            b: vec![serde_json::json!({"a": 1, "b": 2})],
+            c: Za { z: 1, a: 2 },
+        };
+        let mut encoded = serialize_with_spans(&tail).unwrap();
+        assert!(sort_all_fields(&encoded.bytes, &mut encoded.objects));
+        assert_eq!(encode(&tail).unwrap(), reference(&tail));
+
+        // Root disordered, every child ordered.
+        let root_only = Ordered(&[
+            ("b", serde_json::json!({"a": 1, "b": 2})),
+            ("a", serde_json::json!({})),
+        ]);
+        let mut encoded = serialize_with_spans(&root_only).unwrap();
+        assert!(sort_all_fields(&encoded.bytes, &mut encoded.objects));
+        assert_eq!(encode(&root_only).unwrap(), reference(&root_only));
+
+        // Everything ordered, including empty and singleton objects and escaped keys.
+        let ordered = Ordered(&[
+            ("\n", serde_json::json!({})),
+            (
+                "a",
+                serde_json::json!({"only": [1, {"k": {"x": 1, "y": 2}}]}),
+            ),
+            ("b", serde_json::json!({"\u{1}": 1, "!": 2, "a b": 3})),
+        ]);
+        let mut encoded = serialize_with_spans(&ordered).unwrap();
+        assert!(!sort_all_fields(&encoded.bytes, &mut encoded.objects));
+        assert_eq!(encode(&ordered).unwrap(), reference(&ordered));
+    }
+
+    /// Copying the completed buffer through unchanged source-order tables reproduces
+    /// it byte for byte, whole and per object, whether or not the input is ordered.
+    #[test]
+    fn unchanged_span_copy_is_identity() {
+        let cases = [
+            r#"{}"#,
+            r#"{"a":1}"#,
+            r#"{"z":{},"a":[{},{"b":[]}]}"#,
+            r#"{"a":[1,{"z":"}{,\"","a":"\\"},2],"b":"\u0001,{}"}"#,
+            r#"{"\n":true,"!":false,"\u00e9":"\ud83d\ude00","😀":null}"#,
+            r#"{"n":[-0.0,0.0,1.0,1e30,1e-30,-9223372036854775808,18446744073709551615]}"#,
+            r#"{"b":{"a b":{"y":1,"x":2},"a":[{"k":1,"j":2}]},"a":null}"#,
+        ];
+        for case in cases {
+            let value: serde_json::Value = serde_json::from_str(case).unwrap();
+            let map = value.as_object().unwrap();
+            let ordered: Vec<(&str, serde_json::Value)> = map
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone()))
+                .collect();
+            let mut reversed = ordered.clone();
+            reversed.reverse();
+            // A root with at least two keys makes `ordered` and `reversed` distinct.
+            assert_eq!(
+                serde_json::to_vec(&Ordered(&ordered)).unwrap()
+                    == serde_json::to_vec(&Ordered(&reversed)).unwrap(),
+                ordered.len() < 2,
+                "{case}"
+            );
+            for source in [Ordered(&ordered), Ordered(&reversed)] {
+                let encoded = serialize_with_spans(&source).unwrap();
+                let mut whole = Vec::new();
+                copy_sorted_range(
+                    &encoded.bytes,
+                    &encoded.objects,
+                    0..encoded.bytes.len(),
+                    &mut whole,
+                );
+                assert_eq!(whole, encoded.bytes, "{case}");
+                for object in &encoded.objects {
+                    let mut part = Vec::new();
+                    copy_sorted_range(
+                        &encoded.bytes,
+                        &encoded.objects,
+                        object.bytes.clone(),
+                        &mut part,
+                    );
+                    assert_eq!(part, encoded.bytes[object.bytes.clone()], "{case}");
+                    for (field, _) in &object.fields {
+                        let mut part = Vec::new();
+                        copy_sorted_range(
+                            &encoded.bytes,
+                            &encoded.objects,
+                            field.clone(),
+                            &mut part,
+                        );
+                        assert_eq!(part, encoded.bytes[field.clone()], "{case}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_input_returns_the_serialization_buffer_and_disordered_input_does_not() {
+        let ordered = Ordered(&[
+            ("\n", serde_json::json!({"a": 1, "b": [{"c": 2}]})),
+            ("a", serde_json::json!("x".repeat(4096))),
+        ]);
+        let encoded = serialize_with_spans(&ordered).unwrap();
+        let (ptr, len, capacity) = (
+            encoded.bytes.as_ptr(),
+            encoded.bytes.len(),
+            encoded.bytes.capacity(),
+        );
+        let before = finalizations();
+        let out = finalize(encoded);
+        assert_eq!(finalizations(), before + 1);
+        assert_eq!(out.as_ptr(), ptr);
+        assert_eq!(out.len(), len);
+        assert_eq!(out.capacity(), capacity, "no shrink on the ownership path");
+        assert_eq!(out, reference(&ordered));
+
+        let disordered = Ordered(&[
+            ("a", serde_json::json!("x".repeat(4096))),
+            ("\n", serde_json::json!({"b": [{"c": 2}], "a": 1})),
+        ]);
+        let encoded = serialize_with_spans(&disordered).unwrap();
+        let ptr = encoded.bytes.as_ptr();
+        let out = finalize(encoded);
+        assert_ne!(out.as_ptr(), ptr);
+        assert_eq!(out.capacity(), out.len());
+        assert_eq!(out, reference(&disordered));
+    }
+
+    #[test]
+    fn serialization_error_returns_before_finalization() {
+        struct Failing {
+            visits: Cell<usize>,
+            after_prefix: bool,
+        }
+        impl Serialize for Failing {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::{Error, SerializeMap};
+                self.visits.set(self.visits.get() + 1);
+                if !self.after_prefix {
+                    return Err(S::Error::custom("refused before writing"));
+                }
+                let mut outer = serializer.serialize_map(None)?;
+                outer.serialize_entry("z", &1)?;
+                outer.serialize_entry("a", &OpenInner)?;
+                unreachable!("the nested value refuses")
+            }
+        }
+        /// Fails between a nested object's first entry and its close, so the
+        /// formatter stack holds two open objects at the error.
+        struct OpenInner;
+        impl Serialize for OpenInner {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::{Error, SerializeMap};
+                let mut inner = serializer.serialize_map(None)?;
+                inner.serialize_entry("b", &1)?;
+                Err(S::Error::custom("refused with an open nested object"))
+            }
+        }
+        for after_prefix in [false, true] {
+            let failing = Failing {
+                visits: Cell::new(0),
+                after_prefix,
+            };
+            let before = finalizations();
+            let error = encode(&failing).unwrap_err();
+            assert_eq!(finalizations(), before, "no finalization on error");
+            assert_eq!(failing.visits.get(), 1);
+            let expected = if after_prefix {
+                "refused with an open nested object"
+            } else {
+                "refused before writing"
+            };
+            assert_eq!(error.to_string(), expected);
+            assert!(serialize_with_spans(&failing).is_err());
+            assert_eq!(failing.visits.get(), 2);
+        }
+        // Successful canonical and disordered controls each finalize exactly once.
+        let before = finalizations();
+        encode(&Ordered(&[("a", serde_json::json!(1))])).unwrap();
+        encode(&Ordered(&[
+            ("b", serde_json::json!(1)),
+            ("a", serde_json::json!(2)),
+        ]))
+        .unwrap();
+        assert_eq!(finalizations(), before + 2);
+    }
 
     #[test]
     fn canonical_encoding_visits_each_serialize_implementation_once() {

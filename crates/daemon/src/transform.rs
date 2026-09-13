@@ -162,8 +162,13 @@ impl ServedMessage {
     /// Divergence fingerprints use the serialized `WireBlock` basis of `FlatBlock.content_hash`.
     /// Overlaid, reduced, and rewritten blocks serialize and hash afresh.
     fn from_message_reusing(message: WireMessage, projected_blocks: Option<&[&FlatBlock]>) -> Self {
-        let canonical_bytes = crate::served_json::to_vec(&message)
-            .expect("CK wire message values must always serialize");
+        // The canonicalizer may hand back its growth buffer with spare capacity;
+        // converting to the exact-size `Arc` first keeps that slack from outliving
+        // the block-receipt serialization below.
+        let canonical_bytes: Arc<[u8]> = Arc::from(
+            crate::served_json::to_vec(&message)
+                .expect("CK wire message values must always serialize"),
+        );
         let mut by_index = HashMap::new();
         for flat in projected_blocks.into_iter().flatten().copied() {
             by_index.entry(flat.block_index).or_insert(flat);
@@ -204,7 +209,6 @@ impl ServedMessage {
         let output_identity = format!("{canonical_digest:x}");
         let canonical_hash: [u8; 32] = canonical_digest.into();
         let message = Arc::new(message);
-        let canonical_bytes: Arc<[u8]> = Arc::from(canonical_bytes);
         let output_identity: Arc<str> = Arc::from(output_identity);
         let block_fingerprints: Arc<[(String, usize)]> = Arc::from(block_fingerprints);
         let retained_bytes = served_message_retained_bytes(
@@ -13722,6 +13726,83 @@ pub(crate) mod tests {
         );
         assert!(last_divergence["pass_id"].is_number());
         assert!(last_divergence["timestamp_ms"].is_number());
+    }
+
+    #[test]
+    fn positive_output_cache_hit_reuses_owned_artifacts_without_constructing() {
+        let message: WireMessage = serde_json::from_str(
+            r#"{"role":"user","content":[{"kind":{"type":"text","text":"cached"}}]}"#,
+        )
+        .unwrap();
+        let served = ServedMessage::from_message(message.clone());
+        let mut entries = HashMap::new();
+        entries.insert(
+            "synthetic:m0".to_string(),
+            SerializedOutputCacheEntry {
+                identity: "identity-a".to_string(),
+                served: Some(served.clone()),
+            },
+        );
+        entries.insert(
+            "synthetic:m1".to_string(),
+            SerializedOutputCacheEntry {
+                identity: "identity-b".to_string(),
+                served: None,
+            },
+        );
+        let snapshot = SerializedOutputCacheSnapshot { entries };
+        let mut timings = BuildOutputTimings::default();
+
+        // A clean matching positive entry never invokes the constructor closure and
+        // returns pointer-equal owned artifacts.
+        let (hit, reused) = cached_or_serialize_output(
+            Some(&snapshot),
+            "synthetic:m0",
+            "identity-a",
+            false,
+            &mut timings,
+            || unreachable!("a positive hit must not construct"),
+        );
+        assert!(reused);
+        assert!(Arc::ptr_eq(&hit.message, &served.message));
+        assert!(Arc::ptr_eq(&hit.canonical_bytes, &served.canonical_bytes));
+        assert!(Arc::ptr_eq(&hit.output_identity, &served.output_identity));
+        assert!(Arc::ptr_eq(
+            &hit.block_fingerprints,
+            &served.block_fingerprints
+        ));
+        assert_eq!(hit.canonical_hash, served.canonical_hash);
+        assert_eq!((timings.cache_hits, timings.cache_misses), (1, 0));
+
+        // `Some(None)`, a dirty item, a foreign identity, and an absent key all construct.
+        let constructed = std::cell::Cell::new(0);
+        for (key, identity, dirty) in [
+            ("synthetic:m1", "identity-b", false),
+            ("synthetic:m0", "identity-a", true),
+            ("synthetic:m0", "identity-other", false),
+            ("synthetic:m9", "identity-a", false),
+        ] {
+            let (fresh, reused) = cached_or_serialize_output(
+                Some(&snapshot),
+                key,
+                identity,
+                dirty,
+                &mut timings,
+                || {
+                    constructed.set(constructed.get() + 1);
+                    message.clone()
+                },
+            );
+            assert!(!reused, "{key}/{identity}/{dirty}");
+            assert!(!Arc::ptr_eq(
+                &fresh.canonical_bytes,
+                &served.canonical_bytes
+            ));
+            assert_eq!(fresh.canonical_bytes(), served.canonical_bytes());
+        }
+        assert_eq!(constructed.get(), 4);
+        assert_eq!((timings.cache_hits, timings.cache_misses), (1, 4));
+        assert_eq!(timings.cache_dirty_skips, 1);
     }
 
     #[test]

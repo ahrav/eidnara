@@ -68,10 +68,11 @@ impl Population {
     }
 
     /// Whether the canonicalizer returns its serialization buffer for this
-    /// population instead of a fresh exact-size reorder buffer. The unchanged
-    /// canonicalizer copies every population into a fresh buffer.
+    /// population instead of a fresh exact-size reorder buffer. Retained
+    /// originals serialize in canonical order and keep the buffer; typed and
+    /// edited shells still need the reorder copy.
     pub fn expects_serialization_buffer_return(&self) -> bool {
-        false
+        self.expects_canonical_miss()
     }
 
     pub fn build(&self) -> WireMessage {
