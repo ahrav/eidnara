@@ -947,6 +947,41 @@ fn concurrent_queries_observe_one_family_for_rows_checkpoint_and_job_set() {
 }
 
 #[test]
+#[ignore = "launched by `a_umask_that_masks_owner_bits_does_not_break_family_creation`"]
+fn umask_child() {
+    let root = std::path::PathBuf::from(std::env::var("UMASK_CHILD_ROOT").unwrap());
+    let corpus = Corpus::open(&root);
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let config = spec(&root);
+    record(&root, &gate, None, &config.identity);
+    let candidate = ReplacementBuilder::open(&root, &corpus.kernel, &gate, config)
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .unwrap();
+    // Only family creation runs under the umask; the builder's storage layer is not under test.
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o100));
+    let selection = selector(&root);
+    selection.select(candidate, &mut |_| Ok(())).unwrap();
+    let pinned = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    assert_eq!(observe(&pinned).rows.len(), 1);
+}
+
+#[test]
+fn a_umask_that_masks_owner_bits_does_not_break_family_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "selection::umask_child", "--ignored"])
+        .env("UMASK_CHILD_ROOT", root.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "{status}");
+}
+
+#[test]
 fn revoked_gate_refuses_existing_pins_without_releasing_the_family() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());

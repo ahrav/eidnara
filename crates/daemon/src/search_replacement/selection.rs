@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::num::NonZeroUsize;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -849,10 +849,22 @@ fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
 fn create_directory(parent: &Path, name: &str) -> Result<(), BuildError> {
     let parent_dir = crate::projection_lifecycle::open_directory(parent)?;
     let path = parent.join(name);
-    if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&path)
-        && error.kind() != std::io::ErrorKind::AlreadyExists
-    {
-        return Err(error.into());
+    match fs::DirBuilder::new().mode(0o700).create(&path) {
+        // The umask may have narrowed the requested mode; the new directory is set to exactly owner-only.
+        Ok(()) => fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // A crash between the create and its chmod leaves an owner-owned directory the owner
+            // cannot enter; only such a directory is widened, never one with wider bits.
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir()
+                && metadata.uid() == rustix::process::geteuid().as_raw()
+                && metadata.mode() & 0o777 & !0o700 == 0
+                && metadata.mode() & 0o700 != 0o700
+            {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        Err(error) => return Err(error.into()),
     }
     open_directory(&path)?;
     parent_dir.sync_all()?;
@@ -860,12 +872,14 @@ fn create_directory(parent: &Path, name: &str) -> Result<(), BuildError> {
 }
 
 fn create_file(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 
 fn open_directory(path: &Path) -> std::io::Result<File> {
