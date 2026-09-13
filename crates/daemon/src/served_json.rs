@@ -367,12 +367,20 @@ mod tests {
         for case in cases {
             let value: serde_json::Value = serde_json::from_str(case).unwrap();
             let map = value.as_object().unwrap();
-            let mut reversed: Vec<(&str, serde_json::Value)> = map
+            let ordered: Vec<(&str, serde_json::Value)> = map
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.clone()))
                 .collect();
+            let mut reversed = ordered.clone();
             reversed.reverse();
-            for source in [Ordered(&reversed)] {
+            // A root with at least two keys makes `ordered` and `reversed` distinct.
+            assert_eq!(
+                serde_json::to_vec(&Ordered(&ordered)).unwrap()
+                    == serde_json::to_vec(&Ordered(&reversed)).unwrap(),
+                ordered.len() < 2,
+                "{case}"
+            );
+            for source in [Ordered(&ordered), Ordered(&reversed)] {
                 let encoded = serialize_with_spans(&source).unwrap();
                 let mut whole = Vec::new();
                 copy_sorted_range(
