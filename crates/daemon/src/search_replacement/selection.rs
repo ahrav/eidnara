@@ -499,6 +499,7 @@ impl SearchSelection {
         match self.reclaim_locked(digest)? {
             Reclaimed::Removed | Reclaimed::Absent => Ok(()),
             Reclaimed::Uncertified => Err(BuildError::Invalid("uncertified family")),
+            Reclaimed::Residual => Err(BuildError::Invalid("family directory not empty")),
         }
     }
 
@@ -536,7 +537,7 @@ impl SearchSelection {
             match self.reclaim_locked(digest) {
                 Ok(Reclaimed::Removed) => report.removed += 1,
                 Ok(Reclaimed::Absent) => {}
-                Ok(Reclaimed::Uncertified)
+                Ok(Reclaimed::Uncertified | Reclaimed::Residual)
                 | Err(BuildError::Projection(SearchProjectionError::Store(
                     storage::StoreError::Lease(_),
                 ))) => report.retained += 1,
@@ -557,13 +558,11 @@ impl SearchSelection {
                 return Ok(Reclaimed::Uncertified);
             }
             open_directory(&home)?;
-            self.remove_family_dirs(&home)?;
-            return Ok(Reclaimed::Removed);
+            return self.remove_family_dirs(&home);
         }
         let certificate: Bootstrap = serde_json::from_slice(&certificate_bytes(&home)?)
             .map_err(|_| BuildError::Invalid("bootstrap corrupt"))?;
-        self.remove_family(digest, &certificate)?;
-        Ok(Reclaimed::Removed)
+        self.remove_family(digest, &certificate)
     }
 
     pub fn recover_partial(&self, gate: &HookGate) -> Result<LifecycleIntent, BuildError> {
@@ -590,7 +589,11 @@ impl SearchSelection {
         Ok(intent)
     }
 
-    fn remove_family(&self, digest: &str, certificate: &Bootstrap) -> Result<(), BuildError> {
+    fn remove_family(
+        &self,
+        digest: &str,
+        certificate: &Bootstrap,
+    ) -> Result<Reclaimed, BuildError> {
         match GenerationStore::open(Some(&self.data_home))?.read_search_current()? {
             CurrentProfile::Current(current) if current == digest => {
                 return Err(BuildError::Invalid("selected family"));
@@ -605,7 +608,7 @@ impl SearchSelection {
         }
         let home = self.family_home(digest)?;
         if !home.try_exists()? {
-            return Ok(());
+            return Ok(Reclaimed::Absent);
         }
         open_directory(&home)?;
         open_directory(&self.data_home.join(FAMILIES))?;
@@ -630,7 +633,9 @@ impl SearchSelection {
         self.remove_family_dirs(&home)
     }
 
-    fn remove_family_dirs(&self, home: &Path) -> Result<(), BuildError> {
+    /// Removes the family's directories once their expected contents are gone; a residual entry
+    /// leaves the home on disk and yields [`Reclaimed::Residual`].
+    fn remove_family_dirs(&self, home: &Path) -> Result<Reclaimed, BuildError> {
         open_directory(home)?.sync_all()?;
         let search = home.join("search");
         if search.try_exists()? {
@@ -648,19 +653,23 @@ impl SearchSelection {
                 }
             }
         }
+        let mut residual = false;
         for path in [search, home.to_owned()] {
             match fs::remove_dir(path) {
                 Ok(()) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                    ) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                    residual = true;
+                }
                 Err(error) => return Err(error.into()),
             }
         }
         open_directory(&self.data_home.join(FAMILIES))?.sync_all()?;
-        Ok(())
+        Ok(if residual {
+            Reclaimed::Residual
+        } else {
+            Reclaimed::Removed
+        })
     }
 }
 
@@ -669,6 +678,8 @@ enum Reclaimed {
     Absent,
     /// A database without its certificate: ownership cannot be proven, so nothing is deleted.
     Uncertified,
+    /// The database is gone but an unexpected entry keeps the family directory on disk.
+    Residual,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
