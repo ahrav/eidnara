@@ -370,6 +370,10 @@ fn quiesce_at(
         ));
     }
     barrier(SeedBarrier::AfterCheckpoint);
+    // The checkpoint may have outlived the budget or the grant; the projection is handed back open rather than closed for a verification that would only report that.
+    if ended() {
+        return Err(refused(Some(Arc::new(projection)), SeedRefusal::Cancelled));
+    }
     let (path, lease) = projection.close();
     barrier(SeedBarrier::AfterClose);
     let verification = verify_closed_until(&path, expected, bounds.max_bytes, &ended)

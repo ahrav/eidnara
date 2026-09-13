@@ -2045,12 +2045,17 @@ mod sqlite_backend {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Baseline`] naming the difference, including for a pristine (empty) database, [`StoreError::FenceMissing`] when the schema is right but the fence row is absent, and [`StoreError::Backend`] when a read fails.
+    /// Returns [`StoreError::Baseline`] naming the difference, including for a pristine (empty) database, [`StoreError::FenceMissing`] when the schema is right but the fence row is absent, [`StoreError::FenceExhausted`] when no successor epoch is representable, and [`StoreError::Backend`] when a read fails.
     pub fn verify_baseline(conn: &Connection, consumer: &str) -> Result<(), StoreError> {
         match ExpectedIdentity::for_baseline(consumer)?.classify(conn)? {
-            FileState::Baseline => read_fence_epoch_in(conn)?
-                .map(|_| ())
-                .ok_or(StoreError::FenceMissing),
+            FileState::Baseline => {
+                let db_epoch = read_fence_epoch_in(conn)?.ok_or(StoreError::FenceMissing)?;
+                // The same bound `open_sqlite` applies: the lease issues at least `db_epoch + 1`, which must be storable.
+                if db_epoch >= i64::MAX as u64 {
+                    return Err(StoreError::FenceExhausted { db_epoch });
+                }
+                Ok(())
+            }
             FileState::Pristine => Err(StoreError::Baseline(
                 "the database is pristine; the baseline was never applied".into(),
             )),

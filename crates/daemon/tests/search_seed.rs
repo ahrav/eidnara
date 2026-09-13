@@ -599,6 +599,37 @@ async fn cancellation_after_the_close_ends_verification_and_releases_the_lease()
     assert_eq!(count, 2);
 }
 
+/// A budget that ends during the checkpoint is seen before the close: the projection is handed back open rather than closed for a verification that would only report the cancellation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn cancellation_during_the_checkpoint_hands_the_projection_back_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = embedded_fixture(dir.path()).await;
+    let budget = unbounded();
+    let cancel = budget.clone();
+    let refused = quiesce_with_barrier_for_test(
+        fixture.projection,
+        &open_gate(),
+        0,
+        &fixture.expected,
+        seed_bounds(),
+        &budget,
+        &mut |barrier| {
+            if barrier == SeedBarrier::AfterCheckpoint {
+                cancel.cancel();
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(refused.refusal, SeedRefusal::Cancelled);
+    let projection = refused
+        .projection
+        .expect("the projection was not closed for a cancelled seed");
+    let count: i64 = projection
+        .read(|conn| Ok(conn.query_row("SELECT count(*) FROM occurrences", [], |row| row.get(0))?))
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
 /// A gate closed after the seed's admission revokes the grant: quiescing ends as `Cancelled` at its next poll rather than certifying a seed the gate no longer admits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_grant_revoked_after_admission_cancels_the_quiesce() {
@@ -729,7 +760,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     };
-    let cases: [(&str, &str, SeedRefusal); 14] = [
+    let cases: [(&str, &str, SeedRefusal); 15] = [
         (
             "corrupt identity",
             "UPDATE projection_identity SET embedding_model='other'",
@@ -799,6 +830,12 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         (
             "missing fence row",
             "DELETE FROM fence",
+            SeedRefusal::Baseline(String::new()),
+        ),
+        // `open_sqlite` refuses a fence at `i64::MAX` because no successor epoch is representable.
+        (
+            "exhausted fence",
+            "UPDATE fence SET epoch=9223372036854775807 WHERE id=0",
             SeedRefusal::Baseline(String::new()),
         ),
         (
