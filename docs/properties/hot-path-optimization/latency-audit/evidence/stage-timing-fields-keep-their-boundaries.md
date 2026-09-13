@@ -1,7 +1,18 @@
 # stage-timing-fields-keep-their-boundaries
 
-Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
+## Rebase status, 2026-09-13
+
+Relocation anchors refer to the formatted working tree atop `e451a2b4`.
+The merged source preserves upstream's metadata-only read and `pass_state_load`
+field; #438 does not introduce that field. The updated table describes source
+boundaries, not a benchmark result. W2 remains invalidated.
+
+## Historical baseline, 2026-09-10
+
+Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The following discovery and investigation retain their baseline scope. W2 is
+invalidated in the catalog; the implementation note does not reactivate it.
 
 ## Discovery trigger
 
@@ -14,21 +25,21 @@ can shrink a number without making anything faster.
 
 ## Evidence trail
 
-- [`TransformTimings`][tt] has 90 fields, each with `#[serde(default)]`, so
+- [`TransformTimings`][tt] has 89 fields, each with `#[serde(default)]`, so
   a field removed from the producer deserializes as `0` or `0.0` on the
   consumer.
-- [`format_pass_timing_line`][fmt] prints 91 `key=value` pairs (`session`
+- [`format_pass_timing_line`][fmt] prints 90 `key=value` pairs (`session`
   plus one per field). The key for `post_attach` is `post_attach_ms`
-  ([`:1264`][fmt-post-attach], value at [`:1342`][fmt-post-attach-value]);
+  ([`:1254`][fmt-post-attach], value at [`:1331`][fmt-post-attach-value]);
   every other key equals its field name. The plugin's `rust module stages:`
   line ([`:1013-1042`][ts-stages]) reads 22 keys by name from the response
   object; all 22 exist in the struct. Its [`stage`][ts-stage-fn] helper
   prints `n/a` only when the key is absent or non-finite, so a present zero
   prints as `0.0`.
-- The handler assigns 25 fields at [`:8548-8572`][h-timings]. Fourteen are
+- The handler assigns 24 fields at [`:8463-8488`][h-timings]. Thirteen are
   millisecond durations from `Instant` pairs taken on the handler task:
   `handler_total` from `handler_started_at`, the request-to-handler gap,
-  the pass-state load, delta expand, side-channel drain, receive trace, cache lookup and store,
+  delta expand, side-channel drain, receive trace, cache lookup and store,
   native attach, completion trace, observation, retained size, snapshot
   store, and `post_attach`. Six trigger fields come from
   `HistorianTriggerTimings` filled inside [`prepare_historian_fire`][prepare];
@@ -36,8 +47,8 @@ can shrink a number without making anything faster.
 - [`record_token_cache_delta`][rtcd] subtracts two reads of
   [`local_stats`][tc-local], a `thread_local!` counter whose doc says the
   counters exclude other threads and only differences are meaningful. The
-  start read sits at [`apply_additive_only:2384`][snap-add] and
-  [`apply_once:2863`][snap-once]; both functions are synchronous today.
+  start read sits at [`apply_additive_only:2373`][snap-add] and
+  [`apply_once:2852`][snap-once]; both functions are synchronous today.
 - [`respond_transform`][respond] hands `pass_timings` to
   [`emit_pass_timing`][emit], which sets the three response fields and prints
   the line for every response that carries `timings`.
@@ -62,21 +73,10 @@ None in time. The hazard is structural: a stage split across an `.await`
 or moved to another thread changes what its field brackets while the field
 keeps its name and its `#[serde(default)]` fallback.
 
-## Recorded stage delta
-
-The single pass-state load
-([consolidated-cache-state-reads-match-per-consumer-loads](consolidated-cache-state-reads-match-per-consumer-loads.md#single-load-evidence))
-moved the `cache_state` read from inside the `delta_expand` and
-`projection_cache_lookup` windows to before both. It added
-[`pass_state_load`][pass-state-load] as the read's own field and key instead
-of letting those two buckets shrink by the read's cost, so no existing field
-changed what it brackets and the key-to-field map stays the identity except
-`post_attach_ms`. The counts above are the post-change counts.
-
 ## What a test must construct
 
 An ordinary pass that populates `timings`, then a source-level assertion that
-the plugin's 22 keys and the line's 91 keys resolve to struct fields (the
+the plugin's 22 keys and the line's 90 keys resolve to struct fields (the
 `post_attach_ms` rename is the one exception to record), and a per-field
 statement of the start and stop instants each field brackets. The
 [wildcard checks](../existing-checks.md#wildcard-and-cross-cutting) pin the
@@ -104,20 +104,72 @@ not a runtime assertion.
   set.
 - Conclusion: needs human input.
 
-[tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1207
-[rtcd]: ../../../../../crates/daemon/src/transform.rs#L1209-L1220
-[fmt]: ../../../../../crates/daemon/src/transform.rs#L1226-L1360
-[fmt-post-attach]: ../../../../../crates/daemon/src/transform.rs#L1264
-[fmt-post-attach-value]: ../../../../../crates/daemon/src/transform.rs#L1342
-[snap-add]: ../../../../../crates/daemon/src/transform.rs#L2384
-[snap-once]: ../../../../../crates/daemon/src/transform.rs#L2863
-[tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8548-L8572
-[prepare]: ../../../../../crates/daemon/src/lib.rs#L5051-L5381
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14502
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14583-L14605
-[pass-state-load]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
-[ts-read]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
-[ts-stages]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
-[ts-stage-fn]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
-[ts-test]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249
+[pass-state-load]: https://github.com/ahrav/eidnara/blob/e451a2b4/crates/daemon/src/transform.rs#L1033-L1034
+[tt]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L1018-L1197
+[rtcd]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L1199-L1210
+[fmt]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L1216-L1349
+[fmt-post-attach]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L1254
+[fmt-post-attach-value]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L1331
+[snap-add]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2373
+[snap-once]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2852
+[tc-local]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/token_cache.rs#L57-L76
+[h-timings]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8463-L8488
+[prepare]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4994-L5324
+[respond]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L14404
+[emit]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L14485-L14507
+[ts-read]: https://github.com/ahrav/eidnara/blob/9132344/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
+[ts-stages]: https://github.com/ahrav/eidnara/blob/9132344/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
+[ts-stage-fn]: https://github.com/ahrav/eidnara/blob/9132344/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
+[ts-test]: https://github.com/ahrav/eidnara/blob/9132344/packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249
+
+## Implementation evidence, 2026-09-13
+
+[#438](https://github.com/ahrav/eidnara/issues/438) preserves timing field names
+and units. It makes no stage-speedup claim and does not reactivate W2. The
+following source observations distinguish placement from measurement.
+
+| Field group | Boundary after relocation |
+| --- | --- |
+| `handler_total` | The pre-typed-decode `Instant` travels through `EntryTimings`; settlement reads its elapsed time. It includes unit admission queueing, blocking-pool scheduling, and Emergency95 waits before settlement. The permit precedes snapshot `begin` on both unit-backed lanes and unpaged typed acceptance, not this timer's start. Paged staging already accepts before typed admission; that behavior is unchanged. The timer ends inside the final unit, not after that unit's return hop, output reservation, or wire publication. |
+| `pass_state_load` | Upstream's timer brackets preflight `store.load_meta` before delta expansion and unit admission. Its value travels through `EntryTimings` and is copied into the response at settlement. #438 preserves this parent field rather than introducing it. |
+| `request_observed_to_handler`, `delta_expand` | The handler records these before unit submission and carries their values unchanged. |
+| Projection lookup, side-channel drain, receive trace | The same operations have local `Instant` brackets inside `start_transform_pass`; unit queue time is not attributed to these stages. |
+| Projection store, native attach, completion trace, response observation, retained size, snapshot store, `post_attach` | Settlement brackets the corresponding work on its executing thread. These fields are not redefined as the enclosing async wait. |
+| Transform `total` and token-cache deltas | Each synchronous transform attempt keeps its own brackets and both thread-local samples on that attempt's blocking thread. Different attempts may use different threads; no delta subtracts one attempt's start from another's finish. |
+| Trigger timings and native-cache counts | Preparation timings accumulate in `TransformedPass`; settlement copies them and the existing native-cache counts into the response. |
+
+[Entry and submission][entry-live], [pre-transform brackets][pre-live], and
+[settlement assignments][timings-live] establish these source boundaries.
+`transform.rs` and `token_cache.rs` are unchanged by #438. The queued fifth-unit
+test proves off-worker admission, not a measured queue-duration field or a
+performance gain. The four-scalar Emergency95 assertion checks a read boundary,
+not a latency improvement. No comprehensive per-field timing test or TypeScript-to-Rust
+schema check is claimed, and no full-cap paged or slow-disk duration is measured.
+The broader field-ownership question remains open on this invalidated record.
+
+[entry-live]: ../../../../../crates/daemon/src/lib.rs#L8264-L8285
+[pre-live]: ../../../../../crates/daemon/src/lib.rs#L8723-L8767
+[timings-live]: ../../../../../crates/daemon/src/lib.rs#L9017-L9127
+
+## Upstream stage evidence, e451a2b4
+
+The upstream audit records a stage delta that is absent from the discovery
+baseline: the [single pass-state load](consolidated-cache-state-reads-match-per-consumer-loads.md#single-load-evidence)
+moves the `cache_state` read before `delta_expand` and `projection_cache_lookup`
+and exposes its cost as [`pass_state_load`][pass-state-load]. Its updated
+inventory has 90 struct fields, 91 printed keys, and 25 handler assignments,
+including 14 duration fields. The key map retains the `post_attach_ms` exception.
+This preserves the upstream timing correction, not a #438 speedup claim; W2
+remains invalidated.
+
+Upstream [loads metadata and records this duration][upstream-meta-load] before
+constructing `PassState`, and [copies the field into the response][upstream-timing].
+`pass_state_load_has_its_own_timing_bucket` supplies an upstream test for the
+bucket. The rebased source retains that field and the metadata-load API:
+[preflight][metadata-load-live] records the elapsed read, and
+[settlement][timings-live] copies it. The table above includes this merged
+boundary without turning it into a performance result.
+
+[upstream-meta-load]: https://github.com/ahrav/eidnara/blob/e451a2b4/crates/daemon/src/lib.rs#L8257-L8267
+[upstream-timing]: https://github.com/ahrav/eidnara/blob/e451a2b4/crates/daemon/src/lib.rs#L8799-L8809
+[metadata-load-live]: ../../../../../crates/daemon/src/lib.rs#L8398-L8411

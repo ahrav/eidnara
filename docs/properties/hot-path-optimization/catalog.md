@@ -1,9 +1,22 @@
 # Hot-path optimization preservation supplement
 
+## Rebase status, 2026-09-13
+
+Relocation source anchors describe the implementation rebased onto
+`e451a2b4`. Parent PR #523
+merged at `2d408c11`, and its branch was deleted. The final PR targets main.
+The [rebased receipt](existing-checks.md#rebased-working-tree-verification-2026-09-13)
+separates focused checks from the historical `d6060f79` runs. The rebased daemon
+has two known deadline failures. The full-workspace run also has an additional
+timing-sensitive embedding failure; it is not green. Final Bun and focused
+checks pass, as do the final all-target build, formatting, and workspace clippy.
+
 ## Scope and provenance
 
 This supplement supplies reusable `/property-discovery-and-catalog` input for
 a specification. It does not authorize implementation or create tickets.
+
+### Historical discovery baseline, 2026-09-10
 
 - The system is `/local/home/ahrav/scratch/eidnara`.
 - The baseline is `913234433ae36a80a6e22c6aac14c7f9aab74386`.
@@ -23,9 +36,9 @@ a specification. It does not authorize implementation or create tickets.
   The separate review, local dispositions, and independent recheck are recorded
   in [portfolio-evaluation.md](portfolio-evaluation.md). Applying corrections
   is not another independent evaluation.
-- Historical source citations and exercise claims are not carried forward.
-  New source anchors are checked against this HEAD. No tests, campaigns,
-  benchmarks, or query-plan experiments run as part of this work.
+- The discovery audit imports no earlier exercise claims and runs no tests,
+  campaigns, benchmarks, or query-plan experiments. Dated implementation
+  sections are separate evidence, not a rewrite of that audit.
 
 The records constrain preservation across selection pushdown, execution
 placement, callback batching, history-budget calculation, and prepared-field
@@ -42,6 +55,18 @@ and superseded by [Spec: Hot-path latency (HP1)][spec-hp1], which names this
 catalog and its [`latency-audit`](latency-audit/catalog.md) area as the
 authority for its constraints.
 
+## Implementation evidence, 2026-09-13
+
+The E1-E3 records include [#438](https://github.com/ahrav/eidnara/issues/438)
+evidence first collected over `f2c8eab0`, above base `96709d0e`, and retained
+in `d6060f79`. Relocation anchors now refer to the rebased working tree.
+Their evidence files retain the 2026-09-10 discovery baseline under explicit
+historical headings with pinned source links. The [focused execution receipt](existing-checks.md#transform-unit-execution-receipt-2026-09-13)
+records focused passes separately from the workspace runs that failed on the
+two known baseline deadlines and the passing Bun repository gate. The two
+deadline tests also pass individually, but the full workspace remains failed. These
+updates do not claim a full pass, a measured speedup, or global E1 coverage.
+
 ## Reachability and boundaries
 
 | Records | Class | Evidence and limit |
@@ -52,13 +77,16 @@ authority for its constraints.
 | H1-H4 | default-production | [HARD composition][hard-compose] reaches [the history renderer][history-render] and [wrapped retry][outer-retry]. Pressure requires workload construction. |
 | R1-R3 | default-production | [Core preparation][core-prep] and [transaction preparation][transaction-prep] use [prepared fields][prepare-field] on durable writes. |
 
-FUTURE execution topology is unresolved. The transform runs synchronously
-inside its async handler at this HEAD. The existing ingest reservations
-illustrate ownership across blocking work; they do not prove an off-worker
-transform lifecycle. Any proposed worker arrangement needs its own completion
-and accounting evidence before claiming E1-E3 are exercised. Worker-specific
-test readiness is **BLOCKED** pending that design; existing request reachability
-is not evidence that an unbuilt worker is ready for implementation.
+At the historical discovery baseline, transform-worker topology was unresolved.
+The [dated E1 evidence](evidence/route-cleanup-waits-for-request-owned-physical-work.md#implementation-evidence-2026-09-13)
+resolves it for transform units: the host joins them through
+`RequestCtx::run_blocking`. Four daemon-wide unit permits are acquired before
+snapshot `begin` and submission on both unit-backed lanes, and released before
+Emergency95 awaits. Unpaged typed acceptance follows the permit; paged staging
+accepts earlier and keeps that admission behavior. Read preflight remains before
+the permit. Request-owned
+charges travel with the pass. The kernel-route blocking helper remains outside
+this seam.
 
 History records cover HARD/refold rendering. Ordinary SOFT keeps existing m0
 but can replace m1 and other rendered units; pressure refold can rematerialize
@@ -234,8 +262,13 @@ fallback then emits one `cancelled` terminal. Held tokens past both close
 windows refuse cleanup. A real held-worker test checks that fatal close retains
 the handler and instance lock until release. The panic and stderr tests cover
 redaction, internal-error settlement, and charge release on unwind. Work the
-daemon submits through `kernel_routes::blocking` runs through none of this, and
-no relocated transform runs through the seam yet.
+daemon submits through `kernel_routes::blocking` runs through none of this.
+The [real-transform host tests](evidence/route-cleanup-waits-for-request-owned-physical-work.md#implementation-evidence-2026-09-13)
+add post-commit request-cancel, route-close, and panic coverage. They check
+retained bindings, unit permits, exact ingress-pool return, scratch reacquisition,
+and server Error publication. Explicit client cancel does not decode the
+server's error code. The historical `d6060f79` results and final eleven-test
+group are separate receipts; neither makes the full workspace green.
 Guarantee: The callback completion gate precedes route cleanup and reuse, and
 blocking work a request runs through its context is inside that gate: joined by
 the request's cancel arm and by route close, with its panics redacted.
@@ -269,6 +302,11 @@ Open questions:
 - What owns and joins any proposed off-worker transform work? The host does:
   `RequestCtx::run_blocking` enters the work in request, route, and host
   ledgers, and the daemon keeps no drain of its own. (answered)
+- May work exceed the close budget or commit before cancellation settles? The
+  owner explicitly approves both on 2026-09-13. Existing fatal shutdown remains
+  the outcome for unquiesced work; started work can delay process exit. Full-cap
+  paged and slow-disk durations are unmeasured. Later Emergency95 units may skip
+  on cancellation, with derived state recomputed or superseded. (answered)
 - `kernel_routes::blocking`
   ([mod.rs:462-468](../../../crates/daemon/src/kernel_routes/mod.rs#L462-L468))
   is a bare `spawn_blocking` whose result an aborted handler drops unread, so
@@ -281,12 +319,18 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No resource-class lifetime ledger is compared.
+Exercised: partial - The [unit and meter tests](evidence/request-work-accounting-covers-retained-resources.md#implementation-evidence-2026-09-13)
+check retained scratch, exact pool reacquisition, four-unit admission, paged
+staging release, stale apply identity, and cancellation between Emergency95
+units. Real-host tests observe ingress availability equal to the baseline minus
+the held body charge at the post-commit gate, then exactly the baseline after
+cancel publication, route-gone, and panic. Scratch remains held while the unit
+is live. Every retained-output schedule is not measured.
 Guarantee: Execution-placement optimization retains each resource charge until
 the resource covered by that charge is released or explicitly transferred.
 Check: `always` - For each resource class `c`, assert
 `observed_live_units[c] <= reserved_units[c] <= configured_capacity[c]` using
-the [current resource ledger](evidence/request-work-accounting-covers-retained-resources.md#evidence-trail);
+the [implementation resource ledger](evidence/request-work-accounting-covers-retained-resources.md#implementation-evidence-2026-09-13);
 each reservation returns once or transfers ownership without double release.
 Pending permits cover settlement; physical-work and byte charges cover their
 own lifetimes, so equality between these counters is not required.
@@ -295,20 +339,25 @@ retains input, decoded bytes, staging bytes, or a task slot.
 Required faults and enabling state: Exercise normal completion, refusal,
 cancelled waiting, queued work, and retry ownership transfer with live payloads.
 Confidence: high - [Evidence](evidence/request-work-accounting-covers-retained-resources.md).
-Separate host permits and ingest reservation ownership are source-verified.
+Separate host permits, transform unit permits, transferred scratch, shared
+page guards, and environment ownership of rerun results are source-verified.
 Existing check: [Accounting checks](existing-checks.md#execution-lifecycle)
 exercise caps and reservation release; their status is unaudited.
 Impact: Early release undercounts work; missed release strands capacity.
-Open questions:
-- Which existing or explicit new capacity class covers proposed physical work,
-  and what exact bytes does it charge? (needs human input)
+Open questions: None for the transform-unit ownership choice. Four permits
+cover submitted physical units; existing decode charges travel in `PassIntake`
+and `PassEnv._held`; `PassContinuation.env` is its last field and retains those
+charges behind pending pass and action values. This resolves ownership,
+not a new whole-paged-request footprint bound or exhaustive allocation coverage.
 
 ### request-close-overlaps-live-work
 
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet - No close/live-work overlap witness is recorded.
+Exercised: yes - [Real-host tests](evidence/request-close-overlaps-live-work.md#implementation-evidence-2026-09-13)
+hold a post-commit transform unit, initiate route close or request cancel, and
+observe the host cancellation signal before releasing physical work.
 Guarantee: A lifecycle-preservation campaign initiates close during a live
 current callback and extends this witness to physical work if execution moves.
 Check: `sometimes` - For the same route identity, observe work start, then close
@@ -318,14 +367,14 @@ Fault/timing angle: A close after all work finishes cannot expose ownership loss
 Required faults and enabling state: Use a live-work barrier and separate close
 and completion observations; include cancellation and route retirement schedules.
 Confidence: medium - [Evidence](evidence/request-close-overlaps-live-work.md).
-The existing general request lifecycle is reachable; worker-specific test
-readiness is BLOCKED pending execution topology and completion observations.
+The production runner and test-only gate distinguish unit entry, committed
+store state, waiter abort, and physical completion.
 Existing check: [Lifecycle checks](existing-checks.md#execution-lifecycle) are
-unaudited; no transform-worker overlap check is identified in this scope.
+unaudited; the dated evidence adds actual daemon-handler overlap checks.
 Impact: Completion-gate checks can pass without any vulnerable overlap.
-Open questions:
-- Which physical start/completion events can a future worker expose without
-  equating waiter cancellation with completion? (needs human input)
+Open questions: None for the tested topology. Gate entry and release, the host
+cancel signal, and independent joins supply distinct observations. Generation
+retirement and full-cap slow-storage schedules remain coverage gaps.
 
 ## Guarded store
 
@@ -666,21 +715,21 @@ them without creating implementation tickets.
 [r1]: #prepared-field-output-and-audit-policy-agree
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
-[pass-read]: ../../../crates/daemon/src/lib.rs#L8190-L8270
+[pass-read]: ../../../crates/daemon/src/lib.rs#L8747
 [memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L141-L212
 [memory-default]: ../../../crates/daemon/src/config.rs#L122
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L824-L940
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
-[read-callback]: ../../../crates/storage/src/lib.rs#L343
-[write-callback]: ../../../crates/storage/src/lib.rs#L436
+[read-callback]: ../../../crates/storage/src/lib.rs#L346
+[write-callback]: ../../../crates/storage/src/lib.rs#L439
 [prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2380
 [hard-compose]: ../../../crates/daemon/src/transform.rs#L4081-L4112
 [history-render]: ../../../crates/daemon/src/decay_render.rs#L296-L338
-[core-prep]: ../../../crates/memory-store/src/lib.rs#L3550-L3581
-[transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3584-L3616
-[prepare-field]: ../../../crates/memory-store/src/lib.rs#L2289-L2328
-[tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L21-L32
-[read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L159-L248
+[core-prep]: ../../../crates/memory-store/src/lib.rs#L3745-L3777
+[transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3779-L3811
+[prepare-field]: ../../../crates/memory-store/src/lib.rs#L2339-L2377
+[tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L36
+[read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L159
 [admission-reference]: ../../../crates/kernel/src/admission.rs#L3132-L3298
 [outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L178-L215
 [tokenizer-reference]: ../../../crates/tokenizer/src/lib.rs#L123-L155

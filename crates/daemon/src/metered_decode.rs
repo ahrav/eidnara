@@ -90,6 +90,14 @@ struct CountOnly {
     capacity: usize,
 }
 
+/// A reserve that grants everything, for entries that charge no pool.
+#[cfg(any(test, feature = "test-support"))]
+pub fn unbounded_reserve() -> impl ResidentReserve {
+    CountOnly {
+        capacity: usize::MAX,
+    }
+}
+
 impl ResidentReserve for CountOnly {
     fn try_reserve(&self, _bytes: usize) -> Option<ByteCharge> {
         Some(ByteCharge::none())
@@ -103,7 +111,7 @@ impl ResidentReserve for CountOnly {
 /// Why the meter refused a charge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// The footprint exceeds the pool's capacity; no release can admit the body.
+    /// Freeing pool bytes cannot admit the body with this meter.
     Permanent,
     /// The footprint fits the pool, but the bytes were held by other requests.
     Transient,
@@ -146,6 +154,8 @@ pub struct ResidentMeter<'r> {
 const NO_REFUSAL: u8 = 0;
 const PERMANENT: u8 = 1;
 const TRANSIENT: u8 = 2;
+/// The charges belong to another owner; the meter takes no more.
+const TAKEN: u8 = 3;
 
 impl<'r> ResidentMeter<'r> {
     pub fn new(reserve: &'r dyn ResidentReserve) -> Self {
@@ -184,7 +194,7 @@ impl<'r> ResidentMeter<'r> {
 
     pub fn refusal(&self) -> Option<Refusal> {
         match self.refusal.load(Ordering::Relaxed) {
-            PERMANENT => Some(Refusal::Permanent),
+            PERMANENT | TAKEN => Some(Refusal::Permanent),
             TRANSIENT => Some(Refusal::Transient),
             _ => None,
         }
@@ -201,6 +211,9 @@ impl<'r> ResidentMeter<'r> {
     /// Starts the footprint over for a second decode of the same body while keeping the
     /// bytes already held, which the second decode uses before charging more.
     pub fn restart(&self) {
+        if self.refusal.load(Ordering::Relaxed) == TAKEN {
+            return;
+        }
         self.needed.store(0, Ordering::Relaxed);
         self.refusal.store(NO_REFUSAL, Ordering::Relaxed);
         self.longest_escaped.store(0, Ordering::Relaxed);
@@ -216,6 +229,21 @@ impl<'r> ResidentMeter<'r> {
         self.charged.store(0, Ordering::Relaxed);
     }
 
+    /// Hands the held charges to the owner of the bytes they cover, after the last decode.
+    /// Charge transfer is terminal: later charges are permanently refused, even after
+    /// restart, release, or dropping the transferred charges. Repeated calls return no charges.
+    pub fn take_charges(&self) -> Vec<ByteCharge> {
+        let charges = std::mem::take(
+            &mut *self
+                .charges
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        self.charged.store(0, Ordering::Relaxed);
+        self.refusal.store(TAKEN, Ordering::Relaxed);
+        charges
+    }
+
     fn node(&self) -> Result<(), Refusal> {
         self.need(NODE_BYTES)
     }
@@ -225,6 +253,9 @@ impl<'r> ResidentMeter<'r> {
     }
 
     fn escaped_text(&self, len: usize) -> Result<(), Refusal> {
+        if let Some(refusal) = self.refusal() {
+            return Err(refusal);
+        }
         let longest = self.longest_escaped.load(Ordering::Relaxed);
         if len <= longest {
             return Ok(());
@@ -1050,6 +1081,7 @@ impl<'de, 'm, A: VariantAccess<'de>> VariantAccess<'de> for MeteredVariant<'m, A
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::TestPool;
 
     fn dense(values: usize) -> Vec<u8> {
         let mut body = Vec::from(b"[0".as_slice());
@@ -1151,5 +1183,128 @@ mod tests {
         assert!(!footprint_floor_exceeds(&body, footprint));
         // A body too short to reach the capacity is not scanned; the answer is the same.
         assert!(!footprint_floor_exceeds(b"[0,0,0]", 1 << 20));
+    }
+
+    #[test]
+    fn transferred_charges_outlive_meter_and_release_exactly_once() {
+        let text = "x".repeat(CHARGE_STEP_BYTES / 2);
+        let body = serde_json::to_vec(&text).unwrap();
+        let pool = TestPool::with_capacity(footprint_of(&body));
+        let meter = ResidentMeter::new(&pool);
+        let decoded: String = decode_metered(&body, &meter).unwrap();
+        assert_eq!(decoded, text);
+        assert_eq!(meter.refusal(), None);
+        assert_eq!(meter.charged(), pool.capacity());
+        assert!(pool.try_reserve(1).is_none());
+
+        let charges = meter.take_charges();
+        assert_eq!(
+            charges.len(),
+            2,
+            "both incremental charges move to the owner"
+        );
+        assert_eq!(meter.charged(), 0);
+        assert!(meter.take_charges().is_empty());
+        assert!(meter.admit_once());
+        assert_eq!(
+            meter.reserve_unescape_scratch(&body),
+            Err(Refusal::Permanent)
+        );
+        assert!(!meter.admit_once());
+        assert!(pool.try_reserve(1).is_none());
+
+        drop(meter);
+        assert!(
+            pool.try_reserve(1).is_none(),
+            "the owner still holds the bytes"
+        );
+        drop(decoded);
+        drop(charges);
+
+        let restored = pool
+            .try_reserve(pool.capacity())
+            .expect("dropping the transferred charges restores every held byte");
+        assert!(pool.try_reserve(1).is_none(), "no byte is returned twice");
+        drop(restored);
+    }
+
+    #[test]
+    fn transferred_meter_refuses_reuse_even_after_restart_and_release() {
+        let pool = TestPool::with_capacity(4 * CHARGE_STEP_BYTES);
+        let meter = ResidentMeter::new(&pool);
+        let body = br#""a\nb""#;
+        assert!(meter.admit_once());
+        meter.reserve_unescape_scratch(body).unwrap();
+        let decoded: String = decode_metered(body, &meter).unwrap();
+        assert_eq!(decoded, "a\nb");
+        let held = meter.charged();
+        let needed = meter.needed();
+        let longest = meter.longest_escaped.load(Ordering::Relaxed);
+        assert!(longest > 0);
+
+        meter.restart();
+        assert!(!meter.admit_once());
+        meter.reserve_unescape_scratch(body).unwrap();
+        assert_eq!(decode_metered::<String>(body, &meter).unwrap(), decoded);
+        assert_eq!(meter.charged(), held);
+        assert_eq!(meter.needed(), needed);
+        let charges = meter.take_charges();
+        assert_eq!(meter.refusal(), Some(Refusal::Permanent));
+
+        for restart in [false, true] {
+            if restart {
+                meter.restart();
+            }
+            assert!(!meter.admit_once());
+            for scratch_body in [b"true".as_slice(), body, br#""a longer\nstring""#] {
+                assert_eq!(
+                    meter.reserve_unescape_scratch(scratch_body),
+                    Err(Refusal::Permanent)
+                );
+            }
+            assert_eq!(meter.longest_escaped.load(Ordering::Relaxed), longest);
+            assert_eq!(meter.need(1), Err(Refusal::Permanent));
+            assert!(matches!(
+                decode_metered::<bool>(b"true", &meter),
+                Err(DecodeFailure::Refused(Refusal::Permanent))
+            ));
+            assert_eq!(meter.needed(), needed);
+            assert_eq!(meter.charged(), 0);
+            assert_eq!(meter.shortfall(), None);
+            assert!(meter.take_charges().is_empty());
+
+            let free = pool
+                .try_reserve(pool.capacity() - held)
+                .expect("refused reuse leaves the uncharged bytes free");
+            assert!(
+                pool.try_reserve(1).is_none(),
+                "transferred charges stay held"
+            );
+            drop(free);
+        }
+
+        drop(decoded);
+        drop(charges);
+        meter.release();
+        meter.restart();
+        assert!(!meter.admit_once());
+        assert_eq!(
+            meter.reserve_unescape_scratch(body),
+            Err(Refusal::Permanent)
+        );
+        assert_eq!(meter.need(1), Err(Refusal::Permanent));
+        assert!(matches!(
+            decode_metered::<bool>(b"true", &meter),
+            Err(DecodeFailure::Refused(Refusal::Permanent))
+        ));
+        assert_eq!(meter.charged(), 0);
+        assert!(meter.take_charges().is_empty());
+        let restored = pool
+            .try_reserve(pool.capacity())
+            .expect("a spent meter never recharges the pool");
+        assert!(pool.try_reserve(1).is_none());
+        drop(meter);
+        assert!(pool.try_reserve(1).is_none());
+        drop(restored);
     }
 }

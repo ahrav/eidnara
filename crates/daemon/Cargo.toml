@@ -68,7 +68,7 @@ direct-host-fixture = []
 bench-internals = []
 # Exposes the request dispatcher and kernel lifecycle probes to integration
 # tests in `tests/`; enabled only through the self dev-dependency below.
-test-support = []
+test-support = ["host-runtime/test-support"]
 
 [[test]]
 name = "transform_meta_bound"

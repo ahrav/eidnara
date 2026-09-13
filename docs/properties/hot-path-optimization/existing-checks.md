@@ -1,5 +1,12 @@
 # Existing checks for optimization preservation
 
+## Rebase status, 2026-09-13
+
+Relocation anchors describe the implementation rebased onto `e451a2b4`.
+The rebased receipt below
+is separate from the historical `d6060f79` receipt and upstream host-suite counts;
+none of those counts is combined into a green full-workspace gate.
+
 The system is `/local/home/ahrav/scratch/eidnara`, at
 `913234433ae36a80a6e22c6aac14c7f9aab74386`, checked on 2026-09-10.
 The [catalog scope](catalog.md#scope-and-provenance) governs this inventory.
@@ -9,11 +16,16 @@ incidents are not supplied, and final scope confirmation is pending.
 This is a focused inventory of checks bearing on the new deltas, not a
 replacement for the existing catalogs. Every listed check is **unaudited**.
 Descriptions identify what the source checks, not whether the oracle is
-sufficient. No historical exercise claim is imported and no check runs here.
+sufficient. The discovery inventory imports no historical exercise claim and
+runs no checks. Dated implementation evidence below is separate from that audit.
 This is a working-tree inventory against the source baseline. It includes the
 known relevant guards and claim-bearing checks on these preservation surfaces;
 it does not claim exhaustive repository coverage. Explicit exclusions follow
 the tables so an omitted category is not mistaken for absent tests.
+
+The tight-render, token-cache domain, and fixture-builder citations retain
+their discovery source at `9132344`. They are pinned to that baseline rather
+than redirected to different checks after test consolidation.
 
 ## Canonical read
 
@@ -102,11 +114,148 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | [Cleared finish restoration][upload-cleared] | A cleared coordinator refuses restoration of an old finish. | unaudited |
 | [Early discard][upload-discard] | Discard releases the declared total even before a page arrives. | unaudited |
 
-The blocking-work tests cover the host seam with a test handler; no relocated
-transform runs through it at the cited transform site. Pending-table size or
+The #437 blocking-work tests cover the host seam with a test handler. The
+#438 checks below add the production transform path. Pending-table size or
 health counters alone are not physical completion witnesses. A transform may
 have durable effects despite an unknown transport outcome, so terminal counts
 are not durable-effect counts.
+
+### Transform-unit checks, 2026-09-13
+
+These checks began in the working tree over `f2c8eab0`, above base `96709d0e`.
+Their source anchors now refer to the formatted working tree rebased onto
+`e451a2b4`. The sources are `transform_unit.rs` and its `tests.rs` and `host_tests.rs`.
+The [resource ledger](evidence/request-work-accounting-covers-retained-resources.md#implementation-evidence-2026-09-13)
+states the measured classes, including exact ingress-pool observation through
+the read-only `test-support` observer.
+
+| Check | Source condition or assertion | Status |
+| --- | --- | --- |
+| [`aborted_waiter_preserves_commit_bookkeeping_and_worker_charges`][u-abort] | A real commit precedes waiter abort at a blocking gate. Scratch and one unit permit remain held; lineage and guidance settle after release. Reopen retains core state, and a new HARD pass computes a fresh guidance date. | unaudited |
+| [`aborted_page_waiter_keeps_applying_and_staged_bytes_until_worker_finishes`][u-page] | Abort keeps the matching Applying phase, exact staged bytes, pending count, scratch, and permit. Overlapping inputs refuse; completion releases charges and permits later paged and unpaged requests. | unaudited |
+| [`stale_apply_release_preserves_newer_attempt_and_matching_release_runs_once`][u-stale] | An old identity cannot release a newer attempt. Matching release runs once while another session keeps nonzero charges. | unaudited |
+| [`four_parked_units_keep_fifth_waiter_off_the_blocking_pool`][u-cap] | Four gates exhaust permits. One explicit fifth poll submits no work and retains decode scratch; dropping it releases scratch and leaves snapshot lookup Missing rather than installing InFlight. A replacement enters only after a held permit returns. | unaudited |
+| [`cancelled_unit_releases_its_charges_without_store_work`][u-cancel] | Cancellation at the unit head leaves no session row or receive trace and returns all permits and scratch. | unaudited |
+| [`emergency_cancellation_between_units_preserves_commit_and_releases_scratch`][u-emergency] | The first unit commits, then waits on a live historian with scratch held and all unit permits free. A later unit sees cancellation; durable initialization survives and scratch returns exactly. | unaudited |
+| [`route_close_keeps_binding_and_scratch_until_transform_finishes`][u-host-close] | Real host cancellation follows a held post-commit transform. Ingress availability at the gate equals baseline minus held body bytes and returns exactly to baseline after route-gone. Binding cleanup and scratch release wait for completion; committed core survives and shared-memory accounting equals its baseline. The test asserts the available-permit measurement sent by one exercised callback, not a callback-invocation count or duplicate-callback check. | unaudited |
+| [`request_cancel_waits_for_committed_transform_and_releases_scratch`][u-host-cancel] | Explicit client cancel observes no server Error publication before release; publication follows completion with all permits returned and exact ingress baseline restored. The binding survives until explicit route close. The client locally drops its pending receiver, so this is not a decoded cancelled-code assertion. | unaudited |
+| [`transform_panic_is_redacted_and_maps_to_wire_internal_error`][u-panic] | The parent requires one exact child pass, the fixed stderr diagnostic, and no canary on stderr or stdout. | unaudited |
+| [`transform_panic_child`][u-child] | The parent-run ignored role injects panic after a real transform commit, decodes terminal `host.internal_error`, verifies exact ingress baseline return, reacquires all scratch, and observes route cleanup. | unaudited |
+| [`synthetic_unit_failures_map_to_internal_error_and_release_resources`][u-failure] | Each of Panicked, RuntimeStopped, and RouteClosing is synthetically delivered at submission one and two. The failed closure is dropped, not run. Submission two follows a real Emergency95 transform and inline publication. Every case checks internal_error, exact scratch return, all four permits, and the expected durable state. | unaudited |
+| [`spent_meter_cannot_reenter_admitted_body`][u-spent-admission] | After admission, decode, and charge transfer, repeated admit_body refuses without another reserve call. Dropping the decoded value and transferred charges restores exact pool capacity. | unaudited |
+| [`transferred_charges_outlive_meter_and_release_exactly_once`][u-meter] | Charges outlive the meter, transfer once, and restore exactly the pool capacity on drop. | unaudited |
+| [`transferred_meter_refuses_reuse_even_after_restart_and_release`][u-meter-spent] | A spent meter cannot charge again after restart, release, or dropping transferred charges. | unaudited |
+
+The ingress observer captures the semaphore, not the request charge, and exposes
+no mutation. This closes the former ingress visibility gap; shared-memory
+status equality remains a separate regression observation. No allocator-RSS
+bound, power-loss test, full-cap paged/slow-disk duration measurement, or
+exhaustive pending-result cancellation matrix is supplied. Kernel-route blocking
+work remains outside the request ledger and redaction guard.
+
+Source ordering places the first permit acquisition before snapshot `begin` on
+both unit-backed lanes, so an aborted semaphore waiter cannot invalidate Ready.
+Unpaged typed ticket acceptance follows the permit. Paged staging accepts
+earlier, before its Apply arm enters typed admission, and retains that behavior.
+Read preflight still precedes the permit. This ordering is source evidence;
+the fifth-waiter test does not seed a Ready snapshot. `PassContinuation.env`
+is last and retains charges behind both initial and rerun continuation values.
+Page release uses the existing Applying rejection and collector-only eviction
+rules to prevent same-ID replacement while live; no extra epoch is introduced.
+
+### Rebased working-tree verification, 2026-09-13
+
+These results cover the implementation after the manual merge onto `e451a2b4`.
+The final PR targets main after parent PR #523 merged
+at `2d408c11` and its branch was deleted.
+
+| Rebased check | Reported result and scope |
+| --- | --- |
+| All-target build | Passed after the final test-only hook separation. |
+| Workspace clippy and formatting | Passed after the final test-only hook separation. |
+| Metered-decode group | Five passed: the three upstream capacity/footprint tests and the two transfer tests listed above. |
+| Emergency95 group | Four passed. Busy retains its six-scalar-read oracle; the post-publish hook witness retains four. |
+| Final blocking-unit group | Eleven passed and one ignored standalone child role, including spent-meter admission and the separated hooks. The passing panic parent executes the child. |
+| Full daemon suite before the final test-only hook fix | 1052 passed, two known deadline failures, five ignored. Both deadline tests passed earlier isolated reruns, which do not erase the suite failures. |
+| Rebased full workspace with `--no-fail-fast`, before the final test-only hook fix | Across 142 groups: 3735 passed, three failed, 25 ignored; overall exit 101. The daemon accounts for two failures. The additional embedding_dispatch failure is described below. This is not a green workspace result. |
+| Final rebased `bun run check:repo` | Exited 0. Typecheck, lint, test, and build passed, with five unchanged capability skips. This is not coverage of every runtime variant. |
+| `serialized-transform-pages.ts` | Exited 0; the real corpus integration test reported one pass. |
+| Direct-host group | Seven passed. |
+
+The additional full-workspace failure was
+`embedding_dispatch::publication_search_deadline_preserves_admission_without_recharging`:
+it observed `BudgetExhausted` where `SearchDeadline` was expected. Its isolated
+rerun exited 0. This is an additional timing-sensitive failure, not a proven
+baseline failure; embedding code was untouched, but no base reproduction was
+run. The full workspace is not repeated after the final test-only hook fix;
+the final focused results do not replace that failed full run.
+
+The final source keeps two test-only gates: `after_transform_commit` runs before
+lineage and guidance bookkeeping for abort and panic tests, while
+`between_transform_and_prepare` runs after the first publication-floor read for
+C5. The spent-meter guard test is included in the eleven-test blocking result.
+
+The upstream meter cases are
+`a_capacity_bound_count_stops_at_the_value_that_crosses_it`,
+`footprint_of_counts_what_the_value_decode_charges`, and
+`footprint_floor_counts_the_values_the_meter_visits`
+([source][u-meter-upstream]). Source inspection also confirms `admit_body`
+checks refusal before the admission latch, so `TAKEN` cannot be bypassed by an
+already-admitted body. No new negative-control run, benchmark, or all-runtime
+coverage is claimed for this rebase.
+
+[u-meter-upstream]: ../../../crates/daemon/src/metered_decode.rs#L1097-L1186
+[u-spent-admission]: ../../../crates/daemon/src/transform_unit/tests.rs#L12
+
+### Transform-unit execution receipt, 2026-09-13
+
+The implementation controller reports the following results. This documentation
+pass reads source and assertions; it runs no Cargo commands and does not turn
+reported execution into an independent test-adequacy verdict.
+All results in this receipt belong to `d6060f79` before rebasing onto
+`e451a2b4`; they are not reused as merged-build results. The separate rebased
+receipt above records which checks have run again.
+
+| Reported run | Result and boundary |
+| --- | --- |
+| Earlier daemon run | 1023 passed, two known deadline failures, four ignored. This predates the latest six unit tests and real-host additions; it is not a green full-suite result. |
+| Prior focused transform-unit group | Five repeated runs each report nine passed and one ignored standalone child role, before the synthetic failure test was added. |
+| Latest focused transform-unit group | Ten passed and one ignored standalone child role. The passing panic parent launches that child by exact name and requires one child pass. |
+| Meter transfer group | Two passed. |
+| Emergency95 group | Four passed, including the foreign-publish ordering and four-scalar-read assertion. |
+| Earlier direct-host suite | Seven passed at the prior checkpoint; this is not a green full-workspace result. |
+| Workspace formatting and clippy | Both passed at the latest reported checkpoint. |
+| `cargo test --workspace --locked`, before the synthetic failure test | The daemon reported 1029 passed, two known baseline deadline failures, and five ignored. The workspace command failed at those daemon failures. |
+| Final workspace run with `--no-fail-fast` | The daemon reported 1030 passed, the same two baseline deadline failures, and five ignored. Remaining targets ran; the overall command still exited 101. The workspace is not green. |
+| Isolated reruns of the two daemon deadline tests | Each rerun exited 0 on 2026-09-13. These results do not replace the failures or exit 101 from the full no-fail-fast run. |
+| `bun run check:repo` | Exited 0 with Node 22.23.2 and Bun 1.3.14. Typecheck, lint, test, and build passed. Five unchanged capability-gated tests were skipped: three CLI and two e2e tests. This does not establish every runtime variant. |
+
+The controller also reports an executed W8 negative control: replacing
+`forget_guidance_pin_on_commit`'s `.remove` with `.get` made the
+[aborted-waiter regression][u-abort] fail at its guidance-pin absence assertion.
+The removal was restored before the subsequent workspace runs. Those runs
+exercise the restored implementation but still fail on the two baseline
+deadlines; the negative control does not establish every derived-cache oracle.
+
+The owner approves existing fatal shutdown when a unit exceeds the close budget,
+including the risk that started work delays process exit. The owner also
+approves late cancellation after durable commit and skipped later Emergency95
+units with recomputed or superseded derived state. Neither decision asserts
+that every duration, fault, or recovery path has been tested.
+
+[u-abort]: ../../../crates/daemon/src/transform_unit/tests.rs#L144
+[u-page]: ../../../crates/daemon/src/transform_unit/tests.rs#L257
+[u-stale]: ../../../crates/daemon/src/transform_unit/tests.rs#L345
+[u-cap]: ../../../crates/daemon/src/transform_unit/tests.rs#L505
+[u-cancel]: ../../../crates/daemon/src/transform_unit/tests.rs#L726
+[u-emergency]: ../../../crates/daemon/src/transform_unit/tests.rs#L772
+[u-host-close]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L365
+[u-host-cancel]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L370
+[u-panic]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L375
+[u-child]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L406
+[u-failure]: ../../../crates/daemon/src/transform_unit/tests.rs#L867
+[u-meter]: ../../../crates/daemon/src/metered_decode.rs#L1189
+[u-meter-spent]: ../../../crates/daemon/src/metered_decode.rs#L1232
 
 ## Guarded store
 
@@ -339,10 +488,10 @@ that no related check exists anywhere in the repository.
 [oldest-test]: ../../../crates/daemon/src/decay_render.rs#L509
 [render-golden-test]: ../../../crates/daemon/src/decay_render.rs#L614
 [shape-test]: ../../../crates/daemon/src/decay_render.rs#L644
-[tight-test]: ../../../crates/daemon/src/decay_render.rs#L765-L800
+[tight-test]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/decay_render.rs#L765-L800
 [cache-test]: ../../../crates/daemon/src/token_cache.rs#L188-L205
-[preparation]: ../../../crates/memory-store/src/lib.rs#L2289-L2328
-[audit-tx]: ../../../crates/memory-store/src/lib.rs#L2330-L2356
+[preparation]: ../../../crates/memory-store/src/lib.rs#L2339-L2377
+[audit-tx]: ../../../crates/memory-store/src/lib.rs#L2380-L2407
 [receipt-test]: ../../../crates/memory-store/src/lib.rs#L18826-L18867
 [bound-test]: ../../../crates/memory-store/src/lib.rs#L23217-L23248
 [scan-rollback-test]: ../../../crates/memory-store/src/lib.rs#L23044-L23129
@@ -354,33 +503,33 @@ that no related check exists anywhere in the repository.
 [project-scope]: ../../../crates/daemon/tests/kernel_routes.rs#L1847
 [historical-read]: ../../../crates/daemon/tests/kernel_routes.rs#L1919
 [object-filter]: ../../../crates/daemon/tests/kernel_routes.rs#L2060
-[selection-reference]: ../../../crates/daemon/tests/kernel_routes.rs#L2122-L2152
+[selection-reference]: ../../../crates/daemon/tests/kernel_routes.rs#L2031
 [render-category]: ../../../crates/daemon/src/memory_render.rs#L257
 [render-markup]: ../../../crates/daemon/src/memory_render.rs#L284
 [render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L308
 [render-vocabulary]: ../../../crates/daemon/src/memory_render.rs#L352
 [render-order]: ../../../crates/daemon/src/memory_render.rs#L375
-[parse-admission]: ../../../crates/daemon/src/lib.rs#L11920-L11938
+[parse-admission]: ../../../crates/daemon/src/lib.rs#L16366-L16379
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
-[route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1078-L1134
+[route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1079
 [stream-cancel]: ../../../crates/host-runtime/tests/dispatch.rs#L503
 [handler-panic]: ../../../crates/host-runtime/tests/dispatch.rs#L551
-[t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L725-L776
-[t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L781-L825
-[t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L830-L866
-[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L179-L205
-[t-late-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L149-L177
-[t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L872-L906
-[t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L610-L612
+[t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L725
+[t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L781
+[t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L830
+[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L180
+[t-late-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L150
+[t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L872
+[t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L610
 [output-reservation]: ../../../crates/host-runtime/tests/dispatch.rs#L956
 [egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1032
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1216
 [general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1313
-[request-cap]: ../../../crates/daemon/src/lib.rs#L19336
-[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20048
-[parse-copies]: ../../../crates/daemon/src/lib.rs#L20048
-[parse-dense]: ../../../crates/daemon/src/lib.rs#L20048
+[request-cap]: ../../../crates/daemon/src/lib.rs#L19886
+[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20618-L20624
+[parse-copies]: ../../../crates/daemon/src/lib.rs#L20625-L20634
+[parse-dense]: ../../../crates/daemon/src/lib.rs#L20635-L20646
 [upload-restore]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1130
 [upload-begin]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1203
 [upload-replace]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1258
@@ -417,8 +566,8 @@ that no related check exists anywhere in the repository.
 [cache-rotation]: ../../../crates/daemon/src/token_cache.rs#L223
 [cache-capacity]: ../../../crates/daemon/src/token_cache.rs#L233
 [cache-stats]: ../../../crates/daemon/src/token_cache.rs#L249
-[cache-domains]: ../../../crates/daemon/src/token_cache.rs#L266
-[audit-complete]: ../../../crates/memory-store/tests/production_redaction.rs#L68-L184
+[cache-domains]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/token_cache.rs#L266
+[audit-complete]: ../../../crates/memory-store/tests/production_redaction.rs#L68
 [audit-expiry]: ../../../crates/memory-store/tests/production_redaction.rs#L187
 [audit-last-owner]: ../../../crates/memory-store/tests/production_redaction.rs#L248
 [audit-lineage]: ../../../crates/memory-store/tests/production_redaction.rs#L327
@@ -439,7 +588,7 @@ that no related check exists anywhere in the repository.
 [idempotency-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L1513
 [compartment-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L1583
 [transition-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L1634
-[fixture-builder]: ../../../crates/daemon/src/decay_render.rs#L809
+[fixture-builder]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/decay_render.rs#L809
 [host-catalog]: ../host-runtime/catalog.md
 [shared-catalog]: ../shared-primitives/catalog.md
 [transform-catalog]: ../daemon/transform/catalog.md
@@ -450,7 +599,7 @@ that no related check exists anywhere in the repository.
 [resource-pragma-test]: ../../../crates/storage/src/lib.rs#L5233
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5277
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L25915
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L25986
 [t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1494
 [t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L877
 [t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1464

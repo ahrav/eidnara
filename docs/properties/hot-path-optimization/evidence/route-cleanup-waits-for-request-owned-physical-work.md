@@ -1,6 +1,17 @@
 # route-cleanup-waits-for-request-owned-physical-work
 
-Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
+## Rebase status, 2026-09-13
+
+Relocation and host-lifecycle anchors refer to the formatted working tree atop
+`e451a2b4`. The rebased blocking group includes the real-host cancel, close, and
+panic tests. Earlier `d6060f79` and upstream host-suite counts remain separate;
+the earlier rebased full workspace has three failures despite final focused
+and Bun passes. Owner-approved
+limits remain recorded.
+
+## Historical baseline, 2026-09-10
+
+Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
 The discovery and investigation sections describe that baseline. Their source
 links are pinned to it. The implementation evidence below describes the live code.
@@ -61,7 +72,6 @@ are unaudited, and no new physical-completion trace runs here.
   readiness is BLOCKED, not implementation-ready. Default-production reachability
   covers existing callbacks only; it does not establish an off-worker proof or
   prescribe a new route-reuse epoch mechanism.
-
 
 ## Request-work join evidence
 
@@ -176,17 +186,17 @@ Tokio time and an abort-drop signal; they do not claim to execute real blocking
 threads. Separate integration tests exercise held physical work and instance
 exclusion.
 
-[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L593-L644
-[work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L452-L456
-[work-carrier]: ../../../../crates/host-runtime/src/handler.rs#L647-L660
-[failed]: ../../../../crates/host-runtime/src/handler.rs#L461-L469
-[cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L496-L531
-[redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52-L55
-[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L915
+[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L606
+[work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L458-L462
+[work-carrier]: ../../../../crates/host-runtime/src/handler.rs#L660-L673
+[failed]: ../../../../crates/host-runtime/src/handler.rs#L467-L475
+[cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L502-L537
+[redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52
+[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L915-L951
 [cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L951
 [close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
 [close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1290-L1313
-[daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462-L468
+[daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
 [t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L617-L665
 [t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L725-L776
@@ -203,3 +213,61 @@ exclusion.
 [wire]: https://github.com/ahrav/eidnara/blob/9132344/docs/host-wire-protocol.md#L765-L781
 [transform]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8138-L8202
 [overlap]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/tests/dispatch.rs#L832-L887
+
+## Implementation evidence, 2026-09-13
+
+[#438](https://github.com/ahrav/eidnara/issues/438) places production transform
+units through [the RequestCtx runner][unit-runner]. The original receipt belongs
+to `d6060f79`, developed over `f2c8eab0` and implementation base `96709d0e`.
+Relocation anchors now describe the formatted working tree atop `e451a2b4`.
+The first unit owns pre-transform work, commit, lineage insertion, guidance-pin
+removal, historian preparation, and ordinary settlement. Emergency95 waits run
+on the async side, with later rerun and settlement units joined through the
+same host seam. An inline historian follow-up's rerun and settlement share one
+unit. The daemon adds no second route drain.
+
+The [real-host interruption tests][host-unit-tests] run `Handler::handle`, not
+only a synthetic blocking callback. They observe the real commit before cancel
+or close at `after_transform_commit`, hold the worker, and prove that binding
+cleanup, server Error
+publication, and scratch release wait for unit completion. Route-gone records
+the available unit count before unbinding, and the publication hook records it
+when sending the Error frame. Both callbacks send observations to the test,
+which asserts that all four permits are available outside the callbacks.
+Each one-shot captures an available-permit measurement for one exercised
+callback, not the number of invocations; this does not detect duplicate callbacks.
+The read-only ingress observer checks baseline minus held body bytes at the
+post-commit gate and exact baseline return after publication or route-gone;
+raw ingress need not outlive handler abort because units retain decoded values.
+The fixture uses a two-second close budget, five-second shutdown deadline, and
+ten-second watchdog, not a measured production-duration bound. Explicit client cancel
+locally drops its pending receiver: its publication hook observes a server
+Error, not a decoded `cancelled` code. The older raw host-runtime tests above
+remain the separate exact-code oracle. The [panic parent and child][unit-panic]
+check redaction, wire `host.internal_error`, and cleanup after a real transform
+commit. [The focused receipt][receipt] records execution with adequacy unaudited.
+
+### Q: May a unit exceed the close budget or commit before cancellation settles?
+
+- Sources examined: [The host join contract][run-blocking], [the close gate][close-gate-live],
+  [unit cancellation and settlement][unit-lifecycle], and the owner's explicit
+  approval on 2026-09-13.
+- Findings: The owner accepts the existing fatal-shutdown path when physical
+  work outlasts the close budget. Started blocking work cannot be forcibly
+  stopped; a full-cap paged request or slow disk can delay process exit. The
+  owner also accepts late cancellation after a durable commit. A later
+  Emergency95 unit may skip its work when it sees cancellation; derived caches
+  are recomputed and unfinished snapshot generations are superseded.
+- Missing evidence: Full-cap paged and slow-disk durations are unmeasured. The
+  shortened-budget host test is not a production-duration bound. Reopening a
+  store is not a power-loss test. These approvals do not mean all cases passed.
+- Conclusion: Both policy questions are resolved by explicit owner approval.
+  E1 remains partial across the daemon: [kernel_routes::blocking][daemon-blocking]
+  still bypasses the request ledger and worker redaction. Its migration or
+  acceptance remains unresolved; #438 does not establish a global E1 guarantee.
+
+[unit-runner]: ../../../../crates/daemon/src/transform_unit.rs#L23-L49
+[unit-lifecycle]: ../../../../crates/daemon/src/lib.rs#L8466-L8668
+[host-unit-tests]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L372
+[unit-panic]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L374-L439
+[receipt]: ../existing-checks.md#transform-unit-execution-receipt-2026-09-13

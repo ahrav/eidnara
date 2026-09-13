@@ -52,6 +52,7 @@ pub mod session_resolver;
 pub(crate) mod smart_note_evaluation;
 mod tail_hygiene;
 mod token_cache;
+pub(crate) mod transform_unit;
 pub mod wire;
 
 pub mod transform;
@@ -114,6 +115,12 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment};
 use crate::metered_decode::{
     DecodeFailure, RAW_VALUE_TOKEN, Refusal, ResidentMeter, decode_metered, footprint_floor_exceeds,
+};
+use host_runtime::{BlockingWorkFailed, CancelSignal};
+
+use crate::transform_unit::{
+    AdmissionPermit, HistorianFollowup, PageApplyGuard, PassContinuation, PassEntry, PassHold,
+    TRANSFORM_ADMISSION_PERMITS, TRANSFORM_UNITS_AT_ONCE, UnitOutcome, UnitPermit,
 };
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
@@ -660,6 +667,20 @@ impl Drop for TransformDispatchTicket<'_> {
     }
 }
 
+/// `UnitHeartbeat` records non-panicking closure completion even if its waiter aborts.
+struct UnitHeartbeat;
+
+impl Drop for UnitHeartbeat {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        DISPATCH_HEALTH
+            .last_dispatch_completed_at_ms
+            .store(now_ms().max(0) as u64, Ordering::Relaxed);
+    }
+}
+
 /// Compatibility requires this exact memory-render format epoch.
 pub const MEMORY_RENDER_FORMAT_EPOCH: u32 = release_contract::MEMORY_RENDER_EPOCH;
 /// Compatibility requires this exact compartment-render format epoch.
@@ -1143,6 +1164,8 @@ struct CompletedTransformPage {
 struct TransformPageSession {
     phase: TransformPagePhase,
     completed: Option<CompletedTransformPage>,
+    /// Cleared by a discard during `Applying`, so `finish_apply` retains no response.
+    retains_result: bool,
 }
 
 impl Default for TransformPageSession {
@@ -1150,6 +1173,7 @@ impl Default for TransformPageSession {
         Self {
             phase: TransformPagePhase::Idle,
             completed: None,
+            retains_result: true,
         }
     }
 }
@@ -1237,8 +1261,20 @@ impl TransformPageCoordinator {
         self.completed_bytes = self.completed_bytes.saturating_sub(completed.bytes);
     }
 
-    /// Removes the session entry, releasing its staged phase and retained response.
+    /// Removes the session entry, releasing its staged phase and retained response. An
+    /// `Applying` phase is left in place; only [`Self::release_applying`] ends it, and
+    /// `finish_apply` retains no response after a discard during `Applying`.
     fn discard(&mut self, session_id: &str) -> Option<usize> {
+        if let Some(session) = self.sessions.get_mut(session_id)
+            && matches!(session.phase, TransformPagePhase::Applying { .. })
+        {
+            let completed = session.completed.take();
+            session.retains_result = false;
+            if let Some(completed) = completed {
+                self.release_completed(&completed);
+            }
+            return None;
+        }
         let session = self.sessions.remove(session_id)?;
         let staged_pages = match &session.phase {
             TransformPagePhase::Collecting(pending) => Some(pending.pages.len()),
@@ -1334,51 +1370,46 @@ impl TransformPageCoordinator {
         scalar_digest: String,
         result: Option<PreparedOutput>,
     ) {
-        match self.take_phase(session_id) {
-            TransformPagePhase::Applying {
-                transform_id: applying_id,
+        let retains_result = self
+            .sessions
+            .get(session_id)
+            .is_none_or(|session| session.retains_result);
+        if !self.release_applying(session_id, &transform_id) {
+            return;
+        }
+        if let Some(previous) = self
+            .sessions
+            .get_mut(session_id)
+            .and_then(|session| session.completed.take())
+        {
+            self.release_completed(&previous);
+        }
+        let measured = result.filter(|_| retains_result).and_then(|result| {
+            result
+                .measure()
+                .ok()
+                .map(|output| output.len())
+                .map(|bytes| (result, bytes))
+        });
+        if let Some((result, bytes)) = measured
+            && self.reserve_completed_bytes(bytes)
+        {
+            let sequence = self.next_completed_sequence;
+            self.next_completed_sequence += 1;
+            self.completed_bytes += bytes;
+            self.sessions
+                .entry(session_id.to_string())
+                .or_default()
+                .completed = Some(CompletedTransformPage {
+                transform_id,
+                generation,
+                page_total,
+                final_digest,
+                scalar_digest,
+                result,
                 bytes,
-            } if applying_id == transform_id => {
-                self.release_phase(&TransformPagePhase::Applying {
-                    transform_id: applying_id,
-                    bytes,
-                });
-                if let Some(previous) = self
-                    .sessions
-                    .get_mut(session_id)
-                    .and_then(|session| session.completed.take())
-                {
-                    self.release_completed(&previous);
-                }
-                let measured = result.and_then(|result| {
-                    result
-                        .measure()
-                        .ok()
-                        .map(|output| output.len())
-                        .map(|bytes| (result, bytes))
-                });
-                if let Some((result, bytes)) = measured
-                    && self.reserve_completed_bytes(bytes)
-                {
-                    let sequence = self.next_completed_sequence;
-                    self.next_completed_sequence += 1;
-                    self.completed_bytes += bytes;
-                    self.sessions
-                        .entry(session_id.to_string())
-                        .or_default()
-                        .completed = Some(CompletedTransformPage {
-                        transform_id,
-                        generation,
-                        page_total,
-                        final_digest,
-                        scalar_digest,
-                        result,
-                        bytes,
-                        sequence,
-                    });
-                }
-            }
-            current => self.set_phase(session_id, current),
+                sequence,
+            });
         }
         self.remove_if_empty(session_id);
     }
@@ -1405,8 +1436,29 @@ impl TransformPageCoordinator {
             .filter(|completed| completed.transform_id == transform_id)
     }
 
-    /// Releases collectors idle for at least [`TRANSFORM_PAGE_COLLECTOR_TTL`], returning each
-    /// evicted session with its staged page count.
+    /// An obsolete completion or drop guard must not release a newer attempt's staging budget.
+    fn release_applying(&mut self, session_id: &str, transform_id: &str) -> bool {
+        let released = match self.take_phase(session_id) {
+            TransformPagePhase::Applying {
+                transform_id: applying_id,
+                bytes,
+            } if applying_id == transform_id => {
+                self.release_phase(&TransformPagePhase::Applying {
+                    transform_id: applying_id,
+                    bytes,
+                });
+                true
+            }
+            current => {
+                self.set_phase(session_id, current);
+                false
+            }
+        };
+        self.remove_if_empty(session_id);
+        released
+    }
+
+    /// Idle collecting sessions expire after [`TRANSFORM_PAGE_COLLECTOR_TTL`].
     fn evict_stale_collectors(&mut self, now: Instant) -> Vec<(String, usize)> {
         let stale = self
             .sessions
@@ -2955,8 +3007,8 @@ pub struct HandlerCore {
     guidance_now_ms: Mutex<Option<i64>>,
     #[cfg(test)]
     reduction_injection: Mutex<HashMap<String, Vec<ReductionDecision>>>,
-    /// Test-only interleave seam runs between the request transform and Emergency95 preparation, where concurrent publication otherwise cannot interleave.
-    /// deterministically.
+    #[cfg(test)]
+    after_transform_commit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     between_transform_and_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -2989,6 +3041,10 @@ pub struct HandlerCore {
     transform_session_roots: Mutex<HashMap<String, HashSet<PathBuf>>>,
     state_sync_seeds: Mutex<StateSyncSeedCoordinator>,
     transform_pages: Mutex<TransformPageCoordinator>,
+    /// Admits the pass units that run at once; see [`TRANSFORM_UNITS_AT_ONCE`].
+    transform_units: Arc<tokio::sync::Semaphore>,
+    /// Admits the passes that may run or wait for a unit; see [`TRANSFORM_ADMISSION_PERMITS`].
+    transform_admission: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
     transform_page_discard_logs: Mutex<Vec<String>>,
     /// The durable classify protocol behind `dreamer.run_task`; the scheduler
@@ -3534,6 +3590,7 @@ struct PassIntake {
     native_delta_frontier: Option<NativeDeltaFrontier>,
     snapshot_generation: u64,
     entry: EntryTimings,
+    held: PassHold,
 }
 
 /// The fixed context of one transform pass. Every transform attempt and the settle read it;
@@ -3551,6 +3608,8 @@ struct PassEnv {
     snapshot_generation: u64,
     pass_now: i64,
     timings: PassTimings,
+    // Fields drop in declaration order, so request-owned bytes go before their charges.
+    _held: PassHold,
 }
 
 /// What the first transform consumes: the pass load it transforms against and the lineage
@@ -3632,6 +3691,74 @@ impl Deref for Handler {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl Handler {
+    /// Test entry to the routing arms; `RequestCtx` is transport-private, so the pass runs
+    /// its units on a detached runner and charges no pool.
+    pub async fn dispatch_value_for_test(
+        &self,
+        route: RouteHandle,
+        request: Value,
+    ) -> PreparedOutcome {
+        let reserve = metered_decode::unbounded_reserve();
+        let meter = ResidentMeter::new(&reserve);
+        let runner = transform_unit::DetachedRunner::default();
+        let entry = PassEntry {
+            core: &self.core,
+            route,
+            probe: None,
+            meter: &meter,
+            runner: &runner,
+        };
+        self.dispatch_value_with_inbound_bytes(&entry, request, None)
+            .await
+    }
+}
+
+#[cfg(test)]
+impl Handler {
+    async fn dispatch_value(&self, route: RouteHandle, request: Value) -> PreparedOutcome {
+        self.dispatch_value_for_test(route, request).await
+    }
+
+    /// Serializes the request and enters at the body branch, so tests run the lane a
+    /// transform body takes in production, on a detached runner.
+    async fn handle_transform_for_test(
+        &self,
+        route: RouteHandle,
+        request: Value,
+    ) -> PreparedOutcome {
+        let runner = transform_unit::DetachedRunner::default();
+        self.handle_transform_with_runner(route, request, &runner)
+            .await
+    }
+
+    /// As `handle_transform_for_test`, on the runner a test supplies.
+    async fn handle_transform_with_runner(
+        &self,
+        route: RouteHandle,
+        request: Value,
+        runner: &dyn transform_unit::UnitRunner,
+    ) -> PreparedOutcome {
+        let body = serde_json::to_vec(&request).unwrap();
+        let pool = tests::TestPool::unbounded();
+        let meter = ResidentMeter::new(&pool);
+        if let Err(outcome) = admit_body(&body, &meter) {
+            return outcome;
+        }
+        let probe = lane_probe(&body);
+        let entry = PassEntry {
+            core: &self.core,
+            route,
+            probe: probe.as_ref(),
+            meter: &meter,
+            runner,
+        };
+        let (_, outcome) = self.dispatch_body(&entry, &body).await;
+        outcome
+    }
+}
+
 impl Handler {
     /// Creates a handler without a host connection file.
     pub fn new() -> Self {
@@ -3696,6 +3823,8 @@ impl Handler {
             #[cfg(test)]
             reduction_injection: Mutex::new(HashMap::new()),
             #[cfg(test)]
+            after_transform_commit: Mutex::new(None),
+            #[cfg(test)]
             between_transform_and_prepare: Mutex::new(None),
             #[cfg(test)]
             wrapup_operation_budget: Mutex::new(None),
@@ -3718,6 +3847,8 @@ impl Handler {
             transform_session_roots: Mutex::new(HashMap::new()),
             state_sync_seeds: Mutex::new(StateSyncSeedCoordinator::default()),
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
+            transform_units: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_UNITS_AT_ONCE)),
+            transform_admission: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_ADMISSION_PERMITS)),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
@@ -4039,6 +4170,7 @@ impl Handler {
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             guidance_now_ms: Mutex::new(None),
             reduction_injection: Mutex::new(HashMap::new()),
+            after_transform_commit: Mutex::new(None),
             between_transform_and_prepare: Mutex::new(None),
             wrapup_operation_budget: Mutex::new(None),
             unknown_module_retry_delay: Mutex::new(None),
@@ -4056,6 +4188,8 @@ impl Handler {
             transform_session_roots: Mutex::new(HashMap::new()),
             state_sync_seeds: Mutex::new(StateSyncSeedCoordinator::default()),
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
+            transform_units: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_UNITS_AT_ONCE)),
+            transform_admission: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_ADMISSION_PERMITS)),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
@@ -8071,16 +8205,16 @@ impl HandlerCore {
 
     async fn handle_transform_dispatch(
         &self,
-        channel: RouteHandle,
+        entry: &PassEntry<'_>,
         request: Value,
         inbound_bytes: Option<usize>,
     ) -> PreparedOutcome {
         let ticket = TransformDispatchTicket::new(&DISPATCH_HEALTH);
         let outcome = if has_transform_page_fields(&request) {
-            self.handle_transform_page_value(channel, request, TransformLane::Authority, &ticket)
+            self.handle_transform_page_value(entry, request, TransformLane::Authority, &ticket)
                 .await
         } else {
-            self.handle_transform_unpaged_value(channel, request, false, inbound_bytes, &ticket)
+            self.handle_transform_unpaged_value(entry, request, None, inbound_bytes, &ticket)
                 .await
         };
         ticket.finish(matches!(outcome, PreparedOutcome::Error { .. }));
@@ -8090,13 +8224,13 @@ impl HandlerCore {
     /// The unpaged transform lane for a request already decoded from its bytes.
     async fn handle_transform_direct(
         &self,
-        channel: RouteHandle,
+        entry: &PassEntry<'_>,
         parsed: TransformRequest,
         decode_started_at: Instant,
     ) -> PreparedOutcome {
         let ticket = TransformDispatchTicket::new(&DISPATCH_HEALTH);
         let outcome = self
-            .handle_transform_typed(channel, parsed, false, decode_started_at, &ticket)
+            .handle_transform_typed(entry, parsed, None, decode_started_at, &ticket)
             .await;
         ticket.finish(matches!(outcome, PreparedOutcome::Error { .. }));
         outcome
@@ -8106,9 +8240,9 @@ impl HandlerCore {
     /// unpaged lane both enter the typed handler here.
     async fn handle_transform_unpaged_value(
         &self,
-        channel: RouteHandle,
+        entry: &PassEntry<'_>,
         request: Value,
-        from_page_apply: bool,
+        page_apply: Option<Arc<PageApplyGuard>>,
         _inbound_bytes: Option<usize>,
         ticket: &TransformDispatchTicket<'_>,
     ) -> PreparedOutcome {
@@ -8122,7 +8256,7 @@ impl HandlerCore {
                 };
             }
         };
-        self.handle_transform_typed(channel, parsed, from_page_apply, decode_started_at, ticket)
+        self.handle_transform_typed(entry, parsed, page_apply, decode_started_at, ticket)
             .await
     }
 
@@ -8131,14 +8265,17 @@ impl HandlerCore {
     /// the body bytes, on the tree lane the bytes were parsed into a `Value` before it.
     /// `request_observed_to_handler` ends at that same instant, so the decode is counted
     /// once, in `handler_total`.
+    /// `page_apply` is the paged lane's apply phase, held until the pass has settled; `None`
+    /// on the unpaged lanes, which the page-in-progress refusal then applies to.
     async fn handle_transform_typed(
         &self,
-        channel: RouteHandle,
+        entry: &PassEntry<'_>,
         mut parsed: TransformRequest,
-        from_page_apply: bool,
+        page_apply: Option<Arc<PageApplyGuard>>,
         decode_started_at: Instant,
         ticket: &TransformDispatchTicket<'_>,
     ) -> PreparedOutcome {
+        let channel = entry.route;
         let handler_started_at = decode_started_at;
         let mut delta_expand_ms = 0.0;
         let decode_started_at_ms =
@@ -8214,6 +8351,10 @@ impl HandlerCore {
                 };
             }
         };
+        let _admission = match self.admit_pass() {
+            Ok(admission) => admission,
+            Err(outcome) => return outcome,
+        };
         apply_claude_code_config_controls(&mut parsed, &binding.config, serializer_profile);
         parsed
             .prompt_surface_tool_descriptions
@@ -8273,18 +8414,17 @@ impl HandlerCore {
         } else {
             None
         };
-        if !from_page_apply && self.transform_page_in_progress(&binding.session) {
+        if page_apply.is_none() && self.transform_page_in_progress(&binding.session) {
             return PreparedOutcome::Error {
                 code: "authority_transform_page_in_progress".to_string(),
                 message: "transform is blocked until all transform pages arrive".to_string(),
             };
         }
+        let permit = match self.acquire_unit_permit().await {
+            Ok(permit) => permit,
+            Err(outcome) => return outcome,
+        };
         ticket.accept();
-        let snapshot_generation = self
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex")
-            .begin(&parsed.session_id);
         let intake = PassIntake {
             store,
             parsed,
@@ -8293,27 +8433,239 @@ impl HandlerCore {
             serializer_profile,
             pass_load,
             native_delta_frontier,
-            snapshot_generation,
+            snapshot_generation: 0,
             entry: EntryTimings {
                 handler_started_at,
                 request_observed_to_handler,
                 pass_state_load_ms,
                 delta_expand_ms,
             },
+            held: PassHold {
+                _charges: entry.meter.take_charges(),
+                _page_apply: page_apply,
+            },
         };
+        // From here the pass's store work runs on the blocking pool. The resident charges the
+        // decode took travel with the pass, so the bytes stay charged while a thread uses them.
+        let core = Arc::clone(entry.core);
+        let signal = entry.runner.cancel_signal();
+        let outcome = entry
+            .runner
+            .run_unit(Box::new(move || {
+                let _heartbeat = UnitHeartbeat;
+                core.first_unit(intake, &signal, permit)
+            }))
+            .await;
+        let carry = match outcome {
+            Ok(UnitOutcome::Terminal(outcome)) => return outcome,
+            Ok(UnitOutcome::Continue(carry)) => *carry,
+            Err(failed) => return unit_failed_error(failed),
+        };
+        self.finish_emergency_pass(entry, carry).await
+    }
+
+    /// Waits for a unit permit on the async side, where the wait is abortable; the permit
+    /// then rides in the unit's closure and releases when the unit's thread finishes.
+    async fn acquire_unit_permit(&self) -> Result<UnitPermit, PreparedOutcome> {
+        Arc::clone(&self.transform_units)
+            .acquire_owned()
+            .await
+            .map_err(|_| unit_failed_error(BlockingWorkFailed::RuntimeStopped))
+    }
+
+    /// Takes an admission permit without waiting; the admission permit counts the pass while
+    /// its handler runs or waits for a unit.
+    fn admit_pass(&self) -> Result<AdmissionPermit, PreparedOutcome> {
+        match Arc::clone(&self.transform_admission).try_acquire_owned() {
+            Ok(admission) => Ok(admission),
+            Err(tokio::sync::TryAcquireError::NoPermits) => Err(transform_admission_error()),
+            Err(tokio::sync::TryAcquireError::Closed) => {
+                Err(unit_failed_error(BlockingWorkFailed::RuntimeStopped))
+            }
+        }
+    }
+
+    /// Unit one of a pass: the store work before the transform, the transform and its
+    /// commit, the lineage record, the historian preparation, and, when the pass is not an
+    /// Emergency95 pass, the settle. Those all run on one thread, so an abort of the handler
+    /// future cannot fall between the commit and what the commit implies.
+    ///
+    /// Every committing unit invalidates the guidance pin; `apply_once` replaces serialized outputs.
+    /// Lineage follows the first successful transform. Projection and attachments are recomputable.
+    /// Response observations are advisory. A newer `begin` supersedes an unfinished `finish_ready` generation.
+    /// Cancellation before `begin` preserves the session's prior `Ready` snapshot.
+    fn first_unit(
+        &self,
+        mut intake: PassIntake,
+        signal: &CancelSignal,
+        _permit: UnitPermit,
+    ) -> UnitOutcome {
+        if signal.is_cancelled() {
+            return UnitOutcome::Terminal(cancelled_before_transform());
+        }
+        intake.snapshot_generation = self
+            .transform_snapshots
+            .lock()
+            .expect("transform snapshots mutex")
+            .begin(&intake.parsed.session_id);
         let (env, start) = match self.start_transform_pass(intake) {
             Ok(started) => started,
-            Err(outcome) => return outcome,
+            Err(outcome) => return UnitOutcome::Terminal(outcome),
         };
         let mut pass = match self.first_transform(&env, start) {
             Ok(pass) => pass,
+            Err(outcome) => return UnitOutcome::Terminal(outcome),
+        };
+        let emergency = pass.result.scheduler_pass == scheduler::PassDecision::Emergency95;
+        let action = if env.parsed.is_subagent {
+            PreparedHistorianAction::Complete(HistorianDiagnostics {
+                fired: false,
+                reason: Some("subagent_session".to_string()),
+                no_fire: Some("subagent_session".to_string()),
+                state: "disabled".to_string(),
+                progress: None,
+                last_failure: None,
+                project_memory: None,
+            })
+        } else {
+            self.prepare_historian(&env, &mut pass)
+        };
+        let diagnostics = match action {
+            PreparedHistorianAction::Complete(diagnostics) => diagnostics,
+            PreparedHistorianAction::Busy { diagnostics, .. } if !emergency => diagnostics,
+            PreparedHistorianAction::FireReady(prepared) if !emergency => {
+                let diagnostics = prepared.diagnostics.clone();
+                self.spawn_historian_firing(prepared.task);
+                diagnostics
+            }
+            action => {
+                return UnitOutcome::Continue(Box::new(PassContinuation {
+                    pass,
+                    action,
+                    env: Arc::new(env),
+                }));
+            }
+        };
+        UnitOutcome::Terminal(self.settle_transform_pass(&env, pass, diagnostics))
+    }
+
+    /// The Emergency95 pass after unit one: the waits run here, each rerun and the settle run
+    /// as units, and no permit is held across a wait.
+    async fn finish_emergency_pass(
+        &self,
+        entry: &PassEntry<'_>,
+        carry: PassContinuation,
+    ) -> PreparedOutcome {
+        let PassContinuation {
+            env,
+            mut pass,
+            action,
+        } = carry;
+        let action = match action {
+            PreparedHistorianAction::Busy {
+                diagnostics,
+                completion,
+            } => {
+                if self.await_live_historian_completion(completion).await {
+                    let rerun = match self.run_rerun_unit(entry, &env, pass).await {
+                        Ok(rerun) => rerun,
+                        Err(outcome) => return outcome,
+                    };
+                    pass = rerun.pass;
+                    rerun.action
+                } else {
+                    PreparedHistorianAction::Complete(diagnostics)
+                }
+            }
+            action => action,
+        };
+        let (diagnostics, followup) = match action {
+            PreparedHistorianAction::Complete(diagnostics)
+            | PreparedHistorianAction::Busy { diagnostics, .. } => {
+                (diagnostics, HistorianFollowup::Unchanged)
+            }
+            PreparedHistorianAction::FireReady(prepared) => {
+                let diagnostics = prepared.diagnostics.clone();
+                let followup = match self.run_historian_firing_inline(prepared.task).await {
+                    Ok(_) => HistorianFollowup::Published,
+                    Err(_) => HistorianFollowup::Failed,
+                };
+                (diagnostics, followup)
+            }
+        };
+        let core = Arc::clone(entry.core);
+        let signal = entry.runner.cancel_signal();
+        let permit = match self.acquire_unit_permit().await {
+            Ok(permit) => permit,
             Err(outcome) => return outcome,
         };
-        let diagnostics = match self.resolve_historian(&env, &mut pass).await {
-            Ok(diagnostics) => diagnostics,
-            Err(outcome) => return outcome,
-        };
-        self.settle_transform_pass(&env, pass, diagnostics)
+        let outcome = entry
+            .runner
+            .run_unit(Box::new(move || {
+                let _heartbeat = UnitHeartbeat;
+                let _permit = permit;
+                let mut pass = pass;
+                if signal.is_cancelled() {
+                    return UnitOutcome::Terminal(cancelled_before_transform());
+                }
+                let diagnostics = match followup {
+                    HistorianFollowup::Published => {
+                        if let Err(outcome) = core.rerun_transform_and_read_floor(&env, &mut pass) {
+                            return UnitOutcome::Terminal(outcome);
+                        }
+                        diagnostics
+                    }
+                    HistorianFollowup::Failed => core.refresh_historian_diagnostics(
+                        &env.store,
+                        &env.parsed.session_id,
+                        diagnostics,
+                    ),
+                    HistorianFollowup::Unchanged => diagnostics,
+                };
+                UnitOutcome::Terminal(core.settle_transform_pass(&env, pass, diagnostics))
+            }))
+            .await;
+        match outcome {
+            Ok(UnitOutcome::Terminal(outcome)) => outcome,
+            Ok(UnitOutcome::Continue(_)) => {
+                unreachable!("the settle unit settles")
+            }
+            Err(failed) => unit_failed_error(failed),
+        }
+    }
+
+    /// A live historian completion requires a refold and another preparation before deciding whether to fire inline.
+    async fn run_rerun_unit(
+        &self,
+        entry: &PassEntry<'_>,
+        env: &Arc<PassEnv>,
+        pass: TransformedPass,
+    ) -> Result<PassContinuation, PreparedOutcome> {
+        let core = Arc::clone(entry.core);
+        let signal = entry.runner.cancel_signal();
+        let permit = self.acquire_unit_permit().await?;
+        let env = Arc::clone(env);
+        let outcome = entry
+            .runner
+            .run_unit(Box::new(move || {
+                let _heartbeat = UnitHeartbeat;
+                let _permit = permit;
+                let mut pass = pass;
+                if signal.is_cancelled() {
+                    return UnitOutcome::Terminal(cancelled_before_transform());
+                }
+                if let Err(outcome) = core.rerun_transform_and_read_floor(&env, &mut pass) {
+                    return UnitOutcome::Terminal(outcome);
+                }
+                let action = core.prepare_historian(&env, &mut pass);
+                UnitOutcome::Continue(Box::new(PassContinuation { pass, action, env }))
+            }))
+            .await;
+        match outcome {
+            Ok(UnitOutcome::Continue(rerun)) => Ok(*rerun),
+            Ok(UnitOutcome::Terminal(outcome)) => Err(outcome),
+            Err(failed) => Err(unit_failed_error(failed)),
+        }
     }
 
     /// Runs the store work that precedes the transform and builds the pass environment. The
@@ -8323,6 +8675,7 @@ impl HandlerCore {
         intake: PassIntake,
     ) -> Result<(PassEnv, PassStart), PreparedOutcome> {
         let PassIntake {
+            held,
             store,
             mut parsed,
             binding,
@@ -8411,6 +8764,7 @@ impl HandlerCore {
                 side_channel_drain_ms,
                 trace_received_ms,
             },
+            _held: held,
         };
         Ok((
             env,
@@ -8518,7 +8872,17 @@ impl HandlerCore {
         pass.result = self
             .run_transform(env, PassState::Reload)
             .map_err(|error| Self::reject_transform(env, error))?;
+        self.forget_guidance_pin_on_commit(env, &pass.result);
         Ok(())
+    }
+
+    fn forget_guidance_pin_on_commit(&self, env: &PassEnv, result: &TransformWithProjection) {
+        if result.response.committed {
+            self.guidance_dates
+                .lock()
+                .expect("guidance date mutex")
+                .remove(&env.parsed.session_id);
+        }
     }
 
     /// Reruns after a historian firing landed, then reads the publication floor the same way
@@ -8554,6 +8918,17 @@ impl HandlerCore {
             .map_err(|error| Self::reject_transform(env, error))?;
         // Dropping the load makes `Reload` the only state a rerun can name.
         drop(pass_load);
+        // The hook sits between the commit and the first thing the commit implies, so a test
+        // can hold the pass exactly there.
+        #[cfg(test)]
+        if let Some(hook) = self
+            .after_transform_commit
+            .lock()
+            .expect("interleave hook mutex")
+            .take()
+        {
+            hook();
+        }
         // Lineage is proof that this root produced accepted session state, so it is recorded
         // only after the transform succeeds; a rejected attempt must not authorize facade
         // routes for a root the session never served.
@@ -8563,6 +8938,9 @@ impl HandlerCore {
             .entry(env.binding.session.clone())
             .or_default()
             .insert(lineage_root);
+        // The guidance pin is stale once a pass commits; the removal moves with the commit,
+        // since nothing else recomputes it before the next pass renders.
+        self.forget_guidance_pin_on_commit(env, &result);
         let emergency_pre_floor = if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
             Self::read_publication_floor(env)
         } else {
@@ -8602,82 +8980,6 @@ impl HandlerCore {
                 project_memory: env.project_memory.as_ref(),
             },
         )
-    }
-
-    /// Decides the historian diagnostics for the pass. A subagent pass prepares nothing; an
-    /// Emergency95 pass waits for a live firing or drives one inline and reruns the transform
-    /// after it; every other pass prepares once and spawns the firing when one is ready.
-    async fn resolve_historian(
-        &self,
-        env: &PassEnv,
-        pass: &mut TransformedPass,
-    ) -> Result<HistorianDiagnostics, PreparedOutcome> {
-        if env.parsed.is_subagent {
-            return Ok(HistorianDiagnostics {
-                fired: false,
-                reason: Some("subagent_session".to_string()),
-                no_fire: Some("subagent_session".to_string()),
-                state: "disabled".to_string(),
-                progress: None,
-                last_failure: None,
-                project_memory: None,
-            });
-        }
-        if pass.result.scheduler_pass != scheduler::PassDecision::Emergency95 {
-            return Ok(match self.prepare_historian(env, pass) {
-                PreparedHistorianAction::Complete(diagnostics) => diagnostics,
-                PreparedHistorianAction::Busy { diagnostics, .. } => diagnostics,
-                PreparedHistorianAction::FireReady(prepared) => {
-                    let diagnostics = prepared.diagnostics.clone();
-                    self.spawn_historian_firing(prepared.task);
-                    diagnostics
-                }
-            });
-        }
-        Ok(match self.prepare_historian(env, pass) {
-            PreparedHistorianAction::Complete(diagnostics) => diagnostics,
-            PreparedHistorianAction::Busy {
-                diagnostics,
-                completion,
-            } => {
-                if self.await_live_historian_completion(completion).await {
-                    self.rerun_transform_and_read_floor(env, pass)?;
-                    match self.prepare_historian(env, pass) {
-                        PreparedHistorianAction::Complete(diagnostics) => diagnostics,
-                        PreparedHistorianAction::Busy { diagnostics, .. } => diagnostics,
-                        PreparedHistorianAction::FireReady(prepared) => {
-                            self.fire_inline_and_rerun(env, pass, prepared).await?
-                        }
-                    }
-                } else {
-                    diagnostics
-                }
-            }
-            PreparedHistorianAction::FireReady(prepared) => {
-                self.fire_inline_and_rerun(env, pass, prepared).await?
-            }
-        })
-    }
-
-    /// Drives a prepared firing inline and reruns the transform when it lands.
-    async fn fire_inline_and_rerun(
-        &self,
-        env: &PassEnv,
-        pass: &mut TransformedPass,
-        prepared: Box<PreparedHistorianFiring>,
-    ) -> Result<HistorianDiagnostics, PreparedOutcome> {
-        let diagnostics = prepared.diagnostics.clone();
-        match self.run_historian_firing_inline(prepared.task).await {
-            Ok(_) => {
-                self.rerun_transform_and_read_floor(env, pass)?;
-                Ok(diagnostics)
-            }
-            Err(_) => Ok(self.refresh_historian_diagnostics(
-                &env.store,
-                &env.parsed.session_id,
-                diagnostics,
-            )),
-        }
     }
 
     /// Applies the committed pass's derived state, builds the response, and records the
@@ -8734,12 +9036,6 @@ impl HandlerCore {
         let projection_cache_store_ms =
             projection_cache_store_started_at.elapsed().as_secs_f64() * 1_000.0;
         let mut response = result.response;
-        if response.committed {
-            self.guidance_dates
-                .lock()
-                .expect("guidance date mutex")
-                .remove(&parsed.session_id);
-        }
         response.historian = Some(diagnostics);
         let native_attach_started_at = Instant::now();
         let native_cache_stats = if parsed.serve_native {
@@ -8837,23 +9133,6 @@ impl HandlerCore {
             return now;
         }
         Instant::now()
-    }
-
-    /// Serializes the request and enters at the body branch, so tests run the lane a
-    /// transform body takes in production.
-    #[cfg(test)]
-    async fn handle_transform_for_test(
-        &self,
-        route: RouteHandle,
-        request: Value,
-    ) -> PreparedOutcome {
-        let body = serde_json::to_vec(&request).unwrap();
-        let pool = tests::TestPool::unbounded();
-        let meter = ResidentMeter::new(&pool);
-        let (_, outcome) = self
-            .dispatch_body(route, &body, lane_probe(&body).as_ref(), &meter)
-            .await;
-        outcome
     }
 
     fn handle_state_sync_value(&self, channel: RouteHandle, request: Value) -> PreparedOutcome {
@@ -9558,11 +9837,12 @@ impl HandlerCore {
 
     async fn handle_transform_page_value(
         &self,
-        channel: RouteHandle,
+        entry: &PassEntry<'_>,
         request: Value,
         lane: TransformLane,
         ticket: &TransformDispatchTicket<'_>,
     ) -> PreparedOutcome {
+        let channel = entry.route;
         let present = TRANSFORM_PAGE_FIELDS
             .iter()
             .filter(|field| request.get(**field).is_some())
@@ -9764,15 +10044,26 @@ impl HandlerCore {
                 let assembled = match assemble_transform_pages(pages) {
                     Ok(assembled) => assembled,
                     Err(message) => {
-                        self.discard_transform_pages(&binding.session);
+                        self.transform_pages
+                            .lock()
+                            .expect("transform page mutex")
+                            .release_applying(&binding.session, &transform_id);
+                        self.refresh_oldest_queued_at_ms();
                         return transform_page_error(lane, "protocol_mismatch", message);
                     }
                 };
+                // The pass's units hold the other clone, so an apply this future abandons is
+                // released when the last unit's thread has finished, not before.
+                let apply_guard = Arc::new(PageApplyGuard::new(
+                    Arc::clone(entry.core),
+                    binding.session.clone(),
+                    transform_id.clone(),
+                ));
                 let outcome = self
                     .handle_transform_unpaged_value(
-                        channel,
+                        entry,
                         assembled,
-                        true,
+                        Some(Arc::clone(&apply_guard)),
                         Some(inbound_bytes),
                         ticket,
                     )
@@ -9793,6 +10084,7 @@ impl HandlerCore {
                         scalar_digest.unwrap_or_default(),
                         completed_result,
                     );
+                apply_guard.disarm();
                 self.refresh_oldest_queued_at_ms();
                 outcome
             }
@@ -12128,6 +12420,7 @@ impl CompositeComponent for Handler {
     fn resources(&self) -> ResourceDeclaration {
         ResourceDeclaration {
             retained_resident_bytes: DECLARED_RETAINED_RESIDENT_BYTES,
+            general_task_hold_bound: TRANSFORM_ADMISSION_PERMITS,
             ..ResourceDeclaration::default()
         }
     }
@@ -12164,9 +12457,14 @@ impl CompositeComponent for Handler {
             return settle_prepared(&ctx, outcome).await;
         }
         let probe = cap_probe.or_else(|| lane_probe(body));
-        let (_, outcome) = self
-            .dispatch_body(ctx.route, body, probe.as_ref(), &meter)
-            .await;
+        let entry = PassEntry {
+            core: &self.core,
+            route: ctx.route,
+            probe: probe.as_ref(),
+            meter: &meter,
+            runner: &ctx,
+        };
+        let (_, outcome) = self.dispatch_body(&entry, body).await;
         settle_prepared(&ctx, outcome).await
     }
 
@@ -12825,24 +13123,6 @@ pub mod kernel_route_fixtures {
 }
 
 impl HandlerCore {
-    /// `RequestCtx` is transport-private, so this helper lets unit tests exercise routing arms without constructing one.
-    #[cfg(test)]
-    async fn dispatch_value(&self, route: RouteHandle, request: Value) -> PreparedOutcome {
-        self.dispatch_value_with_inbound_bytes(route, request, None)
-            .await
-    }
-
-    /// Integration-test entry to the routing arms; `RequestCtx` is transport-private.
-    #[cfg(feature = "test-support")]
-    pub async fn dispatch_value_for_test(
-        &self,
-        route: RouteHandle,
-        request: Value,
-    ) -> PreparedOutcome {
-        self.dispatch_value_with_inbound_bytes(route, request, None)
-            .await
-    }
-
     #[cfg(feature = "test-support")]
     pub fn kernel_state(&self) -> kernel_routes::KernelState {
         self.kernel.state()
@@ -12910,21 +13190,23 @@ impl HandlerCore {
     /// produces and the two lanes cannot disagree on it.
     async fn dispatch_body(
         &self,
-        channel: RouteHandle,
+        entry: &PassEntry<'_>,
         body: &[u8],
-        probe: Option<&RequestEntryProbe>,
-        meter: &ResidentMeter<'_>,
     ) -> (BodyLane, PreparedOutcome) {
+        let meter = entry.meter;
         if let Err(outcome) = admit_body(body, meter) {
             return (BodyLane::Unread, outcome);
         }
-        if probe.is_some_and(RequestEntryProbe::routes_to_unpaged_transform) {
+        if entry
+            .probe
+            .is_some_and(RequestEntryProbe::routes_to_unpaged_transform)
+        {
             let decode_started_at = Instant::now();
             match direct_lane_gate(body, meter) {
                 Ok(true) => match decode_metered::<TransformRequest>(body, meter) {
                     Ok(parsed) => {
                         let outcome = self
-                            .handle_transform_direct(channel, parsed, decode_started_at)
+                            .handle_transform_direct(entry, parsed, decode_started_at)
                             .await;
                         return (BodyLane::Direct, outcome);
                     }
@@ -12946,17 +13228,18 @@ impl HandlerCore {
             Err(DecodeFailure::Invalid(_)) => Value::Null,
         };
         let outcome = self
-            .dispatch_value_with_inbound_bytes(channel, request, Some(body.len()))
+            .dispatch_value_with_inbound_bytes(entry, request, Some(body.len()))
             .await;
         (BodyLane::Tree, outcome)
     }
 
     async fn dispatch_value_with_inbound_bytes(
         &self,
-        channel: RouteHandle,
+        entry: &PassEntry<'_>,
         request: Value,
         inbound_bytes: Option<usize>,
     ) -> PreparedOutcome {
+        let channel = entry.route;
         let method = request
             .get("method")
             .and_then(Value::as_str)
@@ -12983,7 +13266,7 @@ impl HandlerCore {
                 "manifest.get" => self.handle_prompt_surface_manifest_value(channel, &request),
                 "dreamer.run_task" => self.handle_dreamer_run_task(channel, &request).await,
                 "transform" => {
-                    self.handle_transform_dispatch(channel, request, inbound_bytes)
+                    self.handle_transform_dispatch(entry, request, inbound_bytes)
                         .await
                 }
                 "state_sync" => self.handle_state_sync_value(channel, request),
@@ -16082,6 +16365,9 @@ impl<'de> Deserialize<'de> for RouteName {
 /// unescape buffer for its longest escaped string is charged next, so the pool refuses
 /// before serde_json grows that buffer for the lane probe or either decode.
 fn admit_body(body: &[u8], meter: &ResidentMeter<'_>) -> Result<(), PreparedOutcome> {
+    if let Some(refusal) = meter.refusal() {
+        return Err(resident_refusal(refusal));
+    }
     if !meter.admit_once() {
         return Ok(());
     }
@@ -16122,6 +16408,27 @@ pub fn handle_entry_for_test(
     Ok(cap_probe.or_else(|| lane_probe(body)).is_some())
 }
 
+/// A unit produced no outcome: its thread panicked (the payload reached stderr only as the
+/// redacted diagnostic), the runtime stopped, or the route was closing. The code is the one
+/// the host emits for a panic in the handler task, so the client cannot tell the two apart;
+/// it is not the store-unavailable code, which names a store that could not be opened.
+fn unit_failed_error(failed: BlockingWorkFailed) -> PreparedOutcome {
+    PreparedOutcome::Error {
+        code: "internal_error".to_string(),
+        message: format!("transform work did not complete: {failed}"),
+    }
+}
+
+/// A unit found the request cancelled before it began. The host's cancel arm wins the
+/// select and settles `cancelled` itself, so this outcome has no reader on a live route; a
+/// detached runner returns it to its caller.
+fn cancelled_before_transform() -> PreparedOutcome {
+    PreparedOutcome::Error {
+        code: "cancelled".to_string(),
+        message: "request cancelled before the transform".to_string(),
+    }
+}
+
 fn request_too_large_error() -> PreparedOutcome {
     PreparedOutcome::Error {
         code: "invalid_params".to_string(),
@@ -16133,6 +16440,13 @@ fn resident_capacity_error() -> PreparedOutcome {
     PreparedOutcome::Error {
         code: "queue_full".to_string(),
         message: "resident capacity for request parsing is exhausted".to_string(),
+    }
+}
+
+fn transform_admission_error() -> PreparedOutcome {
+    PreparedOutcome::Error {
+        code: "queue_full".to_string(),
+        message: "transform admission capacity is exhausted".to_string(),
     }
 }
 
@@ -17720,8 +18034,12 @@ fn test_route(channel_id: u16) -> RouteHandle {
     }
 }
 
+#[path = "."]
 #[cfg(test)]
 mod tests {
+    #[path = "transform_unit/tests.rs"]
+    mod blocking_unit_tests;
+
     use super::*;
     use crate::metered_decode::{ResidentReserve, footprint_floor, footprint_of, shortfall_count};
     use std::collections::{HashMap, VecDeque};
@@ -20146,12 +20464,25 @@ mod tests {
                 handler_with_store(Arc::new(ProducerState::default()), default_test_config());
             let pool = TestPool::unbounded();
             let meter = ResidentMeter::new(&pool);
-            let (lane, through_body) = direct
-                .dispatch_body(test_route(7), &body, lane_probe(&body).as_ref(), &meter)
-                .await;
+            let runner = transform_unit::DetachedRunner::default();
+            let probe = lane_probe(&body);
+            let entry = PassEntry {
+                core: &direct.core,
+                route: test_route(7),
+                probe: probe.as_ref(),
+                meter: &meter,
+                runner: &runner,
+            };
+            let (lane, through_body) = direct.dispatch_body(&entry, &body).await;
             let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let tree_meter = ResidentMeter::new(&pool);
+            let entry = PassEntry {
+                core: &tree.core,
+                meter: &tree_meter,
+                ..entry
+            };
             let through_tree = tree
-                .dispatch_value_with_inbound_bytes(test_route(7), request, Some(body.len()))
+                .dispatch_value_with_inbound_bytes(&entry, request, Some(body.len()))
                 .await;
             let through_body = comparable_outcome(through_body);
             assert_eq!(through_body, comparable_outcome(through_tree), "{name}");
@@ -20198,19 +20529,25 @@ mod tests {
                     handler_with_store(Arc::new(ProducerState::default()), default_test_config());
                 let direct_pool = TestPool::with_capacity(capacity);
                 let direct_meter = ResidentMeter::new(&direct_pool);
-                let (_, through_body) = direct
-                    .dispatch_body(
-                        test_route(7),
-                        &body,
-                        probe_request(&body).as_ref(),
-                        &direct_meter,
-                    )
-                    .await;
+                let runner = transform_unit::DetachedRunner::default();
+                let probe = probe_request(&body);
+                let entry = PassEntry {
+                    core: &direct.core,
+                    route: test_route(7),
+                    probe: probe.as_ref(),
+                    meter: &direct_meter,
+                    runner: &runner,
+                };
+                let (_, through_body) = direct.dispatch_body(&entry, &body).await;
                 let tree_pool = TestPool::with_capacity(capacity);
                 let tree_meter = ResidentMeter::new(&tree_pool);
-                let (_, through_tree) = tree
-                    .dispatch_body(test_route(7), &body, None, &tree_meter)
-                    .await;
+                let entry = PassEntry {
+                    core: &tree.core,
+                    probe: None,
+                    meter: &tree_meter,
+                    ..entry
+                };
+                let (_, through_tree) = tree.dispatch_body(&entry, &body).await;
                 let through_body = comparable_outcome(through_body);
                 assert_eq!(
                     through_body,
@@ -20493,9 +20830,16 @@ mod tests {
             let body = body.into_bytes();
             let pool = TestPool::with_capacity(footprint_of(&body) / 2);
             let meter = ResidentMeter::new(&pool);
-            let (lane, outcome) = handler
-                .dispatch_body(test_route(7), &body, probe_request(&body).as_ref(), &meter)
-                .await;
+            let runner = transform_unit::DetachedRunner::default();
+            let probe = probe_request(&body);
+            let entry = PassEntry {
+                core: &handler.core,
+                route: test_route(7),
+                probe: probe.as_ref(),
+                meter: &meter,
+                runner: &runner,
+            };
+            let (lane, outcome) = handler.dispatch_body(&entry, &body).await;
             assert_eq!(
                 pool.reserve_calls(),
                 0,
@@ -20545,6 +20889,8 @@ mod tests {
                 .expect("route channels mutex")
                 .contains_key(&route)
         };
+        let runner = transform_unit::DetachedRunner::default();
+        let probe = probe_request(&body);
 
         for (pool, expected) in [
             (
@@ -20558,9 +20904,14 @@ mod tests {
         ] {
             let holder = pool.hold(pool.capacity() / 2);
             let meter = ResidentMeter::new(&pool);
-            let (_, outcome) = handler
-                .dispatch_body(route, &body, probe_request(&body).as_ref(), &meter)
-                .await;
+            let entry = PassEntry {
+                core: &handler.core,
+                route: test_route(7),
+                probe: probe.as_ref(),
+                meter: &meter,
+                runner: &runner,
+            };
+            let (_, outcome) = handler.dispatch_body(&entry, &body).await;
             assert_eq!(comparable_outcome(outcome), comparable_outcome(expected));
             drop(meter);
             drop(holder);
@@ -20572,9 +20923,14 @@ mod tests {
         // The same body with room is served, and only then is the route bound.
         let pool = TestPool::unbounded();
         let meter = ResidentMeter::new(&pool);
-        let (lane, outcome) = handler
-            .dispatch_body(route, &body, probe_request(&body).as_ref(), &meter)
-            .await;
+        let entry = PassEntry {
+            core: &handler.core,
+            route: test_route(7),
+            probe: probe.as_ref(),
+            meter: &meter,
+            runner: &runner,
+        };
+        let (lane, outcome) = handler.dispatch_body(&entry, &body).await;
         assert_eq!(lane, BodyLane::Direct);
         assert_eq!(comparable_outcome(outcome).0, "response");
         assert!(route_channel_bound(&handler));
@@ -22117,8 +22473,18 @@ mod tests {
         let parsed: TransformRequest = serde_json::from_value(body).unwrap();
         let decode_started_at = Instant::now() - Duration::from_secs(10);
         let ticket = TransformDispatchTicket::new(&DISPATCH_HEALTH);
+        let pool = TestPool::unbounded();
+        let meter = ResidentMeter::new(&pool);
+        let runner = transform_unit::DetachedRunner::default();
+        let entry = PassEntry {
+            core: &handler.core,
+            route: test_route(7),
+            probe: None,
+            meter: &meter,
+            runner: &runner,
+        };
         let outcome = handler
-            .handle_transform_typed(test_route(7), parsed, false, decode_started_at, &ticket)
+            .handle_transform_typed(&entry, parsed, None, decode_started_at, &ticket)
             .await;
         ticket.finish(false);
         let PreparedOutcome::Response(bytes) = outcome else {
@@ -25956,7 +26322,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn claude_code_channel2_lease_is_frozen_idempotent_and_pressure_changes_do_not_rearm() {
         let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        producer.block_output.store(true, Ordering::SeqCst);
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
         let messages_for = |pair_count: u64| {
             let output = "tool output ".repeat(5_000);
             let mut messages = Vec::new();
@@ -26049,6 +26417,9 @@ mod tests {
             "whole-input pressure is no longer a cap transition; only fold, measured U collapse, or reap re-arm"
         );
         assert_eq!(after_pressure_change.meta.channel2_arming_watermark, 1);
+        producer.block_output.store(false, Ordering::SeqCst);
+        producer.notify.notify_waiters();
+        wait_for_idle(&store).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -37628,19 +37999,30 @@ mod tests {
         wait_for_count(&producer.starts, 1).await;
 
         let scalar_runs_before = store.cache_state_scalar_runs();
-        let mut blocked = Box::pin(call_transform_with_usage(
-            &handler, messages, 48_000, 50_000,
+        let runner = blocking_unit_tests::JoinedUnitRunner::default();
+        let mut blocked = Box::pin(handler.handle_transform_with_runner(
+            test_route(7),
+            request_with_usage(messages, 48_000, 50_000),
+            &runner,
         ));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), blocked.as_mut())
-                .await
-                .is_err(),
-            ">=95% requests must wait for the active historian run instead of returning early"
-        );
+        std::future::poll_fn(|cx| {
+            assert!(blocked.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        wait_for_count(&runner.completed, 1).await;
+        std::future::poll_fn(|cx| {
+            assert!(
+                blocked.as_mut().poll(cx).is_pending(),
+                "the completed first unit must wait for the active historian"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
 
         producer.block_output.store(false, Ordering::SeqCst);
         producer.notify.notify_waiters();
-        let response = blocked.await;
+        let response = tool_body(blocked.await);
 
         assert!(response["action"].is_string());
         assert!(m0_text(&response).contains("autonomous summary"));
@@ -37841,7 +38223,7 @@ mod tests {
         let messages = big_messages();
 
         let response = tokio::time::timeout(
-            Duration::from_millis(50),
+            Duration::from_secs(10),
             call_transform_with_usage(&handler, messages, 45_000, 50_000),
         )
         .await
@@ -37850,6 +38232,11 @@ mod tests {
         assert_eq!(response["historian"]["fired"], true);
         assert!(!m0_text(&response).contains("autonomous summary"));
         wait_for_count(&producer.starts, 1).await;
+        assert!(producer.block_output.load(Ordering::SeqCst));
+        assert_ne!(
+            store.load("ses").unwrap().meta.historian.state,
+            HistorianPhase::Idle
+        );
         producer.block_output.store(false, Ordering::SeqCst);
         producer.notify.notify_waiters();
         wait_for_idle(&store).await;
@@ -38118,7 +38505,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handler_stale_reattach_against_idle_is_noop() {
+    async fn stale_reattach_task_rechecks_idle_before_connecting() {
         let producer = Arc::new(ProducerState::default());
         producer.outputs.lock().unwrap().push_back(historian_output(
             1,
@@ -38130,12 +38517,26 @@ mod tests {
         let messages = big_messages();
         seed_awaiting(&store, &messages);
 
-        let reattaching = call_transform(&handler, messages).await;
-        assert_eq!(reattaching["historian"]["no_fire"], "reattaching");
+        let parsed = transform_request(messages, 1, 200_000);
+        let projection = wire::project_messages(&parsed.messages).unwrap();
+        let binding = handler.resolve_binding(test_route(7), "ses").unwrap();
+        let generation = handler.transform_snapshots.lock().unwrap().begin("ses");
+        assert_eq!(
+            handler.maybe_spawn_reattach(
+                Arc::clone(&store),
+                &parsed,
+                generation,
+                &binding,
+                &projection,
+                now_ms(),
+            ),
+            Some("reattaching")
+        );
         seed_idle(&store);
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
+        handler.tasks.close();
+        tokio::time::timeout(Duration::from_secs(10), handler.tasks.wait())
+            .await
+            .unwrap();
 
         let loaded = store.load("ses").unwrap();
         assert_eq!(loaded.meta.historian, HistorianDurableState::default());
@@ -38545,9 +38946,7 @@ mod tests {
             "render_config": "cfg0",
             "messages": messages.iter().map(|m| serde_json::to_value(m).unwrap()).collect::<Vec<_>>(),
         });
-        let out = handler
-            .handle_transform_dispatch(test_route(9), req, None)
-            .await;
+        let out = handler.handle_transform_for_test(test_route(9), req).await;
         let PreparedOutcome::Response(bytes) = out else {
             panic!("pass-through must be a response");
         };

@@ -1,6 +1,15 @@
 # foreign-write-lands-between-pass-loads
 
-Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
+## Rebase status, 2026-09-13
+
+Relocation anchors refer to the formatted working tree atop `e451a2b4`.
+The rebased Emergency95 group passes all four tests, preserving six scalar reads
+for Busy and four for the post-publish hook witness. Historical hook orders and
+`d6060f79` results remain separate from that rebased receipt.
+
+## Historical baseline, 2026-09-10
+
+Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
 The discovery and investigation sections describe that baseline. Their source
 links are pinned to it. The marker evidence below describes the live test.
@@ -113,6 +122,10 @@ storage units that precede it on the branch.
 Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/432)
 and [parent specification](https://github.com/ahrav/eidnara/issues/350).
 
+This section includes the upstream `e451a2b4` clarification of hook order.
+Commit `d6060f79` temporarily used an earlier hook position. The final source
+restores this upstream order and gives W11 a separate post-commit gate.
+
 The [emergency interleave test][marker-test] now carries the marker. Inside the
 `between_transform_and_prepare` hook it reads the `row_version` the transform
 committed, releases the blocked producer, waits for the publish to leave the
@@ -128,6 +141,59 @@ carries the fold.
 The hook stays `#[cfg(test)]`; a campaign outside the unit-test crate still
 needs its own seam, as the investigation log records.
 
-[marker-test]: ../../../../../crates/daemon/src/lib.rs#L36454-L36511
-[pre-floor-live]: ../../../../../crates/daemon/src/lib.rs#L8311-L8316
-[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8451-L8454
+[pre-floor-live]: https://github.com/ahrav/eidnara/blob/e451a2b4/crates/daemon/src/lib.rs#L8565-L8578
+[marker-test]: https://github.com/ahrav/eidnara/blob/e451a2b4/crates/daemon/src/lib.rs#L37664-L37764
+[floor-live]: https://github.com/ahrav/eidnara/blob/e451a2b4/crates/daemon/src/lib.rs#L8694-L8710
+
+## Implementation evidence, 2026-09-13
+
+[#438](https://github.com/ahrav/eidnara/issues/438) preserves the foreign-write
+witness while placing pass work in host-joined blocking units. In the final
+[first_transform][first-live], `between_transform_and_prepare` follows the
+first publication-floor read, matching upstream. Abort and panic tests instead
+use `after_transform_commit` before lineage and guidance bookkeeping. The
+temporary earlier C5 hook position in `d6060f79` is historical, not the final seam.
+
+`handler_emergency_refolds_when_active_run_publishes_before_live_wait_capture`
+still records both row versions through the test's store reference, releases
+the blocked producer, waits for the durable historian state to become idle,
+and asserts `published > transform_committed`. These are observations outside
+the pass's own read. The test uses an `Arc` clone of the store, not a separately
+opened SQLite connection, and does not capture the publisher's return value
+directly. Its response must contain `autonomous summary`, and its statement
+probe requires exactly four scalar reads during the exercised pass.
+
+The [rerun code][rerun-live] names `PassState::Reload`, never the original
+pre-transform load. [Settlement][settle-live] performs a distinct final floor
+check and reruns if the floor changed. After an inline publication, the rerun,
+floor reload, and settlement share one final unit rather than adding a
+redundant check across another await.
+The four [Emergency95 tests][emergency-tests] cover inline success, busy-run
+completion, the foreign publish, and inline failure. They do not establish
+every possible publication schedule or a global freshness theorem. The
+[execution receipt][receipt] reports four passes, separately from full gates.
+
+[first-live]: ../../../../../crates/daemon/src/lib.rs#L8906
+[rerun-live]: ../../../../../crates/daemon/src/lib.rs#L8865-L8903
+[settle-live]: ../../../../../crates/daemon/src/lib.rs#L8993-L9011
+[emergency-tests]: ../../../../../crates/daemon/src/lib.rs#L37972-L38205
+[receipt]: ../../existing-checks.md#transform-unit-execution-receipt-2026-09-13
+
+## Rebase check, 2026-09-13
+
+Both source versions require four scalar reads in this witness. Upstream's
+[assertion](https://github.com/ahrav/eidnara/blob/e451a2b4/crates/daemon/src/lib.rs#L37731-L37750)
+explicitly distinguishes those four reads from the six-read Busy path excluded
+by the hook. The rebased [Busy test][busy-live] separately requires six reads:
+live-completion refold and preparation add a historian-phase read and floor
+read before the inline follow-up. The [post-publish witness][post-publish-live]
+still requires four. The rebased Emergency95 group reports four passes with
+both oracles unchanged; no count was relaxed to accept the other path.
+
+The final C5 hook follows the first floor read, so the passing witness again
+constructs publication between two post-commit reads. C5 returns to exercised
+with default-production reachability, while the separate W11 hook retains its
+test-only reachability. Neither contract or scalar-read oracle is weakened.
+
+[busy-live]: ../../../../../crates/daemon/src/lib.rs#L37987-L38043
+[post-publish-live]: ../../../../../crates/daemon/src/lib.rs#L38045-L38147
