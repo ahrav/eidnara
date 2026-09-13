@@ -244,9 +244,23 @@ impl ServedMessage {
         &self.canonical_bytes
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn canonical_bytes_for_test(&self) -> &[u8] {
+        self.canonical_bytes()
+    }
+
     fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
+}
+
+/// Runs the no-projection constructor arm (`from_message`) alone so an out-of-crate
+/// allocation observer can attribute construction apart from response assembly;
+/// `TransformResponse::passthrough` would fold that assembly into the window. The
+/// daemon crate forbids unsafe code, so the observer cannot live in-crate.
+#[cfg(feature = "test-support")]
+pub fn served_message_for_test(message: WireMessage) -> ServedMessage {
+    ServedMessage::from_message(message)
 }
 
 fn served_message_retained_bytes(
