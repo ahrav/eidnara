@@ -378,20 +378,6 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
             })
             .count(),
         0,
-        "staging leaves no report of its own behind"
-    );
-    assert_eq!(
-        fs::read_dir(dir.path())
-            .unwrap()
-            .flatten()
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(SEED_REPORT_FILE)
-            })
-            .count(),
-        0,
         "every report temp of a finished staging is removed"
     );
 

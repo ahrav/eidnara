@@ -423,6 +423,10 @@ mod sqlite_backend {
         /// `deadline`. The connection lock is polled until `deadline`; the busy timeout is set to
         /// the remaining time for `f` and restored to the standing busy timeout afterward.
         ///
+        /// The busy timeout is computed once, before `f` runs, so `f` is one blocking statement:
+        /// a callback that runs several statements can wait past `deadline` by the time it spent
+        /// before the statement that contended.
+        ///
         /// # Errors
         ///
         /// Returns [`StoreError::Deadline`] when the connection is still held at `deadline`, when
