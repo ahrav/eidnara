@@ -108,17 +108,22 @@ fn canonical_miss_return_buffer_provenance_is_classified() {
                 );
             }
             BufferProvenance::GrowthChain => {
+                let chain = ledger.growth_chain(ptr);
                 assert!(
                     ledger
-                        .allocations_at_least_outside(bytes.len(), ptr)
-                        .is_empty(),
-                    "{label}: no output-sized storage outside the returned chain"
-                );
-                assert!(
-                    ledger.allocations_of_size(bytes.len()).is_empty()
-                        || bytes.capacity() == bytes.len(),
+                        .allocations_of_size(bytes.len())
+                        .iter()
+                        .all(|event| chain.contains(event)),
                     "{label}: no exact-size reorder buffer beside the returned chain"
                 );
+                if population.has_small_span_tables() {
+                    assert!(
+                        ledger
+                            .allocations_at_least_outside(bytes.len(), ptr)
+                            .is_empty(),
+                        "{label}: no output-sized storage outside the returned chain"
+                    );
+                }
             }
             BufferProvenance::Unattributed => unreachable!("asserted above"),
         }

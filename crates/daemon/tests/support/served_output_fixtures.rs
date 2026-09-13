@@ -71,10 +71,19 @@ impl Population {
     }
 
     /// Whether the canonicalizer returns its serialization buffer for this
-    /// population instead of a fresh exact-size reorder buffer. The unchanged
-    /// canonicalizer copies every population into a fresh buffer.
+    /// population instead of a fresh exact-size reorder buffer. Retained
+    /// originals serialize in canonical order and keep the buffer; typed and
+    /// edited shells still need the reorder copy.
     pub fn expects_serialization_buffer_return(&self) -> bool {
-        false
+        self.expects_canonical_miss()
+    }
+
+    /// The large scalar payload keeps the span tables far below the output
+    /// length, so every allocation of at least N bytes must belong to the
+    /// returned buffer's chain. Small outputs cannot make that claim: their
+    /// span-table vectors alone exceed N.
+    pub fn has_small_span_tables(&self) -> bool {
+        matches!(self, Self::RetainedLargePayload { .. })
     }
 
     pub fn build(&self) -> WireMessage {
