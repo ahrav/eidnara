@@ -202,8 +202,8 @@ async fn aborted_waiter_preserves_commit_bookkeeping_and_worker_charges() {
         committed.row_version
     );
 
-    drop(gate);
     let released_at_ms = now_ms().max(0) as u64;
+    drop(gate);
     runner.join_all().await;
     assert!(
         DISPATCH_HEALTH
