@@ -960,7 +960,9 @@ fn umask_child() {
         .unwrap()
         .build(&budget(Duration::from_secs(30)), &mut |_| {})
         .unwrap();
-    // Only family creation runs under the umask; the builder's storage layer is not under test.
+    // Only family creation runs under the umask, and only the owner execute bit is masked: a
+    // mask on owner file bits fails first in the storage crate's lease files, which `select`
+    // also creates and which are not under test here.
     rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o100));
     let selection = selector(&root);
     selection.select(candidate, &mut |_| Ok(())).unwrap();
@@ -968,6 +970,21 @@ fn umask_child() {
         .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
         .unwrap();
     assert_eq!(observe(&pinned).rows.len(), 1);
+    let home = root.join("search-families").join(pinned.digest());
+    for (path, mode) in [
+        (home.clone(), 0o700),
+        (home.join("search"), 0o700),
+        (home.join("bootstrap.json"), 0o600),
+        (home.join("search").join("search.sqlite"), 0o600),
+    ] {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().mode() & 0o777,
+            mode,
+            "{}",
+            path.display()
+        );
+    }
 }
 
 #[test]
