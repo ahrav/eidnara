@@ -101,7 +101,8 @@ pub struct MessageOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireMessage {
     pub role: String,
-    /// Reached through [`WireMessage::content`] and [`WireMessage::content_mut`].
+    /// Private so every message is built through [`WireMessage::from_parts`] or decoded, and so
+    /// retained-size accounting reads the vector's capacity through [`WireMessage::content`].
     content: Vec<WireBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<MessageOrigin>,
@@ -112,7 +113,6 @@ pub struct WireMessage {
 }
 
 impl WireMessage {
-    /// Builds a typed message.
     pub fn from_parts(
         role: impl Into<String>,
         content: Vec<WireBlock>,
@@ -149,7 +149,6 @@ impl WireMessage {
         &self.content
     }
 
-    /// Mutable content blocks.
     pub fn content_mut(&mut self) -> &mut Vec<WireBlock> {
         &mut self.content
     }
@@ -158,7 +157,7 @@ impl WireMessage {
 /// One content block. Equality covers the typed payload and provider extras.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireBlock {
-    /// Reached through [`WireBlock::kind`] and [`WireBlock::kind_mut`].
+    /// Private so every block is built through [`WireBlock::bare`], [`WireBlock::with_provider_extras`], or decoded.
     kind: BlockKind,
     #[serde(default, skip_serializing_if = "ProviderExtras::is_empty")]
     pub provider_extras: ProviderExtras,
@@ -186,7 +185,6 @@ impl WireBlock {
         &self.kind
     }
 
-    /// Mutable block payload.
     pub fn kind_mut(&mut self) -> &mut BlockKind {
         &mut self.kind
     }
