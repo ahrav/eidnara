@@ -1842,6 +1842,114 @@ describe("delta prefix-mutation guard", () => {
 });
 
 describe("bounded transform ownership", () => {
+    it.each([
+        "initial",
+        "full-retry",
+    ] as const)("rejects a getter installed after ordinal resolution before %s encoding", async (phase) => {
+        const sessionId = `rust-ordinal-microtask-${phase}`;
+        installAvailabilityDb(sessionId, {});
+        let rows = rawRows(1);
+        let messages = makeMessages(sessionId);
+        let armed = phase === "initial";
+        let installed = false;
+        let getterCalls = 0;
+        const getter = () => {
+            getterCalls += 1;
+            return "changed after ordinal validation";
+        };
+        unregisters.push(
+            setRawMessageProvider(sessionId, {
+                readMessages: () => rows as unknown as RawMessage[],
+                readMessageOrdinalPage: (after, limit) =>
+                    rows
+                        .filter((row) => !after || row.timeCreated > after.timeCreated)
+                        .slice(0, limit),
+                getStoredMessageCount: () => {
+                    if (armed) {
+                        armed = false;
+                        // The scan and prime continuations run first; the third microtask follows annotation but precedes the caller's encoding.
+                        queueMicrotask(() =>
+                            queueMicrotask(() =>
+                                queueMicrotask(() => {
+                                    installed = true;
+                                    Object.defineProperty(messages[0]!.parts[0], "text", {
+                                        get: getter,
+                                        enumerable: true,
+                                        configurable: true,
+                                    });
+                                }),
+                            ),
+                        );
+                    }
+                    return rows.length;
+                },
+            }),
+        );
+        const { client, bodies, calls } = recordingClient((request, index) => {
+            if (phase === "full-retry" && index === 1) {
+                armed = true;
+                return {
+                    status: "need_full_sync",
+                    note_deliveries: [{ transform_pass_id: "discarded" }],
+                };
+            }
+            return { native_messages: request.native_messages };
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        if (phase === "full-retry") {
+            await transform.run(sessionId, { messages: [...messages] });
+            expect(transform.getState(sessionId).initialized).toBe(true);
+            rows = rawRows(2);
+            messages = rowMessages(sessionId, rows, () => "hello");
+        }
+        const memoBefore = transform.getState(sessionId).ordinals;
+        const output = { messages: messages as unknown[] };
+        await transform.run(sessionId, output);
+        expect(installed).toBe(true);
+        expect(getterCalls).toBe(0);
+        expect(bodies).toHaveLength(phase === "initial" ? 0 : 2);
+        expect(output.messages).toBe(messages);
+        expect(transform.getState(sessionId).ordinals).toEqual(memoBefore);
+        expect(calls.some((call) => call.method === "transform.ack")).toBe(false);
+        if (phase === "full-retry") {
+            expect(bodies[1].tail_delta).toBeDefined();
+            expect(calls.at(-1)?.method).toBe("transform.nack");
+        }
+        expect(defaultTransformCaptureAdmission.chargedBytes).toBe(0);
+    });
+
+    it.each([
+        "x",
+        "\u001f",
+    ])("budgets escaped wire text before preflight for %j", async (character) => {
+        const sessionId = `rust-escaped-wire-${character.charCodeAt(0)}`;
+        installAvailabilityDb(sessionId, {});
+        installRawRows(sessionId, rawRows(1));
+        const messages = makeMessages(sessionId);
+        messages[0]!.parts = [{ type: "text", text: character.repeat(100_000) }];
+        const deps = makeDeps();
+        const directoryRead = spyOn(deps.client.session, "get");
+        const admission = new TransformCaptureAdmission({ maxPasses: 1, maxBytes: 1_200_000 });
+        const { client, bodies } = recordingClient((page) =>
+            page.transform_page_complete === false ? { staged: true } : { native_messages: [] },
+        );
+        const transform = createRustModeTransform(deps, {
+            moduleClient: client,
+            captureAdmission: admission,
+        });
+        const output = { messages: messages as unknown[] };
+        try {
+            await transform.run(sessionId, output);
+            expect(directoryRead.mock.calls.length > 0).toBe(character === "x");
+            expect(bodies.length > 0).toBe(character === "x");
+            expect(transform.getState(sessionId).initialized).toBe(character === "x");
+            if (character !== "x") expect(output.messages).toEqual(messages);
+            expect(admission.chargedBytes).toBe(0);
+        } finally {
+            directoryRead.mockRestore();
+        }
+    });
+
     it("admits a full pass over 1,000 realistic messages under the default budget with room for a second session", async () => {
         const sessionId = "rust-admission-thousand";
         const rows = rawRows(1000);
@@ -1898,14 +2006,22 @@ describe("bounded transform ownership", () => {
         expect(admission.chargedBytes).toBe(0);
     });
 
-    for (const fault of ["mutation", "invalidation"] as const) {
-        it(`stops a series restart after a mid-series reconnect when ${fault} lands first`, async () => {
-            const sessionId = `rust-reconnect-${fault}`;
+    for (const fault of ["mutation", "accessor", "invalidation"] as const) {
+        it.each([
+            "reconnect",
+            "attempt-mismatch",
+        ])(`stops a series restart after %s when ${fault} lands first`, async (restart) => {
+            const sessionId = `rust-${restart}-${fault}`;
             installAvailabilityDb(sessionId, {});
             installRawRows(sessionId, rawRows(1));
             const messages = makeMessages(sessionId);
             messages[0]!.parts = [{ type: "text", text: "x".repeat(600_000) }];
             const member = messages[0];
+            let getterCalls = 0;
+            const getter = () => {
+                getterCalls += 1;
+                return "changed";
+            };
             const reachedPage1 = Promise.withResolvers<void>();
             const reconnect = Promise.withResolvers<unknown>();
             let reconnectReported = false;
@@ -1931,17 +2047,25 @@ describe("bounded transform ownership", () => {
             expect(bodies.filter((body) => body.transform_page_index === 0)).toHaveLength(1);
             expect(bodies.at(-1)?.transform_page_index).toBe(1);
             if (fault === "mutation") (member.parts[0] as { text: string }).text = "changed";
+            else if (fault === "accessor")
+                Object.defineProperty(member.parts[0], "text", {
+                    get: getter,
+                    enumerable: true,
+                    configurable: true,
+                });
             else transform.invalidateWireState(sessionId);
-            reconnect.resolve({
-                transport_status: "connection_generation_changed",
-                previous_generation: 3,
-                current_generation: 4,
-            });
-            await pass;
-            // Invalidation is an ownership fence and stops the restart; a content change is only observed by the publication recheck.
-            expect(bodies.filter((body) => body.transform_page_index === 0)).toHaveLength(
-                fault === "mutation" ? 2 : 1,
+            reconnect.resolve(
+                restart === "reconnect"
+                    ? {
+                          transport_status: "connection_generation_changed",
+                          previous_generation: 3,
+                          current_generation: 4,
+                      }
+                    : { code: "authority_transform_page_attempt_mismatch" },
             );
+            await pass;
+            expect(getterCalls).toBe(0);
+            expect(bodies.filter((body) => body.transform_page_index === 0)).toHaveLength(1);
             expect(output.messages).toBe(messages);
             expect(output.messages[0]).toBe(member);
             expect(calls.some((call) => call.method === "transform.ack")).toBe(false);
@@ -1951,7 +2075,7 @@ describe("bounded transform ownership", () => {
                     .filter((call) => call.method === "transform.nack")
                     .map((call) => (call.body as { transform_pass_id: string }).transform_pass_id)
                     .sort(),
-            ).toEqual(fault === "mutation" ? ["page-zero", "restarted"] : ["page-zero"]);
+            ).toEqual(["page-zero"]);
             expect(transform.getState(sessionId).failureCount).toBe(0);
             expect(defaultTransformCaptureAdmission.chargedBytes).toBe(0);
         });

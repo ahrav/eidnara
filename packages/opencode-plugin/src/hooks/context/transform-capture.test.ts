@@ -1067,6 +1067,25 @@ describe("capture admission", () => {
 });
 
 describe("bounded capture sizing", () => {
+    it.each([
+        "plain",
+        '"\\\b\t\n\f\r',
+        "\u0000\u001f",
+        "\ud800",
+        "\udfff",
+        "\ud800\ud800\udc00\udfff",
+        "\u4e2d\ud83d\ude00",
+    ])("bounds escaped JSON string values and keys for %j", (fragment) => {
+        const text = fragment.repeat(1000);
+        for (const source of [[text], [{ [text]: null }]]) {
+            const inspection = inspectReferenceableMessages(source);
+            if (!inspection.ok) throw new Error("valid source rejected");
+            expect(inspection.messageWireBytes[0]).toBeGreaterThanOrEqual(
+                JSON.stringify(text).length * 2,
+            );
+        }
+    });
+
     it("requires reservation before capture and refuses released or cancelled leases", () => {
         const owner = new TransformCaptureAdmission();
         const admitted = owner.admit("s");

@@ -1212,6 +1212,7 @@ export function createRustModeTransform(
                 );
             }
 
+            recheckCapture("wire-build");
             const projectRoot = options.projectRoot ?? directory;
             state.routeRoot = projectRoot;
             deliveries.projectRoot = projectRoot;
@@ -1349,6 +1350,7 @@ export function createRustModeTransform(
                     sessionId,
                     `transform_series_restart reason=${result.restart.reason} pages=${result.restart.pages} at_page=${result.restart.atPage}`,
                 );
+                recheckCapture("series-restart");
                 result = await sendTransformSeries(payload, `${detail} restart=series`);
                 if ("restart" in result) {
                     throw new Error(
@@ -1390,6 +1392,7 @@ export function createRustModeTransform(
                     if (!retryResolved.ok) {
                         throw new Error(`rust ordinal ${retryResolved.reason} during full retry`);
                     }
+                    recheckCapture("retry-wire-build");
                     const retryEncodedInput = encodeOpenCodeMessagesToCk(
                         retryResolved.annotatedInput,
                     );

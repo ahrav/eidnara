@@ -157,6 +157,26 @@ class ReferenceableWalk {
                   ? (value.description?.length ?? 0) * 2
                   : 0;
         this.spend(TAPE_SLOT_BYTES + retained);
+        if (typeof value === "string" && wireBytes > 0) {
+            for (let index = 0; index < value.length; index += 1) {
+                const unit = value.charCodeAt(index);
+                if (
+                    unit === 0x22 ||
+                    unit === 0x5c ||
+                    (unit >= 0x08 && unit <= 0x0d && unit !== 0x0b)
+                ) {
+                    wireBytes += 2;
+                } else if (unit < 0x20) {
+                    wireBytes += 10;
+                } else if (unit >= 0xd800 && unit <= 0xdbff) {
+                    const next = value.charCodeAt(index + 1);
+                    if (next >= 0xdc00 && next <= 0xdfff) index += 1;
+                    else wireBytes += 10;
+                } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+                    wireBytes += 10;
+                }
+            }
+        }
         this.wire(wireBytes);
         this.field?.(value);
     }
@@ -174,10 +194,9 @@ class ReferenceableWalk {
                 throw new SourceRejected("nonfinite_number", path);
             if (value !== null && type !== "string" && type !== "number" && type !== "boolean")
                 throw new SourceRejected(type as ReferenceableRejection["reason"], path);
-            // A string renders as its units plus quotes; every other scalar fits one f64 token.
             this.emit(
                 value as SnapshotField,
-                type === "string" ? (value as string).length * 2 + 2 : SCALAR_WIRE_BYTES,
+                type === "string" ? (value as string).length * 2 + 4 : SCALAR_WIRE_BYTES,
             );
             return;
         }
@@ -319,7 +338,7 @@ class ReferenceableWalk {
                 }
                 // Object keys render quoted with a colon; array elements pay only their comma.
                 if (array) this.wire(1);
-                else this.emit(key, key.length * 2 + 4);
+                else this.emit(key, key.length * 2 + 6);
                 this.attributes(slot);
                 visit(key, slot);
                 count += 1;
