@@ -77,7 +77,10 @@ impl SearchSelection {
                     ("physical_drain_ms", remaining),
                     (
                         "local_transaction_rows",
-                        spec.retirement.max_obligations.get() as u64 + 1,
+                        u64::try_from(spec.retirement.max_obligations.get())
+                            .ok()
+                            .and_then(|rows| rows.checked_add(1))
+                            .ok_or(BuildError::InventoryBound)?,
                     ),
                     (
                         "local_transaction_bytes",

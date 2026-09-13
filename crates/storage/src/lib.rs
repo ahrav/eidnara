@@ -1981,6 +1981,7 @@ mod sqlite_backend {
     /// Callers hold the exclusive lease, which excludes the shared lease `inspect_existing` runs under.
     /// A directory that cannot be listed is left to the directory sync that follows, whose open needs
     /// the same permission and whose failure reports the removed family's durability as unknown.
+    /// A scratch directory removed before its inspection completes is already gone.
     fn remove_stale_inspection_copies(parent: &Path, db_file_name: &str) -> Result<(), StoreError> {
         let entries = match std::fs::read_dir(parent) {
             Ok(entries) => entries,
@@ -1989,21 +1990,45 @@ mod sqlite_backend {
         };
         for entry in entries {
             let entry = entry.map_err(StoreError::Io)?;
-            if !entry.file_name().to_string_lossy().starts_with(".inspect-") {
+            if !is_inspection_scratch_name(&entry.file_name().to_string_lossy()) {
                 continue;
             }
             let scratch = entry.path();
-            let is_directory = std::fs::symlink_metadata(&scratch)
-                .map_err(StoreError::Io)?
-                .is_dir();
-            let holds_this_database = std::fs::symlink_metadata(scratch.join(db_file_name))
-                .map(|meta| meta.is_file())
-                .unwrap_or(false);
-            if is_directory && holds_this_database {
-                std::fs::remove_dir_all(&scratch).map_err(StoreError::Io)?;
+            match holds_only_copies_of(&scratch, db_file_name) {
+                Ok(true) => std::fs::remove_dir_all(&scratch).map_err(StoreError::Io)?,
+                Ok(false) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(StoreError::Io(error)),
             }
         }
         Ok(())
+    }
+
+    /// Accepts `.inspect-` followed by nonempty decimal pid and nanosecond components.
+    fn is_inspection_scratch_name(name: &str) -> bool {
+        let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+        name.strip_prefix(".inspect-")
+            .and_then(|rest| rest.split_once('-'))
+            .is_some_and(|(pid, nanos)| digits(pid) && digits(nanos))
+    }
+
+    /// An empty directory contains no entry that disproves it is this database's scratch.
+    fn holds_only_copies_of(scratch: &Path, db_file_name: &str) -> std::io::Result<bool> {
+        if !std::fs::symlink_metadata(scratch)?.is_dir() {
+            return Ok(false);
+        }
+        for entry in std::fs::read_dir(scratch)? {
+            let entry = entry?;
+            let is_member = entry
+                .file_name()
+                .to_string_lossy()
+                .strip_prefix(db_file_name)
+                .is_some_and(|suffix| SQLITE_FAMILY_SUFFIXES.contains(&suffix));
+            if !is_member || !entry.file_type()?.is_file() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Requires the SQLite database's parent directory to contain no entries except its lease sidecar.
@@ -3026,6 +3051,40 @@ mod tests {
             other => panic!("foreign residue must still be reported, got {other:?}"),
         }
         std::fs::remove_dir_all(&foreign).expect("clear the foreign directory");
+        verify_sqlite_family_removed(&d).expect("only the lease sidecar remains");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delete_sqlite_family_reaps_only_scratch_it_can_prove_it_owns() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        let path = Path::new(path);
+        drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
+        let name = path.file_name().expect("database file name");
+        // `interrupted` is a copy that died before its first file: the generated name, nothing inside.
+        let interrupted = root.join(".inspect-3-3");
+        std::fs::create_dir(&interrupted).expect("plant an interrupted inspection directory");
+        // `backup` is not a generated name, though it holds a same-named database.
+        let backup = root.join(".inspect-backup");
+        std::fs::create_dir(&backup).expect("plant a foreign directory");
+        std::fs::copy(path, backup.join(name)).expect("copy the database into it");
+        std::fs::write(backup.join("notes.txt"), b"keep").expect("plant unrelated contents");
+        // `stray` has a generated name but contains an extra member.
+        let stray = root.join(".inspect-4-4");
+        std::fs::create_dir(&stray).expect("plant a directory with a stray member");
+        std::fs::copy(path, stray.join(name)).expect("copy the database into it");
+        std::fs::write(stray.join("stray"), b"s").expect("plant the stray member");
+
+        delete_sqlite_family(&d).expect("delete the released family");
+        assert!(!interrupted.exists(), "an interrupted copy is reaped");
+        assert!(backup.join(name).exists() && backup.join("notes.txt").exists());
+        assert!(stray.join(name).exists() && stray.join("stray").exists());
+        for directory in [&backup, &stray] {
+            std::fs::remove_dir_all(directory).expect("clear the retained directory");
+        }
         verify_sqlite_family_removed(&d).expect("only the lease sidecar remains");
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -573,6 +573,34 @@ fn inventory_bounds_and_cancelled_acknowledgement_preserve_old_checkpoint() {
 }
 
 #[test]
+fn a_maximal_obligation_bound_is_refused_before_the_gate_is_charged() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    drop(case.old.take());
+    let mut config = spec(root.path());
+    config.retirement.max_obligations = NonZeroUsize::MAX;
+    let result = case.selection.retire(
+        &case.corpus.kernel,
+        &case.gate,
+        &config,
+        &budget(Duration::from_secs(30)),
+        &mut |_| {},
+    );
+    assert!(
+        matches!(result, Err(BuildError::InventoryBound)),
+        "{result:?}"
+    );
+    case.assert_no_receipt();
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        Some(case.old_checkpoint)
+    );
+}
+
+#[test]
 fn census_bound_is_independent_of_the_per_batch_persist_limit() {
     let root = tempfile::tempdir().unwrap();
     let mut case = RetirementCase::new(root.path());
