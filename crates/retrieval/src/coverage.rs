@@ -343,8 +343,10 @@ pub fn verify_construction(
          (SELECT count(*) FROM occurrence_vectors),
          (SELECT count(*) FROM embedding_jobs),
          (SELECT count(*) FROM embedding_jobs WHERE state='pending' AND attempts=0
-            AND episode_id IS NULL AND episode_deadline IS NULL AND next_attempt_at IS NULL
-            AND host_job_id IS NULL AND stop_reason IS NULL AND authorization_ref IS NULL),
+            AND episode_allowance=0 AND episode_id IS NULL AND episode_deadline IS NULL
+            AND next_attempt_at IS NULL AND admitted_epoch IS NULL AND last_failure_kind IS NULL
+            AND host_job_id IS NULL AND host_incarnation IS NULL AND stop_reason IS NULL
+            AND authorization_ref IS NULL),
          (SELECT count(*) FROM embedding_jobs WHERE state='obsolete'),
          (SELECT count(*) FROM embedding_recovery_authorizations)
            + (SELECT count(*) FROM retirement_receipts)",

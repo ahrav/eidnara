@@ -371,6 +371,14 @@ fn construction_verification_uses_occurrence_identity_and_shared_content_equalit
                     "UPDATE embedding_jobs SET attempts=0",
                 ),
                 (
+                    "UPDATE embedding_jobs SET episode_allowance=1",
+                    "UPDATE embedding_jobs SET episode_allowance=0",
+                ),
+                (
+                    "UPDATE embedding_jobs SET admitted_epoch=1,host_incarnation='h',last_failure_kind='k'",
+                    "UPDATE embedding_jobs SET admitted_epoch=NULL,host_incarnation=NULL,last_failure_kind=NULL",
+                ),
+                (
                     "UPDATE embedding_jobs SET stop_reason='exhausted'",
                     "UPDATE embedding_jobs SET stop_reason=NULL",
                 ),
