@@ -203,6 +203,7 @@ fn all_source_apis_refuse_cancelled_free_guards_and_held_guards_without_progress
     let store = &fixture.store;
     let binding = &hold.binding;
     let id = &hold.hold_id;
+    let controlled = store.controlled_acquisitions_for_test();
     assert_eq!(
         store.tip_within_budget(&fresh()).unwrap(),
         target.through_commit
@@ -220,6 +221,14 @@ fn all_source_apis_refuse_cancelled_free_guards_and_held_guards_without_progress
             .unwrap(),
         target
     );
+    assert!(store.controlled_acquisitions_for_test() > controlled);
+    let controlled = store.controlled_acquisitions_for_test();
+    assert!(
+        store
+            .read_complete_commits(&request, commit_bounds())
+            .is_ok()
+    );
+    assert_eq!(store.controlled_acquisitions_for_test(), controlled);
     let page = store
         .read_complete_commits_within_budget(&fresh(), &request, commit_bounds())
         .unwrap();

@@ -450,7 +450,7 @@ impl<'a> SearchCatchUp<'a> {
         drive_commit_pages(
             self.kernel,
             CommitWalk {
-                budget: self.budget.clone(),
+                budget: Some(self.budget.clone()),
                 consumer_id: &consumer.binding.consumer_id,
                 incarnation: captured.incarnation,
                 now,
@@ -811,10 +811,6 @@ impl<'a> SearchCatchUp<'a> {
                     .quarantine()
                     .expect("quarantine intent must record its cause before publication");
                 return Err(CatchUpError::Quarantined(quarantine).into());
-            }
-            Err(SourceHoldError::Kernel(KernelError::Deadline)) => {
-                // A definite pre-commit refusal does not need the checkpoint read used for unknown outcomes.
-                return Err(Blocked::Cancelled.into());
             }
             Err(SourceHoldError::Kernel(error)) if outcome_unknown(error) => {
                 let kernel_checkpoint = self

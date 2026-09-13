@@ -1260,6 +1260,26 @@ fn unadmitted_decision_publishes_nothing_and_blocks_the_episode() {
     );
 }
 
+/// The legacy entry point does not perform controlled acquisitions.
+#[test]
+fn legacy_episode_reads_pages_without_a_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.decide(Seed::scoped(
+        "rule",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        CONTRACT,
+        "Relied on.",
+    ));
+    let before = corpus.kernel.controlled_acquisitions_for_test();
+    let report = corpus.materialize();
+    assert!(report.commits_consumed > 0, "{report:?}");
+    assert_eq!(corpus.kernel.controlled_acquisitions_for_test(), before);
+}
+
 /// An episode against a kernel that never registered the consumer reports the unknown consumer and walks nothing.
 #[test]
 fn unregistered_consumer_blocks_the_episode() {

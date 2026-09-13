@@ -238,6 +238,40 @@ fn precommit_exhaustion_rolls_back_and_restores_writer_settings() {
 }
 
 #[test]
+fn interrupted_fence_read_reports_deadline_not_fence_loss() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    let budget = EvalBudget::unbounded();
+    let limit = budget.acquire_limit();
+    let mut writer = store.writer_with_limit(&limit).unwrap();
+    let tx = writer.transaction(TransactionBehavior::Immediate).unwrap();
+    assert_eq!(
+        crate::envelope::check_fence(&tx, store.lease_epoch()),
+        Ok(())
+    );
+    // Every opcode polls, so the fence read observes the cancellation itself.
+    limit.clone().set_progress_handler(&tx, 1).unwrap();
+    budget.cancel();
+    assert_eq!(
+        crate::envelope::check_fence(&tx, store.lease_epoch()),
+        Err(KernelError::Deadline)
+    );
+    drop(tx);
+    drop(writer);
+    let fresh = EvalBudget::unbounded();
+    let mut writer = store.writer_with_limit(&fresh.acquire_limit()).unwrap();
+    let tx = writer.transaction(TransactionBehavior::Immediate).unwrap();
+    assert_eq!(
+        crate::envelope::check_fence(&tx, store.lease_epoch()),
+        Ok(())
+    );
+    assert_eq!(
+        crate::envelope::check_fence(&tx, store.lease_epoch() + 1),
+        Err(KernelError::FenceLost)
+    );
+}
+
+#[test]
 fn commit_clears_interrupt_before_sql_and_rearms_it_for_connection_reuse() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();

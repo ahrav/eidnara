@@ -175,6 +175,9 @@ pub struct KernelStore {
     pub(super) materialized_outbox_rows: AtomicUsize,
     #[cfg(feature = "test-support")]
     pub(super) verified_object_reads: AtomicUsize,
+    /// `controlled_acquisitions` counts pooled connections whose busy allowance and progress handler use a caller budget.
+    #[cfg(feature = "test-support")]
+    pub(super) controlled_acquisitions: AtomicUsize,
     pub(super) db_path: PathBuf,
     // Fields drop in declaration order, so `_lease` must stay last: it releases
     // the file lock only after every connection field above it has closed.
@@ -402,6 +405,8 @@ impl KernelStore {
             materialized_outbox_rows: AtomicUsize::new(0),
             #[cfg(feature = "test-support")]
             verified_object_reads: AtomicUsize::new(0),
+            #[cfg(feature = "test-support")]
+            controlled_acquisitions: AtomicUsize::new(0),
             db_path,
             _lease: lease,
         };
@@ -1510,6 +1515,11 @@ pub(crate) struct LimitedConnection<'a> {
 }
 
 impl KernelStore {
+    #[cfg(feature = "test-support")]
+    pub fn controlled_acquisitions_for_test(&self) -> usize {
+        self.controlled_acquisitions.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn reader_with_limit(
         &self,
         limit: &AcquireLimit,
@@ -1519,7 +1529,7 @@ impl KernelStore {
         } else {
             self.lock_reader()?
         };
-        LimitedConnection::new(connection, limit)
+        self.limited_connection(connection, limit)
     }
 
     pub(crate) fn writer_with_limit(
@@ -1531,7 +1541,20 @@ impl KernelStore {
         } else {
             self.lock_writer()?
         };
-        LimitedConnection::new(connection, limit)
+        self.limited_connection(connection, limit)
+    }
+
+    fn limited_connection<'a>(
+        &self,
+        connection: std::sync::MutexGuard<'a, Connection>,
+        limit: &AcquireLimit,
+    ) -> Result<LimitedConnection<'a>, KernelError> {
+        let access = LimitedConnection::new(connection, limit)?;
+        #[cfg(feature = "test-support")]
+        if access.busy_timeout_ms.is_some() {
+            self.controlled_acquisitions.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(access)
     }
 }
 
