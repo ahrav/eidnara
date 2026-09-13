@@ -5,17 +5,18 @@
 //! The kernel is never asked to acknowledge a commit the projection has not durably applied.
 //! The local transaction is committed and released before the kernel writer is taken, so the two databases never hold transactions at the same time.
 //!
-//! A refusal ends the episode without moving either checkpoint.
 //! A window that carries an artifact deletion is refused, because the descriptor export carries no tombstone for it and acknowledging it would report the deletion as propagated.
 //! An unknown local commit outcome is reconciled from the projection's durable rows.
 //! An unknown acknowledgement outcome is reconciled from the kernel's durable consumer checkpoint.
 //! Integrity and storage failures quarantine the projection, so no acknowledgement can rest on a projection whose contents are in doubt.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::time::Instant;
 
+use kernel::applicability::EvalBudget;
 use kernel::{
     ARTIFACT_DELETION_SOURCE_KIND, CommitPageBounds, CommitReadError, CompleteCommit, ExportWindow,
-    KernelError, KernelStore, SourceExportError, SourceHoldAdmission, SourceHoldBinding,
+    KernelError, KernelStore, PageBound, SourceExportError, SourceHoldAdmission, SourceHoldBinding,
     SourceHoldError, SourcePageBounds, SourceRow,
 };
 use retrieval::ProjectionError;
@@ -42,7 +43,7 @@ pub struct CatchUpConsumer {
 }
 
 /// Bounds one episode's reads, hold extensions, exports, and local batches.
-/// Every bound is judged before the work it bounds materializes.
+/// Export admission bounds retained rows and text before decoding; batch admission bounds mutations before writing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpisodeBounds {
     pub commits: CommitPageBounds,
@@ -50,6 +51,11 @@ pub struct EpisodeBounds {
     pub source_page: SourcePageBounds,
     /// Source pages one window's delta may span before the episode refuses it.
     pub max_source_pages: NonZeroUsize,
+    /// Total encoded work across a window. An artifact is charged again when another page reads it.
+    pub max_source_encoded_bytes: NonZeroU64,
+    /// The smaller record/mutation limit conservatively caps retained source rows, including invalidation-only rows.
+    /// `max_source_bytes` additionally caps retained text bytes, not metadata or live heap.
+    /// A created-and-invalidated row contributes two mutations; the full mutation count is admitted before local writes, not before decoding.
     pub batch: BatchBounds,
 }
 
@@ -65,7 +71,7 @@ pub enum EpisodeEvent {
     LocalStaged {
         through: i64,
     },
-    /// The local transaction has ended and its connection is released; the projection holds the whole window or none of it.
+    /// The write attempt ended and no transaction remains; the projection holds the whole window or none of it, even if no write lock was acquired.
     LocalReleased {
         through: i64,
     },
@@ -78,10 +84,11 @@ pub enum EpisodeEvent {
     },
 }
 
-/// Why an episode stopped short of its target.
-/// Nothing durable moved for the window that was refused; the next episode starts from the same prefix.
+/// Cancellation can leave a committed local prefix awaiting acknowledgement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Blocked {
+    /// The shared operation budget was cancelled or its original deadline elapsed. This can follow the final acknowledgement; report counters retain that completed progress.
+    Cancelled,
     /// The kernel rejects negative episode times at acknowledgement, so the
     /// episode refuses them before persisting an unacknowledgeable window.
     NegativeTime {
@@ -121,6 +128,11 @@ pub enum Blocked {
     Export(SourceExportError),
     SourcePagesExceeded {
         through: i64,
+    },
+    /// The window cannot admit another source row within its aggregate allowance.
+    SourceCapacityExceeded {
+        through: i64,
+        bound: &'static str,
     },
     /// The batch was refused before anything of it became durable.
     Admission(ProjectionError),
@@ -178,9 +190,10 @@ pub struct SearchCatchUp<'a> {
     kernel: &'a KernelStore,
     projection: &'a SearchProjection,
     fault: Option<EpisodeFault>,
+    budget: EvalBudget,
+    started: Instant,
 }
 
-/// Why one step ended the episode: a refusal that moved nothing, or a failure the caller must see.
 enum Stop {
     Blocked(Blocked),
     Failed(CatchUpError),
@@ -237,7 +250,16 @@ impl<'a> SearchCatchUp<'a> {
             kernel,
             projection,
             fault: None,
+            budget: EvalBudget::unbounded(),
+            started: Instant::now(),
         }
+    }
+
+    /// Shares the caller's cancellation and absolute deadline across all episodes on this driver.
+    /// Checks are cooperative at page and publication boundaries. The deadline bounds local write-lock acquisition, but kernel lock calls are not interruptible by this budget.
+    pub fn with_budget(mut self, budget: EvalBudget) -> Self {
+        self.budget = budget;
+        self
     }
 
     pub fn quarantine(&self) -> Option<Quarantine> {
@@ -246,7 +268,7 @@ impl<'a> SearchCatchUp<'a> {
 
     /// Captures a target, brings the kernel checkpoint up to the durable local prefix, then applies and acknowledges one window at a time until the target is reached or a step refuses.
     ///
-    /// `now` is Unix-epoch milliseconds: it is recorded as the projection rows' write time and the acknowledgement's `updated_at`, and the export judges hold expiry against it.
+    /// `now` is Unix-epoch milliseconds at entry. Elapsed monotonic time advances export checks and write/acknowledgement audit times; it never renews the operation deadline.
     ///
     /// # Errors
     ///
@@ -260,7 +282,28 @@ impl<'a> SearchCatchUp<'a> {
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<EpisodeReport, CatchUpError> {
         self.fault = None;
-        self.run_episode_inner(consumer, bounds, now, observer)
+        let captured = self.capture_target()?;
+        let through = captured.through_commit;
+        self.run_episode_inner(consumer, bounds, now, observer, captured, through)
+    }
+
+    /// [`Self::run_episode`] toward `target`, a commit fixed before the episode instead of the tip captured by it.
+    /// Commits after `target` are neither applied nor acknowledged, whatever the tip has moved to.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_episode`].
+    pub fn run_episode_toward(
+        &mut self,
+        consumer: &CatchUpConsumer,
+        bounds: &EpisodeBounds,
+        target: i64,
+        now: i64,
+        observer: &mut dyn FnMut(EpisodeEvent),
+    ) -> Result<EpisodeReport, CatchUpError> {
+        self.fault = None;
+        let captured = self.capture_target()?;
+        self.run_episode_inner(consumer, bounds, now, observer, captured, target)
     }
 
     /// [`Self::run_episode`] under one injected fault.
@@ -274,7 +317,17 @@ impl<'a> SearchCatchUp<'a> {
         fault: EpisodeFault,
     ) -> Result<EpisodeReport, CatchUpError> {
         self.fault = Some(fault);
-        self.run_episode_inner(consumer, bounds, now, observer)
+        let captured = self.capture_target()?;
+        let through = captured.through_commit;
+        self.run_episode_inner(consumer, bounds, now, observer, captured, through)
+    }
+
+    fn capture_target(&mut self) -> Result<kernel::CommitReadTarget, CatchUpError> {
+        self.started = Instant::now();
+        if let Some(quarantine) = self.projection.quarantine() {
+            return Err(CatchUpError::Quarantined(quarantine));
+        }
+        Ok(self.kernel.capture_commit_read_target()?)
     }
 
     fn run_episode_inner(
@@ -283,26 +336,17 @@ impl<'a> SearchCatchUp<'a> {
         bounds: &EpisodeBounds,
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
+        captured: kernel::CommitReadTarget,
+        through: i64,
     ) -> Result<EpisodeReport, CatchUpError> {
-        if let Some(quarantine) = self.projection.quarantine() {
-            return Err(CatchUpError::Quarantined(quarantine));
-        }
-        let target = self.kernel.capture_commit_read_target()?;
         let mut report = EpisodeReport {
-            target: target.through_commit,
+            target: through,
             acknowledged_through: 0,
             batches_applied: 0,
             commits_consumed: 0,
             end: EpisodeEnd::ReachedTarget,
         };
-        match self.drive(
-            consumer,
-            bounds,
-            now,
-            observer,
-            target.incarnation,
-            &mut report,
-        ) {
+        match self.drive(consumer, bounds, now, observer, captured, &mut report) {
             Ok(()) => Ok(report),
             Err(Stop::Blocked(blocked)) => {
                 report.end = EpisodeEnd::Blocked(blocked);
@@ -319,7 +363,7 @@ impl<'a> SearchCatchUp<'a> {
         bounds: &EpisodeBounds,
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
-        incarnation: kernel::CommitReadIncarnation,
+        captured: kernel::CommitReadTarget,
         report: &mut EpisodeReport,
     ) -> Result<(), Stop> {
         if now < 0 {
@@ -329,8 +373,18 @@ impl<'a> SearchCatchUp<'a> {
             .kernel
             .outbox_consumer_checkpoint(&consumer.binding.consumer_id)?
             .ok_or(Blocked::Read(CommitReadError::UnknownConsumer))?;
+        self.check_budget()?;
+        if report.target < 0 {
+            return Err(Blocked::Read(CommitReadError::InvalidRequest).into());
+        }
+        if report.target > captured.through_commit {
+            return Err(Blocked::Read(CommitReadError::TargetBeyondTip).into());
+        }
         let checkpoint = self.local_prefix(consumer)?;
         let local = checkpoint.checkpoint_commit_seq;
+        if local > report.target {
+            return Err(Blocked::Read(CommitReadError::InvalidRequest).into());
+        }
         if report.acknowledged_through > local {
             return Err(Blocked::AcknowledgedBeyondLocalPrefix {
                 local,
@@ -341,6 +395,7 @@ impl<'a> SearchCatchUp<'a> {
         // A durable local prefix the kernel has not acknowledged is a lost reply from an earlier episode; the same prefix is acknowledged again.
         if report.acknowledged_through < local {
             observer(EpisodeEvent::HoldExtensionRequested { through: local });
+            self.check_budget()?;
             let hold = self
                 .kernel
                 .extend_source_hold(
@@ -371,17 +426,19 @@ impl<'a> SearchCatchUp<'a> {
         }
         let target = report.target;
         let mut after = local;
+        self.check_budget()?;
         drive_commit_pages(
             self.kernel,
             CommitWalk {
                 consumer_id: &consumer.binding.consumer_id,
-                incarnation,
+                incarnation: captured.incarnation,
                 now,
                 after: local,
                 target,
                 bounds: bounds.commits,
             },
             |page| {
+                self.check_budget()?;
                 // The export delivers creations, supersessions, and retirements; a deletion arrives only as a control row, and the batch it would need is not built here.
                 if let Some(deletion) = first_deletion(&page.commits) {
                     return Err(Blocked::DeletionUnpropagated {
@@ -396,6 +453,7 @@ impl<'a> SearchCatchUp<'a> {
                 self.acknowledge(consumer, through, now, observer)?;
                 report.acknowledged_through = through;
                 after = through;
+                self.check_budget()?;
                 Ok::<(), Stop>(())
             },
         )
@@ -437,6 +495,7 @@ impl<'a> SearchCatchUp<'a> {
     ) -> Result<(), Stop> {
         self.refuse_if_quarantined()?;
         observer(EpisodeEvent::HoldExtensionRequested { through });
+        self.check_budget()?;
         let hold = self
             .kernel
             .extend_source_hold(
@@ -465,7 +524,70 @@ impl<'a> SearchCatchUp<'a> {
             consumer.generation_id.as_deref(),
         )
         .map_err(Blocked::Admission)?;
-        match self.commit_batch(consumer, &batch, bounds, now, observer) {
+        self.commit_batch(consumer, &batch, bounds, now, observer)
+    }
+
+    /// Reports [`EpisodeEvent::LocalReleased`] after the write attempt ends, including a refused lock acquisition.
+    fn commit_batch(
+        &mut self,
+        consumer: &CatchUpConsumer,
+        batch: &ProjectionBatch<'_>,
+        bounds: &EpisodeBounds,
+        now: i64,
+        observer: &mut dyn FnMut(EpisodeEvent),
+    ) -> Result<(), Stop> {
+        self.check_budget()?;
+        let through = batch.identity.through_commit_seq;
+        let kernel = self.kernel;
+        let acknowledge_inside =
+            self.fault == Some(EpisodeFault::AcknowledgeInsideLocalTransaction);
+        let mut cancelled = false;
+        // The projection closure accepts only projection errors. Record cancellation separately so its rollback signal never becomes a quarantine cause.
+        let mut check = || {
+            if self.budget.is_exhausted() {
+                cancelled = true;
+                Err(ProjectionError::MutationConflict)
+            } else {
+                Ok(())
+            }
+        };
+        let write = |conn: &storage::GuardedConn<'_>| {
+            check()?;
+            retrieval::batch::apply_batch(conn, batch, bounds.batch, self.audit_time(now))?;
+            observer(EpisodeEvent::LocalStaged { through });
+            check()?;
+            if acknowledge_inside {
+                // The control only needs the kernel writer taken inside the local transaction; its outcome is not this batch's.
+                observer(EpisodeEvent::AcknowledgementRequested { through });
+                let _ = kernel.acknowledge_through_source_hold(
+                    &consumer.binding,
+                    &consumer.hold_id,
+                    through,
+                    self.audit_time(now),
+                );
+            }
+            Ok(())
+        };
+        let mut applied = match self.budget.deadline() {
+            Some(deadline) => self.projection.write_within(deadline, write),
+            None => self.projection.write(write),
+        };
+        observer(EpisodeEvent::LocalReleased { through });
+        if cancelled
+            || matches!(
+                applied,
+                Err(SearchProjectionError::Store(storage::StoreError::Deadline))
+            )
+        {
+            self.refuse_if_quarantined()?;
+            return Err(Blocked::Cancelled.into());
+        }
+        if self.fault == Some(EpisodeFault::LoseLocalCommitReply) && applied.is_ok() {
+            applied = Err(SearchProjectionError::Store(storage::StoreError::Backend(
+                "database is locked".to_string(),
+            )));
+        }
+        match applied {
             Ok(()) => Ok(()),
             // The store returned before COMMIT, so the batch rolled back and nothing of it is durable.
             Err(SearchProjectionError::Projection(error)) => Err(match classify(&error) {
@@ -498,49 +620,12 @@ impl<'a> SearchCatchUp<'a> {
                 Err(CatchUpError::ProjectionFenced.into())
             }
             // The store failed somewhere between BEGIN and COMMIT; the durable rows, not the error, say whether COMMIT took effect.
-            Err(SearchProjectionError::Store(_)) => match self.projection.batch_status(&batch) {
+            Err(SearchProjectionError::Store(_)) => match self.projection.batch_status(batch) {
                 Ok(BatchStatus::Applied) => Ok(()),
                 Ok(BatchStatus::NotApplied) => Err(Blocked::LocalCommitUnresolved.into()),
                 Err(error) => Err(self.stop_from_projection_error(error)),
             },
         }
-    }
-
-    /// Runs the batch in one fenced local transaction and reports [`EpisodeEvent::LocalReleased`] once that transaction is over.
-    fn commit_batch(
-        &self,
-        consumer: &CatchUpConsumer,
-        batch: &ProjectionBatch<'_>,
-        bounds: &EpisodeBounds,
-        now: i64,
-        observer: &mut dyn FnMut(EpisodeEvent),
-    ) -> Result<(), SearchProjectionError> {
-        let through = batch.identity.through_commit_seq;
-        let kernel = self.kernel;
-        let acknowledge_inside =
-            self.fault == Some(EpisodeFault::AcknowledgeInsideLocalTransaction);
-        let applied = self.projection.write(|conn| {
-            retrieval::batch::apply_batch(conn, batch, bounds.batch, now)?;
-            observer(EpisodeEvent::LocalStaged { through });
-            if acknowledge_inside {
-                // The control only needs the kernel writer taken inside the local transaction; its outcome is not this batch's.
-                observer(EpisodeEvent::AcknowledgementRequested { through });
-                let _ = kernel.acknowledge_through_source_hold(
-                    &consumer.binding,
-                    &consumer.hold_id,
-                    through,
-                    now,
-                );
-            }
-            Ok(())
-        });
-        observer(EpisodeEvent::LocalReleased { through });
-        if self.fault == Some(EpisodeFault::LoseLocalCommitReply) && applied.is_ok() {
-            return Err(SearchProjectionError::Store(storage::StoreError::Backend(
-                "database is locked".to_string(),
-            )));
-        }
-        applied
     }
 
     /// Collects every page of the window's delta, since source pages are keyset-ordered and a partial inventory cannot justify a checkpoint.
@@ -554,21 +639,69 @@ impl<'a> SearchCatchUp<'a> {
     ) -> Result<Vec<SourceRow>, Stop> {
         let mut rows = Vec::new();
         let mut cursor = None;
+        let mut remaining_rows = bounds
+            .batch
+            .persist
+            .max_records
+            .get()
+            .min(bounds.batch.max_local_mutations.get());
+        let mut remaining_decoded = bounds.batch.max_source_bytes.get() as u64;
+        let mut remaining_encoded = bounds.max_source_encoded_bytes.get();
+        let capacity = |bound| Blocked::SourceCapacityExceeded { through, bound };
         for _ in 0..bounds.max_source_pages.get() {
+            self.check_budget()?;
+            let page_bounds = SourcePageBounds {
+                max_rows: NonZeroUsize::new(remaining_rows)
+                    .ok_or_else(|| capacity("rows"))?
+                    .min(bounds.source_page.max_rows),
+                max_decoded_bytes: NonZeroU64::new(remaining_decoded)
+                    .ok_or_else(|| capacity("text"))?
+                    .min(bounds.source_page.max_decoded_bytes),
+                max_encoded_bytes: NonZeroU64::new(remaining_encoded)
+                    .ok_or_else(|| capacity("encoded"))?
+                    .min(bounds.source_page.max_encoded_bytes),
+                max_row_bytes: bounds.source_page.max_row_bytes,
+            };
             let page = self
                 .kernel
                 .export_source_page(
                     &consumer.binding,
                     &consumer.hold_id,
-                    now,
+                    self.audit_time(now),
                     ExportWindow::Delta { after, through },
                     cursor.as_ref(),
-                    bounds.source_page,
+                    page_bounds,
                 )
                 .map_err(|error| match error {
                     SourceExportError::Kernel(error) => Stop::from(error),
+                    SourceExportError::OversizedRow { bound, bytes, .. } => {
+                        let (standalone, dimension) = match bound {
+                            PageBound::Row => (bounds.source_page.max_row_bytes.get(), "text"),
+                            PageBound::Decoded => {
+                                (bounds.source_page.max_decoded_bytes.get(), "text")
+                            }
+                            PageBound::Encoded => {
+                                (bounds.source_page.max_encoded_bytes.get(), "encoded")
+                            }
+                        };
+                        if bytes <= standalone {
+                            capacity(dimension).into()
+                        } else {
+                            Blocked::Export(error).into()
+                        }
+                    }
                     error => Blocked::Export(error).into(),
                 })?;
+            self.check_budget()?;
+            remaining_rows = remaining_rows
+                .checked_sub(page.charge.rows)
+                .ok_or_else(|| capacity("rows"))?;
+            remaining_decoded = remaining_decoded
+                .checked_sub(page.charge.decoded_bytes)
+                .ok_or_else(|| capacity("text"))?;
+            remaining_encoded = remaining_encoded
+                .checked_sub(page.charge.encoded_bytes)
+                .ok_or_else(|| capacity("encoded"))?;
             rows.extend(page.rows);
             match page.next {
                 Some(next) => cursor = Some(next),
@@ -588,12 +721,22 @@ impl<'a> SearchCatchUp<'a> {
     ) -> Result<(), Stop> {
         self.refuse_if_quarantined()?;
         observer(EpisodeEvent::AcknowledgementRequested { through });
+        self.refuse_if_quarantined()?;
+        self.check_budget()?;
+        let mut guard_cancelled = false;
         let mut acknowledged = self.kernel.acknowledge_through_source_hold_if(
             &consumer.binding,
             &consumer.hold_id,
             through,
-            now,
-            || self.projection.acknowledgement_guard(),
+            self.audit_time(now),
+            || {
+                let guard = self.projection.acknowledgement_guard()?;
+                if self.check_budget().is_err() {
+                    guard_cancelled = true;
+                    return None;
+                }
+                Some(guard)
+            },
         );
         if self.fault == Some(EpisodeFault::LoseAcknowledgementReply)
             && matches!(acknowledged, Ok(true))
@@ -603,6 +746,10 @@ impl<'a> SearchCatchUp<'a> {
         match acknowledged {
             Ok(true) => {}
             Ok(false) => {
+                if guard_cancelled {
+                    self.refuse_if_quarantined()?;
+                    return Err(Blocked::Cancelled.into());
+                }
                 let quarantine = self
                     .projection
                     .quarantine()
@@ -660,8 +807,16 @@ impl<'a> SearchCatchUp<'a> {
         self.enter_quarantine(kind, &error).into()
     }
 
-    /// Another writer can quarantine the projection while an episode runs, so
-    /// `refuse_if_quarantined` re-reads shared state.
+    fn check_budget(&self) -> Result<(), Blocked> {
+        self.budget.check().map_err(|_| Blocked::Cancelled)
+    }
+
+    fn audit_time(&self, now: i64) -> i64 {
+        // Round up so a partial millisecond cannot hide hold expiry.
+        let elapsed = self.started.elapsed().as_nanos().div_ceil(1_000_000);
+        now.saturating_add(i64::try_from(elapsed).unwrap_or(i64::MAX))
+    }
+
     fn refuse_if_quarantined(&self) -> Result<(), Stop> {
         match self.projection.quarantine() {
             Some(quarantine) => Err(CatchUpError::Quarantined(quarantine).into()),
