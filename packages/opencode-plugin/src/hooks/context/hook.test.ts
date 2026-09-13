@@ -12,6 +12,7 @@ import {
     __resetProjectIdentityForTests,
     resolveProjectIdentityForSession,
 } from "../../features/context/project-identity";
+import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import * as logger from "../../shared/logger";
 import { TimeoutError } from "../../shared/with-timeout";
 import * as permissionAvailability from "./ctx-reduce-availability";
@@ -163,6 +164,113 @@ async function expectSentinel(promise: Promise<unknown>, sentinel: string): Prom
 }
 
 describe("eidnara hook", () => {
+    it.each([
+        "info",
+        "messages",
+    ])("accepts hidden own %s data through the actual hook", async (field) => {
+        useTempDataHome("hook-hidden-data-");
+        const sessionId = `ses-hidden-${field}`;
+        const messages = installOneRawMessage(sessionId);
+        const approved = { info: { id: "approved" }, parts: [{ type: "text", text: "result" }] };
+        const fake = createFakeModuleClient(() => ({ native_messages: [approved] }));
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
+        );
+        const output = { messages };
+        if (field === "info") Object.defineProperty(messages[0], field, { enumerable: false });
+        else Object.defineProperty(output, field, { enumerable: false });
+        await hook["experimental.chat.messages.transform"]({}, output);
+        expect(fake.calls.map((call) => call.method)).toEqual(["transform"]);
+        expect(output.messages).toBe(messages);
+        expect(messages[0]).toBe(approved);
+    });
+
+    for (const entry of ["hook", "wrapper"] as const) {
+        for (const unsupported of [
+            "output-proxy",
+            "root-proxy",
+            "message-proxy",
+            "index-getter",
+            "nested-getter",
+            "then",
+        ] as const) {
+            it(`rejects ${unsupported} at the actual ${entry} without source hooks or preflight`, async () => {
+                useTempDataHome("hook-source-traps-");
+                const sessionId = `ses-${entry}-${unsupported}`;
+                const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+                const client = createClientMock();
+                const hook = requireHook(
+                    createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+                );
+                const messages = installOneRawMessage(sessionId);
+                const trap = mock(() => {
+                    throw new Error("source trap ran");
+                });
+                const handlers = {
+                    get: trap,
+                    ownKeys: trap,
+                    getPrototypeOf: trap,
+                    getOwnPropertyDescriptor: trap,
+                };
+                let array = messages;
+                if (unsupported === "root-proxy") array = new Proxy(messages, handlers);
+                if (unsupported === "message-proxy") messages[0] = new Proxy(messages[0], handlers);
+                if (unsupported === "index-getter")
+                    Object.defineProperty(messages, "0", { get: trap });
+                if (unsupported === "nested-getter")
+                    Object.defineProperty(messages[0], "parts", { get: trap });
+                if (unsupported === "then")
+                    Object.defineProperty(messages, unsupported, { get: trap });
+                const slot = Object.getOwnPropertyDescriptor(messages, "0");
+                const output = { messages: array };
+                const argument =
+                    unsupported === "output-proxy" ? new Proxy(output, handlers) : output;
+                if (entry === "wrapper") {
+                    const wrapper = createMessagesTransformHandler({
+                        eidnara: hook,
+                        transformMode: "rust",
+                    });
+                    expect(await wrapper({}, argument as never)).toBeUndefined();
+                } else await hook["experimental.chat.messages.transform"]({}, argument);
+                expect(output.messages).toBe(array);
+                expect(Object.getOwnPropertyDescriptor(messages, "0")).toEqual(slot);
+                expect(trap).not.toHaveBeenCalled();
+                expect(client.session.get).not.toHaveBeenCalled();
+                expect(client.app.agents).not.toHaveBeenCalled();
+                expect(fake.calls).toHaveLength(0);
+            });
+        }
+    }
+
+    it("rejects source mutation during hook directory lookup before direct transform", async () => {
+        useTempDataHome("hook-source-directory-");
+        const sessionId = "ses-source-directory";
+        const messages = installOneRawMessage(sessionId);
+        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const client = createClientMock();
+        const started = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        client.session.get = (async () => {
+            started.resolve();
+            await release.promise;
+            return { data: { directory: "/tmp" } };
+        }) as never;
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+        );
+        const trap = mock(() => "changed");
+        const output = { messages };
+        const pending = hook["experimental.chat.messages.transform"]({}, output);
+        await started.promise;
+        Object.defineProperty(messages[0], "parts", { get: trap });
+        release.resolve();
+        await pending;
+        expect(trap).not.toHaveBeenCalled();
+        expect(fake.calls).toHaveLength(0);
+        expect(output.messages).toBe(messages);
+        expect(messages.length).toBe(1);
+    });
+
     for (const failure of ["rejection", "timeout"] as const) {
         it(`keeps todowrite absent after a cached deny and live ${failure}`, async () => {
             useTempDataHome("hook-permission-failure-");

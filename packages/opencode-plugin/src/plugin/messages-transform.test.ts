@@ -57,6 +57,76 @@ describe("createMessagesTransformHandler — ts mode", () => {
 });
 
 describe("createMessagesTransformHandler — rust mode", () => {
+    it.each([
+        "entry",
+        "await",
+    ])("refuses inherited then at %s without invoking it", async (window) => {
+        const key = "then";
+        const saved = Object.getOwnPropertyDescriptor(Array.prototype, key);
+        let getterCalls = 0;
+        let hookCalls = 0;
+        const started = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const handler = createMessagesTransformHandler({
+            eidnara: {
+                "experimental.chat.messages.transform": async () => {
+                    hookCalls += 1;
+                    started.resolve();
+                    await release.promise;
+                },
+            },
+            transformMode: "rust",
+        });
+        const output = makeOutput();
+        const array = output.messages;
+        const member = array[0];
+        let result: unknown;
+        const pending = window === "await" ? handler({}, output) : undefined;
+        if (pending) await started.promise;
+        try {
+            Object.defineProperty(Array.prototype, key, {
+                configurable: true,
+                get: () => {
+                    getterCalls += 1;
+                    return undefined;
+                },
+            });
+            release.resolve();
+            result = await (pending ?? handler({}, output));
+        } finally {
+            if (saved) Object.defineProperty(Array.prototype, key, saved);
+            else Reflect.deleteProperty(Array.prototype, key);
+        }
+        expect(result).toBeUndefined();
+        expect(getterCalls).toBe(0);
+        expect(hookCalls).toBe(window === "await" ? 1 : 0);
+        expect(output.messages).toBe(array);
+        expect(array).toHaveLength(1);
+        expect(array[0]).toBe(member);
+    });
+
+    it("checks only the return container after the hook publishes", async () => {
+        let getterCalls = 0;
+        const handler = createMessagesTransformHandler({
+            eidnara: {
+                "experimental.chat.messages.transform": async (_input, output) => {
+                    Object.defineProperty(output.messages[0], "hidden", {
+                        get: () => {
+                            getterCalls += 1;
+                            return "value";
+                        },
+                    });
+                },
+            },
+            transformMode: "rust",
+        });
+        const output = makeOutput();
+        const array = output.messages;
+        expect(await handler({}, output)).toBe(array);
+        expect(Object.getOwnPropertyDescriptor(array[0], "hidden")?.get).toBeDefined();
+        expect(getterCalls).toBe(0);
+    });
+
     it("calls the inner hook and returns its mutated messages", async () => {
         const handler = createMessagesTransformHandler({
             eidnara: {

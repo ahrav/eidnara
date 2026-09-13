@@ -44,6 +44,16 @@ import {
     type SessionDirectoryDeps,
 } from "./session-directory";
 import type { MessageLike } from "./tag-content-primitives";
+import {
+    assertCapturedMessagesUnchanged,
+    assertReferenceableMessages,
+    type CapturedMessages,
+    captureMessages,
+    type MessageContentSnapshot,
+    readOwnDataProperty,
+    SourceRejected,
+    snapshotFieldsEqual,
+} from "./transform-capture";
 import { logTransformTiming } from "./transform-stage-logger";
 
 export interface RustModeTransformDeps extends SessionDirectoryDeps {
@@ -101,30 +111,13 @@ export interface RustModeModuleClient {
     hasSessionRoute?(sessionId: string): boolean;
 }
 
-type ContentSnapshotField = string | number | boolean | symbol;
-
 /** Wire caches hold a session's content snapshots and its last native output, so the LRU bound is sized to the sessions one OpenCode process keeps active. An evicted session sends its next pass as a full array. */
 const WIRE_CACHE_SESSION_CAPACITY = 64;
-
-const SNAPSHOT_ARRAY = Symbol("array");
-const SNAPSHOT_OBJECT = Symbol("object");
-const SNAPSHOT_KEY = Symbol("key");
-const SNAPSHOT_STRING = Symbol("string");
-const SNAPSHOT_NUMBER = Symbol("number");
-const SNAPSHOT_BOOLEAN = Symbol("boolean");
-const SNAPSHOT_NULL = Symbol("null");
-const SNAPSHOT_UNDEFINED = Symbol("undefined");
-
-interface MessageContentSnapshot {
-    signature: string;
-    fields: ContentSnapshotField[];
-}
 
 interface RustWireCache {
     rawCount: number;
     wireCount: number;
     rawLastId: string | null;
-    rawLastSignature: string | null;
     rawLastVisible: boolean;
     /** Each pass re-verifies reused messages so in-place edits cannot reuse a stale prefix. */
     rawContentSnapshots: MessageContentSnapshot[];
@@ -196,156 +189,18 @@ function messageIdOf(message: MessageLike): string | null {
     return typeof id === "string" && id.length > 0 ? id : null;
 }
 
-const FNV1A_32_OFFSET = 0x811c9dc5;
-const FNV1A_32_PRIME = 0x01000193;
-
-function updateFnv1a32(hash: number, value: string): number {
-    let next = hash;
-    for (let index = 0; index < value.length; index += 1) {
-        next ^= value.charCodeAt(index);
-        next = Math.imul(next, FNV1A_32_PRIME) >>> 0;
-    }
-    return next;
-}
-
-interface MessageContentFieldVisitor {
-    field(value: ContentSnapshotField): boolean;
-    beginObject(): number | undefined;
-    endObject(token: number, entryCount: number): boolean;
-}
-
-function isSnapshotObjectChild(value: unknown): boolean {
-    return value !== undefined && typeof value !== "function" && typeof value !== "symbol";
-}
-
-function visitMessageContentFields(value: unknown, visitor: MessageContentFieldVisitor): boolean {
-    if (value === null) return visitor.field(SNAPSHOT_NULL);
-    if (typeof value === "string") {
-        return visitor.field(SNAPSHOT_STRING) && visitor.field(value);
-    }
-    if (typeof value === "number") {
-        return visitor.field(SNAPSHOT_NUMBER) && visitor.field(value);
-    }
-    if (typeof value === "boolean") {
-        return visitor.field(SNAPSHOT_BOOLEAN) && visitor.field(value);
-    }
-    if (value === undefined || typeof value === "function" || typeof value === "symbol") {
-        return visitor.field(SNAPSHOT_UNDEFINED);
-    }
-    if (Array.isArray(value)) {
-        if (!visitor.field(SNAPSHOT_ARRAY) || !visitor.field(value.length)) return false;
-        for (const item of value) {
-            if (!visitMessageContentFields(item, visitor)) return false;
-        }
-        return true;
-    }
-    if (typeof value === "object") {
-        if (!visitor.field(SNAPSHOT_OBJECT)) return false;
-        const objectToken = visitor.beginObject();
-        if (objectToken === undefined) return false;
-        let entryCount = 0;
-        for (const key in value) {
-            if (!Object.hasOwn(value, key)) continue;
-            const child = (value as Record<string, unknown>)[key];
-            if (!isSnapshotObjectChild(child)) continue;
-            entryCount += 1;
-            if (
-                !visitor.field(SNAPSHOT_KEY) ||
-                !visitor.field(key) ||
-                !visitMessageContentFields(child, visitor)
-            ) {
-                return false;
-            }
-        }
-        return visitor.endObject(objectToken, entryCount);
-    }
-    return visitor.field(SNAPSHOT_UNDEFINED);
-}
-
-function messageContentFields(message: MessageLike): ContentSnapshotField[] {
-    const fields: ContentSnapshotField[] = [];
-    const complete = visitMessageContentFields(message, {
-        field(value) {
-            fields.push(value);
-            return true;
-        },
-        beginObject() {
-            const countIndex = fields.length;
-            fields.push(0);
-            return countIndex;
-        },
-        endObject(countIndex, entryCount) {
-            fields[countIndex] = entryCount;
-            return true;
-        },
-    });
-    if (!complete) throw new Error("message content snapshot traversal stopped unexpectedly");
-    return fields;
-}
-
-function signatureForFields(fields: readonly ContentSnapshotField[]): string {
-    let hash = FNV1A_32_OFFSET;
-    for (const field of fields) {
-        const value = typeof field === "symbol" ? (field.description ?? "") : String(field);
-        hash = updateFnv1a32(hash, `${typeof field}:${value.length}:`);
-        hash = updateFnv1a32(hash, value);
-        hash = updateFnv1a32(hash, "\0");
-    }
-    return hash.toString(16).padStart(8, "0");
-}
-
-function messageContentSnapshot(message: MessageLike): MessageContentSnapshot {
-    const fields = messageContentFields(message);
-    return { signature: signatureForFields(fields), fields };
-}
-
-function contentSnapshotsFor(messages: readonly MessageLike[]): MessageContentSnapshot[] {
-    return messages.map(messageContentSnapshot);
-}
-
-function messageMatchesContentSnapshot(
-    message: MessageLike,
-    snapshot: MessageContentSnapshot,
-): boolean {
-    let fieldIndex = 0;
-    const matched = visitMessageContentFields(message, {
-        field(value) {
-            if (!Object.is(value, snapshot.fields[fieldIndex])) return false;
-            fieldIndex += 1;
-            return true;
-        },
-        beginObject() {
-            const expectedCount = snapshot.fields[fieldIndex];
-            if (typeof expectedCount !== "number") return undefined;
-            fieldIndex += 1;
-            return expectedCount;
-        },
-        endObject(expectedCount, entryCount) {
-            return expectedCount === entryCount;
-        },
-    });
-    return matched && fieldIndex === snapshot.fields.length;
-}
-
 function prefixContentSnapshotsMatch(
-    messages: readonly MessageLike[],
+    snapshots: readonly MessageContentSnapshot[],
     cache: RustWireCache,
     prefixLength: number,
 ): boolean {
     if (prefixLength > cache.rawContentSnapshots.length) return false;
     for (let index = 0; index < prefixLength; index += 1) {
-        if (!messageMatchesContentSnapshot(messages[index], cache.rawContentSnapshots[index])) {
+        if (!snapshotFieldsEqual(snapshots[index], cache.rawContentSnapshots[index])) {
             return false;
         }
     }
     return true;
-}
-
-function messageCacheSignature(message: MessageLike): string {
-    const parts = Array.isArray(message.parts) ? message.parts : [];
-    const serializedParts = JSON.stringify(parts) ?? "null";
-    const serializedMessage = JSON.stringify(message) ?? "null";
-    return `${messageIdOf(message) ?? ""}:${parts.length}:${Buffer.byteLength(serializedParts)}:${createHash("sha256").update(serializedMessage).digest("hex")}`;
 }
 
 function advanceWireFingerprint(previous: string, encoded: unknown): string {
@@ -805,7 +660,7 @@ export function createRustModeTransform(
 ): {
     run: (
         sessionId: string,
-        messages: MessageLike[],
+        messages: readonly MessageLike[],
         output: { messages: unknown[] },
     ) => Promise<void>;
     clearSession: (sessionId: string) => void;
@@ -885,16 +740,44 @@ export function createRustModeTransform(
 
     const run = async (
         sessionId: string,
-        messages: MessageLike[],
+        liveMessages: readonly MessageLike[],
         output: { messages: unknown[] },
     ): Promise<void> => {
         const passStartedAt = performance.now();
+        const logSourceDecline = (error: SourceRejected): void => {
+            sessionLog.debug(sessionId, `rust transform declined ${error.name}: ${error.message}`);
+        };
+        let captured: CapturedMessages;
+        try {
+            captured = captureMessages(liveMessages);
+            const target = readOwnDataProperty(output, "messages");
+            if (target !== liveMessages) assertReferenceableMessages(target);
+        } catch (error) {
+            if (!(error instanceof SourceRejected)) throw error;
+            logSourceDecline(error);
+            return;
+        }
+        const messages = captured.members as MessageLike[];
+        const assertSourceUnchanged = (): void => {
+            assertCapturedMessagesUnchanged(liveMessages, captured);
+        };
+        const sourceUnchanged = (): boolean => {
+            try {
+                assertSourceUnchanged();
+                return true;
+            } catch (error) {
+                if (!(error instanceof SourceRejected)) throw error;
+                logSourceDecline(error);
+                return false;
+            }
+        };
         const state = ensureState(states, sessionId);
         const timings = emptyRustPassTimings();
         const passSequence = ++state.passCount;
         const assertCurrentPass = (): void => {
             if (states.get(sessionId) !== state) throw new SessionClearedDuringPass(sessionId);
             if (state.passCount !== passSequence) throw new PassSupersededDuringPass(sessionId);
+            assertSourceUnchanged();
         };
         const syntheticTurn = observeSyntheticTurn(state, messages);
         if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
@@ -914,8 +797,10 @@ export function createRustModeTransform(
         const passUsageSnapshot = loadContextUsage(deps, sessionId);
         // The directory read also records a host-reported `parentID`, so it runs before the subagent classification is read.
         const directory = await resolveSessionDirectory(deps, sessionId);
+        if (!sourceUnchanged()) return;
         const isSubagent = deps.isSubagentSession(sessionId);
         const systemPromptHash = deps.systemPromptHashFor(sessionId);
+        if (!sourceUnchanged()) return;
         let preflightError: unknown;
         let model = modelFromMessages(messages);
         if (!model) {
@@ -945,6 +830,10 @@ export function createRustModeTransform(
         const finishPass = (applied: boolean): void => {
             const elapsedAt = applied && appliedAt !== undefined ? appliedAt : performance.now();
             const elapsedMs = Math.max(0, elapsedAt - passStartedAt);
+            const outputCount = readOwnDataProperty(
+                readOwnDataProperty(output, "messages"),
+                "length",
+            );
             sessionLog.debug(
                 sessionId,
                 formatRustPassLog({
@@ -952,7 +841,7 @@ export function createRustModeTransform(
                     reason: materializeReason,
                     servedFrom,
                     inputCount,
-                    outputCount: output.messages.length,
+                    outputCount: typeof outputCount === "number" ? outputCount : 0,
                     applied,
                     elapsedMs,
                     moduleElapsedMs,
@@ -1032,7 +921,7 @@ export function createRustModeTransform(
                     sessionLog.debug(sessionId, `rust module stages (slow pass): ${detail}`);
             }
         };
-        // Both verdicts freeze from the first user message in the live array before the DB is consulted; a session whose first user row is not yet persisted otherwise reads as provisional and fails closed.
+        if (!sourceUnchanged()) return;
         resolveCtxReduceAvailabilityFromMessages(sessionId, messages);
         const reduceAvailability = resolveCtxReduceAvailability(sessionId);
         // Pass the module one bool combining the frozen map verdict and OpenCode's live permission decision.
@@ -1046,6 +935,7 @@ export function createRustModeTransform(
             messages,
             todoAvailability,
         );
+        let nackSourceDecline: (() => Promise<void>) | undefined;
         try {
             assertCurrentPass();
             if (preflightError) throw preflightError;
@@ -1099,6 +989,7 @@ export function createRustModeTransform(
                 prompt_surface_guidance_override: promptSurfaceGuidance?.primaryOverride,
                 protected_tags: deps.protectedTags ?? DEFAULT_PROTECTED_TAGS,
             };
+            assertSourceUnchanged();
             const previousWireCache = wireCaches.get(sessionId);
             // Every await after this read lets `invalidateWireState` or `clearSession` run; the commit below compares against this value.
             const wireInvalidationsAtRead = state.wireInvalidations;
@@ -1118,20 +1009,20 @@ export function createRustModeTransform(
             ) {
                 const appending = messages.length > previousWireCache.rawCount;
                 const formerTerminal = messages[previousWireCache.rawCount - 1];
-                // Use delta transport only when the reusable prefix byte-identically matches OpenCode's copy.
-                // The prefix guard stops before the former terminal; the signature check below covers it.
                 const prefixGuardStartedAt = performance.now();
                 const prefixIntact = prefixContentSnapshotsMatch(
-                    messages,
+                    captured.snapshots,
                     previousWireCache,
                     Math.max(0, previousWireCache.rawCount - 1),
                 );
                 logStage(sessionId, "prefixGuard", prefixGuardStartedAt, timings);
-                // When appending, an invisible former terminal may have been edited in place, so only a visible former terminal skips the signature check.
                 const lastChanged =
                     formerTerminal !== undefined &&
                     !(appending && previousWireCache.rawLastVisible) &&
-                    messageCacheSignature(formerTerminal) !== previousWireCache.rawLastSignature;
+                    !snapshotFieldsEqual(
+                        captured.snapshots[previousWireCache.rawCount - 1],
+                        previousWireCache.rawContentSnapshots[previousWireCache.rawCount - 1],
+                    );
                 const replaceExistingTail =
                     lastChanged || (appending && previousWireCache.rawLastVisible);
                 const rawStart = replaceExistingTail
@@ -1192,6 +1083,7 @@ export function createRustModeTransform(
             let resolved = await resolveOrdinalsForModule({
                 sessionId,
                 messages: ordinalMessages,
+                assertSourceUnchanged,
                 memo: ordinalMemoOf(state),
                 provisionalBase,
             });
@@ -1205,6 +1097,7 @@ export function createRustModeTransform(
                     sessionId,
                     messages,
                     memo: ordinalMemoOf(state),
+                    assertSourceUnchanged,
                     provisionalBase: state.ordinalContinuationBase ?? undefined,
                 });
                 logStage(
@@ -1243,7 +1136,6 @@ export function createRustModeTransform(
                         rawCount: messages.length,
                         wireCount: encodedInput.length,
                         rawLastId: rawLast ? messageIdOf(rawLast) : null,
-                        rawLastSignature: rawLast ? messageCacheSignature(rawLast) : null,
                         rawLastVisible:
                             rawLast !== undefined &&
                             encodedInput.some((entry) => entry.mid === messageIdOf(rawLast)),
@@ -1252,7 +1144,7 @@ export function createRustModeTransform(
                         nativeFingerprint: nativeFingerprint.fingerprint,
                         nativePrefixFingerprintBeforeLast:
                             nativeFingerprint.prefixFingerprintBeforeLast,
-                        rawContentSnapshots: contentSnapshotsFor(messages),
+                        rawContentSnapshots: captured.snapshots,
                         fingerprint: `${ckFingerprint.fingerprint}|${nativeFingerprint.fingerprint}`,
                     };
                 }
@@ -1285,16 +1177,12 @@ export function createRustModeTransform(
                     rawCount: messages.length,
                     wireCount: wireDelta.wireStart + encodedInput.length,
                     rawLastId: rawLast ? messageIdOf(rawLast) : null,
-                    rawLastSignature: rawLast ? messageCacheSignature(rawLast) : null,
                     rawLastVisible,
                     ckFingerprint,
                     ckPrefixFingerprintBeforeLast,
                     nativeFingerprint,
                     nativePrefixFingerprintBeforeLast,
-                    rawContentSnapshots: [
-                        ...previousWireCache.rawContentSnapshots.slice(0, wireDelta.rawStart),
-                        ...contentSnapshotsFor(messages.slice(wireDelta.rawStart)),
-                    ],
+                    rawContentSnapshots: captured.snapshots,
                     fingerprint: `${ckFingerprint}|${nativeFingerprint}`,
                 };
             })();
@@ -1351,6 +1239,7 @@ export function createRustModeTransform(
                 payload: Record<string, unknown>,
                 detail = "",
             ): Promise<TransformSeriesResult> => {
+                assertSourceUnchanged();
                 const pages = buildPagedModuleTransformPayloads(payload);
                 const paged = pages.some(
                     (entry) => typeof entry.page.transform_page_id === "string",
@@ -1467,6 +1356,7 @@ export function createRustModeTransform(
                 }
             };
             const nackPendingRetryDeliveries = async (): Promise<void> => {
+                nackSourceDecline = undefined;
                 try {
                     await sendNoteDeliveryDisposition("transform.nack", allDeliveryPassIds);
                 } catch (nackError) {
@@ -1477,6 +1367,7 @@ export function createRustModeTransform(
                     );
                 }
             };
+            nackSourceDecline = nackPendingRetryDeliveries;
             const assertCurrentRetryPass = async (): Promise<void> => {
                 try {
                     assertCurrentPass();
@@ -1495,6 +1386,7 @@ export function createRustModeTransform(
                     );
                 }
                 await assertCurrentRetryPass();
+                assertSourceUnchanged();
                 state.forceFullWire = true;
                 if (wireDelta) {
                     const retryOrdinalStartedAt = performance.now();
@@ -1502,6 +1394,7 @@ export function createRustModeTransform(
                         sessionId,
                         messages,
                         memo: ordinalMemoOf(state),
+                        assertSourceUnchanged,
                         provisionalBase: state.ordinalContinuationBase ?? undefined,
                     });
                     logStage(
@@ -1512,14 +1405,17 @@ export function createRustModeTransform(
                         "retry=full",
                     );
                     await assertCurrentRetryPass();
+                    assertSourceUnchanged();
                     if (!retryResolved.ok) {
                         resetOrdinalMemo(state);
                         retryResolved = await resolveOrdinalsForModule({
                             sessionId,
                             messages,
                             memo: ordinalMemoOf(state),
+                            assertSourceUnchanged,
                         });
                         await assertCurrentRetryPass();
+                        assertSourceUnchanged();
                     }
                     if (!retryResolved.ok) {
                         await nackPendingRetryDeliveries();
@@ -1540,7 +1436,6 @@ export function createRustModeTransform(
                         rawCount: messages.length,
                         wireCount: retryEncodedInput.length,
                         rawLastId: retryRawLast ? messageIdOf(retryRawLast) : null,
-                        rawLastSignature: retryRawLast ? messageCacheSignature(retryRawLast) : null,
                         rawLastVisible:
                             retryRawLast !== undefined &&
                             retryEncodedInput.some(
@@ -1552,7 +1447,7 @@ export function createRustModeTransform(
                         nativeFingerprint: retryNativeFingerprint.fingerprint,
                         nativePrefixFingerprintBeforeLast:
                             retryNativeFingerprint.prefixFingerprintBeforeLast,
-                        rawContentSnapshots: contentSnapshotsFor(messages),
+                        rawContentSnapshots: captured.snapshots,
                         fingerprint: `${retryCkFingerprint.fingerprint}|${retryNativeFingerprint.fingerprint}`,
                     };
                     const retryWireBuildStartedAt = performance.now();
@@ -1616,10 +1511,12 @@ export function createRustModeTransform(
                 }
                 logStage(sessionId, "apply", applyStartedAt, timings);
                 const applyReplaceStartedAt = performance.now();
+                assertSourceUnchanged();
                 replaceMessagesInPlace(output, appliedMessages);
                 logStage(sessionId, "apply", applyReplaceStartedAt, timings);
             } catch (error) {
                 logStage(sessionId, "apply", applyStartedAt, timings, "failed=true");
+                nackSourceDecline = undefined;
                 try {
                     await sendNoteDeliveryDisposition("transform.nack", allDeliveryPassIds);
                 } catch (nackError) {
@@ -1692,6 +1589,11 @@ export function createRustModeTransform(
             appliedAt = performance.now();
             finishPass(true);
         } catch (error) {
+            if (error instanceof SourceRejected) {
+                logSourceDecline(error);
+                await nackSourceDecline?.();
+                return;
+            }
             servedFrom = "raw";
             materializeReason = "none";
             if (
@@ -1704,7 +1606,7 @@ export function createRustModeTransform(
                 if (decision.toLowerCase() !== "need_full_sync") decision = "error";
                 markFailure(sessionId, state, error);
             }
-            replaceMessagesInPlace(output, messages);
+            if (sourceUnchanged()) replaceMessagesInPlace(output, messages);
             finishPass(false);
             return;
         }
@@ -1744,19 +1646,6 @@ export function createRustModeTransform(
 export const __rustModeTransformTest = {
     WIRE_CACHE_SESSION_CAPACITY,
     applyNativeMessagesVerbatim,
-    contentSnapshotsFor,
-    snapshotTags: {
-        array: SNAPSHOT_ARRAY,
-        object: SNAPSHOT_OBJECT,
-        key: SNAPSHOT_KEY,
-        string: SNAPSHOT_STRING,
-        number: SNAPSHOT_NUMBER,
-        boolean: SNAPSHOT_BOOLEAN,
-        null: SNAPSHOT_NULL,
-        undefined: SNAPSHOT_UNDEFINED,
-    },
-    messageContentSnapshot,
-    messageMatchesContentSnapshot,
     buildTransformBody,
     transformGeometryForWire,
     formatRustPassLog,

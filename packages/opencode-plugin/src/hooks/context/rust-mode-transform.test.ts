@@ -79,6 +79,271 @@ function rowMessages(
 const makeMessages = (sessionId: string): MessageLike[] =>
     rowMessages(sessionId, rawRows(1), () => "hello");
 
+describe("live transform source guards", () => {
+    it.each([
+        "proxy",
+        "getter",
+        "toJSON",
+        "cycle",
+        "sparse",
+        "prototype",
+        "bigint",
+    ])("declines initial %s before preflight or dispatch", async (kind) => {
+        const sessionId = `source-initial-${kind}`;
+        const messages = makeMessages(sessionId);
+        const trap = mock(() => {
+            throw new Error("source hook ran");
+        });
+        if (kind === "proxy") messages[0] = new Proxy(messages[0], { get: trap, ownKeys: trap });
+        if (kind === "getter") Object.defineProperty(messages[0], "parts", { get: trap });
+        if (kind === "toJSON") Object.assign(messages[0], { toJSON: trap });
+        if (kind === "cycle") Object.assign(messages[0], { self: messages });
+        if (kind === "sparse") messages.length = 3;
+        if (kind === "prototype") Object.setPrototypeOf(messages[0], { custom: true });
+        if (kind === "bigint") Object.assign(messages[0], { extra: 1n });
+        const deps = makeDeps();
+        const preflight = mock(async () => ({ data: { directory: "/tmp/project" } }));
+        deps.client.session.get = preflight as never;
+        const fake = recordingClient(() => ({ native_messages: [] }));
+        const transform = createRustModeTransform(deps, { moduleClient: fake.client });
+        const host = [{ sentinel: "untouched" }];
+        const output = { messages: host };
+        await transform.run(sessionId, messages, output);
+        expect(output.messages).toBe(host);
+        expect(host).toEqual([{ sentinel: "untouched" }]);
+        expect(preflight).not.toHaveBeenCalled();
+        expect(trap).not.toHaveBeenCalled();
+        expect(fake.calls).toHaveLength(0);
+        expect(transform.getState(sessionId).passCount).toBe(0);
+    });
+
+    it("accepts readonly dense input with a separate mutable destination", async () => {
+        const sessionId = "source-readonly";
+        installRawRows(sessionId, rawRows(1));
+        const messages = Object.freeze(makeMessages(sessionId));
+        const approved = { info: { id: "approved" }, parts: [] };
+        const fake = recordingClient(() => ({ native_messages: [approved] }));
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: fake.client });
+        const output = { messages: [] as unknown[] };
+        const target = output.messages;
+        await transform.run(sessionId, messages, output);
+        expect(output.messages).toBe(target);
+        expect(target).toEqual([approved]);
+        expect(target[0]).toBe(approved);
+        expect(messages[0].info.id).toBe("m-1");
+        expect(fake.bodies).toHaveLength(1);
+    });
+
+    for (const window of ["directory", "ordinal", "response", "retry"] as const) {
+        it.each([false, true])(`${window} pause with source mutation=%s`, async (mutate) => {
+            const sessionId = `source-window-${window}-${mutate}`;
+            installRawRows(sessionId, rawRows(1));
+            const messages = makeMessages(sessionId);
+            const started = Promise.withResolvers<void>();
+            const release = Promise.withResolvers<void>();
+            const trap = mock(() => {
+                throw new Error("installed source hook ran");
+            });
+            const installHook = () => {
+                Object.defineProperty(messages[0], "parts", { get: trap, configurable: true });
+            };
+            const deps = makeDeps();
+            if (window === "directory") {
+                deps.client.session.get = (async () => {
+                    started.resolve();
+                    await release.promise;
+                    return { data: { directory: "/tmp/project" } };
+                }) as never;
+            }
+            if (window === "ordinal") {
+                unregisters.push(
+                    setRawMessageProvider(sessionId, {
+                        readMessages: () => [] as RawMessage[],
+                        readMessageOrdinalPage: () => {
+                            started.resolve();
+                            if (mutate) queueMicrotask(installHook);
+                            return [];
+                        },
+                        getStoredMessageCount: () => 0,
+                    }),
+                );
+            }
+            const approved = [
+                { info: { id: "approved" }, parts: [{ type: "text", text: "result" }] },
+            ];
+            const fake = recordingClient(async (_body, index) => {
+                started.resolve();
+                await release.promise;
+                return window === "retry" && index === 0
+                    ? {
+                          status: "need_full_sync",
+                          note_deliveries: [{ transform_pass_id: "discarded" }],
+                      }
+                    : {
+                          native_messages: approved,
+                          note_deliveries: [{ transform_pass_id: "accepted" }],
+                      };
+            });
+            const transform = createRustModeTransform(deps, { moduleClient: fake.client });
+            const host = [...messages];
+            const output = { messages: host };
+            const pending = transform.run(sessionId, messages, output);
+            await started.promise;
+            if (mutate && window !== "ordinal") installHook();
+            release.resolve();
+            await pending;
+            expect(output.messages).toBe(host);
+            expect(host.length).toBe(1);
+            expect(trap).not.toHaveBeenCalled();
+            if (mutate) {
+                expect(host[0]).toBe(messages[0]);
+                expect(fake.bodies.length).toBe(
+                    window === "response" || window === "retry" ? 1 : 0,
+                );
+                expect(fake.calls.some((call) => call.method === "transform.ack")).toBe(false);
+            } else {
+                expect(host).toEqual([
+                    { info: { id: "approved" }, parts: [{ type: "text", text: "result" }] },
+                ]);
+                expect(host[0]).toBe(approved[0]);
+                expect(fake.bodies.length).toBe(window === "retry" ? 2 : 1);
+                const submitted = JSON.parse(serializedJsonText(fake.bodies[0])!);
+                expect(submitted.native_messages).toEqual([
+                    {
+                        info: { id: "m-1", role: "user", sessionID: sessionId },
+                        parts: [{ type: "text", text: "hello" }],
+                    },
+                ]);
+                expect(
+                    fake.calls
+                        .filter((call) => call.method === "transform.ack")
+                        .map(
+                            (call) =>
+                                (call.body as { transform_pass_id: string }).transform_pass_id,
+                        ),
+                ).toEqual(["accepted"]);
+            }
+            expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+        });
+    }
+
+    it("logs initial domain, walk-limit and paused-mutation declines without daemon failures", async () => {
+        const logSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            for (const kind of ["accessor", "limit", "mutation"] as const) {
+                const sessionId = `source-log-${kind}`;
+                installRawRows(sessionId, rawRows(1));
+                const messages = makeMessages(sessionId);
+                const trap = mock(() => "unexpected");
+                if (kind === "accessor") Object.defineProperty(messages[0], "parts", { get: trap });
+                if (kind === "limit")
+                    Object.assign(messages[0], { text: "x".repeat(33 * 1024 * 1024) });
+                const started = Promise.withResolvers<void>();
+                const release = Promise.withResolvers<void>();
+                const fake = recordingClient(async () => {
+                    started.resolve();
+                    await release.promise;
+                    return { native_messages: [] };
+                });
+                const transform = createRustModeTransform(makeDeps(), {
+                    moduleClient: fake.client,
+                });
+                const pending = transform.run(sessionId, messages, { messages });
+                if (kind === "mutation") {
+                    await started.promise;
+                    Object.defineProperty(messages[0], "parts", { get: trap });
+                    release.resolve();
+                }
+                await pending;
+                const reason =
+                    kind === "limit"
+                        ? "SourceWalkLimitExceeded: source and snapshot walk limit exceeded"
+                        : "SourceRejected: accessor";
+                expect(
+                    sessionLogs(logSpy, sessionId).some((line) =>
+                        line.includes(`declined ${reason}`),
+                    ),
+                ).toBe(true);
+                expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+                expect(fake.bodies.length).toBe(kind === "mutation" ? 1 : 0);
+                expect(trap).not.toHaveBeenCalled();
+            }
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it("NACKs known deliveries when a source changes in the retry-check microtask window", async () => {
+        const sessionId = "source-retry-check-microtask";
+        installRawRows(sessionId, rawRows(1));
+        const messages = makeMessages(sessionId);
+        const trap = mock(() => "unexpected");
+        let queued = false;
+        let mutated = false;
+        let checkedBeforeMutation = false;
+        const descriptor = Object.getOwnPropertyDescriptor;
+        const spy = spyOn(Object, "getOwnPropertyDescriptor").mockImplementation((object, key) => {
+            if (queued && !mutated && object === messages && key === "length")
+                checkedBeforeMutation = true;
+            return descriptor(object, key);
+        });
+        try {
+            const fake = recordingClient(() => ({
+                status: "need_full_sync",
+                note_deliveries: [{ transform_pass_id: "pending-retry" }],
+                get native_messages_delta() {
+                    if (!queued) {
+                        queued = true;
+                        queueMicrotask(() => {
+                            Object.defineProperty(messages[0], "parts", { get: trap });
+                            mutated = true;
+                        });
+                    }
+                    return undefined;
+                },
+            }));
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: fake.client });
+            const output = { messages };
+            await transform.run(sessionId, messages, output);
+            expect(queued && mutated && checkedBeforeMutation).toBe(true);
+            expect(fake.calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
+            expect((fake.calls[1].body as { transform_pass_id: string }).transform_pass_id).toBe(
+                "pending-retry",
+            );
+            expect(output.messages).toBe(messages);
+            expect(messages.length).toBe(1);
+            expect(trap).not.toHaveBeenCalled();
+            expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    it.each([
+        "field",
+        "member",
+        "append",
+    ])("refuses publication after a valid source %s changes during transport", async (kind) => {
+        const sessionId = `source-change-${kind}`;
+        installRawRows(sessionId, rawRows(1));
+        const messages = makeMessages(sessionId);
+        const fake = recordingClient(() => {
+            if (kind === "field") Object.assign(messages[0].parts[0], { text: "edited" });
+            if (kind === "member") messages[0] = makeMessages(sessionId)[0];
+            if (kind === "append") messages.push(makeMessages(sessionId)[0]);
+            return { native_messages: [], note_deliveries: [{ transform_pass_id: "changed" }] };
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: fake.client });
+        const output = { messages };
+        await transform.run(sessionId, messages, output);
+        expect(output.messages).toBe(messages);
+        expect(messages.length).toBe(kind === "append" ? 2 : 1);
+        if (kind === "field")
+            expect((messages[0].parts[0] as { text: string }).text).toBe("edited");
+        expect(fake.calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
+    });
+});
+
 function makeDeps(): RustModeTransformDeps {
     return {
         client: {
@@ -1459,15 +1724,21 @@ describe("delta prefix-mutation guard", () => {
         });
 
         const mutated = buildMessages(4, true);
-        expect(__rustModeTransformTest.messageContentSnapshot(mutated[0]).signature).not.toBe(
-            __rustModeTransformTest.messageContentSnapshot(appended[0]).signature,
-        );
+        expect(mutated[0].parts).toEqual([{ type: "text", text: "MESSAGE m-1" }]);
+        expect(appended[0].parts).toEqual([{ type: "text", text: "message m-1" }]);
         const mutatedOutput = { messages: [...mutated] as unknown[] };
         await transform.run(sessionId, mutated, mutatedOutput);
         expect(bodies).toHaveLength(3);
         expect(bodies[2]?.tail_delta).toBeUndefined();
         expect(bodies[2]?.messages).toHaveLength(4);
         expect(bodies[2]?.native_messages).toEqual(mutated);
+        const submitted = JSON.parse(serializedJsonText(bodies[2])!);
+        expect(submitted.native_messages).toEqual(
+            ["MESSAGE m-1", "message m-2", "message m-3", "message m-4"].map((text, index) => ({
+                info: { id: `m-${index + 1}`, role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text }],
+            })),
+        );
         expect(JSON.stringify(bodies[2]?.messages)).toContain("MESSAGE m-1");
         expect(mutatedOutput.messages).toEqual(mutated);
 
