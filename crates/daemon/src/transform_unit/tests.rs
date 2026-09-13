@@ -432,6 +432,67 @@ fn discard_leaves_an_applying_phase_to_its_guard() {
     assert!(pages.sessions.is_empty());
 }
 
+#[test]
+fn discard_during_apply_drops_the_retained_response_and_retains_none_afterwards() {
+    fn stage_final(pages: &mut TransformPageCoordinator, id: &str) {
+        let staged = pages
+            .stage(
+                "ses",
+                id.to_string(),
+                1,
+                0,
+                1,
+                "d".to_string(),
+                json!({"messages": []}),
+                7,
+                true,
+                1,
+                Instant::now(),
+            )
+            .unwrap();
+        assert!(matches!(staged, TransformPageStageAction::Apply { .. }));
+    }
+    fn finish(pages: &mut TransformPageCoordinator, id: &str) {
+        pages.finish_apply(
+            "ses",
+            id.to_string(),
+            1,
+            1,
+            "d".to_string(),
+            String::new(),
+            Some(PreparedOutput::cached_bytes(vec![0; 5])),
+        );
+    }
+
+    let mut pages = TransformPageCoordinator::default();
+    stage_final(&mut pages, "a");
+    finish(&mut pages, "a");
+    assert!(pages.completed("ses", "a").is_some());
+    stage_final(&mut pages, "b");
+    assert_eq!(pages.discard("ses"), None);
+    assert_eq!(pages.completed_bytes, 0);
+    assert_eq!(pages.total_staged_bytes, 7);
+    assert!(pages.release_applying("ses", "b"));
+    assert!(pages.completed("ses", "a").is_none());
+    assert!(pages.sessions.is_empty());
+
+    let mut pages = TransformPageCoordinator::default();
+    stage_final(&mut pages, "a");
+    finish(&mut pages, "a");
+    stage_final(&mut pages, "b");
+    assert_eq!(pages.discard("ses"), None);
+    finish(&mut pages, "b");
+    assert!(pages.completed("ses", "b").is_none());
+    assert_eq!(pages.completed_bytes, 0);
+    assert_eq!(pages.total_staged_bytes, 0);
+    assert!(pages.sessions.is_empty());
+
+    let mut pages = TransformPageCoordinator::default();
+    stage_final(&mut pages, "c");
+    finish(&mut pages, "c");
+    assert!(pages.completed("ses", "c").is_some());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn four_parked_units_keep_fifth_waiter_off_the_blocking_pool() {
     assert_eq!(TRANSFORM_UNITS_AT_ONCE, 4);

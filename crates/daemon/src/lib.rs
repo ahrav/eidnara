@@ -1149,6 +1149,8 @@ struct CompletedTransformPage {
 struct TransformPageSession {
     phase: TransformPagePhase,
     completed: Option<CompletedTransformPage>,
+    /// Cleared by a discard during `Applying`, so `finish_apply` retains no response.
+    retains_result: bool,
 }
 
 impl Default for TransformPageSession {
@@ -1156,6 +1158,7 @@ impl Default for TransformPageSession {
         Self {
             phase: TransformPagePhase::Idle,
             completed: None,
+            retains_result: true,
         }
     }
 }
@@ -1244,13 +1247,17 @@ impl TransformPageCoordinator {
     }
 
     /// Removes the session entry, releasing its staged phase and retained response. An
-    /// `Applying` phase is left in place; only [`Self::release_applying`] ends it.
+    /// `Applying` phase is left in place; only [`Self::release_applying`] ends it, and
+    /// `finish_apply` retains no response after a discard during `Applying`.
     fn discard(&mut self, session_id: &str) -> Option<usize> {
-        if self
-            .sessions
-            .get(session_id)
-            .is_some_and(|session| matches!(session.phase, TransformPagePhase::Applying { .. }))
+        if let Some(session) = self.sessions.get_mut(session_id)
+            && matches!(session.phase, TransformPagePhase::Applying { .. })
         {
+            let completed = session.completed.take();
+            session.retains_result = false;
+            if let Some(completed) = completed {
+                self.release_completed(&completed);
+            }
             return None;
         }
         let session = self.sessions.remove(session_id)?;
@@ -1348,6 +1355,10 @@ impl TransformPageCoordinator {
         scalar_digest: String,
         result: Option<PreparedOutput>,
     ) {
+        let retains_result = self
+            .sessions
+            .get(session_id)
+            .is_none_or(|session| session.retains_result);
         if !self.release_applying(session_id, &transform_id) {
             return;
         }
@@ -1358,7 +1369,7 @@ impl TransformPageCoordinator {
         {
             self.release_completed(&previous);
         }
-        let measured = result.and_then(|result| {
+        let measured = result.filter(|_| retains_result).and_then(|result| {
             result
                 .measure()
                 .ok()
