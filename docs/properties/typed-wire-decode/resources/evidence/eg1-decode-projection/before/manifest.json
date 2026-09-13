@@ -69,9 +69,9 @@
     "typed_request_plus_projection": "serde_json::from_slice::<TransformRequest>(&body) then wire::project_messages(&request.messages); request and projection both stay live to the end of the interval and are dropped outside it",
     "excluded": "transport, probing, admission (decode_metered), store work, response encoding",
     "warmup": "Criterion default 3 s per cell",
-    "measurement": "Criterion default 5 s per cell, 100 samples, linear iteration schedule",
+    "measurement": "Criterion default 5 s per cell, 100 samples, automatic sampling: linear for both typed_request cells and the 40-message projection cell; flat (12 iterations per sample) for the 200-message projection cell",
     "order_within_process": "typed_request/40, plus_projection/40, typed_request/200, plus_projection/200 (Criterion registration order)",
-    "estimators": "Criterion's console `time:` line is the slope estimator under linear sampling; estimates.json also holds mean, median, MAD, and std_dev. The predeclared rule uses the mean; slopes are retained for cross-checking."
+    "estimators": "Criterion's console `time:` line is the slope estimator under linear sampling and the mean under flat sampling (the flat cell's estimates.json has slope null); estimates.json also holds mean, median, MAD, and std_dev. The predeclared rule uses the mean; slopes are retained for cross-checking where present."
   },
   "replication": {
     "processes": 5,

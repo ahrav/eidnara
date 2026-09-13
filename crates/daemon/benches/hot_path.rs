@@ -98,20 +98,26 @@ fn reattached_messages(class: ContentClass, count: usize, bytes: usize) -> Ingre
         .collect()
 }
 
-/// Typed request decode from the wire bytes a transform body carries, alone and
-/// followed by projection. The body is built once; each iteration decodes fresh.
+/// Both benchmark legs decode these identical EG1 request bytes; the input is
+/// never rebuilt through the serializer under test.
+const DECODE_CORPUS: [(usize, &[u8]); 2] = [
+    (
+        40,
+        include_bytes!(
+            "../../../docs/properties/typed-wire-decode/resources/evidence/eg1-decode-projection/before/corpus/decode-40msgs_2KiB_mixed.json"
+        ),
+    ),
+    (
+        200,
+        include_bytes!(
+            "../../../docs/properties/typed-wire-decode/resources/evidence/eg1-decode-projection/before/corpus/decode-200msgs_2KiB_mixed.json"
+        ),
+    ),
+];
+
 fn bench_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("decode");
-    for &count in &[40usize, 200] {
-        let messages = corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED);
-        let body = serde_json::to_vec(&request("bench-decode", &messages, false))
-            .expect("bench request serializes");
-        // The evidence manifest needs the exact bytes each cell decodes.
-        if let Some(dir) = std::env::var_os("EIDNARA_DUMP_DECODE_CORPUS") {
-            let path =
-                std::path::Path::new(&dir).join(format!("decode-{count}msgs_2KiB_mixed.json"));
-            std::fs::write(&path, &body).expect("write decode corpus");
-        }
+    for &(count, body) in &DECODE_CORPUS {
         group.throughput(criterion::Throughput::Bytes(body.len() as u64));
         group.bench_with_input(
             BenchmarkId::new("typed_request", format!("{count}msgs_2KiB_mixed")),
