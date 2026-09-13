@@ -41,7 +41,7 @@ median of the five process means), which fix each cell's noise floor:
 ## After leg
 
 The `after/` directory holds the paired comparison for the typed-wire U1 tree
-(commit `bc9e8216` on `perf/typed-wire-u1-owned-decode`):
+(commit `3010d73d` on `perf/typed-wire-u1-owned-decode`):
 
 - `manifest.json`: after-tree and before-tree identities, both binary digests,
   the frozen corpus digests and each binary's own dump of the bytes it decoded,

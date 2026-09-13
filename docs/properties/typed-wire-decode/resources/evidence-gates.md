@@ -13,7 +13,7 @@ its instrumentation validity rules do not create a second evidence gate.
 Status: required; both legs collected in
 [`evidence/eg1-decode-projection/`](evidence/eg1-decode-projection/README.md).
 The before leg was taken at production revision `85accd89` with the retained
-harness patch; the after leg at `bc9e8216` on the typed-wire U1 branch, paired
+harness patch; the after leg at `3010d73d` on the typed-wire U1 branch, paired
 with a byte-identical rebuild of the before binary in five alternating process
 pairs over the frozen corpus bytes. The predeclared rule clears on all four
 cells (median per-pair after/before mean ratios 0.55 and 0.47 for decode, 0.74

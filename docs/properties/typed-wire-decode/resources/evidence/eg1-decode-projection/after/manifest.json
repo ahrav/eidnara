@@ -3,8 +3,8 @@
  "gate": "EG1 decode-projection payoff (docs/properties/typed-wire-decode/resources/evidence-gates.md)",
  "leg": "after",
  "source": {
-  "production_revision": "bc9e8216",
-  "production_revision_note": "branch perf/typed-wire-u1-owned-decode: owned typed wire envelopes, replay trees removed, one string copy charged. The bench binary was built from this revision; its `decode` group embeds the frozen before-leg bodies with include_bytes!, so it decodes them byte for byte.",
+  "production_revision": "3010d73d",
+  "production_revision_note": "branch perf/typed-wire-u1-owned-decode: owned typed wire envelopes, replay trees removed, one string copy charged. The bench binary was built from this tree (its SHA-256 matches a rebuild at this commit); its `decode` group embeds the frozen before-leg bodies with include_bytes!, so it decodes them byte for byte.",
   "before_leg_revision": "85accd89",
   "before_leg_note": "The before binary was rebuilt from 85accd89 plus harness.patch in a detached worktree; its SHA-256 equals the before-leg manifest's binary digest, so it is the same artifact.",
   "harness_patch": "../before/harness.patch",
