@@ -162,8 +162,13 @@ impl ServedMessage {
     /// Divergence fingerprints use the serialized `WireBlock` basis of `FlatBlock.content_hash`.
     /// Overlaid, reduced, and rewritten blocks serialize and hash afresh.
     fn from_message_reusing(message: WireMessage, projected_blocks: Option<&[&FlatBlock]>) -> Self {
-        let canonical_bytes = crate::served_json::to_vec(&message)
-            .expect("CK wire message values must always serialize");
+        // The canonicalizer may hand back its growth buffer with spare capacity;
+        // converting to the exact-size `Arc` first keeps that slack from outliving
+        // the block-receipt serialization below.
+        let canonical_bytes: Arc<[u8]> = Arc::from(
+            crate::served_json::to_vec(&message)
+                .expect("CK wire message values must always serialize"),
+        );
         let mut by_index = HashMap::new();
         for flat in projected_blocks.into_iter().flatten().copied() {
             by_index.entry(flat.block_index).or_insert(flat);
@@ -204,7 +209,6 @@ impl ServedMessage {
         let output_identity = format!("{canonical_digest:x}");
         let canonical_hash: [u8; 32] = canonical_digest.into();
         let message = Arc::new(message);
-        let canonical_bytes: Arc<[u8]> = Arc::from(canonical_bytes);
         let output_identity: Arc<str> = Arc::from(output_identity);
         let block_fingerprints: Arc<[(String, usize)]> = Arc::from(block_fingerprints);
         let retained_bytes = served_message_retained_bytes(
