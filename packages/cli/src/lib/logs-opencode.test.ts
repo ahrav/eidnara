@@ -74,7 +74,7 @@ function makeReport(root: string, overrides: Partial<DiagnosticReport> = {}): Di
         logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
         recentSessions: [],
         sessionDiscovery: "ok",
-        historianDumps: {
+        history_summarizerDumps: {
             byProject: [],
             legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
         },
@@ -220,7 +220,10 @@ describe("bundleIssueReport configuration section", () => {
                 eidnaraConfig: {
                     path: join(root, ".config", "eidnara", "eidnara.jsonc"),
                     exists: true,
-                    flags: { historian: { disable: true }, marker_value_once: "unique-marker" },
+                    flags: {
+                        history_summarizer: { disable: true },
+                        marker_value_once: "unique-marker",
+                    },
                 },
             }),
         );
@@ -319,8 +322,8 @@ describe("bundleIssueReport session filter", () => {
         writeFileSync(
             logPath,
             [
-                "[2026-05-11T12:00:00.000Z] [eidnara][ses_keepme0001] historian ran",
-                "[2026-05-11T12:00:01.000Z] [eidnara][ses_other00002] historian failure: boom",
+                "[2026-05-11T12:00:00.000Z] [eidnara][ses_keepme0001] history_summarizer ran",
+                "[2026-05-11T12:00:01.000Z] [eidnara][ses_other00002] history_summarizer failure: boom",
                 "Error: boom",
                 "    at otherFrame (/srv/app/other.ts:1:1)",
                 "[2026-05-11T12:00:02.000Z] [eidnara][ses_keepme0001] Error: mine",
@@ -402,7 +405,7 @@ describe("bundleIssueReport session filter", () => {
         expect(body).toContain("leadingFrame");
     });
 
-    it("scopes recent sessions and historian buckets to the selected session", async () => {
+    it("scopes recent sessions and history_summarizer buckets to the selected session", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-issue-scope-"));
         tempDirs.push(root);
         const body = await bundleInTempCwd(
@@ -422,7 +425,7 @@ describe("bundleIssueReport session filter", () => {
                         lastActiveAt: "2026-05-11T11:00:00.000Z",
                     },
                 ],
-                historianDumps: {
+                history_summarizerDumps: {
                     byProject: [
                         {
                             directory: join(root, "project-a"),
@@ -592,7 +595,7 @@ describe("renderDiagnosticsMarkdown sanitization", () => {
         expect(markdown).not.toContain("abc123");
     });
 
-    it("sanitizes historian dump parse errors and host-config parse errors", () => {
+    it("sanitizes history_summarizer dump parse errors and host-config parse errors", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-render-"));
         tempDirs.push(root);
         const markdown = renderDiagnosticsMarkdown(
@@ -600,18 +603,18 @@ describe("renderDiagnosticsMarkdown sanitization", () => {
                 opencodeConfigParseError:
                     "EACCES: permission denied, open '/home/alice/.config/opencode/opencode.jsonc'",
                 tuiConfigParseError: "Unexpected token } in JSON at position 12",
-                historianDumps: {
+                history_summarizerDumps: {
                     byProject: [],
                     legacyDumps: {
                         dir: join(root, "dumps"),
                         count: 1,
                         recent: [
                             {
-                                name: "historian-1.xml",
+                                name: "history_summarizer-1.xml",
                                 ageMinutes: 5,
                                 sizeKb: 3,
                                 parseError:
-                                    "EACCES: permission denied, open '/home/alice/.eidnara/context/historian/historian-1.xml'",
+                                    "EACCES: permission denied, open '/home/alice/.eidnara/context/history_summarizer/history_summarizer-1.xml'",
                             },
                         ],
                     },
@@ -624,7 +627,9 @@ describe("renderDiagnosticsMarkdown sanitization", () => {
         expect(markdown).toContain(
             "- tui config parse error: Unexpected token } in JSON at position 12",
         );
-        expect(markdown).toContain("/home/<USER>/.eidnara/context/historian/historian-1.xml");
+        expect(markdown).toContain(
+            "/home/<USER>/.eidnara/context/history_summarizer/history_summarizer-1.xml",
+        );
         expect(markdown).not.toContain("alice");
     });
 });
@@ -683,7 +688,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
         expect(sanitized).toContain("OPENCODE_VERSION=1.4.0");
         expect(sanitized).toContain("NODE_ENV=production");
         expect(
-            sanitizeLogContent("Using model anthropic/claude-haiku-4-5 for historian"),
+            sanitizeLogContent("Using model anthropic/claude-haiku-4-5 for history_summarizer"),
         ).toContain("anthropic/claude-haiku-4-5");
         const digest = sanitizeLogContent("computed digest: abcdefgh.ijklmnop.qrstuvwx");
         expect(digest).toContain("abcdefgh.ijklmnop.qrstuvwx");
@@ -765,7 +770,7 @@ describe("bundleIssueReport secret redaction", () => {
                                 "X-Api-Key": "custom-header-secret",
                             },
                         },
-                        historian: { api_key: "historian-secret-value" },
+                        history_summarizer: { api_key: "history_summarizer-secret-value" },
                     },
                 },
                 projectConfig: {
@@ -783,7 +788,7 @@ describe("bundleIssueReport secret redaction", () => {
                 logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
                 recentSessions: [],
                 sessionDiscovery: "ok",
-                historianDumps: {
+                history_summarizerDumps: {
                     byProject: [],
                     legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
                 },
@@ -797,7 +802,7 @@ describe("bundleIssueReport secret redaction", () => {
             expect(body).toContain('"Authorization": "<REDACTED:authorization>"');
             expect(body).toContain('"X-Api-Key": "<REDACTED:x_api_key>"');
             expect(body).not.toContain("emb-secret-value");
-            expect(body).not.toContain("historian-secret-value");
+            expect(body).not.toContain("history_summarizer-secret-value");
             expect(body).not.toContain("header-secret-value");
             expect(body).not.toContain("custom-header-secret");
             expect(body).not.toContain("### OpenCode installations");
@@ -879,7 +884,7 @@ describe("bundleIssueReport secret redaction", () => {
                         lastActiveAt: "2026-05-11T12:00:00.000Z",
                     },
                 ],
-                historianDumps: {
+                history_summarizerDumps: {
                     byProject: [],
                     legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
                 },

@@ -3,7 +3,10 @@ import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
 import type { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
-import { resolveTodowriteAvailability, todowritePermissionDenied } from "./ctx-reduce-availability";
+import {
+    resolveTodowriteAvailability,
+    todowritePermissionDenied,
+} from "./eidnara-reduce-availability";
 import { type ContextUsageEntry, isOlderThanNewestResponse } from "./event-handler";
 import { getMessageUpdatedAssistantInfo, getSessionProperties } from "./event-payloads";
 import { resolveSessionId as resolveEventSessionId } from "./event-resolvers";
@@ -16,7 +19,7 @@ export type AgentBySession = Map<string, string>;
 
 /**
  * Three separate sets keep three independent lifetimes apart; one shared
- * flag would let defer passes blocked by an in-progress historian keep
+ * flag would let defer passes blocked by an in-progress history_summarizer keep
  * re-firing the same flush signal across multiple turns. Each set has
  * exactly one consumer and one lifetime.
  *
@@ -26,20 +29,20 @@ export type AgentBySession = Map<string, string>;
 
 /**
  * A `HistoryRefreshSessions` entry requires rebuilding `<session-history>` on the next pass.
- * `<session-history>` contains compartments, facts, and memories in `message[0]`.
- * `prepareCompartmentInjection()` consumes `HistoryRefreshSessions` entries.
- * `prepareCompartmentInjection()` drains the entry after invocation, even when no rebuild occurs.
+ * `<session-history>` contains history_segments, facts, and memories in `message[0]`.
+ * `prepareHistorySegmentInjection()` consumes `HistoryRefreshSessions` entries.
+ * `prepareHistorySegmentInjection()` drains the entry after invocation, even when no rebuild occurs.
  *
- * `/ctx-flush`, real variant changes, and system-prompt hash changes add sessions to `HistoryRefreshSessions`.
+ * `/eidnara-flush`, real variant changes, and system-prompt hash changes add sessions to `HistoryRefreshSessions`.
  * Explicit flush, recomp, variant, and system-prompt-hash refresh paths add sessions to `HistoryRefreshSessions`.
- * Background historian/compressor publications use DeferredHistoryRefreshSessions.
+ * Background history_summarizer/compressor publications use DeferredHistoryRefreshSessions.
  *
  * The background compressor does not add sessions to `HistoryRefreshSessions`.
  * The background compressor's output waits for the next natural cache-bust pass.
  */
 export type HistoryRefreshSessions = Set<string>;
 
-/** `DeferredHistoryRefreshSessions` persists history-refresh signals from background historian and compressor publications. */
+/** `DeferredHistoryRefreshSessions` persists history-refresh signals from background history_summarizer and compressor publications. */
 export type DeferredHistoryRefreshSessions = Set<string>;
 
 /**
@@ -48,28 +51,28 @@ export type DeferredHistoryRefreshSessions = Set<string>;
  * `system-prompt-hash.ts` consumes `SystemPromptRefreshSessions` entries.
  * `system-prompt-hash.ts` drains each entry after refreshing.
  *
- * `/ctx-flush`, real variant changes, and system-prompt hash changes add sessions to `SystemPromptRefreshSessions`.
+ * `/eidnara-flush`, real variant changes, and system-prompt hash changes add sessions to `SystemPromptRefreshSessions`.
  *
- * Historian, compressor, and recomp do not add sessions to `SystemPromptRefreshSessions`.
- * Historian, compressor, and recomp do not change disk adjuncts, so re-reading them performs unnecessary I/O.
+ * HistorySummarizer, compressor, and recomp do not add sessions to `SystemPromptRefreshSessions`.
+ * HistorySummarizer, compressor, and recomp do not change disk adjuncts, so re-reading them performs unnecessary I/O.
  */
 export type SystemPromptRefreshSessions = Set<string>;
 
 /**
- * A `PendingMaterializationSessions` entry requires queued `ctx_reduce` operations and heuristic cleanup to run.
+ * A `PendingMaterializationSessions` entry requires queued `eidnara_reduce` operations and heuristic cleanup to run.
  * The work remains pending when the current pass cannot safely run heuristics.
- * A compartment run prevents heuristic execution.
+ * A history_segment run prevents heuristic execution.
  * `transform-postprocess-phase.ts` drains entries only after `shouldRunHeuristics` executes.
  * `PendingMaterializationSessions` entries survive blocked passes until materialization succeeds.
  *
- * `/ctx-flush`, real variant changes, system-prompt hash changes, and explicit user refresh paths add sessions to `PendingMaterializationSessions`.
- * Background historian publications use DeferredMaterializationSessions.
+ * `/eidnara-flush`, real variant changes, system-prompt hash changes, and explicit user refresh paths add sessions to `PendingMaterializationSessions`.
+ * Background history_summarizer publications use DeferredMaterializationSessions.
  *
- * Historian and recomp queue drops via `queueDropsForCompartmentalizedMessages`; the next safe pass must materialize them to prevent context accumulation.
+ * HistorySummarizer and recomp queue drops via `queueDropsForHistorySegmentalizedMessages`; the next safe pass must materialize them to prevent context accumulation.
  */
 export type PendingMaterializationSessions = Set<string>;
 
-/** `DeferredMaterializationSessions` persists deferred drop-materialization signals from background historian publication. */
+/** `DeferredMaterializationSessions` persists deferred drop-materialization signals from background history_summarizer publication. */
 export type DeferredMaterializationSessions = Set<string>;
 
 export type LastHeuristicsTurnId = Map<string, string>;

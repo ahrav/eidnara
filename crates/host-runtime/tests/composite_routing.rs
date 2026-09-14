@@ -172,8 +172,8 @@ impl SecondaryComponent for FakeComponent {
 
 fn fake_trio() -> (FakeComponent, FakeComponent, FakeComponent) {
     let primary = FakeComponent::new("context", "tool_provider");
-    let mut secondary = FakeComponent::new("synapse", "management_surface");
-    let mut tertiary = FakeComponent::new("broca", "management_surface");
+    let mut secondary = FakeComponent::new("local_embeddings", "management_surface");
+    let mut tertiary = FakeComponent::new("model_execution", "management_surface");
     secondary.timeline = primary.timeline.clone();
     tertiary.timeline = primary.timeline.clone();
     (primary, secondary, tertiary)
@@ -184,10 +184,10 @@ async fn independent_component_initializers_overlap() {
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
     let primary = FakeComponent::new("context", "tool_provider")
         .with_initialize_barrier(Arc::clone(&barrier));
-    let secondary = FakeComponent::new("synapse", "management_surface")
+    let secondary = FakeComponent::new("local_embeddings", "management_surface")
         .with_initialize_barrier(Arc::clone(&barrier));
-    let tertiary =
-        FakeComponent::new("broca", "management_surface").with_initialize_barrier(barrier);
+    let tertiary = FakeComponent::new("model_execution", "management_surface")
+        .with_initialize_barrier(barrier);
     let composite = StaticComposite::new(primary.clone(), secondary.clone(), tertiary.clone())
         .expect("distinct ids");
 
@@ -240,14 +240,19 @@ async fn three_target_catalog_lists_all_modules_deterministically() {
     assert_eq!(modules.len(), 3);
     assert_eq!(modules[0]["module_id"], "context");
     assert_eq!(modules[0]["roles"][0]["role"], "tool_provider");
-    assert_eq!(modules[1]["module_id"], "synapse");
+    assert_eq!(modules[1]["module_id"], "local_embeddings");
     assert_eq!(modules[1]["roles"][0]["role"], "management_surface");
-    assert_eq!(modules[2]["module_id"], "broca");
+    assert_eq!(modules[2]["module_id"], "model_execution");
     assert_eq!(modules[2]["roles"][0]["role"], "management_surface");
     // `wake.create` is excluded because no composite module implements a control operation.
     support::assert_control_ops(&body["modules"], &[]);
 
-    for (filter, expected) in [("context", 1), ("synapse", 1), ("broca", 1), ("unknown", 0)] {
+    for (filter, expected) in [
+        ("context", 1),
+        ("local_embeddings", 1),
+        ("model_execution", 1),
+        ("unknown", 0),
+    ] {
         let corr = client
             .control(&serde_json::json!({"op": "catalog.list", "module_id": filter}))
             .await
@@ -279,13 +284,25 @@ async fn all_supported_targets_dispatch_to_their_component() {
         .await
         .expect("context binds");
     let (sy_channel, sy_epoch) = client
-        .route_open_target("management_surface", "synapse", ROOT, "opencode", "s1")
+        .route_open_target(
+            "management_surface",
+            "local_embeddings",
+            ROOT,
+            "opencode",
+            "s1",
+        )
         .await
-        .expect("synapse binds");
+        .expect("local_embeddings binds");
     let (br_channel, br_epoch) = client
-        .route_open_target("management_surface", "broca", ROOT, "opencode", "s1")
+        .route_open_target(
+            "management_surface",
+            "model_execution",
+            ROOT,
+            "opencode",
+            "s1",
+        )
         .await
-        .expect("broca binds");
+        .expect("model_execution binds");
     assert_ne!(context_channel, sy_channel, "channels are host-global");
     assert_ne!(context_channel, br_channel);
     assert_ne!(sy_channel, br_channel);
@@ -296,11 +313,11 @@ async fn all_supported_targets_dispatch_to_their_component() {
     );
     assert_eq!(
         request_served_by(&mut client, sy_channel, sy_epoch).await,
-        "synapse"
+        "local_embeddings"
     );
     assert_eq!(
         request_served_by(&mut client, br_channel, br_epoch).await,
-        "broca"
+        "model_execution"
     );
     for component in [&primary, &secondary, &tertiary] {
         assert_eq!(
@@ -327,12 +344,12 @@ async fn wrong_role_pairings_reject_without_any_bind() {
     let mut client = host.client().await;
 
     for (kind, module, expected) in [
-        ("tool_provider", "synapse", "target_unavailable"),
-        ("tool_provider", "broca", "target_unavailable"),
+        ("tool_provider", "local_embeddings", "target_unavailable"),
+        ("tool_provider", "model_execution", "target_unavailable"),
         ("management_surface", "context", "target_unavailable"),
         ("management_surface", "thalamus", "unknown_module"),
         ("tool_provider", "thalamus", "unknown_module"),
-        ("internal_service", "broca", "target_unavailable"),
+        ("internal_service", "model_execution", "target_unavailable"),
         ("mystery_kind", "context", "target_unavailable"),
     ] {
         let err = client
@@ -366,7 +383,10 @@ async fn disabled_children_reject_binds_with_one_route_gone_each_and_keep_primar
     let host = support::CompositeTestHost::start(composite, |_config| {}).await;
     let mut client = host.client().await;
 
-    for (module, child) in [("synapse", &secondary), ("broca", &tertiary)] {
+    for (module, child) in [
+        ("local_embeddings", &secondary),
+        ("model_execution", &tertiary),
+    ] {
         let err = client
             .route_open_target("management_surface", module, ROOT, "opencode", "s1")
             .await
@@ -441,9 +461,15 @@ async fn a_closed_route_handle_cannot_dispatch_to_stale_child_ownership() {
     let mut client = host.client().await;
 
     let (channel, epoch) = client
-        .route_open_target("management_surface", "broca", ROOT, "opencode", "s1")
+        .route_open_target(
+            "management_surface",
+            "model_execution",
+            ROOT,
+            "opencode",
+            "s1",
+        )
         .await
-        .expect("broca binds");
+        .expect("model_execution binds");
     client
         .send_frame(
             raw_client::TY_GOODBYE,
@@ -511,8 +537,8 @@ async fn shutdown_runs_after_route_cleanup_and_orders_children() {
 
     for (kind, module) in [
         ("tool_provider", "context"),
-        ("management_surface", "synapse"),
-        ("management_surface", "broca"),
+        ("management_surface", "local_embeddings"),
+        ("management_surface", "model_execution"),
     ] {
         client
             .route_open_target(kind, module, ROOT, "opencode", "s1")
@@ -547,7 +573,7 @@ async fn shutdown_runs_after_route_cleanup_and_orders_children() {
             component.id
         );
     }
-    // The composite drains Broca before Synapse before the primary.
+    // The composite drains ModelExecution before LocalEmbeddings before the primary.
     let timeline = primary.timeline();
     let shutdown_at = |id: &str| {
         timeline
@@ -556,12 +582,12 @@ async fn shutdown_runs_after_route_cleanup_and_orders_children() {
             .expect("shutdown recorded in the shared timeline")
     };
     assert!(
-        shutdown_at("broca") < shutdown_at("synapse"),
-        "broca shuts down before synapse"
+        shutdown_at("model_execution") < shutdown_at("local_embeddings"),
+        "model_execution shuts down before local_embeddings"
     );
     assert!(
-        shutdown_at("synapse") < shutdown_at("context"),
-        "synapse shuts down before the primary"
+        shutdown_at("local_embeddings") < shutdown_at("context"),
+        "local_embeddings shuts down before the primary"
     );
 }
 
@@ -574,24 +600,24 @@ async fn health_aggregates_with_deterministic_precedence() {
     let report = composite.health().await;
     assert_eq!(report.status, HealthStatus::Ok);
 
-    tertiary.set_health(HealthStatus::Degraded, "broca degraded");
+    tertiary.set_health(HealthStatus::Degraded, "model_execution degraded");
     let report = composite.health().await;
     assert_eq!(report.status, HealthStatus::Degraded);
-    assert_eq!(report.detail.as_deref(), Some("broca degraded"));
+    assert_eq!(report.detail.as_deref(), Some("model_execution degraded"));
 
     // Equal optional severities always report the earlier catalog entry.
-    secondary.set_health(HealthStatus::Degraded, "synapse degraded");
+    secondary.set_health(HealthStatus::Degraded, "local_embeddings degraded");
     let report = composite.health().await;
     assert_eq!(
         report.detail.as_deref(),
-        Some("synapse degraded"),
-        "synapse wins the tie against broca deterministically"
+        Some("local_embeddings degraded"),
+        "local_embeddings wins the tie against model_execution deterministically"
     );
 
-    tertiary.set_health(HealthStatus::Failing, "broca failing");
+    tertiary.set_health(HealthStatus::Failing, "model_execution failing");
     let report = composite.health().await;
     assert_eq!(report.status, HealthStatus::Failing);
-    assert_eq!(report.detail.as_deref(), Some("broca failing"));
+    assert_eq!(report.detail.as_deref(), Some("model_execution failing"));
 
     primary.set_health(HealthStatus::Failing, "primary failing");
     let report = composite.health().await;
@@ -606,16 +632,16 @@ async fn health_aggregates_with_deterministic_precedence() {
 async fn duplicate_component_ids_are_refused_at_construction() {
     let left = FakeComponent::new("context", "tool_provider");
     let middle = FakeComponent::new("context", "management_surface");
-    let right = FakeComponent::new("broca", "management_surface");
+    let right = FakeComponent::new("model_execution", "management_surface");
     assert!(StaticComposite::new(left, middle, right).is_err());
 
     let left = FakeComponent::new("context", "tool_provider");
-    let middle = FakeComponent::new("synapse", "management_surface");
-    let right = FakeComponent::new("synapse", "management_surface");
+    let middle = FakeComponent::new("local_embeddings", "management_surface");
+    let right = FakeComponent::new("local_embeddings", "management_surface");
     assert!(StaticComposite::new(left, middle, right).is_err());
 
     let left = FakeComponent::new("context", "tool_provider");
-    let middle = FakeComponent::new("synapse", "management_surface");
+    let middle = FakeComponent::new("local_embeddings", "management_surface");
     let right = FakeComponent::new("context", "management_surface");
     assert!(StaticComposite::new(left, middle, right).is_err());
 }
@@ -751,18 +777,18 @@ impl SecondaryComponent for PanickingShutdownChild {
 }
 
 #[tokio::test]
-async fn a_panicking_broca_shutdown_still_drains_later_children_and_redacts() {
+async fn a_panicking_model_execution_shutdown_still_drains_later_children_and_redacts() {
     let (primary, secondary, _tertiary) = fake_trio();
     let shutdown_entered = Arc::new(AtomicBool::new(false));
-    let broca = PanickingShutdownChild {
-        id: "broca",
+    let model_execution = PanickingShutdownChild {
+        id: "model_execution",
         shutdown_entered: Arc::clone(&shutdown_entered),
     };
-    let composite =
-        StaticComposite::new(primary.clone(), secondary.clone(), broca).expect("distinct ids");
+    let composite = StaticComposite::new(primary.clone(), secondary.clone(), model_execution)
+        .expect("distinct ids");
 
     let joined = tokio::spawn(async move { composite.shutdown().await }).await;
-    let err = joined.expect_err("the composite must surface the broca failure");
+    let err = joined.expect_err("the composite must surface the model_execution failure");
     assert!(err.is_panic(), "the surfaced failure is a panic");
     let payload = err.into_panic();
     let message = payload
@@ -770,30 +796,30 @@ async fn a_panicking_broca_shutdown_still_drains_later_children_and_redacts() {
         .expect("composed failure message")
         .clone();
     assert_eq!(
-        message, "broca shutdown panicked",
+        message, "model_execution shutdown panicked",
         "one deterministic redacted failure"
     );
     assert!(shutdown_entered.load(Ordering::SeqCst));
-    // Broca drains first, so both later children must still have drained.
+    // ModelExecution drains first, so both later children must still have drained.
     assert!(
         secondary.events().contains(&Ev::Shutdown),
-        "synapse must drain despite the broca panic"
+        "local_embeddings must drain despite the model_execution panic"
     );
     assert!(
         primary.events().contains(&Ev::Shutdown),
-        "the primary must drain despite the broca panic"
+        "the primary must drain despite the model_execution panic"
     );
 }
 
 #[tokio::test]
-async fn an_erroring_broca_shutdown_still_drains_later_children_and_redacts() {
+async fn an_erroring_model_execution_shutdown_still_drains_later_children_and_redacts() {
     let (primary, secondary, tertiary) = fake_trio();
     tertiary.fail_shutdown("SECRET-DETAIL-77");
     let composite = StaticComposite::new(primary.clone(), secondary.clone(), tertiary.clone())
         .expect("distinct ids");
 
     let joined = tokio::spawn(async move { composite.shutdown().await }).await;
-    let err = joined.expect_err("the composite must surface the broca failure");
+    let err = joined.expect_err("the composite must surface the model_execution failure");
     assert!(err.is_panic());
     let payload = err.into_panic();
     let message = payload
@@ -806,12 +832,12 @@ async fn an_erroring_broca_shutdown_still_drains_later_children_and_redacts() {
     );
     assert_eq!(
         message,
-        "broca shutdown failed (16 bytes of detail redacted)"
+        "model_execution shutdown failed (16 bytes of detail redacted)"
     );
     for component in [&primary, &secondary, &tertiary] {
         assert!(
             component.events().contains(&Ev::Shutdown),
-            "{} must drain despite the broca error",
+            "{} must drain despite the model_execution error",
             component.id
         );
     }
@@ -820,7 +846,7 @@ async fn an_erroring_broca_shutdown_still_drains_later_children_and_redacts() {
 #[tokio::test]
 async fn a_child_shutdown_failure_makes_the_host_incarnation_non_graceful() {
     let (primary, secondary, tertiary) = fake_trio();
-    tertiary.fail_shutdown("late broca cleanup fault");
+    tertiary.fail_shutdown("late model_execution cleanup fault");
     let composite =
         StaticComposite::new(primary.clone(), secondary.clone(), tertiary).expect("distinct ids");
     let host = support::CompositeTestHost::start(composite, |_config| {}).await;
@@ -892,7 +918,7 @@ async fn a_panicking_optional_child_health_reports_failing_without_skipping_othe
         primary.clone(),
         secondary.clone(),
         PanickingHealthChild {
-            id: "broca",
+            id: "model_execution",
             health_entered: Arc::clone(&health_entered),
         },
     )
@@ -903,16 +929,16 @@ async fn a_panicking_optional_child_health_reports_failing_without_skipping_othe
     assert_eq!(report.status, HealthStatus::Failing);
     assert_eq!(
         report.detail.as_deref(),
-        Some("broca health check panicked")
+        Some("model_execution health check panicked")
     );
 
-    // The composite continues polling other children after Broca's health probe panics.
+    // The composite continues polling other children after ModelExecution's health probe panics.
     // severity.
-    secondary.set_health(HealthStatus::Degraded, "synapse degraded");
+    secondary.set_health(HealthStatus::Degraded, "local_embeddings degraded");
     let report = composite.health().await;
     assert_eq!(
         report.detail.as_deref(),
-        Some("broca health check panicked"),
+        Some("model_execution health check panicked"),
         "the caught fault outranks a merely degraded sibling"
     );
 
@@ -930,7 +956,7 @@ async fn a_panicking_optional_child_health_reports_failing_without_skipping_othe
     let composite = StaticComposite::new(
         primary.clone(),
         PanickingHealthChild {
-            id: "synapse",
+            id: "local_embeddings",
             health_entered: Arc::clone(&health_entered),
         },
         tertiary,
@@ -942,6 +968,6 @@ async fn a_panicking_optional_child_health_reports_failing_without_skipping_othe
     assert_eq!(report.status, HealthStatus::Failing);
     assert_eq!(
         report.detail.as_deref(),
-        Some("synapse health check panicked")
+        Some("local_embeddings health check panicked")
     );
 }

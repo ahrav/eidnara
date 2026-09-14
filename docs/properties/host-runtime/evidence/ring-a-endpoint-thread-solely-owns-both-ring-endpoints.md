@@ -47,7 +47,7 @@ Two independent structural reinforcements:
   A direct move of a `Ring` across a thread boundary would not compile.
 - `crates/host-runtime/src/lib.rs:5` is `#![deny(unsafe_code)]`, with the doc comment
   at `:1-4` recording that the one permitted `unsafe` block in the crate is a
-  `pre_exec` hook in the Broca subprocess spawner. So there is currently no
+  `pre_exec` hook in the ModelExecution subprocess spawner. So there is currently no
   route in `host-runtime` for smuggling a raw pointer into the arena past the
   `!Send` bound.
 

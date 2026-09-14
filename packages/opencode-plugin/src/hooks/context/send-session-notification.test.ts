@@ -387,7 +387,12 @@ describe("sendIgnoredMessage", () => {
 
     it("pins the last assistant turn's agent+model+variant by default (mid-session)", async () => {
         const session = titledClientWithLastTurn();
-        const result = await sendIgnoredMessage({ session }, "ses-titled", "historian failed", {});
+        const result = await sendIgnoredMessage(
+            { session },
+            "ses-titled",
+            "history_summarizer failed",
+            {},
+        );
         expect(result).toBe("sent");
         const body = lastPromptBody(session.prompt);
         expect(body.agent).toBe("build");

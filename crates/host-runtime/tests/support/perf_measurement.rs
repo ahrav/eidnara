@@ -228,18 +228,18 @@ impl LatencySummary {
     }
 }
 
-/// The Synapse benchmark exercises these wire methods.
+/// The LocalEmbeddings benchmark exercises these wire methods.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum SynapseMethod {
+pub enum LocalEmbeddingsMethod {
     Query,
     Batch,
     Result,
 }
 
-impl SynapseMethod {
+impl LocalEmbeddingsMethod {
     pub fn wire_name(self) -> &'static str {
         match self {
             Self::Query => "embed.query",
@@ -251,7 +251,7 @@ impl SynapseMethod {
 
 /// The harness records the timeout outcome when its deadline fires before any terminal outcome arrives.
 /// The unknown-admission outcome marks an attempt whose admission outcome the wire never revealed.
-/// [`validate_synapse_ledgers`] excludes attempts whose wire admission outcome is unknown from admitted and rejected subtotals.
+/// [`validate_local_embeddings_ledgers`] excludes attempts whose wire admission outcome is unknown from admitted and rejected subtotals.
 pub const ATTEMPT_TIMEOUT_CODE: &str = "attempt_timeout";
 
 /// Attempt-ledger categories are mutually exclusive.
@@ -260,7 +260,7 @@ pub const ATTEMPT_TIMEOUT_CODE: &str = "attempt_timeout";
 /// [`Self::Failure`] records a non-poll wire call answered with an error the client policy cannot act on.
 /// Examples include `artifact_invalid`, `schema_violation`, and `cancelled`.
 /// [`Self::Failure`] terminals occur only in an already-invalid run.
-/// [`validate_synapse_ledgers`] reports any nonzero [`Self::Failure`] count as a ledger error.
+/// [`validate_local_embeddings_ledgers`] reports any nonzero [`Self::Failure`] count as a ledger error.
 /// Every retained repetition satisfies the frozen four-way identity.
 /// Recording [`Self::Failure`] terminals as successes would corrupt the raw evidence used to diagnose an invalid run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -277,7 +277,7 @@ pub enum AttemptDisposition {
 pub struct AttemptRecord {
     pub logical_id: u64,
     pub attempt_id: u64,
-    pub method: SynapseMethod,
+    pub method: LocalEmbeddingsMethod,
     pub disposition: AttemptDisposition,
     pub code: Option<String>,
     pub retry_after_ms: Option<u64>,
@@ -288,7 +288,7 @@ pub struct AttemptRecord {
     /// An attempt is included or excluded with its owning logical request, not by its send instant.
     ///
     /// An attempt is one wire call of its owning logical request, not an independent observation.
-    /// An attempt belongs to its logical request, and [`validate_synapse_ledgers`] rejects repetitions whose logical rows disagree with their owned attempts.
+    /// An attempt belongs to its logical request, and [`validate_local_embeddings_ledgers`] rejects repetitions whose logical rows disagree with their owned attempts.
     /// Classifying attempts by `actual_send_ns` would mark measured requests that retry or poll past the window end inadmissible.
     /// Counting attempts and requests over the same logical requests keeps amplification conservative.
     /// Excluding a censored request's post-boundary attempts would understate amplification.
@@ -464,7 +464,7 @@ pub fn count_class<T>(records: &[T], want: WindowClass, class: impl Fn(&T) -> Wi
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct SynapseLedgerSummary {
+pub struct LocalEmbeddingsLedgerSummary {
     pub valid: bool,
     pub errors: Vec<String>,
     pub offered: u64,
@@ -491,10 +491,10 @@ pub struct SynapseLedgerSummary {
 }
 
 /// The ledger validator checks both frozen count ledgers before rates or percentiles are used.
-pub fn validate_synapse_ledgers(
+pub fn validate_local_embeddings_ledgers(
     logical: &[LogicalRecord],
     attempts: &[AttemptRecord],
-) -> SynapseLedgerSummary {
+) -> LocalEmbeddingsLedgerSummary {
     let offered = logical.len() as u64;
     let completed = logical
         .iter()
@@ -612,9 +612,9 @@ pub fn validate_synapse_ledgers(
         if !attempt_ids.insert(attempt.attempt_id) {
             errors.push(format!("duplicate attempt_id {}", attempt.attempt_id));
         }
-        // `SynapseMethod::Result` must have `AttemptDisposition::Poll`, and only that method may have it; ledger totals do not enforce this invariant.
+        // `LocalEmbeddingsMethod::Result` must have `AttemptDisposition::Poll`, and only that method may have it; ledger totals do not enforce this invariant.
         let is_poll = attempt.disposition == AttemptDisposition::Poll;
-        if (attempt.method == SynapseMethod::Result) != is_poll {
+        if (attempt.method == LocalEmbeddingsMethod::Result) != is_poll {
             errors.push(format!(
                 "attempt {} is {} with disposition {:?}: every embed.result attempt is a poll and no other method is",
                 attempt.attempt_id,
@@ -670,7 +670,7 @@ pub fn validate_synapse_ledgers(
         }
     }
 
-    SynapseLedgerSummary {
+    LocalEmbeddingsLedgerSummary {
         valid: errors.is_empty(),
         errors,
         offered,
@@ -727,9 +727,9 @@ impl DeterministicRng {
     }
 }
 
-/// `POLL_DELAY_MULTIPLIER` must match `SYNAPSE_POLL_DELAY_MULTIPLIER`.
-/// `SYNAPSE_POLL_MIN_DELAY_MS` in
-/// `packages/opencode-plugin/src/features/context/memory/embedding-synapse.ts`,
+/// `POLL_DELAY_MULTIPLIER` must match `LOCAL_EMBEDDINGS_POLL_DELAY_MULTIPLIER`.
+/// `LOCAL_EMBEDDINGS_POLL_MIN_DELAY_MS` in
+/// `packages/opencode-plugin/src/features/context/memory/embedding-local_embeddings.ts`,
 /// invalidating client-faithfulness.
 pub const POLL_DELAY_MULTIPLIER: f64 = 1.6;
 pub const POLL_MIN_DELAY_MS: u64 = 10;
@@ -747,7 +747,7 @@ pub fn pending_poll_delay_ms(next_delay_ms: &mut f64, served_cap_ms: u64) -> f64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SynapseVariant {
+pub enum LocalEmbeddingsVariant {
     #[serde(rename = "baseline")]
     Baseline,
     #[serde(rename = "hygiene-only")]
@@ -762,7 +762,7 @@ pub enum SynapseVariant {
     APlusC,
 }
 
-impl SynapseVariant {
+impl LocalEmbeddingsVariant {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "baseline" => Ok(Self::Baseline),

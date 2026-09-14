@@ -28,7 +28,7 @@ References are to `crates/daemon/src/lib.rs` unless stated. Verified at `HEAD`
 and called on every rejection: version mismatch `:5629`, empty session id `:5636`,
 bad `import_id` `:5640`, bad batch window `:5646`, unbound route `:5656`, session
 mismatch `:5663`, store unavailable `:5674`, duplicate preflight `:5680`,
-session-not-empty `:5689`, preflight error `:5697`, and compartment validation
+session-not-empty `:5689`, preflight error `:5697`, and history_segment validation
 failure `:5712`. Two earlier paths, before `parsed` exists, do the same by hand at
 `:5599-5604` and `:5612-5617`. This is thorough.
 
@@ -36,7 +36,7 @@ failure `:5712`. Two earlier paths, before `parsed` exists, do the same by hand 
 deserialization at `:5609`, `v == 1` at `:5628`, session id at `:5635`,
 `import_id` bounds at `:5639` against `STATE_IMPORT_MAX_ID_BYTES` (128, `:651`),
 batch window at `:5645`, route binding at `:5653`, store availability at `:5671`,
-preflight at `:5678`, and compartment validation at `:5711`. Only then is anything
+preflight at `:5678`, and history_segment validation at `:5711`. Only then is anything
 staged at `:5716-5729` or committed at `:5738`.
 
 **The idempotency key and its two duplicate reports.** `import_id` is
@@ -71,12 +71,12 @@ bounds the record to lost work rather than double-apply.
 ```
 5734            Ok(StateImportStageOutcome::Apply {
 5735                import_id,
-5736                compartments,
+5736                history_segments,
 5737            }) => {
 5738                let outcome = store.commit_state_import(
 5739                    &parsed.session_id,
 5740                    &import_id,
-5741                    &compartments,
+5741                    &history_segments,
 5742                    created_at,
 5743                );
 5744                self.state_imports
@@ -100,7 +100,7 @@ bounds the record to lost work rather than double-apply.
 returned the staged batch set is gone.
 
 **A related detail worth recording.** `created_at` is taken once at `:5705`, before
-the compartments for *this* batch are built at `:5706-5710`, and the same value is
+the history_segments for *this* batch are built at `:5706-5710`, and the same value is
 passed to `commit_state_import` at `:5742`. On a multi-batch import the earlier
 batches were converted using their own request's `created_at`, since `:5706-5710`
 runs per request. So the committed set can carry per-batch creation stamps while
@@ -112,9 +112,9 @@ what the store does with the parameter; noted, not claimed.
 1. A caller imports a session in three batches with `import_id = "imp-9"`.
 2. Batches 0 and 1 stage successfully, each returning `{ok: true, staged: n}` at
    `:5732`.
-3. Batch 2 arrives. Preflight at `:5678` returns `Ready`. Compartment validation at
+3. Batch 2 arrives. Preflight at `:5678` returns `Ready`. HistorySegment validation at
    `:5711` passes. `stage` at `:5716` returns `Apply` with all three batches'
-   compartments.
+   history_segments.
 4. `commit_state_import` at `:5738` fails with `StateImportError::Store`, for
    example `SQLITE_BUSY` past the timeout or a disk error.
 5. `:5744-5747` clears the staging regardless.
@@ -205,13 +205,13 @@ request at `:5597`, so the resend cost scales with `batch_count`.
 ### Q: Does the shared `created_at` across batches cause a defect?
 
 - Sources examined: `:5705` where it is taken; `:5706-5710` where per-request
-  compartments are stamped with it; `:5742` where the last batch's value is passed to
+  history_segments are stamped with it; `:5742` where the last batch's value is passed to
   the commit.
-- Findings: each request stamps its own compartments with its own `created_at`, so
-  the values inside the compartment set vary across batches. The commit receives one
+- Findings: each request stamps its own history_segments with its own `created_at`, so
+  the values inside the history_segment set vary across batches. The commit receives one
   scalar.
 - Missing evidence: what `commit_state_import` does with the `created_at` parameter
-  given the compartments already carry their own.
+  given the history_segments already carry their own.
 - Conclusion: unresolved, needs `memory-store`. Not promoted to a record because I could
   not establish an effect; recorded here so a later pass does not have to rediscover
   the observation.

@@ -176,8 +176,8 @@ export interface RustSessionStatus {
     tail_hygiene?: WireTailHygieneBaseline | null;
     boundary_present?: boolean;
     coverage_ordinal?: number | null;
-    compartment_count?: number;
-    compartment_tokens?: number;
+    history_segment_count?: number;
+    history_segment_tokens?: number;
     pending_drop_count?: number;
     tag_count?: number;
     pending_m1_delta?: boolean;
@@ -420,19 +420,19 @@ export function buildSidebarSnapshot(
         // The sidebar computes work metrics lazily and incrementally to keep computation off the transform hot path.
         const { newWorkTokens, totalInputTokens } = resolveSidebarWorkMetrics(sessionId);
 
-        const compartmentCount =
-            typeof moduleStatus?.compartment_count === "number"
-                ? moduleStatus.compartment_count
+        const history_segmentCount =
+            typeof moduleStatus?.history_segment_count === "number"
+                ? moduleStatus.history_segment_count
                 : 0;
-        const compartmentTokensLocal =
-            typeof moduleStatus?.compartment_tokens === "number"
-                ? moduleStatus.compartment_tokens
+        const history_segmentTokensLocal =
+            typeof moduleStatus?.history_segment_tokens === "number"
+                ? moduleStatus.history_segment_tokens
                 : 0;
         const pendingOpsCount =
             typeof moduleStatus?.pending_drop_count === "number"
                 ? moduleStatus.pending_drop_count
                 : 0;
-        // `wrapup_active` is the daemon's only in-flight signal, so `historianRunning` and `compartmentInProgress` share it.
+        // `wrapup_active` is the daemon's only in-flight signal, so `history_summarizerRunning` and `history_segmentInProgress` share it.
         const wrapupActive = moduleStatus?.wrapup_active === true;
 
         // Expired anti-memories stay out of the count, matching the surface filter list and search apply.
@@ -503,13 +503,13 @@ export function buildSidebarSnapshot(
         // Display-layer attribution.
         //
         // tokenizer-calibration.ts captures empirically measured per-model tokenizer drift.
-        // Compartments carry the daemon's measured count; every other local bucket is zero, so the
+        // HistorySegments carry the daemon's measured count; every other local bucket is zero, so the
         // conversation bucket absorbs the remainder and the buckets sum to exactly inputTokens.
         const calibrated = calibrateBuckets({
             inputTokens: effectiveInputTokens,
             systemLocal: 0,
             toolDefsLocal: 0,
-            compartmentsLocal: compartmentTokensLocal,
+            history_segmentsLocal: history_segmentTokensLocal,
             factsLocal: 0,
             memoriesLocal: 0,
             docsLocal: 0,
@@ -530,21 +530,21 @@ export function buildSidebarSnapshot(
                 ? {}
                 : { native_compaction_active: ownership.nativeActive }),
             systemPromptTokens: calibrated.systemTokens,
-            compartmentCount,
+            history_segmentCount,
             memoryCount,
             ...(memoryTruncated ? { memoryTruncated } : {}),
             memoryState,
             memoryBlockCount: 0,
             pendingOpsCount,
-            historianRunning: wrapupActive,
-            compartmentInProgress: wrapupActive,
+            history_summarizerRunning: wrapupActive,
+            history_segmentInProgress: wrapupActive,
             sessionNoteCount: 0,
-            readySmartNoteCount: 0,
+            readyConditionalNoteCount: 0,
             cacheTtl,
             lastTransformError,
-            lastDreamerRunAt: null,
+            lastMemoryClassifierRunAt: null,
             projectIdentity,
-            compartmentTokens: calibrated.compartmentTokens,
+            history_segmentTokens: calibrated.history_segmentTokens,
             factTokens: calibrated.factTokens,
             memoryTokens: calibrated.memoryTokens,
             docsTokens: calibrated.docsTokens,
@@ -725,7 +725,7 @@ export function buildStatusDetail(
 
         // History compression
         try {
-            const histTokens = base.compartmentTokens + base.factTokens;
+            const histTokens = base.history_segmentTokens + base.factTokens;
             detail.historyBlockTokens = histTokens;
 
             if (detail.contextLimit > 0) {

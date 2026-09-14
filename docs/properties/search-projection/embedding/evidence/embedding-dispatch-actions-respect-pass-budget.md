@@ -54,7 +54,7 @@ uncertain. Once terminal writing starts, the transaction and its deadline own
 the uncertainty boundary. Selected rows are then hydrated and driven one at a
 time after confirmed terminal writes.
 
-Projection obsoletion does not cancel an already held host job. Synapse job,
+Projection obsoletion does not cancel an already held host job. LocalEmbeddings job,
 byte, and retention limits bound that local residue until normal eviction.
 
 ## What a test must construct

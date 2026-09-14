@@ -1,9 +1,9 @@
-//! This module reads JSONC config for autonomous historian firing.
+//! This module reads JSONC config for autonomous history_summarizer firing.
 //!
 //! The reader loads user and project tiers directly without a daemon config plane.
 //! Every key it consumes is a [`ConfigKey`] with one [`TierClass`]: the user
 //! tier sets any key; project values apply only as their class permits.
-//! Model selection, memory and user-profile budgets, historian context and cache
+//! Model selection, memory and user-profile budgets, history_summarizer context and cache
 //! TTL, unattended task schedules, and docs injection are user-only.
 //! Projects may only raise the execute threshold or close the user-memory gate.
 //! No environment variable supplies a configuration value.
@@ -25,24 +25,26 @@ pub const DEFAULT_MEMORY_BUDGET_TOKENS: f64 = 4_000.0;
 pub const DEFAULT_USER_PROFILE_BUDGET_TOKENS: f64 = 4_000.0;
 /// The 90% cap reserves the final 10% of the usable window for mid-turn input growth because output capacity is already reserved.
 const MAX_EXECUTE_THRESHOLD_PERCENTAGE: f64 = 90.0;
-pub const MIN_HISTORIAN_CHUNK_TOKENS: usize = 8_000;
-pub const MAX_HISTORIAN_CHUNK_TOKENS: usize = 50_000;
-/// `DEFAULT_HISTORIAN_CONTEXT_LIMIT_TOKENS` matches the TypeScript historian fallback when no model catalog value is available.
+pub const MIN_HISTORY_SUMMARIZER_CHUNK_TOKENS: usize = 8_000;
+pub const MAX_HISTORY_SUMMARIZER_CHUNK_TOKENS: usize = 50_000;
+/// `DEFAULT_HISTORY_SUMMARIZER_CONTEXT_LIMIT_TOKENS` matches the TypeScript history_summarizer fallback when no model catalog value is available.
 /// The explicit config override still wins when a binding supplies one.
-pub const DEFAULT_HISTORIAN_CONTEXT_LIMIT_TOKENS: usize = 128_000;
+pub const DEFAULT_HISTORY_SUMMARIZER_CONTEXT_LIMIT_TOKENS: usize = 128_000;
 /// The auto-search defaults match the TypeScript `memory.auto_search` schema.
 pub const DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD: f64 = 0.6;
 pub const DEFAULT_AUTO_SEARCH_MIN_PROMPT_CHARS: usize = 20;
-/// The caveman defaults match the TypeScript `caveman_text_compression` schema.
-pub const DEFAULT_CAVEMAN_MIN_SIZE: usize = 500;
+/// The terse_text_compression defaults match the TypeScript `terse_text_compression` schema.
+pub const DEFAULT_TERSE_TEXT_COMPRESSION_MIN_SIZE: usize = 500;
 
-/// Derives the historian producer budget as 25 percent of context capacity, in tokens.
+/// Derives the history_summarizer producer budget as 25 percent of context capacity, in tokens.
 ///
 /// Rounds to the nearest token, then clamps the result to 8,000 through 50,000 tokens. This
 /// matches the TypeScript runner.
-pub fn derive_historian_chunk_tokens(context_limit_tokens: usize) -> usize {
-    (((context_limit_tokens as f64) * 0.25).round() as usize)
-        .clamp(MIN_HISTORIAN_CHUNK_TOKENS, MAX_HISTORIAN_CHUNK_TOKENS)
+pub fn derive_history_summarizer_chunk_tokens(context_limit_tokens: usize) -> usize {
+    (((context_limit_tokens as f64) * 0.25).round() as usize).clamp(
+        MIN_HISTORY_SUMMARIZER_CHUNK_TOKENS,
+        MAX_HISTORY_SUMMARIZER_CHUNK_TOKENS,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,16 +65,16 @@ impl Default for AutoSearchConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CavemanConfig {
+pub struct TerseTextCompressionConfig {
     pub enabled: bool,
     pub min_size: usize,
 }
 
-impl Default for CavemanConfig {
+impl Default for TerseTextCompressionConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            min_size: DEFAULT_CAVEMAN_MIN_SIZE,
+            min_size: DEFAULT_TERSE_TEXT_COMPRESSION_MIN_SIZE,
         }
     }
 }
@@ -86,18 +88,18 @@ pub struct DaemonConfig {
     pub memory_enabled: bool,
     /// Auto-search hint controls operate independently at transform time.
     pub auto_search: AutoSearchConfig,
-    /// Caveman compression uses deterministic age-tier controls.
-    pub caveman: CavemanConfig,
+    /// TerseTextCompression compression uses deterministic age-tier controls.
+    pub terse_text_compression: TerseTextCompressionConfig,
     /// `auto_promote` mirrors the TS auto-promote switch; false drops facts.
     pub auto_promote: bool,
-    /// The privacy gate controls whether historian user observations may be collected for later review and promotion.
+    /// The privacy gate controls whether history_summarizer user observations may be collected for later review and promotion.
     pub user_memory_collection_enabled: bool,
-    /// The five-field cron expression that schedules the Dreamer
+    /// The five-field cron expression that schedules the MemoryClassifier
     /// `review-user-memories` task; `None` leaves the task disabled. Only the
     /// user tier can set it, and a value that is not a valid cron expression is
     /// refused with a warning rather than enabling the task on a guess.
-    pub dreamer_review_user_memories_schedule: Option<String>,
-    pub historian_context_limit_tokens: usize,
+    pub memory_classifier_review_user_memories_schedule: Option<String>,
+    pub history_summarizer_context_limit_tokens: usize,
     pub memory_budget_tokens: f64,
     pub user_profile_budget_tokens: f64,
     /// The m0 baseline option controls whether the frozen m0 baseline includes the canonical project-docs block.
@@ -121,11 +123,12 @@ impl Default for DaemonConfig {
             compaction_enabled: true,
             memory_enabled: true,
             auto_search: AutoSearchConfig::default(),
-            caveman: CavemanConfig::default(),
+            terse_text_compression: TerseTextCompressionConfig::default(),
             auto_promote: true,
             user_memory_collection_enabled: false,
-            dreamer_review_user_memories_schedule: None,
-            historian_context_limit_tokens: DEFAULT_HISTORIAN_CONTEXT_LIMIT_TOKENS,
+            memory_classifier_review_user_memories_schedule: None,
+            history_summarizer_context_limit_tokens:
+                DEFAULT_HISTORY_SUMMARIZER_CONTEXT_LIMIT_TOKENS,
             memory_budget_tokens: DEFAULT_MEMORY_BUDGET_TOKENS,
             user_profile_budget_tokens: DEFAULT_USER_PROFILE_BUDGET_TOKENS,
             inject_docs: true,
@@ -530,27 +533,27 @@ pub enum TierClass {
 /// without a read or a classification does not compile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKey {
-    HistorianModuleModel,
-    HistorianModuleFallbackModels,
-    HistorianModel,
-    HistorianFallbackModels,
+    HistorySummarizerModuleModel,
+    HistorySummarizerModuleFallbackModels,
+    HistorySummarizerModel,
+    HistorySummarizerFallbackModels,
     ExecuteThresholdPercentage,
     CompactionEnabled,
     MemoryEnabled,
     AutoSearchEnabled,
     AutoSearchScoreThreshold,
     AutoSearchMinPromptChars,
-    CavemanEnabled,
-    CavemanMinChars,
+    TerseTextCompressionEnabled,
+    TerseTextCompressionMinChars,
     MemoryInjectionBudgetTokens,
     MemoryBudgetTokens,
     UserProfileBudgetTokens,
     MemoryAutoPromote,
-    DreamerReviewUserMemoriesSchedule,
+    MemoryClassifierReviewUserMemoriesSchedule,
     UserMemoriesEnabled,
-    HistorianContextLimitTokens,
+    HistorySummarizerContextLimitTokens,
     SmartDrops,
-    DreamerInjectDocs,
+    MemoryClassifierInjectDocs,
     TemporalAwareness,
     PromptSurfaceGuidanceOverrideText,
     PromptSurfaceGuidanceOverridePath,
@@ -558,33 +561,33 @@ pub enum ConfigKey {
 }
 
 impl ConfigKey {
-    /// Application order. `DreamerReviewUserMemoriesSchedule` follows
+    /// Application order. `MemoryClassifierReviewUserMemoriesSchedule` follows
     /// `UserMemoriesEnabled` so a schedule wins when a tier sets both. Every
-    /// other key that defers to a sibling (`HistorianModel` to
-    /// `HistorianModuleModel`, `MemoryBudgetTokens` to
+    /// other key that defers to a sibling (`HistorySummarizerModel` to
+    /// `HistorySummarizerModuleModel`, `MemoryBudgetTokens` to
     /// `MemoryInjectionBudgetTokens`) checks the sibling's presence in the tier.
     pub const ALL: &'static [Self] = &[
-        Self::HistorianModuleModel,
-        Self::HistorianModuleFallbackModels,
-        Self::HistorianModel,
-        Self::HistorianFallbackModels,
+        Self::HistorySummarizerModuleModel,
+        Self::HistorySummarizerModuleFallbackModels,
+        Self::HistorySummarizerModel,
+        Self::HistorySummarizerFallbackModels,
         Self::ExecuteThresholdPercentage,
         Self::CompactionEnabled,
         Self::MemoryEnabled,
         Self::AutoSearchEnabled,
         Self::AutoSearchScoreThreshold,
         Self::AutoSearchMinPromptChars,
-        Self::CavemanEnabled,
-        Self::CavemanMinChars,
+        Self::TerseTextCompressionEnabled,
+        Self::TerseTextCompressionMinChars,
         Self::MemoryInjectionBudgetTokens,
         Self::MemoryBudgetTokens,
         Self::UserProfileBudgetTokens,
         Self::MemoryAutoPromote,
         Self::UserMemoriesEnabled,
-        Self::DreamerReviewUserMemoriesSchedule,
-        Self::HistorianContextLimitTokens,
+        Self::MemoryClassifierReviewUserMemoriesSchedule,
+        Self::HistorySummarizerContextLimitTokens,
         Self::SmartDrops,
-        Self::DreamerInjectDocs,
+        Self::MemoryClassifierInjectDocs,
         Self::TemporalAwareness,
         Self::PromptSurfaceGuidanceOverrideText,
         Self::PromptSurfaceGuidanceOverridePath,
@@ -593,29 +596,31 @@ impl ConfigKey {
 
     pub const fn pointer(self) -> &'static str {
         match self {
-            Self::HistorianModuleModel => "/historian/module_model",
-            Self::HistorianModuleFallbackModels => "/historian/module_fallback_models",
-            Self::HistorianModel => "/historian/model",
-            Self::HistorianFallbackModels => "/historian/fallback_models",
+            Self::HistorySummarizerModuleModel => "/history_summarizer/module_model",
+            Self::HistorySummarizerModuleFallbackModels => {
+                "/history_summarizer/module_fallback_models"
+            }
+            Self::HistorySummarizerModel => "/history_summarizer/model",
+            Self::HistorySummarizerFallbackModels => "/history_summarizer/fallback_models",
             Self::ExecuteThresholdPercentage => "/execute_threshold_percentage",
             Self::CompactionEnabled => "/compaction/enabled",
             Self::MemoryEnabled => "/memory/enabled",
             Self::AutoSearchEnabled => "/memory/auto_search/enabled",
             Self::AutoSearchScoreThreshold => "/memory/auto_search/score_threshold",
             Self::AutoSearchMinPromptChars => "/memory/auto_search/min_prompt_chars",
-            Self::CavemanEnabled => "/caveman_text_compression/enabled",
-            Self::CavemanMinChars => "/caveman_text_compression/min_chars",
+            Self::TerseTextCompressionEnabled => "/terse_text_compression/enabled",
+            Self::TerseTextCompressionMinChars => "/terse_text_compression/min_chars",
             Self::MemoryInjectionBudgetTokens => "/memory/injection_budget_tokens",
             Self::MemoryBudgetTokens => "/memory/budget_tokens",
             Self::UserProfileBudgetTokens => "/memory/user_profile_budget_tokens",
             Self::MemoryAutoPromote => "/memory/auto_promote",
-            Self::DreamerReviewUserMemoriesSchedule => {
-                "/dreamer/tasks/review-user-memories/schedule"
+            Self::MemoryClassifierReviewUserMemoriesSchedule => {
+                "/memory_classifier/tasks/review-user-memories/schedule"
             }
             Self::UserMemoriesEnabled => "/user_memories/enabled",
-            Self::HistorianContextLimitTokens => "/historian/context_limit_tokens",
+            Self::HistorySummarizerContextLimitTokens => "/history_summarizer/context_limit_tokens",
             Self::SmartDrops => "/smart_drops",
-            Self::DreamerInjectDocs => "/dreamer/inject_docs",
+            Self::MemoryClassifierInjectDocs => "/memory_classifier/inject_docs",
             Self::TemporalAwareness => "/temporal_awareness",
             Self::PromptSurfaceGuidanceOverrideText => "/prompt_surface/guidance_override_text",
             Self::PromptSurfaceGuidanceOverridePath => "/prompt_surface/guidance_override_path",
@@ -628,21 +633,21 @@ impl ConfigKey {
     /// never `ProjectAllowed`; a `const` assertion below checks that at compile
     /// time.
     ///
-    /// `cache_ttl` is the idle interval after which the historian fires on its
+    /// `cache_ttl` is the idle interval after which the history_summarizer fires on its
     /// own (`scheduler::should_execute`), so it spends model budget.
     pub const fn privileged(self) -> bool {
         match self {
-            Self::HistorianModuleModel
-            | Self::HistorianModuleFallbackModels
-            | Self::HistorianModel
-            | Self::HistorianFallbackModels
+            Self::HistorySummarizerModuleModel
+            | Self::HistorySummarizerModuleFallbackModels
+            | Self::HistorySummarizerModel
+            | Self::HistorySummarizerFallbackModels
             | Self::MemoryInjectionBudgetTokens
             | Self::MemoryBudgetTokens
             | Self::UserProfileBudgetTokens
-            | Self::HistorianContextLimitTokens
-            | Self::DreamerReviewUserMemoriesSchedule
+            | Self::HistorySummarizerContextLimitTokens
+            | Self::MemoryClassifierReviewUserMemoriesSchedule
             | Self::UserMemoriesEnabled
-            | Self::DreamerInjectDocs
+            | Self::MemoryClassifierInjectDocs
             | Self::CacheTtl => true,
             Self::ExecuteThresholdPercentage
             | Self::CompactionEnabled
@@ -650,8 +655,8 @@ impl ConfigKey {
             | Self::AutoSearchEnabled
             | Self::AutoSearchScoreThreshold
             | Self::AutoSearchMinPromptChars
-            | Self::CavemanEnabled
-            | Self::CavemanMinChars
+            | Self::TerseTextCompressionEnabled
+            | Self::TerseTextCompressionMinChars
             | Self::MemoryAutoPromote
             | Self::SmartDrops
             | Self::TemporalAwareness
@@ -662,17 +667,17 @@ impl ConfigKey {
 
     pub const fn tier_class(self) -> TierClass {
         match self {
-            Self::HistorianModuleModel
-            | Self::HistorianModuleFallbackModels
-            | Self::HistorianModel
-            | Self::HistorianFallbackModels
+            Self::HistorySummarizerModuleModel
+            | Self::HistorySummarizerModuleFallbackModels
+            | Self::HistorySummarizerModel
+            | Self::HistorySummarizerFallbackModels
             | Self::CompactionEnabled
             | Self::MemoryInjectionBudgetTokens
             | Self::MemoryBudgetTokens
             | Self::UserProfileBudgetTokens
-            | Self::DreamerReviewUserMemoriesSchedule
-            | Self::HistorianContextLimitTokens
-            | Self::DreamerInjectDocs
+            | Self::MemoryClassifierReviewUserMemoriesSchedule
+            | Self::HistorySummarizerContextLimitTokens
+            | Self::MemoryClassifierInjectDocs
             | Self::PromptSurfaceGuidanceOverrideText
             | Self::PromptSurfaceGuidanceOverridePath
             | Self::CacheTtl => TierClass::UserOnly,
@@ -680,8 +685,8 @@ impl ConfigKey {
             | Self::AutoSearchEnabled
             | Self::AutoSearchScoreThreshold
             | Self::AutoSearchMinPromptChars
-            | Self::CavemanEnabled
-            | Self::CavemanMinChars
+            | Self::TerseTextCompressionEnabled
+            | Self::TerseTextCompressionMinChars
             | Self::MemoryAutoPromote
             | Self::SmartDrops
             | Self::TemporalAwareness => TierClass::ProjectAllowed,
@@ -777,23 +782,23 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
         }
     };
     match key {
-        ConfigKey::HistorianModuleModel => {
+        ConfigKey::HistorySummarizerModuleModel => {
             if let Some(model) = tier.pointer(pointer).and_then(trimmed_str) {
                 cfg.model_chain.push(model);
             }
         }
-        ConfigKey::HistorianModuleFallbackModels => {
+        ConfigKey::HistorySummarizerModuleFallbackModels => {
             if tier
-                .pointer(ConfigKey::HistorianModuleModel.pointer())
+                .pointer(ConfigKey::HistorySummarizerModuleModel.pointer())
                 .and_then(trimmed_str)
                 .is_some()
             {
                 extend_models(&mut cfg.model_chain);
             }
         }
-        ConfigKey::HistorianModel => {
+        ConfigKey::HistorySummarizerModel => {
             if tier
-                .pointer(ConfigKey::HistorianModuleModel.pointer())
+                .pointer(ConfigKey::HistorySummarizerModuleModel.pointer())
                 .and_then(trimmed_str)
                 .is_none()
                 && let Some(model) = tier.pointer(pointer).and_then(trimmed_str)
@@ -801,9 +806,9 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
                 cfg.model_chain.push(model);
             }
         }
-        ConfigKey::HistorianFallbackModels => {
+        ConfigKey::HistorySummarizerFallbackModels => {
             if tier
-                .pointer(ConfigKey::HistorianModuleModel.pointer())
+                .pointer(ConfigKey::HistorySummarizerModuleModel.pointer())
                 .and_then(trimmed_str)
                 .is_none()
             {
@@ -840,14 +845,14 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
                 cfg.auto_search.min_prompt_chars = min_prompt_chars.clamp(5, 500);
             }
         }
-        ConfigKey::CavemanEnabled => {
+        ConfigKey::TerseTextCompressionEnabled => {
             if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
-                cfg.caveman.enabled = enabled;
+                cfg.terse_text_compression.enabled = enabled;
             }
         }
-        ConfigKey::CavemanMinChars => {
+        ConfigKey::TerseTextCompressionMinChars => {
             if let Some(min_chars) = positive_usize_at(tier, pointer) {
-                cfg.caveman.min_size = min_chars.clamp(100, 10_000);
+                cfg.terse_text_compression.min_size = min_chars.clamp(100, 10_000);
             }
         }
         ConfigKey::MemoryInjectionBudgetTokens => {
@@ -878,16 +883,19 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
                 cfg.auto_promote = enabled;
             }
         }
-        ConfigKey::DreamerReviewUserMemoriesSchedule => {
+        ConfigKey::MemoryClassifierReviewUserMemoriesSchedule => {
             if let Some(schedule) = tier.pointer(pointer).and_then(Value::as_str) {
                 let schedule = schedule.trim();
                 cfg.user_memory_collection_enabled = !schedule.is_empty();
                 if schedule.is_empty() {
-                    cfg.dreamer_review_user_memories_schedule = None;
-                } else if crate::smart_note_evaluation::is_valid_smart_note_cron(schedule) {
-                    cfg.dreamer_review_user_memories_schedule = Some(schedule.to_string());
+                    cfg.memory_classifier_review_user_memories_schedule = None;
+                } else if crate::conditional_note_evaluation::is_valid_conditional_note_cron(
+                    schedule,
+                ) {
+                    cfg.memory_classifier_review_user_memories_schedule =
+                        Some(schedule.to_string());
                 } else {
-                    cfg.dreamer_review_user_memories_schedule = None;
+                    cfg.memory_classifier_review_user_memories_schedule = None;
                     warnings.push(format!(
                         "ignoring {pointer}: not a five-field cron expression; the task stays unscheduled"
                     ));
@@ -899,9 +907,9 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
                 cfg.user_memory_collection_enabled = enabled;
             }
         }
-        ConfigKey::HistorianContextLimitTokens => {
+        ConfigKey::HistorySummarizerContextLimitTokens => {
             if let Some(limit) = positive_usize_at(tier, pointer) {
-                cfg.historian_context_limit_tokens = limit;
+                cfg.history_summarizer_context_limit_tokens = limit;
             }
         }
         ConfigKey::SmartDrops => {
@@ -909,7 +917,7 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
                 cfg.smart_drops = enabled;
             }
         }
-        ConfigKey::DreamerInjectDocs => {
+        ConfigKey::MemoryClassifierInjectDocs => {
             if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
                 cfg.inject_docs = enabled;
             }
@@ -1295,12 +1303,12 @@ mod tests {
     #[test]
     fn tier_policy_ignores_project_models_and_rejects_project_lowering() {
         let user = serde_json::json!({
-            "historian": { "model": "cheap", "fallback_models": ["fallback"] },
+            "history_summarizer": { "model": "cheap", "fallback_models": ["fallback"] },
             "execute_threshold_percentage": 80,
             "memory": { "enabled": false }
         });
         let project = serde_json::json!({
-            "historian": { "model": "expensive", "fallback_models": ["expensive2"] },
+            "history_summarizer": { "model": "expensive", "fallback_models": ["expensive2"] },
             "execute_threshold_percentage": 40,
             "memory": { "enabled": true }
         });
@@ -1369,24 +1377,24 @@ mod tests {
                 "injection_budget_tokens": 5_000,
                 "user_profile_budget_tokens": 2_500
             },
-            "historian": { "context_limit_tokens": 64_000 }
+            "history_summarizer": { "context_limit_tokens": 64_000 }
         });
         let project = serde_json::json!({
             "memory": {
                 "budget_tokens": 19_000,
                 "user_profile_budget_tokens": 12_000
             },
-            "historian": { "context_limit_tokens": 200_000 }
+            "history_summarizer": { "context_limit_tokens": 200_000 }
         });
         let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), Some(&project));
 
         assert_eq!(cfg.memory_budget_tokens, 5_000.0);
         assert_eq!(cfg.user_profile_budget_tokens, 2_500.0);
-        assert_eq!(cfg.historian_context_limit_tokens, 64_000);
+        assert_eq!(cfg.history_summarizer_context_limit_tokens, 64_000);
         for key in [
             "/memory/budget_tokens",
             "/memory/user_profile_budget_tokens",
-            "/historian/context_limit_tokens",
+            "/history_summarizer/context_limit_tokens",
         ] {
             assert!(
                 warnings.iter().any(|warning| {
@@ -1417,14 +1425,14 @@ mod tests {
     }
 
     #[test]
-    fn auto_search_and_caveman_config_follow_user_then_project_tiers() {
+    fn auto_search_and_terse_text_compression_config_follow_user_then_project_tiers() {
         let user = serde_json::json!({
             "memory": { "auto_search": {
                 "enabled": false,
                 "score_threshold": 0.4,
                 "min_prompt_chars": 100
             }},
-            "caveman_text_compression": { "enabled": true, "min_chars": 900 }
+            "terse_text_compression": { "enabled": true, "min_chars": 900 }
         });
         let project = serde_json::json!({
             "memory": { "auto_search": {
@@ -1432,7 +1440,7 @@ mod tests {
                 "score_threshold": 0.8,
                 "min_prompt_chars": 50
             }},
-            "caveman_text_compression": { "enabled": false, "min_chars": 700 }
+            "terse_text_compression": { "enabled": false, "min_chars": 700 }
         });
         let cfg = merge_tiers(Some(&user), Some(&project));
         assert_eq!(
@@ -1444,8 +1452,8 @@ mod tests {
             }
         );
         assert_eq!(
-            cfg.caveman,
-            CavemanConfig {
+            cfg.terse_text_compression,
+            TerseTextCompressionConfig {
                 enabled: false,
                 min_size: 700,
             }
@@ -1455,26 +1463,29 @@ mod tests {
             merge_tiers(None, None).auto_search,
             AutoSearchConfig::default()
         );
-        assert_eq!(merge_tiers(None, None).caveman, CavemanConfig::default());
+        assert_eq!(
+            merge_tiers(None, None).terse_text_compression,
+            TerseTextCompressionConfig::default()
+        );
     }
 
     #[test]
-    fn historian_budget_derivation_clamps_at_both_bounds() {
-        assert_eq!(derive_historian_chunk_tokens(1), 8_000);
-        assert_eq!(derive_historian_chunk_tokens(32_000), 8_000);
-        assert_eq!(derive_historian_chunk_tokens(128_000), 32_000);
-        assert_eq!(derive_historian_chunk_tokens(200_000), 50_000);
-        assert_eq!(derive_historian_chunk_tokens(400_000), 50_000);
+    fn history_summarizer_budget_derivation_clamps_at_both_bounds() {
+        assert_eq!(derive_history_summarizer_chunk_tokens(1), 8_000);
+        assert_eq!(derive_history_summarizer_chunk_tokens(32_000), 8_000);
+        assert_eq!(derive_history_summarizer_chunk_tokens(128_000), 32_000);
+        assert_eq!(derive_history_summarizer_chunk_tokens(200_000), 50_000);
+        assert_eq!(derive_history_summarizer_chunk_tokens(400_000), 50_000);
     }
 
     #[test]
     fn docs_injection_is_user_tier_only_and_temporal_flag_follows_project_tier() {
         let user = serde_json::json!({
-            "dreamer": { "inject_docs": false },
+            "memory_classifier": { "inject_docs": false },
             "temporal_awareness": false
         });
         let project = serde_json::json!({
-            "dreamer": { "inject_docs": true },
+            "memory_classifier": { "inject_docs": true },
             "temporal_awareness": true
         });
         let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), Some(&project));
@@ -1485,7 +1496,8 @@ mod tests {
         assert!(cfg.temporal_awareness);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
-            warnings[0].contains("/dreamer/inject_docs") && warnings[0].contains("user-tier only")
+            warnings[0].contains("/memory_classifier/inject_docs")
+                && warnings[0].contains("user-tier only")
         );
         let defaults = merge_tiers(None, None);
         assert!(defaults.inject_docs);
@@ -1621,16 +1633,16 @@ mod tests {
     }
 
     #[test]
-    fn historian_gates_follow_tiers_but_context_limit_remains_user_tier_only() {
+    fn history_summarizer_gates_follow_tiers_but_context_limit_remains_user_tier_only() {
         let user = serde_json::json!({
             "memory": { "auto_promote": false },
-            "dreamer": { "tasks": { "review-user-memories": { "schedule": "daily" } } },
-            "historian": { "context_limit_tokens": 128000 }
+            "memory_classifier": { "tasks": { "review-user-memories": { "schedule": "daily" } } },
+            "history_summarizer": { "context_limit_tokens": 128000 }
         });
         let project = serde_json::json!({
             "memory": { "auto_promote": true },
             "user_memories": { "enabled": false },
-            "historian": { "context_limit_tokens": 64000 }
+            "history_summarizer": { "context_limit_tokens": 64000 }
         });
         assert!(merge_tiers(Some(&user), None).user_memory_collection_enabled);
         let cfg = merge_tiers(Some(&user), Some(&project));
@@ -1639,7 +1651,7 @@ mod tests {
             !cfg.user_memory_collection_enabled,
             "project tier may lower the user-memory gate"
         );
-        assert_eq!(cfg.historian_context_limit_tokens, 128_000);
+        assert_eq!(cfg.history_summarizer_context_limit_tokens, 128_000);
         let legacy_disabled = serde_json::json!({
             "user_memories": { "enabled": false }
         });
@@ -1652,10 +1664,10 @@ mod tests {
         for project in [
             serde_json::json!({ "user_memories": { "enabled": true } }),
             serde_json::json!({
-                "dreamer": { "tasks": { "review-user-memories": { "schedule": "daily" } } }
+                "memory_classifier": { "tasks": { "review-user-memories": { "schedule": "daily" } } }
             }),
             serde_json::json!({
-                "dreamer": { "tasks": { "review-user-memories": { "schedule": "daily" } } },
+                "memory_classifier": { "tasks": { "review-user-memories": { "schedule": "daily" } } },
                 "user_memories": { "enabled": true }
             }),
         ] {
@@ -1678,7 +1690,7 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 
-    /// `historian.model`, `memory.injection_budget_tokens`, and `cache_ttl` are
+    /// `history_summarizer.model`, `memory.injection_budget_tokens`, and `cache_ttl` are
     /// removed by `stripUnsafeProjectConfigFields`; keep both lists aligned.
     #[test]
     fn privileged_keys_are_the_model_budget_and_schedule_levers() {
@@ -1690,17 +1702,17 @@ mod tests {
         assert_eq!(
             privileged,
             vec![
-                ConfigKey::HistorianModuleModel,
-                ConfigKey::HistorianModuleFallbackModels,
-                ConfigKey::HistorianModel,
-                ConfigKey::HistorianFallbackModels,
+                ConfigKey::HistorySummarizerModuleModel,
+                ConfigKey::HistorySummarizerModuleFallbackModels,
+                ConfigKey::HistorySummarizerModel,
+                ConfigKey::HistorySummarizerFallbackModels,
                 ConfigKey::MemoryInjectionBudgetTokens,
                 ConfigKey::MemoryBudgetTokens,
                 ConfigKey::UserProfileBudgetTokens,
                 ConfigKey::UserMemoriesEnabled,
-                ConfigKey::DreamerReviewUserMemoriesSchedule,
-                ConfigKey::HistorianContextLimitTokens,
-                ConfigKey::DreamerInjectDocs,
+                ConfigKey::MemoryClassifierReviewUserMemoriesSchedule,
+                ConfigKey::HistorySummarizerContextLimitTokens,
+                ConfigKey::MemoryClassifierInjectDocs,
                 ConfigKey::CacheTtl,
             ]
         );
@@ -1717,13 +1729,13 @@ mod tests {
     #[test]
     fn hostile_project_tier_cannot_change_privileged_values_and_warns_per_key() {
         let user = serde_json::json!({
-            "historian": { "module_model": "user/model", "module_fallback_models": ["user/fb"] },
+            "history_summarizer": { "module_model": "user/model", "module_fallback_models": ["user/fb"] },
             "execute_threshold_percentage": 70,
             "user_memories": { "enabled": false },
-            "dreamer": { "inject_docs": false }
+            "memory_classifier": { "inject_docs": false }
         });
         let project = serde_json::json!({
-            "historian": {
+            "history_summarizer": {
                 "module_model": "evil/model",
                 "module_fallback_models": ["evil/fb"],
                 "model": "evil/model",
@@ -1740,9 +1752,9 @@ mod tests {
                 "user_profile_budget_tokens": 999,
                 "auto_promote": true
             },
-            "caveman_text_compression": { "enabled": true, "min_chars": 999 },
+            "terse_text_compression": { "enabled": true, "min_chars": 999 },
             "user_memories": { "enabled": true },
-            "dreamer": {
+            "memory_classifier": {
                 "inject_docs": true,
                 "tasks": { "review-user-memories": { "schedule": "daily" } }
             },
@@ -1792,12 +1804,13 @@ mod tests {
             "project tier must not widen the user-profile budget"
         );
         assert_eq!(
-            cfg.historian_context_limit_tokens, user_only.historian_context_limit_tokens,
-            "project tier must not change the historian context budget"
+            cfg.history_summarizer_context_limit_tokens,
+            user_only.history_summarizer_context_limit_tokens,
+            "project tier must not change the history_summarizer context budget"
         );
         assert_eq!(cfg.prompt_surface_guidance_override, None);
         assert_eq!(
-            cfg.dreamer_review_user_memories_schedule, None,
+            cfg.memory_classifier_review_user_memories_schedule, None,
             "no unattended task is runnable from a project tier"
         );
         let ignored = ConfigKey::ALL
@@ -1884,7 +1897,7 @@ mod tests {
             "/index",
             "/message_index",
             "/retrieval",
-            "/synapse",
+            "/local_embeddings",
         ];
         for key in ConfigKey::ALL {
             for prefix in ABSENT_PREFIXES {
@@ -1893,7 +1906,14 @@ mod tests {
                     "{key:?} would let a tier configure an absent subsystem"
                 );
             }
-            for fragment in ["mural", "embed", "git", "index", "retriev", "synapse"] {
+            for fragment in [
+                "mural",
+                "embed",
+                "git",
+                "index",
+                "retriev",
+                "local_embeddings",
+            ] {
                 assert!(
                     !key.pointer().contains(fragment),
                     "{key:?} would let a tier configure an absent subsystem"
@@ -1910,7 +1930,7 @@ mod tests {
             "message_index": { "enabled": true },
             "memory": { "git_commit_indexing": { "enabled": true } },
             "retrieval": { "enabled": true },
-            "synapse": { "enabled": true }
+            "local_embeddings": { "enabled": true }
         });
         let (defaults, _) = merge_tiers_with_warnings(None, None);
         for (user, project) in [
@@ -1929,21 +1949,21 @@ mod tests {
         let cases: [(serde_json::Value, bool); 4] = [
             (
                 serde_json::json!({
-                    "dreamer": { "tasks": { "review-user-memories": { "schedule": "daily" } } },
+                    "memory_classifier": { "tasks": { "review-user-memories": { "schedule": "daily" } } },
                     "user_memories": { "enabled": false }
                 }),
                 true,
             ),
             (
                 serde_json::json!({
-                    "dreamer": { "tasks": { "review-user-memories": { "schedule": "  " } } },
+                    "memory_classifier": { "tasks": { "review-user-memories": { "schedule": "  " } } },
                     "user_memories": { "enabled": true }
                 }),
                 false,
             ),
             (
                 serde_json::json!({
-                    "dreamer": { "tasks": { "review-user-memories": { "schedule": 7 } } },
+                    "memory_classifier": { "tasks": { "review-user-memories": { "schedule": 7 } } },
                     "user_memories": { "enabled": true }
                 }),
                 true,
@@ -1985,10 +2005,10 @@ mod tests {
         // and user docs injection is never lowered by the project either.
         let open_user = serde_json::json!({
             "user_memories": { "enabled": true },
-            "dreamer": { "inject_docs": true }
+            "memory_classifier": { "inject_docs": true }
         });
         let project = serde_json::json!({
-            "dreamer": {
+            "memory_classifier": {
                 "inject_docs": false,
                 "tasks": { "review-user-memories": { "schedule": "" } }
             }
@@ -1999,11 +2019,11 @@ mod tests {
         assert_eq!(warnings.len(), 2, "{warnings:?}");
     }
 
-    /// `historian.module_model` replaces the plugin chain only when non-blank;
+    /// `history_summarizer.module_model` replaces the plugin chain only when non-blank;
     /// otherwise plugin keys apply and module fallbacks are ignored.
     #[test]
     fn module_model_keys_replace_the_plugin_chain_only_when_the_module_model_is_set() {
-        for (historian, expected) in [
+        for (history_summarizer, expected) in [
             (
                 serde_json::json!({
                     "model": "google/antigravity-gemini-3.5-flash",
@@ -2029,7 +2049,7 @@ mod tests {
                 vec!["deepseek/deepseek-v4-flash"],
             ),
         ] {
-            let user = serde_json::json!({ "historian": historian });
+            let user = serde_json::json!({ "history_summarizer": history_summarizer });
             assert_eq!(
                 merge_tiers(Some(&user), None).model_chain,
                 expected,
@@ -2121,7 +2141,7 @@ mod tests {
         let project = dir.path().join("project");
         std::fs::create_dir_all(project.join(".eidnara")).unwrap();
 
-        std::fs::write(&user, r#"{ "historian": { "model": "model-a" } }"#).unwrap();
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-a" } }"#).unwrap();
         std::fs::write(
             project.join(".eidnara/eidnara.jsonc"),
             r#"{ "memory": { "enabled": true } }"#,
@@ -2134,7 +2154,7 @@ mod tests {
 
         // Without an mtime change, the cache ignores a different file body.
         let original_mtime = std::fs::metadata(&user).unwrap().modified().unwrap();
-        std::fs::write(&user, r#"{ "historian": { "model": "model-b" } }"#).unwrap();
+        std::fs::write(&user, r#"{ "history_summarizer": { "model": "model-b" } }"#).unwrap();
         filetime::set_file_mtime(&user, filetime::FileTime::from_system_time(original_mtime))
             .unwrap();
         let unchanged = cache.effective_for_paths(&user, &project);
@@ -2209,7 +2229,7 @@ mod tests {
     #[test]
     fn model_chain_drops_repeats_anywhere_and_keeps_first_occurrence_order() {
         let user = serde_json::json!({
-            "historian": {
+            "history_summarizer": {
                 "model": "a",
                 "fallback_models": ["b", "a", "c", "b"]
             }

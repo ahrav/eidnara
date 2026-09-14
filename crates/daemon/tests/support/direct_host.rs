@@ -130,7 +130,7 @@ impl FixtureProcess {
         assert!(line.len() <= 64 * 1024, "readiness must be bounded");
         let readiness: Value = serde_json::from_str(&line).expect("readiness JSON");
         assert_eq!(readiness["status"], "ready");
-        assert_eq!(readiness["wire_version"], 2);
+        assert_eq!(readiness["wire_version"], 3);
         assert_eq!(
             child.try_wait().expect("fixture status after readiness"),
             None,

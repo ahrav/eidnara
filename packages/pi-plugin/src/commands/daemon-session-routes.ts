@@ -8,7 +8,7 @@ export const COMPACTION_OFF_COMMAND_UNAVAILABLE = `Unavailable: eidnara is in co
 
 export const RECOMP_USAGE = [
     "Usage:",
-    "- `/ctx-recomp` — full rebuild from message 1 to the protected tail",
+    "- `/eidnara-recomp` — full rebuild from message 1 to the protected tail",
 ].join("\n");
 
 export const RECOMP_RANGE_UNSUPPORTED =
@@ -77,23 +77,23 @@ export function formatRustOperationMessage(
             case "nothing_to_compact":
                 return `## Eidnara Wrapup\n\n${summary || "Nothing to compact."}`;
             case "already_in_progress":
-                return `## Eidnara Wrapup — Skipped\n\n/ctx-wrapup is already running for this session${rounds > 0 ? ` (${rounds} round${rounds === 1 ? "" : "s"} complete)` : ""}. Wait for it to finish, then run /ctx-wrapup again if more history remains.`;
+                return `## Eidnara Wrapup — Skipped\n\n/eidnara-wrapup is already running for this session${rounds > 0 ? ` (${rounds} round${rounds === 1 ? "" : "s"} complete)` : ""}. Wait for it to finish, then run /eidnara-wrapup again if more history remains.`;
             case "retryable":
                 // A nonterminal disposition indicates that the drain made progress but stopped before the keep watermark for a retryable reason.
-                return `## Eidnara Wrapup — Partial\n\n${summary || "Wrapup made progress but stopped before the keep watermark."} Run /ctx-wrapup again to continue.`;
+                return `## Eidnara Wrapup — Partial\n\n${summary || "Wrapup made progress but stopped before the keep watermark."} Run /eidnara-wrapup again to continue.`;
             default:
-                return `## Eidnara Wrapup — Failed\n\n${summary || "Wrapup failed; try /ctx-wrapup again."}${rounds > 0 ? ` (${rounds} round${rounds === 1 ? "" : "s"})` : ""}`;
+                return `## Eidnara Wrapup — Failed\n\n${summary || "Wrapup failed; try /eidnara-wrapup again."}${rounds > 0 ? ` (${rounds} round${rounds === 1 ? "" : "s"})` : ""}`;
         }
     }
     switch (disposition) {
         case "started":
-            return "## Eidnara Recomp\n\nHistorian recomp started. Rebuilding compartments from raw session history now.";
+            return "## Eidnara Recomp\n\nHistorySummarizer recomp started. Rebuilding history_segments from raw session history now.";
         case "already_in_progress":
-            return "## Eidnara Recomp — Skipped\n\nHistorian recomp is already running for this session. Wait for it to finish, then try /ctx-recomp again.";
+            return "## Eidnara Recomp — Skipped\n\nHistorySummarizer recomp is already running for this session. Wait for it to finish, then try /eidnara-recomp again.";
         case "nothing_to_do":
-            return "## Eidnara Recomp\n\nNothing to rebuild: this session has no published compartments.";
+            return "## Eidnara Recomp\n\nNothing to rebuild: this session has no published history_segments.";
         default:
-            return `## Eidnara Recomp — Failed\n\n${summary || "Historian recomp failed; try /ctx-recomp again."}`;
+            return `## Eidnara Recomp — Failed\n\n${summary || "HistorySummarizer recomp failed; try /eidnara-recomp again."}`;
     }
 }
 
@@ -121,13 +121,14 @@ export function formatRustStatusText(value: Record<string, unknown>): string {
     const limit = statusContextLimitTokens(value);
     const coverage = value.coverage_ordinal == null ? "none" : String(value.coverage_ordinal);
     const boundary = value.boundary_present === true ? "present" : "absent";
-    const compartments = typeof value.compartment_count === "number" ? value.compartment_count : 0;
+    const history_segments =
+        typeof value.history_segment_count === "number" ? value.history_segment_count : 0;
     return [
         "### Module Cache",
         `- Usage: ${tokens.toLocaleString()}${limit === undefined ? " tokens" : ` / ${limit.toLocaleString()} tokens`}`,
         `- Boundary: ${boundary}`,
         `- Coverage ordinal: ${coverage}`,
-        `- Compartments: ${compartments}`,
+        `- HistorySegments: ${history_segments}`,
     ].join("\n");
 }
 

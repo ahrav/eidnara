@@ -2,8 +2,8 @@
 
 ## Provenance
 
-- Work item: https://github.com/ahrav/eidnara/issues/420.
-- Parent specification: https://github.com/ahrav/eidnara/issues/350.
+- Work item: <https://github.com/ahrav/eidnara/issues/420>.
+- Parent specification: <https://github.com/ahrav/eidnara/issues/350>.
 - Characterization baseline: `afac1d1f`, branch `perf/shared-selection-inputs`.
 - Owner decision supplied in the controller task: remove the dead
   `memory_update_count > 40` SOFT arm and retire its reachability marker.
@@ -20,10 +20,10 @@
 ## Implementation and bounds
 
 `SelKind<'a>::ToolCall.input` is `Cow<'a, Value>`. Both production constructors,
-[`sel_item_from_flat`][selection] and [`sel_kind_for_flat`][historian], borrow
+[`sel_item_from_flat`][selection] and [`sel_kind_for_flat`][history_summarizer], borrow
 the input inside the projected wire block. Selection clones copy that borrow.
 The three consumers use references for arc grouping, todo capture, and
-historian summaries. Standalone owned fixtures use `Cow::Owned`; the frozen
+history_summarizer summaries. Standalone owned fixtures use `Cow::Owned`; the frozen
 selection reference remains byte-identical. Its generator adapts only the
 candidate input representation.
 
@@ -117,9 +117,9 @@ sparse-order fallback.
 `cargo clippy -p daemon --all-targets --locked -- -D warnings` passes.
 Scoped rustfmt and `git diff --check` pass. A broad daemon library run during
 development reported 1083 passed, three failed, and four ignored: the rejected
-full-sidecar rebuild and two dreamer deadline tests. After removing the rebuild,
+full-sidecar rebuild and two memory_classifier deadline tests. After removing the rebuild,
 the giant snapshot passes. Both deadline tests pass when run together with
-filter `dreamer_run_task_bounds_`; their failure under suite load remains
+filter `memory_classifier_run_task_bounds_`; their failure under suite load remains
 reported, not treated as a green full-suite run.
 
 Workspace/Bun gates, six independent reviews, and any draft PR are controller
@@ -215,7 +215,7 @@ workspace/Bun gates and index resolution remain controller work. The worktree
 contains no conflict markers; the unmerged index is deliberately untouched.
 
 [selection]: ../../../../../crates/daemon/src/transform.rs#L6363
-[historian]: ../../../../../crates/daemon/src/lib.rs#L16686
+[history_summarizer]: ../../../../../crates/daemon/src/lib.rs#L16686
 [pressure]: ../../../../../crates/daemon/src/transform.rs#L6326
 [sidecar]: ../../../../../crates/daemon/src/codec/opencode.rs#L2071
 [thresholds]: ../../../../../crates/daemon/src/transform.rs#L24606

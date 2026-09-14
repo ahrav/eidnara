@@ -35,13 +35,13 @@ import { resetSidebarSnapshotCache } from "./sidebar-snapshot-cache";
 
 type Handler = (params: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
-const MISSING_CONNECTION_FILE = "/nonexistent/eidnara-rpc-handlers-test/subc.json";
+const MISSING_CONNECTION_FILE = "/nonexistent/eidnara-rpc-handlers-test/host.json";
 const DAEMON_STATUS: RustSessionStatus = {
     usage: { current_total_input_tokens: 42_000, context_limit_tokens: 100_000 },
     boundary_present: true,
     coverage_ordinal: 17,
-    compartment_count: 4,
-    compartment_tokens: 23,
+    history_segment_count: 4,
+    history_segment_tokens: 23,
     pending_drop_count: 2,
     wrapup_active: true,
     tail_hygiene: {
@@ -81,7 +81,7 @@ function register(
         directory: process.cwd(),
         config: EidnaraConfigSchema.parse({
             transform_mode: "rust",
-            subc: { connection_file: MISSING_CONNECTION_FILE },
+            host: { connection_file: MISSING_CONNECTION_FILE },
             ...configOverrides,
         }),
         client: null,
@@ -144,7 +144,7 @@ describe("registerRpcHandlers", () => {
         expect(snapshot.inputTokens).toBe(42_000);
         expect(snapshot.usagePercentage).toBe(42);
         expect(snapshot.contextLimit).toBe(100_000);
-        expect(snapshot.compartmentCount).toBe(4);
+        expect(snapshot.history_segmentCount).toBe(4);
         expect(snapshot.pendingOpsCount).toBe(2);
         expect(snapshot.memoryCount).toBe(0);
         expect(snapshot.memoryState).toBe("unavailable:daemon_absent");
@@ -153,7 +153,7 @@ describe("registerRpcHandlers", () => {
             sessionId,
         })) as unknown as StatusDetail;
         expect(calls).toEqual(["session.status"]);
-        expect(detail.compartmentCount).toBe(4);
+        expect(detail.history_segmentCount).toBe(4);
     });
 
     test("an empty requested directory falls back to the server's directory instead of pinning an empty root", async () => {
@@ -185,14 +185,14 @@ describe("registerRpcHandlers", () => {
         const sessionId = "ses-handler-host-root";
         const rootA = process.cwd();
         const rootB = join(process.cwd(), "src");
-        // Root B keeps root A's compartment count so a wrong route would be visible only through the token totals.
+        // Root B keeps root A's history_segment count so a wrong route would be visible only through the token totals.
         const statusByRoot = new Map<string, RustSessionStatus>([
             [rootA, DAEMON_STATUS],
             [
                 rootB,
                 {
                     usage: { current_total_input_tokens: 0, context_limit_tokens: 100_000 },
-                    compartment_count: DAEMON_STATUS.compartment_count,
+                    history_segment_count: DAEMON_STATUS.history_segment_count,
                 },
             ],
         ]);
@@ -208,7 +208,7 @@ describe("registerRpcHandlers", () => {
             directory: rootA,
             config: EidnaraConfigSchema.parse({
                 transform_mode: "rust",
-                subc: { connection_file: MISSING_CONNECTION_FILE },
+                host: { connection_file: MISSING_CONNECTION_FILE },
             }),
             client: {
                 session: {
@@ -265,7 +265,7 @@ describe("registerRpcHandlers", () => {
             directory: process.cwd(),
             config: EidnaraConfigSchema.parse({
                 transform_mode: "rust",
-                subc: { connection_file: MISSING_CONNECTION_FILE },
+                host: { connection_file: MISSING_CONNECTION_FILE },
             }),
             client: {
                 session: {
@@ -312,7 +312,7 @@ describe("registerRpcHandlers", () => {
             directory: process.cwd(),
             config: EidnaraConfigSchema.parse({
                 transform_mode: "rust",
-                subc: { connection_file: MISSING_CONNECTION_FILE },
+                host: { connection_file: MISSING_CONNECTION_FILE },
             }),
             client: null,
             liveSessionState: createLiveSessionState(),
@@ -344,7 +344,7 @@ describe("registerRpcHandlers", () => {
             directory: process.cwd(),
             config: EidnaraConfigSchema.parse({
                 transform_mode: "rust",
-                subc: { connection_file: MISSING_CONNECTION_FILE },
+                host: { connection_file: MISSING_CONNECTION_FILE },
             }),
             client: null,
             liveSessionState: createLiveSessionState(),
@@ -365,8 +365,8 @@ describe("registerRpcHandlers", () => {
             StatusDetail,
         ];
         expect(calls).toBe(1);
-        expect(snapshot.compartmentCount).toBe(4);
-        expect(detail.compartmentCount).toBe(4);
+        expect(snapshot.history_segmentCount).toBe(4);
+        expect(detail.history_segmentCount).toBe(4);
     });
 
     test("an assistant message.updated drops the cached status so the refresh it triggers reads the daemon", async () => {
@@ -433,7 +433,7 @@ describe("registerRpcHandlers", () => {
             directory: process.cwd(),
             config: EidnaraConfigSchema.parse({
                 transform_mode: "rust",
-                subc: { connection_file: MISSING_CONNECTION_FILE },
+                host: { connection_file: MISSING_CONNECTION_FILE },
             }),
             client: null,
             liveSessionState: createLiveSessionState(),
@@ -488,7 +488,7 @@ describe("registerRpcHandlers", () => {
                 directory: process.cwd(),
                 config: EidnaraConfigSchema.parse({
                     transform_mode: "rust",
-                    subc: { connection_file: MISSING_CONNECTION_FILE },
+                    host: { connection_file: MISSING_CONNECTION_FILE },
                     ...configOverrides,
                 }),
                 client: null,
@@ -551,7 +551,7 @@ describe("registerRpcHandlers", () => {
             sessionId,
         })) as unknown as SidebarSnapshot;
         expect(daemonOnly.inputTokens).toBe(42_000);
-        expect(daemonOnly.compartmentCount).toBe(DAEMON_STATUS.compartment_count);
+        expect(daemonOnly.history_segmentCount).toBe(DAEMON_STATUS.history_segment_count);
 
         // A newer response measured 6.4k; the daemon still holds the sample a transform forwarded earlier.
         live.contextUsageBySession.set(sessionId, {
@@ -598,7 +598,7 @@ describe("registerRpcHandlers", () => {
         expect(calls).toEqual([]);
         expect(snapshot.inputTokens).toBe(64_000);
         expect(snapshot.usagePercentage).toBe(50);
-        expect(snapshot.compartmentCount).toBe(0);
+        expect(snapshot.history_segmentCount).toBe(0);
 
         const detail = (await handlers.get("status-detail")?.({
             sessionId,
@@ -610,7 +610,7 @@ describe("registerRpcHandlers", () => {
 });
 
 describe("buildSidebarSnapshot — daemon status", () => {
-    test("maps pressure, boundary, coverage, compartments, wrap-up, tail hygiene, and neutral fields", () => {
+    test("maps pressure, boundary, coverage, history_segments, wrap-up, tail hygiene, and neutral fields", () => {
         const snapshot = buildSidebarSnapshot(
             "ses-sidebar-rust-status",
             process.cwd(),
@@ -623,13 +623,13 @@ describe("buildSidebarSnapshot — daemon status", () => {
         expect(snapshot.inputTokens).toBe(42_000);
         expect(snapshot.usagePercentage).toBe(42);
         expect(snapshot.contextLimit).toBe(100_000);
-        expect(snapshot.compartmentCount).toBe(4);
-        expect(snapshot.compartmentTokens).toBe(23);
+        expect(snapshot.history_segmentCount).toBe(4);
+        expect(snapshot.history_segmentTokens).toBe(23);
         expect(snapshot.pendingOpsCount).toBe(2);
         expect(snapshot.boundaryPresent).toBe(true);
         expect(snapshot.coverageOrdinal).toBe(17);
-        expect(snapshot.historianRunning).toBe(true);
-        expect(snapshot.compartmentInProgress).toBe(true);
+        expect(snapshot.history_summarizerRunning).toBe(true);
+        expect(snapshot.history_segmentInProgress).toBe(true);
         expect(snapshot.tailHygiene).toEqual({
             u: 65_100,
             t: 100_000,
@@ -640,11 +640,11 @@ describe("buildSidebarSnapshot — daemon status", () => {
             computedAt: 123,
         });
 
-        // Every token bucket sums to inputTokens; the daemon's compartment count is the only nonzero local bucket.
+        // Every token bucket sums to inputTokens; the daemon's history_segment count is the only nonzero local bucket.
         const sum =
             snapshot.systemPromptTokens +
             snapshot.toolDefinitionTokens +
-            snapshot.compartmentTokens +
+            snapshot.history_segmentTokens +
             snapshot.factTokens +
             snapshot.memoryTokens +
             snapshot.docsTokens +
@@ -655,13 +655,13 @@ describe("buildSidebarSnapshot — daemon status", () => {
 
         expect(snapshot.memoryBlockCount).toBe(0);
         expect(snapshot.sessionNoteCount).toBe(0);
-        expect(snapshot.readySmartNoteCount).toBe(0);
+        expect(snapshot.readyConditionalNoteCount).toBe(0);
         expect(snapshot.lastTransformError).toBeNull();
-        expect(snapshot.lastDreamerRunAt).toBeNull();
+        expect(snapshot.lastMemoryClassifierRunAt).toBeNull();
         expect(snapshot.factTokens).toBe(0);
         expect(snapshot.memoryTokens).toBe(0);
         expect(snapshot.recompProgress).toBeNull();
-        expect(Object.hasOwn(snapshot as object, "archivedCompartmentCount")).toBe(false);
+        expect(Object.hasOwn(snapshot as object, "archivedHistorySegmentCount")).toBe(false);
     });
 
     test("an absent daemon yields a successful zero snapshot with idle progress flags", () => {
@@ -669,10 +669,10 @@ describe("buildSidebarSnapshot — daemon status", () => {
         expect(snapshot.inputTokens).toBe(0);
         expect(snapshot.usagePercentage).toBe(0);
         expect(snapshot.contextLimit).toBe(0);
-        expect(snapshot.compartmentCount).toBe(0);
+        expect(snapshot.history_segmentCount).toBe(0);
         expect(snapshot.pendingOpsCount).toBe(0);
-        expect(snapshot.historianRunning).toBe(false);
-        expect(snapshot.compartmentInProgress).toBe(false);
+        expect(snapshot.history_summarizerRunning).toBe(false);
+        expect(snapshot.history_segmentInProgress).toBe(false);
         expect(snapshot.tailHygiene).toBeUndefined();
         const response = buildSidebarSnapshotRpcResponse("ses-empty", process.cwd());
         expect(response).toMatchObject({ sessionId: "ses-empty", inputTokens: 0 });
@@ -945,7 +945,7 @@ describe("buildStatusDetail", () => {
         expect(detail.totalTags).toBe(0);
         expect(detail.executeThreshold).toBe(65);
         expect(detail.executeThresholdMode).toBe("percentage");
-        expect(detail.historyBlockTokens).toBe(detail.compartmentTokens);
+        expect(detail.historyBlockTokens).toBe(detail.history_segmentTokens);
         expect(detail.compressionBudget).toBe(Math.floor(100_000 * 0.65 * 0.15));
         expect(detail.loggerDiagnostics).toEqual({
             swallowedWriteCount: 0,

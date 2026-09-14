@@ -365,7 +365,7 @@ function isAnchorRow(row: unknown): row is AnchorRow {
 }
 
 /**
- * The function includes the compartment boundary and assigns it ordinal `baseOrdinal`, so
+ * The function includes the history_segment boundary and assigns it ordinal `baseOrdinal`, so
  * `messageIdAtOrdinal(baseOrdinal)` returns the boundary message.
  *
  * An anchor that is a compaction summary or lacks a JSON-object info cannot occupy `baseOrdinal`, so the
@@ -472,19 +472,19 @@ export function extractInMemoryMessageViews(
  *
  *
  * - If `anchorMessageId` is found at index k, that message is the boundary.
- * The function assigns the found anchor ordinal `lastCompartmentEnd` and assigns subsequent messages consecutive ordinals.
+ * The function assigns the found anchor ordinal `lastHistorySegmentEnd` and assigns subsequent messages consecutive ordinals.
  * The function drops messages before a found anchor because the DB tail starts at the anchor.
- * When no anchor is found, the first row receives ordinal `max(1, lastCompartmentEnd + 1)`.
- * When no anchor is found, the function assumes the first row follows `lastCompartmentEnd`.
+ * When no anchor is found, the first row receives ordinal `max(1, lastHistorySegmentEnd + 1)`.
+ * When no anchor is found, the function assumes the first row follows `lastHistorySegmentEnd`.
  *
  *
  */
 export function buildInMemoryTailRawMessages(args: {
     messages: readonly InMemoryMessageView[];
-    lastCompartmentEnd: number;
+    lastHistorySegmentEnd: number;
     anchorMessageId: string | null;
 }): InMemoryTailResult | null {
-    const { messages, lastCompartmentEnd, anchorMessageId } = args;
+    const { messages, lastHistorySegmentEnd, anchorMessageId } = args;
 
     // Mirrors `readRawSessionTailFromDb`: a summary anchor yields no tail. Filtering first would make it look merely absent and fall back to the wrong base ordinal.
     if (anchorMessageId) {
@@ -504,12 +504,12 @@ export function buildInMemoryTailRawMessages(args: {
         if (anchorIndex >= 0) {
             anchorFound = true;
             startIndex = anchorIndex;
-            baseOrdinal = lastCompartmentEnd; // the anchor row IS lastCompartmentEnd
+            baseOrdinal = lastHistorySegmentEnd; // the anchor row IS lastHistorySegmentEnd
         } else {
-            baseOrdinal = Math.max(1, lastCompartmentEnd + 1);
+            baseOrdinal = Math.max(1, lastHistorySegmentEnd + 1);
         }
     } else {
-        baseOrdinal = Math.max(1, lastCompartmentEnd + 1);
+        baseOrdinal = Math.max(1, lastHistorySegmentEnd + 1);
     }
 
     const out: RawMessage[] = [];

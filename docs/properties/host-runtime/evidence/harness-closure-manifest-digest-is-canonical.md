@@ -50,9 +50,9 @@ reads the retained manifest, requires `sha256(bytes) == digest`
 (`:601-603`), decodes it, and requires `canonical_manifest(&manifest) ==
 bytes` (`:607-610`), so a retained manifest that is not in canonical form is
 rejected even if its digest matches. The store is opened only from tests in
-this tree (`tests/broca_subprocess.rs:845`, `tests/harness_closure.rs`); the
-backends consume a `ValidatedHarnessClosure` (`broca/opencode.rs:28`,
-`broca/pi.rs:44`).
+this tree (`tests/model_execution_subprocess.rs:845`, `tests/harness_closure.rs`); the
+backends consume a `ValidatedHarnessClosure` (`model_execution/opencode.rs:28`,
+`model_execution/pi.rs:44`).
 
 Existing checks, verified, in `tests/harness_closure.rs`, a default-harness
 binary CI runs via `cargo test --workspace --all-targets`

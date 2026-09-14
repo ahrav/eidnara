@@ -15,7 +15,7 @@ still holds at `76cd6f41` (`apply_once` still starts at `:3222`, the test module
 still starts at `:12625`).
 
 Files read: `src/transform.rs:1-7510` (the 4b slice), `src/injection.rs`,
-`src/compartment_coverage.rs:1-60`, plus the out-of-slice callees and callers
+`src/history_segment_coverage.rs:1-60`, plus the out-of-slice callees and callers
 that the selection decision depends on and that no other 4b lens owns:
 `src/scheduler.rs`, `src/config.rs`, `src/lib.rs:160-235`, `:1707-1712`,
 `:4460-4484`, `:8278-8320`, `:13443-13465`, `src/selection.rs:180-210`,
@@ -52,7 +52,7 @@ predicate, evaluated after layer 1:
 | Bust opportunity | `bust_opportunity` | `:4293-4297` |
 | Classifier plan | `classify(&ClassifierInput{..})` | `:4298-4319` |
 | Synthetic todo | `todo_injection_pending` | `:4159-4166`, predicate `injection.rs:249-277` |
-| Caveman units | `is_bust_pass && req.caveman_enabled && age_basis_tag != 0` | `:4491-4510`, gate `:6312-6314` |
+| TerseTextCompression units | `is_bust_pass && req.terse_text_compression_enabled && age_basis_tag != 0` | `:4491-4510`, gate `:6312-6314` |
 | Frozen strips | `new_frozen_strip_units(.., is_bust_pass, ..)` | `:4482-4489` |
 | Tag-window protection | `tagging_surface_requested` | `:4168-4183` |
 | Boundary divergence recut | `boundary_divergence_recut` | `:3941-3947` |
@@ -62,7 +62,7 @@ predicate, evaluated after layer 1:
 `hard_advisory` is the disjunction of five bootstrap and repair conditions
 (`:4123-4127`). When it is false, `selection_outcome` is
 `SelectionOutcome::default()` (`:4258`) and the selector never runs. When it is
-true but `ordinary_historian_veto` holds (`:4098-4104`), the selector runs with
+true but `ordinary_history_summarizer_veto` holds (`:4098-4104`), the selector runs with
 `PassClass::Defer`, which suppresses age reclaim while still letting the durable
 queue drain.
 
@@ -70,9 +70,9 @@ queue drain.
 yes, and deliberately so. Every ordered artifact in the 4b slice is produced by
 `BTreeMap`, `BTreeSet`, or an explicit `sort_by` with a total tiebreak:
 `new_reduction_units` uses `BTreeMap<String, FrozenUnit>` (`:6869-6882`),
-`effective_reductions` uses `BTreeMap` (`:6891-6919`), `surviving_caveman_units`
+`effective_reductions` uses `BTreeMap` (`:6891-6919`), `surviving_terse_text_compression_units`
 uses `BTreeMap` (`:6410-6435`), `first_applied_pending_command_ids` funnels
-through `BTreeSet` (`:6728-6731`), `new_caveman_units` sorts candidates by
+through `BTreeSet` (`:6728-6731`), `new_terse_text_compression_units` sorts candidates by
 `(tag_number, block_id)` (`:6344`), and `selection.rs:1291-1296` sorts arcs by
 `(ordinal desc, arc_id desc)`. The `HashMap`/`HashSet` instances in the slice
 (`:4136`, `:4175`, `:4187`, `:4191`, `:4218`, `:4223`, `:6321`, `:6389`,
@@ -90,10 +90,10 @@ and uses the `HashSet` only for dedup. The queue order that does reach selection
 process-local mutable state that is neither in the request nor in the store:
 `observed_last_response_at_ms` (`lib.rs:4460-4483`, which returns `None` until
 this process has seen a response for that session),
-`historian_active` and `wrapup_active` (process-local leases,
+`history_summarizer_active` and `wrapup_active` (process-local leases,
 `lib.rs:8311-8312`), and `now_ms`. Two processes sharing one store can therefore
 select different pass classes for byte-identical inputs. The tag rows that feed
-`tag_tokens_by_block`, the protection sets, and the caveman age basis come from
+`tag_tokens_by_block`, the protection sets, and the terse_text_compression age basis come from
 `load_cached_tags` (`:7639-7696`), a process-global `Mutex` cache.
 
 ## Budget map
@@ -113,7 +113,7 @@ is a wall-clock or token budget on the firing as a whole; there is no deadline o
 Two eligibility budgets sit beside these: `protected_tags` (default `20`,
 `transform.rs:893-895`) is the count of newest tags immune from dropping, and
 `clear_reasoning_age` (default `50`, `:119`) is the tag distance after which
-reasoning is cleared. `caveman_min_chars` (default `500`, `:120`) is a per-block
+reasoning is cleared. `terse_text_compression_min_chars` (default `500`, `:120`) is a per-block
 byte floor.
 
 Exhaustion is graceful for four of the five: the pass degrades to a cheaper plan
@@ -139,17 +139,17 @@ bounded CAS loop 5,000 lines above it.
 - `scheduler.rs:434-464` — `resolve_execute_threshold` does guard: non-finite or negative falls back to `65.0` (`:461-463`) and the result is `min`-ed to `90.0` (`:464`). So the two consumers of one unvalidated number sanitize it differently.
 - `transform.rs:4120-4128` — `producer_gate`. `:4131-4135` — `selection_class`. `:4201-4258` — the selector call, with `SelectionOutcome::default()` on the closed arm.
 - `selection.rs:1096-1104` — the four supersession counters are `Option<usize>` and "Missing means the gate stayed shut and the selector did not run". They are committed at `transform.rs:5585-5588`, but only when `commit_required` (`:5560-5562`); on a no-op defer the `else` arm at `:5600-5601` records nothing.
-- `transform.rs:1317-1360` — `format_pass_timing_line` has no field for the scheduler pass, `producer_gate`, `ordinary_historian_veto`, or `selection_class`. `TransformResponse` (`:1455-1535`) carries `action`, `decision`, and `materialize_reason`, and `materialize_reason` is `None` on a defer (`:12561-12613`).
+- `transform.rs:1317-1360` — `format_pass_timing_line` has no field for the scheduler pass, `producer_gate`, `ordinary_history_summarizer_veto`, or `selection_class`. `TransformResponse` (`:1455-1535`) carries `action`, `decision`, and `materialize_reason`, and `materialize_reason` is `None` on a defer (`:12561-12613`).
 - `lib.rs:13443-13465` — `emit_pass_timing` is unconditional whenever timings are present; there is no env gate. It writes to stderr.
-- `transform.rs:4098-4104` — `ordinary_historian_veto`. No `eprintln!` accompanies it, and the timing line has no field for it.
-- `transform.rs:3925-3947` — the divergence pending count is *frozen*, not incremented, while `ctx.historian_active || ctx.wrapup_active` (`:3924`, `:3926-3928`). The three-pass bound therefore only counts passes taken outside that window.
+- `transform.rs:4098-4104` — `ordinary_history_summarizer_veto`. No `eprintln!` accompanies it, and the timing line has no field for it.
+- `transform.rs:3925-3947` — the divergence pending count is *frozen*, not incremented, while `ctx.history_summarizer_active || ctx.wrapup_active` (`:3924`, `:3926-3928`). The three-pass bound therefore only counts passes taken outside that window.
 - `scheduler.rs:429-431` — `ttl_hard_expired` requires `last_response_time_ms > 0`. `scheduler.rs:476-478` — `should_execute` returns `Defer` outright when `usage.percentage == 0.0 && last_response_time_ms == 0`.
 - `lib.rs:4460-4483` — `observed_last_response_at_ms` returns `None` on the first observation for a session in this process, and thereafter returns `Some` only while `observed_in_process` is true.
-- `transform.rs:6312-6314` — caveman is gated on `is_bust_pass && req.caveman_enabled && !req.is_subagent && age_basis_tag != 0`. `:4491-4499` freezes `age_basis_tag` as the max hydrated tag number on a bust and persists it in the same commit.
-- `transform.rs:6366-6369` — a bare `assert!` (not `debug_assert!`) inside `new_caveman_units`: `compressed.len() <= existing.frozen_payload.len()`, message "caveman deeper tier grew frozen payload for {block_id}".
+- `transform.rs:6312-6314` — terse_text_compression is gated on `is_bust_pass && req.terse_text_compression_enabled && !req.is_subagent && age_basis_tag != 0`. `:4491-4499` freezes `age_basis_tag` as the max hydrated tag number on a bust and persists it in the same commit.
+- `transform.rs:6366-6369` — a bare `assert!` (not `debug_assert!`) inside `new_terse_text_compression_units`: `compressed.len() <= existing.frozen_payload.len()`, message "terse_text_compression deeper tier grew frozen payload for {block_id}".
 - `transform.rs:6370-6374` — when the deeper tier produces an equal-length payload, the *shallower* bytes are kept while the *deeper* depth is recorded.
-- `lib.rs:173-193` — `apply_claude_code_config_controls` returns early for every profile except `ClaudeCodeAnthropic` (`:178-180`), then sets `auto_search_*`, `caveman_enabled`, `caveman_min_chars`, and the guidance override. It does not set `protected_tags` or `clear_reasoning_age`.
-- `packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2009`, `:2014`, `:2015-2017`, `:2031` — the OpenCode plugin does send `effective_execute_threshold`, `clear_reasoning_age`, `caveman_enabled`, `caveman_min_chars`, and `protected_tags` on every pass.
+- `lib.rs:173-193` — `apply_claude_code_config_controls` returns early for every profile except `ClaudeCodeAnthropic` (`:178-180`), then sets `auto_search_*`, `terse_text_compression_enabled`, `terse_text_compression_min_chars`, and the guidance override. It does not set `protected_tags` or `clear_reasoning_age`.
+- `packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2009`, `:2014`, `:2015-2017`, `:2031` — the OpenCode plugin does send `effective_execute_threshold`, `clear_reasoning_age`, `terse_text_compression_enabled`, `terse_text_compression_min_chars`, and `protected_tags` on every pass.
 - `packages/plugin/src/hooks/eidnara/event-resolvers.ts:267-300`, `:386-392` — the TypeScript leg implements the tokens config, the per-model walk, the 90 percent clamp, and a deduplicated clamp warning, then sends only the resolved percentage.
 - `injection.rs:249-277` — `injection_pending_after_capture` builds only the normalized state and call id, deliberately not the messages, before the classifier grants a bust. `todo_tool_present == Some(false)` reports pending only to clear an existing pair.
 - `memory-store/src/lib.rs:6233` — `ORDER BY p.queued_at ASC, p.id ASC` for the pending-drop queue.
@@ -167,7 +167,7 @@ Status: active
 Exercised: not yet — no test replays one fixed pass input repeatedly across
 processes and compares the selected decision list and its order byte for byte.
 Guarantee: For a fixed request, store row, and producer context, the set of
-selected reductions, caveman units, and strip units and their order are
+selected reductions, terse_text_compression units, and strip units and their order are
 identical on every evaluation, and no ordering depends on the iteration order of
 a `HashMap` or `HashSet`.
 Check: `always` — assert on every pass that a second evaluation of the selection
@@ -184,7 +184,7 @@ Confidence: high — [evidence](evidence/sel-pass-order-deterministic-under-fixe
 I enumerated every `HashMap` and `HashSet` construction in `transform.rs:1-7510`
 and checked each use site; all are membership or lookup. Every ordered artifact
 uses `BTreeMap`, `BTreeSet`, or an explicit total sort.
-Existing check: `transform.rs` inline tests around `new_caveman_units`
+Existing check: `transform.rs` inline tests around `new_terse_text_compression_units`
 (`:25479-25490`, `:25684`) assert unit contents but not cross-process order
 stability. None of them runs in CI.
 Impact: A divergence changes frozen bytes between two passes over identical
@@ -197,7 +197,7 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production — `lib.rs:8309-8312` populates
-`observed_last_response_at_ms`, `historian_active`, and `wrapup_active` from
+`observed_last_response_at_ms`, `history_summarizer_active`, and `wrapup_active` from
 process-local structures on the ordinary transform path.
 Status: active
 Exercised: not yet — no test drives two `Handler` instances against one store
@@ -233,6 +233,7 @@ session, so deferred work waits an extra turn. In a shared-store deployment the
 two processes disagree about whether a pass busts, which produces two different
 frozen renders for the same conversation state.
 Open questions:
+
 - Is discarding the durable `last_committed_pass_at_ms` anchor at `lib.rs:4482` intentional conservatism, or an oversight? The code reads the anchor, stores it in the observation, and returns `None` anyway. (needs human input)
 
 ### sel-budget-execute-threshold-unvalidated-from-request
@@ -268,6 +269,7 @@ Impact: `NaN` propagates through `clamp` at `transform.rs:4231` into
 pressure-driven reclaim silently stops. A value above 90 makes the selection
 ceiling admit more history than any pass class will ever bust to reclaim.
 Open questions:
+
 - Does any comparison in `selection.rs` treat a `NaN` ceiling as unbounded rather than as zero? Resolving this decides whether the failure mode is "never reclaims" or "reclaims everything". Unresolved, needs a read of the ceiling comparisons in `selection.rs`.
 
 ### sel-budget-ceiling-clamp-diverges-from-scheduler-cap
@@ -301,6 +303,7 @@ the scheduler will ever declare pressure over, so the age-reclaim batch it sizes
 can be larger than the band that authorized the pass. The observable symptom is
 over-dropping on a force pass.
 Open questions:
+
 - Is the 100 in `clamp(1.0, 100.0)` deliberate, on the theory that the ceiling is a raw window fraction rather than a scheduler threshold? The comment above the call (`transform.rs:4204-4206`) explains a different point and does not address the cap. (needs human input)
 
 ### sel-skip-unobservable-when-producer-gate-closed
@@ -338,6 +341,7 @@ signal distinguishing "gate closed by design" from "selector ran and found
 nothing" from "selector crashed and returned default". The scope map records
 silent skips as a recurring finding in this repo, and this is one.
 Open questions:
+
 - Should the four supersession counters be committed even when `commit_required` is false, given that a no-op defer is exactly the pass an operator most wants explained? (needs human input)
 
 ### sel-queued-drop-drains-within-cache-ttl-window
@@ -362,11 +366,11 @@ Fault/timing angle: The window is the interval between the last recorded
 response observation and the next pass. Two things can hold the gate shut past
 the bound: `last_response_time_ms == 0` after a process restart
 (`lib.rs:4482`), which disables the TTL predicate entirely, and
-`ordinary_historian_veto` (`transform.rs:4098-4104`), which suppresses the
-ordinary Execute arm while a historian lease is held.
+`ordinary_history_summarizer_veto` (`transform.rs:4098-4104`), which suppresses the
+ordinary Execute arm while a history_summarizer lease is held.
 Required faults and enabling state: One queued pending-drop row, usage below the
 execute threshold on every pass, no `soft_refresh_pending`, an initialized
-session, and no historian lease. Then advance the clock past the TTL.
+session, and no history_summarizer lease. Then advance the clock past the TTL.
 Confidence: medium — [evidence](evidence/sel-queued-drop-drains-within-cache-ttl-window.md).
 The gate chain and the TTL predicate are verified. I have not verified that a
 drop surviving a `consumed_pending_drop_ids` pass stays durable across an
@@ -374,11 +378,12 @@ arbitrary number of defers; `:6735-6779` retires rows on coverage or reasoning
 grounds, and I did not enumerate every retirement path.
 Existing check: `transform.rs:23678-23690` exercises a pending drop across a
 "false-window" case. No test bounds the drain time. It does not run in CI.
-Impact: An agent that called `ctx_reduce` sees its reclaim never take effect,
+Impact: An agent that called `eidnara_reduce` sees its reclaim never take effect,
 with no diagnostic (see `sel-skip-unobservable-when-producer-gate-closed`), and
 the context keeps growing until pressure forces a pass.
 Open questions:
-- Is the historian veto bounded for this purpose? `ctx.wrapup_active` is documented as bounded by `historian::MAX_WRAPUP_REQUEST_BUDGET` (3,800 seconds, `transform.rs:604-606`), but `ctx.historian_active` has no stated bound at this call site. Unresolved, needs the 4a lens's finding on historian lease duration.
+
+- Is the history_summarizer veto bounded for this purpose? `ctx.wrapup_active` is documented as bounded by `history_summarizer::MAX_WRAPUP_REQUEST_BUDGET` (3,800 seconds, `transform.rs:604-606`), but `ctx.history_summarizer_active` has no stated bound at this call site. Unresolved, needs the 4a lens's finding on history_summarizer lease duration.
 
 ### sel-divergence-repair-bounded-by-three-pending-passes
 
@@ -388,34 +393,35 @@ non-subagent compaction-enabled pass (`transform.rs:3925-3947`).
 Status: active
 Exercised: partial — `transform.rs:20699`, `:20750`, and `:20769` iterate the
 limit constant and assert escalation, but none of them holds
-`historian_active` or `wrapup_active` true across the window.
+`history_summarizer_active` or `wrapup_active` true across the window.
 Guarantee: A detected boundary-coverage divergence is repaired by a recut within
 `BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT` passes that are taken outside a
 legitimate publication window, and the pending count neither escapes that bound
 nor resets without a repair.
 Check: `sometimes` with a bounded window of three passes: construct the
-divergence, take three passes with no historian or wrapup lease held, and assert
+divergence, take three passes with no history_summarizer or wrapup lease held, and assert
 the recut fired. Three attempts is the unit the code bounds (`transform.rs:85`),
 so the bound is stated in that unit rather than in wall-clock time.
 Fault/timing angle: The count is frozen, not incremented, while
-`ctx.historian_active || ctx.wrapup_active` (`:3924-3928`). A process that holds
-a historian lease across many passes therefore takes an unbounded number of
+`ctx.history_summarizer_active || ctx.wrapup_active` (`:3924-3928`). A process that holds
+a history_summarizer lease across many passes therefore takes an unbounded number of
 passes without advancing toward repair, and the three-pass bound is a bound on a
 subsequence, not on the pass sequence.
 Required faults and enabling state: A coverage gap with a missing or stale
-applied-compartment watermark, so `divergence_candidate` is `Some` and
-`compartment_revision_matches` is false, plus no `divergence_inputs_moved`.
+applied-history_segment watermark, so `divergence_candidate` is `Some` and
+`history_segment_revision_matches` is false, plus no `divergence_inputs_moved`.
 Confidence: high — [evidence](evidence/sel-divergence-repair-bounded-by-three-pending-passes.md).
 I read the full counter expression and the recut filter; the freeze arm is the
 first arm of the `if` at `:3926-3928`, so it takes priority over both the
 increment and the reset.
 Existing check: three inline tests named above, none in CI.
-Impact: A genuinely damaged row waits indefinitely while a historian lease is
+Impact: A genuinely damaged row waits indefinitely while a history_summarizer lease is
 held. The comment at `:3919-3923` argues this is deliberate, so the property
 under test is whether the "bounded by the wrapup budget" claim holds for the
-`historian_active` half too.
+`history_summarizer_active` half too.
 Open questions:
-- The comment at `transform.rs:3919-3923` bounds the wait by the wrapup request budget, but the freeze condition ORs in `ctx.historian_active`, which that budget does not cover. Is the historian lease independently bounded? Unresolved, needs the 4a lens.
+
+- The comment at `transform.rs:3919-3923` bounds the wait by the wrapup request budget, but the freeze condition ORs in `ctx.history_summarizer_active`, which that budget does not cover. Is the history_summarizer lease independently bounded? Unresolved, needs the 4a lens.
 
 ### sel-cas-retry-budget-bounded-tag-hydration-unbounded
 
@@ -451,54 +457,56 @@ Impact: A transform pass can hang without a timeout, holding whatever locks the
 handler took. The dispatch wedge detector in `lib.rs:353-508` exists for exactly
 this class of symptom, which suggests hangs on this path have been seen.
 Open questions:
+
 - Is the tag-hydration loop provably convergent because each retry observes a strictly newer generation? The `can_append` arm requires `generation - self.generation == appended` (`:7539`), which does not obviously monotonically progress. Unresolved, needs a convergence argument or a counter.
 
-### sel-caveman-deeper-tier-growth-panics-in-production
+### sel-terse_text_compression-deeper-tier-growth-panics-in-production
 
 Type: safety
 Reachability: explicit-config-only — the config default is
-`CavemanConfig { enabled: false, .. }` (`config.rs:74-79`, `false` at `:76`).
+`TerseTextCompressionConfig { enabled: false, .. }` (`config.rs:74-79`, `false` at `:76`).
 The shipped setup path agrees: the OpenCode plugin sends
-`caveman_enabled: !isSubagent && deps.cavemanTextCompression?.enabled === true`
+`terse_text_compression_enabled: !isSubagent && deps.terse_text_compressionTextCompression?.enabled === true`
 (`rust-mode-transform.ts:2015-2016`), and the Claude Code leg copies the same
 config field at `lib.rs:186`. The request serde default is also `false`
 (`transform.rs:729-731`). So both the config default and the shipped path are
 off unless a user opts in.
 Status: active
 Exercised: partial — `transform.rs:25463-25490`, `:25606`, `:25660-25684` set
-`caveman_min_chars = 1` and drive `new_caveman_units`, but none constructs a
+`terse_text_compression_min_chars = 1` and drive `new_terse_text_compression_units`, but none constructs a
 deeper tier whose output is longer than the shallower frozen payload.
-Guarantee: Deepening a caveman tier never produces a longer payload than the
+Guarantee: Deepening a terse_text_compression tier never produces a longer payload than the
 tier already frozen for that block, and if it could, the pass does not panic.
 Check: `always` — assert the size relation before the payload choice at
 `transform.rs:6370`. `always` because the assertion is on the pass path and
 fires on the first violating block; there is no tolerated window.
 Fault/timing angle: none. It is a single comparison per candidate block.
 Required faults and enabling state: A text block for which
-`caveman::compress(source, Ultra)` is longer than
-`caveman::compress(source, Full)`, or than whatever depth is already frozen,
-plus caveman enabled and the block inside the eligible tag window. Because the
+`terse_text_compression::compress(source, Ultra)` is longer than
+`terse_text_compression::compress(source, Full)`, or than whatever depth is already frozen,
+plus terse_text_compression enabled and the block inside the eligible tag window. Because the
 compression is always applied to the persisted original (`:6338-6340`) rather
-than to the intermediate, the relation is a property of `caveman.rs`'s level
+than to the intermediate, the relation is a property of `terse_text_compression.rs`'s level
 ladder, not of the transform.
-Confidence: medium — [evidence](evidence/sel-caveman-deeper-tier-growth-panics-in-production.md).
+Confidence: medium — [evidence](evidence/sel-terse_text_compression-deeper-tier-growth-panics-in-production.md).
 The `assert!` is verified at `:6366-6369` and is a hard assert, not
-`debug_assert!`, so it is live in release. I did not audit `caveman.rs` (651
+`debug_assert!`, so it is live in release. I did not audit `terse_text_compression.rs` (651
 lines, 40 tests, owned by 4e) to establish whether a growing deeper tier is
 constructible, so the reachability of the panic itself is unresolved.
-Existing check: the caveman tests named above. None runs in CI.
+Existing check: the terse_text_compression tests named above. None runs in CI.
 Impact: A panic inside `apply_once` on a user-opted-in feature. The pass does not
 commit, and whether the panic escapes to the host or is caught depends on the
 dispatch path, which is 4c and 4d territory.
 Open questions:
-- Can `caveman::compress` at a deeper level ever produce more bytes than at a shallower level for the same input? Unresolved, needs a read of `caveman.rs`'s level ladder or a property test over it.
+
+- Can `terse_text_compression::compress` at a deeper level ever produce more bytes than at a shallower level for the same input? Unresolved, needs a read of `terse_text_compression.rs`'s level ladder or a property test over it.
 - CONFIGURATION.md:740 claims repeated tier shifts "converge to exactly the same output as direct compression at the final depth", but `transform.rs:6370-6374` keeps the shallower bytes when the deeper tier ties on length while still recording the deeper depth. Both sides cited; see the contract-vs-code leads section.
 
-### sel-caveman-eligibility-ladder-deterministic-over-frozen-basis
+### sel-terse_text_compression-eligibility-ladder-deterministic-over-frozen-basis
 
 Type: safety
 Reachability: explicit-config-only — same evidence as
-`sel-caveman-deeper-tier-growth-panics-in-production`: config default `false`
+`sel-terse_text_compression-deeper-tier-growth-panics-in-production`: config default `false`
 (`config.rs:76`), shipped path sends `=== true` only
 (`rust-mode-transform.ts:2015-2016`), request serde default `false`
 (`transform.rs:729-731`).
@@ -506,30 +514,31 @@ Status: active
 Exercised: partial — `transform.rs:25479-25490` asserts the empty and non-empty
 cases; `:25752-25760` covers the protected-window exclusion. No test asserts that
 a same-pass tag mint cannot change the eligible population.
-Guarantee: The caveman eligible population and each block's target depth are
+Guarantee: The terse_text_compression eligible population and each block's target depth are
 determined by the tag basis frozen in this pass's own commit, so a tag minted
 during the same pass cannot change which blocks are compressed or how deeply.
 Check: `always` — assert that every candidate's tag number is at or below
-`caveman_age_basis_tag`, and that the position ladder is computed over the sorted
+`terse_text_compression_age_basis_tag`, and that the position ladder is computed over the sorted
 candidate list. `always` because the basis is captured on every bust pass and a
 leak would corrupt the frozen bytes for that pass.
 Fault/timing angle: The window is a bust pass that also mints new tags.
 `age_basis_tag` is the max *hydrated* tag number (`:4492-4497`), taken before the
-mint suffix is appended, and it is persisted in `meta.caveman_age_basis_tag` in
+mint suffix is appended, and it is persisted in `meta.terse_text_compression_age_basis_tag` in
 the same commit. On a non-bust pass the prior durable value is reused
 (`:4499-4501`).
-Required faults and enabling state: Caveman enabled, a primary session, a bust
+Required faults and enabling state: TerseTextCompression enabled, a primary session, a bust
 pass, and at least one new tag minted in that same pass so the hydrated and
 final tag sets differ.
-Confidence: high — [evidence](evidence/sel-caveman-eligibility-ladder-deterministic-over-frozen-basis.md).
+Confidence: high — [evidence](evidence/sel-terse_text_compression-eligibility-ladder-deterministic-over-frozen-basis.md).
 The gate, the basis capture, the explicit `sort_by((tag_number, block_id))` at
 `:6344`, and the position ladder at `:6283-6297` are all read at `HEAD`.
-Existing check: the caveman tests named above, none in CI.
+Existing check: the terse_text_compression tests named above, none in CI.
 Impact: A basis leak makes the compressed set depend on mint timing, so two
-passes over the same conversation produce different frozen caveman payloads and
+passes over the same conversation produce different frozen terse_text_compression payloads and
 bust the prefix cache.
 Open questions:
-- `caveman_target_depth` (`:6283-6297`) partitions by fractional position, so adding one candidate can shift every other candidate's tier. The units are keyed by block id and depth, and a deeper tier is allowed. Does a candidate that moves *shallower* (because the population grew) leave a stale deeper unit frozen? `:6355-6358` skips when `target_depth <= existing_depth`, which suggests yes by design. Unresolved, needs confirmation that a stale deeper unit is intended.
+
+- `terse_text_compression_target_depth` (`:6283-6297`) partitions by fractional position, so adding one candidate can shift every other candidate's tier. The units are keyed by block id and depth, and a deeper tier is allowed. Does a candidate that moves *shallower* (because the population grew) leave a stale deeper unit frozen? `:6355-6358` skips when `target_depth <= existing_depth`, which suggests yes by design. Unresolved, needs confirmation that a stale deeper unit is intended.
 
 ### sel-protected-tags-not-read-from-module-config
 
@@ -543,7 +552,7 @@ shipped Claude Code setup path, `apply_claude_code_config_controls`
 (`transform.rs:893-895`) and `50` (`:119`, `:861-863`). The OpenCode leg does
 send both (`rust-mode-transform.ts:2031`, `:2014`), so this is leg-specific.
 Status: active
-Exercised: not yet — `lib.rs:18142-18155` asserts the caveman fields are applied
+Exercised: not yet — `lib.rs:18142-18155` asserts the terse_text_compression fields are applied
 but does not assert anything about `protected_tags`.
 Guarantee: A user-configured `protected_tags` and `clear_reasoning_age` take
 effect on every transport leg, or a misconfiguration on a leg that ignores them
@@ -565,12 +574,13 @@ Existing check: `lib.rs:18123-18170` has three
 runs in CI.
 Impact: `protected_tags` is safety-relevant: it is the count of newest tags
 immune from dropping, and it feeds `newest_active_tag_block_ids`
-(`transform.rs:4177-4182`) and `caveman`'s protected cutoff (`:6318`). A user who
+(`transform.rs:4177-4182`) and `terse_text_compression`'s protected cutoff (`:6318`). A user who
 raises it to protect recent work gets the default 20 on the Claude Code leg with
 no warning, so content they expected to be protected becomes eligible for
 reduction. This is a misconfiguration that silently weakens a safety-relevant
 gate, which is exactly the configuration failure mode the lens brief asked for.
 Open questions:
+
 - Is `protected_tags` intended to be host-owned rather than module-config-owned? CONFIGURATION.md:165 documents it as a module config key with a default of 20 and a range of 1 to 100, which argues the module should read it. (needs human input)
 
 ### sel-per-model-and-token-thresholds-inert-in-module
@@ -613,6 +623,7 @@ leg and no warning. The consequence is compaction firing at the wrong point, and
 on the paths described in `docs/specs/context-window-geometry.md` that means
 provider overflow.
 Open questions:
+
 - Is the intended design that the host always resolves the threshold and sends `effective_execute_threshold`, making the module's own config a pure legacy fallback? If so, `config.rs`'s threshold parsing and `CONFIGURATION.md`'s documentation of the object and tokens shapes are both describing a TypeScript-only feature, and the module's silent drop is correct but undocumented. (needs human input)
 
 ## Contract-vs-code leads
@@ -650,7 +661,7 @@ Each lead cites both sides. None is resolved in the documentation's favour.
    `apply_claude_code_config_controls` (`lib.rs:173-193`) does not set it; the
    only source is the request's serde default `20` (`transform.rs:893-895`).
 
-5. **Caveman tier convergence is documented as exact, and the code keeps the
+5. **TerseTextCompression tier convergence is documented as exact, and the code keeps the
    shallower bytes on a length tie.** Doc: `CONFIGURATION.md:740` ("repeated
    tier shifts converge to exactly the same output as direct compression at the
    final depth"). Code: `transform.rs:6370-6374` keeps
@@ -660,8 +671,8 @@ Each lead cites both sides. None is resolved in the documentation's favour.
    depth behaviour, so the divergence is between the code's own comment and
    CONFIGURATION.md, not within the code.
 
-6. **Caveman is documented with no failure mode, and the code carries a live
-   `assert!`.** Doc: `CONFIGURATION.md:720-744` describes caveman with no
+6. **TerseTextCompression is documented with no failure mode, and the code carries a live
+   `assert!`.** Doc: `CONFIGURATION.md:720-744` describes terse_text_compression with no
    mention of a panic. Code: `transform.rs:6366-6369` is a bare `assert!`, not
    `debug_assert!`, so it is enabled in release builds regardless of the
    `debug-assertions` profile setting.
@@ -673,7 +684,7 @@ Each lead cites both sides. None is resolved in the documentation's favour.
    (`_lenses/scope-map-and-risk-ranking.md:313`, `:314`). Code: the *inputs*
    those pure functions receive are assembled from
    `ctx.observed_last_response_at_ms` (`lib.rs:4460-4483`),
-   `ctx.historian_active`, `ctx.wrapup_active`, and `ctx.now_ms`
+   `ctx.history_summarizer_active`, `ctx.wrapup_active`, and `ctx.now_ms`
    (`lib.rs:8309-8312`), plus a process-global tag cache
    (`transform.rs:7639-7696`). The purity claim is about the functions, and it
    holds; the claim a reader is likely to draw from it, that the pass decision
@@ -702,7 +713,7 @@ Each lead cites both sides. None is resolved in the documentation's favour.
   dispatch wedge detector at `lib.rs:353-508` implies a hang is a known concern.
   If a pass deadline is intended, `load_cached_tags`'s unbounded loop is the
   first place it is missing. (needs human input)
-- What is `ctx.historian_active`'s maximum duration? Two records above
+- What is `ctx.history_summarizer_active`'s maximum duration? Two records above
   (`sel-queued-drop-drains-within-cache-ttl-window`,
   `sel-divergence-repair-bounded-by-three-pending-passes`) need it to state a
   bound, and `transform.rs:601-603` documents the flag without a duration.

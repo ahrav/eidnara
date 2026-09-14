@@ -505,10 +505,10 @@ const CONTEXT_COMPONENT: &str = "context";
 pub(crate) const KERNEL_KEY: &str = "kernel";
 pub(crate) const KERNEL_STATE_KEY: &str = "kernel_state";
 pub(crate) const STORAGE_STATE_KEY: &str = "storage_state";
-pub(crate) const SYNAPSE_STATE_KEY: &str = "synapse_state";
-/// State reported by `storage_state`, `synapse_state`, and `kernel_state` while a store is still opening.
+pub(crate) const LOCAL_EMBEDDINGS_STATE_KEY: &str = "local_embeddings_state";
+/// State reported by `storage_state`, `local_embeddings_state`, and `kernel_state` while a store is still opening.
 pub(crate) const STATE_STARTING: &str = "starting";
-/// State reported by `storage_state`, `kernel_state`, and `broca_state` when the subsystem cannot serve.
+/// State reported by `storage_state`, `kernel_state`, and `model_execution_state` when the subsystem cannot serve.
 const STATE_UNAVAILABLE: &str = "unavailable";
 /// `storage_state` values, fixed by the wire protocol (`docs/host-wire-protocol.md`, `host.status`).
 const STORAGE_STATES: [&str; 3] = ["ready", STATE_STARTING, STATE_UNAVAILABLE];
@@ -599,7 +599,7 @@ fn sanitize_context_metrics(
 ) {
     let epoch_names = [
         "memory_render_epoch",
-        "compartment_render_epoch",
+        "history_segment_render_epoch",
         "profile_epoch",
         "tagger_epoch",
         "state_sync_epoch",
@@ -653,11 +653,15 @@ pub fn host_status_response_json(
     for (module, state_key, allowed) in [
         (CONTEXT_COMPONENT, STORAGE_STATE_KEY, &STORAGE_STATES[..]),
         (
-            "synapse",
-            SYNAPSE_STATE_KEY,
+            "local_embeddings",
+            LOCAL_EMBEDDINGS_STATE_KEY,
             &["ready", STATE_STARTING, "degraded", "unsupported"][..],
         ),
-        ("broca", "broca_state", &["ready", STATE_UNAVAILABLE][..]),
+        (
+            "model_execution",
+            "model_execution_state",
+            &["ready", STATE_UNAVAILABLE][..],
+        ),
     ] {
         let Some(component) = raw_components.and_then(|all| all.get(module)) else {
             continue;
@@ -808,8 +812,8 @@ mod tests {
     use super::*;
 
     const LINKED: &str = "context";
-    const SYNAPSE: &str = "synapse";
-    const BROCA: &str = "broca";
+    const LOCAL_EMBEDDINGS: &str = "local_embeddings";
+    const MODEL_EXECUTION: &str = "model_execution";
 
     fn two_target_index() -> TargetIndex {
         TargetIndex::new(vec![
@@ -819,12 +823,12 @@ mod tests {
                 RouteClass::General,
             ),
             (
-                SYNAPSE.into(),
+                LOCAL_EMBEDDINGS.into(),
                 vec![TargetKind::ManagementSurface],
                 RouteClass::General,
             ),
             (
-                BROCA.into(),
+                MODEL_EXECUTION.into(),
                 vec![TargetKind::ManagementSurface],
                 RouteClass::Reserved,
             ),
@@ -908,8 +912,8 @@ mod tests {
     #[test]
     fn management_surface_targets_parse_with_their_declared_classes() {
         for (module, class) in [
-            (SYNAPSE, RouteClass::General),
-            (BROCA, RouteClass::Reserved),
+            (LOCAL_EMBEDDINGS, RouteClass::General),
+            (MODEL_EXECUTION, RouteClass::Reserved),
         ] {
             let mut request = minimal_route_open();
             request["target"]["kind"] = serde_json::Value::String("management_surface".to_owned());
@@ -1094,8 +1098,8 @@ mod tests {
         // A known module under the wrong role, and kinds the host does not serve.
         for (module, kind) in [
             (LINKED, "management_surface"),
-            (SYNAPSE, "tool_provider"),
-            (BROCA, "tool_provider"),
+            (LOCAL_EMBEDDINGS, "tool_provider"),
+            (MODEL_EXECUTION, "tool_provider"),
             (LINKED, "internal_service"),
             (LINKED, "mystery_kind"),
         ] {
@@ -1157,7 +1161,7 @@ mod tests {
                             "storage_state": "starting",
                             "epochs": {
                                 "memory_render_epoch": 2,
-                                "compartment_render_epoch": 2,
+                                "history_segment_render_epoch": 2,
                                 "profile_epoch": 2,
                                 "tagger_epoch": 3,
                                 "state_sync_epoch": 1
@@ -1182,7 +1186,7 @@ mod tests {
             response["metrics"]["components"]["context"]["metrics"]["epochs"],
             serde_json::json!({
                 "memory_render_epoch": 2,
-                "compartment_render_epoch": 2,
+                "history_segment_render_epoch": 2,
                 "profile_epoch": 2,
                 "tagger_epoch": 3,
                 "state_sync_epoch": 1,
@@ -1207,8 +1211,8 @@ mod tests {
             metrics: Some(serde_json::json!({
                 "components": {
                     "context": {"status": "ok", "metrics": {"storage_state": "ready"}},
-                    "synapse": {"status": "failing", "metrics": null},
-                    "broca": {"status": "degraded", "metrics": {"broca_state": "unexpected"}}
+                    "local_embeddings": {"status": "failing", "metrics": null},
+                    "model_execution": {"status": "degraded", "metrics": {"model_execution_state": "unexpected"}}
                 }
             })),
         };
@@ -1221,12 +1225,12 @@ mod tests {
         let components = &response["metrics"]["components"];
         assert_eq!(components["context"]["metrics"]["storage_state"], "ready");
         assert_eq!(
-            components["synapse"],
+            components["local_embeddings"],
             serde_json::json!({"status": "failing", "metrics": {}}),
             "a component whose health check produced no metrics keeps its status"
         );
         assert_eq!(
-            components["broca"],
+            components["model_execution"],
             serde_json::json!({"status": "degraded", "metrics": {}}),
             "an unrecognized state is dropped without dropping the component"
         );
@@ -1471,9 +1475,9 @@ mod tests {
     fn catalog_response_is_lossless_and_truthful() {
         let role = serde_json::json!({
             "role": "tool_provider",
-            "tools": [{"name": "ctx_reduce", "schema": {"type": "object"}}]
+            "tools": [{"name": "eidnara_reduce", "schema": {"type": "object"}}]
         });
-        let synapse_role = serde_json::json!({"role": "management_surface"});
+        let local_embeddings_role = serde_json::json!({"role": "management_surface"});
         let manifests = [
             ManifestSnapshot {
                 module_id: LINKED.to_owned(),
@@ -1482,9 +1486,9 @@ mod tests {
                 control_ops: vec!["context.reload".to_owned()],
             },
             ManifestSnapshot {
-                module_id: SYNAPSE.to_owned(),
+                module_id: LOCAL_EMBEDDINGS.to_owned(),
                 module_version: "0.1.0".to_owned(),
-                provides: vec![synapse_role.clone()],
+                provides: vec![local_embeddings_role.clone()],
                 control_ops: Vec::new(),
             },
         ];
@@ -1506,10 +1510,10 @@ mod tests {
             unfiltered["modules"][0]["control_ops"],
             serde_json::json!(["context.reload"])
         );
-        assert_eq!(unfiltered["modules"][1]["module_id"], SYNAPSE);
+        assert_eq!(unfiltered["modules"][1]["module_id"], LOCAL_EMBEDDINGS);
         assert_eq!(
             unfiltered["modules"][1]["roles"],
-            serde_json::json!([synapse_role])
+            serde_json::json!([local_embeddings_role])
         );
         assert_eq!(
             unfiltered["host_ops"],
@@ -1518,7 +1522,7 @@ mod tests {
         // wake.create must stay absent until implemented (protocol AE10).
         assert!(!unfiltered.to_string().contains("wake.create"));
 
-        for (module, version) in [(LINKED, "9.9.9"), (SYNAPSE, "0.1.0")] {
+        for (module, version) in [(LINKED, "9.9.9"), (LOCAL_EMBEDDINGS, "0.1.0")] {
             let filtered: serde_json::Value =
                 serde_json::from_slice(catalog.body(Some(module))).unwrap();
             let modules = filtered["modules"].as_array().unwrap();

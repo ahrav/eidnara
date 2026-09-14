@@ -201,7 +201,7 @@ part at least one non-safety record.
   `token_golden.rs`. So the golden validates one target.
 - Missing evidence: whether any other workflow file
   (`shm-hardening-optin.yml`, `retrieval-benchmark.yml`,
-  `historian-eval.yml`, `claude-code-review.yml`) runs the Rust test suite on a
+  `history_summarizer-eval.yml`, `claude-code-review.yml`) runs the Rust test suite on a
   different target. I checked the `runs-on`/`matrix` lines of `ci.yml` only.
 - Conclusion: unresolved, needs a full workflow survey. The finding for this
   record stands regardless: the golden cannot detect a platform-specific

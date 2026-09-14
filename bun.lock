@@ -45,6 +45,18 @@
         "typescript": "5.9.3",
       },
     },
+    "packages/fs-observer": {
+      "name": "@eidnara/fs-observer",
+      "version": "0.1.0",
+      "bin": {
+        "fs-observer": "src/cli.ts",
+      },
+      "devDependencies": {
+        "@types/bun": "1.3.14",
+        "@types/node": "^22.20.0",
+        "typescript": "5.9.3",
+      },
+    },
     "packages/host-linux-x64-gnu": {
       "name": "@eidnara/host-linux-x64-gnu",
       "version": "0.1.0",
@@ -67,7 +79,7 @@
         "zod": "4.4.3",
       },
       "devDependencies": {
-        "@eidnara/retina-local-fs": "0.1.0",
+        "@eidnara/fs-observer": "0.1.0",
         "@types/better-sqlite3": "^7.6.13",
         "@types/bun": "1.3.14",
         "@types/node": "^22.20.0",
@@ -112,18 +124,6 @@
         "@earendil-works/pi-coding-agent",
         "@earendil-works/pi-tui",
       ],
-    },
-    "packages/retina-local-fs": {
-      "name": "@eidnara/retina-local-fs",
-      "version": "0.1.0",
-      "bin": {
-        "retina-local-fs": "src/cli.ts",
-      },
-      "devDependencies": {
-        "@types/bun": "1.3.14",
-        "@types/node": "^22.20.0",
-        "typescript": "5.9.3",
-      },
     },
     "packages/shm-native": {
       "name": "@eidnara/shm-native",
@@ -290,13 +290,13 @@
 
     "@eidnara/e2e-tests": ["@eidnara/e2e-tests@workspace:packages/e2e-tests"],
 
+    "@eidnara/fs-observer": ["@eidnara/fs-observer@workspace:packages/fs-observer"],
+
     "@eidnara/host-linux-x64-gnu": ["@eidnara/host-linux-x64-gnu@workspace:packages/host-linux-x64-gnu"],
 
     "@eidnara/opencode": ["@eidnara/opencode@workspace:packages/opencode-plugin"],
 
     "@eidnara/pi": ["@eidnara/pi@workspace:packages/pi-plugin"],
-
-    "@eidnara/retina-local-fs": ["@eidnara/retina-local-fs@workspace:packages/retina-local-fs"],
 
     "@eidnara/shm-native": ["@eidnara/shm-native@workspace:packages/shm-native"],
 

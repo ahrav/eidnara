@@ -16,10 +16,10 @@ import { stringify as stringifyJsonc } from "comment-json";
 import { OmpAdapter } from "../adapters/omp";
 import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
-import { collectPiHistorianDumps, collectPiRecentSessions } from "../lib/diagnostics-pi";
+import { collectPiHistorySummarizerDumps, collectPiRecentSessions } from "../lib/diagnostics-pi";
 import { projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
 import { writeNewFile } from "../lib/fs-utils";
-import { describeHistorianDumps } from "../lib/historian-dumps";
+import { describeHistorySummarizerDumps } from "../lib/history_summarizer-dumps";
 import { capBodyToGithubLimit } from "../lib/issue-body";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import {
@@ -368,7 +368,9 @@ async function runHealthChecks(options: {
                 `Some OMP session directories under ${getOmpSessionsRoot()} could not be read`,
             );
         }
-        for (const line of describeHistorianDumps(collectPiHistorianDumps(sessions.sessions))) {
+        for (const line of describeHistorySummarizerDumps(
+            collectPiHistorySummarizerDumps(sessions.sessions),
+        )) {
             add(results, line.status, line.message);
         }
     }

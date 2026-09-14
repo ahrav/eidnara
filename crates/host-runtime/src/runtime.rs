@@ -960,7 +960,7 @@ async fn accept_loop<H: HostHandler>(shared: &Arc<HostShared<H>>, listener: Unix
 
 fn activation_in_progress(report: &HealthReport) -> bool {
     use crate::control::{
-        KERNEL_KEY, KERNEL_STATE_KEY, STATE_STARTING, STORAGE_STATE_KEY, SYNAPSE_STATE_KEY,
+        KERNEL_KEY, KERNEL_STATE_KEY, LOCAL_EMBEDDINGS_STATE_KEY, STATE_STARTING, STORAGE_STATE_KEY,
     };
     fn is_starting(metrics: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
         metrics.get(key).and_then(serde_json::Value::as_str) == Some(STATE_STARTING)
@@ -973,7 +973,7 @@ fn activation_in_progress(report: &HealthReport) -> bool {
             metrics.is_some_and(|metrics| {
                 // A `starting` kernel block counts from any component here, while `host.status` reports the block only for `CONTEXT_COMPONENT`.
                 is_starting(metrics, STORAGE_STATE_KEY)
-                    || is_starting(metrics, SYNAPSE_STATE_KEY)
+                    || is_starting(metrics, LOCAL_EMBEDDINGS_STATE_KEY)
                     || metrics
                         .get(KERNEL_KEY)
                         .and_then(serde_json::Value::as_object)
@@ -1248,7 +1248,7 @@ mod tests {
             serde_json::json!({ "storage_state": "starting" })
         )));
         assert!(activation_in_progress(&report(serde_json::json!({
-            "synapse": { "status": "ok", "metrics": { "synapse_state": "starting" } }
+            "local_embeddings": { "status": "ok", "metrics": { "local_embeddings_state": "starting" } }
         }))));
         // The kernel store opens after the cache store reports ready.
         assert!(activation_in_progress(&context(serde_json::json!({
@@ -1284,21 +1284,21 @@ mod tests {
                 "status": "ok",
                 "metrics": { "storage_state": "ready", "kernel": { "kernel_state": "ready" } }
             },
-            "synapse": { "status": "ok", "metrics": { "synapse_state": "starting" } },
+            "local_embeddings": { "status": "ok", "metrics": { "local_embeddings_state": "starting" } },
         }))));
         assert!(!activation_in_progress(&report(serde_json::json!({
             "context": {
                 "status": "ok",
                 "metrics": { "storage_state": "ready", "kernel": { "kernel_state": "ready" } }
             },
-            "synapse": { "status": "ok", "metrics": { "synapse_state": "ready" } },
+            "local_embeddings": { "status": "ok", "metrics": { "local_embeddings_state": "ready" } },
         }))));
         // The scan is component-agnostic: a starting kernel block counts wherever the
         // handler reports it, even though `host.status` publishes the block only for `context`.
         assert!(
             activation_in_progress(&report(serde_json::json!({
                 "context": { "status": "ok", "metrics": { "storage_state": "ready" } },
-                "synapse": {
+                "local_embeddings": {
                     "status": "ok",
                     "metrics": { "kernel": { "kernel_state": "starting" } }
                 },

@@ -1,6 +1,6 @@
 /**
  * Parity A1 verifies first-render tag stability during pure-defer growth.
- * Parity A3 verifies aged `ctx_reduce` prefix survival during defer growth.
+ * Parity A3 verifies aged `eidnara_reduce` prefix survival during defer growth.
  * The thinking-block drivers verify that signed reasoning never reaches the provider wire
  * after a drop and that dropping a tagged text block leaves provider roles well-formed.
  */
@@ -96,9 +96,9 @@ export interface CacheStabilityEvidence extends Record<string, JsonValue> {
 
 export interface FirstRenderDeferObservation extends CacheStabilityEvidence {}
 
-export interface AgedCtxReduceObservation extends CacheStabilityEvidence {
+export interface AgedEidnaraReduceObservation extends CacheStabilityEvidence {
     sawReduceOnWire: boolean;
-    finalWireHasCtxReduce: boolean;
+    finalWireHasEidnaraReduce: boolean;
 }
 
 const TAG_OVERLAY_RE = /§\d+§ /u;
@@ -216,9 +216,9 @@ function messageBlocks(message: unknown): Array<Record<string, unknown>> {
     );
 }
 
-/** The check requires the emitted `ctx_reduce` use/result pair, not its tool declaration. */
+/** The check requires the emitted `eidnara_reduce` use/result pair, not its tool declaration. */
 /** `toolName` and `drop` pin the tool use the fixture emitted, so a pair whose name or payload the transform rewrote does not count as retained. */
-export function hasCtxReducePair(
+export function hasEidnaraReducePair(
     body: Record<string, unknown>,
     callId: string,
     drop: string,
@@ -255,8 +255,8 @@ export function hasCtxReducePair(
 }
 
 /* */
-/** `emittedName` reports the published tool name the `tool_use` carried, or null while no request has published a `ctx_reduce` tool. */
-function emitCtxReduceOnce(
+/** `emittedName` reports the published tool name the `tool_use` carried, or null while no request has published a `eidnara_reduce` tool. */
+function emitEidnaraReduceOnce(
     h: RustTestHarness,
     drop: string,
     callId: string,
@@ -270,7 +270,7 @@ function emitCtxReduceOnce(
         const tools = Array.isArray(body.tools) ? body.tools : [];
         const name = tools
             .map((t) => (t && typeof t === "object" ? (t as { name?: unknown }).name : null))
-            .find((n) => typeof n === "string" && /ctx_reduce/.test(n)) as string | undefined;
+            .find((n) => typeof n === "string" && /eidnara_reduce/.test(n)) as string | undefined;
         if (!name) return null;
         emitted = true;
         emittedName = name;
@@ -290,39 +290,39 @@ function emitCtxReduceOnce(
     return { emittedName: () => emittedName };
 }
 
-export async function driveAgedCtxReduceSurvival(
+export async function driveAgedEidnaraReduceSurvival(
     h: RustTestHarness,
-): Promise<AgedCtxReduceObservation> {
+): Promise<AgedEidnaraReduceObservation> {
     const sessionId = await h.createSession();
     h.mock.setDefault({ text: "A3 reply 1", usage: DEFER_USAGE });
     await h.sendPrompt(sessionId, "A3 turn 1: establish baseline content.");
 
-    const reduce = emitCtxReduceOnce(
+    const reduce = emitEidnaraReduceOnce(
         h,
         FIRST_RENDER_A3_FIXTURE.drop,
         FIRST_RENDER_A3_FIXTURE.callId,
     );
     h.mock.setDefault({
-        text: "A3 reply 2 (after ctx_reduce tool call)",
+        text: "A3 reply 2 (after eidnara_reduce tool call)",
         usage: DEFER_USAGE,
     });
-    await h.sendPrompt(sessionId, "A3 turn 2: this turn issues a ctx_reduce call.");
+    await h.sendPrompt(sessionId, "A3 turn 2: this turn issues a eidnara_reduce call.");
     // The pair is matched against the exact name the fixture emitted; an unpublished tool makes every later check false.
     const toolName = reduce.emittedName() ?? "";
     const retainedPair = (body: Record<string, unknown>): boolean =>
         toolName.length > 0 &&
-        hasCtxReducePair(
+        hasEidnaraReducePair(
             body,
             FIRST_RENDER_A3_FIXTURE.callId,
             FIRST_RENDER_A3_FIXTURE.drop,
             toolName,
         );
 
-    // Pure-defer growth ages the `ctx_reduce` call past the protected window.
+    // Pure-defer growth ages the `eidnara_reduce` call past the protected window.
     let sawReduceOnWire = false;
     for (let i = 3; i <= 8; i++) {
         h.mock.setDefault({ text: `A3 defer reply ${i}`, usage: DEFER_USAGE });
-        await h.sendPrompt(sessionId, `A3 turn ${i}: defer growth ages the ctx_reduce call.`);
+        await h.sendPrompt(sessionId, `A3 turn ${i}: defer growth ages the eidnara_reduce call.`);
         const body = h.mock.lastRequest()?.body;
         if (body && retainedPair(body)) {
             sawReduceOnWire = true;
@@ -333,13 +333,13 @@ export async function driveAgedCtxReduceSurvival(
     const finalBody = requests.at(-1)?.body;
     return {
         sawReduceOnWire,
-        finalWireHasCtxReduce: finalBody !== undefined && retainedPair(finalBody),
+        finalWireHasEidnaraReduce: finalBody !== undefined && retainedPair(finalBody),
         ...(await collectCacheStabilityEvidence(h, requests, FIRST_RENDER_A3_FIXTURE.mainRequests)),
     };
 }
 
-export function verifyAgedCtxReduceSurvival(
-    observation: AgedCtxReduceObservation,
+export function verifyAgedEidnaraReduceSurvival(
+    observation: AgedEidnaraReduceObservation,
 ): RegressionResult {
     const stability = cacheStabilityChecks("a3", observation, FIRST_RENDER_A3_FIXTURE.mainRequests);
     return resultFromChecks([
@@ -351,7 +351,7 @@ export function verifyAgedCtxReduceSurvival(
         stability.busts,
         {
             id: "check-a3-reduce-retained-final-wire",
-            passed: observation.finalWireHasCtxReduce,
+            passed: observation.finalWireHasEidnaraReduce,
         },
         stability.cached,
         stability.served,
@@ -451,11 +451,11 @@ function toolName(body: Record<string, unknown>, pattern: RegExp): string | null
     return null;
 }
 
-function emitThinkingCtxReduceOnce(h: RustTestHarness, tag: number): () => boolean {
+function emitThinkingEidnaraReduceOnce(h: RustTestHarness, tag: number): () => boolean {
     let emitted = false;
     h.mock.addMatcher((body) => {
         if (emitted || !JSON.stringify(body.system ?? "").includes("## Eidnara")) return null;
-        const name = toolName(body, /^ctx_reduce$/);
+        const name = toolName(body, /^eidnara_reduce$/);
         if (!name) return null;
         emitted = true;
         return {
@@ -481,7 +481,7 @@ function emitThinkingCtxReduceOnce(h: RustTestHarness, tag: number): () => boole
 
 /** The helper resolves the public §N§ handle for the message containing `needle`. */
 /**
- * The daemon always emits the `<session-history>` wrapper, empty or not, and a compartment heading `## <start>-<end> ·` names the raw message ordinals it replaced.
+ * The daemon always emits the `<session-history>` wrapper, empty or not, and a history_segment heading `## <start>-<end> ·` names the raw message ordinals it replaced.
  * Raw ordinals are 1-based over the session's user and assistant messages, so a driver knows the ordinal of a turn from its position in the prompts it sent.
  */
 export function publishedHistoryCovers(text: string, ordinal: number): boolean {
@@ -530,7 +530,7 @@ async function dropAndMaterialize(
     tag: number,
 ): Promise<{ body: Record<string, unknown>; dropEmitted: boolean }> {
     h.mock.reset();
-    const wasDropEmitted = emitThinkingCtxReduceOnce(h, tag);
+    const wasDropEmitted = emitThinkingEidnaraReduceOnce(h, tag);
     h.mock.setDefault({
         text: "after reduce",
         usage: {
@@ -941,13 +941,13 @@ export const FIRST_RENDER_A1_FIXTURE = {
 } as const;
 
 export const FIRST_RENDER_A3_FIXTURE = {
-    scenario: "aged-ctx-reduce-defer-growth",
+    scenario: "aged-eidnara-reduce-defer-growth",
     turns: 8,
-    // Turn 2's `ctx_reduce` tool_use adds one continuation request carrying the tool result.
+    // Turn 2's `eidnara_reduce` tool_use adds one continuation request carrying the tool result.
     mainRequests: 9,
     drop: "99999",
-    callId: "toolu_incident_a3_ctx_reduce",
-    requiredWireEvidence: "matching ctx_reduce tool_use and tool_result blocks",
+    callId: "toolu_incident_a3_eidnara_reduce",
+    requiredWireEvidence: "matching eidnara_reduce tool_use and tool_result blocks",
     modelContextLimit: 100_000,
     executeThresholdPercentage: 20,
 } as const;
@@ -1021,15 +1021,15 @@ function normalizeFirstRenderA1(raw: JsonValue): FirstRenderDeferObservation {
     );
 }
 
-function normalizeFirstRenderA3(raw: JsonValue): AgedCtxReduceObservation {
+function normalizeFirstRenderA3(raw: JsonValue): AgedEidnaraReduceObservation {
     const value = exactPrimitiveObservation(raw, "parity-a3", {
         sawReduceOnWire: "boolean",
-        finalWireHasCtxReduce: "boolean",
+        finalWireHasEidnaraReduce: "boolean",
         ...CACHE_STABILITY_FIELDS,
     });
     return {
         sawReduceOnWire: booleanField(value, "sawReduceOnWire"),
-        finalWireHasCtxReduce: booleanField(value, "finalWireHasCtxReduce"),
+        finalWireHasEidnaraReduce: booleanField(value, "finalWireHasEidnaraReduce"),
         ...cacheStabilityFields(value),
     };
 }
@@ -1084,19 +1084,19 @@ export function sourceLinkedRegressionIncidentCases(): RegisteredIncidentCase[] 
             implementationFiles: RUST_CACHE_IMPLEMENTATION_FILES,
             fixtures: { ...FIRST_RENDER_A3_FIXTURE },
             driver: adaptBoundSymbol(
-                driveAgedCtxReduceSurvival,
+                driveAgedEidnaraReduceSurvival,
                 (inner) => (context) =>
                     withCaseHarness(context, FIRST_RENDER_HARNESS_OPTIONS, (h) => inner(h)),
             ),
             normalizer: normalizeFirstRenderA3,
             precondition: satisfiedPrecondition,
             verifier: adaptBoundSymbol(
-                verifyAgedCtxReduceSurvival,
+                verifyAgedEidnaraReduceSurvival,
                 (inner) => (raw) => inner(normalizeFirstRenderA3(raw)).checks,
             ),
             binding: {
-                driver: driveAgedCtxReduceSurvival,
-                verifier: verifyAgedCtxReduceSurvival,
+                driver: driveAgedEidnaraReduceSurvival,
+                verifier: verifyAgedEidnaraReduceSurvival,
             },
             prerequisite: rustPrerequisite,
         },

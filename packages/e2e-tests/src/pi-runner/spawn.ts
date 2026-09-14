@@ -288,7 +288,7 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
             auto_search: { enabled: false },
             git_commit_indexing: { enabled: false },
         },
-        sidekick: { disable: true },
+        context_researcher: { disable: true },
         ...(opts.eidnaraConfig ?? {}),
     };
     const userConfigPath = userEidnaraConfigPath(env);

@@ -21,8 +21,8 @@ mac.update(daemon_id);
 ```
 
 `HMAC-SHA256` keyed on the connection key, over four concatenated inputs with a
-domain string first. The two domains are `"eidnara-server-v1"` and
-`"eidnara-client-v1"` (`auth.rs:19-20`), so a server proof can never be replayed as
+domain string first. The two domains are `"eidnara-server-v3"` and
+`"eidnara-client-v3"` (`auth.rs:19-20`), so a server proof can never be replayed as
 a client proof.
 
 Nonce provenance:

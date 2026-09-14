@@ -1,7 +1,7 @@
 # Cache-state load and commit surface
 
 This lens records what the per-turn `transform` pass reads from and writes to
-`cache_state`, `pass_trace`, and `historian_side_channel_outbox`, and what any
+`cache_state`, `pass_trace`, and `history_summarizer_side_channel_outbox`, and what any
 change to that traffic must preserve. Discovery baseline is
 `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10. Live anchors are
 checked against the PR 509 worktree on 2026-09-12; the outbox delivery
@@ -20,14 +20,14 @@ runs [`CACHE_STATE_FULL_SELECT`][full-select] in one deferred read
 transaction ([`with_conn`][with-conn]) and deserializes both `core_state` and
 [`ModuleMeta`][meta-struct] with serde. The handler loads before the transform
 for the [projection-cache epoch][epoch-read] and for
-[`historian_active`][active], inside the transform through
+[`history_summarizer_active`][active], inside the transform through
 [`load_transform_snapshot`][snapshot] (whose [implementation][snapshot-impl]
 reads the row and the overlay tables in one read transaction), and after the
-transform inside [`prepare_historian_fire`][prepare], whose `loaded` feeds the
+transform inside [`prepare_history_summarizer_fire`][prepare], whose `loaded` feeds the
 [`record_no_fire`][no-fire] CAS write with `loaded.row_version` and gates on
 [`pending_rewrite`][meta-pending]. The Emergency95 arm adds [two more
 loads][floor-a] that compare [`publication_floor_ordinal`][meta-floor] before
-and after historian work and may [rerun the transform][rerun]. A CAS conflict
+and after history_summarizer work and may [rerun the transform][rerun]. A CAS conflict
 [reruns `apply_once`][cas-retry], which reloads before the
 [main commit][main-commit]. Every durable write runs through
 [`with_conn_fenced`][fenced]: fence precheck, [`synchronous=FULL`
@@ -45,8 +45,8 @@ passes [`trace_pass_stable`][stable] from inside the transform, and on failure
 transaction for divergence and scheduler history but leaves `receive_count`
 untouched on conflict and initializes it to `0` on a fresh insert.
 
-The historian outbox drain runs [before the transform][drain-call] on every
-pass with per-kind limit 32. [`drain_historian_side_channels`][drain] first
+The history_summarizer outbox drain runs [before the transform][drain-call] on every
+pass with per-kind limit 32. [`drain_history_summarizer_side_channels`][drain] first
 [sweeps rows an earlier build marked delivered][delete-all], gated by a read
 that finds any, then per kind loads due rows in a read transaction and
 delivers each row by inserting the target row and [deleting the outbox
@@ -56,8 +56,8 @@ deleted it in a second one; the [doc comment][drain-doc] states the
 one-transaction design. Rows are [enqueued][enqueue] by the publish
 transaction into the [outbox table][outbox-sql], whose primary key is the
 delivery identity and whose [due index][idx-due] serves the pending count. The
-same drain also runs [after a historian publish][publish-drain] on the
-historian task, so two drainers can overlap on one session. The `meta` blob is
+same drain also runs [after a history_summarizer publish][publish-drain] on the
+history_summarizer task, so two drainers can overlap on one session. The `meta` blob is
 stored through [`json_content`][json-content] under the
 [`DurablePreserveIdentities`][policy] policy, which parses with
 [`parse_json_with_unique_names`][unique], validates keys, walks and redacts a
@@ -71,33 +71,33 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 
 - Type: safety
 - Check: `always` - Within one pass, every `cache_state` read that executes
-  after `commit_transform`, `descend_lineage`, `truncate_compartments_for_revert`,
-  or an awaited historian firing observes a `row_version` at least as new as
+  after `commit_transform`, `descend_lineage`, `truncate_history_segments_for_revert`,
+  or an awaited history_summarizer firing observes a `row_version` at least as new as
   the one that work returned, and any CAS write derived from that read uses
   that `row_version`. `always` because the daemon consumes those reads on
   every committing pass, not only under a fault.
 - Guarantee: Consolidating loads never hands a pre-commit snapshot to a
   consumer that runs after the pass's own durable write.
-- Rationale: [`prepare_historian_fire`][prepare] loads after
+- Rationale: [`prepare_history_summarizer_fire`][prepare] loads after
   [`run_transform`][run] returns and passes `loaded` into
   [`record_no_fire`][no-fire], which commits `last_no_fire` under
   `loaded.row_version`. A pre-commit `loaded` makes that CAS fail silently
   (`let _ =`), so the skip reason is never persisted. The same `loaded` supplies
   `core.frozen_units` to `projected_post_drop_percentage` and the
   `fold_is_only_reclaim` debug assertion, and `meta.pending_rewrite`,
-  `meta.historian.*`, and `meta.ordinal_continuation_base` to fire gating. The
+  `meta.history_summarizer.*`, and `meta.ordinal_continuation_base` to fire gating. The
   Emergency95 arm reads `publication_floor_ordinal` [after the transform][floor-a]
-  and [again after historian work][floor-b]; those two reads must stay distinct
+  and [again after history_summarizer work][floor-b]; those two reads must stay distinct
   because the comparison is the rerun trigger. Inside the transform, the
   lineage-switched path [loads][descent-load], [descends][descend], and then
   takes the [snapshot][snapshot], and the revert path [truncates][truncate] and
-  then [reloads compartments][truncate-reload]. On CAS conflict the
+  then [reloads history_segments][truncate-reload]. On CAS conflict the
   [retry loop][cas-retry] reruns `apply_once`, which reloads.
 - Fault/timing angle: A consolidation reuses a snapshot taken before
   `commit_transform` for a consumer placed after it, or reuses the first
   `run_transform` snapshot for an Emergency95 rerun after an inline firing.
 - Required faults and enabling state: A pass that commits, then reaches
-  `prepare_historian_fire` with a new no-fire reason; an Emergency95 pass with
+  `prepare_history_summarizer_fire` with a new no-fire reason; an Emergency95 pass with
   a publication landing between the transform and the floor check; a CAS
   conflict injected between snapshot and commit.
 - Reachability: default-production - the handler path at
@@ -113,7 +113,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   [`handler_delta_boundary_divergence_recut_retries_cas_without_stale_projection`][t-cas]
   covers the CAS rerun (unaudited).
 - Open questions:
-  - Which of the three pre-commit loads (epoch, `historian_active`, snapshot)
+  - Which of the three pre-commit loads (epoch, `history_summarizer_active`, snapshot)
     may share one snapshot? Merging them removes a window in which the
     projection-cache epoch is read before a concurrent recut; the specification
     should state whether closing that window is intended. (needs human input)
@@ -122,24 +122,24 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 
 - Type: safety
 - Check: `always` - For every stored `meta` text, a scalar projection of
-  `revert_epoch` and `historian.state` returns the same value as
+  `revert_epoch` and `history_summarizer.state` returns the same value as
   `serde_json::from_str::<ModuleMeta>(meta)` when that deserialization
   succeeds, and when it fails, or when `core_state` fails to deserialize, the
   consumer takes the same conservative branch it takes today (`None` for the
-  projection cache, `false` for `historian_active`). `always` because these
+  projection cache, `false` for `history_summarizer_active`). `always` because these
   reads sit on every pass.
 - Guarantee: A narrow read never selects a projection-cache entry or clears a
-  historian veto that the full load would not.
-- Rationale: [`revert_epoch`][meta-epoch] and [`historian`][meta-historian]
-  carry `#[serde(default)]`, and [`HistorianDurableState::state`][hds-state]
+  history_summarizer veto that the full load would not.
+- Rationale: [`revert_epoch`][meta-epoch] and [`history_summarizer`][meta-history_summarizer]
+  carry `#[serde(default)]`, and [`HistorySummarizerDurableState::state`][hds-state]
   does too, so an absent key deserializes to `0` or `Idle` where a JSON path
-  extract returns NULL. [`HistorianPhase`][phase] serializes with
+  extract returns NULL. [`HistorySummarizerPhase`][phase] serializes with
   `rename_all = "snake_case"`, so the stored strings are `idle`, `firing`,
   `awaiting_producer`, `validating`, `publishing`, matching `as_str`. An
   unknown string or a `null` under `revert_epoch` fails serde but not a path
   extract. Today [`lookup_full_projection_cache`][epoch-read] and
   [`expand_transform_tail_delta`][epoch-read-delta] map any load error to
-  `None`, and [`historian_active`][active] maps it to `false`; a corrupt
+  `None`, and [`history_summarizer_active`][active] maps it to `false`; a corrupt
   `core_state` column trips both because [`load`][load] decodes both columns.
   The comment at [lib.rs:4208][epoch-comment] states why the epoch must be the
   persisted one. `ModuleMeta` has no `deny_unknown_fields` and no `flatten`, and
@@ -148,12 +148,12 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 - Fault/timing angle: none; the divergence is a data-shape difference, not an
   interleaving.
 - Required faults and enabling state: Rows whose `meta` lacks `revert_epoch`
-  or `historian`, rows with an unknown `historian.state` string, rows with
+  or `history_summarizer`, rows with an unknown `history_summarizer.state` string, rows with
   `null` under `revert_epoch`, and rows whose `core_state` is not valid JSON.
 - Reachability: default-production - both reads run on the ordinary handler
   path; the delta-request read needs a `tail_delta` request.
 - Existing check: none found for equivalence between a narrow read and the
-  full load, and none found for `Handler::historian_active` reading durable
+  full load, and none found for `Handler::history_summarizer_active` reading durable
   state. The seven in-transaction users of
   [`CACHE_STATE_META_SELECT`][meta-select] all deserialize the whole
   `ModuleMeta` as their predicate source and are not scalar reads.
@@ -256,21 +256,21 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 ### side-channel-row-delivers-exactly-once
 
 - Type: safety
-- Check: `always` - For every `historian_side_channel_outbox` row, the target
+- Check: `always` - For every `history_summarizer_side_channel_outbox` row, the target
   table receives exactly one row for it across all drains, restarts, and
   overlapping drainers, and the outbox state change that retires the row
   commits in the same transaction as the target insert. A delivery whose
   outbox row is no longer pending when its transaction runs must roll back its
-  target insert. `always` because [`compartment_events`][events-insert] and
+  target insert. `always` because [`history_segment_events`][events-insert] and
   [`user_memory_candidates`][obs-insert] are plain inserts with no dedupe;
   only [`primer_candidates`][primer-insert] upserts.
 - Guarantee: The outbox row is the only duplicate guard for events and user
   observations.
-- Rationale: [`deliver_historian_side_channel`][deliver] inserts the target
-  and calls [`retire_historian_side_channel_tx`][retire] in one fenced
+- Rationale: [`deliver_history_summarizer_side_channel`][deliver] inserts the target
+  and calls [`retire_history_summarizer_side_channel_tx`][retire] in one fenced
   transaction; the retirement is a `DELETE` under `delivered_at_ms IS NULL`
   that requires `changed == 1` and returns an error otherwise, which rolls the
-  fenced transaction back. [`load_due_historian_side_channels`][load-due]
+  fenced transaction back. [`load_due_history_summarizer_side_channels`][load-due]
   selects only `delivered_at_ms IS NULL`, so a retired row is absent rather
   than marked and nothing remains for a restart to redeliver; the [drain
   start][drain] sweeps rows an earlier build marked without deleting. The
@@ -278,7 +278,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   can load the same due row; the loser's delete affects zero rows and its
   insert rolls back. The baseline marked in the delivery transaction and
   deleted in a second one, leaving a crash window between the two commits.
-  [`historian_side_channel_status`][status-sc] counts pending as
+  [`history_summarizer_side_channel_status`][status-sc] counts pending as
   `delivered_at_ms IS NULL`, so retiring by delete keeps the pending count
   unchanged.
 - Fault/timing angle: An injected failure between the target insert and the
@@ -290,13 +290,13 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   retired it.
 - Reachability: default-production for the drain call
   ([lib.rs:8208-8212][drain-call]); explicit-config-only for row delivery, because
-  outbox rows come from [`publish_historian_chunk`][publish] and firing
+  outbox rows come from [`publish_history_summarizer_chunk`][publish] and firing
   requires a configured `model_chain` ([config.rs:119][cfg-models],
   [`no_models` gate][no-models]); `user_observation` rows further require
   `user_memory_collection_enabled` ([config.rs:126][cfg-user-mem]).
-- Existing check: [`historian_side_channel_outbox_recovers_after_restart`][t-restart]
+- Existing check: [`history_summarizer_side_channel_outbox_recovers_after_restart`][t-restart]
   covers fail, reopen, redeliver once (unaudited).
-  [`historian_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults]
+  [`history_summarizer_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults]
   covers one failed kind and a later successful retry (unaudited). None found
   for a crash between mark and delete, and none found for two overlapping
   drainers.
@@ -317,10 +317,10 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   which rows a pass touches.
 - Guarantee: Drain scheduling and retry shape are unchanged by the transaction
   restructuring.
-- Rationale: [`HISTORIAN_SIDE_CHANNEL_KINDS`][kinds], the [drain loop][drain],
+- Rationale: [`HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS`][kinds], the [drain loop][drain],
   the [due query][load-due] with its `INDEXED BY` order index
   ([baseline.sql:531-535][idx-order]), and
-  [`record_historian_side_channel_failure`][failure] fix these values.
+  [`record_history_summarizer_side_channel_failure`][failure] fix these values.
 - Fault/timing angle: An empty-drain shortcut that skips the leftover delete,
   or a delete-in-place that changes which rows count as pending for the next
   pass.
@@ -329,7 +329,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   the computed `next_attempt_at_ms`.
 - Reachability: default-production for the empty drain; explicit-config-only
   for populated drains, as above.
-- Existing check: [`historian_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults]
+- Existing check: [`history_summarizer_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults]
   covers isolation and one retry with `now_ms = i64::MAX` (unaudited). None
   found for ordering across firings, for the per-kind limit, or for the
   backoff schedule values.
@@ -394,7 +394,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 - Type: reachability
 - Check: `sometimes` - During a campaign, at least one pass observes a
   `row_version` in its post-commit read that differs from the `row_version`
-  its transform committed, because another actor (historian publish, wrapup
+  its transform committed, because another actor (history_summarizer publish, wrapup
   recut, or state sync) committed in between. `sometimes` rather than
   `reachable` because the branch lines execute on every Emergency95 pass while
   the interleaving that makes the first property meaningful may never occur.
@@ -404,12 +404,12 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   interleaving. Without it, a single-load design and the current design are
   indistinguishable.
 - Fault/timing angle: The window between `commit_transform` and
-  `prepare_historian_fire` or the floor check.
+  `prepare_history_summarizer_fire` or the floor check.
 - Required faults and enabling state: A concurrent publish or recut committed
   through a second handle inside that window; the
   [`between_transform_and_prepare`][hook] test hook is the existing seam.
 - Reachability: default-production for the code; the interleaving needs a
-  concurrent historian task or an external writer.
+  concurrent history_summarizer task or an external writer.
 - Existing check: [`handler_emergency_refolds_when_active_run_publishes_before_live_wait_capture`][t-emergency]
   constructs the interleaving through the hook (unaudited).
 - Open questions: None.
@@ -433,10 +433,10 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 | [`pass_trace_upserts_counts_and_caps_errors`][t-upserts] | upsert counters, 256-entry scheduler ring, 2000-char error cap | unaudited |
 | [`scheduler_trace_records_every_pass_and_preserves_variable_arm_state`][t-sched] | one scheduler observation per accepted pass | unaudited |
 | [`pass_trace_refuses_a_new_secret_session_and_keeps_tracing_a_stored_one`][t-secret] | trace writes refuse a new secret session, tolerate a stored one | unaudited |
-| [`historian_side_channel_outbox_recovers_after_restart`][t-restart] | failed row redelivered once after reopen; pending count drops to 0 | unaudited |
-| [`historian_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults] | one failed kind leaves other kinds delivered; retry succeeds | unaudited |
-| [`publish_historian_chunk_cas_conflict_leaves_no_transcript_row`][t-publish-cas] | CAS loser enqueues no outbox rows | unaudited |
-| [`truncate_compartments_for_revert_removes_anchored_events_and_crossing_ranges`][t-truncate] | revert deletes outbox rows for the session | unaudited |
+| [`history_summarizer_side_channel_outbox_recovers_after_restart`][t-restart] | failed row redelivered once after reopen; pending count drops to 0 | unaudited |
+| [`history_summarizer_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults] | one failed kind leaves other kinds delivered; retry succeeds | unaudited |
+| [`publish_history_summarizer_chunk_cas_conflict_leaves_no_transcript_row`][t-publish-cas] | CAS loser enqueues no outbox rows | unaudited |
+| [`truncate_history_segments_for_revert_removes_anchored_events_and_crossing_ranges`][t-truncate] | revert deletes outbox rows for the session | unaudited |
 | [`duplicate_json_object_names_are_refused`][t-dup] | duplicate names refused at top level and nested; message omits the value | unaudited |
 | [`a_key_directed_substitution_records_its_own_detection`][t-keydir] | protected-key substitution records a synthetic detection | unaudited |
 | [`a_protected_key_holding_a_container_is_refused`][t-container] | protected key with container value refuses | unaudited |
@@ -448,7 +448,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 None found:
 
 - Equivalence between a narrow `meta` scalar read and `MemoryStore::load`.
-- `Handler::historian_active` reading the durable phase (only the in-memory
+- `Handler::history_summarizer_active` reading the durable phase (only the in-memory
   branch is implied by firing tests).
 - `first_divergence` NULL after a rejected pass.
 - `receive_count` after an Emergency95 rerun that commits twice.
@@ -499,7 +499,7 @@ tree's line numbers: `MemoryStore::load` closes at 6223, not
 (4151), not `lookup_full_projection_cache` (4271-4289, load at 4278).
 `prepare_json_content_collecting` spans 3109-3287, not 3276-3290;
 `parse_json_with_unique_names` spans 3291-3372 with its comment at 3289-3290.
-`deliver_historian_side_channel` spans 10917-10973, not 10917-10947.
+`deliver_history_summarizer_side_channel` spans 10917-10973, not 10917-10947.
 `persist_audit` spans 2291-2449, not 2291-2445. `trace_pass_received` spans
 6485-6535. `commit_transform` spans 8172-8632; the meta preparation is at
 8306-8315 and the in-commit `pass_trace` upsert at 8427-8494.
@@ -593,7 +593,7 @@ tree's line numbers: `MemoryStore::load` closes at 6223, not
 [meta-struct]: ../../../../../crates/memory-store/src/lib.rs#L1426
 [meta-epoch]: ../../../../../crates/memory-store/src/lib.rs#L1472-L1473
 [meta-pending]: ../../../../../crates/memory-store/src/lib.rs#L1480-L1481
-[meta-historian]: ../../../../../crates/memory-store/src/lib.rs#L1588-L1589
+[meta-history_summarizer]: ../../../../../crates/memory-store/src/lib.rs#L1588-L1589
 [meta-floor]: ../../../../../crates/memory-store/src/lib.rs#L1593-L1594
 [phase]: ../../../../../crates/memory-store/src/lib.rs#L622-L631
 [hds-state]: ../../../../../crates/memory-store/src/lib.rs#L664-L667

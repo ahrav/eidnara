@@ -23,7 +23,7 @@ measurements. Paths are relative to `crates/daemon/src/`.
 | `codec/pi.rs` | 14 | `codec/pi.rs:1050`, `codec/pi.rs:1457` | unaudited |
 | `codec/mod.rs` | 6 | `codec/mod.rs:59`, `codec/mod.rs:296` | unaudited |
 | `wire.rs` | 12 | `wire.rs:886`, `wire.rs:1603` | unaudited |
-| `caveman.rs` | 3 | `caveman.rs:883`, `caveman.rs:937` | unaudited |
+| `terse_text_compression.rs` | 3 | `terse_text_compression.rs:883`, `terse_text_compression.rs:937` | unaudited |
 | `session_resolver.rs` | 1 | `session_resolver.rs:61` | unaudited |
 | `codec/sidecar.rs` | 3 | `codec/sidecar.rs:488`, `codec/sidecar.rs:520` | unaudited |
 
@@ -54,15 +54,15 @@ not a new property or an adequacy verdict.
 | `memory_injection_budget_uses_standard_key_and_deprecated_user_fallback` | `config.rs:1317` | unaudited |
 | `rust_only_budget_leaves_are_user_tier_only_and_warn_when_project_supplies_them` | `config.rs:1353` | unaudited |
 | `compaction_enabled_defaults_true_and_is_user_tier_only` | `config.rs:1390` | unaudited |
-| `auto_search_and_caveman_config_follow_user_then_project_tiers` | `config.rs:1407` | unaudited |
-| `historian_budget_derivation_clamps_at_both_bounds` | `config.rs:1449` | unaudited |
+| `auto_search_and_terse_text_compression_config_follow_user_then_project_tiers` | `config.rs:1407` | unaudited |
+| `history_summarizer_budget_derivation_clamps_at_both_bounds` | `config.rs:1449` | unaudited |
 | `docs_injection_is_user_tier_only_and_temporal_flag_follows_project_tier` | `config.rs:1458` | unaudited |
 | `guidance_override_accepts_resolved_user_text_and_ignores_project_injection` | `config.rs:1483` | unaudited |
 | `inline_guidance_override_requires_exactly_one_marker_like_the_file_form` | `config.rs:1511` | unaudited |
 | `guidance_override_path_resolves_relative_to_user_config_directory` | `config.rs:1532` | unaudited |
 | `guidance_override_invalid_and_missing_files_warn_and_fall_back` | `config.rs:1558` | unaudited |
 | `guidance_marker_validation_matches_the_typescript_line_rule` | `config.rs:1603` | unaudited |
-| `historian_gates_follow_tiers_but_context_limit_remains_user_tier_only` | `config.rs:1611` | unaudited |
+| `history_summarizer_gates_follow_tiers_but_context_limit_remains_user_tier_only` | `config.rs:1611` | unaudited |
 | `project_tier_cannot_raise_the_user_memory_gate` | `config.rs:1637` | unaudited |
 | `privileged_keys_are_the_model_budget_and_schedule_levers` | `config.rs:1671` | unaudited |
 | `hostile_project_tier_cannot_change_privileged_values_and_warns_per_key` | `config.rs:1705` | unaudited |
@@ -107,7 +107,7 @@ missing tiers. The model-chain test (`config.rs:2185-2194`) supplies primary
 to retained regression contracts, not open silent-read or adjacent-only defects.
 
 No dedicated clamp-reporting check is identified. Ordinary auto-search and
-caveman overrides (`config.rs:1407-1446`) do not establish range diagnostics.
+terse_text_compression overrides (`config.rs:1407-1446`) do not establish range diagnostics.
 The upper threshold test (`config.rs:1297-1302`) asserts a value, not a warning.
 These are inventory limits, not authorization to change runtime policy.
 
@@ -177,7 +177,7 @@ Rust changes.
 
 `crates/daemon/tests/` holds 17 integration binaries. Each was scanned for the 4f
 module paths (`selection::`, `boundary::`, `scheduler::`, `codec::`,
-`caveman::`, `config::`, `wire::`, `session_resolver::`) and for the named codec
+`terse_text_compression::`, `config::`, `wire::`, `session_resolver::`) and for the named codec
 and wire items. Four reach a 4f unit directly; the rest are name false positives
 or belong to other parts. All 17 are selected by the workspace nextest job
 described under [CI execution](#ci-execution). Locations in this section are
@@ -185,8 +185,8 @@ relative to `crates/daemon/tests/`.
 
 | Binary | Tests | 4f reach | Assertion scope | Status |
 | --- | --- | --- | --- | --- |
-| `caveman_differential.rs` | 3 | `use daemon::caveman::{CavemanLevel, compress}` (`caveman_differential.rs:865`) | `optimized_matches_frozen_reference` (`caveman_differential.rs:1004`) runs 512 proptest documents (`caveman_differential.rs:1001-1013`) and `optimized_matches_frozen_reference_on_large_documents` (`caveman_differential.rs:1042`) runs 24 documents over 32 KiB (`caveman_differential.rs:1039-1051`) against a frozen in-file copy of `caveman.rs` (`mod reference`, `caveman_differential.rs:8`); `targeted_case_and_placeholder_edges_match_reference` (`caveman_differential.rs:1016`) pins five hand-picked inputs. The oracle is a frozen copy of the implementation, so it detects drift from that copy, not incorrectness | unaudited |
-| `caveman_reference.rs` | 3 | `use daemon::caveman::{CavemanLevel, compress}` (`caveman_reference.rs:681`) | `reference_matches_golden_fixture` (`caveman_reference.rs:699`) replays the 42-case `caveman-golden.json` (`caveman_reference.rs:701`) through a naive position-by-position port of the TypeScript compressor (`mod reference`, `caveman_reference.rs:15`); `production_matches_reference_on_fuzz_corpus` (`caveman_reference.rs:944`) compares 400 seeded documents; `production_matches_reference_on_tiled_golden` (`caveman_reference.rs:969`) tiles `caveman-golden.json` (`caveman_reference.rs:971`) past 32 KiB and compares once | unaudited |
+| `terse_text_compression_differential.rs` | 3 | `use daemon::terse_text_compression::{TerseTextCompressionLevel, compress}` (`terse_text_compression_differential.rs:865`) | `optimized_matches_frozen_reference` (`terse_text_compression_differential.rs:1004`) runs 512 proptest documents (`terse_text_compression_differential.rs:1001-1013`) and `optimized_matches_frozen_reference_on_large_documents` (`terse_text_compression_differential.rs:1042`) runs 24 documents over 32 KiB (`terse_text_compression_differential.rs:1039-1051`) against a frozen in-file copy of `terse_text_compression.rs` (`mod reference`, `terse_text_compression_differential.rs:8`); `targeted_case_and_placeholder_edges_match_reference` (`terse_text_compression_differential.rs:1016`) pins five hand-picked inputs. The oracle is a frozen copy of the implementation, so it detects drift from that copy, not incorrectness | unaudited |
+| `terse_text_compression_reference.rs` | 3 | `use daemon::terse_text_compression::{TerseTextCompressionLevel, compress}` (`terse_text_compression_reference.rs:681`) | `reference_matches_golden_fixture` (`terse_text_compression_reference.rs:699`) replays the 42-case `terse_text_compression-golden.json` (`terse_text_compression_reference.rs:701`) through a naive position-by-position port of the TypeScript compressor (`mod reference`, `terse_text_compression_reference.rs:15`); `production_matches_reference_on_fuzz_corpus` (`terse_text_compression_reference.rs:944`) compares 400 seeded documents; `production_matches_reference_on_tiled_golden` (`terse_text_compression_reference.rs:969`) tiles `terse_text_compression-golden.json` (`terse_text_compression_reference.rs:971`) past 32 KiB and compares once | unaudited |
 | `selection_differential.rs` | 18 | `use daemon::selection::{PassClass, ..., select_reductions_with_outcome}` (`selection_differential.rs:1442-1445`) | Eight `proptest!` blocks (`selection_differential.rs:2162`, `:2174`, `:2430`, `:2442`, `:2454`, `:2466`, `:2478`, `:2490`) and eight hand-built cases compare `select_reductions_with_outcome` against a frozen in-file copy of `selection.rs` (`mod reference`, `selection_differential.rs:8`); `generators_reach_every_decision_class` (`selection_differential.rs:2585`) and `every_production_variant_is_generated` (`selection_differential.rs:2650`) check the generators, not the selector | unaudited |
 | `transform_canonical_memory.rs` | 5 | `memory.injection_budget_tokens` written to a user config (`transform_canonical_memory.rs:456`) | One test reaches the config reader; see [Config-reader integration check](#config-reader-integration-check) | unaudited |
 
@@ -194,11 +194,11 @@ relative to `crates/daemon/tests/`.
 | --- | --- | --- |
 | `direct_host.rs`, `transform_meta_bound.rs`, `transform_canonical_memory.rs` | JSON string `"render_config"` (`direct_host.rs:96`, `direct_host.rs:162`, `transform_meta_bound.rs:32`, `transform_canonical_memory.rs:127`) | A config-identity field on the request, not `config.rs`. Out of scope |
 | `boundary_counter_durability.rs` | 0 | Name false positive. Its one test, `competing_pass_counter_survives_direct_primary_lifecycle_and_reopen` (`boundary_counter_durability.rs:12`), exercises `boundary_divergence_pending_count` across a store reopen (`boundary_counter_durability.rs:20`, `boundary_counter_durability.rs:30`). It never touches `boundary.rs` |
-| `broca_roundtrip.rs` | 0 | Name false positive. `real_broca_success_block_release_failure_and_counters` (`broca_roundtrip.rs:60`) and `real_broca_cancel_shutdown_and_full_route_handle_cleanup` (`broca_roundtrip.rs:146`) drive a `host_runtime` request-and-stream round trip, not a codec round trip |
+| `model_execution_roundtrip.rs` | 0 | Name false positive. `real_model_execution_success_block_release_failure_and_counters` (`model_execution_roundtrip.rs:60`) and `real_model_execution_cancel_shutdown_and_full_route_handle_cleanup` (`model_execution_roundtrip.rs:146`) drive a `host_runtime` request-and-stream round trip, not a codec round trip |
 | `release_contract_conformance.rs` | 0 | Five tests, `credential_constants_match_the_release_contract` (`release_contract_conformance.rs:30`), `provider_credential_matrix_matches_the_published_doc` (`release_contract_conformance.rs:56`), `rust_canonical_encoding_reproduces_every_qualified_closure_digest` (`release_contract_conformance.rs:150`), `lock_platform_blocks_match_the_release_contract` (`release_contract_conformance.rs:230`), and `published_closure_manifest_schema_matches_the_runtime_types` (`release_contract_conformance.rs:284`), over `host_runtime` credential and closure-digest constants and `daemon::release_contract` (`release_contract_conformance.rs:19-32`). It runs under the workspace job and reaches no 4f file |
-| `base64_differential.rs`, `historian_truncate_differential.rs`, `host_adapter.rs`, `kernel_routes.rs`, `lifecycle_cli.rs`, `prepared_output.rs`, `stage1_eligibility.rs`, `stage1_routes.rs` | 0 | Other parts |
+| `base64_differential.rs`, `history_summarizer_truncate_differential.rs`, `host_adapter.rs`, `kernel_routes.rs`, `lifecycle_cli.rs`, `prepared_output.rs`, `stage1_eligibility.rs`, `stage1_routes.rs` | 0 | Other parts |
 
-Only `caveman::compress`, `selection::select_reductions_with_outcome`, and the
+Only `terse_text_compression::compress`, `selection::select_reductions_with_outcome`, and the
 config reader have integration coverage. `boundary.rs`, `scheduler.rs`, the codec
 files, `wire.rs`, and `session_resolver.rs` are reached only from their own
 `mod tests` and from `lib.rs` and `transform.rs` unit tests.
@@ -219,7 +219,7 @@ relative to `crates/daemon/testdata/`.
 | `scheduler-golden.json` | `scheduler.rs:1012` | none | none |
 | `selection-golden.json` (15 cases) | `selection.rs:1617` | none | none |
 | `boundary-golden.json` | `boundary.rs:1946` | none | none |
-| `caveman-golden.json` (42 cases) | `caveman.rs:903`; also `crates/daemon/tests/caveman_reference.rs:701`, `:971` and `crates/daemon/benches/kernels.rs:30` | none | none; `caveman.rs:3-8` names the TypeScript compressor as the origin |
+| `terse_text_compression-golden.json` (42 cases) | `terse_text_compression.rs:903`; also `crates/daemon/tests/terse_text_compression_reference.rs:701`, `:971` and `crates/daemon/benches/kernels.rs:30` | none | none; `terse_text_compression.rs:3-8` names the TypeScript compressor as the origin |
 | `codec/opencode-golden.json` (1 case) | `codec/mod.rs:61` | none | `testdata/codec/gen-opencode-golden.ts` |
 | `codec/pi-golden.json` (1 case) | `codec/mod.rs:186` | none | `testdata/codec/gen-pi-golden.ts` |
 | `codec/serve-native-golden.json` | `codec/mod.rs:107-109` | none | none |
@@ -230,7 +230,7 @@ expectations, not against Rust. `resolveCacheTtl` is tested at
 without reading `cache-ttl-routing-vectors.json`. `encodeOpenCodeMessagesToCk` is
 imported at `packages/opencode-plugin/src/hooks/context/module-wire.test.ts:9` and
 tested from `packages/opencode-plugin/src/hooks/context/module-wire.test.ts:17`;
-it does not invoke `codec/opencode.rs`. The TypeScript `checkCompartmentTrigger`
+it does not invoke `codec/opencode.rs`. The TypeScript `checkHistorySegmentTrigger`
 and `resolveProtectedTailBoundary` functions that `boundary.rs` was ported from
 are not present in tracked package source. `boundary_constants_match_ts_sources`
 (`boundary.rs:1961`) and the three goldens `chunk_golden_matches_ts_formatting`
@@ -286,7 +286,7 @@ not adequacy verdicts; every check is `unaudited`.
 | `codec/pi.rs` | `mod tests` at `codec/pi.rs:1046` | 14 | `codec/pi.rs:1050`-`codec/pi.rs:1457` | `response_id_arriving_later_does_not_replace_pinned_timestamp_mid` (`codec/pi.rs:1050`); `split_pipe_tool_ids_decode_to_canonical_id_and_round_trip` (`codec/pi.rs:1088`); adjacency deletion and survivor extras from `adjacent_tool_deletion_matches_the_surviving_native_id` (`codec/pi.rs:1120`) through `mutated_text_survivor_keeps_its_own_signature_and_vendor_extras` (`codec/pi.rs:1198`); multi-part, image, opaque, and empty-error tool results from `untouched_multi_text_tool_result_replays_raw_part_boundaries_and_extras` (`codec/pi.rs:1244`) through `empty_error_tool_result_retains_empty_content_and_error_polarity` (`codec/pi.rs:1373`); frozen and untouched replay in `frozen_deletion_replay_is_byte_stable` (`codec/pi.rs:1397`), `untouched_message_replays_the_exact_retained_raw_value` (`codec/pi.rs:1417`), and `deleted_tool_result_does_not_replay_the_retained_raw_entry` (`codec/pi.rs:1440`); `compaction_entry_is_boundary_signal` (`codec/pi.rs:1457`) |
 | `codec/mod.rs` | `mod tests` at `codec/mod.rs:18` | 6 | `codec/mod.rs:59`-`codec/mod.rs:296` | The two harness round-trip goldens `opencode_golden_round_trips_wire_projected_parts_and_is_deterministic` (`codec/mod.rs:59`) and `pi_golden_round_trips_non_compaction_entries_and_is_deterministic` (`codec/mod.rs:184`); `serve_native_golden_preserves_ingress_and_pins_synthetic_shapes` (`codec/mod.rs:97`); `fresh_boundary_prefix_does_not_borrow_persisted_synthetic_meta` (`codec/mod.rs:133`); `codec_conformance_removes_leading_native_blocks_without_reindex_drift` (`codec/mod.rs:222`); `fixture_builder_drives_synthetic_todo_wire_shape` (`codec/mod.rs:296`) |
 | `wire.rs` | `mod tests` at `wire.rs:844` | 12 | `wire.rs:886`-`wire.rs:1603` | `projection_retained_bytes_counts_wire_and_frontier_allocations_once` (`wire.rs:886`); arc identity in `repeated_call_id_within_owner_message_shares_one_arc_identity` (`wire.rs:1126`) and `reasoning_joins_the_arc_its_adjacent_call_was_assigned` (`wire.rs:1160`); the user-carried tool-result accept and reject cases `user_carried_tool_result_pairs_with_prior_assistant_call` (`wire.rs:1241`) and `user_carried_tool_result_without_prior_call_still_rejects` (`wire.rs:1306`); `opaque_and_media_inside_tool_result_content_are_accepted_and_projected` (`wire.rs:1331`); `incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state` (`wire.rs:1404`); `empty_and_reserved_message_ids_are_rejected` (`wire.rs:1459`) and `duplicate_message_ids_are_rejected_across_the_incremental_prefix` (`wire.rs:1476`); `reduced_tool_result_keeps_failure_variant_and_output_extras` (`wire.rs:1505`); `reattach_keeps_block_level_original_but_rebuilds_the_message_shell` (`wire.rs:1589`); `incremental_projection_checks_effective_synthetic_status` (`wire.rs:1603`) |
-| `caveman.rs` | `mod tests` at `caveman.rs:876` | 3 | `caveman.rs:883`-`caveman.rs:937` | `literal_placeholder_text_survives_compression_unchanged` (`caveman.rs:883`); `differential_golden_matches_typescript_oracle` (`caveman.rs:901`, extent `caveman.rs:901-929`), the 42-case golden; `pattern_set_invariants` (`caveman.rs:937`) for the automaton. Shared with 4e |
+| `terse_text_compression.rs` | `mod tests` at `terse_text_compression.rs:876` | 3 | `terse_text_compression.rs:883`-`terse_text_compression.rs:937` | `literal_placeholder_text_survives_compression_unchanged` (`terse_text_compression.rs:883`); `differential_golden_matches_typescript_oracle` (`terse_text_compression.rs:901`, extent `terse_text_compression.rs:901-929`), the 42-case golden; `pattern_set_invariants` (`terse_text_compression.rs:937`) for the automaton. Shared with 4e |
 | `session_resolver.rs` | `mod tests` at `session_resolver.rs:57` | 1 | `session_resolver.rs:61` `unsupported_mapping_is_local_absence`, with `#[tokio::test]` at `session_resolver.rs:60` | The absence case only. The supported-mapping path has no test |
 | `codec/sidecar.rs` | `mod tests` at `codec/sidecar.rs:465` | 3 | `codec/sidecar.rs:488`-`codec/sidecar.rs:520` (extent `codec/sidecar.rs:487-557`) | Alignment pairing only: `oversized_alignment_takes_the_linear_memory_path_and_keeps_positional_pairs` (`codec/sidecar.rs:488-506`) drives `match_block_metas` past `MAX_ALIGNMENT_CELLS`; `greedy_alignment_never_reuses_a_meta_and_preserves_order` (`codec/sidecar.rs:509-517`) and `greedy_alignment_pairs_fingerprinted_metas_through_the_fingerprint_index` (`codec/sidecar.rs:520-557`) drive the private `greedy_block_metas`. See quiet area 1 for what remains untested |
 
@@ -297,8 +297,8 @@ not adequacy verdicts; every check is `unaudited`.
 `apply_once_stage_timings_large_fixture` (`transform.rs:12375-12376`),
 `tag_baseline_warm_hydration_50k` (`transform.rs:22539-22540`), and
 `full_module_pass_timing_fixture` (`transform.rs:27392-27393`). `lib.rs` carries
-one, `historian_trigger_token_reuse_benchmark` (`lib.rs:16761-16762`), which
-calls `boundary::check_compartment_trigger_retokenized_reference`.
+one, `history_summarizer_trigger_token_reuse_benchmark` (`lib.rs:16761-16762`), which
+calls `boundary::check_history_segment_trigger_retokenized_reference`.
 
 `should_panic`: none found in any 4f file. One test has a panic oracle written a
 way a `should_panic` search misses:
@@ -309,7 +309,7 @@ in 4f, and it carries `#[cfg(debug_assertions)]` at `codec/opencode.rs:2026`,
 which the guards section turns on.
 
 Property tooling: `proptest` is a `daemon` dev-dependency and drives two of the
-integration binaries above (`caveman_differential.rs` and
+integration binaries above (`terse_text_compression_differential.rs` and
 `selection_differential.rs`). No 4f file under `crates/daemon/src/` uses
 `proptest`, `quickcheck`, `loom`, `shuttle`, `miri`, or `kani`. No coverage or
 mutation configuration exists in the repository, so every placement statement
@@ -364,10 +364,10 @@ Three separable facts, each verified line by line:
 
 No `cfg(not(debug_assertions))` exists anywhere in 4f. Matched across all codec
 files, `config.rs`, `scheduler.rs`, `boundary.rs`, `selection.rs`,
-`caveman.rs`, `wire.rs`, and `session_resolver.rs`: zero occurrences. So no
+`terse_text_compression.rs`, `wire.rs`, and `session_resolver.rs`: zero occurrences. So no
 release-arm counterpart exists for any of the three assertions. The divergence
 risk in 4f is concentrated in one codec file; `config.rs`, `scheduler.rs`,
-`boundary.rs`, `selection.rs`, and `caveman.rs` contain no `debug_assert!` and
+`boundary.rs`, `selection.rs`, and `terse_text_compression.rs` contain no `debug_assert!` and
 no `#[cfg(debug_assertions)]` production code. Their input guards are
 unconditional expressions that behave identically in both profiles:
 `derive_trigger_budget` gates a non-finite or non-positive context limit and
@@ -405,18 +405,18 @@ Panicking sites: two, so 4f is unlike 4e, which had none.
 | `scheduler.rs:836` | `.unwrap_or_else(\|err\| panic!("invalid regex {source:?}: {err}"))` in `compile_case_insensitive` (`scheduler.rs:832-837`) | Infallible by construction. The parameter is `source: &'static str` (`scheduler.rs:832`) and both callers, `overflow_patterns` (`scheduler.rs:839`) and `limit_patterns` (`scheduler.rs:854`), map over the literal constant tables `OVERFLOW_PATTERN_SOURCES` (`scheduler.rs:36`) and `LIMIT_EXTRACTION_PATTERN_SOURCES` (`scheduler.rs:60`). Not reachable from configuration or provider text | unaudited |
 
 `.expect(`: five, in three files. `scheduler.rs:871` `"valid 413 regex"` on a
-literal pattern; `caveman.rs:184` `"static pattern set builds"` on the
-Aho-Corasick build over constant tables; `caveman.rs:236`
-`"run_start > 0 within text"` on a char walk; `caveman.rs:626`
+literal pattern; `terse_text_compression.rs:184` `"static pattern set builds"` on the
+Aho-Corasick build over constant tables; `terse_text_compression.rs:236`
+`"run_start > 0 within text"` on a char walk; `terse_text_compression.rs:626`
 `"digits are ascii"` on a byte slice already scanned as ASCII digits;
 `wire.rs:337` `"flat projection differential bytes must serialize"`. Two name a
-contract no test asserts directly: `caveman.rs:236` and `wire.rs:337`.
+contract no test asserts directly: `terse_text_compression.rs:236` and `wire.rs:337`.
 
 `.unwrap()`: 13 in production halves, and all but five are regex compilation.
-`caveman.rs` carries eight `Regex::new(...)` over literal patterns inside
-`get_or_init` (`caveman.rs:480`, `:520`, `:528`, `:551`, `:556`, `:561`, `:566`,
+`terse_text_compression.rs` carries eight `Regex::new(...)` over literal patterns inside
+`get_or_init` (`terse_text_compression.rs:480`, `:520`, `:528`, `:551`, `:556`, `:561`, `:566`,
 `:574`) and four `next_char(text, ...).unwrap()` calls on its hand-rolled cursor
-walk (`caveman.rs:670`, `:703`, `:743`, `:762`). `selection.rs:581` is
+walk (`terse_text_compression.rs:670`, `:703`, `:743`, `:762`). `selection.rs:581` is
 `serde_json::to_string(k).unwrap()` inside `canonical_json`
 (`selection.rs:571`), on a map key. Zero `.unwrap()` in the production halves of
 `boundary.rs`, `scheduler.rs`, `config.rs`, `wire.rs`, `session_resolver.rs`,
@@ -518,19 +518,19 @@ Ranked by the gap between what the code decides and what any check proves.
    extras replay verbatim, so a fingerprint that silently collides or silently
    differs changes served bytes. This is the quietest area in the sub-part.
 
-2. `caveman.rs` is 975 lines behind one 42-case snapshot, two structural
+2. `terse_text_compression.rs` is 975 lines behind one 42-case snapshot, two structural
    tests, and two differential oracles, none of which is the live TypeScript.
-   `differential_golden_matches_typescript_oracle` (`caveman.rs:901`, extent
-   `caveman.rs:901-929`) replays `caveman-golden.json` (`caveman.rs:903`); the
+   `differential_golden_matches_typescript_oracle` (`terse_text_compression.rs:901`, extent
+   `terse_text_compression.rs:901-929`) replays `terse_text_compression-golden.json` (`terse_text_compression.rs:903`); the
    fixture has no TypeScript consumer and no tracked generator, so the
-   compatibility contract the header names (`caveman.rs:3-8`) is a snapshot.
-   The integration oracles (`crates/daemon/tests/caveman_reference.rs`,
-   `crates/daemon/tests/caveman_differential.rs`) are Rust ports and a frozen
+   compatibility contract the header names (`terse_text_compression.rs:3-8`) is a snapshot.
+   The integration oracles (`crates/daemon/tests/terse_text_compression_reference.rs`,
+   `crates/daemon/tests/terse_text_compression_differential.rs`) are Rust ports and a frozen
    copy of the implementation. The file carries 12 of the 13 production
    `.unwrap()` calls in 4f, four of them on a hand-rolled cursor walk. 4e
    records the same fixture as the seam
    (`../rendering/existing-checks.md:725-728`) and adds the part 4f cannot see:
-   caveman payloads feed the hygiene metric through
+   terse_text_compression payloads feed the hygiene metric through
    `tail_hygiene.rs:431-437` and `tail_hygiene.rs:540`, so the compression and
    the metric consuming it are pinned separately and never checked together.
 
@@ -566,11 +566,11 @@ Ranked by the gap between what the code decides and what any check proves.
    (`pub(crate) mod tests`, `transform.rs:11754` onward) and by no integration
    binary. Its in-crate evidence is its own 29 file-local tests, three
    Rust-only goldens, and three `lib.rs` tests that call
-   `check_compartment_trigger`:
-   `historian_trigger_token_reuse_matches_retokenized_production_shape`
+   `check_history_segment_trigger`:
+   `history_summarizer_trigger_token_reuse_matches_retokenized_production_shape`
    (`lib.rs:16658`),
    `trigger_suppresses_fire_when_projected_drops_hit_relative_target`
-   (`lib.rs:16933`), and the ignored `historian_trigger_token_reuse_benchmark`
+   (`lib.rs:16933`), and the ignored `history_summarizer_trigger_token_reuse_benchmark`
    (`lib.rs:16762`). No whole-pass test in `transform.rs` asserts anything
    about where the protected-tail split lands.
 
@@ -604,10 +604,10 @@ Ranked by the gap between what the code decides and what any check proves.
 
 12. No integration coverage of the boundary, the scheduler, the codecs, or the
     wire projector. Of 17 integration binaries, four reach 4f, and they reach
-    `caveman::compress`, `selection::select_reductions_with_outcome`, and the
+    `terse_text_compression::compress`, `selection::select_reductions_with_outcome`, and the
     config reader. Two of the seventeen have names suggesting otherwise and do
     not deliver: `boundary_counter_durability.rs` tests a store counter, and
-    `broca_roundtrip.rs` tests an RPC stream.
+    `model_execution_roundtrip.rs` tests an RPC stream.
 
 ## Registered claims that no record owns
 
@@ -622,7 +622,7 @@ and the other part owns the application.
 
 | # | Claim | Implementing code at HEAD | Existing check and what a record needs |
 | --- | --- | --- | --- |
-| C1-29 | Caveman tier shifts are path-independent: compressing the original at the final depth gives byte-identical output to shifting through intermediate depths | Real, and outside 4f: `transform.rs:5690` reads `row.source_bytes`, `transform.rs:5705-5707` refuses a non-increasing depth (`target_depth <= existing_depth`), and `transform.rs:5709` calls `caveman::compress(&source, level)` on the pristine text. The claim is load-bearing because `compress` is not idempotent by construction: `apply_ultra_connectives` (`caveman.rs:440`) and `apply_ultra_abbreviations` (`caveman.rs:456`) rewrite words into symbols a second pass would read as different input | `caveman_depth_deepens_from_source_without_regrowth` (`transform.rs:24650-24687`) seeds a Lite unit and asserts the deepened payload equals `compress(&source, Ultra)` (`transform.rs:24683-24686`), which covers the mechanism for one depth pair at 4b's layer. Status `unaudited`. No test asserts the inequality `compress(compress(t, Lite), Ultra) != compress(t, Ultra)` or that the production path never takes the left-hand form for every depth pair |
+| C1-29 | TerseTextCompression tier shifts are path-independent: compressing the original at the final depth gives byte-identical output to shifting through intermediate depths | Real, and outside 4f: `transform.rs:5690` reads `row.source_bytes`, `transform.rs:5705-5707` refuses a non-increasing depth (`target_depth <= existing_depth`), and `transform.rs:5709` calls `terse_text_compression::compress(&source, level)` on the pristine text. The claim is load-bearing because `compress` is not idempotent by construction: `apply_ultra_connectives` (`terse_text_compression.rs:440`) and `apply_ultra_abbreviations` (`terse_text_compression.rs:456`) rewrite words into symbols a second pass would read as different input | `terse_text_compression_depth_deepens_from_source_without_regrowth` (`transform.rs:24650-24687`) seeds a Lite unit and asserts the deepened payload equals `compress(&source, Ultra)` (`transform.rs:24683-24686`), which covers the mechanism for one depth pair at 4b's layer. Status `unaudited`. No test asserts the inequality `compress(compress(t, Lite), Ultra) != compress(t, Ultra)` or that the production path never takes the left-hand form for every depth pair |
 | C1-30 | With `smart_drops` off, the messages sent to the model are byte-identical to the age-based-only behaviour, so the feature is inert | `NOT FOUND` as a byte-equality check. The flag defaults `false` (`config.rs:128`) and is `ProjectAllowed` (`config.rs:680-681`), so either tier can set it | None. `smart_drops` appears in test fixtures as a fixed flag (`transform.rs:13190`, `transform.rs:13204`) and no test compares the emitted array with the flag off against the flag on over one identical input. A record needs that differential oracle. The [tier-policy record](catalog.md#dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list) covers who may set the flag; this one would cover what the flag does when unset |
 
 Neither is mined here, per METHOD rule 6. Both are queued in
@@ -651,11 +651,11 @@ Seven limits, stated so a later pass does not read absence as absence of risk.
   Four exported entry points, the incremental decoder, and the
   `codec/sidecar.rs` identity functions are recorded as having no golden on
   that basis.
-- The differential integration oracles for `caveman.rs` and `selection.rs`
+- The differential integration oracles for `terse_text_compression.rs` and `selection.rs`
   compare production against a frozen in-file copy of the same implementation
   or against a Rust port. They detect drift from that copy; they do not
   establish agreement with the TypeScript originals.
-- `caveman.rs`'s tests are counted by both this file and 4e's, so 4e's total
+- `terse_text_compression.rs`'s tests are counted by both this file and 4e's, so 4e's total
   and any figure here overlap by exactly three in-crate tests plus 975
   production lines.
 - The `.unwrap()`, `.expect(`, and `let _` counts are line matches over
@@ -673,5 +673,5 @@ The [pre-refresh inventory](https://github.com/ahrav/eidnara/blob/74044960ee9164
 preserves the cross-part `transform.rs` attribution analysis (the 192-test and
 39-test figures and the three-way reconciliation with 4b and 4e) that this file
 no longer restates. Its line coordinates, zero-integration claim,
-zero-sidecar-test claim, single-caveman-test claim, and absent-CI conclusions
+zero-sidecar-test claim, single-terse_text_compression-test claim, and absent-CI conclusions
 are not current coverage evidence. The sections above replace them.

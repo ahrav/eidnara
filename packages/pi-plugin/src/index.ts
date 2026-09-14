@@ -11,12 +11,15 @@
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
-import type { EidnaraConfig, SidekickConfig } from "@eidnara/opencode/config/schema/eidnara";
+import type {
+    ContextResearcherConfig,
+    EidnaraConfig,
+} from "@eidnara/opencode/config/schema/eidnara";
 import {
     resolveProjectIdentityForSession,
     resolveProjectRootDirectory,
 } from "@eidnara/opencode/features/context/project-identity";
-import { setCtxReduceRegisteredGlobally } from "@eidnara/opencode/hooks/context/ctx-reduce-availability";
+import { setEidnaraReduceRegisteredGlobally } from "@eidnara/opencode/hooks/context/eidnara-reduce-availability";
 import { closeKernelSession } from "@eidnara/opencode/hooks/context/kernel-transport";
 import {
     configureManagedDemandStart,
@@ -35,13 +38,13 @@ import {
 import { resolveFallbackChain } from "@eidnara/opencode/shared/resolve-fallbacks";
 
 import { handlePiCloneSessionStart } from "./clone-inheritance";
-import { type PiSidekickConfig, registerCtxAugCommand } from "./commands/ctx-aug";
-import { registerCtxFlushCommand } from "./commands/ctx-flush";
-import { registerCtxMemoryMarkCommand } from "./commands/ctx-memory-mark";
-import { registerCtxRecompCommand } from "./commands/ctx-recomp";
-import { registerCtxStatusCommand } from "./commands/ctx-status";
-import { registerCtxWrapupCommand } from "./commands/ctx-wrapup";
 import type { DaemonSessionDeps } from "./commands/daemon-session-routes";
+import { type PiContextResearcherConfig, registerCtxAugCommand } from "./commands/eidnara-aug";
+import { registerCtxFlushCommand } from "./commands/eidnara-flush";
+import { registerEidnaraMemoryMarkCommand } from "./commands/eidnara-memory-mark";
+import { registerCtxRecompCommand } from "./commands/eidnara-recomp";
+import { registerCtxStatusCommand } from "./commands/eidnara-status";
+import { registerCtxWrapupCommand } from "./commands/eidnara-wrapup";
 import { registerCtxStatusEntryRenderer } from "./commands/pi-command-utils";
 import { loadPiConfig } from "./config";
 import { createPiKernelClientResolver, forgetPiSessionKernelTokens } from "./kernel-client-pi";
@@ -249,17 +252,19 @@ setHarness("pi");
 // Each resolver returns `undefined` when its feature is disabled, allowing registration helpers to short-circuit.
 // ---------------------------------------------------------------------------
 
-export function resolveSidekickFromConfig(config: EidnaraConfig): PiSidekickConfig | undefined {
-    const sidekick = config.sidekick as SidekickConfig | undefined;
-    if (!sidekick || sidekick.disable === true) return undefined;
-    const model = sidekick.model?.trim();
+export function resolveContextResearcherFromConfig(
+    config: EidnaraConfig,
+): PiContextResearcherConfig | undefined {
+    const context_researcher = config.context_researcher as ContextResearcherConfig | undefined;
+    if (!context_researcher || context_researcher.disable === true) return undefined;
+    const model = context_researcher.model?.trim();
     if (!model || model.length === 0) return undefined;
     return {
         model,
-        systemPrompt: sidekick.system_prompt,
-        timeoutMs: sidekick.timeout_ms,
-        thinking_level: sidekick.thinking_level,
-        fallbackModels: resolveFallbackChain(sidekick.fallback_models),
+        systemPrompt: context_researcher.system_prompt,
+        timeoutMs: context_researcher.timeout_ms,
+        thinking_level: context_researcher.thinking_level,
+        fallbackModels: resolveFallbackChain(context_researcher.fallback_models),
         language: config.language,
         allowHomeProject: config.allow_home_project,
     };
@@ -317,7 +322,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     info(`loaded | harness=pi | project=${projectIdentity} | dir=${projectDir}`);
     // Pi registers tools once per process, so compaction registration does not follow later /cd config changes.
     const compactionOff = !isCompactionEnabled(config);
-    setCtxReduceRegisteredGlobally(!compactionOff);
+    setEidnaraReduceRegisteredGlobally(!compactionOff);
     // Pi configures child-runner extensions once at boot because the allowlist is user-tier only.
     // The returned merged config strips project-level subagent extension settings.
     configurePiSubagentExtensions(config.pi?.subagent_extensions);
@@ -334,7 +339,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     }
 
     // The connection file is user-tier configuration, so one daemon client serves every project in this process.
-    const moduleClient: HostModuleClient = createHostModuleClient(config.subc?.connection_file);
+    const moduleClient: HostModuleClient = createHostModuleClient(config.host?.connection_file);
     const rustToolBackends = createPiRustToolBackends(moduleClient);
     // Each command routes on its own `ctx.cwd`, so the deps carry no project root.
     const daemonSessionDeps: DaemonSessionDeps = {
@@ -346,7 +351,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         projectDir: string;
         projectIdentity: string;
         config: EidnaraConfig;
-        sidekickConfig: PiSidekickConfig | undefined;
+        context_researcherConfig: PiContextResearcherConfig | undefined;
     };
 
     // Pi resolves runtime dependencies per cwd because /cd and multi-root sessions can switch projects while registrations remain process-wide.
@@ -369,7 +374,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             projectDir: dir,
             projectIdentity: identity,
             config: cfg,
-            sidekickConfig: resolveSidekickFromConfig(cfg),
+            context_researcherConfig: resolveContextResearcherFromConfig(cfg),
         };
     }
 
@@ -420,11 +425,11 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     info(
         compactionOff
             ? todowriteEnabled
-                ? "registered tools: ctx_search, ctx_memory, ctx_note, todowrite; registered /todos (ctx_reduce unavailable in compaction-off mode)"
-                : "registered tools: ctx_search, ctx_memory, ctx_note (ctx_reduce unavailable in compaction-off mode; todowrite disabled)"
+                ? "registered tools: eidnara_search, eidnara_memory, eidnara_note, todowrite; registered /todos (eidnara_reduce unavailable in compaction-off mode)"
+                : "registered tools: eidnara_search, eidnara_memory, eidnara_note (eidnara_reduce unavailable in compaction-off mode; todowrite disabled)"
             : todowriteEnabled
-              ? "registered tools: ctx_search, ctx_memory, ctx_note, todowrite, ctx_reduce; registered /todos"
-              : "registered tools: ctx_search, ctx_memory, ctx_note, ctx_reduce (todowrite disabled)",
+              ? "registered tools: eidnara_search, eidnara_memory, eidnara_note, todowrite, eidnara_reduce; registered /todos"
+              : "registered tools: eidnara_search, eidnara_memory, eidnara_note, eidnara_reduce (todowrite disabled)",
     );
 
     pi.on("session_start", async (event, ctx) => {
@@ -441,18 +446,18 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             : "registered todowrite overlay: DISABLED (todowrite.enabled=false or todowrite.overlay=false)",
     );
 
-    registerCtxAugCommand(pi, (ctx) => resolveCurrentProjectDeps(ctx).sidekickConfig);
+    registerCtxAugCommand(pi, (ctx) => resolveCurrentProjectDeps(ctx).context_researcherConfig);
     info(
-        bootProjectDeps.sidekickConfig
-            ? `registered /ctx-aug (sidekick model=${bootProjectDeps.sidekickConfig.model})`
-            : "registered /ctx-aug (sidekick disabled — set sidekick.disable=false and sidekick.model in config)",
+        bootProjectDeps.context_researcherConfig
+            ? `registered /eidnara-aug (context_researcher model=${bootProjectDeps.context_researcherConfig.model})`
+            : "registered /eidnara-aug (context_researcher disabled — set context_researcher.disable=false and context_researcher.model in config)",
     );
 
     const statusEntryRendererAvailable = registerCtxStatusEntryRenderer(pi);
     info(
         statusEntryRendererAvailable
-            ? "registered model-invisible ctx-status entry renderer"
-            : "ctx-status entry renderer unavailable; using visible-message fallback",
+            ? "registered model-invisible eidnara-status entry renderer"
+            : "eidnara-status entry renderer unavailable; using visible-message fallback",
     );
 
     registerCtxStatusCommand(pi, {
@@ -469,21 +474,21 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             };
         },
     });
-    info("registered /ctx-status");
+    info("registered /eidnara-status");
     registerStatusLine(pi, { projectIdentity });
     info("registered eidnara status line");
 
     registerCtxFlushCommand(pi, daemonSessionDeps);
-    info("registered /ctx-flush");
+    info("registered /eidnara-flush");
 
     registerCtxRecompCommand(pi, daemonSessionDeps);
-    info("registered /ctx-recomp");
+    info("registered /eidnara-recomp");
 
     registerCtxWrapupCommand(pi, daemonSessionDeps);
-    info("registered /ctx-wrapup");
+    info("registered /eidnara-wrapup");
 
-    registerCtxMemoryMarkCommand(pi, { kernelClient });
-    info("registered /ctx-memory-mark");
+    registerEidnaraMemoryMarkCommand(pi, { kernelClient });
+    info("registered /eidnara-memory-mark");
 
     const systemPromptRefreshSessions = new Set<string>();
 

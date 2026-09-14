@@ -32,7 +32,7 @@ const MANIFEST_KEYS = [
     "mode",
     "package",
     "platform_floor",
-    "synapse",
+    "local_embeddings",
     "launcher",
     "files",
 ];
@@ -340,7 +340,7 @@ function verifyPackage(packageDir: string, target: PayloadTarget): VerifiedPaylo
         !SHA256_RE.test(manifest.release_contract_sha256) ||
         typeof manifest.production_inputs_lock_sha256 !== "string" ||
         !SHA256_RE.test(manifest.production_inputs_lock_sha256) ||
-        typeof manifest.synapse !== "string"
+        typeof manifest.local_embeddings !== "string"
     ) {
         fail("payload manifest release identity does not match the release contract");
     }

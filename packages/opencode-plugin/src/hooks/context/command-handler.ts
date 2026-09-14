@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
-import type { SidekickConfig } from "../../config/schema/eidnara";
-import { runSidekick } from "../../features/context/sidekick/agent";
+import type { ContextResearcherConfig } from "../../config/schema/eidnara";
+import { runContextResearcher } from "../../features/context/context-researcher/agent";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared";
 import type { KernelClientResolver } from "../../shared/kernel-client";
@@ -34,7 +34,7 @@ export interface PartialRecompRange {
 
 const RECOMP_USAGE = [
     "Usage:",
-    "- `/ctx-recomp` — full rebuild from message 1 to the protected tail",
+    "- `/eidnara-recomp` — full rebuild from message 1 to the protected tail",
 ].join("\n");
 
 const RECOMP_RANGE_UNSUPPORTED =
@@ -53,7 +53,7 @@ export function parseRecompArgs(
     if (!match) {
         return {
             kind: "error",
-            message: `Invalid /ctx-recomp arguments: \`${trimmed}\`.\n\n${RECOMP_USAGE}`,
+            message: `Invalid /eidnara-recomp arguments: \`${trimmed}\`.\n\n${RECOMP_USAGE}`,
         };
     }
 
@@ -84,7 +84,7 @@ export function parseWrapupArgs(
         return {
             ok: false,
             message:
-                "Usage: `/ctx-wrapup [messages_to_keep]` where messages_to_keep is a positive integer.",
+                "Usage: `/eidnara-wrapup [messages_to_keep]` where messages_to_keep is a positive integer.",
         };
     }
     const messagesToKeep = Number.parseInt(trimmed, 10);
@@ -174,25 +174,25 @@ function formatRustOperationMessage(
             case "nothing_to_compact":
                 return `## Eidnara Wrapup\n\n${summary || "Nothing to compact."}`;
             case "already_in_progress":
-                return `## Eidnara Wrapup — Skipped\n\n/ctx-wrapup is already running for this session${rounds > 0 ? ` (${rounds} round${rounds === 1 ? "" : "s"} complete)` : ""}. Wait for it to finish, then run /ctx-wrapup again if more history remains.`;
+                return `## Eidnara Wrapup — Skipped\n\n/eidnara-wrapup is already running for this session${rounds > 0 ? ` (${rounds} round${rounds === 1 ? "" : "s"} complete)` : ""}. Wait for it to finish, then run /eidnara-wrapup again if more history remains.`;
             case "retryable":
                 // A nonterminal disposition indicates that the drain made progress but stopped before the keep watermark for a retryable reason.
                 // The orchestrator renders retryable dispositions as Partial rather than Failed.
-                // A retryable disposition instructs the user to rerun /ctx-wrapup instead of reporting failure.
-                return `## Eidnara Wrapup — Partial\n\n${summary || "Wrapup made progress but stopped before the keep watermark."} Run /ctx-wrapup again to continue.`;
+                // A retryable disposition instructs the user to rerun /eidnara-wrapup instead of reporting failure.
+                return `## Eidnara Wrapup — Partial\n\n${summary || "Wrapup made progress but stopped before the keep watermark."} Run /eidnara-wrapup again to continue.`;
             default:
-                return `## Eidnara Wrapup — Failed\n\n${summary || "Wrapup failed; try /ctx-wrapup again."}${rounds > 0 ? ` (${rounds} round${rounds === 1 ? "" : "s"})` : ""}`;
+                return `## Eidnara Wrapup — Failed\n\n${summary || "Wrapup failed; try /eidnara-wrapup again."}${rounds > 0 ? ` (${rounds} round${rounds === 1 ? "" : "s"})` : ""}`;
         }
     }
     switch (disposition) {
         case "started":
-            return "## Eidnara Recomp\n\nHistorian recomp started. Rebuilding compartments from raw session history now.";
+            return "## Eidnara Recomp\n\nHistorySummarizer recomp started. Rebuilding history_segments from raw session history now.";
         case "already_in_progress":
-            return "## Eidnara Recomp — Skipped\n\nHistorian recomp is already running for this session. Wait for it to finish, then try /ctx-recomp again.";
+            return "## Eidnara Recomp — Skipped\n\nHistorySummarizer recomp is already running for this session. Wait for it to finish, then try /eidnara-recomp again.";
         case "nothing_to_do":
-            return "## Eidnara Recomp\n\nNothing to rebuild: this session has no published compartments.";
+            return "## Eidnara Recomp\n\nNothing to rebuild: this session has no published history_segments.";
         default:
-            return `## Eidnara Recomp — Failed\n\n${summary || "Historian recomp failed; try /ctx-recomp again."}`;
+            return `## Eidnara Recomp — Failed\n\n${summary || "HistorySummarizer recomp failed; try /eidnara-recomp again."}`;
     }
 }
 
@@ -230,7 +230,7 @@ function formatRustStatusText(value: Record<string, unknown>): string {
     const limit = typeof usage.context_limit_tokens === "number" ? usage.context_limit_tokens : 0;
     const coverage = value.coverage_ordinal == null ? "none" : String(value.coverage_ordinal);
     const boundary = value.boundary_present === true ? "present" : "absent";
-    const compartments = statusCount(value, "compartment_count");
+    const history_segments = statusCount(value, "history_segment_count");
     const pendingDrops = statusCount(value, "pending_drop_count");
     const tags = statusCount(value, "tag_count");
     const pendingM1 =
@@ -241,10 +241,10 @@ function formatRustStatusText(value: Record<string, unknown>): string {
         value.wrapup_active === true
             ? `running (${plural(statusCount(value, "wrapup_rounds"), "round")} complete)`
             : "idle";
-    const historian = statusObject(value, "historian");
-    const publishFailures = statusCount(historian, "consecutive_publish_failures");
+    const history_summarizer = statusObject(value, "history_summarizer");
+    const publishFailures = statusCount(history_summarizer, "consecutive_publish_failures");
     const publishHealth =
-        historian.publish_health_degraded === true
+        history_summarizer.publish_health_degraded === true
             ? `degraded (${publishFailures} consecutive publish failures)`
             : `ok (${plural(publishFailures, "consecutive publish failure")})`;
     const passTrace = statusObject(value, "pass_trace");
@@ -257,10 +257,10 @@ function formatRustStatusText(value: Record<string, unknown>): string {
         `- Usage: ${tokens.toLocaleString()}${limit > 0 ? ` / ${limit.toLocaleString()} tokens` : " tokens"}`,
         `- Boundary: ${boundary}`,
         `- Coverage ordinal: ${coverage}`,
-        `- Compartments: ${compartments}`,
+        `- HistorySegments: ${history_segments}`,
         `- Pending: ${plural(pendingDrops, "drop")}, ${plural(tags, "tag")}, m1 delta ${pendingM1}`,
         `- Wrapup: ${wrapup}`,
-        `- Historian publish health: ${publishHealth}`,
+        `- HistorySummarizer publish health: ${publishHealth}`,
     ];
     if (value.pass_trace && typeof value.pass_trace === "object") {
         lines.push(
@@ -274,7 +274,7 @@ function formatRustStatusText(value: Record<string, unknown>): string {
 }
 
 /**
- * /ctx-aug uses Sidekick to augment the user's prompt and sends the result as a user message.
+ * /eidnara-aug uses ContextResearcher to augment the user's prompt and sends the result as a user message.
  */
 async function executeAugmentation(
     deps: {
@@ -283,10 +283,10 @@ async function executeAugmentation(
             text: string,
             params: NotificationParams,
         ) => Promise<void>;
-        sidekick?: {
-            config: SidekickConfig;
+        context_researcher?: {
+            config: ContextResearcherConfig;
             projectPath: string;
-            /** The Sidekick child runs in the session's own directory, not the plugin launch directory. */
+            /** The ContextResearcher child runs in the session's own directory, not the plugin launch directory. */
             resolveSessionDirectory?: (sessionId: string) => Promise<string> | string;
             client: PluginContext["client"];
             language?: string;
@@ -296,66 +296,77 @@ async function executeAugmentation(
     userPrompt: string,
     promptContext: NotificationParams,
 ): Promise<never> {
-    if (!deps.sidekick?.config) {
+    if (!deps.context_researcher?.config) {
         await deps.sendNotification(
             sessionId,
-            "## /ctx-aug\n\nSidekick is not configured. Add sidekick settings to `eidnara.jsonc` to use /ctx-aug.",
+            "## /eidnara-aug\n\nContextResearcher is not configured. Add context_researcher settings to `eidnara.jsonc` to use /eidnara-aug.",
             { forcePersist: !isTuiConnected(sessionId) },
         );
-        throwSentinel("CTX-AUG");
+        throwSentinel("EIDNARA-AUG");
     }
 
     const prompt = userPrompt.trim();
     if (prompt.length === 0) {
         await deps.sendNotification(
             sessionId,
-            "## /ctx-aug\n\nUsage: `/ctx-aug <your prompt>`\n\nProvide a prompt to augment with project memory context.",
+            "## /eidnara-aug\n\nUsage: `/eidnara-aug <your prompt>`\n\nProvide a prompt to augment with project memory context.",
             { forcePersist: !isTuiConnected(sessionId) },
         );
-        throwSentinel("CTX-AUG");
+        throwSentinel("EIDNARA-AUG");
     }
 
     void deps.sendNotification(
         sessionId,
-        "🔍 Preparing augmentation… this may take 2-10s depending on your sidekick provider.",
+        "🔍 Preparing augmentation… this may take 2-10s depending on your context_researcher provider.",
         {},
     );
 
-    sessionLog(sessionId, "/ctx-aug: running sidekick");
-    const sidekickResult = await runSidekick({
-        client: deps.sidekick.client,
+    sessionLog(sessionId, "/eidnara-aug: running context_researcher");
+    const context_researcherResult = await runContextResearcher({
+        client: deps.context_researcher.client,
         sessionId,
-        projectPath: deps.sidekick.projectPath,
-        sessionDirectory: await deps.sidekick.resolveSessionDirectory?.(sessionId),
+        projectPath: deps.context_researcher.projectPath,
+        sessionDirectory: await deps.context_researcher.resolveSessionDirectory?.(sessionId),
         userMessage: prompt,
-        config: deps.sidekick.config,
-        language: deps.sidekick.language,
+        config: deps.context_researcher.config,
+        language: deps.context_researcher.language,
     });
 
     let augmentedPrompt: string;
-    if (sidekickResult) {
-        augmentedPrompt = `${prompt}\n\n<sidekick-augmentation>\n${sidekickResult}\n</sidekick-augmentation>`;
-        sessionLog(sessionId, `/ctx-aug: sidekick returned ${sidekickResult.length} chars`);
+    if (context_researcherResult) {
+        augmentedPrompt = `${prompt}\n\n<context_researcher-augmentation>\n${context_researcherResult}\n</context_researcher-augmentation>`;
+        sessionLog(
+            sessionId,
+            `/eidnara-aug: context_researcher returned ${context_researcherResult.length} chars`,
+        );
     } else {
         augmentedPrompt = prompt;
-        sessionLog(sessionId, "/ctx-aug: sidekick returned no result, sending prompt as-is");
+        sessionLog(
+            sessionId,
+            "/eidnara-aug: context_researcher returned no result, sending prompt as-is",
+        );
     }
 
     try {
         // The replacement turn keeps the agent, model, and variant the intercepted command carried; a bare text prompt would run under the session default.
-        await sendUserPrompt(deps.sidekick.client, sessionId, augmentedPrompt, promptContext);
+        await sendUserPrompt(
+            deps.context_researcher.client,
+            sessionId,
+            augmentedPrompt,
+            promptContext,
+        );
     } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
-        sessionLog(sessionId, `/ctx-aug: failed to send augmented prompt: ${reason}`);
+        sessionLog(sessionId, `/eidnara-aug: failed to send augmented prompt: ${reason}`);
         // A timed-out send may still have enqueued the turn, so the notice asks the user to look before resending instead of telling them the prompt was lost.
         const notice =
             error instanceof TimeoutError
-                ? `## /ctx-aug — Delivery unconfirmed\n\nOpenCode did not confirm the augmented prompt in time: ${reason}\n\nThe prompt may still arrive. If it does not appear in this session, send it again, with or without /ctx-aug:\n\n${prompt}`
-                : `## /ctx-aug — Failed\n\nThe augmented prompt was not sent to the session: ${reason}\n\nYour original prompt was not sent either. Send it again, with or without /ctx-aug:\n\n${prompt}`;
+                ? `## /eidnara-aug — Delivery unconfirmed\n\nOpenCode did not confirm the augmented prompt in time: ${reason}\n\nThe prompt may still arrive. If it does not appear in this session, send it again, with or without /eidnara-aug:\n\n${prompt}`
+                : `## /eidnara-aug — Failed\n\nThe augmented prompt was not sent to the session: ${reason}\n\nYour original prompt was not sent either. Send it again, with or without /eidnara-aug:\n\n${prompt}`;
         await deps.sendNotification(sessionId, notice, { forcePersist: true });
     }
 
-    throwSentinel("CTX-AUG");
+    throwSentinel("EIDNARA-AUG");
 }
 
 /** OpenCode's command path has no dialog, so the confirmation is the reply itself: the user re-issues the command with the confirm flag. */
@@ -397,7 +408,7 @@ export function createEidnaraCommandHandler(deps: {
     /** Command paths use boot-resolved mode and must not reread configuration. */
     compactionOff?: boolean;
     getLiveModelKey?: (sessionId: string) => string | undefined;
-    /** The `session.wrapup` request carries no subagent flag, so the handler gates `/ctx-wrapup` on this predicate. */
+    /** The `session.wrapup` request carries no subagent flag, so the handler gates `/eidnara-wrapup` on this predicate. */
     isSubagentSession: (sessionId: string) => boolean | Promise<boolean>;
     /** Prevents a command whose route lookup lost to session deletion from recreating daemon state. */
     isSessionDeleted?: (sessionId: string) => boolean;
@@ -408,12 +419,12 @@ export function createEidnaraCommandHandler(deps: {
         params: NotificationParams,
     ) => Promise<void>;
     moduleClient: RustModeModuleClient;
-    /** Resolves the kernel client `/ctx-memory-mark` previews and commits through; the command answers `disabled` when absent. */
+    /** Resolves the kernel client `/eidnara-memory-mark` previews and commits through; the command answers `disabled` when absent. */
     kernelClient?: KernelClientResolver;
     /** The daemon keys session state by `(session, project_root)`; commands route by the same directory the transform resolved for the session. */
     resolveProjectRoot?: (sessionId: string) => Promise<string> | string;
-    sidekick?: {
-        config: SidekickConfig;
+    context_researcher?: {
+        config: ContextResearcherConfig;
         projectPath: string;
         resolveSessionDirectory?: (sessionId: string) => Promise<string> | string;
         client: PluginContext["client"];
@@ -433,11 +444,11 @@ export function createEidnaraCommandHandler(deps: {
         }
     };
 
-    const isStatusCommand = (command: string): boolean => command === "ctx-status";
-    const isFlushCommand = (command: string): boolean => command === "ctx-flush";
-    const isRecompCommand = (command: string): boolean => command === "ctx-recomp";
-    const isWrapupCommand = (command: string): boolean => command === "ctx-wrapup";
-    const isAugCommand = (command: string): boolean => command === "ctx-aug";
+    const isStatusCommand = (command: string): boolean => command === "eidnara-status";
+    const isFlushCommand = (command: string): boolean => command === "eidnara-flush";
+    const isRecompCommand = (command: string): boolean => command === "eidnara-recomp";
+    const isWrapupCommand = (command: string): boolean => command === "eidnara-wrapup";
+    const isAugCommand = (command: string): boolean => command === "eidnara-aug";
     const isMemoryMarkCommand = (command: string): boolean => command === MEMORY_MARK_COMMAND;
     const callRust = async (
         method: Parameters<RustModeModuleClient["call"]>[0]["method"],
@@ -521,7 +532,7 @@ export function createEidnaraCommandHandler(deps: {
                         { action: "show-flush-dialog", message: result },
                         sessionId,
                     );
-                    sessionLog(sessionId, "command ctx-flush: pushed show-flush-dialog to TUI");
+                    sessionLog(sessionId, "command eidnara-flush: pushed show-flush-dialog to TUI");
                     throwSentinel(input.command);
                 }
             }
@@ -542,7 +553,10 @@ export function createEidnaraCommandHandler(deps: {
                 }
                 if (isTuiConnected(sessionId)) {
                     pushNotification("action", { action: "show-status-dialog" }, sessionId);
-                    sessionLog(sessionId, "command ctx-status: pushed show-status-dialog to TUI");
+                    sessionLog(
+                        sessionId,
+                        "command eidnara-status: pushed show-status-dialog to TUI",
+                    );
                     throwSentinel(input.command);
                 }
                 const liveModelKey = deps.getLiveModelKey?.(sessionId);
@@ -596,7 +610,7 @@ export function createEidnaraCommandHandler(deps: {
                 const parsed = parseWrapupArgs(input.arguments);
                 if (await deps.isSubagentSession(sessionId)) {
                     result =
-                        "## Eidnara Wrapup — Skipped\n\n/ctx-wrapup is only available in primary sessions.";
+                        "## Eidnara Wrapup — Skipped\n\n/eidnara-wrapup is only available in primary sessions.";
                 } else if (!parsed.ok) {
                     result = `## Eidnara Wrapup — Invalid Arguments\n\n${parsed.message}`;
                 } else {

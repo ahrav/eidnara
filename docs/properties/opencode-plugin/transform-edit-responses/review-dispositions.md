@@ -116,7 +116,7 @@ recorded in [the source-guard supplement](source-guards.md#measured-local-cost).
 - Focused six-file tests pass: 193 tests, 1,441 assertions, zero failures.
 - The ten-file Biome check and plugin typecheck pass.
 - Root `bun run check:repo` passes, including 3,351 OpenCode tests and builds.
-- Plugin smart-note Wasm and TUI import smoke checks pass.
+- Plugin conditional-note Wasm and TUI import smoke checks pass.
 - Node 24.18.0 proxy, descriptor, metadata and accessor probes pass without traps.
 - Comment-marker and whitespace checks pass. The 1,000-message sequential
    benchmark's one-sample oracle smoke passes, without a performance comparison.
@@ -130,4 +130,4 @@ Admission, cancellation/settlement charges, pass-local ordinals, atomic current
 publication, rollback removal and promotion before delivery waits remain PR2
 work. Native-addon-enabled CI and broader Rust checks are not replaced by the
 root Bun gate. The precursor has a cohesive checked source-guard boundary;
-#533 is not complete until its deferred ownership work is complete.
+# 533 is not complete until its deferred ownership work is complete.

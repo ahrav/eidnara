@@ -10,7 +10,7 @@ The package is private and never published.
   loaded by `file://` URL) against the daemon's `direct_host_fixture`
   (`crates/daemon`, built with `--features direct-host-fixture`). The runner
   writes user-tier consent for `transform_mode: "rust"` plus the fixture's
-  `subc.connection_file`, so the plugin routes every transform through the
+  `host.connection_file`, so the plugin routes every transform through the
   daemon. There is no TypeScript transform mode and no plugin database; the
   harness reads nothing but OpenCode's own session store and the daemon's
   `session.status` route.
@@ -35,8 +35,8 @@ lacks a file. The retained set is:
 cache-invariants            rust-fm-oc-2                 rust-park-self-heal
 cache-stability             rust-fm-oc-3                 rust-removal-self-heal
 incident-pool-green         rust-fm-oc-5                 rust-smoke
-rust-ctx-reduce-roundtrip   rust-fold-under-pressure     rust-steady-state-byte-identity
-rust-duplicate-tool-use-id  rust-historian-producer      rust-tail-mutation-readopt
+rust-eidnara-reduce-roundtrip   rust-fold-under-pressure     rust-steady-state-byte-identity
+rust-duplicate-tool-use-id  rust-history_summarizer-producer      rust-tail-mutation-readopt
 rust-multi-frame-delta-perf thinking-block-safety        pi-smoke
 ```
 

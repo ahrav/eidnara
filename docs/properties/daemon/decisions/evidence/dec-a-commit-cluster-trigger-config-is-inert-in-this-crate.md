@@ -37,7 +37,7 @@ triggers; otherwise an unchanged fire result does not prove a wiring defect.
 ## Timing windows and dependencies
 
 No timing fault is required. Reachability is `default-production` for the
-context construction in `prepare_historian_fire`. A meaningful config test needs
+context construction in `prepare_history_summarizer_fire`. A meaningful config test needs
 a nondefault supplied value plus either observation of the constructed context
 or a workload whose outcome distinguishes the requested value from the constants.
 

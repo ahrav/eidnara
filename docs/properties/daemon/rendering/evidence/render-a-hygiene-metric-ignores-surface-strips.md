@@ -4,7 +4,7 @@
 
 `tail_hygiene.rs`'s header calls it the "rendered-tail hygiene metric". Checking
 which render effects it actually accounts for showed it knows about reductions and
-caveman replacements but not about surface strips.
+terse_text_compression replacements but not about surface strips.
 
 ## Evidence trail
 
@@ -40,7 +40,7 @@ So the metric is render-aware for three effects:
 | Render effect | Accounted where |
 | --- | --- |
 | reduction (`red:` unit) | `:474`, `:478`, `:508` |
-| caveman replacement (`cav:` unit) | `caveman_content` at `:422-429`, used at `:526` |
+| terse_text_compression replacement (`cav:` unit) | `terse_text_compression_content` at `:422-429`, used at `:526` |
 | Channel-1 reminder text | `strip_channel1_reminder_spans` at `:62-71`, used at `:527` and `:554` |
 | an already-rendered drop sentinel | `is_drop_sentinel` at `:73-82`, used at `:528`, `:555`, `:570`, `:488` |
 
@@ -70,7 +70,7 @@ The sentinel is `provider_sentinel_text(req)` (`:9890-9896`): the empty string w
 `request_accepts_empty_content(req)`, else `"[dropped]"`.
 
 Neither form is visible to the metric. The metric measures the block's original
-text, because `caveman_content(core, block).unwrap_or(text)` at `:526` falls back
+text, because `terse_text_compression_content(core, block).unwrap_or(text)` at `:526` falls back
 to the projection text when no `cav:` unit exists, and `is_drop_sentinel` at `:528`
 tests that original text, which is not a sentinel.
 

@@ -26,7 +26,7 @@ commit in `crates/memory-store/src/lib.rs` as part of 4b. The scope map's own 4b
 definition
 ([../../_lenses/scope-map-and-risk-ranking.md:521-533](../../_lenses/scope-map-and-risk-ranking.md))
 lists eight units that include neither: `transform.rs:1-7510`, `injection.rs`,
-`compartment_coverage.rs`, `m0_compose.rs`, `healing.rs`, `m1_compose.rs`,
+`history_segment_coverage.rs`, `m0_compose.rs`, `healing.rs`, `m1_compose.rs`,
 `retained_size.rs`, `divergence.rs`. It places `scheduler.rs` in 4f and does not
 assign `memory-store` to Part 4 at all. This lens treats the eight units as scope
 and `scheduler.rs` plus the `memory-store` commit as cited adjacent surfaces, the
@@ -48,7 +48,7 @@ that it is discharged correctly.
 
 | # | Verbatim claim (source) | Implied property | Implementing code |
 | --- | --- | --- | --- |
-| C1 | "Each leaves the durable frozen-set UNCHANGED (the CAS simply does not advance)" (`transform.rs:1796-1797`) | Pass atomicity: a `TransformError` mutates nothing durable | `transform.rs:5565` `commit_transform`, guarded by `commit_required` (`:5559-5560`). **Two counterexamples**, both verified: `store.descend_lineage` (`:3312`) and `store.truncate_compartments_for_revert` (`:4646`). See leads L1, L2. |
+| C1 | "Each leaves the durable frozen-set UNCHANGED (the CAS simply does not advance)" (`transform.rs:1796-1797`) | Pass atomicity: a `TransformError` mutates nothing durable | `transform.rs:5565` `commit_transform`, guarded by `commit_required` (`:5559-5560`). **Two counterexamples**, both verified: `store.descend_lineage` (`:3312`) and `store.truncate_history_segments_for_revert` (`:4646`). See leads L1, L2. |
 | C2 | "Commit accepted cache state and its speculative overlays in one CAS transaction." (`memory-store/src/lib.rs:7259`) | All-or-nothing: cache state, pass trace, tag mints, temporal marks, hints, channel-1 appends, frontiers, ledger stamps and pending-drop deletions land together or not at all | `memory-store/src/lib.rs:7260-7600`, one fenced transaction |
 | C3 | "Decisions from this request stay in memory until the final cache-state compare-and-swap accepts the pass." (`transform.rs:3505-3507`) | No mid-pass durable write | `transform.rs:4369-4371` open the clone region. False for `:3312` and `:4646`, same as C1 |
 | C4 | "render byte-complete units ONLY on bust passes; replay verbatim on defer; a pure defer (boundary present, no delta) writes nothing" (`transform.rs:11-12`) | Render-once, replay-verbatim, and defer-writes-nothing | `is_bust_pass` (`:4439` = non-subagent and `Hard \| MigrateHard \| Soft`, `:4435-4438`) gates the render sites; `commit_required` (`:5559-5560`) gates the write |
@@ -59,18 +59,18 @@ that it is discharged correctly.
 | C9 | "Fail-loud monotonicity guard (runs EVERY pass, before classify) ... the set-membership trigger would SILENTLY skip it (already in keys) and serve the stale frozen payload. Error instead." (`transform.rs:6809-6812`) | Every pass validates, and a conflict errors rather than silently serving stale bytes | `transform.rs:6817-6824`; `TransformError::ReductionConflict` (`:1811`), message at `:1851-1853` |
 | C10 | "Both are reached ONLY on the Hard/MigrateHard arm — never SOFT, defer, m1 compose, or the tail splice ... determinism ... is what preserves byte-identical replay between HARDs" (`transform.rs:2088-2092`) | The token estimator cannot change bytes outside an intentional HARD | Injected through `apply_once_with_estimator` (`:2174`); the doc at `:2171-2173` names the test seam ("tests can inject a panicking/counting one to prove the estimator is HARD-only") |
 | C11 | "It is pure given the store contents + `now_ms` + `budget`: same inputs → same bytes, the property the frozen-m0 cache depends on. The expiry cutoff (`now_ms`) is passed in ... never read here from a live clock" (`m0_compose.rs:6-9`) | m0 byte determinism, no ambient clock | `m0_compose.rs` (403 lines, **zero tests**) |
-| C12 | "Pure over a chronological compartment list ... validates that stored compartment ranges are strictly increasing and non-overlapping" (`compartment_coverage.rs:4-8`) | Coverage-set validity is checked, not assumed | `resolve_coverage` (`compartment_coverage.rs:180`); rejects `next.start <= prev.end` per `:177` |
+| C12 | "Pure over a chronological history_segment list ... validates that stored history_segment ranges are strictly increasing and non-overlapping" (`history_segment_coverage.rs:4-8`) | Coverage-set validity is checked, not assumed | `resolve_coverage` (`history_segment_coverage.rs:180`); rejects `next.start <= prev.end` per `:177` |
 | C13 | "The anchor can then never be present, so reconcile can never clear and the pass loops as an unbounded phantom HARD. Fail loud" (`transform.rs:1827-1831`) | An unbounded-HARD loop is prevented by a loud rejection | `TransformError::BoundaryNotPresent` raised at `:4723`, `:4731`, `:4954`, `:5091`; message at `:1872-1874` |
 | C14 | "A post-read probe makes a concurrent mutation retry before its bytes reach the transform, and trigger-backed generations force a cold refill for replacement or deletion." (`transform.rs:7636-7638`) | Tag hydration is correct under concurrent mutation. States the retry as the mechanism and **states no bound on it** | `load_cached_tags` (`:7639`), an unbounded `loop` at `:7644`; called from the engine at `:3391`. Task cited `:7641`; that is the signature's closing line. Lens A `pass-firing-work-bounded-by-max-cas-retries`, lens B `sel-cas-retry-budget-bounded-tag-hydration-unbounded` |
 | C15 | "A no-op truncation returns the current epoch/version without rewriting the meta blob." (`memory-store/src/lib.rs:9013-9014`) | Revert-truncate idempotency across a CAS retry | `memory-store/src/lib.rs:9015`; the no-op arm. Lens A `revert-epoch-bumps-at-most-once-per-logical-recut` depends on exactly this |
 | C16 | "A valid current shape: EXACTLY one `m0`, EXACTLY one `m1` ... An initialized state missing `m0`/`m1`, or carrying any other key, is an unknown shape (rejected, never cleared)." (`transform.rs:6197-6199`) | Cache-state shape validity; a corrupt frozen set is never destructively cleared | `valid_m0m1_shape` / `cached_m1_missing` (`:6200`); `TransformError::UnknownShape` (`:1807`, doc `:1806`) raised at `:2890`, `:2900`, `:3077`, `:3082`, `:4558` |
-| C17 | "`age_basis_tag` is captured durably by the caller with the same commit as these units, so newly minted tags cannot change this cycle's eligible population. The original tag source is authoritative, so a later tier shift never compresses an already-compressed payload." (`transform.rs:6299-6302`) | Caveman eligibility determinism against same-pass mints | `new_caveman_units` (`:6303`); basis captured at `:4491-4499`. Lens B `sel-caveman-eligibility-ladder-deterministic-over-frozen-basis` |
+| C17 | "`age_basis_tag` is captured durably by the caller with the same commit as these units, so newly minted tags cannot change this cycle's eligible population. The original tag source is authoritative, so a later tier shift never compresses an already-compressed payload." (`transform.rs:6299-6302`) | TerseTextCompression eligibility determinism against same-pass mints | `new_terse_text_compression_units` (`:6303`); basis captured at `:4491-4499`. Lens B `sel-terse_text_compression-eligibility-ladder-deterministic-over-frozen-basis` |
 | C18 | "`boundary_present` is deliberately NOT a field: it is a cache-correctness decision ... never caller-supplied (a caller-supplied value would be a poison surface — a crafted array could force a wrong replay or reconcile)" (`transform.rs:653-656`) | The replay-vs-reconcile decision is store-derived, not request-derived | `resolve_boundary_state` (`:7167`); `TransformRequest` (`:660`) carries no such field |
 | C19 | "Pure state-transition functions; durable state enters as parameters and exits in return values." (`scheduler.rs:3-4`) | Pass-class production is a pure function | `scheduler.rs` (1,449 lines). Lens B lead 7 shows the *inputs* carry process-local state even though the functions are pure |
 | C20 | "the numbers are estimates, but they cannot diverge between those paths" (`retained_size.rs:6`) | One accounting routine feeds both cache admission and telemetry, so budget and reported retention agree | `retained_size.rs` (212 lines, **zero tests**); consumed by every 4b/4e cache budget |
 | C21 | "a new sequence that retains every old entry in order and only appends blocks is normal tail growth" (`divergence.rs:30-31`); "It only reports a mismatch when an existing served position changes" (`:4-5`) | First-divergence attribution never fires on pure tail growth | `first_divergence` (`divergence.rs:32`) |
 | C22 | "Bust passes may replace or clear the frozen unit. Defer passes never build from the current state and never clear" (`injection.rs:296-297`); "the deterministic `synthetic_todo_<hash>` call id, the byte-exact injected pair" (`:2`) | Synthetic-todo freeze is bust-only and byte-deterministic | `advance_injection` (`injection.rs:300`); id builder at `:120`, pair builder at `:127` |
-| C23 | "Defer passes don't run caveman, and tier assignments are persisted in `tags.caveman_depth` so the next pass re-compresses only the tags that have shifted tiers." (`CONFIGURATION.md:742`) | Caveman is bust-gated and incremental | Gate at `transform.rs:6312-6314`. **Note the register's own tension with C17's "never compresses an already-compressed payload"**: `:6366-6369` is a live `assert!` guarding exactly that relation. Lens B leads 5 and 6 |
+| C23 | "Defer passes don't run terse_text_compression, and tier assignments are persisted in `tags.terse_text_compression_depth` so the next pass re-compresses only the tags that have shifted tiers." (`CONFIGURATION.md:742`) | TerseTextCompression is bust-gated and incremental | Gate at `transform.rs:6312-6314`. **Note the register's own tension with C17's "never compresses an already-compressed payload"**: `:6366-6369` is a live `assert!` guarding exactly that relation. Lens B leads 5 and 6 |
 | C24 | "Every drop resolves to the same deterministic placeholder as the normal drops, so defer passes replay byte-for-byte identically. **When `smart_drops` is off, the messages sent to the model are byte-identical to the age-based-only behavior** — the entire feature is inert." (`CONFIGURATION.md:763`) | Byte-identical defer replay, and a feature-off inertness claim | `smart_drops` parsed at `config.rs:467-468`, defaulted `false` at `:135`; consumed via the selector gate at `transform.rs:4201-4258`. The byte-identity half has no Rust check |
 | C25 | "If `transform_mode: \"rust\"` is also configured, compaction-off mode resolves to the TypeScript transform and emits one frozen boot warning. There is no Rust reduced-mode contract in this cycle." (`CONFIGURATION.md:427`) | The Rust additive engine is not the serving path when compaction is off | **Implemented, in TypeScript**: `packages/plugin/src/config/transform-mode.ts:22-27` downgrades, called from `packages/plugin/src/config/index.ts:605`. See lead L3 for the reachability consequence for `transform.rs:2711-3219` |
 
@@ -110,7 +110,7 @@ through L7 are new to this lens.
 doc says otherwise.** Verified. `store.descend_lineage` at `transform.rs:3312`
 commits before the array-validity guards at `:3355` (`DuplicateBlockId`), `:3364`
 (`ReservedId`) and `:3371` (`OrdinalViolation`).
-`store.truncate_compartments_for_revert` at `:4646` commits ~900 lines before
+`store.truncate_history_segments_for_revert` at `:4646` commits ~900 lines before
 `:5565`, re-points the pass's own CAS expectation at `:4651` and adopts the new
 epoch at `:4652`; a `CoverageGap` at `:4704` is raised after it. The surrounding
 prose is C1 and C3: `:1796-1797` says every `TransformError` leaves durable
@@ -123,18 +123,18 @@ neither early write is rolled back if the pass later errors. Lens A owns this as
 `lineage-descent-write-precedes-the-array-validity-guards` and
 `revert-truncate-commits-outside-the-terminal-cas`.
 
-**L2. Defer omits the compartment fence while still writing a compartment
+**L2. Defer omits the history_segment fence while still writing a history_segment
 watermark, and the commit doc claims one fenced CAS.** Verified.
-`transform.rs:5574` passes `compartment_max_seq: is_bust_pass.then_some(..)`,
+`transform.rs:5574` passes `history_segment_max_seq: is_bust_pass.then_some(..)`,
 and `is_bust_pass` (`:4439`) excludes Defer because it requires
 `Hard | MigrateHard | Soft` (`:4435-4438`). With `None`, the store's
-compartment-sequence check at `memory-store/src/lib.rs:7378-7387` is skipped
+history_segment-sequence check at `memory-store/src/lib.rs:7378-7387` is skipped
 entirely. Meanwhile the Defer arm at `transform.rs:5156-5159` writes
-`meta.coverage_compartment_seq` from `m1_signal`, inside the `SoftPlus` block
+`meta.coverage_history_segment_seq` from `m1_signal`, inside the `SoftPlus` block
 whose `core.step` is at `:5151-5155`. The surrounding prose is C2: the store's
 own doc calls this "one CAS transaction", which is true of the writes and silent
 about which predicates guard them. Lens A owns this as
-`defer-commit-carries-no-compartment-fence`.
+`defer-commit-carries-no-history_segment-fence`.
 
 **L3. The Rust compaction-off engine may be unreachable on the shipped leg, and
 its own error path assumes it runs.** New. Lens A classified
@@ -154,7 +154,7 @@ would be selected. What makes this a lead rather than a curiosity: the additive
 engine contains a production `unreachable!("reject returned before
 composition")` at `transform.rs:3068`, so the branch least likely to be
 exercised is the one carrying a hard panic. Whether another host (an explicit
-`subc` daemon, Pi, or the direct fixture) can reach it with compaction off is
+`host` daemon, Pi, or the direct fixture) can reach it with compaction off is
 unresolved; `compaction_enabled` appears nowhere in `packages/`, so the module's
 value never comes from a request field.
 
@@ -193,9 +193,9 @@ instances, each verified as prose and none traced to a Rust check: markers are
 "idempotent by regex detection ... re-running the injector on any transform pass
 produces the same output" (`:659`); the user hint is "replayed exactly (from a
 deterministic per-message cache), so the append is idempotent and never rewrites
-cached content" (`:716`); caveman "Defer passes don't run caveman" (`:742`, = C23);
+cached content" (`:716`); terse_text_compression "Defer passes don't run terse_text_compression" (`:742`, = C23);
 smart drops "defer passes replay byte-for-byte identically" and are
-"byte-identical" when off (`:763`, = C24). The caveman gate does exist in Rust
+"byte-identical" when off (`:763`, = C24). The terse_text_compression gate does exist in Rust
 (`transform.rs:6312-6314`). The three idempotency-and-byte-identity claims are
 the strongest determinism statements anywhere in the documentation for this
 sub-part, and the register could find no Rust assertion, test name, or guard
@@ -243,7 +243,7 @@ breaks them silently.
    about the functions. The property a reader draws from it, that the pass
    decision is reproducible from request plus store, is enforced by nothing:
    lens B's `sel-eligibility-reads-process-local-scheduler-state` shows
-   `observed_last_response_at_ms`, `historian_active`, `wrapup_active` and
+   `observed_last_response_at_ms`, `history_summarizer_active`, `wrapup_active` and
    `now_ms` all enter from process-local state.
 
 6. **C20's non-divergence.** "They cannot diverge between those paths" is true
@@ -259,7 +259,7 @@ breaks them silently.
    idempotent only if the recomputed `keep_through_seq` is never smaller than
    the surviving max sequence. That rests on `surviving_revert_prefix_seq`
    (`transform.rs:7275-7284`) being a prefix scan over
-   `load_compartments`'s `ORDER BY sequence ASC`. Neither side asserts the
+   `load_history_segments`'s `ORDER BY sequence ASC`. Neither side asserts the
    relation. Lens A's `revert-epoch-bumps-at-most-once-per-logical-recut` carries
    the reasoning at `Confidence: medium`.
 
@@ -304,7 +304,7 @@ Scope-file totals, each re-counted at `HEAD`:
 | --- | --- | --- | --- |
 | `transform.rs` | 280 + 5 | `:12626`, `:9629` | See split above |
 | `injection.rs` | 18 | `:458` | `#[cfg(test)]` islands also at `:11`, `:19`, `:362` |
-| `compartment_coverage.rs` | 7 | `:217` | 413-line file |
+| `history_segment_coverage.rs` | 7 | `:217` | 413-line file |
 | `healing.rs` | 5 | `:161` | — |
 | `divergence.rs` | 7 | `:104` | — |
 | `m0_compose.rs` | **0** | none | 403 lines, carries C11 |
@@ -326,7 +326,7 @@ name and line:
 | `:14425` | `transform_snapshot_resists_commit_between_state_and_overlay_reads` |
 | `:14479` | `transform_snapshot_keeps_row_version_and_overlays_from_one_commit` |
 | `:14562` | `transform_cas_conflict_leaves_every_overlay_table_empty` |
-| `:18267` | `truncate_compartments_for_revert_deletes_suffix_and_bumps_epoch` |
+| `:18267` | `truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch` |
 
 `:14562` is the closest existing check to C1/C2, and `:14425`/`:14479` are the
 closest to the read-linearization half. `:18267` covers C15's bump path; nothing
@@ -376,7 +376,7 @@ neither in CI.
 | `host_adapter.rs` | 4 | `:163-172` asserts on the **text of the production source** (`split("fn respond_transform")`, then `contains`/`!contains`), so it is a source-shape gate, not an execution test | **No** |
 | `boundary_counter_durability.rs` | 1 | Uses `context_core::CoreState` (`:6`, `:17`) only; adjacent, not a transform test | **No** |
 | `lifecycle_cli.rs` | 12 | **Zero** mentions of `transform` | Yes (`ci.yml:168`) |
-| `broca_roundtrip.rs`, `release_contract_conformance.rs` | 2, 3 | none | **No** |
+| `model_execution_roundtrip.rs`, `release_contract_conformance.rs` | 2, 3 | none | **No** |
 
 The one integration binary CI runs is the one with no transform coverage.
 
@@ -405,31 +405,31 @@ bear on transform behaviour:
 
 Separately, `packages/plugin` and `packages/pi-plugin` contain a large executing
 suite over a **parallel TypeScript transform implementation** of the same
-contract: `compartment-runner*.test.ts` (eight files),
-`boundary-execution*.test.ts`, `inject-compartments*.test.ts`,
+contract: `history_segment-runner*.test.ts` (eight files),
+`boundary-execution*.test.ts`, `inject-history_segments*.test.ts`,
 `m0m1-taxonomy.test.ts`, `cache-busting-signals.test.ts`,
 `degraded-reanchor.test.ts`, `transform-authority-flip-back.test.ts`, plus the
 Pi equivalents. These run on every pull request and cover the same
 cache-discipline vocabulary the Rust header uses. They are coverage of a
 different implementation, and `docs/AUDIT-KNOWN-ISSUES.md` is written about that
-one (lead L5). This is the same shape Part 4a found for the historian
-(`../historian/existing-checks.md:76-129`): the only executing per-PR
+one (lead L5). This is the same shape Part 4a found for the history_summarizer
+(`../history_summarizer/existing-checks.md:76-129`): the only executing per-PR
 coverage measures the TypeScript twin. **Nothing executing anywhere compares the
-two transform implementations.** Unlike the historian, 4b has no in-crate
+two transform implementations.** Unlike the history_summarizer, 4b has no in-crate
 TypeScript-oracle golden driver at all — there is no 4b counterpart to
-`historian_validate.rs:1384 validate_golden_matches_typescript_oracle`.
+`history_summarizer_validate.rs:1384 validate_golden_matches_typescript_oracle`.
 
 ### Production assertions and guards (clustered)
 
 **Panicking sites in production code, four, clustered by liveness.**
 
 - **Live in release, unconditionally: one.** `transform.rs:6366-6369`, a bare
-  `assert!` (not `debug_assert!`) inside `new_caveman_units`:
-  `compressed.len() <= existing.frozen_payload.len()`, message "caveman deeper
+  `assert!` (not `debug_assert!`) inside `new_terse_text_compression_units`:
+  `compressed.len() <= existing.frozen_payload.len()`, message "terse_text_compression deeper
   tier grew frozen payload for {block_id}". This is the production panic path
   the sibling lens reported; verified at `HEAD`, in 4b scope, and reachable only
-  when caveman is enabled (`config.rs:76` defaults it `false`). Lens B owns it as
-  `sel-caveman-deeper-tier-growth-panics-in-production`. Its guarded relation is
+  when terse_text_compression is enabled (`config.rs:76` defaults it `false`). Lens B owns it as
+  `sel-terse_text_compression-deeper-tier-growth-panics-in-production`. Its guarded relation is
   C17/C23's "never compresses an already-compressed payload"; `:6370-6374` keeps
   the shallower bytes on a tie while `:6378` still records the deeper depth.
 - **Live in release under an environment variable: two.**
@@ -451,11 +451,11 @@ TypeScript-oracle golden driver at all — there is no 4b counterpart to
   the engine" and it cannot fire in production.
 
 **The other seven scope files have almost nothing.** Verified per file over
-production lines only: `injection.rs` (prod `1-456`), `compartment_coverage.rs`
+production lines only: `injection.rs` (prod `1-456`), `history_segment_coverage.rs`
 (`1-215`), `healing.rs` (`1-159`), `divergence.rs` (`1-102`), `m0_compose.rs`,
 `m1_compose.rs`, `retained_size.rs` (all-production). Zero `assert!`, zero
 `debug_assert!`, zero `panic!`, zero `unreachable!`. Two infallible-by-
-construction `expect`s: `compartment_coverage.rs:196`
+construction `expect`s: `history_segment_coverage.rs:196`
 `.expect("non-empty checked above")` and `retained_size.rs:67`
 `.expect("wire values must serialize for accounting")`. `scheduler.rs`
 (adjacent) has two, both static regex compilation: `:875` and `:910`.
@@ -484,10 +484,10 @@ almost no assertions.** All unaudited.
   `:3082`, `:4558`, backed by `valid_m0m1_shape`/`cached_m1_missing`
   (`:6200`). Discharge C16, including its "never cleared" half.
 - **The strict-ordering check** in `resolve_coverage`
-  (`compartment_coverage.rs:180`), which rejects `next.start <= prev.end`
+  (`history_segment_coverage.rs:180`), which rejects `next.start <= prev.end`
   (`:177`) while deliberately allowing coordinate gaps. Discharges C12.
 - **The store-side commit predicates**: row-version CAS, claim-vector match
-  (`memory-store/src/lib.rs:7374-7377`), and the bust-only compartment-sequence
+  (`memory-store/src/lib.rs:7374-7377`), and the bust-only history_segment-sequence
   re-read inside the transaction (`:7378-7387`). The last is the one Defer skips
   (lead L2).
 - **The two output-integrity guards**, `assert_no_orphaned_tool_arcs`
@@ -507,7 +507,7 @@ CAS-conflict test uses. There is **no seam between the two out-of-transaction
 writes and the terminal commit**, so C1's atomicity obligation on the `:3312`
 and `:4646` paths is currently unfalsifiable by a Rust test without new code —
 the same structural gap Part 4a recorded for the publish transaction
-(`../historian/existing-checks.md:395-402`).
+(`../history_summarizer/existing-checks.md:395-402`).
 
 ## Suspiciously quiet areas
 
@@ -524,7 +524,7 @@ proves.
 2. **The two out-of-transaction writes have no seam, so C1 is untestable, not
    merely untested.** `descend_lineage` (`:3312`) commits 43 lines before the
    guards that can reject the same pass, and
-   `truncate_compartments_for_revert` (`:4646`) commits ~900 lines before
+   `truncate_history_segments_for_revert` (`:4646`) commits ~900 lines before
    `:5565` with a `CoverageGap` at `:4704` inside that window. The only hook in
    the engine (`:5563-5564`) fires after both, so no test can land a fault
    between either write and the terminal commit. Existing coverage reaches only
@@ -561,12 +561,12 @@ proves.
    sub-part.
 
 5. **The Defer commit's watermark write is guarded by nothing on the path that
-   writes it.** `:5156-5159` writes `meta.coverage_compartment_seq` from a read
-   taken outside any predicate, while `:5574` withholds the compartment fence
+   writes it.** `:5156-5159` writes `meta.coverage_history_segment_seq` from a read
+   taken outside any predicate, while `:5574` withholds the history_segment fence
    from exactly that pass class. The nearest existing check,
    `claim_vector_commit_fence_never_publishes_interleaved_stale_bytes`
    (`:14185`), covers the claim-vector predicate instead. Nothing covers the
-   compartment predicate's absence on Defer.
+   history_segment predicate's absence on Defer.
 
 6. **The strongest drift check in the engine is compiled out, and its sibling
    ships with no documentation.** `:5451-5479` re-renders every cached output and
@@ -593,17 +593,17 @@ proves.
    form of `execute_threshold_percentage`, and the documented lower bound of 20.
    `protected_tags` is the safety-relevant one: it is the count of newest tags
    immune from dropping, feeding `newest_active_tag_block_ids`
-   (`transform.rs:4177-4182`) and caveman's protected cutoff (`:6318`). A
+   (`transform.rs:4177-4182`) and terse_text_compression's protected cutoff (`:6318`). A
    configuration-reference conformance check comparing documented keys against
    `config.rs` parsing would catch all four; none exists. Lens B owns the
    records.
 
-10. **The caveman `assert!` is the sub-part's only unconditional production
+10. **The terse_text_compression `assert!` is the sub-part's only unconditional production
     panic and has no test that reaches it.** `:25463-25490`, `:25606` and
-    `:25660-25684` drive `new_caveman_units` with `caveman_min_chars = 1`; none
+    `:25660-25684` drive `new_terse_text_compression_units` with `terse_text_compression_min_chars = 1`; none
     constructs a deeper tier whose output is longer than the frozen payload.
-    Whether that is constructible is a property of `caveman.rs`'s level ladder
-    (651 lines, 4e scope), and `CONFIGURATION.md:720-744` documents caveman with
+    Whether that is constructible is a property of `terse_text_compression.rs`'s level ladder
+    (651 lines, 4e scope), and `CONFIGURATION.md:720-744` documents terse_text_compression with
     no failure mode at all.
 
 11. **The three CONFIGURATION.md idempotency and byte-identity claims have no
@@ -615,7 +615,7 @@ proves.
 
 12. **There is no TypeScript-oracle golden driver for the transform.** Part 4a
     at least has `validate_golden_matches_typescript_oracle`
-    (`historian_validate.rs:1384`) tying the two validators together, ungated
+    (`history_summarizer_validate.rs:1384`) tying the two validators together, ungated
     though it is. 4b has no counterpart: no in-crate test compares the Rust
     engine's output to the TypeScript transform's, and the executing per-PR suite
     covers the TypeScript twin exclusively.
@@ -638,7 +638,7 @@ proves.
 - **Can any host reach `apply_additive_only` in production?** The shipped
   OpenCode plugin downgrades to the TypeScript transform when compaction is off
   (lead L3), and `compaction_enabled` appears nowhere in `packages/`, so the
-  module's value comes only from its own JSONC. Whether an explicit `subc`
+  module's value comes only from its own JSONC. Whether an explicit `host`
   daemon, the Pi leg, or a non-shipped host can call the Rust transform with
   compaction off is unresolved; it decides whether `transform.rs:2711-3219` and
   its `unreachable!` at `:3068` need any record at all. Unresolved, needs the

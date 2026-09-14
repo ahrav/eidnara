@@ -6,11 +6,11 @@ Every claim-bearing check for admission, dispatch, and the response obligation:
 integration binaries whose subject is the request path, the four
 `compile_fail` doctests, and the CI steps that reach any of them.
 
-Provenance: system `the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`. Counts come from
+Provenance: system `the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`,`HEAD` = `e447c927`. Counts come from
 lens B, which derived each by extracting the production half of each file and
 grepping it so no test-module hit is included. This synthesis re-derived the
-file lengths with `wc -l`, the `#[cfg(test)]` boundaries by grep, the
+file lengths with`wc -l`, the`#[cfg(test)]` boundaries by grep, the
 `routing.rs` panic sites by grep, and the `ci.yml` hit list by grep, and
 records each correction where it lands.
 
@@ -106,7 +106,7 @@ names none of them.**
 | `tests/protocol_vectors.rs` | 15 | 762 | **unnamed** |
 | `tests/handler_contract.rs` | 12 | 672 | **unnamed** |
 | `tests/routing.rs` | 12 | 640 | **unnamed** |
-| `tests/broca_protocol.rs` | 9 | 713 | **unnamed** |
+| `tests/model_execution_protocol.rs` | 9 | 713 | **unnamed** |
 | **Total** | **84** | 4,993 | **0 named** |
 
 The four binaries CI does name are `client` (`ci.yml:132`, `:179`, `:187`),
@@ -148,8 +148,8 @@ The integration tests named by catalog records:
 | `:665` | `oversized_handler_output_cannot_corrupt_framing` | the response ceiling, not the emptiness gap |
 | `:788` | (egress budget saturation) | the precondition of `busy_rejects` exhaustion |
 | `:835` | `closing_a_route_settles_its_admitted_work` | no emission after retirement |
-| `:976` | `saturated_broca_reserve_cannot_consume_a_general_slot` | class separation |
-| `:1074` | `saturated_general_capacity_cannot_consume_the_broca_reserve` | class separation |
+| `:976` | `saturated_model_execution_reserve_cannot_consume_a_general_slot` | class separation |
+| `:1074` | `saturated_general_capacity_cannot_consume_the_model_execution_reserve` | class separation |
 | `tests/routing.rs:98` | `unsupported_operations_leave_the_generation_usable` | control rejection paths |
 | `:212` | `malformed_control_bodies_are_refused_before_handler_work` | control rejection paths |
 | `:396` | `rejected_bind_never_publishes_and_still_reports_route_gone` | route.open answering exits |
@@ -161,7 +161,7 @@ The integration tests named by catalog records:
 | `tests/lifecycle.rs:576` | `shutdown_refuses_new_routes_and_new_routed_work` | the divergent shutdown codes, in full and **in CI** (`ci.yml:178-179`, `:187`). Added during disposition; the record's `Existing check:` read `none` |
 
 One inventory note carried forward from lens B for a later pass:
-`tests/broca_subprocess.rs` is 3,220 lines and a grep for `#[test]` or
+`tests/model_execution_subprocess.rs` is 3,220 lines and a grep for `#[test]` or
 `#[tokio::test]` returns **zero**, so it is either a shared-helper binary or
 uses a macro-generated form. Not resolved here, and it affects the integration
 count if it is a test binary.
@@ -457,7 +457,7 @@ Stated so a later pass knows what was and was not looked at.
 - The six integration binaries were counted and their subjects identified, but
   only the tests named by catalog records were read. Their other tests may bear
   on records; this inventory establishes only the counts and the CI status.
-- `tests/broca_subprocess.rs` (3,220 lines, zero `#[test]` attributes) was not
+- `tests/model_execution_subprocess.rs` (3,220 lines, zero `#[test]` attributes) was not
   read. If it is a test binary the integration count above is low.
 - Whether this repository's release profile enables `debug-assertions` was not
   read, which is what decides whether `dispatch.rs:212` is a live guard.
@@ -525,19 +525,19 @@ records use. Every one was re-verified at carry time.
 
 | Site | Test | Record it serves |
 | --- | --- | --- |
-| `:485-531` | `rejected_broca_bind_gets_exactly_one_broca_route_gone` | route-entry removal: exactly one `route_gone` for a rejected bind, the only one of the three named bind outcomes with a test |
+| `:485-531` | `rejected_model_execution_bind_gets_exactly_one_model_execution_route_gone` | route-entry removal: exactly one `route_gone` for a rejected bind, the only one of the three named bind outcomes with a test |
 | `:532-600` | `a_closed_route_handle_cannot_dispatch_to_stale_child_ownership` | route-entry removal: a closed handle cannot dispatch to stale child ownership |
-| `:851-885` | `a_panicking_broca_shutdown_still_drains_later_children_and_redacts` | panic containment: shutdown panic, contained category |
-| `:886-917` | `an_erroring_broca_shutdown_still_drains_later_children_and_redacts` | panic containment: shutdown error, contained category |
+| `:851-885` | `a_panicking_model_execution_shutdown_still_drains_later_children_and_redacts` | panic containment: shutdown panic, contained category |
+| `:886-917` | `an_erroring_model_execution_shutdown_still_drains_later_children_and_redacts` | panic containment: shutdown error, contained category |
 | `:918-985` | `a_child_shutdown_failure_makes_the_host_incarnation_non_graceful` | panic containment: the non-graceful incarnation |
-| `:986-1027` | `a_panicking_broca_health_reports_failing_without_skipping_other_children` | panic containment: optional-child health panic, contained category |
-| `:1028-1049` | `a_panicking_synapse_health_reports_failing_without_unwinding` | panic containment: optional-child health panic on the tertiary child |
+| `:986-1027` | `a_panicking_model_execution_health_reports_failing_without_skipping_other_children` | panic containment: optional-child health panic, contained category |
+| `:1028-1049` | `a_panicking_local_embeddings_health_reports_failing_without_unwinding` | panic containment: optional-child health panic on the tertiary child |
 
 Status unaudited for all seven. None runs in CI.
 
 **One location repaired.** The last span is `:1028-1049`, not `:1028-1060`. The
 file is 1,049 lines, so the lens's end bound overran it by eleven;
-`a_panicking_synapse_health_reports_failing_without_unwinding` has its attribute
+`a_panicking_local_embeddings_health_reports_failing_without_unwinding` has its attribute
 at `:1028`, its `fn` at `:1029`, and its final `}` at `:1049`, the last line of
 the file. This is the only citation drift in either composite record, and it was
 wrong when written rather than made wrong by a change: the file has not moved.

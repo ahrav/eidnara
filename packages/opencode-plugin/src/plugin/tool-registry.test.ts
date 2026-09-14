@@ -6,14 +6,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import type { EidnaraPluginConfig } from "../config";
-import { resetCtxReduceRegisteredGloballyForTest } from "../hooks/context/ctx-reduce-availability";
+import { resetEidnaraReduceRegisteredGloballyForTest } from "../hooks/context/eidnara-reduce-availability";
 import {
     A1_HASH_BASELINE_HEADING,
     A1_TOOL_SECTION_HEADING,
     a1GoldenSectionOffset,
     readA1GoldenDocument,
 } from "../shared/prompt-surface-a1-golden";
-import type { PromptSurfaceRuntime, PromptSurfaceToolId } from "../shared/prompt-surface-runtime";
+import type { PromptSurfaceRuntime } from "../shared/prompt-surface-runtime";
 import {
     ACTIVE_TOOL_IDS,
     createPromptSurfaceRuntime,
@@ -26,17 +26,15 @@ afterEach(() => {
     // The compaction-off override is process-global and boot-resolved; reset
     // to the default-true baseline so a compaction-off test cannot leak a
     // false verdict into a later test in the same bun process.
-    resetCtxReduceRegisteredGloballyForTest();
+    resetEidnaraReduceRegisteredGloballyForTest();
 });
 
-/** Tool ids the prompt-surface catalog names but this registry never builds. */
-const UNREGISTERED_CATALOG_TOOL_IDS = new Set<string>(["ctx_expand"]);
-
-function registeredCatalogToolIds(): PromptSurfaceToolId[] {
-    return ACTIVE_TOOL_IDS.filter((id) => !UNREGISTERED_CATALOG_TOOL_IDS.has(id));
-}
-
-const REGISTERED_TOOL_IDS = ["ctx_reduce", "ctx_search", "ctx_note", "ctx_memory"] as const;
+const REGISTERED_TOOL_IDS = [
+    "eidnara_reduce",
+    "eidnara_search",
+    "eidnara_note",
+    "eidnara_memory",
+] as const;
 const A1_GUIDANCE_SECTION_HEADING = "## 1. System-prompt guidance section";
 const DAEMON_GUIDANCE_ASSETS = [
     ["PRIMARY full (reduce=on)", "guidance_primary.txt"],
@@ -70,17 +68,17 @@ describe("createToolRegistry — registered tool set", () => {
         expect(buildRegistry({ enabled: false })).toEqual({});
     });
 
-    it("registers ctx_memory regardless of memory.enabled", () => {
+    it("registers eidnara_memory regardless of memory.enabled", () => {
         const tools = buildRegistry({ memory: { enabled: false } as never });
-        expect(Object.keys(tools)).toContain("ctx_memory");
-        expect(Object.keys(tools)).toContain("ctx_search");
+        expect(Object.keys(tools)).toContain("eidnara_memory");
+        expect(Object.keys(tools)).toContain("eidnara_search");
     });
 
     it("advertises only real ctx_* fields", () => {
         const tools = buildRegistry({});
         const expectedFields: Record<string, string[]> = {
-            ctx_reduce: ["drop"],
-            ctx_note: [
+            eidnara_reduce: ["drop"],
+            eidnara_note: [
                 "action",
                 "content",
                 "surface_condition",
@@ -89,8 +87,8 @@ describe("createToolRegistry — registered tool set", () => {
                 "offset",
                 "note_id",
             ],
-            ctx_search: ["query", "limit", "sources"],
-            ctx_memory: [
+            eidnara_search: ["query", "limit", "sources"],
+            eidnara_memory: [
                 "action",
                 "content",
                 "category",
@@ -131,12 +129,16 @@ describe("createToolRegistry — compaction-off mode (#266 S4)", () => {
         expect(added).toEqual([]);
 
         // Every other ctx_* tool stays registered (subject to its own gates).
-        expect(modeOff.ctx_reduce).toBeUndefined();
-        expect(Object.keys(modeOff).sort()).toEqual(["ctx_memory", "ctx_note", "ctx_search"]);
-        // ctx_search still advertises its fields — the reduce factory was
+        expect(modeOff.eidnara_reduce).toBeUndefined();
+        expect(Object.keys(modeOff).sort()).toEqual([
+            "eidnara_memory",
+            "eidnara_note",
+            "eidnara_search",
+        ]);
+        // eidnara_search still advertises its fields — the reduce factory was
         // skipped, not the search factory.
         const searchSchema = tool.schema.toJSONSchema(
-            tool.schema.object(modeOff.ctx_search?.args ?? {}),
+            tool.schema.object(modeOff.eidnara_search?.args ?? {}),
         ) as { properties?: Record<string, unknown> };
         expect(Object.keys(searchSchema.properties ?? {})).toContain("query");
     });
@@ -145,7 +147,7 @@ describe("createToolRegistry — compaction-off mode (#266 S4)", () => {
         const implicit = buildRegistry({});
         const explicit = buildRegistry({ compaction: { enabled: true } as never });
         expect(Object.keys(explicit).sort()).toEqual(Object.keys(implicit).sort());
-        expect(Object.keys(explicit)).toContain("ctx_reduce");
+        expect(Object.keys(explicit)).toContain("eidnara_reduce");
     });
 });
 
@@ -166,7 +168,7 @@ function readA1GoldenGuidance(document: string): Record<string, string> {
     return Object.fromEntries(
         [
             ...guidanceSection.matchAll(
-                /^### (.+?): \d+ chars, ~\d+ tokens\n\n```markdown\n([\s\S]*?)\n```$/gm,
+                /^### (.+?): \d+ chars(?:, ~\d+ tokens)?\n\n```markdown\n([\s\S]*?)\n```$/gm,
             ),
         ].map((match) => [match[1], match[2]]),
     );
@@ -187,7 +189,7 @@ function readA1GoldenTools(): Record<string, GoldenTool> {
         a1GoldenSectionOffset(document, A1_TOOL_SECTION_HEADING),
         a1GoldenSectionOffset(document, A1_HASH_BASELINE_HEADING),
     );
-    const headings = [...toolSection.matchAll(/^### (ctx_[a-z_]+) —.*$/gm)];
+    const headings = [...toolSection.matchAll(/^### (eidnara_[a-z_]+) —.*$/gm)];
     return Object.fromEntries(
         headings.map((heading, index) => {
             const start = (heading.index ?? 0) + heading[0].length;
@@ -255,8 +257,8 @@ describe("A1 prompt-surface golden", () => {
 
     it("keeps guidance within the registered memory address and search-source contracts", () => {
         const registry = buildRegistry({});
-        const memory = registry.ctx_memory;
-        const search = registry.ctx_search;
+        const memory = registry.eidnara_memory;
+        const search = registry.eidnara_search;
         expect(memory).toBeDefined();
         expect(search).toBeDefined();
 
@@ -298,10 +300,8 @@ describe("A1 prompt-surface golden", () => {
                 .find((line) => line.includes("`sources` permits only `memory`"));
             expect(sourceScopeLine).toContain("only `memory`");
             expect(sourceScopeLine).toMatch(/notes or (summarized history|summaries)/);
-            expect(sourceScopeLine).toContain("`ctx_expand`");
-            expect(sourceScopeLine).toContain("When `ctx_expand` is registered");
-            expect(sourceScopeLine).toContain("`## start-end · date · title`");
-            expect(sourceScopeLine).toContain("`<session-history>`");
+            expect(guidance).not.toContain("ctx_expand");
+            expect(guidance).toContain("`<session-history>`");
         }
     });
 });
@@ -309,9 +309,9 @@ describe("A1 prompt-surface golden", () => {
 describe("createToolRegistry — prompt-surface registration", () => {
     it("links canonical prompt-surface IDs to light descriptions and registration", () => {
         const registeredCtxToolIds = Object.keys(buildRegistry({})).filter((id) =>
-            id.startsWith("ctx_"),
+            id.startsWith("eidnara_"),
         );
-        const canonicalIds = new Set<string>(registeredCatalogToolIds());
+        const canonicalIds = new Set<string>(ACTIVE_TOOL_IDS);
         const registeredIds = new Set(registeredCtxToolIds);
         const missing = [...canonicalIds].filter((id) => !registeredIds.has(id));
         const extra = [...registeredIds].filter((id) => !canonicalIds.has(id));
@@ -326,7 +326,7 @@ describe("createToolRegistry — prompt-surface registration", () => {
             );
         }
 
-        for (const id of registeredCatalogToolIds()) {
+        for (const id of ACTIVE_TOOL_IDS) {
             expect(Object.hasOwn(LIGHT_TOOL_DESCRIPTIONS, id)).toBe(true);
             expect(LIGHT_TOOL_DESCRIPTIONS[id].trim().length).toBeGreaterThan(0);
         }
@@ -361,15 +361,15 @@ describe("createToolRegistry — prompt-surface registration", () => {
                 prompt_surface: {
                     default: "full",
                     models: { "provider/model": "light" },
-                    tool_descriptions: { ctx_search: "Custom search surface" },
+                    tool_descriptions: { eidnara_search: "Custom search surface" },
                 },
             } as Partial<EidnaraPluginConfig>,
             undefined,
             runtime,
         );
 
-        expect(overridden.ctx_search.description).toBe("Custom search surface");
-        expect(overridden.ctx_reduce.description).toBe(baseline.ctx_reduce.description);
+        expect(overridden.eidnara_search.description).toBe("Custom search surface");
+        expect(overridden.eidnara_reduce.description).toBe(baseline.eidnara_reduce.description);
         for (const toolId of Object.keys(baseline)) {
             expect(providerParameters(overridden[toolId])).toEqual(
                 providerParameters(baseline[toolId]),
@@ -392,7 +392,6 @@ describe("createToolRegistry — prompt-surface registration", () => {
         );
 
         for (const toolId of Object.keys(LIGHT_TOOL_DESCRIPTIONS)) {
-            if (UNREGISTERED_CATALOG_TOOL_IDS.has(toolId)) continue;
             expect(light[toolId]?.description).toBe(
                 LIGHT_TOOL_DESCRIPTIONS[toolId as keyof typeof LIGHT_TOOL_DESCRIPTIONS],
             );
@@ -413,18 +412,18 @@ describe("createToolRegistry — user-owned registration default", () => {
             {
                 prompt_surface: {
                     default: "light",
-                    tool_descriptions: { ctx_search: "User-owned search description" },
+                    tool_descriptions: { eidnara_search: "User-owned search description" },
                 },
             } as Partial<EidnaraPluginConfig>,
             undefined,
             runtime,
             {
                 default: "full",
-                tool_descriptions: { ctx_search: "User-owned search description" },
+                tool_descriptions: { eidnara_search: "User-owned search description" },
             },
         );
 
-        expect(registry.ctx_search.description).toBe("User-owned search description");
+        expect(registry.eidnara_search.description).toBe("User-owned search description");
         expect(warnings).toEqual([]);
     });
 });

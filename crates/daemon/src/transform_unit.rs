@@ -18,7 +18,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dispatch::PreparedOutcome;
 use crate::metered_decode::ResidentMeter;
-use crate::{HandlerCore, PassEnv, PreparedHistorianAction, RequestEntryProbe, TransformedPass};
+use crate::{
+    HandlerCore, PassEnv, PreparedHistorySummarizerAction, RequestEntryProbe, TransformedPass,
+};
 
 /// Runs one unit of a pass off the async workers. The request's context is the runner in
 /// production; tests supply one that runs the unit on a bare blocking thread.
@@ -95,11 +97,11 @@ pub(crate) enum UnitOutcome {
 
 pub(crate) struct PassContinuation {
     pub(crate) pass: TransformedPass,
-    pub(crate) action: PreparedHistorianAction,
+    pub(crate) action: PreparedHistorySummarizerAction,
     pub(crate) env: Arc<PassEnv>,
 }
 
-pub(crate) enum HistorianFollowup {
+pub(crate) enum HistorySummarizerFollowup {
     Unchanged,
     Published,
     Failed,
@@ -153,7 +155,7 @@ impl Drop for PageApplyGuard {
 }
 
 /// The cap matches the serving runtime's worker count rather than the blocking pool's much larger limit.
-/// Permits cover executing units and their store-lock waits, but not async historian waits.
+/// Permits cover executing units and their store-lock waits, but not async history_summarizer waits.
 pub(crate) const TRANSFORM_UNITS_AT_ONCE: usize = 4;
 
 pub(crate) const TRANSFORM_WAITERS_AT_MOST: usize = 12;

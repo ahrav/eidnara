@@ -10,11 +10,10 @@ import { dirname, isAbsolute, resolve } from "node:path";
 
 import { eidnaraUserConfigBasePath } from "../config/config-paths";
 import {
-    CTX_EXPAND_LIGHT_DESCRIPTION,
-    CTX_MEMORY_LIGHT_DESCRIPTION,
-    CTX_NOTE_LIGHT_DESCRIPTION,
-    CTX_REDUCE_LIGHT_DESCRIPTION,
-    CTX_SEARCH_LIGHT_DESCRIPTION,
+    EIDNARA_MEMORY_LIGHT_DESCRIPTION,
+    EIDNARA_NOTE_LIGHT_DESCRIPTION,
+    EIDNARA_REDUCE_LIGHT_DESCRIPTION,
+    EIDNARA_SEARCH_LIGHT_DESCRIPTION,
 } from "../tools/light-descriptions";
 import { piModelRefToCanonical } from "./harness-provider-map";
 import {
@@ -32,21 +31,19 @@ export const MAX_GUIDANCE_OVERRIDE_BYTES = 1 << 20;
 /**
  */
 export const ACTIVE_TOOL_IDS = [
-    "ctx_reduce",
-    "ctx_expand",
-    "ctx_note",
-    "ctx_memory",
-    "ctx_search",
+    "eidnara_reduce",
+    "eidnara_note",
+    "eidnara_memory",
+    "eidnara_search",
 ] as const;
 
 export type PromptSurfaceToolId = (typeof ACTIVE_TOOL_IDS)[number];
 
 export const LIGHT_TOOL_DESCRIPTIONS = {
-    ctx_reduce: CTX_REDUCE_LIGHT_DESCRIPTION,
-    ctx_expand: CTX_EXPAND_LIGHT_DESCRIPTION,
-    ctx_note: CTX_NOTE_LIGHT_DESCRIPTION,
-    ctx_memory: CTX_MEMORY_LIGHT_DESCRIPTION,
-    ctx_search: CTX_SEARCH_LIGHT_DESCRIPTION,
+    eidnara_reduce: EIDNARA_REDUCE_LIGHT_DESCRIPTION,
+    eidnara_note: EIDNARA_NOTE_LIGHT_DESCRIPTION,
+    eidnara_memory: EIDNARA_MEMORY_LIGHT_DESCRIPTION,
+    eidnara_search: EIDNARA_SEARCH_LIGHT_DESCRIPTION,
 } as const satisfies Readonly<Record<PromptSurfaceToolId, string>>;
 
 /**
@@ -224,7 +221,7 @@ export function createPromptSurfaceRuntime(
                 if (!PROMPT_SURFACE_TOOL_ID_SET.has(toolId)) {
                     warnOnce(
                         `unknown-tool:${toolId}`,
-                        `prompt_surface.tool_descriptions.${toolId} is not a known ctx_* tool ID; the override was ignored.`,
+                        `prompt_surface.tool_descriptions.${toolId} is not a known eidnara_* tool ID; the override was ignored.`,
                     );
                 } else if (description.trim().length === 0) {
                     warnOnce(

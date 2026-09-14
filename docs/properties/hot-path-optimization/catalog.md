@@ -166,6 +166,7 @@ Existing check: [Canonical checks](existing-checks.md#canonical-read) cover
 composition and budgets; their status is unaudited.
 Impact: Memory bytes, revision-driven materialization, or withholding can drift.
 Open questions:
+
 - Must skipping a corrupt excluded row preserve the baseline error? This is
   an owner gate before M1 pushdown across decoding; suppression is not approved.
   (needs human input)
@@ -194,6 +195,7 @@ Existing check: [Canonical checks](existing-checks.md#canonical-read) include
 generic row and byte caps; canonical noise pressure remains unaudited.
 Impact: Busy unrelated domains can erase usable project memory.
 Open questions:
+
 - How will paired fixtures isolate unrelated rows from shared lineage and
   sensitivity facts? The fixture must not change legitimate authorization.
 
@@ -299,6 +301,7 @@ Existing check: [Lifecycle checks](existing-checks.md#execution-lifecycle) cover
 settlement and cleanup cases; their status is unaudited.
 Impact: Cleanup can race live work or permit stale work to affect reused state.
 Open questions:
+
 - What owns and joins any proposed off-worker transform work? The host does:
   `RequestCtx::run_blocking` enters the work in request, route, and host
   ledgers, and the daemon keeps no drain of its own. (answered)
@@ -447,6 +450,7 @@ Existing check: [Snapshot and rollback checks](existing-checks.md#guarded-store)
 are unaudited.
 Impact: A batching optimization can serve stale decisions or enlarge rollback.
 Open questions:
+
 - Which reads belong to one logical observation in the proposed batching plan?
   Existing independent boundaries cannot be silently removed. (needs human input)
 
@@ -484,7 +488,7 @@ Status: active
 Exercised: not yet - No inner/outer boundary comparison runs.
 Guarantee: Optimization preserves the distinct inner body guard, outer wrapped
 history retry policy, and frozen replay boundary.
-Check: `always` - With the actual estimator and representable compartment/guard
+Check: `always` - With the actual estimator and representable history_segment/guard
 sizes, finite positive inner budgets produce bodies whose cost fits; direct-API
 nonpositive budgets disable that guard. Outer results match the reference's
 wrapped-slice 105% threshold and at-most-three rerenders, even if still over
@@ -502,6 +506,7 @@ Existing check: [History checks](existing-checks.md#history-render) are
 unaudited; a complete outer-boundary comparison is not identified.
 Impact: Valid direct calls can change behavior or replay can be recomputed.
 Open questions:
+
 - Will request validation remain separate from the direct renderer contract?
   No broader handling of nonfinite inputs is specified here. (needs human input)
 
@@ -518,7 +523,7 @@ after its first legal demotion both exceed the positive budget, and another
 demotion remains possible; this witnesses pressure without demanding a defect
 or requiring the optimized renderer to execute separate iterations.
 Fault/timing angle: Generous budgets or single-step fixtures hide stopping errors.
-Required faults and enabling state: Construct ordered, demotable compartments
+Required faults and enabling state: Construct ordered, demotable history_segments
 and record actual whole-body costs before candidate execution.
 Confidence: high - [Evidence](evidence/history-budget-pressure-paths-are-exercised.md).
 The oldest-first loop and the limitations of existing pressure markers are read.
@@ -526,6 +531,7 @@ Existing check: [Tight history goldens](existing-checks.md#history-render) are
 unaudited and do not supply this campaign's independent witness.
 Impact: A parity suite may never test the optimization's repeated-pressure case.
 Open questions:
+
 - Which fixtures independently certify multiple reference demotions with the
   production estimator, including repeated equal-tier bytes?
 
@@ -577,6 +583,7 @@ Existing check: [Redaction checks](existing-checks.md#redaction-ownership) cover
 preserve/substitute actions; their status is unaudited.
 Impact: Stored values and audit claims can disagree despite successful writes.
 Open questions:
+
 - Which detector fixtures exercise every supported layer distinction without
   deriving expected metadata from the candidate preparation code?
 
@@ -602,6 +609,7 @@ Existing check: [Bound and rollback checks](existing-checks.md#redaction-ownersh
 are unaudited; in-memory no-append coverage is not established.
 Impact: Refused inputs can leave misleading audit receipts or partial effects.
 Open questions:
+
 - How will the test observe scan append separately from durable rollback?
 
 ### redaction-audit-does-not-depend-on-retained-payload
@@ -629,6 +637,7 @@ Existing check: [Receipt checks](existing-checks.md#redaction-ownership) are
 unaudited; metadata-only differential coverage is not identified.
 Impact: Allocation reduction can silently detach receipts from stored effects.
 Open questions:
+
 - Which allocation measurement will establish the performance benefit
   separately from functional parity? (needs human input)
 

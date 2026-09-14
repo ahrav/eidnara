@@ -1,22 +1,22 @@
 /**
- * A stale `ctx_reduce` strip requires growth, an EXECUTE pass that freezes drop state, and a
+ * A stale `eidnara_reduce` strip requires growth, an EXECUTE pass that freezes drop state, and a
  * subsequent DEFER pass. DEFER passes must not change the cached prefix. `analyzePasses` counts
  * changes between consecutive requests to a wire segment before the final `cache_control`
  * breakpoint.
  *
  *   A1  low-pressure pure-defer growth stays byte-stable
  *   A2  defer passes AFTER an execute pass + growth stay byte-stable
- *   A3  an aged ctx_reduce call never vanishes mid-prefix on a defer pass
+ *   A3  an aged eidnara_reduce call never vanishes mid-prefix on a defer pass
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { analyzePasses, formatBustReport, mainAgentRequests } from "../src/cache-analysis";
 import {
-    driveAgedCtxReduceSurvival,
+    driveAgedEidnaraReduceSurvival,
     driveFirstRenderPureDeferStability,
     FIRST_RENDER_HARNESS_OPTIONS,
     failedCheckIds,
-    verifyAgedCtxReduceSurvival,
+    verifyAgedEidnaraReduceSurvival,
     verifyFirstRenderPureDeferStability,
     wireCarriesTagOverlay,
 } from "../src/incident-pool/scenarios/source-linked-regressions";
@@ -136,19 +136,19 @@ describe.skipIf(!rustPrereqs.ok)("cache invariants — replay class", () => {
         });
     });
 
-    describe("#given an aged ctx_reduce call in the conversation (A3 — the regression)", () => {
+    describe("#given an aged eidnara_reduce call in the conversation (A3 — the regression)", () => {
         describe("#when pure-defer turns grow the tail past the protected window", () => {
-            it("#then the ctx_reduce message never vanishes mid-prefix and the prefix never busts", async () => {
-                const observation = await driveAgedCtxReduceSurvival(h);
+            it("#then the eidnara_reduce message never vanishes mid-prefix and the prefix never busts", async () => {
+                const observation = await driveAgedEidnaraReduceSurvival(h);
 
                 if (observation.bustReport) {
                     console.error(
-                        `[cache-invariant:A3-ctx_reduce-defer-growth] ${observation.bustCount} bust(s):\n${observation.bustReport}`,
+                        `[cache-invariant:A3-eidnara_reduce-defer-growth] ${observation.bustCount} bust(s):\n${observation.bustReport}`,
                     );
                 }
                 expect(observation.sawReduceOnWire).toBe(true);
-                expect(observation.finalWireHasCtxReduce).toBe(true);
-                const result = verifyAgedCtxReduceSurvival(observation);
+                expect(observation.finalWireHasEidnaraReduce).toBe(true);
+                const result = verifyAgedEidnaraReduceSurvival(observation);
                 expect(failedCheckIds(result)).toEqual([]);
                 expect(result.verdict).toBe("pass");
             }, 150_000);

@@ -42,7 +42,7 @@ can shrink a number without making anything faster.
   delta expand, side-channel drain, receive trace, cache lookup and store,
   native attach, completion trace, observation, retained size, snapshot
   store, and `post_attach`. Six trigger fields come from
-  `HistorianTriggerTimings` filled inside [`prepare_historian_fire`][prepare];
+  `HistorySummarizerTriggerTimings` filled inside [`prepare_history_summarizer_fire`][prepare];
   five are native-cache counts.
 - [`record_token_cache_delta`][rtcd] subtracts two reads of
   [`local_stats`][tc-local], a `thread_local!` counter whose doc says the

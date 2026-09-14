@@ -20,7 +20,7 @@ Three rows are re-pinned past that span, because the cache-state evidence record
 they index were rewritten against the U6 cache-core consumer migration:
 `exactly-one-core-step-executes-per-pass`,
 `core-fields-mutated-outside-the-step-machine`, and
-`defer-commit-carries-no-compartment-fence`. Their `transform.rs` and `memory-store`
+`defer-commit-carries-no-history_segment-fence`. Their `transform.rs` and `memory-store`
 citations, and item 4's T1 list below, resolve at `eae8f72b`; cache-core citations
 resolve at `commons@cb5a5c01`. Every other row still resolves at the three commits
 named above.
@@ -46,7 +46,7 @@ output-cache records constructible without new infrastructure.
 Third, **one distinction has to be stated precisely or the availability column
 will read as more optimistic than it is.** The two out-of-transaction writes,
 `store.descend_lineage` (`transform.rs:3312`) and
-`store.truncate_compartments_for_revert` (`:4646`), each have reachable in-code
+`store.truncate_history_segments_for_revert` (`:4646`), each have reachable in-code
 error paths downstream of them inside the same pass: the array-validity guards
 at `:3355`, `:3362-3365` and `:3367-3372` for the first, and the `CoverageGap`
 at `:4704` for the second. So the split durable state **can be observed today**
@@ -67,22 +67,22 @@ them and neither is expensive.
 | Class | Description | Available today |
 | --- | --- | --- |
 | T0 test execution in CI | Any workflow job that builds and runs `daemon --lib` or any `memory-store` test target | **No.** Verified across all five files in `.github/workflows/` at `76cd6f41`. The only `daemon` test invocation is `cargo test -p daemon --test lifecycle_cli` (`ci.yml:168`, `HEAD` `:172`), which selects one integration binary and does not build `--lib`. `memory-store` has zero matches in any workflow. `scripts/test-rust.sh` (`cargo nextest run --workspace`) and `test:rust-e2e` exist in root `package.json` and no workflow calls either. This costs a workflow change and no new infrastructure |
-| T1 compare-and-swap conflict injection | A conflicting row committed between this pass's read and its terminal commit, forcing `TransformError::Store(MemoryStoreError::CasConflict)` at `:2283` and a reload | **Yes, and the seam is already built and already used.** `run_transform_attempt_hook` fires at `:5563-5564` under `#[cfg(test)]` immediately before `commit_transform` (`:5565`). `boundary_divergence_recut_retries_after_interleaved_historian_publish` (`:20433`) already drives one retry. What no test does is exercise the **bound**: `MAX_CAS_RETRIES = 8` (`:82`, compared at `:2284`) has no dedicated test, so nine attempts per firing is asserted nowhere. The same hook also lands a non-conflicting mutation, such as a compartment append, inside the commit window |
+| T1 compare-and-swap conflict injection | A conflicting row committed between this pass's read and its terminal commit, forcing `TransformError::Store(MemoryStoreError::CasConflict)` at `:2283` and a reload | **Yes, and the seam is already built and already used.** `run_transform_attempt_hook` fires at `:5563-5564` under `#[cfg(test)]` immediately before `commit_transform` (`:5565`). `boundary_divergence_recut_retries_after_interleaved_history_summarizer_publish` (`:20433`) already drives one retry. What no test does is exercise the **bound**: `MAX_CAS_RETRIES = 8` (`:82`, compared at `:2284`) has no dedicated test, so nine attempts per firing is asserted nowhere. The same hook also lands a non-conflicting mutation, such as a history_segment append, inside the commit window |
 | T2 a fault between the two out-of-fence writes and the terminal commit | An injected error or a process termination at a chosen point in `:3312`-`:3371` or `:4650`-`:5565` | **No, and there is no seam of any shape.** The engine's only hook fires at `:5563-5564`, after both writes. No test in this scope terminates a process; `direct_host.rs:149` restarts a fixture host between requests, not inside a pass. The reachable in-code errors are a partial substitute and are credited per row, not to this class. Compounding it, the fenced wrapper that defines the commit boundary lives in `../commons/crates/storage` (source-catalog path, not present at HEAD) and the cache-state machine in `../commons/crates/cache-stability` (source-catalog path, not present at HEAD), a path dependency at `Cargo.toml:15` checked out at a different commit, and CI provisions the siblings as metadata-only stubs (`ci.yml:160`, `HEAD` `:164`) |
-| T3 store-transaction failure inside the commit | An error or a termination landing between two of the ten write groups in `commit_transform` (`memory-store/src/lib.rs:7390-7597`) | **No.** Verified over `:7260-7600`: no hook, no injectable error. Outcome-level rejection is a different matter and is available: the row-version CAS (`:7360-7367`), the claim-vector match (`:7374-7377`) and the bust-only compartment-sequence re-read (`:7378-7387`) are all reachable, and `transform_cas_conflict_leaves_every_overlay_table_empty` (`:14562`) reaches the first. What is unavailable is a **partial** commit. **No record in the catalog depends on this class**, which is itself worth recording: the all-or-nothing claim at `:7259` has no property covering its partial-commit failure mode |
-| T4 process-local state variation across two processes on one store | Two module processes, or one process restarted, transforming the same session against one store, so `observed_last_response_at_ms`, `historian_active`, `wrapup_active`, `now_ms` and the process-global tag baseline cache differ between them | **Partial, and this is the pivot for the selection-purity records.** The four `ProducerContext` fields are settable per test, so a single-process test can *simulate* the divergent inputs: `observed_last_response_at_ms` returns `None` until this process has seen a response for that session (`lib.rs:4460-4483`), and `None` sets `last_response_time_ms = 0`, which disables both the idle-TTL HARD (`scheduler.rs:429-431`) and the TTL arm of `should_execute` (`:476-478`). What a single process cannot vary is the process-global tag baseline cache behind `load_cached_tags` (`transform.rs:7639-7696`), which is a `Mutex` singleton, nor `RandomState` seeding across processes. A genuine two-process form exists in principle: `direct_host.rs` already drives a fixture host over a real process boundary with a `"kind": "transform"` request (`:67`, `:110`; `:149`, `:173`). Nothing points two of them at one store |
+| T3 store-transaction failure inside the commit | An error or a termination landing between two of the ten write groups in `commit_transform` (`memory-store/src/lib.rs:7390-7597`) | **No.** Verified over `:7260-7600`: no hook, no injectable error. Outcome-level rejection is a different matter and is available: the row-version CAS (`:7360-7367`), the claim-vector match (`:7374-7377`) and the bust-only history_segment-sequence re-read (`:7378-7387`) are all reachable, and `transform_cas_conflict_leaves_every_overlay_table_empty` (`:14562`) reaches the first. What is unavailable is a **partial** commit. **No record in the catalog depends on this class**, which is itself worth recording: the all-or-nothing claim at `:7259` has no property covering its partial-commit failure mode |
+| T4 process-local state variation across two processes on one store | Two module processes, or one process restarted, transforming the same session against one store, so `observed_last_response_at_ms`, `history_summarizer_active`, `wrapup_active`, `now_ms` and the process-global tag baseline cache differ between them | **Partial, and this is the pivot for the selection-purity records.** The four `ProducerContext` fields are settable per test, so a single-process test can *simulate* the divergent inputs: `observed_last_response_at_ms` returns `None` until this process has seen a response for that session (`lib.rs:4460-4483`), and `None` sets `last_response_time_ms = 0`, which disables both the idle-TTL HARD (`scheduler.rs:429-431`) and the TTL arm of `should_execute` (`:476-478`). What a single process cannot vary is the process-global tag baseline cache behind `load_cached_tags` (`transform.rs:7639-7696`), which is a `Mutex` singleton, nor `RandomState` seeding across processes. A genuine two-process form exists in principle: `direct_host.rs` already drives a fixture host over a real process boundary with a `"kind": "transform"` request (`:67`, `:110`; `:149`, `:173`). Nothing points two of them at one store |
 | T5 budget and threshold boundary values | A request field or config value at or past a boundary: `effective_execute_threshold` as `NaN`, negative, or above 90; `protected_tags` other than 20 on a Claude Code route; `execute_threshold_tokens` or an object-valued `execute_threshold_percentage` in config | **Yes, and it is the cheapest capability in the part after T0.** No seam, no store state, no second process: a field value. `effective_execute_threshold` is `Option<f64>` with no validator (`transform.rs:707-709`, wire mirror `:924`), and `execute_threshold_or` (`lib.rs:1710-1712`) is a bare `unwrap_or` with no finiteness or range check, so any JSON number arrives intact at the selection ceiling's `clamp(1.0, 100.0)` (`:4231`), where `f64::clamp` returns `NaN` for a `NaN` input. The two consumers sanitize differently: `scheduler::resolve_execute_threshold` falls back to `65.0` on non-finite (`scheduler.rs:461-463`) and `min`s to `90.0` (`:464`) |
 | T6 unbounded tag hydration under a concurrent tag writer | A writer mutating the session's tag summary between the two reads at `transform.rs:7657`/`:7659`, or between `:7683`/`:7684`, on every iteration of `load_cached_tags` | **Partial for the static half, unresolved for the spin.** The missing counter is verifiable statically: the `loop` at `:7644` has two exits, a `continue` at `:7678` and a fallthrough revalidation at `:7695`, and no attempt counter. Constructing repeated retries needs a second tag writer; `mint_or_get_tags` (`memory-store/src/lib.rs:6258`) is reachable only under `test` or the `test-support` feature, so a writer exists in test builds. Whether the loop is livelock-reachable is unresolved, because the `can_append` arm requires `generation - self.generation == appended`, which does not obviously progress monotonically. The store generation advances via SQLite triggers, so any tag mutation invalidates the summary |
-| T7 cross-implementation differential against the TypeScript transform | Running the same input through the Rust engine and through the parallel TypeScript transform implementation and comparing served bytes | **Partial, and the missing half is wiring rather than infrastructure.** Both sides exist and both are checked in. The TypeScript twin has 228 tests across 16 files under `packages/plugin/src/hooks/eidnara/`, all executing on every pull request through `bun run test` (`ci.yml:249` (source-catalog line, not present at HEAD), `HEAD` `:257`). The Rust side has 210 whole-pass drivers through one helper (`transform.rs:14331-14338`). Unlike Part 4a, there is **no** in-crate oracle tying them together: no counterpart to `historian_validate.rs:1384`. The blockers are decisions, not work: who owns the harness, and which documented byte-identity claims (`CONFIGURATION.md:659` (source-catalog path, not present at HEAD), `:716`, `:763`) become failures rather than documented divergences |
+| T7 cross-implementation differential against the TypeScript transform | Running the same input through the Rust engine and through the parallel TypeScript transform implementation and comparing served bytes | **Partial, and the missing half is wiring rather than infrastructure.** Both sides exist and both are checked in. The TypeScript twin has 228 tests across 16 files under `packages/plugin/src/hooks/eidnara/`, all executing on every pull request through `bun run test` (`ci.yml:249` (source-catalog line, not present at HEAD), `HEAD` `:257`). The Rust side has 210 whole-pass drivers through one helper (`transform.rs:14331-14338`). Unlike Part 4a, there is **no** in-crate oracle tying them together: no counterpart to `history_summarizer_validate.rs:1384`. The blockers are decisions, not work: who owns the harness, and which documented byte-identity claims (`CONFIGURATION.md:659` (source-catalog path, not present at HEAD), `:716`, `:763`) become failures rather than documented divergences |
 | T8 crafted wire ingress array | A request whose array is well-formed enough to reach `apply_once` and then violates one ingress or coverage rule: a duplicate flat block id, a live block whose id starts with `eidnara_`, non-increasing non-synthetic ordinals, a replayed synthetic todo pair whose wire metadata lacks the `synthetic` marker, a stray live item below coverage end | **Yes.** The array is harness-supplied and the guards are straight-line at the top of `apply_once`: `DuplicateBlockId` (`:3355`), the `live` filter (`:3357-3361`), `ReservedId` (`:3362-3365`, over `RESERVED_ID_PREFIX` at `:91`), `OrdinalViolation` (`:3367-3372`). `CoverageGap` (`:4603`, `:4704`, `:4934`, `:5066`), `BoundaryNotPresent` (`:4723`, `:4731`, `:4954`, `:5091`), `UnknownShape` (`:2890`, `:2900`, `:3077`, `:3082`, `:4558`) and `ReductionConflict` (`:6820`) are all reachable from crafted state. The plugin sets `lineage_switched` from `passInputs` (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1404` (source-catalog path, not present at HEAD)), so the lineage-switch half is production-reachable too |
-| T9 clock advance and lease state | `now_ms` past `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:23`, 300,000 ms), plus `historian_active` or `wrapup_active` held true or false across a chosen number of passes | **Yes, by parameter rather than by seam.** All four are `ProducerContext` fields the fixture builds directly (`run` builds a context at `:14332` and mutates it at `:14333`), so no clock abstraction is needed. This is the one place 4b is cheaper than 4a, where the equivalent capability (H8) was unavailable and blocked two liveness records outright (`../historian/fault-map.md:41`) |
+| T9 clock advance and lease state | `now_ms` past `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:23`, 300,000 ms), plus `history_summarizer_active` or `wrapup_active` held true or false across a chosen number of passes | **Yes, by parameter rather than by seam.** All four are `ProducerContext` fields the fixture builds directly (`run` builds a context at `:14332` and mutates it at `:14333`), so no clock abstraction is needed. This is the one place 4b is cheaper than 4a, where the equivalent capability (H8) was unavailable and blocked two liveness records outright (`../history_summarizer/fault-map.md:41`) |
 
 One availability caveat that cuts across T1, T8 and T9. Two records hinge on
-the caveman path, which is `explicit-config-only`: the module config default is
-`CavemanConfig { enabled: false, .. }` (`config.rs:74-79`, `false` at `:76`),
+the terse_text_compression path, which is `explicit-config-only`: the module config default is
+`TerseTextCompressionConfig { enabled: false, .. }` (`config.rs:74-79`, `false` at `:76`),
 the request serde default is `false` (`transform.rs:729-731`), and the shipped
-OpenCode plugin sends `caveman_enabled: !isSubagent &&
-deps.cavemanTextCompression?.enabled === true`
+OpenCode plugin sends `terse_text_compression_enabled: !isSubagent &&
+deps.terse_text_compressionTextCompression?.enabled === true`
 (`rust-mode-transform.ts:2015-2016`). Enabling it in a test is one field. But
 the path carries an unconditional production `assert!` at `:6366-6369`, so any
 test or marker that requires the deeper-tier-growth case to occur **crashes the
@@ -107,7 +107,7 @@ Two reachability preconditions are stated once here rather than per row. Every
 lens A record and ten of the twelve lens B records need
 `compaction_enabled == true`, which is the default (`config.rs:123`) and short-
 circuits to `apply_additive_only` when false (`transform.rs:3233-3235`). The
-two caveman records need the opt-in described above.
+two terse_text_compression records need the opt-in described above.
 
 ### Engine: commit point, atomicity, and the out-of-fence writes
 
@@ -118,13 +118,13 @@ two caveman records need the opt-in described above.
 | revert-truncate-commits-outside-the-terminal-cas | `loaded.core.reconcile_pending == true` plus a minted anchor absent from the live array (`:4636-4645`), which is the post-revert shape, then the `CoverageGap` at `:4704` (T8). That error sits inside the `:4650`-`:5565` window, so the split state is observable with no seam. A process kill anywhere else in the ~900-line window needs T2 | **Yes** — for the `:4704` form only |
 | revert-epoch-bumps-at-most-once-per-logical-recut | The reconcile-rematerialize arm plus a `CasConflict` on the terminal commit so attempt 2 re-enters the truncate (T1). Idempotence rests on the `dropped_count == 0` no-op arm (`memory-store/src/lib.rs:9053-9059`) returning the current epoch, and that on the recomputed `keep_through_seq` never being smaller than the surviving max sequence. Nothing covers the no-op arm today; `:18267` covers the bump path | **Yes** |
 | exactly-one-core-step-executes-per-pass | **None.** Structural: instrument `CoreState::step` with a per-pass counter. The seven call sites (`:2785`, `:2852`, `:4236`, `:4453`, `:4649`, `:4737`, `:4782`) are mutually exclusive by control-flow shape plus the *move* of `boundary_token: String` (`:3334-3338`) into whichever `PassInput` runs. The bound is at-most-one, not exactly-one: an accepted Defer path can execute no step | **Yes** |
-| core-fields-mutated-outside-the-step-machine | For the frozen-set half, a coverage-extending SOFT (`m1.new_coverage.is_some()`, `:4720`) with at least one frozen `red:` unit whose target the advance folds below coverage, so `prune_covered_red_units` (`:4748`) runs after the step bumped `core.version` (T8). For the latch half, a `validate_lineage_anchor` failure (`:2316-2377`, detected `:3261-3263`, handled `:4128-4132` and `:4813-4815`) on a pass whose boundary is still present. The `cav:` half additionally needs the caveman opt-in | **Yes** |
+| core-fields-mutated-outside-the-step-machine | For the frozen-set half, a coverage-extending SOFT (`m1.new_coverage.is_some()`, `:4720`) with at least one frozen `red:` unit whose target the advance folds below coverage, so `prune_covered_red_units` (`:4748`) runs after the step bumped `core.version` (T8). For the latch half, a `validate_lineage_anchor` failure (`:2316-2377`, detected `:3261-3263`, handled `:4128-4132` and `:4813-4815`) on a pass whose boundary is still present. The `cav:` half additionally needs the terse_text_compression opt-in | **Yes** |
 
 ### Engine: fences, races, and cache validity
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
-| defer-commit-carries-no-compartment-fence | **None constructible.** The fence really is absent on Defer — `compartment_max_seq` is `None` because `is_bust_pass` (`:4138`) excludes Defer, and `:4783-4786` writes the watermark from a read taken outside any predicate. But no production caller can land a compartment append inside that window: production historian publication does not use the standalone `append_compartments` wrapper (`memory-store/src/lib.rs:8615`), and the paths it does use bump the cache-state row version, which turns the interval into an ordinary stale-CAS retry. The earlier T1-hook recipe reached "constructible" only by treating production publication as the standalone wrapper | **No** — vacuous against current callers. A future production caller of standalone `append_compartments` would reopen it |
+| defer-commit-carries-no-history_segment-fence | **None constructible.** The fence really is absent on Defer — `history_segment_max_seq` is `None` because `is_bust_pass` (`:4138`) excludes Defer, and `:4783-4786` writes the watermark from a read taken outside any predicate. But no production caller can land a history_segment append inside that window: production history_summarizer publication does not use the standalone `append_history_segments` wrapper (`memory-store/src/lib.rs:8615`), and the paths it does use bump the cache-state row version, which turns the interval into an ordinary stale-CAS retry. The earlier T1-hook recipe reached "constructible" only by treating production publication as the standalone wrapper | **No** — vacuous against current callers. A future production caller of standalone `append_history_segments` would reopen it |
 | canonical-read-staleness-is-distinguishable-from-emptiness | A HARD pass whose canonical read is withheld: kernel phase not `Ready`, an `outbox_lag`/`read_visible` error, or a registered outbox consumer past a lag threshold (`serving.rs:58-63`); the unit test at `transform.rs:13278` injects the `KernelOutcome` directly; the integration test registers a consumer and publishes 10,000 outbox positions past its checkpoint on a real store | **Yes** - both forms run in CI |
 | speculative-tag-numbering-has-two-authorities | `tagging_active` (`:3503-3504`, requires `ClaudeCodeAnthropic` or `OpencodeAiSdk` plus `tool_present`) and a mint batch containing a `block_id` already present in `tags`, so the store's skip branch (`memory-store/src/lib.rs:7488-7495`) desynchronises every later number in the batch. Whether `compute_active_overlay_decisions` (`transform.rs:8574-8761`, 4e scope) can ever emit such a `block_id` is unresolved | **Partial** — the coverage form over the two numbering authorities is writable today; the mismatch needs a 4e answer first |
 | pass-firing-work-bounded-by-max-cas-retries | For the retry bound, the hook at `:5563-5564` committing a conflicting row on the first three attempts, then stopping, and asserting the firing returns within `MAX_CAS_RETRIES + 1 = 9` attempts (T1). For the tag-loop half, a writer changing the tag summary on every iteration (T6) | **Partial** — the attempt bound is constructible and unasserted today; the tag-loop half is blocked on T6 |
@@ -145,19 +145,19 @@ two caveman records need the opt-in described above.
 | --- | --- | --- |
 | sel-budget-execute-threshold-unvalidated-from-request | One request field: `effective_execute_threshold` as `NaN`, a negative, or a value above 90 (T5). `lib.rs:8298-8299` prefers it over the clamped route config unconditionally, so it reaches `clamp(1.0, 100.0)` at `:4231` intact | **Yes** — the cheapest oracle in the part |
 | sel-budget-ceiling-clamp-diverges-from-scheduler-cap | An effective threshold above 90 (T5), then assert the percentage used at `:4231` equals the threshold `scheduler::resolve_execute_threshold` produced for the same pass. Shares its enabling state with the record above; the defect under test is the divergent cap (`clamp(1.0, 100.0)` versus `min(90.0)` at `scheduler.rs:464`), not the missing validation | **Yes** |
-| sel-protected-tags-not-read-from-module-config | A user config setting `protected_tags` to something other than 20 on a Claude Code route (T5), then assert the effective value used by `newest_active_tag_block_ids` (`:4177-4182`) and caveman's protected cutoff (`:6318`). Structural today: `config.rs` has zero occurrences of the key, so the check is over `apply_claude_code_config_controls` (`lib.rs:173-193`) omitting it | **Yes** |
+| sel-protected-tags-not-read-from-module-config | A user config setting `protected_tags` to something other than 20 on a Claude Code route (T5), then assert the effective value used by `newest_active_tag_block_ids` (`:4177-4182`) and terse_text_compression's protected cutoff (`:6318`). Structural today: `config.rs` has zero occurrences of the key, so the check is over `apply_claude_code_config_controls` (`lib.rs:173-193`) omitting it | **Yes** |
 | sel-per-model-and-token-thresholds-inert-in-module | A config carrying `execute_threshold_tokens` or an object-valued `execute_threshold_percentage` (T5), then assert the `SchedulerConfig` handed to `scheduler::decide` reflects the parsed shape. `scheduler_config` hardwires `execute_threshold_tokens: None` (`:6109`) and always builds `Percentage` (`:6106-6108`), so `ExecuteThresholdConfig::ByModel` (`scheduler.rs:112-113`) is unreachable from either call site (`:2814`, `:3973`) | **Yes** |
 
-### Selection: observability, liveness, and caveman
+### Selection: observability, liveness, and terse_text_compression
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
 | sel-skip-unobservable-when-producer-gate-closed | Queue an agent drop through `handle_agent_drops_value`, then issue a transform whose usage is below the execute threshold, whose cache is warm, and which has no hard advisory, giving `producer_gate == false` and `SelectionOutcome::default()` (`:4258`) whose four counters are `None` (`selection.rs:1096-1104`). No fault class beyond ordinary state | **Yes** |
-| sel-queued-drop-drains-within-cache-ttl-window | One queued pending-drop row, usage below the execute threshold on every pass, no `soft_refresh_pending`, an initialized session, no historian lease, then `now_ms` advanced past `cache_ttl` (T9). The gate can also be held shut past the bound by `last_response_time_ms == 0` after a restart (T4) or by `ordinary_historian_veto` (`:4098-4104`) | **Yes** — with the limit that lens B did not enumerate every retirement path at `:6735-6779`, so the durability of a surviving drop across many defers is unverified |
-| sel-divergence-repair-bounded-by-three-pending-passes | A coverage gap with a missing or stale applied-compartment watermark so `divergence_candidate` is `Some` and `compartment_revision_matches` is false, plus no `divergence_inputs_moved` (T8), then three passes with `historian_active` and `wrapup_active` both false (T9). The uncovered arm is the freeze at `:3926-3928`, which needs a lease held true across many passes | **Yes** |
+| sel-queued-drop-drains-within-cache-ttl-window | One queued pending-drop row, usage below the execute threshold on every pass, no `soft_refresh_pending`, an initialized session, no history_summarizer lease, then `now_ms` advanced past `cache_ttl` (T9). The gate can also be held shut past the bound by `last_response_time_ms == 0` after a restart (T4) or by `ordinary_history_summarizer_veto` (`:4098-4104`) | **Yes** — with the limit that lens B did not enumerate every retirement path at `:6735-6779`, so the durability of a surviving drop across many defers is unverified |
+| sel-divergence-repair-bounded-by-three-pending-passes | A coverage gap with a missing or stale applied-history_segment watermark so `divergence_candidate` is `Some` and `history_segment_revision_matches` is false, plus no `divergence_inputs_moved` (T8), then three passes with `history_summarizer_active` and `wrapup_active` both false (T9). The uncovered arm is the freeze at `:3926-3928`, which needs a lease held true across many passes | **Yes** |
 | sel-cas-retry-budget-bounded-tag-hydration-unbounded | For the static half, none: the absence of a counter in the `loop` at `:7644` is verifiable by reading the code. For the contention half, two writers on one store or an interleaving tag mint from another route (T6) | **Partial** — merges with `pass-firing-work-bounded-by-max-cas-retries` |
-| sel-caveman-deeper-tier-growth-panics-in-production | Caveman enabled, a primary session, a block inside the eligible tag window, and a text block for which the deeper tier's compression is longer than the frozen payload. Whether such a block exists is a property of `caveman.rs`'s level ladder (4e scope) and is unresolved, because compression is always applied to the persisted original (`:6338-6340`) rather than to the intermediate | **Partial** — the tie arm at `:6370-6374` is constructible and is the safe coverage form; the growth case that fires the `assert!` is unresolved |
-| sel-caveman-eligibility-ladder-deterministic-over-frozen-basis | Caveman enabled, a primary session, a bust pass, and at least one new tag minted in that same pass so the hydrated and final tag sets differ. `age_basis_tag` is the max *hydrated* tag number (`:4492-4497`), captured before the mint suffix is appended and persisted in the same commit; a non-bust pass reuses the prior durable value (`:4499-4501`) | **Yes** |
+| sel-terse_text_compression-deeper-tier-growth-panics-in-production | TerseTextCompression enabled, a primary session, a block inside the eligible tag window, and a text block for which the deeper tier's compression is longer than the frozen payload. Whether such a block exists is a property of `terse_text_compression.rs`'s level ladder (4e scope) and is unresolved, because compression is always applied to the persisted original (`:6338-6340`) rather than to the intermediate | **Partial** — the tie arm at `:6370-6374` is constructible and is the safe coverage form; the growth case that fires the `assert!` is unresolved |
+| sel-terse_text_compression-eligibility-ladder-deterministic-over-frozen-basis | TerseTextCompression enabled, a primary session, a bust pass, and at least one new tag minted in that same pass so the hydrated and final tag sets differ. `age_basis_tag` is the max *hydrated* tag number (`:4492-4497`), captured before the mint suffix is appended and persisted in the same commit; a non-bust pass reuses the prior durable value (`:4499-4501`) | **Yes** |
 
 **Totals: 18 non-vacuous today, 5 partial, 1 no.**
 
@@ -165,13 +165,13 @@ The distribution differs from both neighbours, and the reason is worth naming.
 Part 3 had cheap capabilities missing and records blocked on infrastructure.
 Part 4a had almost everything constructible and one record blocked outright by a
 missing seam inside the publish transaction
-(`../historian/fault-map.md:108`). Part 4b has **no** blocked record and
+(`../history_summarizer/fault-map.md:108`). Part 4b has **no** blocked record and
 still has the same structural hole, because the hole falls on a claim no record
 covers: T3, a partial commit inside `commit_transform`, is unavailable and
 nothing in the catalog needs it. The five `Partial` rows cluster on three narrow
 capabilities: T4 (two processes on one store, 2 rows), T6 (tag contention, 2
 rows, which are the merge pair), and a 4e answer about whether a duplicate mint
-`block_id` or a growing deeper caveman tier is constructible at all (2 rows).
+`block_id` or a growing deeper terse_text_compression tier is constructible at all (2 rows).
 
 ## Coverage checks to add
 
@@ -184,13 +184,13 @@ never constructed dynamically.
 | `transform_pass_reached_the_terminal_commit_gate` | `commit_required` (`:5559-5560`) evaluated true | The ordinary shape of every accepted pass |
 | `transform_pass_returned_err_inside_the_mutation_region` | An error raised between the clone at `:4369` and the commit at `:5565` | Legal: the coverage, boundary and shape guards exist to raise exactly this. It is the precondition of the sole-writer obligation, not the violation |
 | `transform_lineage_descent_committed_before_the_array_guards` | A pass observed to reach `:3312` and then reach `:3355` | A structural fact about straight-line order, true today with fully correct behaviour |
-| `transform_revert_truncate_returned_a_nonzero_dropped_count` | `truncate_compartments_for_revert` (`:4646`) deleted at least one compartment | Legal; the reconcile-rematerialize arm exists for it |
+| `transform_revert_truncate_returned_a_nonzero_dropped_count` | `truncate_history_segments_for_revert` (`:4646`) deleted at least one history_segment | Legal; the reconcile-rematerialize arm exists for it |
 | `transform_revert_truncate_returned_the_no_op_arm` | The `dropped_count == 0` arm (`memory-store/src/lib.rs:9053-9059`) taken on a later attempt | Legal, and it is the mechanism the documented idempotency claim names. Untested today |
 | `transform_firing_performed_more_than_one_apply_once_attempt` | The retry loop at `:2274` iterated | Legal; `MAX_CAS_RETRIES` exists for it |
 | `transform_core_step_executed_once_for_this_pass` | Exactly one `CoreState::step` call completed | The positive form of the one-step invariant, legal by construction |
-| `transform_soft_step_was_followed_by_a_coverage_prune` | `prune_covered_red_units` (`:4748`) or `prune_covered_caveman_units` (`:4749`) ran after the step bumped `core.version` | Legal and is the documented ordering; recording it is what makes the "`version` is not a witness for the frozen set" finding checkable |
-| `transform_defer_commit_wrote_a_compartment_watermark` | A committing Defer wrote `meta.coverage_compartment_seq` at `:4783-4786` | Legal; that is the ordinary Defer path |
-| `transform_commit_withheld_the_compartment_fence` | `compartment_max_seq` was `None` at `:5173` | Legal: `is_bust_pass` excludes Defer by design, so observing `None` is a fact about the code, not an outcome |
+| `transform_soft_step_was_followed_by_a_coverage_prune` | `prune_covered_red_units` (`:4748`) or `prune_covered_terse_text_compression_units` (`:4749`) ran after the step bumped `core.version` | Legal and is the documented ordering; recording it is what makes the "`version` is not a witness for the frozen set" finding checkable |
+| `transform_defer_commit_wrote_a_history_segment_watermark` | A committing Defer wrote `meta.coverage_history_segment_seq` at `:4783-4786` | Legal; that is the ordinary Defer path |
+| `transform_commit_withheld_the_history_segment_fence` | `history_segment_max_seq` was `None` at `:5173` | Legal: `is_bust_pass` excludes Defer by design, so observing `None` is a fact about the code, not an outcome |
 | `transform_commit_carried_a_nonempty_tag_mint_span` | `tag_mint_count > 0`, so the commit sliced `tag_rows` at `:5591-5592` | Legal on any tagging pass |
 | `transform_store_skipped_an_existing_tag_block_id_at_commit` | The store's skip branch (`memory-store/src/lib.rs:7488-7495`) was taken for at least one input | The independent precondition of the numbering desync, stated without asserting a desync |
 | `transform_ingress_carried_a_replayed_synthetic_todo_pair` | An ingress array carried a synthetic pair recognised by its reserved call id rather than its wire marker | Legal OpenCode replay shape; the normalization exists for it |
@@ -198,9 +198,9 @@ never constructed dynamically.
 | `transform_effective_execute_threshold_arrived_outside_one_to_ninety` | The request field carried a non-finite or out-of-band value before either clamp | An input-domain outcome, legal to observe; the precondition of the clamp divergence, not the divergence |
 | `transform_producer_gate_closed_with_a_nonempty_pending_drop_queue` | `producer_gate == false` while durable pending drops existed | The common steady state; the precondition of the unobservable-skip record |
 | `transform_pass_observed_last_response_time_of_zero` | `last_response_time_ms == 0` on a pass, which is what `lib.rs:4482` produces on first observation in a process | Legal and deliberate; the precondition of the process-local-input record |
-| `transform_caveman_deeper_tier_tied_on_length` | The equal-length arm at `:6370-6374` taken: shallower bytes kept, deeper depth recorded at `:6378` | Legal and documented in the code's own comment. **Use this and never a growth marker**, because the `assert!` at `:6366-6369` panics in release on growth |
+| `transform_terse_text_compression_deeper_tier_tied_on_length` | The equal-length arm at `:6370-6374` taken: shallower bytes kept, deeper depth recorded at `:6378` | Legal and documented in the code's own comment. **Use this and never a growth marker**, because the `assert!` at `:6366-6369` panics in release on growth |
 | `transform_tag_hydration_loop_retried_at_least_once` | The `continue` at `:7678` or the fallthrough revalidation at `:7695` taken | Legal: the post-read probe exists for it. The precondition of the unbounded-loop concern, not a spin |
-| `transform_divergence_pending_count_was_frozen_by_a_held_lease` | The freeze arm at `:3926-3928` taken because `historian_active` or `wrapup_active` was true | Legal and deliberate per the comment at `:3919-3923`. This is the marker that keeps the three-pass `sometimes` honest |
+| `transform_divergence_pending_count_was_frozen_by_a_held_lease` | The freeze arm at `:3926-3928` taken because `history_summarizer_active` or `wrapup_active` was true | Legal and deliberate per the comment at `:3919-3923`. This is the marker that keeps the three-pass `sometimes` honest |
 
 ### The two existing `sometimes` records, checked against METHOD.md
 
@@ -215,7 +215,7 @@ needs a guard against a specific failure mode. Neither is duplicated above.
   refinement.** The bound is stated in passes, the unit
   `BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT` (`:85`) bounds, which is correct. The
   risk is starvation rather than illegality: the counter is *frozen*, not
-  incremented, while `historian_active || wrapup_active` (`:3926-3928`), so a
+  incremented, while `history_summarizer_active || wrapup_active` (`:3926-3928`), so a
   campaign that happens to hold either lease across the window never advances
   toward the repair and the marker fails for a legal reason. The three-pass
   window must therefore be constructed with both leases false, and that
@@ -235,22 +235,22 @@ here because the defect is easier to name than its precondition.
   `transform_firing_performed_more_than_one_apply_once_attempt` and
   `transform_revert_truncate_returned_the_no_op_arm` instead: two independent
   preconditions, both legal, both present on a correct implementation.
-- Do not pair `always(!stale_compartment_watermark_committed)` with
-  `sometimes(stale_compartment_watermark_committed)`. Assert
-  `transform_defer_commit_wrote_a_compartment_watermark` and
-  `transform_commit_withheld_the_compartment_fence` instead. The second is a
+- Do not pair `always(!stale_history_segment_watermark_committed)` with
+  `sometimes(stale_history_segment_watermark_committed)`. Assert
+  `transform_defer_commit_wrote_a_history_segment_watermark` and
+  `transform_commit_withheld_the_history_segment_fence` instead. The second is a
   fact about `is_bust_pass`, not an outcome.
 - Do not pair `always(rendered_tag_number == durable_tag_number)` with
   `sometimes(tag_number_desync)`. Assert
   `transform_store_skipped_an_existing_tag_block_id_at_commit` instead.
-- Do not pair `always(!caveman_payload_grew)` with
-  `sometimes(caveman_payload_grew)`. The production `assert!` at `:6366-6369`
+- Do not pair `always(!terse_text_compression_payload_grew)` with
+  `sometimes(terse_text_compression_payload_grew)`. The production `assert!` at `:6366-6369`
   **is** the enforcement and it panics, so a companion `sometimes` can only fire
   by crashing the pass in release. This is why the record is written as
   `unreachable` on the assertion's failing edge rather than as `always` over the
   size relation: `unreachable` needs no witness of the forbidden state, only
   proof that the edge is not entered. Assert
-  `transform_caveman_deeper_tier_tied_on_length` for situation coverage instead.
+  `transform_terse_text_compression_deeper_tier_tied_on_length` for situation coverage instead.
 - Do not pair `always(threshold_in_1_to_90)` with
   `sometimes(threshold_out_of_band)`. Assert
   `transform_effective_execute_threshold_arrived_outside_one_to_ninety`
@@ -286,7 +286,7 @@ infrastructure, a new dependency, a subprocess harness, or a new seam.
    `scripts/test-rust.sh` lane that already exists in `package.json` and that no
    workflow invokes. It unblocks **zero** new records and **protects 271
    existing test functions**: 226 in-scope tests in `transform.rs`, 18 in
-   `injection.rs`, 7 in `compartment_coverage.rs`, 5 in `healing.rs`, 7 in
+   `injection.rs`, 7 in `history_segment_coverage.rs`, 5 in `healing.rs`, 7 in
    `divergence.rs`, and the 6 store-side transform-commit tests at
    `memory-store/src/lib.rs:14207-18267`, plus the two real-transform integration
    tests in `direct_host.rs` (`:67`, `:149`), which are the only place a
@@ -314,7 +314,7 @@ infrastructure, a new dependency, a subprocess harness, or a new seam.
    owns the harness, and which documented divergences become failures rather
    than recorded exceptions. Note the asymmetry with Part 4a: there, one side of
    the bridge already existed as a checked-in golden
-   (`historian_validate.rs:1384`); here neither side has an oracle, so this is
+   (`history_summarizer_validate.rs:1384`); here neither side has an oracle, so this is
    slightly more work than 4a's equivalent and buys more.
 
 3. **T5, boundary values on one request field.** No fault, no seam, no store
@@ -339,7 +339,7 @@ infrastructure, a new dependency, a subprocess harness, or a new seam.
    valid: `revert-epoch-bumps-at-most-once-per-logical-recut`,
    `recut-intent-survives-the-mandatory-cas-reload`, and
    `output-cache-replace-trails-the-accepted-commit`. It no longer buys
-   `defer-commit-carries-no-compartment-fence`: that record's row above now reads
+   `defer-commit-carries-no-history_segment-fence`: that record's row above now reads
    **No**, because the interleaving the hook would create is unreachable from
    production callers, so the hook cannot make it non-vacuous. It sits below item 3
    only because it is a seam rather than a value. Two specific gaps it closes
@@ -402,7 +402,7 @@ infrastructure, a new dependency, a subprocess harness, or a new seam.
     partial-commit level. Adding one would need a hook in a sibling repository
     that CI provisions as a metadata-only stub, so it is an ownership decision
     before it is an engineering task. This is the same wall Part 4a hit for the
-    publish transaction (`../historian/fault-map.md:255-265`).
+    publish transaction (`../history_summarizer/fault-map.md:255-265`).
 
 **Records that need a product decision rather than a harness.** No amount of
 test infrastructure resolves these, and each is a live open question from at
@@ -413,8 +413,8 @@ least one lens:
   `:2354-2357`) live in a release build, and no `docs/` file mentions it. If it
   is a developer switch the gate should say so; if it is an operational canary
   the panic is the contract and should be documented.
-- Whether the caveman `assert!` at `:6366-6369` should be a panic at all, given
-  the documentation describes caveman with no failure mode
+- Whether the terse_text_compression `assert!` at `:6366-6369` should be a panic at all, given
+  the documentation describes terse_text_compression with no failure mode
   (`CONFIGURATION.md:720-744` (source-catalog path, not present at HEAD)) and the code's own comment at `:6366-6368`
   explains the tie behaviour without addressing the growth case.
 - Whether any host can reach `apply_additive_only` (`:2711-3219`) with its
@@ -429,7 +429,7 @@ least one lens:
 - Whether the documented `execute_threshold_tokens` map and object-valued
   `execute_threshold_percentage` are TypeScript-leg-only features, and if so
   whether `CONFIGURATION.md` (source-catalog path, not present at HEAD) should annotate keys by leg. The same question 4a
-  reached about `historian.two_pass`.
+  reached about `history_summarizer.two_pass`.
 - Whether the `#[cfg(test)]` drift check at `:5451-5479` should ship in a
   sampled form, since it is the strongest check in the engine and is compiled
   out while its weaker twin ships behind an undocumented environment variable.

@@ -1,19 +1,19 @@
 import { createHmac } from "node:crypto";
 import hostRelease from "../../../../../release/host-release.json";
-import type { BrocaProvider, CredentialFingerprints } from "./types";
+import type { CredentialFingerprints, ModelExecutionProvider } from "./types";
 
 const DOMAIN: string = hostRelease.credential_fingerprint.domain;
 const CANONICALIZATION: string = hostRelease.credential_fingerprint.canonicalization;
-export const BROCA_CREDENTIAL_VALUE_CAP_BYTES: number =
+export const MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES: number =
     hostRelease.harness_unavailable.value_cap_bytes;
 
 const PROVIDER_ROWS = {
     anthropic: ["ANTHROPIC_API_KEY"],
     google: ["GEMINI_API_KEY"],
     openai: ["OPENAI_API_KEY"],
-} as const satisfies Record<BrocaProvider, readonly string[]>;
+} as const satisfies Record<ModelExecutionProvider, readonly string[]>;
 
-export const BROCA_CREDENTIAL_NAMES = Object.freeze(Object.values(PROVIDER_ROWS).flat());
+export const MODEL_EXECUTION_CREDENTIAL_NAMES = Object.freeze(Object.values(PROVIDER_ROWS).flat());
 
 function encoded(field: string): string {
     return `${Buffer.byteLength(field)}:${field}`;
@@ -21,7 +21,7 @@ function encoded(field: string): string {
 
 export function canonicalCredentialRowEncoding(
     harness: "opencode" | "pi",
-    provider: BrocaProvider,
+    provider: ModelExecutionProvider,
     entries: readonly (readonly [string, string])[],
 ): string {
     let message = encoded(CANONICALIZATION) + encoded(harness) + encoded(provider);
@@ -40,20 +40,20 @@ export function credentialFingerprints(
         throw new TypeError("connection key must be exactly 32 bytes");
     }
     const derivedKey = createHmac("sha256", connectionKey).update(DOMAIN).digest();
-    const fingerprints: Partial<Record<BrocaProvider, string>> = {};
+    const fingerprints: Partial<Record<ModelExecutionProvider, string>> = {};
     for (const [provider, names] of Object.entries(PROVIDER_ROWS) as [
-        BrocaProvider,
+        ModelExecutionProvider,
         readonly string[],
     ][]) {
         const entries: [string, string][] = [];
         let complete = true;
         for (const name of names) {
             const value = source[name];
-            // An unqualified value drops only this provider's row, matching the host's per-provider `provider_row` in `crates/host-runtime/src/broca/subprocess.rs`.
+            // An unqualified value drops only this provider's row, matching the host's per-provider `provider_row` in `crates/host-runtime/src/model_execution/subprocess.rs`.
             if (
                 value === undefined ||
                 value.length === 0 ||
-                Buffer.byteLength(value) > BROCA_CREDENTIAL_VALUE_CAP_BYTES
+                Buffer.byteLength(value) > MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES
             ) {
                 complete = false;
                 break;

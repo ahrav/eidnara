@@ -7,7 +7,7 @@ import type {
 import { Box, type Component, Text } from "@earendil-works/pi-tui";
 import { sessionLog } from "@eidnara/opencode/shared/logger";
 
-export const CTX_STATUS_CUSTOM_TYPE = "ctx-status";
+export const CTX_STATUS_CUSTOM_TYPE = "eidnara-status";
 
 export type CtxStatusLevel = "info" | "success" | "warning" | "error";
 

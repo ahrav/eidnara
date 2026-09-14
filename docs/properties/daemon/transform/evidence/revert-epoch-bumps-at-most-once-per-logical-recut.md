@@ -22,35 +22,35 @@ The retry loop:
 
 So attempts run for `attempt` values 0 through 8, giving at most nine
 `apply_once` invocations. Each one re-reads everything: `load_transform_snapshot`
-at `:3387` and `load_compartments` at `:4643`.
+at `:3387` and `load_history_segments` at `:4643`.
 
 The truncate arm on attempt 2 recomputes its argument:
 
-- `transform.rs:4643` — `let compartments = store.load_compartments(&req.session_id)?;`
+- `transform.rs:4643` — `let history_segments = store.load_history_segments(&req.session_id)?;`
 - `transform.rs:4644-4645` — `let keep_through_seq =
-  surviving_revert_prefix_seq(&compartments, &live);`
+  surviving_revert_prefix_seq(&history_segments, &live);`
 
 `surviving_revert_prefix_seq` (`transform.rs:7275-7284`):
 
 ```
 let live_ids: BTreeSet<&str> = live.iter().map(|block| block.id()).collect();
-compartments
+history_segments
     .iter()
-    .take_while(|compartment| live_ids.contains(compartment.end_message_id.as_str()))
-    .map(|compartment| compartment.sequence)
+    .take_while(|history_segment| live_ids.contains(history_segment.end_message_id.as_str()))
+    .map(|history_segment| history_segment.sequence)
     .last()
     .unwrap_or(-1)
 ```
 
 It is a `take_while` prefix scan. `live` is fixed within one firing, because
 `req` does not change across retries. Truncation removes a suffix of
-`compartments`. Removing a suffix cannot shorten a `take_while` prefix, so
+`history_segments`. Removing a suffix cannot shorten a `take_while` prefix, so
 `keep_through_seq` on attempt 2 is greater than or equal to attempt 1's value.
 
 The idempotence then rests on the store's no-op arm:
 
 - `memory-store/src/lib.rs:9046-9052` — `SELECT COUNT(*), MIN(sequence),
-  MAX(sequence) FROM compartments WHERE session_id = ?1 AND sequence > ?2`
+  MAX(sequence) FROM history_segments WHERE session_id = ?1 AND sequence > ?2`
 - `memory-store/src/lib.rs:9053-9059` — `if dropped_count == 0 { return
   Ok(TruncateTxnOutcome::Committed(TruncateOutcome { revert_epoch:
   meta.revert_epoch, last_recut: meta.last_recut, row_version: current.max(0) as
@@ -77,7 +77,7 @@ The test hook that makes this constructible exists:
 ## Failure scenario
 
 If `keep_through_seq` on a retry were ever *smaller* than the previous
-attempt's, the retry would find `dropped_count > 0`, delete more compartments,
+attempt's, the retry would find `dropped_count > 0`, delete more history_segments,
 and bump `revert_epoch` a second time within one firing. The observable
 consequences: the serialized-output cache is evicted twice
 (`transform.rs:5381`, `:422-429`), and `revert_epoch` stops being a witness for
@@ -89,7 +89,7 @@ over-count.
 
 Window: one firing, up to nine attempts. No external writer required, only a
 CAS conflict on the terminal commit, which a concurrent state-sync, agent-drop
-consumption, or historian publish can cause.
+consumption, or history_summarizer publish can cause.
 
 Dependency: the argument above assumes `live` is byte-identical across attempts
 within a firing. That holds because `req` is borrowed unchanged into
@@ -119,19 +119,19 @@ within a firing. That holds because `req` is borrowed unchanged into
 - Sources examined: `transform.rs:7275-7284` (the whole function),
   `:4643-4645`, `:2274-2299`, `:3243`, `:3342`;
   `memory-store/src/lib.rs:9046-9059`.
-- Findings: the function is a `take_while` over `compartments` in iteration
+- Findings: the function is a `take_while` over `history_segments` in iteration
   order, gated on `end_message_id` membership in the `live` id set. Two inputs:
-  `compartments`, which loses a suffix across the retry, and `live`, which is
+  `history_segments`, which loses a suffix across the retry, and `live`, which is
   fixed. A `take_while` prefix over a list that lost a suffix is the same prefix
-  truncated at worst to the surviving length. Since the surviving compartments
+  truncated at worst to the surviving length. Since the surviving history_segments
   are exactly the prefix through `keep_through_seq`, and each of those had a live
   `end_message_id` on attempt 1, the same predicate holds on attempt 2 and the
   scan runs to the end of the shorter list. So `keep_through_seq` is unchanged.
   Then `sequence > keep_through_seq` selects nothing and `dropped_count == 0`.
-- Missing evidence: whether `load_compartments` returns rows ordered by
+- Missing evidence: whether `load_history_segments` returns rows ordered by
   `sequence`. The `take_while` is order-sensitive and the argument depends on it.
   The truncate's own queries order explicitly (`memory-store/src/lib.rs:9066`,
-  `:9075`), but `load_compartments`'s ordering was not read.
-- Conclusion: unresolved, needs one read of `load_compartments`'s `ORDER BY`.
+  `:9075`), but `load_history_segments`'s ordering was not read.
+- Conclusion: unresolved, needs one read of `load_history_segments`'s `ORDER BY`.
   The reasoning is sound conditional on ordered output, and no test constructs
   the retry today, so the record's confidence stays medium.

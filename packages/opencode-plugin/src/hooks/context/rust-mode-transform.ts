@@ -12,19 +12,19 @@ import {
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
 import {
-    resolveCtxReduceAvailability,
-    resolveCtxReduceAvailabilityFromMessages,
-    resolveTodowriteAvailability,
-    resolveTodowriteAvailabilityFromMessages,
-    type ToolAvailabilityVerdict,
-    todowritePermissionDenied,
-} from "./ctx-reduce-availability";
-import {
     applyRecipe,
     canonicalJsonLength,
     parseRecipe,
     type RecipeSourceBase,
 } from "./edit-recipe";
+import {
+    resolveEidnaraReduceAvailability,
+    resolveEidnaraReduceAvailabilityFromMessages,
+    resolveTodowriteAvailability,
+    resolveTodowriteAvailabilityFromMessages,
+    type ToolAvailabilityVerdict,
+    todowritePermissionDenied,
+} from "./eidnara-reduce-availability";
 import type { ContextUsageEntry } from "./event-handler";
 import type { ContextUsage } from "./event-payloads";
 import {
@@ -78,7 +78,7 @@ export interface RustModeTransformDeps extends SessionDirectoryDeps {
     historyBudgetPercentage?: number;
     promptSurface?: PromptSurfaceConfig;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
-    cavemanTextCompression?: { enabled: boolean; minChars: number };
+    terse_text_compressionTextCompression?: { enabled: boolean; minChars: number };
     autoSearch?: { enabled: boolean; scoreThreshold: number; minPromptChars: number };
     cacheTtl: string | Record<string, string>;
     compactionOff?: boolean;
@@ -767,8 +767,8 @@ function buildTransformBody(args: {
         auto_search_min_prompt_chars: args.passInputs.auto_search_min_prompt_chars,
         history_budget_tokens: args.passInputs.history_budget_tokens,
         clear_reasoning_age: args.passInputs.clear_reasoning_age,
-        caveman_enabled: args.passInputs.caveman_enabled === true,
-        caveman_min_chars: args.passInputs.caveman_min_chars ?? 500,
+        terse_text_compression_enabled: args.passInputs.terse_text_compression_enabled === true,
+        terse_text_compression_min_chars: args.passInputs.terse_text_compression_min_chars ?? 500,
         cache_ttl: args.passInputs.cache_ttl,
     };
 }
@@ -1100,8 +1100,8 @@ export function createRustModeTransform(
             const passUsageSnapshot = loadContextUsage(deps, sessionId);
             let model = modelFromMessages(messages);
             // Both verdicts freeze from the first user message in the live array before the DB is consulted; a session whose first user row is not yet persisted otherwise reads as provisional and fails closed.
-            resolveCtxReduceAvailabilityFromMessages(sessionId, messages);
-            const reduceAvailability = resolveCtxReduceAvailability(sessionId);
+            resolveEidnaraReduceAvailabilityFromMessages(sessionId, messages);
+            const reduceAvailability = resolveEidnaraReduceAvailability(sessionId);
             resolveTodowriteAvailabilityFromMessages(sessionId, messages);
             const todoAvailability = resolveTodowriteAvailability(sessionId);
             const toolPresent = reduceAvailability.frozen && reduceAvailability.callable;
@@ -1214,8 +1214,10 @@ export function createRustModeTransform(
                 auto_search_min_prompt_chars: deps.autoSearch?.minPromptChars ?? 20,
                 history_budget_tokens: historyBudgetTokens,
                 clear_reasoning_age: deps.clearReasoningAge,
-                caveman_enabled: !isSubagent && deps.cavemanTextCompression?.enabled === true,
-                caveman_min_chars: deps.cavemanTextCompression?.minChars ?? 500,
+                terse_text_compression_enabled:
+                    !isSubagent && deps.terse_text_compressionTextCompression?.enabled === true,
+                terse_text_compression_min_chars:
+                    deps.terse_text_compressionTextCompression?.minChars ?? 500,
                 cache_ttl: resolveCacheTtl(deps.cacheTtl, modelKey ?? undefined),
                 is_subagent: isSubagent,
                 tool_present: toolPresent,

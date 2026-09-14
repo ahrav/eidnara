@@ -13,7 +13,7 @@ use host_runtime::{
     RequestOutcome, RouteHandle, RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
 };
 
-use support::synapse::EchoPrimary;
+use support::local_embeddings::EchoPrimary;
 
 const BUDGET: Duration = Duration::from_secs(10);
 
@@ -138,10 +138,14 @@ async fn wait_for_publication(publication: &PathBuf) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn transport_publishes_before_blocked_activation_settles() {
     let data_root = tempfile::tempdir().expect("data root");
-    let synapse_like = GatedActivation::new("synapse", false);
-    let broca_like = GatedActivation::new("broca", false);
-    let composite = StaticComposite::new(EchoPrimary, synapse_like.clone(), broca_like.clone())
-        .expect("distinct ids");
+    let local_embeddings_like = GatedActivation::new("local_embeddings", false);
+    let model_execution_like = GatedActivation::new("model_execution", false);
+    let composite = StaticComposite::new(
+        EchoPrimary,
+        local_embeddings_like.clone(),
+        model_execution_like.clone(),
+    )
+    .expect("distinct ids");
 
     let shutdown = CancellationToken::new();
     let run_shutdown = shutdown.clone();
@@ -151,8 +155,8 @@ async fn transport_publishes_before_blocked_activation_settles() {
         tokio::spawn(async move { host_runtime::run(composite, config, run_shutdown).await });
 
     wait_for_publication(&publication).await;
-    assert!(!synapse_like.activated.load(Ordering::SeqCst));
-    assert!(!broca_like.activated.load(Ordering::SeqCst));
+    assert!(!local_embeddings_like.activated.load(Ordering::SeqCst));
+    assert!(!model_execution_like.activated.load(Ordering::SeqCst));
 
     let info = support::raw_client::discover(&publication).expect("publication validates");
     let mut client = support::raw_client::RawClient::connect(&info)
@@ -180,7 +184,7 @@ async fn transport_publishes_before_blocked_activation_settles() {
     let err = client
         .route_open_target(
             "management_surface",
-            "synapse",
+            "local_embeddings",
             "/workspace/project",
             "opencode",
             "s1",
@@ -189,13 +193,13 @@ async fn transport_publishes_before_blocked_activation_settles() {
         .expect_err("gated secondary rejects until activation settles");
     assert_eq!(err, "module_reloading");
 
-    synapse_like.release.add_permits(1);
+    local_embeddings_like.release.add_permits(1);
     let deadline = tokio::time::Instant::now() + BUDGET;
     loop {
         match client
             .route_open_target(
                 "management_surface",
-                "synapse",
+                "local_embeddings",
                 "/workspace/project",
                 "opencode",
                 "s2",
@@ -213,9 +217,9 @@ async fn transport_publishes_before_blocked_activation_settles() {
             Err(code) => panic!("released lane must bind, got {code}"),
         }
     }
-    assert!(!broca_like.activated.load(Ordering::SeqCst));
+    assert!(!model_execution_like.activated.load(Ordering::SeqCst));
 
-    broca_like.release.add_permits(1);
+    model_execution_like.release.add_permits(1);
     drop(client);
     shutdown.cancel();
     let result = host.await.expect("run task joins");
@@ -225,11 +229,11 @@ async fn transport_publishes_before_blocked_activation_settles() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn activation_invariant_failure_reaches_the_fatal_channel() {
     let data_root = tempfile::tempdir().expect("data root");
-    let failing = GatedActivation::new("synapse", true);
+    let failing = GatedActivation::new("local_embeddings", true);
     let composite = StaticComposite::new(
         EchoPrimary,
         failing.clone(),
-        support::StubComponent::new("broca", "management_surface"),
+        support::StubComponent::new("model_execution", "management_surface"),
     )
     .expect("distinct ids");
 
@@ -264,11 +268,11 @@ async fn activation_invariant_failure_reaches_the_fatal_channel() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn expected_artifact_faults_degrade_only_their_lane() {
     let data_root = tempfile::tempdir().expect("data root");
-    let degrading = GatedActivation::new("synapse", false);
+    let degrading = GatedActivation::new("local_embeddings", false);
     let composite = StaticComposite::new(
         EchoPrimary,
         degrading.clone(),
-        support::StubComponent::new("broca", "management_surface"),
+        support::StubComponent::new("model_execution", "management_surface"),
     )
     .expect("distinct ids");
 
@@ -376,8 +380,8 @@ async fn bootstrap_precedes_publication_and_activation_follows_it() {
     }));
     let composite = StaticComposite::new(
         primary.clone(),
-        support::StubComponent::new("synapse", "management_surface"),
-        support::StubComponent::new("broca", "management_surface"),
+        support::StubComponent::new("local_embeddings", "management_surface"),
+        support::StubComponent::new("model_execution", "management_surface"),
     )
     .expect("distinct ids");
 

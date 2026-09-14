@@ -10,7 +10,7 @@ Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927`
 [../../METHOD.md](../../METHOD.md). Scope and region maps taken from
 [../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md),
 sub-part 4e: `transform.rs:7511-12623`, `tail_hygiene.rs`, `decay_render.rs`,
-`caveman.rs`, `memory_render.rs`, `classify.rs`, `prompt_surface.rs`.
+`terse_text_compression.rs`, `memory_render.rs`, `classify.rs`, `prompt_surface.rs`.
 
 Every line reference below was read back at `HEAD` before it was written. The
 region map's line numbers for `transform.rs` still hold at `e447c927`: the
@@ -88,10 +88,10 @@ Inside the tail loop, for one retained message, in order:
 | identity hash | `:11882-11897` (`message_output_identity`, `:11014-11096`) | nothing | nothing |
 | cache lookup | `:11904` (`cached_output_item`, `:11098-11109`) | a whole previously-served message | nothing; but a cached `Some(None)` replays "this message renders to nothing" |
 | reduced-block replacement | `:11945-11966` | `[dropped §N§]` display payload (`:11949-11956`) | replaces a block in place, index-stable |
-| caveman replacement | `:11967-11990` | nothing | replaces text in place, index-stable |
+| terse_text_compression replacement | `:11967-11990` | nothing | replaces text in place, index-stable |
 | `apply_surface_strips` | `:11992-12003` (`:10371-10458`) | a provider sentinel | **collapses `content` to a single sentinel block** on a whole-message strip (`:10388-10391`) or a fully-emptied stale reduce (`:10454-10457`); otherwise index-stable |
 | full-drop filter | `:12004-12023` | nothing | **removes blocks and re-indexes `content`** |
-| `apply_tag_overlay_to_message` | `:12024-12031` (`:8208-8269`) | `§N§ ` prefix, temporal comment, user hint, Channel-1 reminder | nothing |
+| `apply_tag_overlay_to_message` | `:12024-12031` (`:8208-8269`) | `§N§` prefix, temporal comment, user hint, Channel-1 reminder | nothing |
 | `remove_frozen_historical_reasoning` | `:12035` | nothing | reasoning blocks |
 | `present` gate | `:12037-12039` | nothing | **the whole message** |
 | serializer residual / trailing blank | `:12041-12059` | a canonical blank block | a merged reasoning block |
@@ -252,7 +252,7 @@ which is what keeps `newest_active_tag_block_ids`'s `source_bytes` comparison at
 16. `transform.rs:9070-9082` — `utf16_prefix` measures in UTF-16 units but slices
     on whole scalars, so no truncation can emit a lone surrogate.
 17. `transform.rs:9119-9128` — `truncate_hint_to_total_cap` rebuilds the
-    `<ctx-search-hint>` envelope around the truncated body, so a truncated hint
+    `<eidnara-search-hint>` envelope around the truncated body, so a truncated hint
     is still a balanced element. Same for `one_line_fragment` (`:9130-9140`),
     which appends `…` inside the list item.
 18. `transform.rs:8443-8445` — when a whole line consists only of tag
@@ -273,7 +273,7 @@ which is what keeps `newest_active_tag_block_ids`'s `source_bytes` comparison at
     block, not an empty one.
 21. `decay_render.rs:330-348` — the history budget guard demotes tiers
     oldest-first until the body fits, and tier 5 renders empty
-    (`:319-322`), so under a binding budget whole compartments leave the
+    (`:319-322`), so under a binding budget whole history_segments leave the
     rendered artifact. Part 3 owns the ladder and the termination bound; noted
     here only because it is the one place in the m0 body where a bound removes
     content.
@@ -294,6 +294,7 @@ Confidence: high — [evidence](evidence/render-a-composition-order-is-fixed-and
 Existing check: `transform.rs:27150`, `:23307`; both inline, neither runs in CI.
 Impact: A duplicated or reordered message is a provider-visible prefix change, which busts the prompt cache at best and produces an invalid conversation at worst.
 Open questions:
+
 - Can the anchored and unanchored synthetic-todo branches both fire in one pass? The anchored branch requires `anchor_mid.is_some()` and the unanchored branch requires `anchor_mid.is_none()` on the same `meta.synthetic_todo`, so no. Recorded as resolved in the evidence file.
 
 ### render-a-emptied-tail-message-drops-without-a-report
@@ -310,6 +311,7 @@ Confidence: high — [evidence](evidence/render-a-emptied-tail-message-drops-wit
 Existing check: none.
 Impact: A message the module intended to keep leaves the served context silently. If it was an authored user message, the agent loses a directive with no signal that it happened.
 Open questions:
+
 - Is the omission intended for every producer, or only for the strip path? The `present` predicate accepts a message absent from `blocks_by_mid`, which suggests the author's target was messages with no projected blocks, not messages emptied by strips. Needs the author. (needs human input)
 
 ### render-a-overlay-targets-stale-indices-after-full-drop-filter
@@ -324,8 +326,9 @@ Fault/timing angle: None. The hazard is a within-message index shift, not a race
 Required faults and enabling state: One message must contain a block that the full-drop filter removes (`full_drop_tool_ids` returns its tool id, `:10839-10891`, which needs a frozen `red:` unit of kind `drop`) followed by at least two overlay-eligible blocks. Whether that shape occurs is the open question. A whole-message strip collapsing `content` to one block (`:10388`) creates the same shift with a smaller footprint. The `block_index >= content.len()` guards at `:8227` and `:10400` convert the out-of-range half of the hazard into a silently skipped overlay, which is a separate failure mode with the same cause.
 Confidence: medium — [evidence](evidence/render-a-overlay-targets-stale-indices-after-full-drop-filter.md). The index shift is verified from source: `filter_map` rebuilds `content` at `:12014-12021` and the overlay at `:12024-12031` passes the same unmodified `blocks` slice. What is not established is whether a real harness emits a message with a full-drop tool block followed by two taggable blocks.
 Existing check: `transform.rs:27216`, `:27131`; neither runs in CI.
-Impact: A `§N§` prefix on the wrong block breaks the tag-to-block mapping that `ctx_reduce` resolves against, so the agent's reduce request hits content it did not choose. The bytes are already frozen into the provider prefix by the time it could be noticed.
+Impact: A `§N§` prefix on the wrong block breaks the tag-to-block mapping that `eidnara_reduce` resolves against, so the agent's reduce request hits content it did not choose. The bytes are already frozen into the provider prefix by the time it could be noticed.
 Open questions:
+
 - Can one wire message carry a full-drop tool block followed by two or more taggable blocks? Depends on the harness codecs, which are 4f scope. Unresolved, needs 4f.
 
 ### render-a-duplicate-tool-use-repair-is-release-only
@@ -342,6 +345,7 @@ Confidence: high — [evidence](evidence/render-a-duplicate-tool-use-repair-is-r
 Existing check: `transform.rs:21504` (debug only), `:21514` (release only, does not compile in a debug test run).
 Impact: The two profiles disagree about what a duplicate does: debug aborts the pass, release silently removes content and continues. Whichever profile ships is the only one whose behaviour was ever executed, and today neither arm's test runs in CI.
 Open questions:
+
 - Which profile does the shipped `eidnara-host` use? `ci.yml:164-165` builds it without `--release`, so the CI artifact is a debug build with the panicking arm. Whether the distributed artifact matches is unresolved, needs the release pipeline.
 
 ### render-a-orphan-tool-arc-has-no-production-detection
@@ -358,6 +362,7 @@ Confidence: high — [evidence](evidence/render-a-orphan-tool-arc-has-no-product
 Existing check: `transform.rs:5486-5487` (test builds only), plus the test-module assertions listed above.
 Impact: An orphaned arc is a deterministic provider 400 for the whole session until the array changes. In production nothing detects it, so the first signal is the provider error.
 Open questions:
+
 - Is the guard test-only deliberately, on the argument that its cost is O(messages × blocks) per pass? The sibling `enforce_unique_tool_use_ids` runs in production with a comparable cost, so the asymmetry looks unintentional. Needs the author. (needs human input)
 
 ### render-a-mint-batch-block-ids-are-unique-per-pass
@@ -374,6 +379,7 @@ Confidence: medium — [evidence](evidence/render-a-mint-batch-block-ids-are-uni
 Existing check: `transform.rs:23364`, `:23466`; neither runs in CI.
 Impact: This is the enabling condition for the sibling record [`speculative-tag-numbering-has-two-authorities`](../../transform/catalog.md#speculative-tag-numbering-has-two-authorities). If it holds, that record's divergence is unreachable through the public path; if the generation trigger has a gap, it is reachable.
 Open questions:
+
 - Do the `tags` SQLite triggers advance `generation` on delete and on update, not only on insert? Unresolved, needs an `memory-store` read.
 
 ### render-a-channel2-derived-tag-numbers-name-no-durable-row
@@ -386,18 +392,19 @@ Guarantee: Every `§N§` a nudge or directive renders names a tag number the age
 Check: `always` — whenever `format_reclaimable_hint` produces a non-empty string, assert each rendered `N` matches a durable `tags.tag_number` for this session. `always` because a directive naming a non-existent handle is wrong every time it is rendered.
 Fault/timing angle: None.
 Required faults and enabling state: `SerializerProfile::OpencodeAiSdk` (so `channel2_directives` takes the host-directive arm at `:9347-9365`), Channel-2 pressure due, and `active_tags_for_nudge` returning empty so `active_tags_for_channel2` falls through to the derived numbering at `:9293-9312`. The comment at `:9279-9281` says that fallthrough is deliberate for profiles that "historically did not mint overlay tags", which is exactly the state in which no durable row exists.
-Confidence: medium — [evidence](evidence/render-a-channel2-derived-tag-numbers-name-no-durable-row.md). Verified the derived numbering, verified it reaches `oldest_channel2_hint` (`:9396`) and `format_reclaimable_hint` (`:9872`), and verified the rendered form is `§N§ tool`. Not verified: what `ctx_reduce` does with a tag number that has no row, which is 4d's surface.
+Confidence: medium — [evidence](evidence/render-a-channel2-derived-tag-numbers-name-no-durable-row.md). Verified the derived numbering, verified it reaches `oldest_channel2_hint` (`:9396`) and `format_reclaimable_hint` (`:9872`), and verified the rendered form is `§N§ tool`. Not verified: what `eidnara_reduce` does with a tag number that has no row, which is 4d's surface.
 Existing check: none.
-Impact: The agent is told to reduce `§3§` when no `§3§` exists, so a compliant `ctx_reduce` either no-ops or resolves to a different block. The second is a misattributed reduction.
+Impact: The agent is told to reduce `§3§` when no `§3§` exists, so a compliant `eidnara_reduce` either no-ops or resolves to a different block. The second is a misattributed reduction.
 Open questions:
-- Does `ctx_reduce` reject an unresolvable tag number or silently resolve it? `parse_tag_range_string` is `lib.rs:15165-15210`, which is 4d scope. Unresolved, needs 4d.
+
+- Does `eidnara_reduce` reject an unresolvable tag number or silently resolve it? `parse_tag_range_string` is `lib.rs:15165-15210`, which is 4d scope. Unresolved, needs 4d.
 
 ### render-a-hygiene-metric-ignores-surface-strips
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `recurring_raw_call_id_orphan_is_conservative_t_only` (`tail_hygiene.rs:1211`) and the surrounding suite cover exclusion for `red:`, caveman and sentinel content. Nothing covers a `strip:` unit.
+Exercised: partial — `recurring_raw_call_id_orphan_is_conservative_t_only` (`tail_hygiene.rs:1211`) and the surrounding suite cover exclusion for `red:`, terse_text_compression and sentinel content. Nothing covers a `strip:` unit.
 Guarantee: The tail-hygiene metric's total `t` counts only tokens the render actually serves.
 Check: `always` — for a pass with at least one `strip:` frozen unit whose target is in the measured tail, assert `measure_tail_hygiene`'s `t` excludes the stripped block's original tokens. `always` because the number is wrong on every pass where a strip is active.
 Fault/timing angle: None; both are computed in the same pass from the same `core`.
@@ -406,6 +413,7 @@ Confidence: high — [evidence](evidence/render-a-hygiene-metric-ignores-surface
 Existing check: `tail_hygiene.rs:1211` and its neighbours; none run in CI.
 Impact: `t` and possibly `u` overstate the served tail, so `hygiene_band` (`:704`) and both nudge gates fire on a tail that is smaller than measured. The agent is told about tokens that are not there.
 Open questions:
+
 - Is the divergence bounded? A whole-message strip replaces every block, so the overstatement is the whole message. Whether any strip class can dominate the tail is unresolved, needs a measurement on a real session.
 
 ### render-a-render-is-deterministic-over-fixed-inputs
@@ -422,6 +430,7 @@ Confidence: high — [evidence](evidence/render-a-render-is-deterministic-over-f
 Existing check: `transform.rs:27150`, `:27216`, `:23307`, `:28622`; none run in CI.
 Impact: The whole cache discipline in the module header (`transform.rs:1-16`) rests on a replay producing identical bytes. A seed-dependent render would bust the provider prefix cache on every process restart.
 Open questions:
+
 - None. The one `HashMap` iteration is order-independent for the reason recorded above; a regression test pinning the disjointness assumption would be cheap.
 
 ### render-a-user-hint-total-cap-cannot-bind
@@ -434,10 +443,11 @@ Guarantee: `truncate_hint_to_total_cap` is never entered from `render_user_hint`
 Check: `unreachable` — instrument the `utf16_len(wrapped) > limit` branch of `truncate_hint_to_total_cap` (`:9120-9127`) and assert it is never taken. `unreachable` and not `always`, because the subject is a specific code location that the arithmetic says cannot execute.
 Fault/timing angle: None.
 Required faults and enabling state: `auto_search_active`, which is `!req.is_subagent && req.auto_search_enabled` (`:3519`) and defaults to `true` on the wire (`default_auto_search_enabled`, `:865-867`) and in the shipped producer (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2010`).
-Confidence: high — [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the maximum: 18 (`<ctx-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 + 2 + 1 + 127 (footer) + 19 = 458 UTF-16 units against a cap of 800. `USER_HINT_RESULT_LIMIT` is 3 (`:117`, applied `:9090`) and `one_line_fragment` caps each fragment at 80 UTF-16 units (`:113`, applied `:9096`, enforced `:9132-9139`).
+Confidence: high — [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the maximum: 18 (`<eidnara-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 + 2 + 1 + 127 (footer) + 19 = 458 UTF-16 units against a cap of 800. `USER_HINT_RESULT_LIMIT` is 3 (`:117`, applied `:9090`) and `one_line_fragment` caps each fragment at 80 UTF-16 units (`:113`, applied `:9096`, enforced `:9132-9139`).
 Existing check: none. The only guard is the `debug_assert!` at `:9115`, which is trivially satisfied.
 Impact: A dead truncation path plus a `debug_assert` that can never fail. It is also a latent trap: raising `USER_HINT_RESULT_LIMIT` or the fragment cap silently activates a path that has never executed.
 Open questions:
+
 - Is `truncate_hint_to_total_cap` reachable from any other caller? Grep found only `:9114`. Recorded as resolved in the evidence file.
 
 ### render-a-hint-fragment-cap-binds-in-a-served-render
@@ -446,14 +456,15 @@ Type: reachability
 Reachability: default-production
 Status: active
 Exercised: not yet — no test observes a truncated fragment inside a served array.
-Guarantee: A campaign reaches a render in which the user-hint fragment cap actually binds, and the served bytes are still a balanced `<ctx-search-hint>` element with no broken scalar.
-Check: `sometimes` — at least once per campaign, observe a served array containing a `<ctx-search-hint>` block whose body has a line ending in `…`, and assert on that same render that the element is balanced, that every fragment line is at most `USER_HINT_FRAGMENT_CHAR_CAP + 2` UTF-16 units, and that the whole message is valid UTF-8 with no lone surrogate. `sometimes` and not `reachable`, because executing `one_line_fragment`'s truncation branch in a unit test proves nothing about a render that actually carried a truncated hint into the provider array.
+Guarantee: A campaign reaches a render in which the user-hint fragment cap actually binds, and the served bytes are still a balanced `<eidnara-search-hint>` element with no broken scalar.
+Check: `sometimes` — at least once per campaign, observe a served array containing a `<eidnara-search-hint>` block whose body has a line ending in `…`, and assert on that same render that the element is balanced, that every fragment line is at most `USER_HINT_FRAGMENT_CHAR_CAP + 2` UTF-16 units, and that the whole message is valid UTF-8 with no lone surrogate. `sometimes` and not `reachable`, because executing `one_line_fragment`'s truncation branch in a unit test proves nothing about a render that actually carried a truncated hint into the provider array.
 Fault/timing angle: None.
-Required faults and enabling state: `auto_search_active` (default true, see the record above), an authored user tail that is the last message (`:8776-8780`), no existing hint row for its block, and at least one memory search result whose caveman-compressed snippet exceeds 80 UTF-16 units. The last is the ordinary case for a real memory hit, since `caveman::compress` at `Ultra` shortens but does not cap.
+Required faults and enabling state: `auto_search_active` (default true, see the record above), an authored user tail that is the last message (`:8776-8780`), no existing hint row for its block, and at least one memory search result whose terse_text_compression-compressed snippet exceeds 80 UTF-16 units. The last is the ordinary case for a real memory hit, since `terse_text_compression::compress` at `Ultra` shortens but does not cap.
 Confidence: high — [evidence](evidence/render-a-hint-fragment-cap-binds-in-a-served-render.md). Verified the cap application at `:9096`, the truncation at `:9135-9139`, the whole-scalar slicing at `:9070-9082`, and the envelope construction at `:9111`.
 Existing check: none.
 Impact: This is the only budget in 4e that binds in ordinary operation. Without a `sometimes` record a campaign can run for hours, execute the truncation lines from a unit test, and never once serve a truncated hint, so the envelope and scalar guarantees stay unproven on real data.
 Open questions:
+
 - None.
 
 ### render-a-light-surface-fallback-notice-never-served
@@ -470,6 +481,7 @@ Confidence: high — [evidence](evidence/render-a-light-surface-fallback-notice-
 Existing check: `prompt_surface.rs:329-342`; does not run in CI.
 Impact: Low on its own. It matters as a documentation artifact: the notice text says light assets "are not available yet", which is stale, and a reader who trusts it will conclude the light preset is inert when the mapping document and the assets show it is not.
 Open questions:
+
 - None.
 
 ## Contract-vs-code leads
@@ -493,7 +505,7 @@ Open questions:
    (`scope-map-and-risk-ranking.md:94-96`, "It measures the rendered tail").
    Code side: `measure_tail_hygiene(projection, core, ..)` (`:458-465`) walks
    `projection.blocks`, and the file contains no reference to any `strip:` frozen
-   unit. It is render-aware for reductions and caveman only. Record 8.
+   unit. It is render-aware for reductions and terse_text_compression only. Record 8.
 
 3. **`LIGHT_FALLBACK_NOTICE` asserts a state the build makes impossible.**
    Contract side: `prompt_surface.rs:28` — "built-in light assets are not
@@ -528,9 +540,9 @@ Open questions:
   overlay-eligible blocks? This decides whether record 3 is a live
   misattribution or only a skipped overlay. It depends on the harness codecs,
   which are 4f scope. Unresolved, needs 4f.
-- Does `ctx_reduce` reject a tag number with no `tags` row, or resolve it to
+- Does `eidnara_reduce` reject a tag number with no `tags` row, or resolve it to
   something? This decides the impact of record 7. `parse_tag_range_string`
-  (`lib.rs:15165-15210`) and `handle_ctx_reduce_facade` (`lib.rs:10482-10588`)
+  (`lib.rs:15165-15210`) and `handle_eidnara_reduce_facade` (`lib.rs:10482-10588`)
   are 4d scope. Unresolved, needs 4d.
 - Do the `tags` SQLite triggers advance the cache generation for deletes and
   updates as well as inserts? This is the last door for the sibling's

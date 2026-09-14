@@ -1,7 +1,7 @@
 {
   "protocol": "eidnara-canonical-json-contract-v1",
-  "dreamerRequestEncodingVersion": 1,
-  "dreamerRequestDigestProtocol": "eidnara-dreamer-request-v1",
+  "memory_classifierRequestEncodingVersion": 1,
+  "memory_classifierRequestDigestProtocol": "eidnara-memory_classifier-request-v1",
   "canonicalization": [
     {
       "name": "scalars-and-key-order",

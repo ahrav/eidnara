@@ -20,8 +20,8 @@ function peer(daemonVer: string): AuthenticatedPeer {
 
 const healthyCatalog = [
     entry("context", "0.1.0"),
-    entry("synapse", "0.1.0"),
-    entry("broca", "0.1.0"),
+    entry("local_embeddings", "0.1.0"),
+    entry("model_execution", "0.1.0"),
 ];
 
 const healthyEpochs = { ...hostRelease.epochs };
@@ -58,7 +58,7 @@ describe("daemon version range (U3 scenario 12)", () => {
 
 describe("module version ranges", () => {
     test("each fixed module mismatch names the exact module", () => {
-        for (const moduleId of ["context", "synapse", "broca"]) {
+        for (const moduleId of ["context", "local_embeddings", "model_execution"]) {
             const catalog = healthyCatalog.map((existing) =>
                 existing.module_id === moduleId ? entry(moduleId, "0.2.0") : existing,
             );
@@ -76,10 +76,10 @@ describe("module version ranges", () => {
         expect(missing.ok).toBe(false);
         const malformed = evaluateModuleCompatibility([
             ...healthyCatalog.slice(0, 2),
-            entry("broca", "not-semver"),
+            entry("model_execution", "not-semver"),
         ]);
         expect(malformed.ok).toBe(false);
-        if (!malformed.ok) expect(malformed.detail).toContain("broca");
+        if (!malformed.ok) expect(malformed.detail).toContain("model_execution");
     });
 
     test("extra unknown modules do not fail the fixed-module check", () => {
@@ -92,7 +92,7 @@ describe("module version ranges", () => {
 describe("exact epoch comparison", () => {
     const wireEpochs = {
         memory_render_epoch: 2,
-        compartment_render_epoch: 2,
+        history_segment_render_epoch: 2,
         profile_epoch: 2,
         tagger_epoch: 3,
         state_sync_epoch: 1,

@@ -35,7 +35,7 @@ use crate::arena::{ArenaCounts, ArenaError, ArenaSpan, MAX_FRAME_BYTES, SpanPlan
 use crate::backend::sys;
 use crate::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor, Incarnation,
-    MAX_SPANS, ReleaseIdentity, WIRE_V2_HEADER_BYTES, WIRE_V2_VERSION, check_wire_header,
+    MAX_SPANS, ReleaseIdentity, WIRE_V3_HEADER_BYTES, WIRE_V3_VERSION, check_wire_header,
 };
 use crate::lease::{LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, copy_in};
 use crate::profile::TargetProfile;
@@ -95,7 +95,7 @@ struct WakeEpoch {
 #[derive(Clone, Copy)]
 struct SharedDescriptor {
     schema_version: u16,
-    wire_header: [u8; WIRE_V2_HEADER_BYTES],
+    wire_header: [u8; WIRE_V3_HEADER_BYTES],
     incarnation: [u8; 16],
     lane: u32,
     sequence: u64,
@@ -110,7 +110,7 @@ struct SharedDescriptor {
 impl SharedDescriptor {
     const ZERO: Self = Self {
         schema_version: 0,
-        wire_header: [0; WIRE_V2_HEADER_BYTES],
+        wire_header: [0; WIRE_V3_HEADER_BYTES],
         incarnation: [0; 16],
         lane: 0,
         sequence: 0,
@@ -1267,7 +1267,7 @@ impl Ring {
     pub fn try_reserve(
         &self,
         bound: usize,
-        wire_header: [u8; WIRE_V2_HEADER_BYTES],
+        wire_header: [u8; WIRE_V3_HEADER_BYTES],
     ) -> Result<ProducerReservation<'_>, ProducerError> {
         if bound > MAX_FRAME_BYTES {
             return Err(ProducerError::BoundExceedsSpans);
@@ -1345,7 +1345,7 @@ impl Ring {
     pub fn reserve_until(
         &self,
         bound: usize,
-        wire_header: [u8; WIRE_V2_HEADER_BYTES],
+        wire_header: [u8; WIRE_V3_HEADER_BYTES],
         deadline: Instant,
     ) -> Result<ProducerReservation<'_>, ProducerError> {
         loop {
@@ -2310,7 +2310,7 @@ impl Ring {
         sequence: u64,
         plan: SpanPlan,
         exact_len: usize,
-        wire_header: [u8; WIRE_V2_HEADER_BYTES],
+        wire_header: [u8; WIRE_V3_HEADER_BYTES],
     ) -> Result<PreparedCommit, ProducerError> {
         let exact = plan.prefix(exact_len).map_err(ProducerError::Arena)?;
         check_wire_header(&wire_header, exact_len as u64)
@@ -2447,7 +2447,7 @@ pub struct ProducerReservation<'ring> {
     plan: SpanPlan,
     sequence: u64,
     cursor: usize,
-    wire_header: [u8; WIRE_V2_HEADER_BYTES],
+    wire_header: [u8; WIRE_V3_HEADER_BYTES],
     finished: bool,
     _not_send: PhantomData<Rc<()>>,
 }
@@ -2507,7 +2507,7 @@ impl ProducerReservation<'_> {
     /// Replaces the header given to `try_reserve`. `commit` checks its declared length.
     pub fn set_wire_header(
         &mut self,
-        wire_header: [u8; WIRE_V2_HEADER_BYTES],
+        wire_header: [u8; WIRE_V3_HEADER_BYTES],
     ) -> Result<(), ProducerError> {
         if self.finished {
             return Err(ProducerError::Aborted);
@@ -2618,14 +2618,14 @@ impl fmt::Debug for DuplexRing {
 }
 
 /// Header with `body_len` in the first four bytes and version 2 in the fifth, zeros elsewhere.
-pub fn wire_v2_header(body_len: usize) -> Result<[u8; WIRE_V2_HEADER_BYTES], ProducerError> {
+pub fn wire_v3_header(body_len: usize) -> Result<[u8; WIRE_V3_HEADER_BYTES], ProducerError> {
     let body_len = u32::try_from(body_len).map_err(|_| ProducerError::BoundExceedsSpans)?;
     if body_len as usize > MAX_FRAME_BYTES {
         return Err(ProducerError::BoundExceedsSpans);
     }
-    let mut header = [0u8; WIRE_V2_HEADER_BYTES];
+    let mut header = [0u8; WIRE_V3_HEADER_BYTES];
     header[0..4].copy_from_slice(&body_len.to_le_bytes());
-    header[4] = WIRE_V2_VERSION;
+    header[4] = WIRE_V3_VERSION;
     Ok(header)
 }
 
@@ -3030,7 +3030,7 @@ mod tests {
 
     use super::{
         Doorbell, FAIL_NEXT_PAGE_REMOVAL, ProducerError, Ring, RingError, RingGrant,
-        SyscallCounters, removal_ranges, sys, wire_v2_header,
+        SyscallCounters, removal_ranges, sys, wire_v3_header,
     };
 
     fn ring() -> Ring {
@@ -3040,7 +3040,7 @@ mod tests {
 
     fn publish(ring: &Ring, bytes: &[u8]) {
         let mut reservation = ring
-            .try_reserve(bytes.len(), wire_v2_header(bytes.len()).unwrap())
+            .try_reserve(bytes.len(), wire_v3_header(bytes.len()).unwrap())
             .unwrap();
         reservation.write(bytes).unwrap();
         reservation.commit(bytes.len()).unwrap();
@@ -3198,7 +3198,7 @@ mod tests {
     #[test]
     fn commit_after_quarantine_is_refused_and_aborts() {
         let ring = ring();
-        let mut reservation = ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap();
+        let mut reservation = ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap();
         reservation.write(&[1]).unwrap();
         ring.enter_quarantine();
         assert_eq!(reservation.commit(1), Err(ProducerError::Quarantined));
@@ -3215,7 +3215,7 @@ mod tests {
         publish(&ring, &[1; 100]);
         consumer.try_receive().unwrap().unwrap().release().unwrap();
         assert!(matches!(consumer.trim(), Err(RingError::RoleMismatch)));
-        ring.try_reserve(0, wire_v2_header(0).unwrap())
+        ring.try_reserve(0, wire_v3_header(0).unwrap())
             .unwrap()
             .abort();
         ring.trim().unwrap();
@@ -3233,7 +3233,7 @@ mod tests {
         descriptor.allocation_len = 8192;
         slot.write_descriptor(descriptor);
         assert!(matches!(
-            ring.try_reserve(0, wire_v2_header(0).unwrap()),
+            ring.try_reserve(0, wire_v3_header(0).unwrap()),
             Err(ProducerError::Ring(RingError::InvalidSharedState))
         ));
         assert!(ring.is_quarantined());
@@ -3268,7 +3268,7 @@ mod tests {
         // handle's own record can tell it apart from a legitimate cursor.
         producer.arena_write.store(0, Ordering::Release);
         assert!(matches!(
-            ring.try_reserve(4096, wire_v2_header(4096).unwrap()),
+            ring.try_reserve(4096, wire_v3_header(4096).unwrap()),
             Err(ProducerError::Ring(RingError::InvalidSharedState))
         ));
         assert!(ring.is_quarantined());
@@ -3285,7 +3285,7 @@ mod tests {
         producer.published.store(1, Ordering::Release);
         slot.state.store(super::SLOT_FREE, Ordering::Release);
         assert!(matches!(
-            ring.try_reserve(1, wire_v2_header(1).unwrap()),
+            ring.try_reserve(1, wire_v3_header(1).unwrap()),
             Err(ProducerError::Ring(RingError::InvalidSharedState))
         ));
         assert!(ring.is_quarantined());
@@ -3377,7 +3377,7 @@ mod tests {
         assert!(matches!(
             ring.reserve_until(
                 1,
-                wire_v2_header(1).unwrap(),
+                wire_v3_header(1).unwrap(),
                 std::time::Instant::now() + std::time::Duration::from_secs(5)
             ),
             Err(ProducerError::Ring(RingError::DoorbellFailed))
@@ -3406,7 +3406,7 @@ mod tests {
         let ring = ring();
         publish(&ring, &[1; 100]);
         let lease = ring.try_receive().unwrap().unwrap();
-        let held = ring.try_reserve(50, wire_v2_header(50).unwrap()).unwrap();
+        let held = ring.try_reserve(50, wire_v3_header(50).unwrap()).unwrap();
         ring.probe().unwrap();
         let (descriptors, bytes) = ring.conservation().unwrap();
         assert_eq!(descriptors.receiver_leased, 1);
@@ -3515,7 +3515,7 @@ mod tests {
         // `publish_commit` stores the slot before `published`, and `release` moves the slot
         // before decrementing `active_leases`; a probe between those stores must pass.
         let ring = ring();
-        let mut reservation = ring.try_reserve(4, wire_v2_header(4).unwrap()).unwrap();
+        let mut reservation = ring.try_reserve(4, wire_v3_header(4).unwrap()).unwrap();
         reservation.write(&[1; 4]).unwrap();
         let slot = ring.slot(1).unwrap();
         slot.state.store(super::SLOT_PUBLISHED, Ordering::Release);
@@ -3638,7 +3638,7 @@ mod tests {
     #[test]
     fn publication_that_raced_a_quarantine_is_not_reported_as_delivered() {
         let ring = ring();
-        let mut reservation = ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap();
+        let mut reservation = ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap();
         reservation.write(&[1]).unwrap();
         let prepared = ring
             .prepare_commit(1, reservation.plan, 1, reservation.wire_header)
@@ -3669,7 +3669,7 @@ mod tests {
         let ring = ring();
         let page = super::system_page_size();
         let mut reservation = ring
-            .try_reserve(page * 2, wire_v2_header(page * 2).unwrap())
+            .try_reserve(page * 2, wire_v3_header(page * 2).unwrap())
             .unwrap();
         reservation.write(&vec![7; page * 2]).unwrap();
         assert_eq!(ring.resident_arena_pages().unwrap(), 2);
@@ -3947,7 +3947,7 @@ mod tests {
             );
             assert!(matches!(ring.try_receive(), Err(RingError::Quarantined)));
             assert_eq!(
-                ring.try_reserve(0, wire_v2_header(0).unwrap()).unwrap_err(),
+                ring.try_reserve(0, wire_v3_header(0).unwrap()).unwrap_err(),
                 ProducerError::Quarantined
             );
             assert!(matches!(ring.trim(), Err(RingError::Quarantined)));
@@ -3966,7 +3966,7 @@ mod tests {
         slot.state
             .store(super::SLOT_PRODUCER_RESERVED, Ordering::Release);
         assert!(matches!(
-            ring.try_reserve(1, wire_v2_header(1).unwrap()),
+            ring.try_reserve(1, wire_v3_header(1).unwrap()),
             Err(ProducerError::Ring(RingError::InvalidSharedState))
         ));
         assert!(ring.is_quarantined());
@@ -3980,7 +3980,7 @@ mod tests {
         let wake = ring.data_wake().unwrap();
         wake.parked.store(1, Ordering::Release);
 
-        let mut reservation = ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap();
+        let mut reservation = ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap();
         reservation.write(&[9]).unwrap();
         assert!(matches!(
             reservation.commit(1),
@@ -4009,7 +4009,7 @@ mod tests {
             .arena_write
             .store(3 * arena_len as u64, Ordering::Release);
         assert!(matches!(
-            ring.try_reserve(0, wire_v2_header(0).unwrap()),
+            ring.try_reserve(0, wire_v3_header(0).unwrap()),
             Err(ProducerError::Ring(RingError::InvalidSharedState))
         ));
         assert!(ring.is_quarantined());
@@ -4024,7 +4024,7 @@ mod tests {
 
         publish(&ring, &vec![1; batch + 100]);
         ring.try_receive().unwrap().unwrap().release().unwrap();
-        ring.try_reserve(0, wire_v2_header(0).unwrap())
+        ring.try_reserve(0, wire_v3_header(0).unwrap())
             .unwrap()
             .abort();
         assert_eq!(
@@ -4035,7 +4035,7 @@ mod tests {
 
         publish(&ring, &vec![2; batch]);
         ring.try_receive().unwrap().unwrap().release().unwrap();
-        ring.try_reserve(0, wire_v2_header(0).unwrap())
+        ring.try_reserve(0, wire_v3_header(0).unwrap())
             .unwrap()
             .abort();
         assert_eq!(
@@ -4081,7 +4081,7 @@ mod tests {
         assert!(ring.resident_arena_pages().unwrap() > 0);
 
         let reservation = ring
-            .try_reserve(arena_len, wire_v2_header(arena_len).unwrap())
+            .try_reserve(arena_len, wire_v3_header(arena_len).unwrap())
             .unwrap();
         assert_eq!(ring.resident_arena_pages().unwrap(), 0);
         let segment = reservation.segment(0).unwrap().unwrap();
@@ -4099,7 +4099,7 @@ mod tests {
         for index in 0..page / 256 {
             publish(&ring, &[index as u8; 256]);
             ring.try_receive().unwrap().unwrap().release().unwrap();
-            ring.try_reserve(0, wire_v2_header(0).unwrap())
+            ring.try_reserve(0, wire_v3_header(0).unwrap())
                 .unwrap()
                 .abort();
             assert_eq!(ring.resident_arena_pages().unwrap(), 1);
@@ -4109,7 +4109,7 @@ mod tests {
 
         publish(&ring, &[0x5a; 256]);
         ring.try_receive().unwrap().unwrap().release().unwrap();
-        ring.try_reserve(0, wire_v2_header(0).unwrap())
+        ring.try_reserve(0, wire_v3_header(0).unwrap())
             .unwrap()
             .abort();
         assert_eq!(ring.resident_arena_pages().unwrap(), 1);
@@ -4126,7 +4126,7 @@ mod tests {
         let second = ring.try_receive().unwrap().unwrap();
         first.release().unwrap();
 
-        ring.try_reserve(0, wire_v2_header(0).unwrap())
+        ring.try_reserve(0, wire_v3_header(0).unwrap())
             .unwrap()
             .abort();
         ring.trim().unwrap();
@@ -4140,16 +4140,16 @@ mod tests {
         let ring = ring();
         publish(&ring, &[0x11; 100]);
         ring.try_receive().unwrap().unwrap().release().unwrap();
-        ring.try_reserve(0, wire_v2_header(0).unwrap())
+        ring.try_reserve(0, wire_v3_header(0).unwrap())
             .unwrap()
             .abort();
         // Drained: `arena_reclaimed == arena_write == 100`, mid-page. The reservation now
         // starts inside the page that `trim` would otherwise treat as fully dead.
-        let mut held = ring.try_reserve(50, wire_v2_header(50).unwrap()).unwrap();
+        let mut held = ring.try_reserve(50, wire_v3_header(50).unwrap()).unwrap();
         held.write(&[0x33; 50]).unwrap();
 
         assert_eq!(
-            ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap_err(),
+            ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap_err(),
             ProducerError::ReservationOutstanding
         );
         ring.trim().unwrap();
@@ -4166,16 +4166,16 @@ mod tests {
     #[test]
     fn outstanding_reservation_is_refused_without_parking() {
         let ring = ring();
-        let held = ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap();
+        let held = ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap();
         assert_eq!(
-            ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap_err(),
+            ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap_err(),
             ProducerError::ReservationOutstanding
         );
         let started = std::time::Instant::now();
         assert_eq!(
             ring.reserve_until(
                 1,
-                wire_v2_header(1).unwrap(),
+                wire_v3_header(1).unwrap(),
                 started + std::time::Duration::from_secs(5),
             )
             .unwrap_err(),
@@ -4183,7 +4183,7 @@ mod tests {
         );
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
         held.abort();
-        ring.try_reserve(1, wire_v2_header(1).unwrap())
+        ring.try_reserve(1, wire_v3_header(1).unwrap())
             .unwrap()
             .abort();
     }
@@ -4197,7 +4197,7 @@ mod tests {
         assert_eq!(
             ring.reserve_until(
                 1,
-                wire_v2_header(1).unwrap(),
+                wire_v3_header(1).unwrap(),
                 started + Duration::from_millis(30),
             )
             .unwrap_err(),
@@ -4229,7 +4229,7 @@ mod tests {
         let started = Instant::now();
         ring.reserve_until(
             1,
-            wire_v2_header(1).unwrap(),
+            wire_v3_header(1).unwrap(),
             started + Duration::from_secs(10),
         )
         .unwrap()
@@ -4251,7 +4251,7 @@ mod tests {
         FAIL_NEXT_PAGE_REMOVAL.store(true, Ordering::Release);
 
         assert!(matches!(
-            ring.try_reserve(0, wire_v2_header(0).unwrap()),
+            ring.try_reserve(0, wire_v3_header(0).unwrap()),
             Err(ProducerError::Ring(RingError::PageRemovalFailed))
         ));
         assert!(ring.is_quarantined());

@@ -10,7 +10,7 @@ import { log } from "../shared/logger";
  *
  * User permission overrides merge after the default allow-list and can extend it.
  *
- * Sidekick uses AFT navigation to retrieve structural context for prompt-referenced symbols and files.
+ * ContextResearcher uses AFT navigation to retrieve structural context for prompt-referenced symbols and files.
  */
 
 /** The returned record is compatible with `AgentConfig.permission`. */
@@ -106,6 +106,10 @@ export function denyTaskRoutingToCallerAgents(
     return result;
 }
 
-export const SMART_NOTE_COMPILER_ALLOWED_TOOLS = [] as const;
+export const NOTE_CONDITION_COMPILER_ALLOWED_TOOLS = [] as const;
 
-export const SIDEKICK_ALLOWED_TOOLS = ["ctx_search", "aft_outline", "aft_zoom"] as const;
+export const CONTEXT_RESEARCHER_ALLOWED_TOOLS = [
+    "eidnara_search",
+    "aft_outline",
+    "aft_zoom",
+] as const;

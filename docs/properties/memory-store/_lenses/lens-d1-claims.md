@@ -261,7 +261,7 @@ the evidence named in that claim, not asserted in a preamble.
   satisfied claim rather than a lead.
 
 - C20: "Tier demotion is byte-deterministic at render time, driven by
-  compartment age, an emitted importance... and live budget pressure — no LLM
+  history_segment age, an emitted importance... and live budget pressure — no LLM
   call." [`crates/context-core/src/decay.rs:4-7`] → implied property: tier selection
   is a pure total function of its numeric inputs. Exact check: `always` — equal
   inputs yield equal tiers within one binary. Implementing code:
@@ -360,15 +360,15 @@ the evidence named in that claim, not asserted in a preamble.
   default-production. All three constants are currently `1`, so the
   independence the comment claims has never been exercised by a divergence.
 
-- C28: "compartment seq must be strictly increasing: {current} followed
-  {previous}" [`lib.rs:3565`] → implied property: compartment sequence numbers
+- C28: "history_segment seq must be strictly increasing: {current} followed
+  {previous}" [`lib.rs:3565`] → implied property: history_segment sequence numbers
   form a strictly increasing series per session. Exact check: `always` — for
-  consecutive persisted compartments, `sequence` strictly increases.
+  consecutive persisted history_segments, `sequence` strictly increases.
   Implementing code: the error variant is constructed in `MemoryStoreError`
   (`lib.rs:3361`) and formatted at `3565`; ordering is also validated for the
-  seed path at `lib.rs:4289` ("seeded compartment ordinal ranges must be
+  seed path at `lib.rs:4289` ("seeded history_segment ordinal ranges must be
   non-negative and ordered"). Reachability: default-production. Note the SQL
-  side does not encode it: `compartments` has no `CHECK` on `sequence`
+  side does not encode it: `history_segments` has no `CHECK` on `sequence`
   monotonicity, only the uniqueness at S9.
 
 - C29: "acknowledged transition must not supply result_json" and "result_json is
@@ -482,13 +482,13 @@ almost nothing to enforce.
   accepts any 32 characters. Four validation sites against six constrained
   tables is an asymmetry worth resolving; see the open questions.
 
-- S9: `UNIQUE(session_id, block_id)` on the compartment block table
+- S9: `UNIQUE(session_id, block_id)` on the history_segment block table
   [`lib.rs:557`] and `UNIQUE(session_id, target_id)` [`lib.rs:500`] — encodes:
   one row per block or target within a session, the append-idempotency key for
-  compartment writes. Also enforced in app code: the writers are
-  `insert_compartment_tx` (`lib.rs:12352`) and `append_compartments_tx`
+  history_segment writes. Also enforced in app code: the writers are
+  `insert_history_segment_tx` (`lib.rs:12352`) and `append_history_segments_tx`
   (`lib.rs:12609`); ordering is separately validated at `lib.rs:4289-4294`
-  ("seeded compartment sequences must be unique"), which duplicates the
+  ("seeded history_segment sequences must be unique"), which duplicates the
   uniqueness claim in app code for the seed path only.
 
 - S10: `UNIQUE(note_id, session_id, delivered_pass_fingerprint)`
@@ -565,7 +565,7 @@ almost nothing to enforce.
   'liveness', 'fallback'))` [`lib.rs:1177`], and roughly twenty further
   enumeration checks — encodes: closed vocabularies for kind, status, phase, and
   disposition columns. Also enforced in app code: mostly yes, via matching Rust
-  enums such as `HistorianPhase` (`lib.rs:1420`) and `BlockKind` (`lib.rs:268`).
+  enums such as `HistorySummarizerPhase` (`lib.rs:1420`) and `BlockKind` (`lib.rs:268`).
   As with S7, these pin alphabets and never transitions: the six-state `status`
   ladder has no constraint preventing `dismissed` returning to `pending`.
 
@@ -666,9 +666,9 @@ obligation carried by convention, review, or an out-of-scope implementor.
 - Ordinal monotonicity (C23). `FlatBlock::ordinal` documents "strictly increasing
   across the lineage" (`crates/context-core/src/lib.rs:28-30`). `context-core` never
   constructs an item, so nothing in scope can check it. No SQL constraint
-  encodes it either: `compartments` constrains uniqueness (S9) but not
+  encodes it either: `history_segments` constrains uniqueness (S9) but not
   ordering, and the only ordering enforcement is the error text at
-  `lib.rs:3565` on the compartment sequence, which is a different value.
+  `lib.rs:3565` on the history_segment sequence, which is a different value.
 
 - Generation and epoch monotonicity (S19). Every generation and epoch column is
   constrained non-negative and never monotonic. An epoch fence depends on

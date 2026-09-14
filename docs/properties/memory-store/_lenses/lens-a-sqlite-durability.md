@@ -38,15 +38,15 @@ Full-path citations in this table identify code verified against HEAD.
 | 1314-1342 | `LATEST_MIGRATION_VERSION` 1321-1331, `OLDEST_ADOPTABLE_MIGRATION_VERSION` 1342 |
 | 1344-1385 | `recorded_cache_version` 1346-1366, `refuse_pre_cutover_store` 1375-1385 |
 | 1387-1411 | `normalize_authority_note_route_tx` |
-| 1413-3349 | Domain DTO and state types: `HistorianPhase` 1420, `HistorianDurableState` 1461, publish request and error types 1766-1876, lineage types 1897-2071, `ModuleMeta` 2227, note types 2809-3068, claim-intent types 3071-3115, sync and import types 3250-3348 |
+| 1413-3349 | Domain DTO and state types: `HistorySummarizerPhase` 1420, `HistorySummarizerDurableState` 1461, publish request and error types 1766-1876, lineage types 1897-2071, `ModuleMeta` 2227, note types 2809-3068, claim-intent types 3071-3115, sync and import types 3250-3348 |
 | 3351-3652 | Error types and conversions: `ModuleStateSyncError` 3351, `MemoryStoreError` 3361, `Display`/`Error` impls 3447-3645, `From<StoreError> for MemoryStoreError` 3554-3558 |
 | 3654-3775 | Internal transaction-outcome enums (`CommitOutcome` 3654, `PublishTxnOutcome` 3686, `StateImportTxnOutcome` 3761) and side-channel row types 3718-3739 |
-| 3776-4343 | SQL constants and free helpers: `AUTHORITY_SELECT_SQL` 3776, claim-intent helpers 3787-3962, authority helpers 3964-4197, `validate_state_import_compartments` 4199, `session_has_durable_state` 4242, `validated_seed_boundary` 4272 |
+| 3776-4343 | SQL constants and free helpers: `AUTHORITY_SELECT_SQL` 3776, claim-intent helpers 3787-3962, authority helpers 3964-4197, `validate_state_import_history_segments` 4199, `session_has_durable_state` 4242, `validated_seed_boundary` 4272 |
 | 4345-4608 | Facade scope guards and `FacadeMutationTxn` 4388-4608 |
 | 4610-4634 | `pub struct MemoryStore` |
 | 4636-4808 | Drop-seed and strip-seed materializers |
-| **4810-12234** | **`impl MemoryStore` block 1.** `open` 4816-4905, `prune_transform_session_roots` 4907-4929, `repair_note_artifacts_v51` 5069-5114, `with_note_conn_fenced` 5323-5343, `module_store_schema_version` 5348-5358, `delete_session` 5432-5475, `load` 5481, `load_transform_snapshot_with_hook` 5526, `load_session_status_snapshot` 5658, `set_todo_state` 6727-6757, `arm_soft_refresh` 6760-6778, `preflight_state_import` 7114-7139, `commit_state_import` 7145-7205, `commit` 7215-7223, `commit_with_consumed_drops` 7226-7257, `commit_transform` 7260-7609, `apply_state_sync` 7617, lineage 8177-8854, compartment writes 8887-9193, historian publish and outbox 9194-9798, notes 10033-11xxx, claim intent and mirror 11xxx-12232 |
-| 12236-12825 | Free `*_tx` writer helpers and compression: `write_seed_compartment_tx` 12236, `insert_compartment_tx` 12352, `insert_historian_events_tx` 12388-12409, outbox helpers 12411-12607, `append_compartments_tx` 12609, transcript helpers 12671-12825 |
+| **4810-12234** | **`impl MemoryStore` block 1.** `open` 4816-4905, `prune_transform_session_roots` 4907-4929, `repair_note_artifacts_v51` 5069-5114, `with_note_conn_fenced` 5323-5343, `module_store_schema_version` 5348-5358, `delete_session` 5432-5475, `load` 5481, `load_transform_snapshot_with_hook` 5526, `load_session_status_snapshot` 5658, `set_todo_state` 6727-6757, `arm_soft_refresh` 6760-6778, `preflight_state_import` 7114-7139, `commit_state_import` 7145-7205, `commit` 7215-7223, `commit_with_consumed_drops` 7226-7257, `commit_transform` 7260-7609, `apply_state_sync` 7617, lineage 8177-8854, history_segment writes 8887-9193, history_summarizer publish and outbox 9194-9798, notes 10033-11xxx, claim intent and mirror 11xxx-12232 |
+| 12236-12825 | Free `*_tx` writer helpers and compression: `write_seed_history_segment_tx` 12236, `insert_history_segment_tx` 12352, `insert_history_summarizer_events_tx` 12388-12409, outbox helpers 12411-12607, `append_history_segments_tx` 12609, transcript helpers 12671-12825 |
 | 12827-13158 | Note SQL constants, row mappers, note-eval helpers |
 | `crates/memory-store/src/lib.rs:15119-15430`; `crates/memory-store/src/task_lease.rs:477-1012` | **Note-evaluation claim lifecycle.** The acquire, renew, complete, and abandon lease protocol lives in `task_lease.rs`, parameterized by `TaskLeaseKind`; `lib.rs` keeps the note-specific selector, snapshot load, and completion body under `NOTE_EVALUATION` |
 | `crates/memory-store/src/task_lease.rs:436-475` | `task_lease::rebind_claim_tx` |
@@ -134,10 +134,10 @@ A scan of every production `fn` for bodies containing two or more
 - `lib.rs:5069-5117` `repair_note_artifacts_v51` — three `with_conn` plus one
   fenced loop. This is a genuine read-modify-write spanning transactions; see
   below.
-- `lib.rs:9662-9719` `deliver_historian_side_channel` — three
+- `lib.rs:9662-9719` `deliver_history_summarizer_side_channel` — three
   `with_conn_fenced` calls, but they are **mutually exclusive match arms**
   (9684, 9697, 9706), one per side-channel kind. Each arm does the domain
-  insert and `mark_historian_side_channel_delivered_tx` in the *same*
+  insert and `mark_history_summarizer_side_channel_delivered_tx` in the *same*
   transaction. This is a correct transactional-outbox shape, not a split
   read-modify-write.
 
@@ -228,7 +228,7 @@ the version table — falls through to `Ok(())` and the bootstrap runs.
 - There is no application-level retry loop for busy. A content search across
   production `lib.rs` for `busy`, `Busy`, `retry`, `SQLITE_BUSY`, and
   `DatabaseBusy` finds only: an index name in the migration SQL (790),
-  `NoteEvalAcquireOutcome::Busy` (2999) and `HistorianBusy` (3355, 3626, 4332,
+  `NoteEvalAcquireOutcome::Busy` (2999) and `HistorySummarizerBusy` (3355, 3626, 4332,
   7663, 7925) which are domain-level lease-contention outcomes, not SQLite
   busy, and the two CAS retry loops (6755, 6776).
 - Writer-writer conflict is prevented at two layers before SQLite sees it: the
@@ -311,7 +311,7 @@ violates it, and never evaluates the gate on the production open path.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `lib.rs:16927` `historian_side_channel_outbox_recovers_after_restart` and `lib.rs:14717` `first_application_marker_is_atomic_and_survives_reopen` reopen the store in-process after a clean drop. Neither kills a process mid-commit.
+Exercised: partial — `lib.rs:16927` `history_summarizer_side_channel_outbox_recovers_after_restart` and `lib.rs:14717` `first_application_marker_is_atomic_and_survives_reopen` reopen the store in-process after a clean drop. Neither kills a process mid-commit.
 Guarantee: When `with_conn_fenced` returns `Ok`, the committed rows are present after the process is killed without cleanup and the store is reopened.
 Check: `always` — for every fenced write that returned `Ok`, after `SIGKILL` and reopen, the row is readable with the committed `row_version`. `always` because every acknowledged write makes this promise; there is no path on which the promise is conditional.
 Fault/timing angle: the window is between `tx.commit()` returning at `storage:230-231` and the caller observing `Ok`. A kill inside `commit()` must yield either the whole transaction or none of it, which is SQLite's contract, not this code's. The code-level risk is the missing `synchronous` declaration: at `NORMAL` the commit is in the WAL but unfsynced, so a process kill is survived and a power loss is not.
@@ -320,6 +320,7 @@ Confidence: high on the transaction shape, low on the power-loss half — [evide
 Existing check: `lib.rs:16189` `state_import_is_atomic_bootstrap_only_and_durably_idempotent` and `lib.rs:16927` cover reopen-after-clean-drop. Status `unaudited`.
 Impact: an acknowledged commit that vanishes makes the `row_version` CAS unsound across restart, because the caller's cached expectation no longer matches durable state.
 Open questions:
+
 - Does the `libsqlite3-sys 0.30.1` bundled build override `SQLITE_DEFAULT_SYNCHRONOUS`? Not resolved by reading; needs a query against the built engine.
 
 ### synchronous-level-is-explicitly-declared-not-inherited
@@ -336,6 +337,7 @@ Confidence: high — [evidence](../evidence/synchronous-level-is-explicitly-decl
 Existing check: `crates/memory-store/tests/sqlite_runtime.rs:192-200` proves the verifier rejects `synchronous=OFF`, on a hand-built connection. It never inspects a `MemoryStore` connection. Status `unaudited`.
 Impact: the durability class of every acknowledged write is decided by the dependency's build flags rather than by this project, and a future toolchain change can silently downgrade it.
 Open questions:
+
 - Is `NORMAL` intended to be acceptable? If yes the doc's durability language needs narrowing to process-crash survival; if no the verifier's accepted set is wrong. (needs human input)
 
 ### bundled-engine-satisfies-the-declared-wal-reset-precondition
@@ -352,6 +354,7 @@ Confidence: high — [evidence](../evidence/bundled-engine-satisfies-the-declare
 Existing check: `tests/sqlite_runtime.rs:139-169`, which encodes the violation as the expected outcome. That is an accurate regression pin for today's state, not a guarantee. Status `unaudited`.
 Impact: the crate has written down a durability precondition and ships a build that does not meet it. Whatever the WAL-reset bug can do to this database, it can do today.
 Open questions:
+
 - `Cargo.toml:30` says raising `rusqlite` requires bumping `storage` in the same change. Is that coordinated bump tracked anywhere? (needs human input)
 
 ### wal-reset-gate-runs-on-the-production-open-path
@@ -368,6 +371,7 @@ Confidence: high — [evidence](../evidence/wal-reset-gate-runs-on-the-productio
 Existing check: none in production. The test file exercises the function directly. Status `unaudited`.
 Impact: `docs/migration-version-lanes.md:41-44` says "Bun and Node writers probe an approved WAL-reset-safe SQLite source on an off-path database. The root Rust module applies the same rule to `store.db`." The Rust half of that sentence is not implemented.
 Open questions:
+
 - Would wiring the gate in today make `MemoryStore::open` fail outright, given the engine is 3.46.0? If so the gate cannot be enabled before the version bump, and the doc claim should be marked pending rather than current. (needs human input)
 
 ### connection-contract-is-verified-on-the-production-connection
@@ -384,6 +388,7 @@ Confidence: high — [evidence](../evidence/connection-contract-is-verified-on-t
 Existing check: `tests/sqlite_runtime.rs:171-202` proves the verifier's own logic on a connection the test configures by hand. It does not test any `MemoryStore` connection. Status `unaudited`.
 Impact: `docs/migration-version-lanes.md:47-51` promises that "Application connections verify: foreign keys enabled, WAL activation, configured busy timeout, declared synchronous mode." No application connection in this crate verifies any of the four.
 Open questions:
+
 - `storage:287` uses `pragma_update` for `journal_mode`, which discards the returned mode. Does that mask a refused WAL activation? Not resolved; needs a test on a filesystem that rejects WAL.
 
 ### failed-fenced-transaction-leaves-no-partial-state
@@ -394,8 +399,8 @@ Status: active
 Exercised: partial — `storage:691-712` `fenced_write_rolls_back_on_error` forces a closure error after a write and asserts rollback. That is the dependency's own test, on the dependency's shape, not on any `memory-store` multi-statement writer.
 Guarantee: When a closure passed to `with_conn_fenced` returns `Err` at any statement, none of its earlier statements in that transaction are durable.
 Check: `always` — after any fenced write that returned `Err`, every table the closure touched is byte-identical to its pre-call state. `always` because every fenced write makes this promise unconditionally.
-Fault/timing angle: the interesting closures are the multi-statement ones, where the window between the first and last statement is real: `commit_transform` writes cache state then up to eight overlay tables (`lib.rs:7390-7586`); `delete_session` deletes from every discovered table in a loop (`lib.rs:5448-5472`); `commit_state_import` inserts N compartments then the import record (`lib.rs:7177-7190`); `append_compartments_tx` (`lib.rs:12609`). An injected error must land *between* statements, not before the first.
-Required faults and enabling state: an error injected at statement k of an n-statement closure, for k strictly between 1 and n. The existing `historian_side_channel_fail_once` hook (`lib.rs:9667-9678`) is the only injection point of this shape and it fires before any write.
+Fault/timing angle: the interesting closures are the multi-statement ones, where the window between the first and last statement is real: `commit_transform` writes cache state then up to eight overlay tables (`lib.rs:7390-7586`); `delete_session` deletes from every discovered table in a loop (`lib.rs:5448-5472`); `commit_state_import` inserts N history_segments then the import record (`lib.rs:7177-7190`); `append_history_segments_tx` (`lib.rs:12609`). An injected error must land *between* statements, not before the first.
+Required faults and enabling state: an error injected at statement k of an n-statement closure, for k strictly between 1 and n. The existing `history_summarizer_side_channel_fail_once` hook (`lib.rs:9667-9678`) is the only injection point of this shape and it fires before any write.
 Confidence: high on the mechanism, medium on coverage — [evidence](../evidence/failed-fenced-transaction-leaves-no-partial-state.md). Verified the early return at `storage:229` precedes `tx.commit()` at 230, and rusqlite's `Transaction` defaults to rollback on drop.
 Existing check: `storage:691-712` in the dependency. Nothing in `memory-store` injects a mid-closure failure. Status `unaudited`.
 Impact: a partially applied `commit_transform` would leave overlay tables ahead of the cache row's `row_version`, so the next CAS would accept a state the overlays already contradict.
@@ -415,6 +420,7 @@ Confidence: high — [evidence](../evidence/migration-and-its-version-record-com
 Existing check: `lib.rs:16140` `fresh_and_current_module_stores_open_without_a_pre_cutover_refusal` and `storage:528`. Both happy-path. Status `unaudited`.
 Impact: a recorded-but-unapplied version would make `refuse_pre_cutover_store` pass a database whose schema does not exist, and the first query would fail on a missing table.
 Open questions:
+
 - Does SQLite roll back a partially executed `execute_batch` of DDL inside an explicit transaction in all cases, including implicit commits from statements that cannot run transactionally? I found no such statement in the batch, but did not enumerate all 878 lines against the list of statements that force a commit.
 
 ### recorded-schema-version-cannot-disagree-with-the-actual-schema
@@ -431,6 +437,7 @@ Confidence: medium — [evidence](../evidence/recorded-schema-version-cannot-dis
 Existing check: `lib.rs:16069`, `lib.rs:16089` `pre_cutover_module_store_is_refused_by_family_not_by_ddl_collision`. Neither compares the inventory. Status `unaudited`.
 Impact: `docs/migration-version-lanes.md:11-17` promises "an exact `main.sqlite_schema` inventory" as part of format identity and says a manifest mismatch fails closed. For `store.db` there is no inventory check, so the failure surfaces as a missing-table error at first use.
 Open questions:
+
 - `sqlite_runtime.rs:156-167` `compute_schema_manifest_digest` exists to make exactly this comparison cheap. Is there a plan to wire it into `MemoryStore::open`? (needs human input)
 
 ### post-migration-open-repair-is-resumable-and-effect-idempotent
@@ -447,6 +454,7 @@ Confidence: high — [evidence](../evidence/post-migration-open-repair-is-resuma
 Existing check: `lib.rs:18124`, `lib.rs:18905`, `lib.rs:18072` `migration_v51_backfill_initializes_revisions_and_normalizes_check_status`. Status `unaudited`.
 Impact: a non-idempotent repair would either advance note revisions on every boot, invalidating downstream compiled artifacts, or loop forever on a row it cannot repair.
 Open questions:
+
 - The completion flag is a sentinel row in `cache_state` with `session_id = "note_artifact_repair_v51_done"` (`lib.rs:5070, 5107-5109`). `delete_session` (`lib.rs:5432`) deletes by `session_id` across every table with that column. Can any caller pass the sentinel key and clear the flag? Not resolved; needs a caller audit outside this lens's scope.
 
 ### busy-timeout-expiry-aborts-cleanly-without-partial-effect
@@ -463,6 +471,7 @@ Confidence: medium — [evidence](../evidence/busy-timeout-expiry-aborts-cleanly
 Existing check: `lib.rs:16697-16713`. Status `unaudited`.
 Impact: because `StoreError::Backend(e.to_string())` (`storage:229`) discards the SQLite error code, a busy failure reaches the caller as an opaque string. The caller cannot tell a retryable lock contention from a corrupt database, so it will either retry a permanent failure forever or surface a transient one as fatal.
 Open questions:
+
 - Is `IMMEDIATE` on every fenced write, including read-mostly ones, taking the write lock more often than needed and manufacturing contention that a `DEFERRED` read path would avoid? Not measured.
 
 ### bounded-cas-retry-never-duplicates-an-effect
@@ -474,11 +483,12 @@ Exercised: partial — `lib.rs:14153` `boundary_divergence_counter_cas_loser_doe
 Guarantee: The read-modify-write loops in `set_todo_state` and `arm_soft_refresh` terminate within 8 attempts and apply their effect at most once, even when every intermediate attempt loses the CAS.
 Check: `always` — attempt count never exceeds 8, and the observed effect count for one logical call is exactly 0 or 1. `always` because both bounds must hold on every call.
 Fault/timing angle: the window is between `self.load()` (`lib.rs:6736`, `6763`) and `self.commit()` (`6746`, `6769`), which are separate transactions. A concurrent transform committing in that window bumps `row_version` and the CAS rejects, so the loop re-reads. The loop is what makes the split safe, per the comment at `lib.rs:6725-6726`. Two things make an effect non-duplicable: `set_todo_state` short-circuits to `Noop` when the owner and hash already match (6737-6741), and `arm_soft_refresh` short-circuits when the flag is already set (6764-6766).
-Required faults and enabling state: 8 or more successful competing commits landing between one caller's load and commit. A test needs a hook in the load-to-commit window; `set_before_max_compartment_end_read_hook` (`lib.rs:5283`) is the existing hook of this shape but on a different path.
+Required faults and enabling state: 8 or more successful competing commits landing between one caller's load and commit. A test needs a hook in the load-to-commit window; `set_before_max_history_segment_end_read_hook` (`lib.rs:5283`) is the existing hook of this shape but on a different path.
 Confidence: high — [evidence](../evidence/bounded-cas-retry-never-duplicates-an-effect.md). Verified both loops are `for _ in 0..8` (6735, 6762), both short-circuit before writing, both convert exhaustion into an error at 6754-6756 and 6775-6777.
 Existing check: `lib.rs:14153` for a sibling CAS site. Status `unaudited`.
 Impact: exhaustion returns `MemoryStoreError::Serde` with a prose message (`lib.rs:6755, 6776`), which is a misclassification: a contention outcome surfaces as a serialization error, so a caller cannot retry it correctly.
 Open questions:
+
 - Why 8? No comment justifies the bound, and there is no backoff between attempts, so a steady writer can starve the loop deterministically. (needs human input)
 
 ### write-predicates-are-re-evaluated-inside-the-write-transaction

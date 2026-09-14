@@ -1,19 +1,19 @@
 import { describe, expect, it } from "bun:test";
 import {
     buildAllowOnlyPermission,
+    CONTEXT_RESEARCHER_ALLOWED_TOOLS,
     denyTaskRoutingToAgents,
     denyTaskRoutingToCallerAgents,
-    SIDEKICK_ALLOWED_TOOLS,
-    SMART_NOTE_COMPILER_ALLOWED_TOOLS,
+    NOTE_CONDITION_COMPILER_ALLOWED_TOOLS,
 } from "./permissions";
 
 describe("buildAllowOnlyPermission", () => {
     it("places only the named allows after the wildcard deny so findLast-semantics make them win", () => {
         // Permission.evaluate uses insertion-order rules with `findLast`; a wildcard after a named tool denies that tool.
         // Exact key equality also proves that unlisted tools (task, bash, edit, web) get no entry of their own.
-        const perm = buildAllowOnlyPermission(["read", "ctx_search"]);
-        expect(perm).toEqual({ "*": "deny", read: "allow", ctx_search: "allow" });
-        expect(Object.keys(perm)).toEqual(["*", "read", "ctx_search"]);
+        const perm = buildAllowOnlyPermission(["read", "eidnara_search"]);
+        expect(perm).toEqual({ "*": "deny", read: "allow", eidnara_search: "allow" });
+        expect(Object.keys(perm)).toEqual(["*", "read", "eidnara_search"]);
     });
 
     it("returns deny-all when the allow-list is undefined", () => {
@@ -24,60 +24,62 @@ describe("buildAllowOnlyPermission", () => {
 
 describe("denyTaskRoutingToAgents", () => {
     it("appends exact agent-ID denies after a whole-permission action", () => {
-        expect(denyTaskRoutingToAgents("allow", ["sidekick"])).toEqual({
+        expect(denyTaskRoutingToAgents("allow", ["context-researcher"])).toEqual({
             "*": "allow",
-            task: { sidekick: "deny" },
+            task: { "context-researcher": "deny" },
         });
     });
 
     it("preserves user task patterns and appends internal denies last", () => {
         const result = denyTaskRoutingToAgents(
             { edit: "ask", task: { "*": "allow", explore: "allow" } },
-            ["sidekick", "smart-note-compiler"],
+            ["context-researcher", "note-condition-compiler"],
         );
         expect(result).toEqual({
             edit: "ask",
             task: {
                 "*": "allow",
                 explore: "allow",
-                sidekick: "deny",
-                "smart-note-compiler": "deny",
+                "context-researcher": "deny",
+                "note-condition-compiler": "deny",
             },
         });
         expect(Object.keys((result as { task: Record<string, unknown> }).task)).toEqual([
             "*",
             "explore",
-            "sidekick",
-            "smart-note-compiler",
+            "context-researcher",
+            "note-condition-compiler",
         ]);
     });
 
     it("expands a task action into a wildcard rule before the denies", () => {
-        expect(denyTaskRoutingToAgents({ task: "allow" }, ["sidekick"])).toEqual({
-            task: { "*": "allow", sidekick: "deny" },
+        expect(denyTaskRoutingToAgents({ task: "allow" }, ["context-researcher"])).toEqual({
+            task: { "*": "allow", "context-researcher": "deny" },
         });
     });
 
     it("moves a user allow for an internal agent after the deny so the deny wins", () => {
-        const result = denyTaskRoutingToAgents({ task: { sidekick: "allow" } }, ["sidekick"]);
-        expect(result).toEqual({ task: { sidekick: "deny" } });
+        const result = denyTaskRoutingToAgents({ task: { "context-researcher": "allow" } }, [
+            "context-researcher",
+        ]);
+        expect(result).toEqual({ task: { "context-researcher": "deny" } });
     });
 
     it("treats a missing or malformed permission as empty", () => {
-        expect(denyTaskRoutingToAgents(undefined, ["sidekick"])).toEqual({
-            task: { sidekick: "deny" },
+        expect(denyTaskRoutingToAgents(undefined, ["context-researcher"])).toEqual({
+            task: { "context-researcher": "deny" },
         });
-        expect(denyTaskRoutingToAgents(["bogus"], ["sidekick"])).toEqual({
-            task: { sidekick: "deny" },
+        expect(denyTaskRoutingToAgents(["bogus"], ["context-researcher"])).toEqual({
+            task: { "context-researcher": "deny" },
         });
     });
 });
 
 describe("denyTaskRoutingToCallerAgents", () => {
     it("adds task denies to the built-in build and plan agents even when unconfigured", () => {
-        const result = denyTaskRoutingToCallerAgents({}, ["sidekick"]);
-        expect(result.build).toEqual({ permission: { task: { sidekick: "deny" } } });
-        expect(result.plan).toEqual({ permission: { task: { sidekick: "deny" } } });
+        const result = denyTaskRoutingToCallerAgents({}, ["context-researcher"]);
+        expect(result.build).toEqual({ permission: { task: { "context-researcher": "deny" } } });
+        expect(result.plan).toEqual({ permission: { task: { "context-researcher": "deny" } } });
     });
 
     it("adds task denies to user primary agents and leaves subagents untouched", () => {
@@ -87,11 +89,11 @@ describe("denyTaskRoutingToCallerAgents", () => {
                 explore: { mode: "subagent", permission: "allow" },
                 helper: { mode: "all" },
             },
-            ["sidekick"],
+            ["context-researcher"],
         );
         expect(result.reviewer).toEqual({
             mode: "primary",
-            permission: { "*": "allow", task: { sidekick: "deny" } },
+            permission: { "*": "allow", task: { "context-researcher": "deny" } },
         });
         expect(result.explore).toEqual({ mode: "subagent", permission: "allow" });
         expect(result.helper).toEqual({ mode: "all" });
@@ -100,37 +102,44 @@ describe("denyTaskRoutingToCallerAgents", () => {
     it("leaves agents without a mode alone unless they are build or plan", () => {
         const result = denyTaskRoutingToCallerAgents(
             { custom: { permission: "allow" }, build: { model: "m" } },
-            ["sidekick"],
+            ["context-researcher"],
         );
         expect(result.custom).toEqual({ permission: "allow" });
-        expect(result.build).toEqual({ model: "m", permission: { task: { sidekick: "deny" } } });
+        expect(result.build).toEqual({
+            model: "m",
+            permission: { task: { "context-researcher": "deny" } },
+        });
     });
 });
 
-describe("SMART_NOTE_COMPILER_ALLOWED_TOOLS", () => {
+describe("NOTE_CONDITION_COMPILER_ALLOWED_TOOLS", () => {
     it("is empty so the compiler emits text without calling tools", () => {
-        expect([...SMART_NOTE_COMPILER_ALLOWED_TOOLS]).toEqual([]);
+        expect([...NOTE_CONDITION_COMPILER_ALLOWED_TOOLS]).toEqual([]);
     });
 });
 
-describe("SIDEKICK_ALLOWED_TOOLS", () => {
-    it("is exactly ctx_search plus aft_outline/aft_zoom for navigation: no ctx_memory, read, write, task, or web tools", () => {
-        expect([...SIDEKICK_ALLOWED_TOOLS]).toEqual(["ctx_search", "aft_outline", "aft_zoom"]);
+describe("CONTEXT_RESEARCHER_ALLOWED_TOOLS", () => {
+    it("is exactly eidnara_search plus aft_outline/aft_zoom for navigation: no eidnara_memory, read, write, task, or web tools", () => {
+        expect([...CONTEXT_RESEARCHER_ALLOWED_TOOLS]).toEqual([
+            "eidnara_search",
+            "aft_outline",
+            "aft_zoom",
+        ]);
     });
 });
 
 describe("integration: full hidden-agent permission shape", () => {
-    it("smart-note-compiler permission object: `*` denied with no allow entry at all", () => {
-        const perm = buildAllowOnlyPermission(SMART_NOTE_COMPILER_ALLOWED_TOOLS);
+    it("note-condition-compiler permission object: `*` denied with no allow entry at all", () => {
+        const perm = buildAllowOnlyPermission(NOTE_CONDITION_COMPILER_ALLOWED_TOOLS);
         expect(perm).toEqual({ "*": "deny" });
         expect(Object.keys(perm)).toEqual(["*"]);
     });
 
-    it("sidekick permission object: `*` denied + read-only retrieval/navigation allowed", () => {
-        const perm = buildAllowOnlyPermission(SIDEKICK_ALLOWED_TOOLS);
+    it("context_researcher permission object: `*` denied + read-only retrieval/navigation allowed", () => {
+        const perm = buildAllowOnlyPermission(CONTEXT_RESEARCHER_ALLOWED_TOOLS);
         expect(perm).toEqual({
             "*": "deny",
-            ctx_search: "allow",
+            eidnara_search: "allow",
             aft_outline: "allow",
             aft_zoom: "allow",
         });

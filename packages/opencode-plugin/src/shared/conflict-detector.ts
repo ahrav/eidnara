@@ -119,7 +119,7 @@ export function detectConflicts(
     if (omoResult.preemptiveCompaction) {
         conflicts.omoPreemptiveCompaction = true;
         reasons.push(
-            "oh-my-opencode preemptive-compaction hook is active — it triggers compaction that conflicts with historian",
+            "oh-my-opencode preemptive-compaction hook is active — it triggers compaction that conflicts with history_summarizer",
         );
     }
     if (omoResult.contextWindowMonitor) {
@@ -131,7 +131,7 @@ export function detectConflicts(
     if (omoResult.anthropicRecovery) {
         conflicts.omoAnthropicRecovery = true;
         reasons.push(
-            "oh-my-opencode anthropic-context-window-limit-recovery hook is active — it triggers emergency compaction that bypasses historian",
+            "oh-my-opencode anthropic-context-window-limit-recovery hook is active — it triggers emergency compaction that bypasses history_summarizer",
         );
     }
 

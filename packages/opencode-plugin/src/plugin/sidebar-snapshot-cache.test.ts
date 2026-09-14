@@ -20,20 +20,20 @@ function makeSnapshot(overrides: Partial<SidebarSnapshot> = {}): SidebarSnapshot
         inputTokens: 0,
         contextLimit: 0,
         systemPromptTokens: 0,
-        compartmentCount: 0,
+        history_segmentCount: 0,
         memoryCount: 0,
         memoryState: "available",
         memoryBlockCount: 0,
         pendingOpsCount: 0,
-        historianRunning: false,
-        compartmentInProgress: false,
+        history_summarizerRunning: false,
+        history_segmentInProgress: false,
         sessionNoteCount: 0,
-        readySmartNoteCount: 0,
+        readyConditionalNoteCount: 0,
         cacheTtl: "5m",
         lastTransformError: null,
-        lastDreamerRunAt: null,
+        lastMemoryClassifierRunAt: null,
         projectIdentity: null,
-        compartmentTokens: 0,
+        history_segmentTokens: 0,
         factTokens: 0,
         memoryTokens: 0,
         docsTokens: 0,
@@ -52,9 +52,9 @@ describe("applyStickySnapshotCache", () => {
             inputTokens: 100_000,
             usagePercentage: 30,
             systemPromptTokens: 25_000,
-            compartmentTokens: 50_000,
+            history_segmentTokens: 50_000,
             conversationTokens: 25_000,
-            compartmentCount: 5,
+            history_segmentCount: 5,
             memoryCount: 10,
         });
         const result = applyStickySnapshotCache({ sessionId: "ses_test", directory: ROOT }, fresh);
@@ -69,7 +69,7 @@ describe("applyStickySnapshotCache", () => {
                 usagePercentage: 35,
                 native_context_usage_percentage: 17.5,
                 systemPromptTokens: 25_000,
-                compartmentTokens: 128_000,
+                history_segmentTokens: 128_000,
                 factTokens: 200,
                 memoryTokens: 8_000,
                 docsTokens: 3_000,
@@ -77,16 +77,16 @@ describe("applyStickySnapshotCache", () => {
                 conversationTokens: 53_000,
                 toolCallTokens: 99_000,
                 toolDefinitionTokens: 32_000,
-                compartmentCount: 392,
+                history_segmentCount: 392,
                 memoryCount: 486,
             }),
         );
         const flickered = makeSnapshot({
             inputTokens: 0, // mid-turn flicker
             native_context_usage_percentage: 0,
-            compartmentCount: 393, // a new compartment landed
+            history_segmentCount: 393, // a new history_segment landed
             memoryCount: 487,
-            historianRunning: true,
+            history_summarizerRunning: true,
             pendingOpsCount: 12,
             totalInputTokens: 9_000_000,
             newWorkTokens: 4_000,
@@ -101,7 +101,7 @@ describe("applyStickySnapshotCache", () => {
         expect(result.usagePercentage).toBe(35);
         expect(result.native_context_usage_percentage).toBe(17.5);
         expect(result.systemPromptTokens).toBe(25_000);
-        expect(result.compartmentTokens).toBe(128_000);
+        expect(result.history_segmentTokens).toBe(128_000);
         expect(result.factTokens).toBe(200);
         expect(result.memoryTokens).toBe(8_000);
         expect(result.docsTokens).toBe(3_000);
@@ -111,9 +111,9 @@ describe("applyStickySnapshotCache", () => {
         expect(result.toolDefinitionTokens).toBe(32_000);
 
         // Counts, live state, and cumulative work metrics come from the fresh build.
-        expect(result.compartmentCount).toBe(393);
+        expect(result.history_segmentCount).toBe(393);
         expect(result.memoryCount).toBe(487);
-        expect(result.historianRunning).toBe(true);
+        expect(result.history_summarizerRunning).toBe(true);
         expect(result.pendingOpsCount).toBe(12);
         expect(result.totalInputTokens).toBe(9_000_000);
         expect(result.newWorkTokens).toBe(4_000);
@@ -126,7 +126,7 @@ describe("applyStickySnapshotCache", () => {
                 inputTokens: 100_000,
                 systemPromptTokens: 10_000,
                 toolDefinitionTokens: 5_000,
-                compartmentTokens: 30_000,
+                history_segmentTokens: 30_000,
                 factTokens: 1_000,
                 memoryTokens: 4_000,
                 docsTokens: 6_000,
@@ -137,12 +137,12 @@ describe("applyStickySnapshotCache", () => {
         );
         const result = applyStickySnapshotCache(
             "ses_test",
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         const bucketSum =
             result.systemPromptTokens +
             result.toolDefinitionTokens +
-            result.compartmentTokens +
+            result.history_segmentTokens +
             result.factTokens +
             result.memoryTokens +
             result.docsTokens +
@@ -157,20 +157,20 @@ describe("applyStickySnapshotCache", () => {
             { sessionId: "ses_test", directory: ROOT },
             makeSnapshot({
                 inputTokens: 100_000,
-                compartmentCount: 5,
+                history_segmentCount: 5,
                 memoryCount: 10,
             }),
         );
 
-        // The cache treats inputTokens, compartmentCount, and memoryCount of 0 with no in-flight signal as a reset.
+        // The cache treats inputTokens, history_segmentCount, and memoryCount of 0 with no in-flight signal as a reset.
         const reset = applyStickySnapshotCache(
             { sessionId: "ses_test", directory: ROOT },
             makeSnapshot({
                 inputTokens: 0,
-                compartmentCount: 0,
+                history_segmentCount: 0,
                 memoryCount: 0,
-                compartmentInProgress: false,
-                historianRunning: false,
+                history_segmentInProgress: false,
+                history_summarizerRunning: false,
             }),
         );
         expect(reset.inputTokens).toBe(0);
@@ -178,7 +178,7 @@ describe("applyStickySnapshotCache", () => {
         // The reset removes the cached entry, so later in-flight signals cannot restore tokens.
         const later = applyStickySnapshotCache(
             { sessionId: "ses_test", directory: ROOT },
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         expect(later.inputTokens).toBe(0);
     });
@@ -186,13 +186,13 @@ describe("applyStickySnapshotCache", () => {
     test("a complete available memory read with a lower count is reset evidence", () => {
         applyStickySnapshotCache(
             "ses_test",
-            makeSnapshot({ inputTokens: 100_000, compartmentCount: 5, memoryCount: 10 }),
+            makeSnapshot({ inputTokens: 100_000, history_segmentCount: 5, memoryCount: 10 }),
         );
         const reset = applyStickySnapshotCache(
             "ses_test",
             makeSnapshot({
                 inputTokens: 0,
-                compartmentCount: 5,
+                history_segmentCount: 5,
                 memoryCount: 4,
                 memoryState: "available",
             }),
@@ -201,7 +201,7 @@ describe("applyStickySnapshotCache", () => {
 
         const later = applyStickySnapshotCache(
             "ses_test",
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         expect(later.inputTokens).toBe(0);
     });
@@ -209,14 +209,14 @@ describe("applyStickySnapshotCache", () => {
     test("a truncated memory read with a lower count is not reset evidence", () => {
         applyStickySnapshotCache(
             "ses_test",
-            makeSnapshot({ inputTokens: 100_000, compartmentCount: 5, memoryCount: 300 }),
+            makeSnapshot({ inputTokens: 100_000, history_segmentCount: 5, memoryCount: 300 }),
         );
         // The capped read returns a prefix, so its count is a lower bound and can fall below the cached count.
         const result = applyStickySnapshotCache(
             "ses_test",
             makeSnapshot({
                 inputTokens: 0,
-                compartmentCount: 5,
+                history_segmentCount: 5,
                 memoryCount: 256,
                 memoryTruncated: true,
             }),
@@ -229,14 +229,14 @@ describe("applyStickySnapshotCache", () => {
     test("a non-available memory state with a zero count is not reset evidence", () => {
         applyStickySnapshotCache(
             "ses_test",
-            makeSnapshot({ inputTokens: 100_000, compartmentCount: 5, memoryCount: 10 }),
+            makeSnapshot({ inputTokens: 100_000, history_segmentCount: 5, memoryCount: 10 }),
         );
         for (const memoryState of ["unavailable:daemon_absent", "stale", "disabled", null]) {
             const result = applyStickySnapshotCache(
                 "ses_test",
                 makeSnapshot({
                     inputTokens: 0,
-                    compartmentCount: 5,
+                    history_segmentCount: 5,
                     memoryCount: 0,
                     memoryState,
                 }),
@@ -247,16 +247,16 @@ describe("applyStickySnapshotCache", () => {
         }
     });
 
-    test("an indeterminate memory read does not rescue a compartment-count drop", () => {
+    test("an indeterminate memory read does not rescue a history_segment-count drop", () => {
         applyStickySnapshotCache(
             "ses_test",
-            makeSnapshot({ inputTokens: 100_000, compartmentCount: 5, memoryCount: 10 }),
+            makeSnapshot({ inputTokens: 100_000, history_segmentCount: 5, memoryCount: 10 }),
         );
         const reset = applyStickySnapshotCache(
             "ses_test",
             makeSnapshot({
                 inputTokens: 0,
-                compartmentCount: 0,
+                history_segmentCount: 0,
                 memoryCount: 0,
                 memoryState: "unavailable:daemon_absent",
             }),
@@ -272,20 +272,20 @@ describe("applyStickySnapshotCache", () => {
                 inputTokens: 350_000,
                 usagePercentage: 35,
                 systemPromptTokens: 25_000,
-                compartmentTokens: 128_000,
+                history_segmentTokens: 128_000,
                 memoryTokens: 8_000,
                 conversationTokens: 100_000,
-                compartmentCount: 392,
+                history_segmentCount: 392,
                 memoryCount: 486,
             }),
         );
 
         const firstPromptFlicker = makeSnapshot({
             inputTokens: 0,
-            compartmentInProgress: false,
-            historianRunning: false,
+            history_segmentInProgress: false,
+            history_summarizerRunning: false,
             pendingOpsCount: 0,
-            compartmentCount: 392,
+            history_segmentCount: 392,
             memoryCount: 486,
         });
         const result = applyStickySnapshotCache(
@@ -294,7 +294,7 @@ describe("applyStickySnapshotCache", () => {
         );
 
         expect(result.inputTokens).toBe(350_000);
-        expect(result.compartmentTokens).toBe(128_000);
+        expect(result.history_segmentTokens).toBe(128_000);
         expect(result.memoryTokens).toBe(8_000);
         expect(result.conversationTokens).toBe(100_000);
     });
@@ -307,7 +307,7 @@ describe("applyStickySnapshotCache", () => {
         // The cache preserves token breakdowns during a mid-turn flicker.
         const stuck = applyStickySnapshotCache(
             { sessionId: "ses_test", directory: ROOT },
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         expect(stuck.inputTokens).toBe(100_000);
         // A nonzero inputTokens snapshot replaces the cached snapshot.
@@ -319,7 +319,7 @@ describe("applyStickySnapshotCache", () => {
         // A later zero-inputTokens snapshot uses the replacement.
         const stuck2 = applyStickySnapshotCache(
             { sessionId: "ses_test", directory: ROOT },
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         expect(stuck2.inputTokens).toBe(200_000);
     });
@@ -347,7 +347,7 @@ describe("applyStickySnapshotCache", () => {
 
         const switched = applyStickySnapshotCache(
             after,
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         expect(switched.inputTokens).toBe(0);
         expect(switched.usagePercentage).toBe(0);
@@ -362,7 +362,7 @@ describe("applyStickySnapshotCache", () => {
         );
         const stuck = applyStickySnapshotCache(
             after,
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         expect(stuck.inputTokens).toBe(40_000);
         expect(stuck.usagePercentage).toBe(20);
@@ -381,7 +381,7 @@ describe("applyStickySnapshotCache", () => {
         expect(otherRoot.inputTokens).toBe(0);
         const sameRoot = applyStickySnapshotCache(
             { sessionId: "ses_test", directory: "/repo-a" },
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         expect(sameRoot.inputTokens).toBe(100_000);
     });
@@ -399,12 +399,12 @@ describe("applyStickySnapshotCache", () => {
         }
         const evicted = applyStickySnapshotCache(
             { sessionId: "ses_test", directory: roots[0] },
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         expect(evicted.inputTokens).toBe(0);
         const retained = applyStickySnapshotCache(
             { sessionId: "ses_test", directory: roots[1] },
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         expect(retained.inputTokens).toBe(2_000);
     });
@@ -421,11 +421,11 @@ describe("applyStickySnapshotCache", () => {
         clearSidebarSnapshotCache("ses_test");
         const stuckA = applyStickySnapshotCache(
             { sessionId: "ses_test", directory: "/repo-a" },
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         const stuckB = applyStickySnapshotCache(
             { sessionId: "ses_test", directory: "/repo-b" },
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+            makeSnapshot({ inputTokens: 0, history_segmentInProgress: true }),
         );
         expect(stuckA.inputTokens).toBe(0);
         expect(stuckB.inputTokens).toBe(0);

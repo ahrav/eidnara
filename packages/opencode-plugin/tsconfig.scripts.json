@@ -22,6 +22,6 @@
         "scripts/experiments",
         "scripts/lib",
         "scripts/smoke-node-sqlite.ts",
-        "scripts/test-historian-prompt.ts"
+        "scripts/test-history_summarizer-prompt.ts"
     ]
 }

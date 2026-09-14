@@ -66,9 +66,9 @@ export function createPiRustToolBackends(moduleClient: RustModeModuleClient): Pi
             moduleClient.call({
                 sessionId,
                 projectRoot,
-                method: "ctx_note",
+                method: "eidnara_note",
                 body: {
-                    name: "ctx_note",
+                    name: "eidnara_note",
                     arguments: {
                         ...(commandId ? { command_id: commandId } : {}),
                         action,

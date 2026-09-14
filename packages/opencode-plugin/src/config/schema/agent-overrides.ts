@@ -22,7 +22,7 @@ const PermissionSchema = z
     .catchall(PermissionRuleSchema)
     .optional();
 
-export const AgentOverrideConfigSchema = z.object({
+export const AgentOverrideConfigSchema = z.strictObject({
     model: z.string().optional().describe("Primary model ID (e.g. 'claude-sonnet-4-6')"),
     temperature: z.number().min(0).max(2).optional().describe("Sampling temperature (0-2)"),
     top_p: z.number().min(0).max(1).optional().describe("Nucleus sampling top_p (0-1)"),

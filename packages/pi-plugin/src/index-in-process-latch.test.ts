@@ -48,7 +48,7 @@ describe("Pi in-process re-init latch (#247)", () => {
         expect(first.events.length).toBeGreaterThan(0);
         expect(first.tools.length).toBeGreaterThan(0);
         expect(first.commands.length).toBeGreaterThan(0);
-        expect(first.entryRenderers).toEqual(["ctx-status"]);
+        expect(first.entryRenderers).toEqual(["eidnara-status"]);
 
         expect(__test.isPiEidnaraActiveInProcess()).toBe(true);
 
@@ -80,7 +80,7 @@ describe("Pi in-process re-init latch (#247)", () => {
         expect(second.events.length).toBeGreaterThan(0);
         expect(second.tools.length).toBeGreaterThan(0);
         expect(second.commands.length).toBeGreaterThan(0);
-        expect(second.entryRenderers).toEqual(["ctx-status"]);
+        expect(second.entryRenderers).toEqual(["eidnara-status"]);
     }, 15_000);
 
     it("a disabled configuration leaves the latch clear so /reload can register an enabled one", async () => {

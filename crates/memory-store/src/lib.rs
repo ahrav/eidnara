@@ -13,7 +13,7 @@
 
 #![forbid(unsafe_code)]
 
-pub mod dreamer_ledger;
+pub mod memory_classifier_ledger;
 pub(crate) mod task_lease;
 
 use cache_stability::{DurabilityClass, FrozenUnit};
@@ -84,7 +84,7 @@ pub struct HarnessMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish: Option<String>,
     /// Native message creation time, when the harness provides it. Used for temporal
-    /// compartment heading dates without making dates part of message identity.
+    /// history_segment heading dates without making dates part of message identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at_ms: Option<i64>,
 }
@@ -485,12 +485,12 @@ fn normalize_authority_note_route_tx(
 
 /// A project's workspace membership: the union of member identities it reads, which of
 /// them are its OWN (full visibility) vs FOREIGN (visible only in `share_categories`),
-/// The durable historian single-flight phase. The phase lives in [`ModuleMeta`] so
+/// The durable history_summarizer single-flight phase. The phase lives in [`ModuleMeta`] so
 /// the same row-version CAS that guards cache-state commits also guards writer
 /// orchestration: a stale producer can never publish against a newer module state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HistorianPhase {
+pub enum HistorySummarizerPhase {
     #[default]
     Idle,
     Firing,
@@ -499,57 +499,57 @@ pub enum HistorianPhase {
     Publishing,
 }
 
-impl HistorianPhase {
+impl HistorySummarizerPhase {
     pub fn as_str(&self) -> &'static str {
         match self {
-            HistorianPhase::Idle => "idle",
-            HistorianPhase::Firing => "firing",
-            HistorianPhase::AwaitingProducer => "awaiting_producer",
-            HistorianPhase::Validating => "validating",
-            HistorianPhase::Publishing => "publishing",
+            HistorySummarizerPhase::Idle => "idle",
+            HistorySummarizerPhase::Firing => "firing",
+            HistorySummarizerPhase::AwaitingProducer => "awaiting_producer",
+            HistorySummarizerPhase::Validating => "validating",
+            HistorySummarizerPhase::Publishing => "publishing",
         }
     }
 }
 
-/// Inclusive ordinal range pinned for one historian run.
+/// Inclusive ordinal range pinned for one history_summarizer run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistorianChunkRange {
+pub struct HistorySummarizerChunkRange {
     pub from_ordinal: u64,
     pub to_ordinal: u64,
 }
 
-/// Content-sensitive identity for one message selected into a historian firing.
+/// Content-sensitive identity for one message selected into a history_summarizer firing.
 /// The outer firing vector preserves message order; each block vector preserves
 /// the canonical block order already tracked by [`ModuleMeta::block_identity_by_mid`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistorianSelectedMessageIdentity {
+pub struct HistorySummarizerSelectedMessageIdentity {
     pub mid: String,
     pub block_identities: Vec<BlockIdentity>,
 }
 
-/// The durable historian state stored inside [`ModuleMeta`]. Idle keeps
+/// The durable history_summarizer state stored inside [`ModuleMeta`]. Idle keeps
 /// `firing_seq` as the monotonic last-issued sequence and clears the in-flight
 /// identifiers; abandon paths additionally set `failure_backoff_at_ms`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistorianDurableState {
+pub struct HistorySummarizerDurableState {
     #[serde(default)]
-    pub state: HistorianPhase,
+    pub state: HistorySummarizerPhase,
     #[serde(default)]
     pub firing_seq: u64,
     #[serde(default)]
-    pub chunk_range: Option<HistorianChunkRange>,
+    pub chunk_range: Option<HistorySummarizerChunkRange>,
     #[serde(default)]
     pub chunk_fingerprint: String,
     /// Durable content identities for exactly the message range sent to the producer.
     /// Publication compares these with the current store metadata inside the write
     /// transaction, allowing later tail extension while rejecting selected-byte drift.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub selected_range_identities: Vec<HistorianSelectedMessageIdentity>,
+    pub selected_range_identities: Vec<HistorySummarizerSelectedMessageIdentity>,
     #[serde(default)]
     pub producer_session_id: Option<String>,
     #[serde(default)]
     pub producer_run_id: Option<String>,
-    /// The harness the producer run was started under. Broca scopes a run's
+    /// The harness the producer run was started under. ModelExecution scopes a run's
     /// identity by `(project_root, harness, session)`, so recovery must
     /// reattach with THIS harness rather than whatever the resuming route is
     /// bound to: after a cross-harness handoff the current binding would
@@ -565,11 +565,11 @@ pub struct HistorianDurableState {
     /// same epoch it originally saw, not the session's current epoch.
     #[serde(default)]
     pub expected_revert_epoch: u64,
-    /// The compartment-set generation observed with the firing snapshot. Publication
+    /// The history_segment-set generation observed with the firing snapshot. Publication
     /// rechecks it inside its transaction so an overlapping external sync cannot slip
     /// between the producer's snapshot and the append.
     #[serde(default)]
-    pub compartment_set_generation: CompartmentSetGeneration,
+    pub history_segment_set_generation: HistorySegmentSetGeneration,
     #[serde(default)]
     pub failure_backoff_at_ms: Option<i64>,
     /// Human-readable detail of the most recent failed firing. The producer runs in a
@@ -584,16 +584,16 @@ pub struct HistorianDurableState {
     /// block, so the skip branch must be readable from the state dump. Cleared on fire.
     #[serde(default)]
     pub last_no_fire: Option<String>,
-    /// Consecutive failures on the historian publication path. This is diagnostic-only
+    /// Consecutive failures on the history_summarizer publication path. This is diagnostic-only
     /// state: it makes repeated fence/outbox failures visible without affecting bytes.
     #[serde(default)]
     pub consecutive_publish_failures: u32,
 }
 
-impl Default for HistorianDurableState {
+impl Default for HistorySummarizerDurableState {
     fn default() -> Self {
-        HistorianDurableState {
-            state: HistorianPhase::Idle,
+        HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::Idle,
             firing_seq: 0,
             chunk_range: None,
             chunk_fingerprint: String::new(),
@@ -603,7 +603,7 @@ impl Default for HistorianDurableState {
             producer_harness: None,
             fired_at_ms: None,
             expected_revert_epoch: 0,
-            compartment_set_generation: CompartmentSetGeneration::default(),
+            history_segment_set_generation: HistorySegmentSetGeneration::default(),
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
@@ -737,29 +737,29 @@ pub struct PassTrace {
     pub scheduler_history: Vec<PassSchedulerObservation>,
 }
 
-/// A validated historian fact that may become a project memory. Validation owns
-/// A historian event retained for a future module-to-TS mirror. `at_compartment` keeps the
-/// producer's one-based anchor even when the module-side compartment surrogate is unavailable.
+/// A validated history_summarizer fact that may become a project memory. Validation owns
+/// A history_summarizer event retained for a future module-to-TS mirror. `at_history_segment` keeps the
+/// producer's one-based anchor even when the module-side history_segment surrogate is unavailable.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistorianEventCandidate {
+pub struct HistorySummarizerEventCandidate {
     pub kind: String,
-    pub at_compartment: Option<u64>,
-    pub compartment_id: Option<u64>,
+    pub at_history_segment: Option<u64>,
+    pub history_segment_id: Option<u64>,
     pub fields_json: String,
     pub created_at: i64,
     pub harness: String,
 }
 
 /// A primer candidate records a question that should remain available across sessions, along with
-/// the project, session, and source-compartment information needed to trace where it came from.
+/// the project, session, and source-history_segment information needed to trace where it came from.
 /// Its fields match the corresponding TypeScript primer record.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistorianPrimerCandidate {
+pub struct HistorySummarizerPrimerCandidate {
     pub project_path: String,
     pub session_id: String,
     pub question: String,
-    pub source_compartment_start: Option<u64>,
-    pub source_compartment_end: Option<u64>,
+    pub source_history_segment_start: Option<u64>,
+    pub source_history_segment_end: Option<u64>,
     pub source_start_message_id: String,
     pub source_end_message_id: String,
     pub source_message_time: i64,
@@ -769,11 +769,11 @@ pub struct HistorianPrimerCandidate {
 /// A privacy-gated user observation candidate. It is intentionally not a project memory:
 /// the TS review task owns promotion after the user opts into collection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistorianUserMemoryCandidate {
+pub struct HistorySummarizerUserMemoryCandidate {
     pub content: String,
     pub session_id: String,
-    pub source_compartment_start: Option<u64>,
-    pub source_compartment_end: Option<u64>,
+    pub source_history_segment_start: Option<u64>,
+    pub source_history_segment_end: Option<u64>,
     pub created_at: i64,
 }
 
@@ -781,49 +781,49 @@ pub struct HistorianUserMemoryCandidate {
 /// The stale-producer predicate checked inside the publish transaction before any
 /// additive writes occur. Every field must match the durable state row.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistorianPublishPredicate {
+pub struct HistorySummarizerPublishPredicate {
     pub firing_seq: u64,
     pub producer_run_id: String,
     pub chunk_fingerprint: String,
-    pub selected_range_identities: Vec<HistorianSelectedMessageIdentity>,
-    /// Cheap generation of the complete compartment set captured when this firing
+    pub selected_range_identities: Vec<HistorySummarizerSelectedMessageIdentity>,
+    /// Cheap generation of the complete history_segment set captured when this firing
     /// assembled its raw chunk. Count closes the sequence-reuse case that max alone
     /// cannot distinguish.
-    pub compartment_set_generation: CompartmentSetGeneration,
+    pub history_segment_set_generation: HistorySegmentSetGeneration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistorianPublishResult {
+pub struct HistorySummarizerPublishResult {
     pub row_version: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HistorianSideChannelDrainResult {
+pub struct HistorySummarizerSideChannelDrainResult {
     pub attempted: usize,
     pub succeeded: usize,
     pub failed: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HistorianSideChannelStatus {
+pub struct HistorySummarizerSideChannelStatus {
     pub pending_count: usize,
     pub last_failure: Option<String>,
 }
 
-/// A cheap, snapshot-consistent identifier for the complete compartment set.
+/// A cheap, snapshot-consistent identifier for the complete history_segment set.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompartmentSetGeneration {
+pub struct HistorySegmentSetGeneration {
     pub max_sequence: i64,
     pub count: i64,
 }
 
-/// Session data read atomically for historian assembly. The epoch and compartment
+/// Session data read atomically for history_summarizer assembly. The epoch and history_segment
 /// generation must be snapped with the set that determines the chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistorianAssemblySnapshot {
-    pub compartments: Vec<StoredCompartment>,
+pub struct HistorySummarizerAssemblySnapshot {
+    pub history_segments: Vec<StoredHistorySegment>,
     pub revert_epoch: u64,
-    pub compartment_set_generation: CompartmentSetGeneration,
+    pub history_segment_set_generation: HistorySegmentSetGeneration,
 }
 
 /// Result of a deterministic revert re-cut. The caller must use the returned
@@ -836,30 +836,27 @@ pub struct TruncateOutcome {
     pub row_version: u64,
 }
 
-pub struct HistorianPublishRequest<'a> {
+pub struct HistorySummarizerPublishRequest<'a> {
     pub session_id: &'a str,
     pub expected_row_version: Option<u64>,
     pub expected_revert_epoch: u64,
-    pub predicate: &'a HistorianPublishPredicate,
+    pub predicate: &'a HistorySummarizerPublishPredicate,
     pub project_path: &'a str,
-    pub compartments: &'a [StoredCompartment],
-    pub events: &'a [HistorianEventCandidate],
-    pub primer_candidates: &'a [HistorianPrimerCandidate],
-    pub user_memory_candidates: &'a [HistorianUserMemoryCandidate],
+    pub history_segments: &'a [StoredHistorySegment],
+    pub events: &'a [HistorySummarizerEventCandidate],
+    pub primer_candidates: &'a [HistorySummarizerPrimerCandidate],
+    pub user_memory_candidates: &'a [HistorySummarizerUserMemoryCandidate],
     pub publication_floor_ordinal: u64,
     pub chunk_transcript: Option<&'a str>,
-    /// JSON-encoded original CK messages for the compacted range. Unlike the condensed
-    /// transcript, this preserves full tool output for durable ctx_expand recovery.
-    pub raw_chunk_messages: Option<&'a str>,
 }
 
 /// Typed publish failures. CAS and state mismatches are deliberately separate so a
 /// caller can tell "another writer already committed" from "this producer is stale."
 #[derive(Debug, thiserror::Error)]
-pub enum HistorianPublishError {
+pub enum HistorySummarizerPublishError {
     #[error("store: {0}")]
     Store(#[source] MemoryStoreError),
-    #[error("publish CAS conflict: expected {expected:?}, found {found}{reason_suffix}", reason_suffix = historian_publish_reason_suffix(reason))]
+    #[error("publish CAS conflict: expected {expected:?}, found {found}{reason_suffix}", reason_suffix = history_summarizer_publish_reason_suffix(reason))]
     CasConflict {
         expected: Option<u64>,
         found: u64,
@@ -871,43 +868,43 @@ pub enum HistorianPublishError {
     /// producer failure, and an immediate retry with a fresh snapshot is valid.
     #[error("publication fence rejected: {reason}")]
     FenceRejected { reason: String },
-    /// An appended historian compartment intersects an already durable range. This
+    /// An appended history_summarizer history_segment intersects an already durable range. This
     /// is a publish rejection rather than a SQLite failure so callers can abandon the
     /// stale firing and leave the session immediately reusable.
     #[error(
-        "historian compartment {incoming_start_message}..={incoming_end_message} overlaps existing sequence {existing_sequence}"
+        "history_summarizer history_segment {incoming_start_message}..={incoming_end_message} overlaps existing sequence {existing_sequence}"
     )]
-    CompartmentOverlap {
+    HistorySegmentOverlap {
         existing_sequence: i64,
         incoming_start_message: i64,
         incoming_end_message: i64,
     },
-    #[error("historian publish state mismatch: expected seq {} run {} fingerprint {}, found {:?}", .expected.firing_seq, .expected.producer_run_id, .expected.chunk_fingerprint, found)]
+    #[error("history_summarizer publish state mismatch: expected seq {} run {} fingerprint {}, found {:?}", .expected.firing_seq, .expected.producer_run_id, .expected.chunk_fingerprint, found)]
     StateMismatch {
-        expected: Box<HistorianPublishPredicate>,
-        found: Box<HistorianDurableState>,
+        expected: Box<HistorySummarizerPublishPredicate>,
+        found: Box<HistorySummarizerDurableState>,
     },
-    #[error("historian publish invalid state: {state}")]
+    #[error("history_summarizer publish invalid state: {state}")]
     InvalidState { state: String },
     #[error("serde: {0}")]
     Serde(String),
 }
 
-fn historian_publish_reason_suffix(reason: &Option<String>) -> String {
+fn history_summarizer_publish_reason_suffix(reason: &Option<String>) -> String {
     reason
         .as_deref()
         .map_or_else(String::new, |reason| format!(": {reason}"))
 }
 
-impl From<MemoryStoreError> for HistorianPublishError {
+impl From<MemoryStoreError> for HistorySummarizerPublishError {
     fn from(e: MemoryStoreError) -> Self {
-        HistorianPublishError::Store(e)
+        HistorySummarizerPublishError::Store(e)
     }
 }
 
-impl From<StoreError> for HistorianPublishError {
+impl From<StoreError> for HistorySummarizerPublishError {
     fn from(e: StoreError) -> Self {
-        HistorianPublishError::Store(MemoryStoreError::Store(e))
+        HistorySummarizerPublishError::Store(MemoryStoreError::Store(e))
     }
 }
 
@@ -1324,7 +1321,7 @@ pub struct ModuleMeta {
     /// wall clock, we update it only during a pass that already rewrites cached content.
     #[serde(default)]
     pub guidance_date: String,
-    /// Monotonic session-level epoch bumped atomically with a revert re-cut. Historian
+    /// Monotonic session-level epoch bumped atomically with a revert re-cut. HistorySummarizer
     /// firings carry the epoch observed at assembly so stale publishers cannot append
     /// rows after the covered prefix has been truncated.
     #[serde(default)]
@@ -1346,7 +1343,7 @@ pub struct ModuleMeta {
     #[serde(default)]
     pub pending_rewrite_ambiguous: bool,
     /// Durable loud detail for the pending/ambiguous rewrite alarm. It is separate from
-    /// historian failures because no historian run owns this state.
+    /// history_summarizer failures because no history_summarizer run owns this state.
     #[serde(default)]
     pub pending_rewrite_last_failure: Option<String>,
     /// Frozen harness-native synthetic todo pair plus the real tail message id it follows.
@@ -1363,13 +1360,13 @@ pub struct ModuleMeta {
     /// cache. 0 is retained for pre-materialization metadata.
     #[serde(default)]
     pub m1_revision: u64,
-    /// Highest compartment sequence represented by the applied m1 revision. Unlike the combined
+    /// Highest history_segment sequence represented by the applied m1 revision. Unlike the combined
     /// revision digest, this component is unaffected by project memories, notes, or profile churn.
     /// `None` identifies metadata written before the component watermark was persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub m1_compartment_seq: Option<i64>,
-    /// Counted coherent divergence observations suppressed by a pending compartment revision.
-    /// Active historian and wrapup publication windows retain this value without incrementing or
+    pub m1_history_segment_seq: Option<i64>,
+    /// Counted coherent divergence observations suppressed by a pending history_segment revision.
+    /// Active history_summarizer and wrapup publication windows retain this value without incrementing or
     /// resetting it; legacy or damaged rows resume escalation after those bounded windows close.
     #[serde(default, skip_serializing_if = "u8_is_zero")]
     pub boundary_divergence_pending_count: u8,
@@ -1404,25 +1401,25 @@ pub struct ModuleMeta {
 
     // --- slice 4d-m0: the two-watermark coverage model + memory manifest ---
     // (all serde(default) so pre-4d meta JSON loads cleanly)
-    /// The highest compartment `sequence` folded INTO m0. The "in-m0 vs riding-m1"
-    /// divider — advances ONLY on a HARD fold. The m1 renderer treats compartments with
-    /// `sequence > folded_compartment_seq` as new (renders them at P1); the HARD folds
+    /// The highest history_segment `sequence` folded INTO m0. The "in-m0 vs riding-m1"
+    /// divider — advances ONLY on a HARD fold. The m1 renderer treats history_segments with
+    /// `sequence > folded_history_segment_seq` as new (renders them at P1); the HARD folds
     /// them and advances this. Distinct from `coverage_ordinal` (the m0+m1 coverage end /
     /// tail-trim point, which advances on a coverage-extending SOFT too).
     #[serde(default)]
-    pub folded_compartment_seq: i64,
-    /// The first ordinal covered by the compartment span reflected in `coverage_ordinal`.
-    /// Leading system messages below this start are not summarized by compartments and
+    pub folded_history_segment_seq: i64,
+    /// The first ordinal covered by the history_segment span reflected in `coverage_ordinal`.
+    /// Leading system messages below this start are not summarized by history_segments and
     /// must remain pass-through on full-array profiles.
     #[serde(default)]
     pub coverage_start_ordinal: Option<u64>,
-    /// The highest compartment `sequence` reflected in `coverage_ordinal` after either a
+    /// The highest history_segment `sequence` reflected in `coverage_ordinal` after either a
     /// HARD fold or a coverage-extending SOFT. The transform compares the live scalar max
     /// against this before loading full rows for covered-system absorption, keeping steady
-    /// defer passes off the compartment-row hot path. `None` means legacy metadata; callers
-    /// fall back to `folded_compartment_seq`.
+    /// defer passes off the history_segment-row hot path. `None` means legacy metadata; callers
+    /// fall back to `folded_history_segment_seq`.
     #[serde(default)]
-    pub coverage_compartment_seq: Option<i64>,
+    pub coverage_history_segment_seq: Option<i64>,
     /// `Some` records either a pinned canonical snapshot or a withheld composition.
     /// `None` occurs before the first HARD, or when memory was disabled at the
     /// HARD and no canonical read was taken.
@@ -1437,17 +1434,17 @@ pub struct ModuleMeta {
     #[serde(default)]
     pub expiry_cutoff_ms: i64,
 
-    // --- historian writer orchestration ---
-    /// Durable single-flight state for the background historian. It is intentionally
+    // --- history_summarizer writer orchestration ---
+    /// Durable single-flight state for the background history_summarizer. It is intentionally
     /// colocated with the cache meta blob: publish can CAS the state row and append
     /// rows in one SQLite transaction without introducing a second concurrency token.
     /// These fields never feed render bytes; they only decide whether a producer may
     /// publish or be reattached after restart.
     #[serde(default)]
-    pub historian: HistorianDurableState,
+    pub history_summarizer: HistorySummarizerDurableState,
     /// The trigger-only protected-tail floor advanced by a successful publication.
     /// This is distinct from `coverage_ordinal`: coverage drives render/splice output,
-    /// while this floor only anchors future historian trigger selection.
+    /// while this floor only anchors future history_summarizer trigger selection.
     #[serde(default)]
     pub publication_floor_ordinal: Option<u64>,
 
@@ -1485,12 +1482,12 @@ pub struct ModuleMeta {
     /// Keep the older ordinal field populated so pre-tag readers remain compatible.
     #[serde(default)]
     pub reasoning_cleared_through_tag: u64,
-    /// Highest tag number used as the immutable caveman age basis by the last
-    /// caveman-enabled genuine bust. Defer passes and restarts retain this value while
+    /// Highest tag number used as the immutable terse_text_compression age basis by the last
+    /// terse_text_compression-enabled genuine bust. Defer passes and restarts retain this value while
     /// newly tagged text waits for the next independently busting pass. Zero means no
-    /// caveman-enabled bust has captured an age basis yet.
+    /// terse_text_compression-enabled bust has captured an age basis yet.
     #[serde(default)]
-    pub caveman_age_basis_tag: u64,
+    pub terse_text_compression_age_basis_tag: u64,
     /// The request-local Claude Code mechanics state committed with the rendered identity.
     /// Missing legacy metadata is false, which preserves the dormant render path.
     #[serde(default)]
@@ -1514,7 +1511,7 @@ pub struct ModuleMeta {
     /// never enters this set.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub pending_user_hint_block_ids: BTreeSet<String>,
-    /// Set by ctx_reduce after the agent has acted on a reminder. The next transform
+    /// Set by eidnara_reduce after the agent has acted on a reminder. The next transform
     /// suppresses new Channel-1 appends while still replaying every stored append row.
     #[serde(default)]
     pub channel1_reduce_suppressed: bool,
@@ -1745,10 +1742,10 @@ pub struct TransformCommit<'a> {
     pub meta: &'a ModuleMeta,
     pub consumed_drop_ids: &'a [i64],
     pub first_applied_command_ids: &'a [String],
-    /// Highest compartment sequence observed while composing a bust. The fenced commit
+    /// Highest history_segment sequence observed while composing a bust. The fenced commit
     /// re-reads this scalar so a publication interleaved between signal read and commit
     /// cannot be hidden behind the older rendered m1 bytes.
-    pub compartment_max_seq: Option<i64>,
+    pub history_segment_max_seq: Option<i64>,
     /// Authenticated filesystem root observed by the transform that owns this cache commit.
     pub project_root: Option<&'a str>,
     /// Serialized first-divergence attribution to store with the accepted pass.
@@ -1773,17 +1770,17 @@ pub struct TransformCommit<'a> {
 #[derive(Debug, Clone)]
 pub struct SessionStatusSnapshot {
     pub loaded: LoadedState,
-    pub compartment_count: usize,
+    pub history_segment_count: usize,
     pub pending_drop_count: usize,
     pub tag_count: usize,
     pub pass_trace: Option<PassTrace>,
-    pub compartment_page: Option<CompartmentPage>,
+    pub history_segment_page: Option<HistorySegmentPage>,
 }
 
-/// A bounded chronological page of module-owned compartments.
+/// A bounded chronological page of module-owned history_segments.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompartmentPage {
-    pub compartments: Vec<StoredCompartment>,
+pub struct HistorySegmentPage {
+    pub history_segments: Vec<StoredHistorySegment>,
     pub max_sequence: i64,
 }
 
@@ -1807,10 +1804,10 @@ pub enum TodoStateSetOutcome {
     Noop,
 }
 
-/// A stored compartment row (the m0/m1 history source). `sequence` is the
+/// A stored history_segment row (the m0/m1 history source). `sequence` is the
 /// chronological order (1 = oldest).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StoredCompartment {
+pub struct StoredHistorySegment {
     pub sequence: i64,
     pub start_message: i64,
     pub end_message: i64,
@@ -1829,27 +1826,19 @@ pub struct StoredCompartment {
     /// Decay rate (1..100), defaults to 50.
     pub importance: i32,
     pub episode_type: Option<String>,
-    /// 1 = pre-v2 flat compartment, 0 = v2 tiered.
+    /// 1 = pre-v2 flat history_segment, 0 = v2 tiered.
     pub legacy: i32,
     pub created_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectMuralArtifact {
-    pub project_path: String,
-    pub data_url: Vec<u8>,
-    pub content_hash: String,
-    pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M1RevisionSnapshot {
-    pub max_compartment_seq: i64,
+    pub max_history_segment_seq: i64,
     pub note_status_version: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StoredCompartmentSearchRow {
+pub struct StoredHistorySegmentSearchRow {
     pub sequence: i64,
     pub title: String,
     pub content: String,
@@ -1862,13 +1851,12 @@ pub struct StoredCompartmentSearchRow {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredChunkTranscript {
-    pub compartment_seq: i64,
+    pub history_segment_seq: i64,
     pub start_ordinal: i64,
     pub end_ordinal: i64,
     pub transcript: Option<String>,
     /// JSON-encoded original CK messages for this compacted range. Old transcript rows do not
     /// have this migration-era payload, so callers retain the condensed transcript fallback.
-    pub raw_messages_json: Option<String>,
     pub created_at_ms: i64,
 }
 
@@ -2934,15 +2922,14 @@ pub enum DurableWriteFamily {
     CommandLedgers,
     Notes,
     NoteEvaluationLedgers,
-    Compartments,
+    HistorySegments,
     ChunkTranscripts,
     Tags,
-    HistorianSideChannels,
+    HistorySummarizerSideChannels,
     WorkspaceProfileMemory,
     AuthorityRoutes,
     AuthorityControl,
     AuthoritySeedRows,
-    ProjectMuralArtifacts,
     FacadeMutationLedger,
     LineageCopies,
     KernelCommitEnvelope,
@@ -2963,15 +2950,14 @@ impl DurableWriteFamily {
         Self::CommandLedgers,
         Self::Notes,
         Self::NoteEvaluationLedgers,
-        Self::Compartments,
+        Self::HistorySegments,
         Self::ChunkTranscripts,
         Self::Tags,
-        Self::HistorianSideChannels,
+        Self::HistorySummarizerSideChannels,
         Self::WorkspaceProfileMemory,
         Self::AuthorityRoutes,
         Self::AuthorityControl,
         Self::AuthoritySeedRows,
-        Self::ProjectMuralArtifacts,
         Self::FacadeMutationLedger,
         Self::LineageCopies,
         Self::KernelCommitEnvelope,
@@ -2990,15 +2976,14 @@ impl DurableWriteFamily {
             Self::CommandLedgers => "command_ledgers",
             Self::Notes => "notes",
             Self::NoteEvaluationLedgers => "note_evaluation_ledgers",
-            Self::Compartments => "compartments",
+            Self::HistorySegments => "history_segments",
             Self::ChunkTranscripts => "chunk_transcripts",
             Self::Tags => "tags",
-            Self::HistorianSideChannels => "historian_side_channels",
+            Self::HistorySummarizerSideChannels => "history_summarizer_side_channels",
             Self::WorkspaceProfileMemory => "workspace_profile_memory",
             Self::AuthorityRoutes => "authority_routes",
             Self::AuthorityControl => "authority_control",
             Self::AuthoritySeedRows => "authority_seed_rows",
-            Self::ProjectMuralArtifacts => "project_mural_artifacts",
             Self::FacadeMutationLedger => "facade_mutation",
             Self::LineageCopies => "lineage_copies",
             Self::KernelCommitEnvelope => "kernel_commit_envelope",
@@ -3061,16 +3046,16 @@ pub const DURABLE_WRITE_REGISTRY: &[DurableWriteRegistration] = &[
         test: "lib::note_evaluation_callback_errors_are_redacted",
     },
     DurableWriteRegistration {
-        family: DurableWriteFamily::Compartments,
+        family: DurableWriteFamily::HistorySegments,
         policy: DurableFieldPolicy::Mixed,
-        preparation: "prepare_compartment",
-        test: "production_redaction::compartment_content_redacts_and_new_message_identities_reject",
+        preparation: "prepare_history_segment",
+        test: "production_redaction::history_segment_content_redacts_and_new_message_identities_reject",
     },
     DurableWriteRegistration {
         family: DurableWriteFamily::ChunkTranscripts,
         policy: DurableFieldPolicy::Redact,
         preparation: "prepare_content / prepare_json_content before compression",
-        test: "lib::publish_historian_chunk_scans_transcript_and_raw_chunk_messages_before_storing",
+        test: "lib::publish_history_summarizer_chunk_cas_conflict_leaves_no_transcript_row",
     },
     DurableWriteRegistration {
         family: DurableWriteFamily::Tags,
@@ -3079,10 +3064,10 @@ pub const DURABLE_WRITE_REGISTRY: &[DurableWriteRegistration] = &[
         test: "lib::tags_mint_monotonically_and_channel1_appends_are_idempotent",
     },
     DurableWriteRegistration {
-        family: DurableWriteFamily::HistorianSideChannels,
+        family: DurableWriteFamily::HistorySummarizerSideChannels,
         policy: DurableFieldPolicy::Mixed,
         preparation: "prepare_json_content",
-        test: "lib::historian_side_channel_outbox_recovers_after_restart",
+        test: "lib::history_summarizer_side_channel_outbox_recovers_after_restart",
     },
     DurableWriteRegistration {
         family: DurableWriteFamily::WorkspaceProfileMemory,
@@ -3107,12 +3092,6 @@ pub const DURABLE_WRITE_REGISTRY: &[DurableWriteRegistration] = &[
         policy: DurableFieldPolicy::Mixed,
         preparation: "prepare_json_content and bind prepared snapshot",
         test: "lib::authority_note_seed_frame_uses_one_fenced_transaction_and_is_idempotent",
-    },
-    DurableWriteRegistration {
-        family: DurableWriteFamily::ProjectMuralArtifacts,
-        policy: DurableFieldPolicy::Reject,
-        preparation: "identity, data URL, and hash rejection before transaction",
-        test: "production_redaction::mural_artifacts_reject_secret_bytes_hashes_and_new_identity",
     },
     DurableWriteRegistration {
         family: DurableWriteFamily::FacadeMutationLedger,
@@ -3217,23 +3196,16 @@ fn prepare_transaction_response_collecting(
 enum JsonScanPolicy {
     DurableRejectProtected,
     DurablePreserveIdentities,
-    TransactionRejectProtected,
     TransactionPreserveIdentities,
 }
 
 impl JsonScanPolicy {
     fn transaction(self) -> bool {
-        matches!(
-            self,
-            Self::TransactionRejectProtected | Self::TransactionPreserveIdentities
-        )
+        matches!(self, Self::TransactionPreserveIdentities)
     }
 
     fn reject_protected(self) -> bool {
-        matches!(
-            self,
-            Self::DurableRejectProtected | Self::TransactionRejectProtected
-        )
+        matches!(self, Self::DurableRejectProtected)
     }
 }
 
@@ -3682,73 +3654,75 @@ fn sqlite_redaction_kind(error: &rusqlite::Error) -> Option<RedactionErrorKind> 
         })
 }
 
-fn prepare_compartment(
+fn prepare_history_segment(
     write: &mut PreparedWrite,
-    compartment: &StoredCompartment,
-) -> Result<StoredCompartment, MemoryStoreError> {
-    if compartment.start_message < 0 || compartment.end_message < compartment.start_message {
+    history_segment: &StoredHistorySegment,
+) -> Result<StoredHistorySegment, MemoryStoreError> {
+    if history_segment.start_message < 0
+        || history_segment.end_message < history_segment.start_message
+    {
         return Err(MemoryStoreError::Serde(format!(
-            "compartment ordinal range {}..{} must be non-negative and ordered",
-            compartment.start_message, compartment.end_message
+            "history_segment ordinal range {}..{} must be non-negative and ordered",
+            history_segment.start_message, history_segment.end_message
         )));
     }
-    write.identity("start_message_id", &compartment.start_message_id)?;
-    write.identity("end_message_id", &compartment.end_message_id)?;
-    if let Some(episode_type) = &compartment.episode_type {
+    write.identity("start_message_id", &history_segment.start_message_id)?;
+    write.identity("end_message_id", &history_segment.end_message_id)?;
+    if let Some(episode_type) = &history_segment.episode_type {
         write.identity("episode_type", episode_type)?;
     }
-    Ok(StoredCompartment {
-        sequence: compartment.sequence,
-        start_message: compartment.start_message,
-        end_message: compartment.end_message,
-        start_message_id: compartment.start_message_id.clone(),
-        end_message_id: compartment.end_message_id.clone(),
-        start_date: compartment
+    Ok(StoredHistorySegment {
+        sequence: history_segment.sequence,
+        start_message: history_segment.start_message,
+        end_message: history_segment.end_message,
+        start_message_id: history_segment.start_message_id.clone(),
+        end_message_id: history_segment.end_message_id.clone(),
+        start_date: history_segment
             .start_date
             .as_deref()
             .map(|value| write.content("start_date", value))
             .transpose()?,
-        end_date: compartment
+        end_date: history_segment
             .end_date
             .as_deref()
             .map(|value| write.content("end_date", value))
             .transpose()?,
-        title: write.content("title", &compartment.title)?,
-        content: write.content("content", &compartment.content)?,
-        p1: compartment
+        title: write.content("title", &history_segment.title)?,
+        content: write.content("content", &history_segment.content)?,
+        p1: history_segment
             .p1
             .as_deref()
             .map(|value| write.content("p1", value))
             .transpose()?,
-        p2: compartment
+        p2: history_segment
             .p2
             .as_deref()
             .map(|value| write.content("p2", value))
             .transpose()?,
-        p3: compartment
+        p3: history_segment
             .p3
             .as_deref()
             .map(|value| write.content("p3", value))
             .transpose()?,
-        p4: compartment
+        p4: history_segment
             .p4
             .as_deref()
             .map(|value| write.content("p4", value))
             .transpose()?,
-        importance: compartment.importance,
-        episode_type: compartment.episode_type.clone(),
-        legacy: compartment.legacy,
-        created_at: compartment.created_at,
+        importance: history_segment.importance,
+        episode_type: history_segment.episode_type.clone(),
+        legacy: history_segment.legacy,
+        created_at: history_segment.created_at,
     })
 }
 
-fn prepare_compartments(
+fn prepare_history_segments(
     write: &mut PreparedWrite,
-    compartments: &[StoredCompartment],
-) -> Result<Vec<StoredCompartment>, MemoryStoreError> {
-    compartments
+    history_segments: &[StoredHistorySegment],
+) -> Result<Vec<StoredHistorySegment>, MemoryStoreError> {
+    history_segments
         .iter()
-        .map(|compartment| prepare_compartment(write, compartment))
+        .map(|history_segment| prepare_history_segment(write, history_segment))
         .collect()
 }
 
@@ -3780,7 +3754,7 @@ fn prepare_workspace(
     })
 }
 
-/// Full module-side note write input. `surface_condition` selects the pending smart-note
+/// Full module-side note write input. `surface_condition` selects the pending conditional-note
 /// state; an absent condition creates an ordinary active note for legacy callers, while the
 /// Rust-mode adapter keeps session-only notes on the TypeScript-owned path.
 #[derive(Debug, Clone, Copy)]
@@ -3909,7 +3883,7 @@ pub struct NoteEvaluationInput<'a> {
     pub now_ms: i64,
 }
 
-/// Lease length for one durable smart-note evaluation claim.
+/// Lease length for one durable conditional-note evaluation claim.
 pub const NOTE_EVAL_CLAIM_LEASE_MS: i64 = 2 * 60_000;
 /// Replay retention for a `no_work` acquisition decision.
 pub const NOTE_EVAL_NO_WORK_RETENTION_MS: i64 = 10 * 60_000;
@@ -3926,7 +3900,7 @@ pub const NOTE_EVAL_LEDGER_CAP: i64 = 10_000;
 /// Rows the seeded-compiled-check verifier examines per committed batch.
 const NOTE_ARTIFACT_REPAIR_BATCH: i64 = 500;
 
-/// Smart-note evaluation: the first task kind on the shared lease ledger.
+/// Conditional-note evaluation: the first task kind on the shared lease ledger.
 pub(crate) const NOTE_EVALUATION: TaskLeaseKind = TaskLeaseKind {
     task_kind: "note_evaluation",
     authority_domain: "notes",
@@ -3939,33 +3913,33 @@ pub(crate) const NOTE_EVALUATION: TaskLeaseKind = TaskLeaseKind {
     ledger_cap: NOTE_EVAL_LEDGER_CAP,
 };
 
-/// A scheduled Dreamer task is leased for longer than one classify request
+/// A scheduled MemoryClassifier task is leased for longer than one classify request
 /// can run (`CLASSIFY_MAX_REQUEST_TIMEOUT` plus recovery), so a live run never
 /// has to renew.
-pub const DREAMER_TASK_LEASE_MS: i64 = 20 * 60 * 1_000;
+pub const MEMORY_CLASSIFIER_TASK_LEASE_MS: i64 = 20 * 60 * 1_000;
 /// Each task is held by at most one live claim per project, and a handful of
 /// `no_work` decisions is all a scheduler tick leaves behind, so the
 /// per-project ledger stays small.
-pub const DREAMER_TASK_LEDGER_CAP: i64 = 64;
+pub const MEMORY_CLASSIFIER_TASK_LEDGER_CAP: i64 = 64;
 
-/// Scheduled Dreamer tasks: fenced on the `memories` authority the runs write
+/// Scheduled MemoryClassifier tasks: fenced on the `memories` authority the runs write
 /// under, so a memories transition ends every in-flight task like a notes
 /// transition ends every note evaluation.
-pub const DREAMER_TASK: TaskLeaseKind = TaskLeaseKind {
-    task_kind: "dreamer_task",
+pub const MEMORY_CLASSIFIER_TASK: TaskLeaseKind = TaskLeaseKind {
+    task_kind: "memory_classifier_task",
     authority_domain: "memories",
     claim_id_prefix: "dtc:",
     phases: &["run"],
-    lease_ms: DREAMER_TASK_LEASE_MS,
+    lease_ms: MEMORY_CLASSIFIER_TASK_LEASE_MS,
     no_work_retention_ms: NOTE_EVAL_NO_WORK_RETENTION_MS,
     terminal_retention_ms: NOTE_EVAL_TERMINAL_RETENTION_MS,
     response_redact_ms: NOTE_EVAL_RESPONSE_REDACT_MS,
-    ledger_cap: DREAMER_TASK_LEDGER_CAP,
+    ledger_cap: MEMORY_CLASSIFIER_TASK_LEDGER_CAP,
 };
 
 /// Every kind on the shared ledger, so an authority transition can fence the
 /// kinds that domain governs.
-const LEASE_KINDS: [&TaskLeaseKind; 2] = [&NOTE_EVALUATION, &DREAMER_TASK];
+const LEASE_KINDS: [&TaskLeaseKind; 2] = [&NOTE_EVALUATION, &MEMORY_CLASSIFIER_TASK];
 
 pub use task_lease::{
     LeaseAbandonOutcome as NoteEvalAbandonOutcome, LeaseAcquireOutcome, LeaseClaim,
@@ -3973,14 +3947,14 @@ pub use task_lease::{
     LeaseCompleteOutcome as NoteEvalCompleteOutcome, LeaseRenewOutcome as NoteEvalRenewOutcome,
 };
 
-/// The outcome of leasing one scheduled Dreamer task; the claim's `note_id` is
+/// The outcome of leasing one scheduled MemoryClassifier task; the claim's `note_id` is
 /// the task id and its `source_revision` the due instant the task was leased for.
-pub type DreamerTaskAcquireOutcome = LeaseAcquireOutcome<DreamerLeasedTask>;
+pub type MemoryClassifierTaskAcquireOutcome = LeaseAcquireOutcome<MemoryClassifierLeasedTask>;
 
-/// Which task a Dreamer claim leases, relative to the task the acquisition
+/// Which task a MemoryClassifier claim leases, relative to the task the acquisition
 /// asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DreamerLeasedTask {
+pub enum MemoryClassifierLeasedTask {
     Requested,
     /// The caller's slot still held a live claim on `claim.note_id`; that
     /// claim is returned, rebound to this acquisition and renewed. `task_id`
@@ -3991,10 +3965,10 @@ pub enum DreamerLeasedTask {
 impl MemoryStore {
     /// Leases `task_id` for the run due at `due_at_ms`. A task another live
     /// claim holds is `NoWork`. A live claim already on the caller's own slot
-    /// is recovered instead, and the outcome's `DreamerLeasedTask` says
+    /// is recovered instead, and the outcome's `MemoryClassifierLeasedTask` says
     /// whether that claim is on `task_id` or on a task the slot still held.
     #[allow(clippy::too_many_arguments)]
-    pub fn acquire_dreamer_task(
+    pub fn acquire_memory_classifier_task(
         &self,
         project: &str,
         acquisition_id: &str,
@@ -4004,18 +3978,18 @@ impl MemoryStore {
         task_id: i64,
         due_at_ms: i64,
         now_ms: i64,
-    ) -> Result<DreamerTaskAcquireOutcome, MemoryStoreError> {
+    ) -> Result<MemoryClassifierTaskAcquireOutcome, MemoryStoreError> {
         #[cfg(any(test, feature = "test-support"))]
         if self
-            .dreamer_task_acquire_fail_once
+            .memory_classifier_task_acquire_fail_once
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             return Err(MemoryStoreError::Store(StoreError::Backend(
-                "injected dreamer task acquire failure".to_string(),
+                "injected memory_classifier task acquire failure".to_string(),
             )));
         }
         self.acquire_task_lease(
-            &DREAMER_TASK,
+            &MEMORY_CLASSIFIER_TASK,
             project,
             acquisition_id,
             scheduler_instance,
@@ -4027,7 +4001,7 @@ impl MemoryStore {
                     "SELECT COUNT(*) FROM note_eval_claims
                       WHERE project = ?1 AND task_kind = ?2 AND note_id = ?3
                         AND terminal_kind IS NULL",
-                    params![project, DREAMER_TASK.task_kind, task_id],
+                    params![project, MEMORY_CLASSIFIER_TASK.task_kind, task_id],
                     |row| row.get(0),
                 )?;
                 if held > 0 {
@@ -4038,7 +4012,7 @@ impl MemoryStore {
                 Ok(task_lease::LeaseSelected::Claim {
                     note_id: task_id,
                     phase: "run".to_string(),
-                    task: DreamerLeasedTask::Requested,
+                    task: MemoryClassifierLeasedTask::Requested,
                     source_revision: due_at_ms,
                     state_version: 0,
                     policy_version: 0,
@@ -4046,9 +4020,9 @@ impl MemoryStore {
             },
             |_, leased_task_id| {
                 Ok(Some(if leased_task_id == task_id {
-                    DreamerLeasedTask::Requested
+                    MemoryClassifierLeasedTask::Requested
                 } else {
-                    DreamerLeasedTask::Held
+                    MemoryClassifierLeasedTask::Held
                 }))
             },
         )
@@ -4057,7 +4031,7 @@ impl MemoryStore {
     /// Records the run's terminal response against the claim; a completion
     /// under a changed memories authority or an expired lease is a conflict.
     #[allow(clippy::too_many_arguments)]
-    pub fn complete_dreamer_task(
+    pub fn complete_memory_classifier_task(
         &self,
         project: &str,
         claim_id: &str,
@@ -4069,15 +4043,15 @@ impl MemoryStore {
     ) -> Result<LeaseCompleteOutcome, MemoryStoreError> {
         #[cfg(any(test, feature = "test-support"))]
         if self
-            .dreamer_task_complete_fail_once
+            .memory_classifier_task_complete_fail_once
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             return Err(MemoryStoreError::Store(StoreError::Backend(
-                "injected dreamer task complete failure".to_string(),
+                "injected memory_classifier task complete failure".to_string(),
             )));
         }
         self.complete_task_lease(
-            &DREAMER_TASK,
+            &MEMORY_CLASSIFIER_TASK,
             project,
             claim_id,
             completion_id,
@@ -4092,7 +4066,7 @@ impl MemoryStore {
         )
     }
 
-    pub fn abandon_dreamer_task(
+    pub fn abandon_memory_classifier_task(
         &self,
         project: &str,
         claim_id: &str,
@@ -4101,7 +4075,7 @@ impl MemoryStore {
         now_ms: i64,
     ) -> Result<task_lease::LeaseAbandonOutcome, MemoryStoreError> {
         self.abandon_task_lease(
-            &DREAMER_TASK,
+            &MEMORY_CLASSIFIER_TASK,
             project,
             claim_id,
             scheduler_instance,
@@ -4116,7 +4090,7 @@ impl MemoryStore {
     /// never reclaimed, so the answer is above every claim that could still be
     /// rebound. Wall time is not used: a clock that steps backwards would rank
     /// a successor below its predecessor.
-    pub fn next_dreamer_scheduler_generation(
+    pub fn next_memory_classifier_scheduler_generation(
         &self,
         scheduler_instance: &str,
     ) -> Result<i64, MemoryStoreError> {
@@ -4125,7 +4099,7 @@ impl MemoryStore {
                 conn.query_row(
                     "SELECT COALESCE(MAX(registration_generation), 0) + 1 FROM note_eval_claims
                       WHERE task_kind = ?1 AND evaluator_instance = ?2",
-                    params![DREAMER_TASK.task_kind, scheduler_instance],
+                    params![MEMORY_CLASSIFIER_TASK.task_kind, scheduler_instance],
                     |row| row.get::<_, i64>(0),
                 )
             })
@@ -4195,7 +4169,7 @@ pub struct AuthorityRow {
     pub step_seed: bool,
     pub step_memories: bool,
     pub step_notes: bool,
-    pub step_compartments: bool,
+    pub step_history_segments: bool,
     pub step_reconcile: bool,
     pub step_verify: bool,
     pub step_flip: bool,
@@ -4367,7 +4341,7 @@ pub struct ModuleStateSyncRequest<'a> {
     pub strip_seeds: &'a [ModuleStripSeedRow],
     pub strip_seed_skipped: usize,
     pub reasoning_cleared_through_tag: Option<u64>,
-    pub compartments: &'a [StoredCompartment],
+    pub history_segments: &'a [StoredHistorySegment],
     pub user_profile: &'a [String],
     /// False means the sender omitted the profile section; true includes Some(empty) clears.
     pub user_profile_present: bool,
@@ -4406,8 +4380,8 @@ pub enum ModuleStateSyncError {
     GenerationMismatch { expected: u64, found: u64 },
     #[error("authority seq mismatch: expected {expected}, found {found}")]
     AuthoritySeqMismatch { expected: u64, found: u64 },
-    #[error("historian compartment sync busy: {}", phase.as_str())]
-    HistorianBusy { phase: HistorianPhase },
+    #[error("history_summarizer history_segment sync busy: {}", phase.as_str())]
+    HistorySummarizerBusy { phase: HistorySummarizerPhase },
     #[error("invalid seed boundary {declared:?}: {detail}")]
     InvalidSeedBoundary { declared: String, detail: String },
     #[error("serde: {0}")]
@@ -4417,7 +4391,7 @@ pub enum ModuleStateSyncError {
 struct PreparedStateSync {
     drop_seeds: Vec<ModuleDropSeedRow>,
     pending_agent_drops: Vec<PendingAgentDropSeedRow>,
-    compartments: Vec<StoredCompartment>,
+    history_segments: Vec<StoredHistorySegment>,
     user_profile: Vec<String>,
     user_hint_seeds: Vec<UserHintSeedRow>,
     workspace: Option<ModuleWorkspaceRow>,
@@ -4467,7 +4441,7 @@ fn prepare_state_sync(
             Ok(seed.clone())
         })
         .collect::<Result<Vec<_>, MemoryStoreError>>()?;
-    let compartments = prepare_compartments(write, request.compartments)?;
+    let history_segments = prepare_history_segments(write, request.history_segments)?;
     let user_profile = request
         .user_profile
         .iter()
@@ -4555,7 +4529,7 @@ fn prepare_state_sync(
     Ok(PreparedStateSync {
         drop_seeds,
         pending_agent_drops,
-        compartments,
+        history_segments,
         user_profile,
         user_hint_seeds,
         workspace,
@@ -4603,11 +4577,11 @@ pub enum MemoryStoreError {
     },
     #[error("note {id} is not owned by project {project}")]
     NoteOwnershipMismatch { id: i64, project: String },
-    /// An append would overlap a durable compartment range for the same session.
+    /// An append would overlap a durable history_segment range for the same session.
     #[error(
-        "compartment {incoming_start_message}..={incoming_end_message} overlaps existing sequence {existing_sequence}"
+        "history_segment {incoming_start_message}..={incoming_end_message} overlaps existing sequence {existing_sequence}"
     )]
-    CompartmentRangeOverlap {
+    HistorySegmentRangeOverlap {
         existing_sequence: i64,
         incoming_start_message: i64,
         incoming_end_message: i64,
@@ -4662,23 +4636,23 @@ enum AuthorityFinishDrainOutcome {
 }
 
 enum PublishTxnOutcome {
-    Committed(HistorianPublishResult),
+    Committed(HistorySummarizerPublishResult),
     CasConflict {
         found: u64,
         reason: Option<String>,
     },
     FenceRejected(String),
-    CompartmentOverlap {
+    HistorySegmentOverlap {
         existing_sequence: i64,
         incoming_start_message: i64,
         incoming_end_message: i64,
     },
-    StateMismatch(Box<HistorianDurableState>),
+    StateMismatch(Box<HistorySummarizerDurableState>),
     InvalidState(String),
     Serde(String),
 }
 
-enum AppendCompartmentsTxnOutcome {
+enum AppendHistorySegmentsTxnOutcome {
     Appended,
     Overlap {
         existing_sequence: i64,
@@ -4687,28 +4661,28 @@ enum AppendCompartmentsTxnOutcome {
     },
 }
 
-const HISTORIAN_SIDE_CHANNEL_KINDS: [&str; 3] = ["event", "primer", "user_observation"];
-const HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND: usize = 32;
-const HISTORIAN_SIDE_CHANNEL_MAX_BACKOFF_MS: i64 = 60_000;
-const HISTORIAN_SIDE_CHANNEL_ERROR_CAP: usize = 2_000;
+const HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS: [&str; 3] = ["event", "primer", "user_observation"];
+const HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND: usize = 32;
+const HISTORY_SUMMARIZER_SIDE_CHANNEL_MAX_BACKOFF_MS: i64 = 60_000;
+const HISTORY_SUMMARIZER_SIDE_CHANNEL_ERROR_CAP: usize = 2_000;
 
 #[derive(Debug)]
-struct HistorianSideChannelOutboxRow {
+struct HistorySummarizerSideChannelOutboxRow {
     session_id: String,
-    id: HistorianSideChannelOutboxId,
+    id: HistorySummarizerSideChannelOutboxId,
     payload_json: String,
     attempt_count: u32,
 }
 
 #[derive(Debug)]
-struct HistorianSideChannelPendingItem {
-    id: HistorianSideChannelOutboxId,
+struct HistorySummarizerSideChannelPendingItem {
+    id: HistorySummarizerSideChannelOutboxId,
     payload_json: String,
     created_at_ms: i64,
 }
 
 #[derive(Debug, Clone)]
-struct HistorianSideChannelOutboxId {
+struct HistorySummarizerSideChannelOutboxId {
     firing_seq: u64,
     kind: String,
     source_start: u64,
@@ -4718,12 +4692,12 @@ struct HistorianSideChannelOutboxId {
 
 /// A due outbox row's payload, parsed before its delivery transaction begins.
 enum SideChannelCandidate {
-    Event(HistorianEventCandidate),
-    Primer(HistorianPrimerCandidate),
-    UserObservation(HistorianUserMemoryCandidate),
+    Event(HistorySummarizerEventCandidate),
+    Primer(HistorySummarizerPrimerCandidate),
+    UserObservation(HistorySummarizerUserMemoryCandidate),
 }
 
-enum AbandonHistorianTxnOutcome {
+enum AbandonHistorySummarizerTxnOutcome {
     Unchanged,
     Committed(u64),
     Serde(String),
@@ -4753,7 +4727,7 @@ struct ValidatedSeedBoundary {
 
 const AUTHORITY_SELECT_SQL: &str = "SELECT context_store_uuid, project, domain, state, generation,
     captured_upper_bound, drain_generation, drain_cursor, step_seed, step_memories,
-    step_notes, step_compartments, step_reconcile, step_verify, step_flip,
+    step_notes, step_history_segments, step_reconcile, step_verify, step_flip,
     coordinator_lease, lease_expires_at, coordinator_token,
     checksum_expected, checksum_actual, checksum_ok
     FROM authority WHERE context_store_uuid = ?1 AND project = ?2 AND domain = ?3";
@@ -4793,11 +4767,11 @@ impl CacheStateSelect {
 const CACHE_STATE_META_SCALAR_SELECT: &str = "SELECT json_valid(meta, 1), json_type(meta), \
      json_type(meta, ?2), meta ->> ?2 FROM cache_state WHERE session_id = ?1";
 
-/// Column list every `stored_compartment_from_row` reader selects, in the
-/// positional order that mapper reads. All compartment SELECTs interpolate
+/// Column list every `stored_history_segment_from_row` reader selects, in the
+/// positional order that mapper reads. All history_segment SELECTs interpolate
 /// this one constant: the mapper indexes by position, so a reordered or
 /// partial per-site list would silently mis-map fields.
-const COMPARTMENT_SELECT_COLUMNS: &str = "sequence, start_message, end_message, start_message_id, end_message_id, start_date, end_date, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at";
+const HISTORY_SEGMENT_SELECT_COLUMNS: &str = "sequence, start_message, end_message, start_message_id, end_message_id, start_date, end_date, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at";
 
 #[derive(Debug, thiserror::Error)]
 enum AuthorityTransitionError {
@@ -4862,7 +4836,7 @@ fn authority_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<Authority
         step_seed: row.get::<_, i64>(8)? != 0,
         step_memories: row.get::<_, i64>(9)? != 0,
         step_notes: row.get::<_, i64>(10)? != 0,
-        step_compartments: row.get::<_, i64>(11)? != 0,
+        step_history_segments: row.get::<_, i64>(11)? != 0,
         step_reconcile: row.get::<_, i64>(12)? != 0,
         step_verify: row.get::<_, i64>(13)? != 0,
         step_flip: row.get::<_, i64>(14)? != 0,
@@ -4901,16 +4875,18 @@ fn split_flat_block_id(id: &str) -> Option<(&str, u64)> {
     Some((mid, index.parse().ok()?))
 }
 
-fn validate_compartment_set_ordering(compartments: &[StoredCompartment]) -> Result<(), String> {
-    let mut ordered = compartments.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|compartment| compartment.sequence);
+fn validate_history_segment_set_ordering(
+    history_segments: &[StoredHistorySegment],
+) -> Result<(), String> {
+    let mut ordered = history_segments.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|history_segment| history_segment.sequence);
     for pair in ordered.windows(2) {
         if pair[0].sequence == pair[1].sequence {
-            return Err("compartment sequences must be unique".to_string());
+            return Err("history_segment sequences must be unique".to_string());
         }
         if pair[1].start_message <= pair[0].end_message {
             return Err(format!(
-                "compartment ranges overlap at ordinals {} and {}",
+                "history_segment ranges overlap at ordinals {} and {}",
                 pair[0].end_message, pair[1].start_message
             ));
         }
@@ -4920,43 +4896,44 @@ fn validate_compartment_set_ordering(compartments: &[StoredCompartment]) -> Resu
 
 fn validated_seed_boundary(
     declared: &str,
-    compartments: &[StoredCompartment],
+    history_segments: &[StoredHistorySegment],
 ) -> Result<ValidatedSeedBoundary, String> {
     let (declared_mid, declared_index) = split_flat_block_id(declared)
         .ok_or_else(|| "declared identity must be a parseable <mid>#<index> flat id".to_string())?;
-    let mut ordered = compartments.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|compartment| compartment.sequence);
-    let tail = ordered
-        .last()
-        .copied()
-        .ok_or_else(|| "a boundary cannot be adopted without seeded compartments".to_string())?;
+    let mut ordered = history_segments.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|history_segment| history_segment.sequence);
+    let tail = ordered.last().copied().ok_or_else(|| {
+        "a boundary cannot be adopted without seeded history_segments".to_string()
+    })?;
 
-    if ordered.iter().any(|compartment| {
-        compartment.start_message < 0 || compartment.end_message < compartment.start_message
+    if ordered.iter().any(|history_segment| {
+        history_segment.start_message < 0
+            || history_segment.end_message < history_segment.start_message
     }) {
         return Err(
-            "seeded compartment ordinal ranges must be non-negative and ordered".to_string(),
+            "seeded history_segment ordinal ranges must be non-negative and ordered".to_string(),
         );
     }
-    validate_compartment_set_ordering(compartments)
+    validate_history_segment_set_ordering(history_segments)
         .map_err(|message| format!("seeded {message}"))?;
 
     let (tail_mid, tail_index) = split_flat_block_id(&tail.end_message_id).ok_or_else(|| {
-        "the highest-sequence compartment must carry a parseable flat end_message_id".to_string()
+        "the highest-sequence history_segment must carry a parseable flat end_message_id"
+            .to_string()
     })?;
     if declared_mid != tail_mid {
         return Err(format!(
-            "declared message {declared_mid:?} did not match tail compartment message {tail_mid:?}"
+            "declared message {declared_mid:?} did not match tail history_segment message {tail_mid:?}"
         ));
     }
     if declared_index != tail_index {
         return Err(format!(
-            "declared block index {declared_index} did not match tail compartment end-block index {tail_index}"
+            "declared block index {declared_index} did not match tail history_segment end-block index {tail_index}"
         ));
     }
 
     Ok(ValidatedSeedBoundary {
-        // The compartment publisher's end-block form is canonical even if a future
+        // The history_segment publisher's end-block form is canonical even if a future
         // sender derives the same identity through a different marker representation.
         boundary_id: tail.end_message_id.clone(),
         coverage_start_ordinal: ordered[0].start_message as u64,
@@ -4969,15 +4946,16 @@ enum ModuleStateSyncTxnOutcome {
     Committed(ModuleStateSyncResult),
     GenerationMismatch { found: u64 },
     AuthoritySeqMismatch { found: u64 },
-    HistorianBusy { phase: HistorianPhase },
+    HistorySummarizerBusy { phase: HistorySummarizerPhase },
     InvalidSeedBoundary { declared: String, detail: String },
     Serde(String),
 }
 
 #[cfg(any(test, feature = "test-support"))]
-type AbandonHistorianHook = std::sync::Arc<std::sync::Mutex<Option<Box<dyn FnMut() + Send>>>>;
+type AbandonHistorySummarizerHook =
+    std::sync::Arc<std::sync::Mutex<Option<Box<dyn FnMut() + Send>>>>;
 #[cfg(any(test, feature = "test-support"))]
-type BeforeMaxCompartmentEndReadHook =
+type BeforeMaxHistorySegmentEndReadHook =
     std::sync::Arc<std::sync::Mutex<Option<Box<dyn FnMut(&MemoryStore) + Send>>>>;
 
 /// The memory store: one single-writer SQLite handle for the daemon's lifetime.
@@ -5235,19 +5213,19 @@ pub struct MemoryStore {
     facade_authority_scope: Arc<Mutex<Option<FacadeAuthorityScope>>>,
     facade_mutation_lock: Mutex<()>,
     #[cfg(any(test, feature = "test-support"))]
-    abandon_historian_hook: AbandonHistorianHook,
+    abandon_history_summarizer_hook: AbandonHistorySummarizerHook,
     #[cfg(any(test, feature = "test-support"))]
-    before_max_compartment_end_read_hook: BeforeMaxCompartmentEndReadHook,
+    before_max_history_segment_end_read_hook: BeforeMaxHistorySegmentEndReadHook,
     #[cfg(any(test, feature = "test-support"))]
     tag_number_query_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     authority_seed_transaction_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
-    historian_side_channel_fail_once: Mutex<BTreeSet<String>>,
+    history_summarizer_side_channel_fail_once: Mutex<BTreeSet<String>>,
     /// Kinds whose next delivery fails after the target insert and before the outbox
     /// retirement, inside the delivery transaction, so the rollback of both is observable.
     #[cfg(any(test, feature = "test-support"))]
-    historian_side_channel_crash_after_insert_once: Mutex<BTreeSet<String>>,
+    history_summarizer_side_channel_crash_after_insert_once: Mutex<BTreeSet<String>>,
     /// One entry per drain that found due rows for a kind: the kind, the pending rows read,
     /// and the drain's `now_ms`, recorded before delivery runs.
     #[cfg(any(test, feature = "test-support"))]
@@ -5261,14 +5239,14 @@ pub struct MemoryStore {
     /// so a caller's store-failure branch can be exercised on a healthy store.
     #[cfg(any(test, feature = "test-support"))]
     authority_route_read_fail_once: std::sync::atomic::AtomicBool,
-    /// Makes the next `acquire_dreamer_task` fail as a backend error before it
+    /// Makes the next `acquire_memory_classifier_task` fail as a backend error before it
     /// touches the ledger.
     #[cfg(any(test, feature = "test-support"))]
-    dreamer_task_acquire_fail_once: std::sync::atomic::AtomicBool,
-    /// Makes the next `complete_dreamer_task` fail as a backend error before
+    memory_classifier_task_acquire_fail_once: std::sync::atomic::AtomicBool,
+    /// Makes the next `complete_memory_classifier_task` fail as a backend error before
     /// it touches the ledger.
     #[cfg(any(test, feature = "test-support"))]
-    dreamer_task_complete_fail_once: std::sync::atomic::AtomicBool,
+    memory_classifier_task_complete_fail_once: std::sync::atomic::AtomicBool,
 }
 
 fn valid_drop_seed_block_id(block_id: &str) -> bool {
@@ -5563,7 +5541,7 @@ impl MemoryStore {
 
     /// How many times the connection has run the `cache_state` scalar select through the
     /// statement cache on the handle the probe observed; every scalar `meta` read (the
-    /// publication floor, the revert epoch, the historian phase) adds to it.
+    /// publication floor, the revert epoch, the history_summarizer phase) adds to it.
     #[cfg(any(test, feature = "test-support"))]
     pub fn cache_state_scalar_runs(&self) -> i32 {
         self.inner
@@ -5671,24 +5649,6 @@ impl MemoryStore {
                         .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
                 },
             )?;
-            conn.create_scalar_function(
-                "redact_transaction_raw_messages",
-                1,
-                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-                |context| {
-                    let blob = context.get::<Vec<u8>>(0)?;
-                    let input =
-                        decompress_durable_text_exact(&blob, MAX_CHUNK_TRANSCRIPT_INFLATED_BYTES)
-                            .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
-                    let prepared = prepare_json_content_with(
-                        &input,
-                        JsonScanPolicy::TransactionRejectProtected,
-                    )
-                    .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
-                    compress_raw_messages(&prepared)
-                        .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
-                },
-            )?;
             conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
             ConnectionProfile::apply(conn)
         })?;
@@ -5700,17 +5660,19 @@ impl MemoryStore {
             facade_authority_scope,
             facade_mutation_lock: Mutex::new(()),
             #[cfg(any(test, feature = "test-support"))]
-            abandon_historian_hook: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            abandon_history_summarizer_hook: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(any(test, feature = "test-support"))]
-            before_max_compartment_end_read_hook: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            before_max_history_segment_end_read_hook: std::sync::Arc::new(std::sync::Mutex::new(
+                None,
+            )),
             #[cfg(any(test, feature = "test-support"))]
             tag_number_query_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             authority_seed_transaction_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
-            historian_side_channel_fail_once: Mutex::new(BTreeSet::new()),
+            history_summarizer_side_channel_fail_once: Mutex::new(BTreeSet::new()),
             #[cfg(any(test, feature = "test-support"))]
-            historian_side_channel_crash_after_insert_once: Mutex::new(BTreeSet::new()),
+            history_summarizer_side_channel_crash_after_insert_once: Mutex::new(BTreeSet::new()),
             #[cfg(any(test, feature = "test-support"))]
             due_side_channel_markers: Mutex::new(Vec::new()),
             #[cfg(any(test, feature = "test-support"))]
@@ -5718,9 +5680,9 @@ impl MemoryStore {
             #[cfg(any(test, feature = "test-support"))]
             authority_route_read_fail_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
-            dreamer_task_acquire_fail_once: std::sync::atomic::AtomicBool::new(false),
+            memory_classifier_task_acquire_fail_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
-            dreamer_task_complete_fail_once: std::sync::atomic::AtomicBool::new(false),
+            memory_classifier_task_complete_fail_once: std::sync::atomic::AtomicBool::new(false),
         };
         store.prune_transform_session_roots()?;
         Ok(store)
@@ -6182,12 +6144,12 @@ impl MemoryStore {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn fail_next_historian_side_channel_for_test(&self, kind: &str) {
+    pub fn fail_next_history_summarizer_side_channel_for_test(&self, kind: &str) {
         assert!(
-            HISTORIAN_SIDE_CHANNEL_KINDS.contains(&kind),
-            "unknown historian side-channel kind: {kind}"
+            HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS.contains(&kind),
+            "unknown history_summarizer side-channel kind: {kind}"
         );
-        self.historian_side_channel_fail_once
+        self.history_summarizer_side_channel_fail_once
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(kind.to_string());
@@ -6213,12 +6175,12 @@ impl MemoryStore {
     /// Makes the next delivery of `kind` fail between its target insert and its outbox
     /// retirement, inside the delivery transaction.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn crash_next_historian_side_channel_after_insert_for_test(&self, kind: &str) {
+    pub fn crash_next_history_summarizer_side_channel_after_insert_for_test(&self, kind: &str) {
         assert!(
-            HISTORIAN_SIDE_CHANNEL_KINDS.contains(&kind),
-            "unknown historian side-channel kind: {kind}"
+            HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS.contains(&kind),
+            "unknown history_summarizer side-channel kind: {kind}"
         );
-        self.historian_side_channel_crash_after_insert_once
+        self.history_summarizer_side_channel_crash_after_insert_once
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(kind.to_string());
@@ -6232,17 +6194,17 @@ impl MemoryStore {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// The next `acquire_dreamer_task` fails as a backend error; later calls run normally.
+    /// The next `acquire_memory_classifier_task` fails as a backend error; later calls run normally.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn fail_next_dreamer_task_acquire_for_test(&self) {
-        self.dreamer_task_acquire_fail_once
+    pub fn fail_next_memory_classifier_task_acquire_for_test(&self) {
+        self.memory_classifier_task_acquire_fail_once
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// The next `complete_dreamer_task` fails as a backend error; later calls run normally.
+    /// The next `complete_memory_classifier_task` fails as a backend error; later calls run normally.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn fail_next_dreamer_task_complete_for_test(&self) {
-        self.dreamer_task_complete_fail_once
+    pub fn fail_next_memory_classifier_task_complete_for_test(&self) {
+        self.memory_classifier_task_complete_fail_once
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -6265,29 +6227,29 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Install a one-shot callback immediately before the max-compartment-end query. It lets
+    /// Install a one-shot callback immediately before the max-history_segment-end query. It lets
     /// detector tests place a publication after an earlier revision read without adding a
     /// production scheduling seam.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_before_max_compartment_end_read_hook(
+    pub fn set_before_max_history_segment_end_read_hook(
         &self,
         hook: Box<dyn FnMut(&MemoryStore) + Send>,
     ) {
         *self
-            .before_max_compartment_end_read_hook
+            .before_max_history_segment_end_read_hook
             .lock()
-            .expect("max compartment-end read hook mutex") = Some(hook);
+            .expect("max history_segment-end read hook mutex") = Some(hook);
     }
 
-    /// Install a test callback while cleanup of a matching pending historian run holds
+    /// Install a test callback while cleanup of a matching pending history_summarizer run holds
     /// SQLite's writer lock. The callback checks that a competing write cannot slip
     /// between reading the match and storing the idle state.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_abandon_historian_hook(&self, hook: Box<dyn FnMut() + Send>) {
+    pub fn set_abandon_history_summarizer_hook(&self, hook: Box<dyn FnMut() + Send>) {
         *self
-            .abandon_historian_hook
+            .abandon_history_summarizer_hook
             .lock()
-            .expect("abandon historian hook mutex") = Some(hook);
+            .expect("abandon history_summarizer hook mutex") = Some(hook);
     }
 
     pub fn facade_mutation_ledger_response(
@@ -6355,79 +6317,8 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// Return the last OC-host-rendered mural for a resolved project identity.
-    pub fn load_project_mural_artifact(
-        &self,
-        project_path: &str,
-    ) -> Result<Option<ProjectMuralArtifact>, MemoryStoreError> {
-        self.inner
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT project_path, data_url, content_hash, updated_at
-                       FROM project_mural_artifacts
-                      WHERE project_path = ?1",
-                    params![project_path],
-                    |row| {
-                        Ok(ProjectMuralArtifact {
-                            project_path: row.get(0)?,
-                            data_url: row.get(1)?,
-                            content_hash: row.get(2)?,
-                            updated_at: row.get(3)?,
-                        })
-                    },
-                )
-                .optional()
-            })
-            .map_err(Into::into)
-    }
-
-    /// Store a host-rendered mural only when its content identity changes.
-    ///
-    /// A transform can carry the same host artifact on every pass. Updating `updated_at` in that
-    /// case would turn ordinary defer traffic into a write stream, so the hash is the sole gate.
-    pub fn upsert_project_mural_artifact(
-        &self,
-        project_path: &str,
-        data_url: &[u8],
-        content_hash: &str,
-        updated_at: i64,
-    ) -> Result<bool, MemoryStoreError> {
-        let existing = self.load_project_mural_artifact(project_path)?.is_some();
-        let mut write = PreparedWrite::new(DurableWriteFamily::ProjectMuralArtifacts);
-        write.domain_owner("project", project_path, "mural");
-        if existing {
-            write.existing_identity("project_path", project_path)?;
-        } else {
-            write.identity("project_path", project_path)?;
-        }
-        let data_url_text = std::str::from_utf8(data_url)
-            .map_err(|_| MemoryStoreError::Serde("mural data URL is not UTF-8".to_string()))?;
-        write.identity("data_url", data_url_text)?;
-        write.identity("content_hash", content_hash)?;
-        write.execute(&self.inner, |coordinated| {
-            let tx = coordinated.tx();
-            let changed = tx.execute(
-                "INSERT INTO project_mural_artifacts(
-                         project_path, data_url, content_hash, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT(project_path) DO UPDATE SET
-                         data_url = excluded.data_url,
-                         content_hash = excluded.content_hash,
-                         updated_at = excluded.updated_at
-                     WHERE project_mural_artifacts.content_hash <> excluded.content_hash",
-                params![project_path, data_url, content_hash, updated_at],
-            )?;
-            let changed = changed != 0;
-            Ok(if changed {
-                WriteDisposition::Applied(true)
-            } else {
-                WriteDisposition::Replay(false)
-            })
-        })
-    }
-
     /// Delete every row whose ownership is expressed by an exact `session_id` column.
-    /// Project memories and smart notes survive because their ownership is project-scoped;
+    /// Project memories and conditional notes survive because their ownership is project-scoped;
     /// session notes and every cache/overlay/producer ledger row are removed atomically.
     pub fn delete_session(
         &self,
@@ -6617,24 +6508,28 @@ impl MemoryStore {
         })
     }
 
-    /// `meta.historian.state` without deserializing the row: absent is `Idle`, the serde
+    /// `meta.history_summarizer.state` without deserializing the row: absent is `Idle`, the serde
     /// default; an unknown variant or a non-string is refused as serde refuses it. A
-    /// `historian` that is not an object also reads as absent here, because the path has
+    /// `history_summarizer` that is not an object also reads as absent here, because the path has
     /// no object to descend, where the full load refuses the row.
-    pub fn load_historian_phase(
+    pub fn load_history_summarizer_phase(
         &self,
         session_id: &str,
-    ) -> Result<HistorianPhase, MemoryStoreError> {
-        self.load_meta_scalar(session_id, "$.historian.state", |field| match field {
-            None => Ok(HistorianPhase::default()),
-            Some((kind, rusqlite::types::Value::Text(state))) if kind == "text" => {
-                serde_json::from_value(serde_json::Value::String(state))
-                    .map_err(|e| MemoryStoreError::Serde(e.to_string()))
-            }
-            Some((kind, _)) => Err(MemoryStoreError::Serde(format!(
-                "historian.state is a JSON {kind}, expected a string"
-            ))),
-        })
+    ) -> Result<HistorySummarizerPhase, MemoryStoreError> {
+        self.load_meta_scalar(
+            session_id,
+            "$.history_summarizer.state",
+            |field| match field {
+                None => Ok(HistorySummarizerPhase::default()),
+                Some((kind, rusqlite::types::Value::Text(state))) if kind == "text" => {
+                    serde_json::from_value(serde_json::Value::String(state))
+                        .map_err(|e| MemoryStoreError::Serde(e.to_string()))
+                }
+                Some((kind, _)) => Err(MemoryStoreError::Serde(format!(
+                    "history_summarizer.state is a JSON {kind}, expected a string"
+                ))),
+            },
+        )
     }
 
     /// `meta.publication_floor_ordinal` without deserializing the row: absent and JSON
@@ -6797,7 +6692,7 @@ impl MemoryStore {
     pub fn load_session_status_snapshot(
         &self,
         session_id: &str,
-        compartment_page: Option<(i64, usize)>,
+        history_segment_page: Option<(i64, usize)>,
     ) -> Result<SessionStatusSnapshot, MemoryStoreError> {
         let snapshot = self.inner.with_conn(|transaction| {
             let state = transaction
@@ -6842,33 +6737,33 @@ impl MemoryStore {
                     )
                     .map(|value| value.max(0) as usize)
             };
-            let compartment_page = compartment_page
+            let history_segment_page = history_segment_page
                 .map(|(after_sequence, limit)| {
                     let max_sequence = transaction
                         .query_row(
-                            "SELECT MAX(sequence) FROM compartments WHERE session_id = ?1",
+                            "SELECT MAX(sequence) FROM history_segments WHERE session_id = ?1",
                             params![session_id],
                             |row| row.get::<_, Option<i64>>(0),
                         )?
                         .map_or(after_sequence, |max| max.max(after_sequence));
                     let mut statement = transaction.prepare(&format!(
-                        "SELECT {COMPARTMENT_SELECT_COLUMNS}
-                       FROM compartments
+                        "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS}
+                       FROM history_segments
                           WHERE session_id = ?1 AND sequence > ?2
                           ORDER BY sequence ASC LIMIT ?3"
                     ))?;
-                    let compartments = statement
+                    let history_segments = statement
                         .query_map(
                             params![
                                 session_id,
                                 after_sequence,
                                 i64::try_from(limit).unwrap_or(i64::MAX)
                             ],
-                            Self::stored_compartment_from_row,
+                            Self::stored_history_segment_from_row,
                         )?
                         .collect::<Result<Vec<_>, _>>()?;
-                    Ok::<CompartmentPage, rusqlite::Error>(CompartmentPage {
-                        compartments,
+                    Ok::<HistorySegmentPage, rusqlite::Error>(HistorySegmentPage {
+                        history_segments,
                         max_sequence,
                     })
                 })
@@ -6904,11 +6799,11 @@ impl MemoryStore {
                 .optional()?;
             let snapshot = SessionStatusSnapshot {
                 loaded,
-                compartment_count: count("compartments")?,
+                history_segment_count: count("history_segments")?,
                 pending_drop_count: count("pending_agent_drops")?,
                 tag_count: count("tags")?,
                 pass_trace,
-                compartment_page,
+                history_segment_page,
             };
             Ok(snapshot)
         })?;
@@ -7401,7 +7296,7 @@ impl MemoryStore {
         })?)
     }
 
-    /// Append flat block ids requested by ctx_reduce to the durable per-session queue.
+    /// Append flat block ids requested by eidnara_reduce to the durable per-session queue.
     /// Duplicate pending ids are ignored so repeated command delivery is harmless.
     pub fn append_pending_agent_drops(
         &self,
@@ -7419,7 +7314,7 @@ impl MemoryStore {
         Ok(outcome.queued as usize)
     }
 
-    /// Append ctx_reduce drops and, when supplied, durably record the command that requested
+    /// Append eidnara_reduce drops and, when supplied, durably record the command that requested
     /// them. A repeated command is acknowledged without touching pending queue rows.
     ///
     /// When `zero_targets` is true the ledger row is still recorded (idempotency correctness
@@ -7536,7 +7431,7 @@ impl MemoryStore {
         Ok(outcome)
     }
 
-    /// Load queued ctx_reduce drops in the deterministic drain order.
+    /// Load queued eidnara_reduce drops in the deterministic drain order.
     pub fn load_pending_agent_drops(
         &self,
         session_id: &str,
@@ -8609,7 +8504,7 @@ impl MemoryStore {
         self.commit_with_consumed_drops(session_id, expected, core, meta, &[])
     }
 
-    /// Commit cache state and delete consumed ctx_reduce queue rows in one fenced tx.
+    /// Commit cache state and delete consumed eidnara_reduce queue rows in one fenced tx.
     pub fn commit_with_consumed_drops(
         &self,
         session_id: &str,
@@ -8626,7 +8521,7 @@ impl MemoryStore {
                 meta,
                 consumed_drop_ids,
                 first_applied_command_ids: &[],
-                compartment_max_seq: None,
+                history_segment_max_seq: None,
                 project_root: None,
                 first_divergence: None,
                 scheduler_observation: None,
@@ -8672,7 +8567,7 @@ impl MemoryStore {
             meta,
             consumed_drop_ids,
             first_applied_command_ids,
-            compartment_max_seq,
+            history_segment_max_seq,
             project_root,
             first_divergence,
             scheduler_observation,
@@ -8926,9 +8821,9 @@ impl MemoryStore {
                     .reject_recorded_identities(&["session_id"])
                     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             }
-            if let Some(expected_seq) = compartment_max_seq {
+            if let Some(expected_seq) = history_segment_max_seq {
                 let current_seq: i64 = tx.query_row(
-                    "SELECT COALESCE(MAX(sequence), 0) FROM compartments WHERE session_id = ?1",
+                    "SELECT COALESCE(MAX(sequence), 0) FROM history_segments WHERE session_id = ?1",
                     params![session_id],
                     |row| row.get(0),
                 )?;
@@ -9217,7 +9112,7 @@ impl MemoryStore {
 
     /// Apply an authority state update atomically after validating its sequence. Authority
     /// rows use the regular memory and profile tables read by real-session transforms, while
-    /// compartment and cache-state tables are shared by both lanes.
+    /// history_segment and cache-state tables are shared by both lanes.
     pub fn apply_authority_state_sync(
         &self,
         request: ModuleStateSyncRequest<'_>,
@@ -9233,7 +9128,7 @@ impl MemoryStore {
         let PreparedStateSync {
             drop_seeds,
             pending_agent_drops,
-            compartments,
+            history_segments,
             user_profile,
             user_hint_seeds,
             workspace,
@@ -9286,11 +9181,11 @@ impl MemoryStore {
             }
             let initialized_before_sync = meta.initialized;
 
-            if !request.compartments.is_empty()
-                && meta.historian.state != HistorianPhase::Idle
+            if !request.history_segments.is_empty()
+                && meta.history_summarizer.state != HistorySummarizerPhase::Idle
             {
-                return Ok(WriteDisposition::Replay(ModuleStateSyncTxnOutcome::HistorianBusy {
-                    phase: meta.historian.state,
+                return Ok(WriteDisposition::Replay(ModuleStateSyncTxnOutcome::HistorySummarizerBusy {
+                    phase: meta.history_summarizer.state,
                 }));
             }
             if meta.shadow_generation != request.shadow_generation {
@@ -9305,7 +9200,7 @@ impl MemoryStore {
             }
 
             if let Some(declared) = request.seed_boundary_id {
-                let adoption = match validated_seed_boundary(declared, request.compartments) {
+                let adoption = match validated_seed_boundary(declared, request.history_segments) {
                     Ok(adoption) => adoption,
                     Err(detail) => {
                         return Ok(WriteDisposition::Replay(ModuleStateSyncTxnOutcome::InvalidSeedBoundary {
@@ -9328,8 +9223,8 @@ impl MemoryStore {
                     core.reconcile_pending = false;
                     meta.coverage_ordinal = Some(adoption.coverage_end_ordinal);
                     meta.coverage_start_ordinal = Some(adoption.coverage_start_ordinal);
-                    meta.coverage_compartment_seq = Some(adoption.max_sequence);
-                    meta.folded_compartment_seq = adoption.max_sequence;
+                    meta.coverage_history_segment_seq = Some(adoption.max_sequence);
+                    meta.folded_history_segment_seq = adoption.max_sequence;
                     meta.pending_rewrite = None;
                     meta.initialized = true;
                     meta.bootstrap_seed_fold_pending = true;
@@ -9443,30 +9338,30 @@ impl MemoryStore {
                 request.strip_seed_skipped,
             );
 
-            let mut compartment_overwrites_skipped = 0usize;
-            for compartment in &compartments {
+            let mut history_segment_overwrites_skipped = 0usize;
+            for history_segment in &history_segments {
                 if initialized_before_sync {
-                    let retained_sequence = meta.folded_compartment_seq;
-                    if compartment.sequence <= retained_sequence
-                        || !write_seed_compartment_tx(
+                    let retained_sequence = meta.folded_history_segment_seq;
+                    if history_segment.sequence <= retained_sequence
+                        || !write_seed_history_segment_tx(
                             tx,
                             request.session_id,
-                            compartment,
+                            history_segment,
                             false,
                         )?
                     {
-                        compartment_overwrites_skipped =
-                            compartment_overwrites_skipped.saturating_add(1);
+                        history_segment_overwrites_skipped =
+                            history_segment_overwrites_skipped.saturating_add(1);
                     }
                 } else {
-                    write_seed_compartment_tx(tx, request.session_id, compartment, true)?;
+                    write_seed_history_segment_tx(tx, request.session_id, history_segment, true)?;
                 }
             }
-            if compartment_overwrites_skipped > 0 {
+            if history_segment_overwrites_skipped > 0 {
                 eprintln!(
-                    "memory-store: skipped {} state-sync compartment overwrite(s) while retaining folded sequence {} for session {}",
-                    compartment_overwrites_skipped,
-                    meta.folded_compartment_seq,
+                    "memory-store: skipped {} state-sync history_segment overwrite(s) while retaining folded sequence {} for session {}",
+                    history_segment_overwrites_skipped,
+                    meta.folded_history_segment_seq,
                     request.session_id
                 );
             }
@@ -9508,7 +9403,7 @@ impl MemoryStore {
             ) {
                 Ok(core) => core,
                 // Fail the transaction rather than reporting a refusal through a successful
-                // disposition. Pending drops, hint seeds, compartments, the workspace, and the
+                // disposition. Pending drops, hint seeds, history_segments, the workspace, and the
                 // user profile are already written by this point, and `Replay` commits them.
                 Err(error) => {
                     return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
@@ -9576,8 +9471,8 @@ impl MemoryStore {
                     found,
                 })
             }
-            ModuleStateSyncTxnOutcome::HistorianBusy { phase } => {
-                Err(ModuleStateSyncError::HistorianBusy { phase })
+            ModuleStateSyncTxnOutcome::HistorySummarizerBusy { phase } => {
+                Err(ModuleStateSyncError::HistorySummarizerBusy { phase })
             }
             ModuleStateSyncTxnOutcome::InvalidSeedBoundary { declared, detail } => {
                 Err(ModuleStateSyncError::InvalidSeedBoundary { declared, detail })
@@ -9586,8 +9481,10 @@ impl MemoryStore {
         }
     }
 
-    fn stored_compartment_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredCompartment> {
-        Ok(StoredCompartment {
+    fn stored_history_segment_from_row(
+        r: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<StoredHistorySegment> {
+        Ok(StoredHistorySegment {
             sequence: r.get(0)?,
             start_message: r.get(1)?,
             end_message: r.get(2)?,
@@ -9608,33 +9505,36 @@ impl MemoryStore {
         })
     }
 
-    /// Read a session's compartments in chronological order (oldest first), the order
+    /// Read a session's history_segments in chronological order (oldest first), the order
     /// the decay renderer expects (it indexes from newest internally).
-    pub fn load_compartments(
+    pub fn load_history_segments(
         &self,
         session_id: &str,
-    ) -> Result<Vec<StoredCompartment>, MemoryStoreError> {
+    ) -> Result<Vec<StoredHistorySegment>, MemoryStoreError> {
         let rows = self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare_cached(&format!(
-                "SELECT {COMPARTMENT_SELECT_COLUMNS}
-                       FROM compartments WHERE session_id = ?1 ORDER BY sequence ASC"
+                "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS}
+                       FROM history_segments WHERE session_id = ?1 ORDER BY sequence ASC"
             ))?;
             let mapped = stmt
-                .query_map(params![session_id], Self::stored_compartment_from_row)?
+                .query_map(params![session_id], Self::stored_history_segment_from_row)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(mapped)
         })?;
         Ok(rows)
     }
 
-    /// Return the greatest message ordinal covered by a session's compartments without
-    /// materializing the wide compartment rows. The migration-42 index covers both the session
+    /// Return the greatest message ordinal covered by a session's history_segments without
+    /// materializing the wide history_segment rows. The migration-42 index covers both the session
     /// predicate and the aggregate value.
-    pub fn max_compartment_end_ordinal(&self, session_id: &str) -> Result<i64, MemoryStoreError> {
+    pub fn max_history_segment_end_ordinal(
+        &self,
+        session_id: &str,
+    ) -> Result<i64, MemoryStoreError> {
         #[cfg(any(test, feature = "test-support"))]
         {
             let hook = self
-                .before_max_compartment_end_read_hook
+                .before_max_history_segment_end_read_hook
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take();
@@ -9646,7 +9546,7 @@ impl MemoryStore {
             .with_conn(|conn| {
                 conn.query_row(
                     "SELECT COALESCE(MAX(end_message), 0)
-                       FROM compartments
+                       FROM history_segments
                       WHERE session_id = ?1",
                     params![session_id],
                     |row| row.get(0),
@@ -9655,21 +9555,21 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// Return the newest ordinal covered by a persisted compacted compartment.
+    /// Return the newest ordinal covered by a persisted compacted history_segment.
     pub fn last_compacted_ordinal(&self, session_id: &str) -> Result<i64, MemoryStoreError> {
-        self.max_compartment_end_ordinal(session_id)
+        self.max_history_segment_end_ordinal(session_id)
     }
 
     /// Read only the compacted rows intersecting a range. The SQL limit is intentional: facade
-    /// expansion must not materialize every historical compartment before applying its response
+    /// expansion must not materialize every historical history_segment before applying its response
     /// budget.
-    pub fn load_compartments_for_range(
+    pub fn load_history_segments_for_range(
         &self,
         session_id: &str,
         start: i64,
         end: i64,
         limit: usize,
-    ) -> Result<Vec<StoredCompartment>, MemoryStoreError> {
+    ) -> Result<Vec<StoredHistorySegment>, MemoryStoreError> {
         if limit == 0 || start > end {
             return Ok(Vec::new());
         }
@@ -9677,8 +9577,8 @@ impl MemoryStore {
         self.inner
             .with_conn(|conn| {
                 let mut stmt = conn.prepare_cached(&format!(
-                    "SELECT {COMPARTMENT_SELECT_COLUMNS}
-                       FROM compartments
+                    "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS}
+                       FROM history_segments
                       WHERE session_id = ?1
                         AND end_message >= ?2
                         AND start_message <= ?3
@@ -9688,7 +9588,7 @@ impl MemoryStore {
                 let mapped = stmt
                     .query_map(
                         params![session_id, start, end, limit],
-                        Self::stored_compartment_from_row,
+                        Self::stored_history_segment_from_row,
                     )?
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(mapped)
@@ -9696,13 +9596,13 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// Read the compartment rows and session revert epoch in one store snapshot for
-    /// historian assembly. The epoch is the fence carried by the firing until publish.
-    pub fn load_historian_assembly_snapshot(
+    /// Read the history_segment rows and session revert epoch in one store snapshot for
+    /// history_summarizer assembly. The epoch is the fence carried by the firing until publish.
+    pub fn load_history_summarizer_assembly_snapshot(
         &self,
         session_id: &str,
-    ) -> Result<HistorianAssemblySnapshot, MemoryStoreError> {
-        let (meta_json, compartments, compartment_set_generation) =
+    ) -> Result<HistorySummarizerAssemblySnapshot, MemoryStoreError> {
+        let (meta_json, history_segments, history_segment_set_generation) =
             self.inner.with_conn(|conn| {
                 let meta_json = conn
                     .query_row(
@@ -9712,24 +9612,24 @@ impl MemoryStore {
                     )
                     .optional()?;
                 let mut stmt = conn.prepare_cached(&format!(
-                    "SELECT {COMPARTMENT_SELECT_COLUMNS}
-                       FROM compartments WHERE session_id = ?1 ORDER BY sequence ASC"
+                    "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS}
+                       FROM history_segments WHERE session_id = ?1 ORDER BY sequence ASC"
                 ))?;
-                let compartments = stmt
-                    .query_map(params![session_id], Self::stored_compartment_from_row)?
+                let history_segments = stmt
+                    .query_map(params![session_id], Self::stored_history_segment_from_row)?
                     .collect::<Result<Vec<_>, _>>()?;
-                let compartment_set_generation = conn.query_row(
+                let history_segment_set_generation = conn.query_row(
                     "SELECT COALESCE(MAX(sequence), 0), COUNT(*)
-                 FROM compartments WHERE session_id = ?1",
+                 FROM history_segments WHERE session_id = ?1",
                     params![session_id],
                     |row| {
-                        Ok(CompartmentSetGeneration {
+                        Ok(HistorySegmentSetGeneration {
                             max_sequence: row.get(0)?,
                             count: row.get(1)?,
                         })
                     },
                 )?;
-                Ok((meta_json, compartments, compartment_set_generation))
+                Ok((meta_json, history_segments, history_segment_set_generation))
             })?;
         let revert_epoch = match meta_json {
             Some(json) => {
@@ -9739,21 +9639,21 @@ impl MemoryStore {
             }
             None => 0,
         };
-        Ok(HistorianAssemblySnapshot {
-            compartments,
+        Ok(HistorySummarizerAssemblySnapshot {
+            history_segments,
             revert_epoch,
-            compartment_set_generation,
+            history_segment_set_generation,
         })
     }
 
-    /// The highest compartment `sequence` for a session (0 when none). A cheap read the
-    /// transform does every pass to detect "a new compartment was published" without
-    /// loading the full compartment rows (those load only on the pass that actually
+    /// The highest history_segment `sequence` for a session (0 when none). A cheap read the
+    /// transform does every pass to detect "a new history_segment was published" without
+    /// loading the full history_segment rows (those load only on the pass that actually
     /// re-composes the m1 delta block).
-    pub fn max_compartment_seq(&self, session_id: &str) -> Result<i64, MemoryStoreError> {
+    pub fn max_history_segment_seq(&self, session_id: &str) -> Result<i64, MemoryStoreError> {
         let max = self.inner.with_conn(|conn| {
             let v: i64 = conn.query_row(
-                "SELECT COALESCE(MAX(sequence), 0) FROM compartments WHERE session_id = ?1",
+                "SELECT COALESCE(MAX(sequence), 0) FROM history_segments WHERE session_id = ?1",
                 params![session_id],
                 |r| r.get(0),
             )?;
@@ -9762,17 +9662,17 @@ impl MemoryStore {
         Ok(max)
     }
 
-    /// Whether the session has any compartment at all. This is a presence check, NOT a
-    /// count or a max-sequence read: `max_compartment_seq` COALESCEs a missing MAX to 0,
-    /// which is indistinguishable from a real first compartment at sequence 0, so it
-    /// cannot answer "does a compartment exist". The first-fold HARD trigger needs the
-    /// unambiguous existence answer (empty boundary + a compartment present => the first
+    /// Whether the session has any history_segment at all. This is a presence check, NOT a
+    /// count or a max-sequence read: `max_history_segment_seq` COALESCEs a missing MAX to 0,
+    /// which is indistinguishable from a real first history_segment at sequence 0, so it
+    /// cannot answer "does a history_segment exist". The first-fold HARD trigger needs the
+    /// unambiguous existence answer (empty boundary + a history_segment present => the first
     /// fold is due), so this returns a true/false from `SELECT EXISTS` on the session
     /// index — O(1), never touches the sequence value.
-    pub fn has_compartments(&self, session_id: &str) -> Result<bool, MemoryStoreError> {
+    pub fn has_history_segments(&self, session_id: &str) -> Result<bool, MemoryStoreError> {
         let exists = self.inner.with_conn(|conn| {
             let v: i64 = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM compartments WHERE session_id = ?1)",
+                "SELECT EXISTS(SELECT 1 FROM history_segments WHERE session_id = ?1)",
                 params![session_id],
                 |r| r.get(0),
             )?;
@@ -9819,7 +9719,7 @@ impl MemoryStore {
 
     /// Resolve and persist one fake-compaction lineage edge under the store's writer fence.
     /// The method owns every row participating in adoption so callers cannot observe a copied
-    /// compartment set without its marker, anchor, ordinal base, or prior-lineage publish fence.
+    /// history_segment set without its marker, anchor, ordinal base, or prior-lineage publish fence.
     pub fn descend_lineage(
         &self,
         request: LineageDescentRequest<'_>,
@@ -10100,7 +10000,7 @@ impl MemoryStore {
 
             let mut statement = tx.prepare_cached(
                 "SELECT sequence, start_message, end_message
-                   FROM compartments
+                   FROM history_segments
                   WHERE session_id = ?1
                   ORDER BY sequence ASC",
             )?;
@@ -10213,9 +10113,9 @@ impl MemoryStore {
             target_core.reconcile_pending = false;
             target_meta = source_meta;
             target_meta.coverage_ordinal = Some(placeholder_ordinal);
-            target_meta.coverage_compartment_seq = Some(placeholder_sequence);
+            target_meta.coverage_history_segment_seq = Some(placeholder_sequence);
             target_meta.newest_live_ordinal = prior_last;
-            target_meta.historian = HistorianDurableState::default();
+            target_meta.history_summarizer = HistorySummarizerDurableState::default();
             target_meta.pending_rewrite = None;
             target_meta.pending_rewrite_trip_count = 0;
             target_meta.pending_rewrite_ambiguous = false;
@@ -10277,8 +10177,8 @@ impl MemoryStore {
             Self::link_lineage_copy_scans(coordinated, &source_key, request.target_key)?;
 
             for owner_kind in [
-                "compartments",
-                "historian_side_channels",
+                "history_segments",
+                "history_summarizer_side_channels",
                 "authority_seed_rows",
                 "lineage_copies",
             ] {
@@ -10291,7 +10191,7 @@ impl MemoryStore {
             }
             for table in [
                 "chunk_transcripts",
-                "compartments",
+                "history_segments",
                 "tags",
                 "temporal_marks",
                 "user_hints",
@@ -10303,7 +10203,7 @@ impl MemoryStore {
                     params![request.target_key],
                 )?;
             }
-            // Session notes follow the descended conversation key. Do not copy smart notes:
+            // Session notes follow the descended conversation key. Do not copy conditional notes:
             // their project-wide visibility is independent of one lineage's retained history.
             let note_projects = {
                 let mut statement = tx.prepare_cached(
@@ -10398,7 +10298,7 @@ impl MemoryStore {
                 copy_result?;
             }
             tx.execute(
-                "INSERT INTO compartments (
+                "INSERT INTO history_segments (
                      session_id, sequence, start_message, end_message, start_message_id,
                      end_message_id, start_date, end_date, title, content, p1, p2, p3, p4,
                      importance, episode_type, legacy, created_at
@@ -10420,18 +10320,16 @@ impl MemoryStore {
                          CASE WHEN episode_type IS NULL THEN NULL
                               ELSE reject_transaction_text(episode_type) END,
                          legacy, created_at
-                   FROM compartments WHERE session_id = ?2",
+                   FROM history_segments WHERE session_id = ?2",
                 params![request.target_key, source_key],
             )?;
             tx.execute(
                 "INSERT INTO chunk_transcripts (
-                     session_id, compartment_seq, start_ordinal, end_ordinal,
-                     transcript_deflate, raw_messages_deflate, created_at_ms
+                     session_id, history_segment_seq, start_ordinal, end_ordinal,
+                     transcript_deflate, created_at_ms
                  )
-                  SELECT ?1, compartment_seq, start_ordinal, end_ordinal,
+                  SELECT ?1, history_segment_seq, start_ordinal, end_ordinal,
                          redact_transaction_transcript(transcript_deflate),
-                         CASE WHEN raw_messages_deflate IS NULL THEN NULL
-                              ELSE redact_transaction_raw_messages(raw_messages_deflate) END,
                          created_at_ms
                    FROM chunk_transcripts WHERE session_id = ?2",
                 params![request.target_key, source_key],
@@ -10476,7 +10374,7 @@ impl MemoryStore {
                 params![request.target_key, source_key],
             )?;
             tx.execute(
-                "INSERT INTO compartments (
+                "INSERT INTO history_segments (
                      session_id, sequence, start_message, end_message, start_message_id,
                      end_message_id, start_date, end_date, title, content, p1, p2, p3, p4,
                      importance, episode_type, legacy, created_at
@@ -10494,7 +10392,7 @@ impl MemoryStore {
             let placeholder_valid = tx
                 .query_row(
                     "SELECT start_message, end_message, end_message_id
-                       FROM compartments
+                       FROM history_segments
                       WHERE session_id = ?1 AND sequence = ?2",
                     params![request.target_key, placeholder_sequence],
                     |row| {
@@ -10584,8 +10482,8 @@ impl MemoryStore {
     ) -> Result<M1RevisionSnapshot, MemoryStoreError> {
         self.inner
             .with_conn(|transaction| {
-                let max_compartment_seq = transaction.query_row(
-                    "SELECT COALESCE(MAX(sequence), 0) FROM compartments WHERE session_id = ?1",
+                let max_history_segment_seq = transaction.query_row(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM history_segments WHERE session_id = ?1",
                     params![session_id],
                     |row| row.get(0),
                 )?;
@@ -10595,49 +10493,50 @@ impl MemoryStore {
                     |row| row.get(0),
                 )?;
                 Ok(M1RevisionSnapshot {
-                    max_compartment_seq,
+                    max_history_segment_seq,
                     note_status_version,
                 })
             })
             .map_err(Into::into)
     }
 
-    /// Replace a session's entire compartment set in one fenced transaction. The
+    /// Replace a session's entire history_segment set in one fenced transaction. The
     /// history producer republishes the full chronological set each time, so a
     /// wholesale delete-then-insert (rather than an incremental upsert) keeps the
     /// stored `sequence` contiguous. Writes are serialized by the store's single-writer
     /// lease (the same one guarding the cache-state commit).
-    pub fn replace_compartments(
+    pub fn replace_history_segments(
         &self,
         session_id: &str,
-        compartments: &[StoredCompartment],
+        history_segments: &[StoredHistorySegment],
     ) -> Result<(), MemoryStoreError> {
-        let mut write = PreparedWrite::new(DurableWriteFamily::Compartments);
-        write.domain_owner("session", session_id, "compartments");
+        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+        write.domain_owner("session", session_id, "history_segments");
         write.existing_identity("session_id", session_id)?;
-        let compartments = prepare_compartments(&mut write, compartments)?;
-        validate_compartment_set_ordering(&compartments).map_err(MemoryStoreError::Serde)?;
+        let history_segments = prepare_history_segments(&mut write, history_segments)?;
+        validate_history_segment_set_ordering(&history_segments)
+            .map_err(MemoryStoreError::Serde)?;
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
             // Retire only the owner whose rows the deletes below remove.
-            retire_active_scan_owner_kind(tx, "session", session_id, "compartments")?;
+            retire_active_scan_owner_kind(tx, "session", session_id, "history_segments")?;
             tx.execute(
                 "DELETE FROM chunk_transcripts WHERE session_id = ?1",
                 params![session_id],
             )?;
             tx.execute(
-                "DELETE FROM compartments WHERE session_id = ?1",
+                "DELETE FROM history_segments WHERE session_id = ?1",
                 params![session_id],
             )?;
-            for c in &compartments {
-                insert_compartment_tx(tx, session_id, c.sequence, c)?;
+            for c in &history_segments {
+                insert_history_segment_tx(tx, session_id, c.sequence, c)?;
             }
             Ok(WriteDisposition::Applied(()))
         })?;
         Ok(())
     }
 
-    /// The full-session form of the revert re-cut: compartments and their recoverable transcripts are removed, while the cache row is replaced with an empty core and default meta carrying a bumped revert epoch. The epoch and row-version update share one fenced transaction, so an in-flight historian cannot publish against the retired compartment set.
+    /// The full-session form of the revert re-cut: history_segments and their recoverable transcripts are removed, while the cache row is replaced with an empty core and default meta carrying a bumped revert epoch. The epoch and row-version update share one fenced transaction, so an in-flight history_summarizer cannot publish against the retired history_segment set.
     pub fn reset_session_for_recomp(
         &self,
         session_id: &str,
@@ -10667,7 +10566,7 @@ impl MemoryStore {
             let reset_meta = ModuleMeta {
                 revert_epoch: next_epoch,
                 last_recut: Some(format!(
-                    "native recomp reset all compartments; epoch {next_epoch}"
+                    "native recomp reset all history_segments; epoch {next_epoch}"
                 )),
                 ..ModuleMeta::default()
             };
@@ -10680,8 +10579,8 @@ impl MemoryStore {
                 Err(error) => return Ok(TruncateTxnOutcome::Serde(error.to_string())),
             };
             for owner_kind in [
-                "compartments",
-                "historian_side_channels",
+                "history_segments",
+                "history_summarizer_side_channels",
                 "authority_seed_rows",
                 "lineage_copies",
             ] {
@@ -10692,11 +10591,11 @@ impl MemoryStore {
                 params![session_id],
             )?;
             tx.execute(
-                "DELETE FROM compartments WHERE session_id = ?1",
+                "DELETE FROM history_segments WHERE session_id = ?1",
                 params![session_id],
             )?;
             tx.execute(
-                "DELETE FROM compartment_events WHERE session_id = ?1",
+                "DELETE FROM history_segment_events WHERE session_id = ?1",
                 params![session_id],
             )?;
             tx.execute(
@@ -10708,7 +10607,7 @@ impl MemoryStore {
                 params![session_id],
             )?;
             tx.execute(
-                "DELETE FROM historian_side_channel_outbox WHERE session_id = ?1",
+                "DELETE FROM history_summarizer_side_channel_outbox WHERE session_id = ?1",
                 params![session_id],
             )?;
             let next_version = current as u64 + 1;
@@ -10740,10 +10639,10 @@ impl MemoryStore {
         }
     }
 
-    /// Delete every compartment after `keep_through_seq` and bump the session revert
+    /// Delete every history_segment after `keep_through_seq` and bump the session revert
     /// epoch under the same row-version CAS. A no-op truncation returns the current
     /// epoch/version without rewriting the meta blob.
-    pub fn truncate_compartments_for_revert(
+    pub fn truncate_history_segments_for_revert(
         &self,
         session_id: &str,
         keep_through_seq: i64,
@@ -10777,7 +10676,7 @@ impl MemoryStore {
             let (dropped_count, dropped_min, dropped_max): (i64, Option<i64>, Option<i64>) = tx
                 .query_row(
                     "SELECT COUNT(*), MIN(sequence), MAX(sequence)
-                     FROM compartments WHERE session_id = ?1 AND sequence > ?2",
+                     FROM history_segments WHERE session_id = ?1 AND sequence > ?2",
                     params![session_id, keep_through_seq],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )?;
@@ -10791,7 +10690,7 @@ impl MemoryStore {
 
             let surviving_tail = tx
                 .query_row(
-                    "SELECT sequence, end_message_id FROM compartments
+                    "SELECT sequence, end_message_id FROM history_segments
                      WHERE session_id = ?1 AND sequence <= ?2
                      ORDER BY sequence DESC LIMIT 1",
                     params![session_id, keep_through_seq],
@@ -10800,7 +10699,7 @@ impl MemoryStore {
                 .optional()?;
             let surviving_head_id = tx
                 .query_row(
-                    "SELECT start_message_id FROM compartments
+                    "SELECT start_message_id FROM history_segments
                      WHERE session_id = ?1 AND sequence <= ?2
                      ORDER BY sequence ASC LIMIT 1",
                     params![session_id, keep_through_seq],
@@ -10842,39 +10741,39 @@ impl MemoryStore {
             };
 
             tx.execute(
-                "DELETE FROM chunk_transcripts WHERE session_id = ?1 AND compartment_seq > ?2",
+                "DELETE FROM chunk_transcripts WHERE session_id = ?1 AND history_segment_seq > ?2",
                 params![session_id, keep_through_seq],
             )?;
             tx.execute(
-                "DELETE FROM compartments WHERE session_id = ?1 AND sequence > ?2",
+                "DELETE FROM history_segments WHERE session_id = ?1 AND sequence > ?2",
                 params![session_id, keep_through_seq],
             )?;
             tx.execute(
-                "DELETE FROM compartment_events
+                "DELETE FROM history_segment_events
                   WHERE session_id = ?1
-                    AND (compartment_id > ?2 OR at_compartment > ?2)",
+                    AND (history_segment_id > ?2 OR at_history_segment > ?2)",
                 params![session_id, keep_through_seq],
             )?;
             // Delete side-channel artifacts whose source ranges end in the dropped suffix.
             tx.execute(
                 "DELETE FROM primer_candidates
                   WHERE session_id = ?1
-                    AND COALESCE(source_compartment_end, source_compartment_start) > COALESCE(
-                        (SELECT MAX(end_message) FROM compartments WHERE session_id = ?1), -1)",
+                    AND COALESCE(source_history_segment_end, source_history_segment_start) > COALESCE(
+                        (SELECT MAX(end_message) FROM history_segments WHERE session_id = ?1), -1)",
                 params![session_id],
             )?;
             tx.execute(
                 "DELETE FROM user_memory_candidates
                   WHERE session_id = ?1
-                    AND COALESCE(source_compartment_end, source_compartment_start) > COALESCE(
-                        (SELECT MAX(end_message) FROM compartments WHERE session_id = ?1), -1)",
+                    AND COALESCE(source_history_segment_end, source_history_segment_start) > COALESCE(
+                        (SELECT MAX(end_message) FROM history_segments WHERE session_id = ?1), -1)",
                 params![session_id],
             )?;
             tx.execute(
-                "DELETE FROM historian_side_channel_outbox
+                "DELETE FROM history_summarizer_side_channel_outbox
                   WHERE session_id = ?1
                     AND source_end > COALESCE(
-                        (SELECT MAX(end_message) FROM compartments WHERE session_id = ?1), -1)",
+                        (SELECT MAX(end_message) FROM history_segments WHERE session_id = ?1), -1)",
                 params![session_id],
             )?;
             let next = next_row_version(current)?;
@@ -10901,33 +10800,36 @@ impl MemoryStore {
         }
     }
 
-    /// Append compartments at the current tail without renumbering existing rows.
+    /// Append history_segments at the current tail without renumbering existing rows.
     /// The incoming `sequence` values are treated as producer-local hints; durable
     /// sequences are assigned contiguously after the current max so concurrent readers
     /// never observe gaps or rewritten history.
-    pub fn append_compartments(
+    pub fn append_history_segments(
         &self,
         session_id: &str,
-        compartments: &[StoredCompartment],
+        history_segments: &[StoredHistorySegment],
     ) -> Result<(), MemoryStoreError> {
-        let mut write = PreparedWrite::new(DurableWriteFamily::Compartments);
-        write.domain_owner("session", session_id, "compartments");
+        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySegments);
+        write.domain_owner("session", session_id, "history_segments");
         write.existing_identity("session_id", session_id)?;
-        let compartments = prepare_compartments(&mut write, compartments)?;
+        let history_segments = prepare_history_segments(&mut write, history_segments)?;
         let outcome = write.execute(&self.inner, |coordinated| {
-            let outcome = append_compartments_tx(coordinated.tx(), session_id, &compartments)?;
+            let outcome =
+                append_history_segments_tx(coordinated.tx(), session_id, &history_segments)?;
             Ok(match outcome {
-                AppendCompartmentsTxnOutcome::Appended => WriteDisposition::Applied(outcome),
-                AppendCompartmentsTxnOutcome::Overlap { .. } => WriteDisposition::Replay(outcome),
+                AppendHistorySegmentsTxnOutcome::Appended => WriteDisposition::Applied(outcome),
+                AppendHistorySegmentsTxnOutcome::Overlap { .. } => {
+                    WriteDisposition::Replay(outcome)
+                }
             })
         })?;
         match outcome {
-            AppendCompartmentsTxnOutcome::Appended => Ok(()),
-            AppendCompartmentsTxnOutcome::Overlap {
+            AppendHistorySegmentsTxnOutcome::Appended => Ok(()),
+            AppendHistorySegmentsTxnOutcome::Overlap {
                 existing_sequence,
                 incoming_start_message,
                 incoming_end_message,
-            } => Err(MemoryStoreError::CompartmentRangeOverlap {
+            } => Err(MemoryStoreError::HistorySegmentRangeOverlap {
                 existing_sequence,
                 incoming_start_message,
                 incoming_end_message,
@@ -10935,19 +10837,19 @@ impl MemoryStore {
         }
     }
 
-    /// Promote validated historian facts into project memories using exact-content
+    /// Promote validated history_summarizer facts into project memories using exact-content
     /// de-duplication against the active render set. This path is additive only: it
     /// inserts new `memories` rows and never writes mutation-log rows, so the next
     /// m1/materialization pass observes the rows solely through the max-memory-id
     /// watermark.
-    pub fn abandon_historian_run_if_matching(
+    pub fn abandon_history_summarizer_run_if_matching(
         &self,
         session_id: &str,
-        predicate: &HistorianPublishPredicate,
+        predicate: &HistorySummarizerPublishPredicate,
         failure_backoff_at_ms: Option<i64>,
         detail: Option<&str>,
     ) -> Result<Option<u64>, MemoryStoreError> {
-        self.abandon_historian_run_if_matching_with_publish_failure(
+        self.abandon_history_summarizer_run_if_matching_with_publish_failure(
             session_id,
             predicate,
             failure_backoff_at_ms,
@@ -10958,17 +10860,17 @@ impl MemoryStore {
 
     /// Release a matching run and optionally record a failed publish attempt.
     /// Publication errors can occur after the producer succeeded, so this counter
-    /// lives with the durable historian state rather than producer diagnostics.
-    pub fn abandon_historian_run_if_matching_with_publish_failure(
+    /// lives with the durable history_summarizer state rather than producer diagnostics.
+    pub fn abandon_history_summarizer_run_if_matching_with_publish_failure(
         &self,
         session_id: &str,
-        predicate: &HistorianPublishPredicate,
+        predicate: &HistorySummarizerPublishPredicate,
         failure_backoff_at_ms: Option<i64>,
         detail: Option<&str>,
         count_publish_failure: bool,
     ) -> Result<Option<u64>, MemoryStoreError> {
-        let mut write = PreparedWrite::new(DurableWriteFamily::HistorianSideChannels);
-        write.domain_owner("session", session_id, "historian");
+        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
+        write.domain_owner("session", session_id, "history_summarizer");
         write.existing_identity("session_id", session_id)?;
         let detail = detail
             .map(|value| write.content("last_failure", value))
@@ -10982,59 +10884,66 @@ impl MemoryStore {
                 .optional()?;
             let Some((current, meta_json)) = row else {
                 return Ok(WriteDisposition::Replay(
-                    AbandonHistorianTxnOutcome::Unchanged,
+                    AbandonHistorySummarizerTxnOutcome::Unchanged,
                 ));
             };
             let mut meta: ModuleMeta = match serde_json::from_str(&meta_json) {
                 Ok(meta) => meta,
                 Err(error) => {
-                    return Ok(WriteDisposition::Replay(AbandonHistorianTxnOutcome::Serde(
-                        error.to_string(),
-                    )));
+                    return Ok(WriteDisposition::Replay(
+                        AbandonHistorySummarizerTxnOutcome::Serde(error.to_string()),
+                    ));
                 }
             };
-            let historian = &meta.historian;
-            let predicate_matches = historian.firing_seq == predicate.firing_seq
-                && historian.producer_run_id.as_deref() == Some(predicate.producer_run_id.as_str())
-                && historian.chunk_fingerprint == predicate.chunk_fingerprint
-                && historian.selected_range_identities == predicate.selected_range_identities
-                && historian.compartment_set_generation == predicate.compartment_set_generation;
-            if !predicate_matches || historian.state == HistorianPhase::Idle {
+            let history_summarizer = &meta.history_summarizer;
+            let predicate_matches = history_summarizer.firing_seq == predicate.firing_seq
+                && history_summarizer.producer_run_id.as_deref()
+                    == Some(predicate.producer_run_id.as_str())
+                && history_summarizer.chunk_fingerprint == predicate.chunk_fingerprint
+                && history_summarizer.selected_range_identities
+                    == predicate.selected_range_identities
+                && history_summarizer.history_segment_set_generation
+                    == predicate.history_segment_set_generation;
+            if !predicate_matches || history_summarizer.state == HistorySummarizerPhase::Idle {
                 return Ok(WriteDisposition::Replay(
-                    AbandonHistorianTxnOutcome::Unchanged,
+                    AbandonHistorySummarizerTxnOutcome::Unchanged,
                 ));
             }
 
             #[cfg(any(test, feature = "test-support"))]
             if let Some(hook) = self
-                .abandon_historian_hook
+                .abandon_history_summarizer_hook
                 .lock()
-                .expect("abandon historian hook mutex")
+                .expect("abandon history_summarizer hook mutex")
                 .as_mut()
             {
                 hook();
             }
 
-            let last_failure = detail.clone().or_else(|| historian.last_failure.clone());
-            meta.historian = HistorianDurableState {
-                state: HistorianPhase::Idle,
-                firing_seq: historian.firing_seq,
+            let last_failure = detail
+                .clone()
+                .or_else(|| history_summarizer.last_failure.clone());
+            meta.history_summarizer = HistorySummarizerDurableState {
+                state: HistorySummarizerPhase::Idle,
+                firing_seq: history_summarizer.firing_seq,
                 failure_backoff_at_ms,
                 last_failure,
                 consecutive_publish_failures: if count_publish_failure {
-                    historian.consecutive_publish_failures.saturating_add(1)
+                    history_summarizer
+                        .consecutive_publish_failures
+                        .saturating_add(1)
                 } else {
-                    historian.consecutive_publish_failures
+                    history_summarizer.consecutive_publish_failures
                 },
-                ..HistorianDurableState::default()
+                ..HistorySummarizerDurableState::default()
             };
             let next = next_row_version(current)?;
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
                 Err(error) => {
-                    return Ok(WriteDisposition::Replay(AbandonHistorianTxnOutcome::Serde(
-                        error.to_string(),
-                    )));
+                    return Ok(WriteDisposition::Replay(
+                        AbandonHistorySummarizerTxnOutcome::Serde(error.to_string()),
+                    ));
                 }
             };
             if coordinated
@@ -11043,16 +10952,20 @@ impl MemoryStore {
                 .transaction_content("meta", &meta_json)
                 .is_err()
             {
-                return Ok(WriteDisposition::Replay(AbandonHistorianTxnOutcome::Serde(
-                    "historian metadata failed secret scanning".to_string(),
-                )));
+                return Ok(WriteDisposition::Replay(
+                    AbandonHistorySummarizerTxnOutcome::Serde(
+                        "history_summarizer metadata failed secret scanning".to_string(),
+                    ),
+                ));
             }
             let meta_json = match prepare_transaction_json_preserving_identities(&meta_json) {
                 Ok(json) => json,
                 Err(_) => {
-                    return Ok(WriteDisposition::Replay(AbandonHistorianTxnOutcome::Serde(
-                        "historian metadata failed secret scanning".to_string(),
-                    )));
+                    return Ok(WriteDisposition::Replay(
+                        AbandonHistorySummarizerTxnOutcome::Serde(
+                            "history_summarizer metadata failed secret scanning".to_string(),
+                        ),
+                    ));
                 }
             };
             tx.execute(
@@ -11061,24 +10974,24 @@ impl MemoryStore {
                 params![session_id, next as i64, meta_json, current],
             )?;
             Ok(WriteDisposition::Applied(
-                AbandonHistorianTxnOutcome::Committed(next),
+                AbandonHistorySummarizerTxnOutcome::Committed(next),
             ))
         })?;
 
         match outcome {
-            AbandonHistorianTxnOutcome::Unchanged => Ok(None),
-            AbandonHistorianTxnOutcome::Committed(row_version) => Ok(Some(row_version)),
-            AbandonHistorianTxnOutcome::Serde(error) => Err(MemoryStoreError::Serde(error)),
+            AbandonHistorySummarizerTxnOutcome::Unchanged => Ok(None),
+            AbandonHistorySummarizerTxnOutcome::Committed(row_version) => Ok(Some(row_version)),
+            AbandonHistorySummarizerTxnOutcome::Serde(error) => Err(MemoryStoreError::Serde(error)),
         }
     }
 
     /// Increment publication health without changing the in-flight state. This covers
     /// failures before a publish transaction can safely abandon the producer run, such
     /// as side-channel outbox preparation errors.
-    pub fn record_historian_publish_failure_if_matching(
+    pub fn record_history_summarizer_publish_failure_if_matching(
         &self,
         session_id: &str,
-        predicate: &HistorianPublishPredicate,
+        predicate: &HistorySummarizerPublishPredicate,
     ) -> Result<Option<u64>, MemoryStoreError> {
         let outcome = self.inner.with_conn_fenced(|tx| {
             let row = tx
@@ -11089,35 +11002,35 @@ impl MemoryStore {
                 )
                 .optional()?;
             let Some((current, meta_json)) = row else {
-                return Ok(AbandonHistorianTxnOutcome::Unchanged);
+                return Ok(AbandonHistorySummarizerTxnOutcome::Unchanged);
             };
             let mut meta: ModuleMeta = match serde_json::from_str(&meta_json) {
                 Ok(meta) => meta,
-                Err(error) => return Ok(AbandonHistorianTxnOutcome::Serde(error.to_string())),
+                Err(error) => return Ok(AbandonHistorySummarizerTxnOutcome::Serde(error.to_string())),
             };
-            let historian = &meta.historian;
-            let predicate_matches = historian.firing_seq == predicate.firing_seq
-                && historian.producer_run_id.as_deref() == Some(predicate.producer_run_id.as_str())
-                && historian.chunk_fingerprint == predicate.chunk_fingerprint
-                && historian.selected_range_identities == predicate.selected_range_identities
-                && historian.compartment_set_generation == predicate.compartment_set_generation;
+            let history_summarizer = &meta.history_summarizer;
+            let predicate_matches = history_summarizer.firing_seq == predicate.firing_seq
+                && history_summarizer.producer_run_id.as_deref() == Some(predicate.producer_run_id.as_str())
+                && history_summarizer.chunk_fingerprint == predicate.chunk_fingerprint
+                && history_summarizer.selected_range_identities == predicate.selected_range_identities
+                && history_summarizer.history_segment_set_generation == predicate.history_segment_set_generation;
             if !predicate_matches {
-                return Ok(AbandonHistorianTxnOutcome::Unchanged);
+                return Ok(AbandonHistorySummarizerTxnOutcome::Unchanged);
             }
-            meta.historian.consecutive_publish_failures = meta
-                .historian
+            meta.history_summarizer.consecutive_publish_failures = meta
+                .history_summarizer
                 .consecutive_publish_failures
                 .saturating_add(1);
             let next = next_row_version(current)?;
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
-                Err(error) => return Ok(AbandonHistorianTxnOutcome::Serde(error.to_string())),
+                Err(error) => return Ok(AbandonHistorySummarizerTxnOutcome::Serde(error.to_string())),
             };
             let meta_json = match prepare_transaction_json_preserving_identities(&meta_json) {
                 Ok(json) => json,
                 Err(_) => {
-                    return Ok(AbandonHistorianTxnOutcome::Serde(
-                        "historian metadata failed secret scanning".to_string(),
+                    return Ok(AbandonHistorySummarizerTxnOutcome::Serde(
+                        "history_summarizer metadata failed secret scanning".to_string(),
                     ))
                 }
             };
@@ -11125,48 +11038,38 @@ impl MemoryStore {
                 "UPDATE cache_state SET row_version = ?2, meta = ?3 WHERE session_id = ?1 AND row_version = ?4",
                 params![session_id, next as i64, meta_json, current],
             )?;
-            Ok(AbandonHistorianTxnOutcome::Committed(next))
+            Ok(AbandonHistorySummarizerTxnOutcome::Committed(next))
         })?;
         match outcome {
-            AbandonHistorianTxnOutcome::Unchanged => Ok(None),
-            AbandonHistorianTxnOutcome::Committed(row_version) => Ok(Some(row_version)),
-            AbandonHistorianTxnOutcome::Serde(error) => Err(MemoryStoreError::Serde(error)),
+            AbandonHistorySummarizerTxnOutcome::Unchanged => Ok(None),
+            AbandonHistorySummarizerTxnOutcome::Committed(row_version) => Ok(Some(row_version)),
+            AbandonHistorySummarizerTxnOutcome::Serde(error) => Err(MemoryStoreError::Serde(error)),
         }
     }
 
-    /// Publish a validated historian chunk in one CAS-gated transaction. The publish
+    /// Publish a validated history_summarizer chunk in one CAS-gated transaction. The publish
     /// predicate proves the producer still matches the exact firing that created the
     /// chunk; stale reattaches or a second racing publisher fail before any rows are
     /// appended. The transaction intentionally leaves render state (`CoreState`,
     /// `coverage_ordinal`, watermarks, and m1 revision) untouched: new rows become
     /// visible only through the existing store watermarks on a later materializing pass.
-    pub fn publish_historian_chunk(
+    pub fn publish_history_summarizer_chunk(
         &self,
-        request: HistorianPublishRequest<'_>,
-    ) -> Result<HistorianPublishResult, HistorianPublishError> {
+        request: HistorySummarizerPublishRequest<'_>,
+    ) -> Result<HistorySummarizerPublishResult, HistorySummarizerPublishError> {
         let session_id = request.session_id;
         let expected_row_version = request.expected_row_version;
         let predicate = request.predicate;
-        let mut write = PreparedWrite::new(DurableWriteFamily::HistorianSideChannels);
-        write.domain_owner("session", session_id, "historian");
+        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
+        write.domain_owner("session", session_id, "history_summarizer");
         write.existing_identity("session_id", session_id)?;
-        let compartments = prepare_compartments(&mut write, request.compartments)?;
+        let history_segments = prepare_history_segments(&mut write, request.history_segments)?;
         let chunk_transcript = request
             .chunk_transcript
             .map(|value| write.content("chunk_transcript", value))
             .transpose()?;
-        let raw_chunk_messages = request
-            .raw_chunk_messages
-            .map(|value| {
-                write.json_content(
-                    "raw_chunk_messages",
-                    value,
-                    JsonScanPolicy::DurableRejectProtected,
-                )
-            })
-            .transpose()?;
-        let mut side_channel_items =
-            historian_side_channel_pending_items(&request).map_err(HistorianPublishError::Serde)?;
+        let mut side_channel_items = history_summarizer_side_channel_pending_items(&request)
+            .map_err(HistorySummarizerPublishError::Serde)?;
         for item in &mut side_channel_items {
             item.payload_json = write.json_content(
                 "side_channel_payload",
@@ -11176,13 +11079,10 @@ impl MemoryStore {
         }
         // Deflate runs here, before the fenced callback takes the store's connection lock;
         // the redacted inputs are final, so the callback only binds the blobs.
-        let chunk_transcript_blobs = prepare_chunk_transcript_blobs(
-            chunk_transcript.as_deref(),
-            raw_chunk_messages.as_deref(),
-        )
-        .map_err(|error| {
-            MemoryStoreError::Serde(format!("chunk transcript compression failed: {error}"))
-        })?;
+        let chunk_transcript_blobs = prepare_chunk_transcript_blobs(chunk_transcript.as_deref())
+            .map_err(|error| {
+                MemoryStoreError::Serde(format!("chunk transcript compression failed: {error}"))
+            })?;
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx;
             let outcome = (|| -> rusqlite::Result<PublishTxnOutcome> {
@@ -11215,23 +11115,23 @@ impl MemoryStore {
             };
 
             if !matches!(
-                meta.historian.state,
-                HistorianPhase::Publishing | HistorianPhase::AwaitingProducer
+                meta.history_summarizer.state,
+                HistorySummarizerPhase::Publishing | HistorySummarizerPhase::AwaitingProducer
             ) {
                 return Ok(PublishTxnOutcome::InvalidState(
-                    meta.historian.state.as_str().to_string(),
+                    meta.history_summarizer.state.as_str().to_string(),
                 ));
             }
 
-            let predicate_matches = meta.historian.firing_seq == predicate.firing_seq
-                && meta.historian.producer_run_id.as_deref()
+            let predicate_matches = meta.history_summarizer.firing_seq == predicate.firing_seq
+                && meta.history_summarizer.producer_run_id.as_deref()
                     == Some(predicate.producer_run_id.as_str())
-                && meta.historian.chunk_fingerprint == predicate.chunk_fingerprint
-                && meta.historian.selected_range_identities == predicate.selected_range_identities
-                && meta.historian.compartment_set_generation
-                    == predicate.compartment_set_generation;
+                && meta.history_summarizer.chunk_fingerprint == predicate.chunk_fingerprint
+                && meta.history_summarizer.selected_range_identities == predicate.selected_range_identities
+                && meta.history_summarizer.history_segment_set_generation
+                    == predicate.history_segment_set_generation;
             if !predicate_matches {
-                return Ok(PublishTxnOutcome::StateMismatch(Box::new(meta.historian)));
+                return Ok(PublishTxnOutcome::StateMismatch(Box::new(meta.history_summarizer)));
             }
 
             // `chunk_fingerprint` remains a readable structural diagnostic; exact
@@ -11240,14 +11140,14 @@ impl MemoryStore {
             // cannot establish that the selected content is still current.
             if predicate.selected_range_identities.is_empty() {
                 return Ok(PublishTxnOutcome::FenceRejected(
-                    "historian firing has no selected-range content identities".to_string(),
+                    "history_summarizer firing has no selected-range content identities".to_string(),
                 ));
             }
             if let Some(changed) = predicate.selected_range_identities.iter().find(|selected| {
                 meta.block_identity_by_mid.get(&selected.mid) != Some(&selected.block_identities)
             }) {
                 return Ok(PublishTxnOutcome::FenceRejected(format!(
-                    "selected historian message {} changed after firing",
+                    "selected history_summarizer message {} changed after firing",
                     changed.mid
                 )));
             }
@@ -11261,36 +11161,36 @@ impl MemoryStore {
                 });
             }
 
-            let current_compartment_set_generation = tx.query_row(
+            let current_history_segment_set_generation = tx.query_row(
                 "SELECT COALESCE(MAX(sequence), 0), COUNT(*)
-                 FROM compartments WHERE session_id = ?1",
+                 FROM history_segments WHERE session_id = ?1",
                 params![session_id],
                 |row| {
-                    Ok(CompartmentSetGeneration {
+                    Ok(HistorySegmentSetGeneration {
                         max_sequence: row.get(0)?,
                         count: row.get(1)?,
                     })
                 },
             )?;
-            if current_compartment_set_generation != predicate.compartment_set_generation {
+            if current_history_segment_set_generation != predicate.history_segment_set_generation {
                 return Ok(PublishTxnOutcome::FenceRejected(format!(
-                    "compartment set changed after firing (expected max sequence {} with {} rows, found {} with {} rows)",
-                    predicate.compartment_set_generation.max_sequence,
-                    predicate.compartment_set_generation.count,
-                    current_compartment_set_generation.max_sequence,
-                    current_compartment_set_generation.count,
+                    "history_segment set changed after firing (expected max sequence {} with {} rows, found {} with {} rows)",
+                    predicate.history_segment_set_generation.max_sequence,
+                    predicate.history_segment_set_generation.count,
+                    current_history_segment_set_generation.max_sequence,
+                    current_history_segment_set_generation.count,
                 )));
             }
 
-            let first_appended_sequence = next_compartment_sequence_tx(tx, session_id)?;
-            match append_compartments_tx(tx, session_id, &compartments)? {
-                AppendCompartmentsTxnOutcome::Appended => {}
-                AppendCompartmentsTxnOutcome::Overlap {
+            let first_appended_sequence = next_history_segment_sequence_tx(tx, session_id)?;
+            match append_history_segments_tx(tx, session_id, &history_segments)? {
+                AppendHistorySegmentsTxnOutcome::Appended => {}
+                AppendHistorySegmentsTxnOutcome::Overlap {
                     existing_sequence,
                     incoming_start_message,
                     incoming_end_message,
                 } => {
-                    return Ok(PublishTxnOutcome::CompartmentOverlap {
+                    return Ok(PublishTxnOutcome::HistorySegmentOverlap {
                         existing_sequence,
                         incoming_start_message,
                         incoming_end_message,
@@ -11302,18 +11202,18 @@ impl MemoryStore {
                     tx,
                     session_id,
                     first_appended_sequence,
-                    &compartments,
+                    &history_segments,
                     blobs,
                 )?;
             }
-            enqueue_historian_side_channels_tx(tx, session_id, &side_channel_items)?;
+            enqueue_history_summarizer_side_channels_tx(tx, session_id, &side_channel_items)?;
 
             meta.publication_floor_ordinal = Some(
                 meta.publication_floor_ordinal
                     .unwrap_or(1)
                     .max(request.publication_floor_ordinal.max(1)),
             );
-            meta.historian = idle_historian_after_success(meta.historian.firing_seq);
+            meta.history_summarizer = idle_history_summarizer_after_success(meta.history_summarizer.firing_seq);
 
             let next = next_row_version(current)?;
             let meta_json = match serde_json::to_string(&meta) {
@@ -11333,7 +11233,7 @@ impl MemoryStore {
                 params![session_id, next as i64, meta_json, current],
             )?;
 
-            Ok(PublishTxnOutcome::Committed(HistorianPublishResult {
+            Ok(PublishTxnOutcome::Committed(HistorySummarizerPublishResult {
                 row_version: next,
             }))
             })()?;
@@ -11345,69 +11245,71 @@ impl MemoryStore {
 
         match outcome {
             PublishTxnOutcome::Committed(result) => {
-                // The accepted payload is already durable beside the compartment commit. Drain
+                // The accepted payload is already durable beside the history_segment commit. Drain
                 // each kind independently now; any failure remains queued for a later transform.
-                let _ = self.drain_historian_side_channels(
+                let _ = self.drain_history_summarizer_side_channels(
                     session_id,
                     current_time_ms(),
-                    HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND,
+                    HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND,
                 );
                 Ok(result)
             }
             PublishTxnOutcome::CasConflict { found, reason } => {
-                Err(HistorianPublishError::CasConflict {
+                Err(HistorySummarizerPublishError::CasConflict {
                     expected: expected_row_version,
                     found,
                     reason,
                 })
             }
             PublishTxnOutcome::FenceRejected(reason) => {
-                Err(HistorianPublishError::FenceRejected { reason })
+                Err(HistorySummarizerPublishError::FenceRejected { reason })
             }
-            PublishTxnOutcome::CompartmentOverlap {
+            PublishTxnOutcome::HistorySegmentOverlap {
                 existing_sequence,
                 incoming_start_message,
                 incoming_end_message,
-            } => Err(HistorianPublishError::CompartmentOverlap {
+            } => Err(HistorySummarizerPublishError::HistorySegmentOverlap {
                 existing_sequence,
                 incoming_start_message,
                 incoming_end_message,
             }),
-            PublishTxnOutcome::StateMismatch(found) => Err(HistorianPublishError::StateMismatch {
-                expected: Box::new(predicate.clone()),
-                found,
-            }),
+            PublishTxnOutcome::StateMismatch(found) => {
+                Err(HistorySummarizerPublishError::StateMismatch {
+                    expected: Box::new(predicate.clone()),
+                    found,
+                })
+            }
             PublishTxnOutcome::InvalidState(state) => {
-                Err(HistorianPublishError::InvalidState { state })
+                Err(HistorySummarizerPublishError::InvalidState { state })
             }
-            PublishTxnOutcome::Serde(e) => Err(HistorianPublishError::Serde(e)),
+            PublishTxnOutcome::Serde(e) => Err(HistorySummarizerPublishError::Serde(e)),
         }
     }
 
-    /// Drain due historian side-channel work without coupling any target table to another.
+    /// Drain due history_summarizer side-channel work without coupling any target table to another.
     /// A successful target write retires the outbox row in the same fenced transaction,
     /// guarded by the row still being pending, so a row is delivered exactly once whether a
     /// second drainer runs beside this one or the process restarts between drains. Rows an
     /// earlier build marked delivered without deleting are swept first when any exist.
-    pub fn drain_historian_side_channels(
+    pub fn drain_history_summarizer_side_channels(
         &self,
         session_id: &str,
         now_ms: i64,
         per_kind_limit: usize,
-    ) -> Result<HistorianSideChannelDrainResult, MemoryStoreError> {
-        let mut result = HistorianSideChannelDrainResult::default();
+    ) -> Result<HistorySummarizerSideChannelDrainResult, MemoryStoreError> {
+        let mut result = HistorySummarizerSideChannelDrainResult::default();
         let mut bookkeeping_error = None;
-        self.delete_delivered_historian_side_channels(session_id)?;
+        self.delete_delivered_history_summarizer_side_channels(session_id)?;
         if per_kind_limit == 0 {
             return Ok(result);
         }
 
-        for kind in HISTORIAN_SIDE_CHANNEL_KINDS {
-            let rows = self.load_due_historian_side_channels(
+        for kind in HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS {
+            let rows = self.load_due_history_summarizer_side_channels(
                 session_id,
                 kind,
                 now_ms,
-                per_kind_limit.min(HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND),
+                per_kind_limit.min(HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND),
             )?;
             #[cfg(any(test, feature = "test-support"))]
             if !rows.is_empty() {
@@ -11426,15 +11328,15 @@ impl MemoryStore {
             }
             for row in rows {
                 result.attempted += 1;
-                match self.deliver_historian_side_channel(&row) {
+                match self.deliver_history_summarizer_side_channel(&row) {
                     Ok(true) => result.succeeded += 1,
                     // Another drainer retired the row after this one read it; nothing was
                     // delivered here and nothing is due.
                     Ok(false) => {}
                     Err(error) => {
                         result.failed += 1;
-                        if let Err(record_error) =
-                            self.record_historian_side_channel_failure(&row, now_ms, &error)
+                        if let Err(record_error) = self
+                            .record_history_summarizer_side_channel_failure(&row, now_ms, &error)
                         {
                             bookkeeping_error.get_or_insert(record_error);
                         }
@@ -11449,26 +11351,26 @@ impl MemoryStore {
         }
     }
 
-    pub fn historian_side_channel_status(
+    pub fn history_summarizer_side_channel_status(
         &self,
         session_id: &str,
-    ) -> Result<HistorianSideChannelStatus, MemoryStoreError> {
+    ) -> Result<HistorySummarizerSideChannelStatus, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             conn.query_row(
                 "SELECT COUNT(*),
                         (SELECT last_error
-                           FROM historian_side_channel_outbox recent
+                           FROM history_summarizer_side_channel_outbox recent
                           WHERE recent.session_id = ?1
                             AND recent.delivered_at_ms IS NULL
                             AND recent.last_error IS NOT NULL
                           ORDER BY recent.last_attempt_at_ms DESC, recent.firing_seq DESC,
                                    recent.item_index DESC
                           LIMIT 1)
-                   FROM historian_side_channel_outbox pending
+                   FROM history_summarizer_side_channel_outbox pending
                   WHERE pending.session_id = ?1 AND pending.delivered_at_ms IS NULL",
                 params![session_id],
                 |row| {
-                    Ok(HistorianSideChannelStatus {
+                    Ok(HistorySummarizerSideChannelStatus {
                         pending_count: row.get::<_, i64>(0)?.max(0) as usize,
                         last_failure: row.get(1)?,
                     })
@@ -11477,18 +11379,18 @@ impl MemoryStore {
         })?)
     }
 
-    fn load_due_historian_side_channels(
+    fn load_due_history_summarizer_side_channels(
         &self,
         session_id: &str,
         kind: &str,
         now_ms: i64,
         limit: usize,
-    ) -> Result<Vec<HistorianSideChannelOutboxRow>, MemoryStoreError> {
+    ) -> Result<Vec<HistorySummarizerSideChannelOutboxRow>, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             let mut statement = conn.prepare_cached(
                 "SELECT firing_seq, source_start, source_end, item_index, payload_json,
                         attempt_count
-                   FROM historian_side_channel_outbox INDEXED BY idx_historian_side_channel_outbox_order
+                   FROM history_summarizer_side_channel_outbox INDEXED BY idx_history_summarizer_side_channel_outbox_order
                   WHERE session_id = ?1 AND kind = ?2 AND delivered_at_ms IS NULL
                     AND next_attempt_at_ms <= ?3
                   ORDER BY firing_seq, source_start, source_end, item_index
@@ -11496,9 +11398,9 @@ impl MemoryStore {
             )?;
             let rows =
                 statement.query_map(params![session_id, kind, now_ms, limit as i64], |row| {
-                    Ok(HistorianSideChannelOutboxRow {
+                    Ok(HistorySummarizerSideChannelOutboxRow {
                         session_id: session_id.to_string(),
-                        id: HistorianSideChannelOutboxId {
+                        id: HistorySummarizerSideChannelOutboxId {
                             firing_seq: row.get::<_, i64>(0)?.max(0) as u64,
                             kind: kind.to_string(),
                             source_start: row.get::<_, i64>(1)?.max(0) as u64,
@@ -11515,26 +11417,26 @@ impl MemoryStore {
 
     /// Delivers one due row. `Ok(false)` means another drainer retired the row first, so
     /// this transaction rolled back and delivered nothing.
-    fn deliver_historian_side_channel(
+    fn deliver_history_summarizer_side_channel(
         &self,
-        row: &HistorianSideChannelOutboxRow,
+        row: &HistorySummarizerSideChannelOutboxRow,
     ) -> Result<bool, MemoryStoreError> {
         #[cfg(any(test, feature = "test-support"))]
         if self
-            .historian_side_channel_fail_once
+            .history_summarizer_side_channel_fail_once
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&row.id.kind)
         {
             return Err(MemoryStoreError::Serde(format!(
-                "injected historian {} side-channel failure",
+                "injected history_summarizer {} side-channel failure",
                 row.id.kind
             )));
         }
 
         #[cfg(any(test, feature = "test-support"))]
         let crash_after_insert = self
-            .historian_side_channel_crash_after_insert_once
+            .history_summarizer_side_channel_crash_after_insert_once
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&row.id.kind);
@@ -11556,33 +11458,33 @@ impl MemoryStore {
             ),
             other => {
                 return Err(MemoryStoreError::Serde(format!(
-                    "unknown historian side-channel kind {other:?}"
+                    "unknown history_summarizer side-channel kind {other:?}"
                 )));
             }
         };
         let deliver = |tx: &GuardedConn<'_>| -> rusqlite::Result<()> {
             match &candidate {
-                SideChannelCandidate::Event(candidate) => insert_historian_events_tx(
+                SideChannelCandidate::Event(candidate) => insert_history_summarizer_events_tx(
                     tx,
                     &row.session_id,
                     std::slice::from_ref(candidate),
                 )?,
                 SideChannelCandidate::Primer(candidate) => {
-                    insert_historian_primer_tx(tx, candidate)?
+                    insert_history_summarizer_primer_tx(tx, candidate)?
                 }
                 SideChannelCandidate::UserObservation(candidate) => {
-                    insert_historian_user_observation_tx(tx, candidate)?
+                    insert_history_summarizer_user_observation_tx(tx, candidate)?
                 }
             }
             if crash_after_insert {
                 return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
                     MemoryStoreError::Serde(format!(
-                        "injected historian {} crash between delivery and retirement",
+                        "injected history_summarizer {} crash between delivery and retirement",
                         row.id.kind
                     )),
                 )));
             }
-            retire_historian_side_channel_tx(tx, row)
+            retire_history_summarizer_side_channel_tx(tx, row)
         };
         match self.inner.with_conn_fenced(deliver) {
             Ok(()) => Ok(true),
@@ -11595,25 +11497,25 @@ impl MemoryStore {
         }
     }
 
-    fn record_historian_side_channel_failure(
+    fn record_history_summarizer_side_channel_failure(
         &self,
-        row: &HistorianSideChannelOutboxRow,
+        row: &HistorySummarizerSideChannelOutboxRow,
         now_ms: i64,
         error: &MemoryStoreError,
     ) -> Result<(), MemoryStoreError> {
         let exponent = row.attempt_count.min(6);
         let delay_ms = 1_000_i64
             .saturating_mul(1_i64 << exponent)
-            .min(HISTORIAN_SIDE_CHANNEL_MAX_BACKOFF_MS);
+            .min(HISTORY_SUMMARIZER_SIDE_CHANNEL_MAX_BACKOFF_MS);
         let next_attempt_at_ms = now_ms.saturating_add(delay_ms);
         let error = error
             .to_string()
             .chars()
-            .take(HISTORIAN_SIDE_CHANNEL_ERROR_CAP)
+            .take(HISTORY_SUMMARIZER_SIDE_CHANNEL_ERROR_CAP)
             .collect::<String>();
         self.inner.with_conn_fenced(|tx| {
             tx.execute(
-                "UPDATE historian_side_channel_outbox
+                "UPDATE history_summarizer_side_channel_outbox
                     SET attempt_count = attempt_count + 1, next_attempt_at_ms = ?7,
                         last_attempt_at_ms = ?8, last_error = ?9
                   WHERE session_id = ?1 AND firing_seq = ?2 AND kind = ?3
@@ -11639,14 +11541,14 @@ impl MemoryStore {
     /// Rows marked delivered but not deleted come only from a store file written before
     /// delivery and retirement shared one transaction. A read decides whether the fenced
     /// delete runs, so a store without such rows pays no durable write here.
-    fn delete_delivered_historian_side_channels(
+    fn delete_delivered_history_summarizer_side_channels(
         &self,
         session_id: &str,
     ) -> Result<(), MemoryStoreError> {
         let marked: bool = self.inner.with_conn(|conn| {
             conn.prepare_cached(
                 "SELECT EXISTS(
-                     SELECT 1 FROM historian_side_channel_outbox
+                     SELECT 1 FROM history_summarizer_side_channel_outbox
                       WHERE session_id = ?1 AND delivered_at_ms IS NOT NULL)",
             )?
             .query_row(params![session_id], |row| row.get(0))
@@ -11656,7 +11558,7 @@ impl MemoryStore {
         }
         self.inner.with_conn_fenced(|tx| {
             tx.execute(
-                "DELETE FROM historian_side_channel_outbox
+                "DELETE FROM history_summarizer_side_channel_outbox
                   WHERE session_id = ?1 AND delivered_at_ms IS NOT NULL",
                 params![session_id],
             )?;
@@ -11665,21 +11567,21 @@ impl MemoryStore {
         Ok(())
     }
 
-    pub fn load_compartment_events(
+    pub fn load_history_segment_events(
         &self,
         session_id: &str,
-    ) -> Result<Vec<HistorianEventCandidate>, MemoryStoreError> {
+    ) -> Result<Vec<HistorySummarizerEventCandidate>, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare_cached(
-                "SELECT kind, at_compartment, compartment_id, fields_json, created_at, harness
-                   FROM compartment_events
+                "SELECT kind, at_history_segment, history_segment_id, fields_json, created_at, harness
+                   FROM history_segment_events
                   WHERE session_id = ?1 ORDER BY id",
             )?;
             let rows = stmt.query_map(params![session_id], |row| {
-                Ok(HistorianEventCandidate {
+                Ok(HistorySummarizerEventCandidate {
                     kind: row.get(0)?,
-                    at_compartment: row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
-                    compartment_id: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                    at_history_segment: row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                    history_segment_id: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
                     fields_json: row.get(3)?,
                     created_at: row.get(4)?,
                     harness: row.get(5)?,
@@ -11692,22 +11594,22 @@ impl MemoryStore {
     pub fn load_primer_candidates(
         &self,
         session_id: &str,
-    ) -> Result<Vec<HistorianPrimerCandidate>, MemoryStoreError> {
+    ) -> Result<Vec<HistorySummarizerPrimerCandidate>, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare_cached(
-                "SELECT project_path, session_id, question, source_compartment_start,
-                        source_compartment_end, source_start_message_id, source_end_message_id,
+                "SELECT project_path, session_id, question, source_history_segment_start,
+                        source_history_segment_end, source_start_message_id, source_end_message_id,
                         source_message_time, created_at
                    FROM primer_candidates
                   WHERE session_id = ?1 ORDER BY id",
             )?;
             let rows = stmt.query_map(params![session_id], |row| {
-                Ok(HistorianPrimerCandidate {
+                Ok(HistorySummarizerPrimerCandidate {
                     project_path: row.get(0)?,
                     session_id: row.get(1)?,
                     question: row.get(2)?,
-                    source_compartment_start: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
-                    source_compartment_end: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
+                    source_history_segment_start: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                    source_history_segment_end: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
                     source_start_message_id: row.get(5)?,
                     source_end_message_id: row.get(6)?,
                     source_message_time: row.get(7)?,
@@ -11721,20 +11623,20 @@ impl MemoryStore {
     pub fn load_user_memory_candidates(
         &self,
         session_id: &str,
-    ) -> Result<Vec<HistorianUserMemoryCandidate>, MemoryStoreError> {
+    ) -> Result<Vec<HistorySummarizerUserMemoryCandidate>, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare_cached(
-                "SELECT content, session_id, source_compartment_start,
-                        source_compartment_end, created_at
+                "SELECT content, session_id, source_history_segment_start,
+                        source_history_segment_end, created_at
                    FROM user_memory_candidates
                   WHERE session_id = ?1 ORDER BY id",
             )?;
             let rows = stmt.query_map(params![session_id], |row| {
-                Ok(HistorianUserMemoryCandidate {
+                Ok(HistorySummarizerUserMemoryCandidate {
                     content: row.get(0)?,
                     session_id: row.get(1)?,
-                    source_compartment_start: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
-                    source_compartment_end: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                    source_history_segment_start: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                    source_history_segment_end: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
                     created_at: row.get(4)?,
                 })
             })?;
@@ -11749,11 +11651,11 @@ impl MemoryStore {
     /// is supplied by the caller, NOT read from the live clock, so the full render and
     /// every later byte-identical replay of it observe the SAME memory set — a live
     /// clock would expire a memory mid-replay and silently change the rendered bytes.
-    pub fn load_compartment_candidates(
+    pub fn load_history_segment_candidates(
         &self,
         session_id: &str,
         limit: usize,
-    ) -> Result<Vec<StoredCompartmentSearchRow>, MemoryStoreError> {
+    ) -> Result<Vec<StoredHistorySegmentSearchRow>, MemoryStoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -11761,14 +11663,14 @@ impl MemoryStore {
         let rows = self.inner.with_conn(|conn| {
             let mut statement = conn.prepare_cached(
                 "SELECT sequence, title, content, p1, p2, p3, p4, created_at
-                   FROM compartments
+                   FROM history_segments
                   WHERE session_id = ?1
                   ORDER BY sequence DESC
                   LIMIT ?2",
             )?;
             let rows = statement
                 .query_map(params![session_id, limit], |row| {
-                    Ok(StoredCompartmentSearchRow {
+                    Ok(StoredHistorySegmentSearchRow {
                         sequence: row.get(0)?,
                         title: row.get(1)?,
                         content: row.get(2)?,
@@ -11787,14 +11689,14 @@ impl MemoryStore {
 
     /// Search active/permanent memory content visible to `project_path` with a literal,
     /// case-insensitive SQL LIKE. Workspace visibility is built by the same helper used by
-    /// Search a session's compartment title and tier text with a literal, case-insensitive
+    /// Search a session's history_segment title and tier text with a literal, case-insensitive
     /// SQL LIKE. The caller supplies the already-resolved session id; no routing is done in
     /// this store layer.
-    pub fn search_compartments_like(
+    pub fn search_history_segments_like(
         &self,
         session_id: &str,
         query: &str,
-    ) -> Result<Vec<StoredCompartmentSearchRow>, MemoryStoreError> {
+    ) -> Result<Vec<StoredHistorySegmentSearchRow>, MemoryStoreError> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -11802,7 +11704,7 @@ impl MemoryStore {
         let rows = self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare_cached(
                 "SELECT sequence, title, content, p1, p2, p3, p4, created_at
-                   FROM compartments
+                   FROM history_segments
                   WHERE session_id = ?1
                     AND (unicode_lower(title) LIKE ?2 ESCAPE '\\'
                       OR unicode_lower(content) LIKE ?2 ESCAPE '\\'
@@ -11815,7 +11717,7 @@ impl MemoryStore {
             )?;
             let mapped = stmt
                 .query_map(params![session_id, pattern], |r| {
-                    Ok(StoredCompartmentSearchRow {
+                    Ok(StoredHistorySegmentSearchRow {
                         sequence: r.get(0)?,
                         title: r.get(1)?,
                         content: r.get(2)?,
@@ -11857,45 +11759,30 @@ impl MemoryStore {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare_cached(
-                "SELECT compartment_seq, start_ordinal, end_ordinal, transcript_deflate,
-                        raw_messages_deflate, created_at_ms
+                "SELECT history_segment_seq, start_ordinal, end_ordinal, transcript_deflate,
+                        created_at_ms
                    FROM chunk_transcripts
                    WHERE session_id = ?1
                      AND end_ordinal >= ?2
                      AND start_ordinal <= ?3
-                   ORDER BY compartment_seq ASC
+                   ORDER BY history_segment_seq ASC
                    LIMIT ?4",
             )?;
             let mapped = stmt
                 .query_map(params![session_id, start, end, limit], |r| {
                     let transcript_blob: Vec<u8> = r.get(3)?;
-                    let raw_messages_blob: Option<Vec<u8>> = r.get(4)?;
                     Ok(StoredChunkTranscript {
-                        compartment_seq: r.get(0)?,
+                        history_segment_seq: r.get(0)?,
                         start_ordinal: r.get(1)?,
                         end_ordinal: r.get(2)?,
                         transcript: decompress_transcript(&transcript_blob).ok(),
-                        raw_messages_json: raw_messages_blob
-                            .as_deref()
-                            .and_then(|blob| decompress_raw_messages(blob).ok()),
-                        created_at_ms: r.get(5)?,
+                        created_at_ms: r.get(4)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(mapped)
         })?;
         Ok(rows)
-    }
-
-    pub fn load_chunk_transcript_for_message(
-        &self,
-        session_id: &str,
-        ordinal: i64,
-    ) -> Result<Option<StoredChunkTranscript>, MemoryStoreError> {
-        Ok(self
-            .load_chunk_transcripts_for_range(session_id, ordinal, ordinal)?
-            .into_iter()
-            .next())
     }
 
     fn note_by_id(&self, note_id: i64) -> Result<Option<StoredNote>, MemoryStoreError> {
@@ -11928,7 +11815,7 @@ impl MemoryStore {
     }
 
     /// Load one note through the same project/session visibility fence used by the facade.
-    /// Smart notes are project-visible across sessions; session notes require the provenance
+    /// Conditional notes are project-visible across sessions; session notes require the provenance
     /// session to match. The SQL predicate keeps this lookup independent of page size.
     pub fn get_note_by_id(
         &self,
@@ -11952,7 +11839,7 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// Page the notes visible to one session: all project smart notes plus that session's
+    /// Page the notes visible to one session: all project conditional notes plus that session's
     /// ordinary notes. Ownership and pagination both remain in SQL.
     pub fn read_visible_notes(
         &self,
@@ -12020,7 +11907,7 @@ impl MemoryStore {
             input.anchor_block_id,
         )?;
         // This compatibility entry point keeps legacy callers on the active-status path
-        // used by the previous context-note surface; the full project smart-note writer
+        // used by the previous context-note surface; the full project conditional-note writer
         // below deliberately uses pending instead while still recording condition text.
         self.with_prepared_note_conn_fenced(input.project_path, write, |coordinated| {
             let note = insert_note_tx(coordinated.tx(), &input, &prepared)?;
@@ -12135,7 +12022,7 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    pub fn read_smart_notes(
+    pub fn read_conditional_notes(
         &self,
         project_path: &str,
         statuses: &[&str],
@@ -12369,7 +12256,7 @@ impl MemoryStore {
         Ok(outcome)
     }
 
-    /// Store a host-evaluated smart-note verdict under the evaluator's source revision.
+    /// Store a host-evaluated conditional-note verdict under the evaluator's source revision.
     /// The module never interprets condition text; it only performs this CAS write and
     /// promotes a true verdict to `ready` for a later natural cache bust.
     pub fn write_note_evaluation(
@@ -12505,7 +12392,7 @@ impl MemoryStore {
         })
     }
 
-    /// Claim one due pending smart note for an evaluator. The source revision is the
+    /// Claim one due pending conditional note for an evaluator. The source revision is the
     /// status_version observed by the evaluator; the lease itself is represented by the
     /// module-internal `surfacing` state and is released by a CAS transition.
     pub fn claim_due_note(
@@ -13427,7 +13314,7 @@ impl MemoryStore {
                             SET coordinator_lease = ?1, lease_expires_at = ?2, coordinator_token = ?3,
                                 captured_upper_bound = ?4, drain_cursor = 0,
                                 step_seed = 0, step_memories = 0, step_notes = 0,
-                                step_compartments = 0, step_reconcile = 0, step_verify = 0
+                                step_history_segments = 0, step_reconcile = 0, step_verify = 0
                           WHERE context_store_uuid = ?5 AND project = ?6 AND domain = ?7"
                     } else {
                         "UPDATE authority
@@ -13498,7 +13385,7 @@ impl MemoryStore {
                             drain_cursor = 0, coordinator_lease = ?2, lease_expires_at = ?3,
                             coordinator_token = ?4,
                             step_seed = 0, step_memories = 0, step_notes = 0,
-                            step_compartments = 0, step_reconcile = 0, step_verify = 0, step_flip = 0
+                            step_history_segments = 0, step_reconcile = 0, step_verify = 0, step_flip = 0
                       WHERE context_store_uuid = ?5 AND project = ?6 AND domain = ?7",
                     params![
                         upper_bound,
@@ -13538,7 +13425,7 @@ impl MemoryStore {
             "seed" => "step_seed",
             "memories" => "step_memories",
             "notes" => "step_notes",
-            "compartments" => "step_compartments",
+            "history_segments" => "step_history_segments",
             "reconcile" => "step_reconcile",
             "verify" => "step_verify",
             "flip" => "step_flip",
@@ -13662,7 +13549,7 @@ impl MemoryStore {
                 let all_steps = current.step_seed
                     && current.step_memories
                     && current.step_notes
-                    && current.step_compartments
+                    && current.step_history_segments
                     && current.step_reconcile
                     && current.step_verify;
                 if !all_steps || !verified || checksum_expected != checksum_actual {
@@ -14021,10 +13908,10 @@ impl MemoryStore {
     }
 }
 
-fn write_seed_compartment_tx(
+fn write_seed_history_segment_tx(
     tx: &GuardedConn<'_>,
     session_id: &str,
-    c: &StoredCompartment,
+    c: &StoredHistorySegment,
     overwrite_existing: bool,
 ) -> rusqlite::Result<bool> {
     let conflict_clause = if overwrite_existing {
@@ -14049,7 +13936,7 @@ fn write_seed_compartment_tx(
         "ON CONFLICT(session_id, sequence) DO NOTHING"
     };
     let sql = format!(
-        "INSERT INTO compartments
+        "INSERT INTO history_segments
            (session_id, sequence, start_message, end_message, start_message_id,
             end_message_id, start_date, end_date, title, content, p1, p2, p3, p4,
             importance, episode_type, legacy, created_at)
@@ -14154,14 +14041,14 @@ fn replace_authority_user_profile_tx(
     Ok(())
 }
 
-fn insert_compartment_tx(
+fn insert_history_segment_tx(
     tx: &GuardedConn<'_>,
     session_id: &str,
     sequence: i64,
-    c: &StoredCompartment,
+    c: &StoredHistorySegment,
 ) -> rusqlite::Result<()> {
     tx.execute(
-        "INSERT INTO compartments
+        "INSERT INTO history_segments
            (session_id, sequence, start_message, end_message, start_message_id,
             end_message_id, start_date, end_date, title, content, p1, p2, p3, p4,
             importance, episode_type, legacy, created_at)
@@ -14190,20 +14077,20 @@ fn insert_compartment_tx(
     Ok(())
 }
 
-fn insert_historian_events_tx(
+fn insert_history_summarizer_events_tx(
     tx: &GuardedConn<'_>,
     session_id: &str,
-    events: &[HistorianEventCandidate],
+    events: &[HistorySummarizerEventCandidate],
 ) -> rusqlite::Result<()> {
     for event in events {
         tx.execute(
-            "INSERT INTO compartment_events
-               (session_id, compartment_id, at_compartment, kind, fields_json, created_at, harness)
+            "INSERT INTO history_segment_events
+               (session_id, history_segment_id, at_history_segment, kind, fields_json, created_at, harness)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'module')",
             params![
                 session_id,
-                event.compartment_id.map(|v| v as i64),
-                event.at_compartment.map(|v| v as i64),
+                event.history_segment_id.map(|v| v as i64),
+                event.at_history_segment.map(|v| v as i64),
                 event.kind,
                 event.fields_json,
                 event.created_at,
@@ -14213,19 +14100,19 @@ fn insert_historian_events_tx(
     Ok(())
 }
 
-fn historian_side_channel_pending_items(
-    request: &HistorianPublishRequest<'_>,
-) -> Result<Vec<HistorianSideChannelPendingItem>, String> {
+fn history_summarizer_side_channel_pending_items(
+    request: &HistorySummarizerPublishRequest<'_>,
+) -> Result<Vec<HistorySummarizerSideChannelPendingItem>, String> {
     let default_start = request
-        .compartments
+        .history_segments
         .iter()
-        .map(|compartment| compartment.start_message.max(0) as u64)
+        .map(|history_segment| history_segment.start_message.max(0) as u64)
         .min()
         .unwrap_or_else(|| request.publication_floor_ordinal.saturating_sub(1));
     let default_end = request
-        .compartments
+        .history_segments
         .iter()
-        .map(|compartment| compartment.end_message.max(0) as u64)
+        .map(|history_segment| history_segment.end_message.max(0) as u64)
         .max()
         .unwrap_or(default_start);
     let created_at_ms = current_time_ms();
@@ -14233,26 +14120,26 @@ fn historian_side_channel_pending_items(
 
     for (item_index, event) in request.events.iter().enumerate() {
         let fits = |value: Option<u64>| value.is_none_or(|value| i64::try_from(value).is_ok());
-        if !fits(event.compartment_id) || !fits(event.at_compartment) {
+        if !fits(event.history_segment_id) || !fits(event.at_history_segment) {
             return Err(format!(
-                "historian event {item_index} has a compartment anchor outside the i64 range"
+                "history_summarizer event {item_index} has a history_segment anchor outside the i64 range"
             ));
         }
-        let source = event.compartment_id.and_then(|sequence| {
+        let source = event.history_segment_id.and_then(|sequence| {
             request
-                .compartments
+                .history_segments
                 .iter()
-                .find(|compartment| compartment.sequence.max(0) as u64 == sequence)
+                .find(|history_segment| history_segment.sequence.max(0) as u64 == sequence)
         });
-        items.push(HistorianSideChannelPendingItem {
-            id: HistorianSideChannelOutboxId {
+        items.push(HistorySummarizerSideChannelPendingItem {
+            id: HistorySummarizerSideChannelOutboxId {
                 firing_seq: request.predicate.firing_seq,
                 kind: "event".to_string(),
                 source_start: source
-                    .map(|compartment| compartment.start_message.max(0) as u64)
+                    .map(|history_segment| history_segment.start_message.max(0) as u64)
                     .unwrap_or(default_start),
                 source_end: source
-                    .map(|compartment| compartment.end_message.max(0) as u64)
+                    .map(|history_segment| history_segment.end_message.max(0) as u64)
                     .unwrap_or(default_end),
                 item_index,
             },
@@ -14270,12 +14157,12 @@ fn historian_side_channel_pending_items(
                 primer.project_path, primer.session_id, request.project_path, request.session_id
             ));
         }
-        items.push(HistorianSideChannelPendingItem {
-            id: HistorianSideChannelOutboxId {
+        items.push(HistorySummarizerSideChannelPendingItem {
+            id: HistorySummarizerSideChannelOutboxId {
                 firing_seq: request.predicate.firing_seq,
                 kind: "primer".to_string(),
-                source_start: primer.source_compartment_start.unwrap_or(default_start),
-                source_end: primer.source_compartment_end.unwrap_or(default_end),
+                source_start: primer.source_history_segment_start.unwrap_or(default_start),
+                source_end: primer.source_history_segment_end.unwrap_or(default_end),
                 item_index,
             },
             payload_json: serde_json::to_string(primer).map_err(|error| error.to_string())?,
@@ -14292,14 +14179,16 @@ fn historian_side_channel_pending_items(
                 observation.session_id, request.session_id
             ));
         }
-        items.push(HistorianSideChannelPendingItem {
-            id: HistorianSideChannelOutboxId {
+        items.push(HistorySummarizerSideChannelPendingItem {
+            id: HistorySummarizerSideChannelOutboxId {
                 firing_seq: request.predicate.firing_seq,
                 kind: "user_observation".to_string(),
                 source_start: observation
-                    .source_compartment_start
+                    .source_history_segment_start
                     .unwrap_or(default_start),
-                source_end: observation.source_compartment_end.unwrap_or(default_end),
+                source_end: observation
+                    .source_history_segment_end
+                    .unwrap_or(default_end),
                 item_index,
             },
             payload_json: serde_json::to_string(observation).map_err(|error| error.to_string())?,
@@ -14323,14 +14212,14 @@ fn historian_side_channel_pending_items(
     Ok(items)
 }
 
-fn enqueue_historian_side_channels_tx(
+fn enqueue_history_summarizer_side_channels_tx(
     tx: &GuardedConn<'_>,
     session_id: &str,
-    items: &[HistorianSideChannelPendingItem],
+    items: &[HistorySummarizerSideChannelPendingItem],
 ) -> rusqlite::Result<()> {
     for item in items {
         tx.execute(
-            "INSERT INTO historian_side_channel_outbox
+            "INSERT INTO history_summarizer_side_channel_outbox
                  (session_id, firing_seq, kind, source_start, source_end, item_index,
                   payload_json, created_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -14351,19 +14240,20 @@ fn enqueue_historian_side_channels_tx(
 
 /// The error a delivery returns when its outbox row was retired by another drainer between
 /// the due read and the delivery; the transaction rolls back and the drain counts nothing.
-const SIDE_CHANNEL_ROW_ALREADY_RETIRED: &str = "historian side-channel row already retired";
+const SIDE_CHANNEL_ROW_ALREADY_RETIRED: &str =
+    "history_summarizer side-channel row already retired";
 
 /// Retires one pending outbox row inside the delivery transaction. The `delivered_at_ms IS
 /// NULL` predicate is the row-still-pending guard: a concurrent drainer that retired the row
 /// first leaves nothing to delete, the error rolls this transaction's target insert back,
 /// and the row is delivered once. The payload predicate keeps a handle read before a
 /// session reset from consuming a row re-issued under the same key with other bytes.
-fn retire_historian_side_channel_tx(
+fn retire_history_summarizer_side_channel_tx(
     tx: &GuardedConn<'_>,
-    row: &HistorianSideChannelOutboxRow,
+    row: &HistorySummarizerSideChannelOutboxRow,
 ) -> rusqlite::Result<()> {
     let changed = tx.execute(
-        "DELETE FROM historian_side_channel_outbox
+        "DELETE FROM history_summarizer_side_channel_outbox
           WHERE session_id = ?1 AND firing_seq = ?2 AND kind = ?3
             AND source_start = ?4 AND source_end = ?5 AND item_index = ?6
             AND delivered_at_ms IS NULL AND payload_json = ?7",
@@ -14385,9 +14275,9 @@ fn retire_historian_side_channel_tx(
     Ok(())
 }
 
-fn insert_historian_primer_tx(
+fn insert_history_summarizer_primer_tx(
     tx: &GuardedConn<'_>,
-    candidate: &HistorianPrimerCandidate,
+    candidate: &HistorySummarizerPrimerCandidate,
 ) -> rusqlite::Result<()> {
     let question = candidate.question.trim();
     if question.is_empty() {
@@ -14401,7 +14291,7 @@ fn insert_historian_primer_tx(
     tx.execute(
         "INSERT INTO primer_candidates
            (project_path, harness, session_id, question, normalized_question,
-            source_compartment_start, source_compartment_end,
+            source_history_segment_start, source_history_segment_end,
             source_start_message_id, source_end_message_id,
             source_message_time, created_at)
          VALUES (?1, 'module', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -14409,8 +14299,8 @@ fn insert_historian_primer_tx(
                      source_start_message_id, source_end_message_id)
          DO UPDATE SET question = excluded.question,
                        normalized_question = excluded.normalized_question,
-                       source_compartment_start = excluded.source_compartment_start,
-                       source_compartment_end = excluded.source_compartment_end,
+                       source_history_segment_start = excluded.source_history_segment_start,
+                       source_history_segment_end = excluded.source_history_segment_end,
                        source_message_time = excluded.source_message_time,
                        created_at = MIN(primer_candidates.created_at, excluded.created_at)",
         params![
@@ -14418,8 +14308,12 @@ fn insert_historian_primer_tx(
             candidate.session_id,
             question,
             normalized,
-            candidate.source_compartment_start.map(|value| value as i64),
-            candidate.source_compartment_end.map(|value| value as i64),
+            candidate
+                .source_history_segment_start
+                .map(|value| value as i64),
+            candidate
+                .source_history_segment_end
+                .map(|value| value as i64),
             candidate.source_start_message_id,
             candidate.source_end_message_id,
             candidate.source_message_time,
@@ -14429,9 +14323,9 @@ fn insert_historian_primer_tx(
     Ok(())
 }
 
-fn insert_historian_user_observation_tx(
+fn insert_history_summarizer_user_observation_tx(
     tx: &GuardedConn<'_>,
-    candidate: &HistorianUserMemoryCandidate,
+    candidate: &HistorySummarizerUserMemoryCandidate,
 ) -> rusqlite::Result<()> {
     let content = candidate.content.trim();
     if content.is_empty() {
@@ -14439,32 +14333,32 @@ fn insert_historian_user_observation_tx(
     }
     tx.execute(
         "INSERT INTO user_memory_candidates
-           (content, session_id, source_compartment_start, source_compartment_end, created_at)
+           (content, session_id, source_history_segment_start, source_history_segment_end, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             content,
             candidate.session_id,
-            candidate.source_compartment_start.map(|value| value as i64),
-            candidate.source_compartment_end.map(|value| value as i64),
+            candidate.source_history_segment_start.map(|value| value as i64),
+            candidate.source_history_segment_end.map(|value| value as i64),
             candidate.created_at,
         ],
     )?;
     Ok(())
 }
 
-fn append_compartments_tx(
+fn append_history_segments_tx(
     tx: &GuardedConn<'_>,
     session_id: &str,
-    compartments: &[StoredCompartment],
-) -> rusqlite::Result<AppendCompartmentsTxnOutcome> {
-    if compartments.is_empty() {
-        return Ok(AppendCompartmentsTxnOutcome::Appended);
+    history_segments: &[StoredHistorySegment],
+) -> rusqlite::Result<AppendHistorySegmentsTxnOutcome> {
+    if history_segments.is_empty() {
+        return Ok(AppendHistorySegmentsTxnOutcome::Appended);
     }
 
-    let next_sequence = next_compartment_sequence_tx(tx, session_id)?;
+    let next_sequence = next_history_segment_sequence_tx(tx, session_id)?;
     let mut statement = tx.prepare_cached(
         "SELECT sequence, start_message, end_message
-         FROM compartments WHERE session_id = ?1",
+         FROM history_segments WHERE session_id = ?1",
     )?;
     let mut ranges = statement
         .query_map(params![session_id], |row| {
@@ -14479,43 +14373,51 @@ fn append_compartments_tx(
 
     // Validate the whole append before writing its first row. This keeps a rejected
     // batch atomic and makes ordinal-overlap corruption impossible even if a caller
-    // bypassed the historian's optimistic publish fence.
+    // bypassed the history_summarizer's optimistic publish fence.
     // Coverage resolution reads the set by sequence and refuses a later row that starts at or before the previous row's end, so a range behind the current tail is reported as overlapping the tail.
-    for (index, compartment) in compartments.iter().enumerate() {
+    for (index, history_segment) in history_segments.iter().enumerate() {
         let conflict = ranges
             .iter()
             .find(|(_, start, end)| {
-                compartment.start_message <= *end && *start <= compartment.end_message
+                history_segment.start_message <= *end && *start <= history_segment.end_message
             })
             .or_else(|| {
                 ranges
                     .iter()
                     .max_by_key(|(sequence, _, _)| *sequence)
-                    .filter(|(_, _, tail_end)| compartment.start_message <= *tail_end)
+                    .filter(|(_, _, tail_end)| history_segment.start_message <= *tail_end)
             });
         if let Some((existing_sequence, _, _)) = conflict {
-            return Ok(AppendCompartmentsTxnOutcome::Overlap {
+            return Ok(AppendHistorySegmentsTxnOutcome::Overlap {
                 existing_sequence: *existing_sequence,
-                incoming_start_message: compartment.start_message,
-                incoming_end_message: compartment.end_message,
+                incoming_start_message: history_segment.start_message,
+                incoming_end_message: history_segment.end_message,
             });
         }
         ranges.push((
             next_sequence + index as i64,
-            compartment.start_message,
-            compartment.end_message,
+            history_segment.start_message,
+            history_segment.end_message,
         ));
     }
 
-    for (index, compartment) in compartments.iter().enumerate() {
-        insert_compartment_tx(tx, session_id, next_sequence + index as i64, compartment)?;
+    for (index, history_segment) in history_segments.iter().enumerate() {
+        insert_history_segment_tx(
+            tx,
+            session_id,
+            next_sequence + index as i64,
+            history_segment,
+        )?;
     }
-    Ok(AppendCompartmentsTxnOutcome::Appended)
+    Ok(AppendHistorySegmentsTxnOutcome::Appended)
 }
 
-fn next_compartment_sequence_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<i64> {
+fn next_history_segment_sequence_tx(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+) -> rusqlite::Result<i64> {
     tx.query_row(
-        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM compartments WHERE session_id = ?1",
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM history_segments WHERE session_id = ?1",
         params![session_id],
         |r| r.get(0),
     )
@@ -14524,60 +14426,47 @@ fn next_compartment_sequence_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusql
 /// Deflated `chunk_transcripts` payloads.
 struct ChunkTranscriptBlobs {
     transcript_deflate: Vec<u8>,
-    raw_messages_deflate: Option<Vec<u8>>,
 }
 
 /// Returns `None` when neither payload is storable: nothing was supplied, or the only
 /// transcript deflates past `MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES`.
 fn prepare_chunk_transcript_blobs(
     transcript: Option<&str>,
-    raw_messages: Option<&str>,
 ) -> std::io::Result<Option<ChunkTranscriptBlobs>> {
-    let compressed = transcript.and_then(|transcript| {
-        compress_transcript(transcript)
-            .ok()
-            .filter(|compressed| compressed.len() <= MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES)
-    });
-    let raw_messages_deflate = raw_messages.map(compress_raw_messages).transpose()?;
-    if compressed.is_none() && raw_messages_deflate.is_none() {
+    let Some(transcript) = transcript else {
         return Ok(None);
-    }
-    // The schema keeps transcript_deflate NOT NULL. A raw-only row still needs a
-    // harmless condensed payload so durable raw recovery is not discarded with an oversized
-    // historian transcript.
-    let transcript_deflate =
-        compressed.unwrap_or_else(|| compress_transcript("").unwrap_or_default());
-    Ok(Some(ChunkTranscriptBlobs {
-        transcript_deflate,
-        raw_messages_deflate,
-    }))
+    };
+    let transcript_deflate = compress_transcript(transcript)?;
+    Ok(
+        (transcript_deflate.len() <= MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES)
+            .then_some(ChunkTranscriptBlobs { transcript_deflate }),
+    )
 }
 
 fn insert_chunk_transcripts_tx(
     tx: &GuardedConn<'_>,
     session_id: &str,
     first_sequence: i64,
-    compartments: &[StoredCompartment],
+    history_segments: &[StoredHistorySegment],
     blobs: &ChunkTranscriptBlobs,
 ) -> rusqlite::Result<()> {
-    if compartments.is_empty() {
+    if history_segments.is_empty() {
         return Ok(());
     }
     let mut insert = tx.prepare_cached(
         "INSERT OR REPLACE INTO chunk_transcripts
-           (session_id, compartment_seq, start_ordinal, end_ordinal,
-            transcript_deflate, raw_messages_deflate, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+           (session_id, history_segment_seq, start_ordinal, end_ordinal,
+            transcript_deflate, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?;
-    for (idx, compartment) in compartments.iter().enumerate() {
+    for (idx, history_segment) in history_segments.iter().enumerate() {
         insert.execute(params![
             session_id,
             first_sequence + idx as i64,
-            compartment.start_message,
-            compartment.end_message,
+            history_segment.start_message,
+            history_segment.end_message,
             &blobs.transcript_deflate,
-            blobs.raw_messages_deflate.as_deref(),
-            compartment.created_at,
+            history_segment.created_at,
         ])?;
     }
     drop(insert);
@@ -14585,7 +14474,6 @@ fn insert_chunk_transcripts_tx(
 }
 
 fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
-    let empty_transcript = compress_transcript("").unwrap_or_default();
     loop {
         let total: i64 = tx.query_row(
             "SELECT COALESCE(SUM(LENGTH(transcript_deflate)), 0)
@@ -14596,48 +14484,18 @@ fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlit
         if total <= MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES {
             return Ok(());
         }
-        let victim: Option<(i64, bool)> = tx
-            .query_row(
-                "SELECT compartment_seq, raw_messages_deflate IS NOT NULL
-                   FROM chunk_transcripts
-                  WHERE session_id = ?1
-                    AND (raw_messages_deflate IS NULL OR transcript_deflate <> ?2)
-                  ORDER BY created_at_ms ASC, compartment_seq ASC
-                  LIMIT 1",
-                params![session_id, &empty_transcript],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((victim, retains_raw_messages)) = victim else {
-            return Ok(());
-        };
-        if retains_raw_messages {
-            // Full message recovery is durable by contract. Retain its raw payload and reclaim
-            // only the optional condensed transcript when the legacy transcript budget fills.
-            tx.execute(
-                "UPDATE chunk_transcripts
-                    SET transcript_deflate = ?3
-                  WHERE session_id = ?1 AND compartment_seq = ?2",
-                params![session_id, victim, &empty_transcript],
-            )?;
-        } else {
-            tx.execute(
-                "DELETE FROM chunk_transcripts WHERE session_id = ?1 AND compartment_seq = ?2",
-                params![session_id, victim],
-            )?;
-        }
+        tx.execute(
+            "DELETE FROM chunk_transcripts WHERE session_id = ?1 AND history_segment_seq = (
+                SELECT history_segment_seq FROM chunk_transcripts WHERE session_id = ?1
+                ORDER BY created_at_ms ASC, history_segment_seq ASC LIMIT 1)",
+            params![session_id],
+        )?;
     }
 }
 
 fn compress_transcript(transcript: &str) -> std::io::Result<Vec<u8>> {
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::fast());
     encoder.write_all(transcript.as_bytes())?;
-    encoder.finish()
-}
-
-fn compress_raw_messages(raw_messages: &str) -> std::io::Result<Vec<u8>> {
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::fast());
-    encoder.write_all(raw_messages.as_bytes())?;
     encoder.finish()
 }
 
@@ -14658,13 +14516,6 @@ fn decompress_durable_text_exact(blob: &[u8], limit: usize) -> std::io::Result<S
             "durable compressed text is not UTF-8",
         )
     })
-}
-
-fn decompress_raw_messages(blob: &[u8]) -> std::io::Result<String> {
-    let mut decoder = DeflateDecoder::new(blob);
-    let mut raw_messages = String::new();
-    decoder.read_to_string(&mut raw_messages)?;
-    Ok(raw_messages)
 }
 
 fn decompress_transcript(blob: &[u8]) -> std::io::Result<String> {
@@ -14843,7 +14694,7 @@ fn insert_note_tx(
     load_note_tx(tx, tx.last_insert_rowid())
 }
 
-/// Single definition of the project smart-note insert executed by both the
+/// Single definition of the project conditional-note insert executed by both the
 /// `MemoryStore` method and the facade command path. A non-empty surface
 /// condition starts the note `pending` (awaiting compile); otherwise it is
 /// immediately `active`.
@@ -15072,7 +14923,7 @@ const NOTE_EVAL_CANDIDATE_COLUMNS: &str = "id, status, compile_status, created_a
     compiled_check IS NOT NULL, check_status, check_quarantined_until, check_next_due_at, \
     check_false_since_at, check_last_liveness_at, policy_version, last_checked_at";
 
-/// One pending smart note as seen by the work selector.
+/// One pending conditional note as seen by the work selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteEvalCandidate {
     pub id: i64,
@@ -15108,7 +14959,7 @@ fn note_eval_candidate_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteE
 
 impl MemoryStore {
     /// Acquire one durable evaluation claim or a replayable `no_work` decision.
-    /// `select` receives the pending, unclaimed smart notes and returns either a
+    /// `select` receives the pending, unclaimed conditional notes and returns either a
     /// (note, phase) claim or a classified `no_work`; the lease protocol is
     /// `acquire_task_lease` under the `NOTE_EVALUATION` kind.
     #[allow(clippy::too_many_arguments)]
@@ -15419,8 +15270,8 @@ fn complete_note_evaluation_tx(
     Ok(LeaseCompletion::Applied { response_json })
 }
 
-/// Canonical digest binding a compiled smart-note artifact to the condition it was
-/// compiled from. Mirrors hashCheck in packages/plugin smart-notes/compiler.ts;
+/// Canonical digest binding a compiled conditional-note artifact to the condition it was
+/// compiled from. Mirrors hashCheck in packages/plugin conditional-notes/compiler.ts;
 /// `manifest_json` is hashed exactly as stored so both sides produce the same hex
 /// digest.
 ///
@@ -15556,7 +15407,7 @@ fn sql_like_pattern(query: &str) -> String {
     format!("%{escaped}%")
 }
 
-/// Compute the ctx_memory normalized hash used for duplicate detection. This mirrors the
+/// Compute the eidnara_memory normalized hash used for duplicate detection. This mirrors the
 /// plugin path: lowercase, collapse whitespace runs to one space, trim, then MD5 hex.
 fn canonical_authority_value(value: &Value) -> String {
     match value {
@@ -15591,10 +15442,10 @@ fn canonical_authority_value(value: &Value) -> String {
     }
 }
 
-fn idle_historian_after_success(firing_seq: u64) -> HistorianDurableState {
-    HistorianDurableState {
+fn idle_history_summarizer_after_success(firing_seq: u64) -> HistorySummarizerDurableState {
+    HistorySummarizerDurableState {
         firing_seq,
-        ..HistorianDurableState::default()
+        ..HistorySummarizerDurableState::default()
     }
 }
 
@@ -15629,7 +15480,7 @@ mod tests {
     /// is refused, an unknown enum variant is refused, JSON5, malformed text, and strict JSON
     /// that is not an object fail. The
     /// recorded divergences: a corrupt `core_state` and a sibling field's corruption fail
-    /// only the full load; a `historian` that is not an object reads as absent; an epoch
+    /// only the full load; a `history_summarizer` that is not an object reads as absent; an epoch
     /// above `i64::MAX` fails only the scalar read.
     #[test]
     fn meta_scalar_reads_agree_with_the_full_deserialization() {
@@ -15649,7 +15500,7 @@ mod tests {
                 empty_core.clone(),
                 meta_with(&|m| {
                     m.remove("revert_epoch");
-                    m.remove("historian");
+                    m.remove("history_summarizer");
                     m.remove("publication_floor_ordinal");
                 }),
             ),
@@ -15658,7 +15509,10 @@ mod tests {
                 empty_core.clone(),
                 meta_with(&|m| {
                     m.insert("revert_epoch".into(), 7.into());
-                    m.insert("historian".into(), serde_json::json!({"state": "firing"}));
+                    m.insert(
+                        "history_summarizer".into(),
+                        serde_json::json!({"state": "firing"}),
+                    );
                     m.insert("publication_floor_ordinal".into(), 42.into());
                 }),
             ),
@@ -15694,7 +15548,10 @@ mod tests {
                 "phase-unknown",
                 empty_core.clone(),
                 meta_with(&|m| {
-                    m.insert("historian".into(), serde_json::json!({"state": "dreaming"}));
+                    m.insert(
+                        "history_summarizer".into(),
+                        serde_json::json!({"state": "dreaming"}),
+                    );
                 }),
             ),
             (
@@ -15719,17 +15576,17 @@ mod tests {
                 }),
             ),
             (
-                "historian-null",
+                "history_summarizer-null",
                 empty_core.clone(),
                 meta_with(&|m| {
-                    m.insert("historian".into(), serde_json::Value::Null);
+                    m.insert("history_summarizer".into(), serde_json::Value::Null);
                 }),
             ),
             (
-                "historian-scalar",
+                "history_summarizer-scalar",
                 empty_core.clone(),
                 meta_with(&|m| {
-                    m.insert("historian".into(), 5.into());
+                    m.insert("history_summarizer".into(), 5.into());
                 }),
             ),
             (
@@ -15775,7 +15632,7 @@ mod tests {
             let full = store.load(session);
             let meta = store.load_meta(session);
             let epoch = store.load_revert_epoch(session);
-            let phase = store.load_historian_phase(session);
+            let phase = store.load_history_summarizer_phase(session);
             let floor = store.load_publication_floor_ordinal(session);
             // The meta-only load succeeds for `core-malformed` because it does not
             // deserialize `core_state`; every other row decides both loads alike.
@@ -15798,7 +15655,11 @@ mod tests {
             match full {
                 Ok(loaded) => {
                     assert_eq!(epoch.unwrap(), loaded.meta.revert_epoch, "{session}");
-                    assert_eq!(phase.unwrap(), loaded.meta.historian.state, "{session}");
+                    assert_eq!(
+                        phase.unwrap(),
+                        loaded.meta.history_summarizer.state,
+                        "{session}"
+                    );
                     assert_eq!(
                         floor.unwrap(),
                         loaded.meta.publication_floor_ordinal,
@@ -15821,10 +15682,10 @@ mod tests {
                             assert!(epoch.is_ok(), "{session}: siblings answer");
                             phase.is_err()
                         }
-                        "historian-null" | "historian-scalar" => {
-                            // `$.historian.state` has no object to descend, so the path is
+                        "history_summarizer-null" | "history_summarizer-scalar" => {
+                            // `$.history_summarizer.state` has no object to descend, so the path is
                             // absent here while the full load refuses the non-object.
-                            assert_eq!(phase.unwrap(), HistorianPhase::Idle, "{session}");
+                            assert_eq!(phase.unwrap(), HistorySummarizerPhase::Idle, "{session}");
                             true
                         }
                         "meta-json5" | "meta-malformed" | "meta-null" | "meta-array"
@@ -15844,8 +15705,8 @@ mod tests {
             never_seen.meta.revert_epoch
         );
         assert_eq!(
-            store.load_historian_phase("never-seen").unwrap(),
-            never_seen.meta.historian.state
+            store.load_history_summarizer_phase("never-seen").unwrap(),
+            never_seen.meta.history_summarizer.state
         );
         assert_eq!(
             store.load_publication_floor_ordinal("never-seen").unwrap(),
@@ -16630,22 +16491,21 @@ mod tests {
             "one live pass owner holds every copy"
         );
 
-        // A historian publish bumps the row version without passing through a pass; the
+        // A history_summarizer publish bumps the row version without passing through a pass; the
         // next pass still retires the previous pass's scans and the publish's own remain.
         let published = store
-            .publish_historian_chunk(HistorianPublishRequest {
+            .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                 session_id: "ses",
                 expected_row_version: expected,
                 expected_revert_epoch: 0,
                 predicate: &publish_predicate(),
                 project_path: "git:proj",
-                compartments: &[publish_compartment()],
+                history_segments: &[publish_history_segment()],
                 events: &[],
                 primer_candidates: &[],
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                raw_chunk_messages: None,
             })
             .unwrap();
         let after_publish = scan_audit_rows(&store);
@@ -16746,7 +16606,10 @@ mod tests {
         let mut want = vec![
             ("cache_state".to_string(), overlay_copies),
             ("cache_state".to_string(), steady_before_publish.1),
-            ("historian_side_channels".to_string(), publish_copies),
+            (
+                "history_summarizer_side_channels".to_string(),
+                publish_copies,
+            ),
         ];
         want.sort();
         assert_eq!(
@@ -16756,10 +16619,10 @@ mod tests {
         );
     }
 
-    /// A pass that loses the compartment-generation check replays without touching the
+    /// A pass that loses the history_segment-generation check replays without touching the
     /// audit: the live pass's scan rows still describe the stored bytes.
     #[test]
-    fn a_compartment_generation_conflict_keeps_the_live_pass_scan_audit_rows() {
+    fn a_history_segment_generation_conflict_keeps_the_live_pass_scan_audit_rows() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let core = CoreState::empty();
@@ -16773,7 +16636,7 @@ mod tests {
             .commit_transform(
                 "ses",
                 TransformCommit {
-                    compartment_max_seq: Some(7),
+                    history_segment_max_seq: Some(7),
                     ..base_commit(Some(version), &core, &meta)
                 },
             )
@@ -17309,10 +17172,10 @@ mod tests {
         store
             .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
             .unwrap();
-        let old_payload = serde_json::to_string(&HistorianEventCandidate {
+        let old_payload = serde_json::to_string(&HistorySummarizerEventCandidate {
             kind: "old".into(),
-            at_compartment: Some(1),
-            compartment_id: Some(0),
+            at_history_segment: Some(1),
+            history_segment_id: Some(0),
             fields_json: "{}".into(),
             created_at: 1,
             harness: "module".into(),
@@ -17324,7 +17187,7 @@ mod tests {
                 .inner
                 .with_conn_fenced(|tx| {
                     tx.execute(
-                        "INSERT INTO historian_side_channel_outbox(session_id, firing_seq, kind, \
+                        "INSERT INTO history_summarizer_side_channel_outbox(session_id, firing_seq, kind, \
                          source_start, source_end, item_index, payload_json, created_at_ms) \
                          VALUES ('ses', 1, 'event', 1, 2, 0, ?1, 1)",
                         params![payload],
@@ -17335,32 +17198,34 @@ mod tests {
         };
         insert(&old_payload);
         let stale = store
-            .load_due_historian_side_channels("ses", "event", i64::MAX, 32)
+            .load_due_history_summarizer_side_channels("ses", "event", i64::MAX, 32)
             .unwrap()
             .remove(0);
         store
             .inner
             .with_conn_fenced(|tx| {
                 tx.execute(
-                    "DELETE FROM historian_side_channel_outbox WHERE session_id = 'ses'",
+                    "DELETE FROM history_summarizer_side_channel_outbox WHERE session_id = 'ses'",
                     [],
                 )
                 .map(|_| ())
             })
             .unwrap();
         insert(&new_payload);
-        let delivered = store.deliver_historian_side_channel(&stale).unwrap();
+        let delivered = store
+            .deliver_history_summarizer_side_channel(&stale)
+            .unwrap();
         assert!(
             !delivered,
             "the stale handle reports the row as already retired"
         );
         assert_eq!(
-            store.load_compartment_events("ses").unwrap().len(),
+            store.load_history_segment_events("ses").unwrap().len(),
             0,
             "the stale payload is not delivered"
         );
         let pending = store
-            .load_due_historian_side_channels("ses", "event", i64::MAX, 32)
+            .load_due_history_summarizer_side_channels("ses", "event", i64::MAX, 32)
             .unwrap();
         assert_eq!(
             pending
@@ -17377,9 +17242,9 @@ mod tests {
     fn side_channel_payloads_are_parsed_before_the_fenced_delivery() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let row = HistorianSideChannelOutboxRow {
+        let row = HistorySummarizerSideChannelOutboxRow {
             session_id: "ses".to_string(),
-            id: HistorianSideChannelOutboxId {
+            id: HistorySummarizerSideChannelOutboxId {
                 firing_seq: 1,
                 kind: "event".to_string(),
                 source_start: 0,
@@ -17392,7 +17257,9 @@ mod tests {
         let writer = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         let started = std::time::Instant::now();
-        let error = store.deliver_historian_side_channel(&row).unwrap_err();
+        let error = store
+            .deliver_history_summarizer_side_channel(&row)
+            .unwrap_err();
         let elapsed = started.elapsed();
         writer.execute_batch("ROLLBACK").unwrap();
         assert!(
@@ -17485,7 +17352,7 @@ mod tests {
             meta,
             consumed_drop_ids: &[],
             first_applied_command_ids: &[],
-            compartment_max_seq: None,
+            history_segment_max_seq: None,
             project_root: None,
             first_divergence: None,
             scheduler_observation: None,
@@ -17535,7 +17402,7 @@ mod tests {
                     meta: &meta,
                     consumed_drop_ids: &[],
                     first_applied_command_ids: &[],
-                    compartment_max_seq: None,
+                    history_segment_max_seq: None,
                     project_root: None,
                     first_divergence: produced_output_divergence.then_some("{}"),
                     scheduler_observation: Some(observation),
@@ -17628,21 +17495,21 @@ mod tests {
         ),
         (
             "chunk_transcripts",
-            "INSERT INTO chunk_transcripts(session_id, compartment_seq, start_ordinal, end_ordinal, transcript_deflate, created_at_ms)
+            "INSERT INTO chunk_transcripts(session_id, history_segment_seq, start_ordinal, end_ordinal, transcript_deflate, created_at_ms)
              VALUES (?1, 1, 1, 2, x'00', 1)",
         ),
         (
-            "compartment_events",
-            "INSERT INTO compartment_events(session_id, kind) VALUES (?1, 'k')",
+            "history_segment_events",
+            "INSERT INTO history_segment_events(session_id, kind) VALUES (?1, 'k')",
         ),
         (
-            "compartments",
-            "INSERT INTO compartments(session_id, sequence, start_message, end_message, title, content)
+            "history_segments",
+            "INSERT INTO history_segments(session_id, sequence, start_message, end_message, title, content)
              VALUES (?1, 1, 1, 2, 't', 'c')",
         ),
         (
-            "historian_side_channel_outbox",
-            "INSERT INTO historian_side_channel_outbox(session_id, firing_seq, kind, source_start, source_end, item_index, payload_json, created_at_ms)
+            "history_summarizer_side_channel_outbox",
+            "INSERT INTO history_summarizer_side_channel_outbox(session_id, firing_seq, kind, source_start, source_end, item_index, payload_json, created_at_ms)
              VALUES (?1, 1, 'event', 1, 2, 0, '{}', 1)",
         ),
         (
@@ -17782,7 +17649,7 @@ mod tests {
             .with_note_conn_fenced("/project", |tx| {
                 tx.execute(
                     "INSERT INTO notes(type, project_path, session_id, content)
-                     VALUES ('smart', '/project', 'ses_delete', 'smart note')",
+                     VALUES ('smart', '/project', 'ses_delete', 'conditional note')",
                     [],
                 )
             })
@@ -17823,7 +17690,7 @@ mod tests {
                 assert_eq!(
                     count(table, "session_id = 'ses_delete' AND type = 'smart'"),
                     1,
-                    "{table}: the smart note is project-owned and must survive"
+                    "{table}: the conditional note is project-owned and must survive"
                 );
                 assert_eq!(
                     count(
@@ -17941,7 +17808,7 @@ mod tests {
             "proj-facade",
             "notes",
             "facade-session",
-            "ctx_note",
+            "eidnara_note",
             "noop",
             None,
             |_txn| Ok(b"{}".to_vec()),
@@ -18091,7 +17958,7 @@ mod tests {
                     caller_project,
                     "notes",
                     "facade-session",
-                    "ctx_note",
+                    "eidnara_note",
                     "update",
                     None,
                     |txn| {
@@ -18239,7 +18106,7 @@ mod tests {
                         meta: &loaded.meta,
                         consumed_drop_ids: &[],
                         first_applied_command_ids: &[],
-                        compartment_max_seq: None,
+                        history_segment_max_seq: None,
                         project_root: Some("/root-a"),
                         first_divergence: None,
                         scheduler_observation: None,
@@ -18557,7 +18424,7 @@ mod tests {
         let hint = UserHintDecisionInput {
             ordinal: 1,
             block_id: "m1#0".to_string(),
-            hint_text: "<ctx-search-hint>memory</ctx-search-hint>".to_string(),
+            hint_text: "<eidnara-search-hint>memory</eidnara-search-hint>".to_string(),
         };
         let channel1 = Channel1AppendRow {
             block_id: "m1#0".to_string(),
@@ -19189,7 +19056,7 @@ mod tests {
                 .append_user_hint(
                     "ses",
                     "m3#0",
-                    "\n\n<ctx-search-hint>hit</ctx-search-hint>",
+                    "\n\n<eidnara-search-hint>hit</eidnara-search-hint>",
                     700
                 )
                 .unwrap()
@@ -19204,7 +19071,7 @@ mod tests {
                 },
                 UserHintRow {
                     block_id: "m3#0".to_string(),
-                    hint_text: "\n\n<ctx-search-hint>hit</ctx-search-hint>".to_string(),
+                    hint_text: "\n\n<eidnara-search-hint>hit</eidnara-search-hint>".to_string(),
                     created_at: 700,
                 },
             ]
@@ -19969,7 +19836,7 @@ mod tests {
                         meta: &meta,
                         consumed_drop_ids: &[],
                         first_applied_command_ids: &[],
-                        compartment_max_seq: None,
+                        history_segment_max_seq: None,
                         project_root: None,
                         first_divergence,
                         scheduler_observation: Some(&observation),
@@ -19998,72 +19865,6 @@ mod tests {
                 Some(fingerprint)
             );
         }
-    }
-
-    #[test]
-    fn project_mural_artifact_upsert_is_hash_gated() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-
-        assert!(
-            store
-                .upsert_project_mural_artifact(
-                    "git:project",
-                    b"data:image/png;base64,YQ==",
-                    "mural-a",
-                    100,
-                )
-                .unwrap()
-        );
-        let first = store
-            .load_project_mural_artifact("git:project")
-            .unwrap()
-            .unwrap();
-        assert_eq!(first.data_url, b"data:image/png;base64,YQ==");
-        assert_eq!(first.content_hash, "mural-a");
-        assert_eq!(first.updated_at, 100);
-
-        assert!(
-            !store
-                .upsert_project_mural_artifact(
-                    "git:project",
-                    b"data:image/png;base64,unexpected-but-same-hash",
-                    "mural-a",
-                    200,
-                )
-                .unwrap()
-        );
-        let unchanged = store
-            .load_project_mural_artifact("git:project")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            unchanged, first,
-            "same hash must not bump artifact identity"
-        );
-
-        assert!(
-            store
-                .upsert_project_mural_artifact(
-                    "git:project",
-                    b"data:image/png;base64,Yg==",
-                    "mural-b",
-                    300,
-                )
-                .unwrap()
-        );
-        assert_eq!(
-            store
-                .load_project_mural_artifact("git:project")
-                .unwrap()
-                .unwrap(),
-            ProjectMuralArtifact {
-                project_path: "git:project".to_string(),
-                data_url: b"data:image/png;base64,Yg==".to_vec(),
-                content_hash: "mural-b".to_string(),
-                updated_at: 300,
-            }
-        );
     }
 
     #[test]
@@ -20125,7 +19926,7 @@ mod tests {
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let secret = "x_auth_token=hunter-two";
 
-        let mut write = PreparedWrite::new(DurableWriteFamily::Compartments);
+        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySegments);
         write.domain_owner("session", "ses_actions", "receipt_probe");
         let kept = write.existing_identity("unit_key", secret).unwrap();
         assert_eq!(kept, secret, "an existing identity is stored verbatim");
@@ -20164,13 +19965,13 @@ mod tests {
     }
 
     #[test]
-    fn compartments_roundtrip_chronological_with_tiers_and_legacy() {
+    fn history_segments_roundtrip_chronological_with_tiers_and_legacy() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        assert!(store.load_compartments("ses_a").unwrap().is_empty());
+        assert!(store.load_history_segments("ses_a").unwrap().is_empty());
 
         let comps = vec![
-            StoredCompartment {
+            StoredHistorySegment {
                 sequence: 1,
                 start_message: 1,
                 end_message: 9,
@@ -20181,7 +19982,7 @@ mod tests {
                 created_at: 100,
                 ..Default::default()
             },
-            StoredCompartment {
+            StoredHistorySegment {
                 sequence: 2,
                 start_message: 10,
                 end_message: 19,
@@ -20200,9 +20001,9 @@ mod tests {
                 ..Default::default()
             },
         ];
-        store.replace_compartments("ses_a", &comps).unwrap();
+        store.replace_history_segments("ses_a", &comps).unwrap();
 
-        let read = store.load_compartments("ses_a").unwrap();
+        let read = store.load_history_segments("ses_a").unwrap();
         assert_eq!(
             read, comps,
             "chronological round-trip incl NULL p4 + tiers + legacy"
@@ -20210,28 +20011,30 @@ mod tests {
         assert_eq!(read[0].sequence, 1, "oldest first");
 
         // a wholesale replace fully supplants the prior set
-        let replacement = vec![StoredCompartment {
+        let replacement = vec![StoredHistorySegment {
             sequence: 1,
             title: "only".into(),
             content: "x".into(),
             importance: 50,
             ..Default::default()
         }];
-        store.replace_compartments("ses_a", &replacement).unwrap();
-        let read2 = store.load_compartments("ses_a").unwrap();
+        store
+            .replace_history_segments("ses_a", &replacement)
+            .unwrap();
+        let read2 = store.load_history_segments("ses_a").unwrap();
         assert_eq!(read2.len(), 1);
         assert_eq!(read2[0].title, "only");
 
         // distinct sessions are isolated
-        assert!(store.load_compartments("ses_b").unwrap().is_empty());
+        assert!(store.load_history_segments("ses_b").unwrap().is_empty());
     }
 
     #[test]
-    fn max_compartment_end_ordinal_matches_full_compartment_load() {
+    fn max_history_segment_end_ordinal_matches_full_history_segment_load() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let compartments = vec![
-            StoredCompartment {
+        let history_segments = vec![
+            StoredHistorySegment {
                 sequence: 1,
                 start_message: 1,
                 end_message: 8,
@@ -20239,7 +20042,7 @@ mod tests {
                 content: "one".into(),
                 ..Default::default()
             },
-            StoredCompartment {
+            StoredHistorySegment {
                 sequence: 2,
                 start_message: 9,
                 end_message: 23,
@@ -20249,24 +20052,26 @@ mod tests {
             },
         ];
         store
-            .replace_compartments("ordinal-session", &compartments)
+            .replace_history_segments("ordinal-session", &history_segments)
             .unwrap();
 
         let full_max = store
-            .load_compartments("ordinal-session")
+            .load_history_segments("ordinal-session")
             .unwrap()
             .iter()
-            .map(|compartment| compartment.end_message)
+            .map(|history_segment| history_segment.end_message)
             .max()
             .unwrap_or(0);
         assert_eq!(
             store
-                .max_compartment_end_ordinal("ordinal-session")
+                .max_history_segment_end_ordinal("ordinal-session")
                 .unwrap(),
             full_max
         );
         assert_eq!(
-            store.max_compartment_end_ordinal("empty-session").unwrap(),
+            store
+                .max_history_segment_end_ordinal("empty-session")
+                .unwrap(),
             0
         );
 
@@ -20276,7 +20081,7 @@ mod tests {
                 let mut statement = conn.prepare_cached(
                     "EXPLAIN QUERY PLAN
                      SELECT COALESCE(MAX(end_message), 0)
-                       FROM compartments WHERE session_id = ?1",
+                       FROM history_segments WHERE session_id = ?1",
                 )?;
                 let rows = statement
                     .query_map(params!["ordinal-session"], |row| row.get::<_, String>(3))?
@@ -20286,9 +20091,9 @@ mod tests {
             .unwrap();
         assert!(
             details.iter().any(|detail| {
-                detail.contains("USING COVERING INDEX idx_compartments_session_end_message")
+                detail.contains("USING COVERING INDEX idx_history_segments_session_end_message")
             }),
-            "compartment max must use the covering end-ordinal index: {details:?}"
+            "history_segment max must use the covering end-ordinal index: {details:?}"
         );
     }
 
@@ -20320,50 +20125,50 @@ mod tests {
     }
 
     #[test]
-    fn append_compartments_rejects_overlapping_ranges_without_partial_rows() {
+    fn append_history_segments_rejects_overlapping_ranges_without_partial_rows() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let compartment = |sequence: i64,
-                           start_message: i64,
-                           end_message: i64,
-                           end_message_id: &str| StoredCompartment {
-            sequence,
-            start_message,
-            end_message,
-            end_message_id: end_message_id.to_string(),
-            title: "summary".to_string(),
-            content: "summary".to_string(),
-            ..Default::default()
-        };
+        let history_segment =
+            |sequence: i64, start_message: i64, end_message: i64, end_message_id: &str| {
+                StoredHistorySegment {
+                    sequence,
+                    start_message,
+                    end_message,
+                    end_message_id: end_message_id.to_string(),
+                    title: "summary".to_string(),
+                    content: "summary".to_string(),
+                    ..Default::default()
+                }
+            };
         store
-            .replace_compartments("ses", &[compartment(1, 1, 5, "m5")])
+            .replace_history_segments("ses", &[history_segment(1, 1, 5, "m5")])
             .unwrap();
 
         let error = store
-            .append_compartments("ses", &[compartment(99, 5, 8, "m8")])
+            .append_history_segments("ses", &[history_segment(99, 5, 8, "m8")])
             .unwrap_err();
         assert!(matches!(
             error,
-            MemoryStoreError::CompartmentRangeOverlap {
+            MemoryStoreError::HistorySegmentRangeOverlap {
                 existing_sequence: 1,
                 incoming_start_message: 5,
                 incoming_end_message: 8,
             }
         ));
-        let rows = store.load_compartments("ses").unwrap();
+        let rows = store.load_history_segments("ses").unwrap();
         assert_eq!(rows.len(), 1, "a rejected append must stay atomic");
         assert_eq!(rows[0].sequence, 1);
 
         store
-            .append_compartments("ses", &[compartment(99, 6, 8, "m8")])
+            .append_history_segments("ses", &[history_segment(99, 6, 8, "m8")])
             .unwrap();
-        let rows = store.load_compartments("ses").unwrap();
+        let rows = store.load_history_segments("ses").unwrap();
         assert_eq!(rows.len(), 2, "a disjoint append must remain legal");
         assert_eq!(rows[1].sequence, 2, "append still owns durable numbering");
     }
 
-    fn selected_range_identities() -> Vec<HistorianSelectedMessageIdentity> {
-        vec![HistorianSelectedMessageIdentity {
+    fn selected_range_identities() -> Vec<HistorySummarizerSelectedMessageIdentity> {
+        vec![HistorySummarizerSelectedMessageIdentity {
             mid: "m10".to_string(),
             block_identities: vec![BlockIdentity {
                 kind_tag: "text".to_string(),
@@ -20379,10 +20184,10 @@ mod tests {
                 .iter()
                 .map(|selected| (selected.mid.clone(), selected.block_identities.clone()))
                 .collect(),
-            historian: HistorianDurableState {
-                state: HistorianPhase::Publishing,
+            history_summarizer: HistorySummarizerDurableState {
+                state: HistorySummarizerPhase::Publishing,
                 firing_seq: 7,
-                chunk_range: Some(HistorianChunkRange {
+                chunk_range: Some(HistorySummarizerChunkRange {
                     from_ordinal: 10,
                     to_ordinal: 20,
                 }),
@@ -20393,7 +20198,7 @@ mod tests {
                 producer_harness: None,
                 fired_at_ms: Some(123),
                 expected_revert_epoch: 0,
-                compartment_set_generation: CompartmentSetGeneration::default(),
+                history_segment_set_generation: HistorySegmentSetGeneration::default(),
                 failure_backoff_at_ms: Some(456),
                 last_failure: None,
                 last_no_fire: None,
@@ -20404,7 +20209,7 @@ mod tests {
     }
 
     #[test]
-    fn historian_publish_failure_counter_accumulates_and_success_state_resets() {
+    fn history_summarizer_publish_failure_counter_accumulates_and_success_state_resets() {
         let directory = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(directory.path())).unwrap();
         let predicate = publish_predicate();
@@ -20416,13 +20221,13 @@ mod tests {
         for expected_failures in 1..=3 {
             let loaded = store.load("publish-health").unwrap();
             meta = publishing_meta();
-            meta.historian.consecutive_publish_failures =
-                loaded.meta.historian.consecutive_publish_failures;
+            meta.history_summarizer.consecutive_publish_failures =
+                loaded.meta.history_summarizer.consecutive_publish_failures;
             store
                 .commit("publish-health", loaded.row_version, &loaded.core, &meta)
                 .unwrap();
             store
-                .abandon_historian_run_if_matching_with_publish_failure(
+                .abandon_history_summarizer_run_if_matching_with_publish_failure(
                     "publish-health",
                     &predicate,
                     None,
@@ -20435,28 +20240,28 @@ mod tests {
                     .load("publish-health")
                     .unwrap()
                     .meta
-                    .historian
+                    .history_summarizer
                     .consecutive_publish_failures,
                 expected_failures,
             );
         }
 
-        let successful = idle_historian_after_success(predicate.firing_seq);
+        let successful = idle_history_summarizer_after_success(predicate.firing_seq);
         assert_eq!(successful.consecutive_publish_failures, 0);
     }
 
-    fn publish_predicate() -> HistorianPublishPredicate {
-        HistorianPublishPredicate {
+    fn publish_predicate() -> HistorySummarizerPublishPredicate {
+        HistorySummarizerPublishPredicate {
             firing_seq: 7,
             producer_run_id: "run-1".into(),
             chunk_fingerprint: "fp".into(),
             selected_range_identities: selected_range_identities(),
-            compartment_set_generation: CompartmentSetGeneration::default(),
+            history_segment_set_generation: HistorySegmentSetGeneration::default(),
         }
     }
 
-    fn publish_compartment() -> StoredCompartment {
-        StoredCompartment {
+    fn publish_history_segment() -> StoredHistorySegment {
+        StoredHistorySegment {
             start_message: 10,
             end_message: 20,
             end_message_id: "m20".into(),
@@ -20467,7 +20272,7 @@ mod tests {
     }
 
     #[test]
-    fn matching_historian_abandon_fences_predicate_and_update_for_both_backoffs() {
+    fn matching_history_summarizer_abandon_fences_predicate_and_update_for_both_backoffs() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
         let raw_path = match &descriptor.backend {
@@ -20481,7 +20286,7 @@ mod tests {
 
         let hook_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let hook_calls_for_hook = std::sync::Arc::clone(&hook_calls);
-        store.set_abandon_historian_hook(Box::new(move || {
+        store.set_abandon_history_summarizer_hook(Box::new(move || {
             hook_calls_for_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let raw = rusqlite::Connection::open(&raw_path).unwrap();
             raw.busy_timeout(std::time::Duration::ZERO).unwrap();
@@ -20503,7 +20308,7 @@ mod tests {
 
         let first_before = store.load("ses").unwrap();
         let first_abandoned = store
-            .abandon_historian_run_if_matching(
+            .abandon_history_summarizer_run_if_matching(
                 "ses",
                 &publish_predicate(),
                 None,
@@ -20513,11 +20318,14 @@ mod tests {
         assert_eq!(first_abandoned, Some(first_before.row_version.unwrap() + 1));
         let idle = store.load("ses").unwrap();
         assert_eq!(idle.row_version, first_abandoned);
-        assert_eq!(idle.meta.historian.state, HistorianPhase::Idle);
-        assert_eq!(idle.meta.historian.firing_seq, 7);
-        assert_eq!(idle.meta.historian.failure_backoff_at_ms, None);
         assert_eq!(
-            idle.meta.historian.last_failure.as_deref(),
+            idle.meta.history_summarizer.state,
+            HistorySummarizerPhase::Idle
+        );
+        assert_eq!(idle.meta.history_summarizer.firing_seq, 7);
+        assert_eq!(idle.meta.history_summarizer.failure_backoff_at_ms, None);
+        assert_eq!(
+            idle.meta.history_summarizer.last_failure.as_deref(),
             Some("snapshot generation changed")
         );
 
@@ -20533,7 +20341,7 @@ mod tests {
             .unwrap();
         let second_before = store.load("ses").unwrap();
         let second_abandoned = store
-            .abandon_historian_run_if_matching(
+            .abandon_history_summarizer_run_if_matching(
                 "ses",
                 &publish_predicate(),
                 Some(999),
@@ -20546,10 +20354,16 @@ mod tests {
         );
         let cooled_down = store.load("ses").unwrap();
         assert_eq!(cooled_down.row_version, second_abandoned);
-        assert_eq!(cooled_down.meta.historian.state, HistorianPhase::Idle);
-        assert_eq!(cooled_down.meta.historian.failure_backoff_at_ms, Some(999));
         assert_eq!(
-            cooled_down.meta.historian.last_failure.as_deref(),
+            cooled_down.meta.history_summarizer.state,
+            HistorySummarizerPhase::Idle
+        );
+        assert_eq!(
+            cooled_down.meta.history_summarizer.failure_backoff_at_ms,
+            Some(999)
+        );
+        assert_eq!(
+            cooled_down.meta.history_summarizer.last_failure.as_deref(),
             Some("fingerprint or CAS conflict")
         );
         assert_eq!(
@@ -20560,14 +20374,14 @@ mod tests {
     }
 
     #[test]
-    fn publish_historian_chunk_rejects_overlapping_compartment_as_typed_error() {
+    fn publish_history_summarizer_chunk_rejects_overlapping_history_segment_as_typed_error() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let mut existing = publish_compartment();
+        let mut existing = publish_history_segment();
         existing.sequence = 1;
-        store.replace_compartments("ses", &[existing]).unwrap();
+        store.replace_history_segments("ses", &[existing]).unwrap();
         let mut meta = publishing_meta();
-        meta.historian.compartment_set_generation = CompartmentSetGeneration {
+        meta.history_summarizer.history_segment_set_generation = HistorySegmentSetGeneration {
             max_sequence: 1,
             count: 1,
         };
@@ -20575,95 +20389,93 @@ mod tests {
             .commit("ses", None, &CoreState::empty(), &meta)
             .unwrap();
         let expected = store.load("ses").unwrap().row_version;
-        let predicate = HistorianPublishPredicate {
-            compartment_set_generation: meta.historian.compartment_set_generation,
+        let predicate = HistorySummarizerPublishPredicate {
+            history_segment_set_generation: meta.history_summarizer.history_segment_set_generation,
             ..publish_predicate()
         };
 
         let error = store
-            .publish_historian_chunk(HistorianPublishRequest {
+            .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                 session_id: "ses",
                 expected_row_version: expected,
                 expected_revert_epoch: 0,
                 predicate: &predicate,
                 project_path: "git:proj",
-                compartments: &[publish_compartment()],
+                history_segments: &[publish_history_segment()],
                 events: &[],
                 primer_candidates: &[],
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                raw_chunk_messages: None,
             })
             .unwrap_err();
         assert!(matches!(
             error,
-            HistorianPublishError::CompartmentOverlap {
+            HistorySummarizerPublishError::HistorySegmentOverlap {
                 existing_sequence: 1,
                 incoming_start_message: 10,
                 incoming_end_message: 20,
             }
         ));
-        assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
     }
 
     #[test]
-    fn historian_side_channel_faults_are_isolated_and_retryable_per_kind() {
-        for failed_kind in HISTORIAN_SIDE_CHANNEL_KINDS {
+    fn history_summarizer_side_channel_faults_are_isolated_and_retryable_per_kind() {
+        for failed_kind in HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS {
             let dir = tempfile::tempdir().unwrap();
             let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
             store
                 .commit("ses", None, &CoreState::empty(), &publishing_meta())
                 .unwrap();
-            store.fail_next_historian_side_channel_for_test(failed_kind);
-            let event = HistorianEventCandidate {
+            store.fail_next_history_summarizer_side_channel_for_test(failed_kind);
+            let event = HistorySummarizerEventCandidate {
                 kind: "trajectory_correction".into(),
-                at_compartment: Some(1),
-                compartment_id: Some(0),
+                at_history_segment: Some(1),
+                history_segment_id: Some(0),
                 fields_json: "{\"detail\":\"fixed\"}".into(),
                 created_at: 123,
                 harness: "module".into(),
             };
-            let primer = HistorianPrimerCandidate {
+            let primer = HistorySummarizerPrimerCandidate {
                 project_path: "git:proj".into(),
                 session_id: "ses".into(),
                 question: "How is publication recovered?".into(),
-                source_compartment_start: Some(10),
-                source_compartment_end: Some(20),
+                source_history_segment_start: Some(10),
+                source_history_segment_end: Some(20),
                 source_start_message_id: "m10".into(),
                 source_end_message_id: "m20".into(),
                 source_message_time: 123,
                 created_at: 123,
             };
-            let observation = HistorianUserMemoryCandidate {
+            let observation = HistorySummarizerUserMemoryCandidate {
                 content: "The user prefers explicit recovery semantics.".into(),
                 session_id: "ses".into(),
-                source_compartment_start: Some(10),
-                source_compartment_end: Some(20),
+                source_history_segment_start: Some(10),
+                source_history_segment_end: Some(20),
                 created_at: 123,
             };
             let expected = store.load("ses").unwrap().row_version;
 
             store
-                .publish_historian_chunk(HistorianPublishRequest {
+                .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                     session_id: "ses",
                     expected_row_version: expected,
                     expected_revert_epoch: 0,
                     predicate: &publish_predicate(),
                     project_path: "git:proj",
-                    compartments: &[publish_compartment()],
+                    history_segments: &[publish_history_segment()],
                     events: std::slice::from_ref(&event),
                     primer_candidates: std::slice::from_ref(&primer),
                     user_memory_candidates: std::slice::from_ref(&observation),
                     publication_floor_ordinal: 21,
                     chunk_transcript: None,
-                    raw_chunk_messages: None,
                 })
                 .unwrap();
 
-            assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+            assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
             assert_eq!(
-                store.load_compartment_events("ses").unwrap().len(),
+                store.load_history_segment_events("ses").unwrap().len(),
                 usize::from(failed_kind != "event")
             );
             assert_eq!(
@@ -20681,7 +20493,7 @@ mod tests {
                     "a failed Primer write must not suppress user observations"
                 );
             }
-            let pending = store.historian_side_channel_status("ses").unwrap();
+            let pending = store.history_summarizer_side_channel_status("ses").unwrap();
             assert_eq!(pending.pending_count, 1);
             assert!(
                 pending
@@ -20691,15 +20503,15 @@ mod tests {
             );
 
             let retry = store
-                .drain_historian_side_channels("ses", i64::MAX, 32)
+                .drain_history_summarizer_side_channels("ses", i64::MAX, 32)
                 .unwrap();
             assert_eq!(retry.succeeded, 1);
-            assert_eq!(store.load_compartment_events("ses").unwrap().len(), 1);
+            assert_eq!(store.load_history_segment_events("ses").unwrap().len(), 1);
             assert_eq!(store.load_primer_candidates("ses").unwrap().len(), 1);
             assert_eq!(store.load_user_memory_candidates("ses").unwrap().len(), 1);
             assert_eq!(
                 store
-                    .historian_side_channel_status("ses")
+                    .history_summarizer_side_channel_status("ses")
                     .unwrap()
                     .pending_count,
                 0
@@ -20709,48 +20521,48 @@ mod tests {
 
     /// Side-channel candidates are validated before any publish write: one scoped to
     /// another project or session, or carrying an ordinal outside `i64`, fails the whole
-    /// request as a serialization error and leaves no compartment or outbox row behind.
+    /// request as a serialization error and leaves no history_segment or outbox row behind.
     #[test]
-    fn historian_publish_rejects_malformed_side_channel_candidates_without_publishing() {
+    fn history_summarizer_publish_rejects_malformed_side_channel_candidates_without_publishing() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         store
             .commit("ses", None, &CoreState::empty(), &publishing_meta())
             .unwrap();
         let expected = store.load("ses").unwrap().row_version;
-        let foreign_primer = HistorianPrimerCandidate {
+        let foreign_primer = HistorySummarizerPrimerCandidate {
             project_path: "git:other".into(),
             session_id: "ses".into(),
             question: "Whose project is this?".into(),
-            source_compartment_start: Some(10),
-            source_compartment_end: Some(20),
+            source_history_segment_start: Some(10),
+            source_history_segment_end: Some(20),
             source_start_message_id: "m10".into(),
             source_end_message_id: "m20".into(),
             source_message_time: 123,
             created_at: 123,
         };
-        let foreign_observation = HistorianUserMemoryCandidate {
+        let foreign_observation = HistorySummarizerUserMemoryCandidate {
             content: "Whose session is this?".into(),
             session_id: "other-session".into(),
-            source_compartment_start: Some(10),
-            source_compartment_end: Some(20),
+            source_history_segment_start: Some(10),
+            source_history_segment_end: Some(20),
             created_at: 123,
         };
-        let overflowing_primer = HistorianPrimerCandidate {
+        let overflowing_primer = HistorySummarizerPrimerCandidate {
             project_path: "git:proj".into(),
             session_id: "ses".into(),
             question: "Where does this ordinal fit?".into(),
-            source_compartment_start: Some(u64::MAX),
-            source_compartment_end: Some(u64::MAX),
+            source_history_segment_start: Some(u64::MAX),
+            source_history_segment_end: Some(u64::MAX),
             source_start_message_id: "m10".into(),
             source_end_message_id: "m20".into(),
             source_message_time: 123,
             created_at: 123,
         };
-        let overflowing_event = HistorianEventCandidate {
+        let overflowing_event = HistorySummarizerEventCandidate {
             kind: "trajectory_correction".into(),
-            at_compartment: Some(u64::MAX),
-            compartment_id: None,
+            at_history_segment: Some(u64::MAX),
+            history_segment_id: None,
             fields_json: "{}".into(),
             created_at: 123,
             harness: "module".into(),
@@ -20782,30 +20594,29 @@ mod tests {
             ),
         ] {
             let error = store
-                .publish_historian_chunk(HistorianPublishRequest {
+                .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                     session_id: "ses",
                     expected_row_version: expected,
                     expected_revert_epoch: 0,
                     predicate: &publish_predicate(),
                     project_path: "git:proj",
-                    compartments: &[publish_compartment()],
+                    history_segments: &[publish_history_segment()],
                     events,
                     primer_candidates: primers,
                     user_memory_candidates: observations,
                     publication_floor_ordinal: 21,
                     chunk_transcript: None,
-                    raw_chunk_messages: None,
                 })
                 .unwrap_err();
             assert!(
-                matches!(error, HistorianPublishError::Serde(_)),
+                matches!(error, HistorySummarizerPublishError::Serde(_)),
                 "{label}: {error:?}"
             );
         }
-        assert!(store.load_compartments("ses").unwrap().is_empty());
+        assert!(store.load_history_segments("ses").unwrap().is_empty());
         assert_eq!(
             store
-                .historian_side_channel_status("ses")
+                .history_summarizer_side_channel_status("ses")
                 .unwrap()
                 .pending_count,
             0
@@ -20827,77 +20638,76 @@ mod tests {
         store
             .commit("ses", None, &CoreState::empty(), &publishing_meta())
             .unwrap();
-        for kind in HISTORIAN_SIDE_CHANNEL_KINDS {
-            store.fail_next_historian_side_channel_for_test(kind);
+        for kind in HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS {
+            store.fail_next_history_summarizer_side_channel_for_test(kind);
         }
-        let event = HistorianEventCandidate {
+        let event = HistorySummarizerEventCandidate {
             kind: "trajectory_correction".into(),
-            at_compartment: Some(1),
-            compartment_id: Some(0),
+            at_history_segment: Some(1),
+            history_segment_id: Some(0),
             fields_json: "{\"detail\":\"fixed\"}".into(),
             created_at: 123,
             harness: "module".into(),
         };
-        let primer = HistorianPrimerCandidate {
+        let primer = HistorySummarizerPrimerCandidate {
             project_path: "git:proj".into(),
             session_id: "ses".into(),
             question: "How is publication recovered?".into(),
-            source_compartment_start: Some(10),
-            source_compartment_end: Some(20),
+            source_history_segment_start: Some(10),
+            source_history_segment_end: Some(20),
             source_start_message_id: "m10".into(),
             source_end_message_id: "m20".into(),
             source_message_time: 123,
             created_at: 123,
         };
-        let observation = HistorianUserMemoryCandidate {
+        let observation = HistorySummarizerUserMemoryCandidate {
             content: "The user prefers explicit recovery semantics.".into(),
             session_id: "ses".into(),
-            source_compartment_start: Some(10),
-            source_compartment_end: Some(20),
+            source_history_segment_start: Some(10),
+            source_history_segment_end: Some(20),
             created_at: 123,
         };
         let expected = store.load("ses").unwrap().row_version;
         store
-            .publish_historian_chunk(HistorianPublishRequest {
+            .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                 session_id: "ses",
                 expected_row_version: expected,
                 expected_revert_epoch: 0,
                 predicate: &publish_predicate(),
                 project_path: "git:proj",
-                compartments: &[publish_compartment()],
+                history_segments: &[publish_history_segment()],
                 events: std::slice::from_ref(&event),
                 primer_candidates: std::slice::from_ref(&primer),
                 user_memory_candidates: std::slice::from_ref(&observation),
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                raw_chunk_messages: None,
             })
             .unwrap();
         assert_eq!(
             store
-                .historian_side_channel_status("ses")
+                .history_summarizer_side_channel_status("ses")
                 .unwrap()
                 .pending_count,
             3,
             "the inline drain failed every kind, so three rows are pending"
         );
 
-        for kind in HISTORIAN_SIDE_CHANNEL_KINDS {
-            store.crash_next_historian_side_channel_after_insert_for_test(kind);
+        for kind in HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS {
+            store.crash_next_history_summarizer_side_channel_after_insert_for_test(kind);
         }
         let crashed = store
-            .drain_historian_side_channels("ses", i64::MAX, 32)
+            .drain_history_summarizer_side_channels("ses", i64::MAX, 32)
             .unwrap();
         assert_eq!(
             (crashed.attempted, crashed.succeeded, crashed.failed),
             (3, 0, 3)
         );
-        assert_eq!(store.load_compartment_events("ses").unwrap().len(), 0);
+        assert_eq!(store.load_history_segment_events("ses").unwrap().len(), 0);
         assert_eq!(store.load_primer_candidates("ses").unwrap().len(), 0);
         assert_eq!(store.load_user_memory_candidates("ses").unwrap().len(), 0);
         assert_eq!(
             store
-                .historian_side_channel_status("ses")
+                .history_summarizer_side_channel_status("ses")
                 .unwrap()
                 .pending_count,
             3,
@@ -20905,25 +20715,30 @@ mod tests {
         );
 
         // A second drainer read its due rows before the first drainer delivered them.
-        let stale: Vec<HistorianSideChannelOutboxRow> = HISTORIAN_SIDE_CHANNEL_KINDS
-            .iter()
-            .flat_map(|kind| {
-                store
-                    .load_due_historian_side_channels("ses", kind, i64::MAX, 32)
-                    .unwrap()
-            })
-            .collect();
+        let stale: Vec<HistorySummarizerSideChannelOutboxRow> =
+            HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS
+                .iter()
+                .flat_map(|kind| {
+                    store
+                        .load_due_history_summarizer_side_channels("ses", kind, i64::MAX, 32)
+                        .unwrap()
+                })
+                .collect();
         assert_eq!(stale.len(), 3);
         // One delivery called directly retires its row inside its own transaction: the row
         // is absent as soon as the call returns, before any drain-side cleanup could run,
         // which the baseline's mark-then-delete would not have shown at this point.
         let first = &stale[0];
-        assert!(store.deliver_historian_side_channel(first).unwrap());
+        assert!(
+            store
+                .deliver_history_summarizer_side_channel(first)
+                .unwrap()
+        );
         let first_kind_rows: i64 = store
             .inner
             .with_conn(|conn| {
                 conn.query_row(
-                    "SELECT COUNT(*) FROM historian_side_channel_outbox \
+                    "SELECT COUNT(*) FROM history_summarizer_side_channel_outbox \
                      WHERE session_id = 'ses' AND kind = ?1",
                     params![first.id.kind],
                     |row| row.get(0),
@@ -20936,7 +20751,7 @@ mod tests {
             first.id.kind
         );
         let drained = store
-            .drain_historian_side_channels("ses", i64::MAX, 32)
+            .drain_history_summarizer_side_channels("ses", i64::MAX, 32)
             .unwrap();
         assert_eq!(
             (drained.attempted, drained.succeeded, drained.failed),
@@ -20944,17 +20759,17 @@ mod tests {
         );
         for row in &stale {
             assert!(
-                !store.deliver_historian_side_channel(row).unwrap(),
+                !store.deliver_history_summarizer_side_channel(row).unwrap(),
                 "the stale {} row was retired first, so its delivery rolls back",
                 row.id.kind
             );
         }
-        assert_eq!(store.load_compartment_events("ses").unwrap().len(), 1);
+        assert_eq!(store.load_history_segment_events("ses").unwrap().len(), 1);
         assert_eq!(store.load_primer_candidates("ses").unwrap().len(), 1);
         assert_eq!(store.load_user_memory_candidates("ses").unwrap().len(), 1);
         assert_eq!(
             store
-                .historian_side_channel_status("ses")
+                .history_summarizer_side_channel_status("ses")
                 .unwrap()
                 .pending_count,
             0,
@@ -20964,7 +20779,7 @@ mod tests {
             .inner
             .with_conn(|conn| {
                 conn.query_row(
-                    "SELECT COUNT(*) FROM historian_side_channel_outbox WHERE session_id = 'ses'",
+                    "SELECT COUNT(*) FROM history_summarizer_side_channel_outbox WHERE session_id = 'ses'",
                     [],
                     |row| row.get(0),
                 )
@@ -20973,7 +20788,7 @@ mod tests {
         assert_eq!(outbox_rows, 0, "delivered rows are retired, not marked");
 
         let markers = store.due_side_channel_markers();
-        for kind in HISTORIAN_SIDE_CHANNEL_KINDS {
+        for kind in HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS {
             assert!(
                 markers
                     .iter()
@@ -20984,15 +20799,15 @@ mod tests {
     }
 
     #[test]
-    fn historian_side_channel_outbox_recovers_after_restart() {
+    fn history_summarizer_side_channel_outbox_recovers_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
         let store = MemoryStore::open(&descriptor).unwrap();
         store
             .commit("ses", None, &CoreState::empty(), &publishing_meta())
             .unwrap();
-        store.fail_next_historian_side_channel_for_test("event");
-        let event = HistorianEventCandidate {
+        store.fail_next_history_summarizer_side_channel_for_test("event");
+        let event = HistorySummarizerEventCandidate {
             kind: "causal_incident".into(),
             fields_json: "{}".into(),
             created_at: 123,
@@ -21001,24 +20816,23 @@ mod tests {
         };
         let expected = store.load("ses").unwrap().row_version;
         store
-            .publish_historian_chunk(HistorianPublishRequest {
+            .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                 session_id: "ses",
                 expected_row_version: expected,
                 expected_revert_epoch: 0,
                 predicate: &publish_predicate(),
                 project_path: "git:proj",
-                compartments: &[publish_compartment()],
+                history_segments: &[publish_history_segment()],
                 events: std::slice::from_ref(&event),
                 primer_candidates: &[],
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                raw_chunk_messages: None,
             })
             .unwrap();
         assert_eq!(
             store
-                .historian_side_channel_status("ses")
+                .history_summarizer_side_channel_status("ses")
                 .unwrap()
                 .pending_count,
             1
@@ -21027,119 +20841,63 @@ mod tests {
 
         let reopened = MemoryStore::open(&descriptor).unwrap();
         let recovery = reopened
-            .drain_historian_side_channels("ses", i64::MAX, 32)
+            .drain_history_summarizer_side_channels("ses", i64::MAX, 32)
             .unwrap();
         assert_eq!(recovery.succeeded, 1);
-        assert_eq!(reopened.load_compartment_events("ses").unwrap().len(), 1);
+        assert_eq!(
+            reopened.load_history_segment_events("ses").unwrap().len(),
+            1
+        );
         assert_eq!(
             reopened
-                .historian_side_channel_status("ses")
+                .history_summarizer_side_channel_status("ses")
                 .unwrap()
                 .pending_count,
             0
         );
     }
 
-    /// The transcript and the raw chunk messages are both scanned before the publish
-    /// transaction writes: a detected secret in the transcript is substituted, a protected
-    /// key in the raw messages refuses the whole publish, and a clean payload lands as-is.
     #[test]
-    fn publish_historian_chunk_scans_transcript_and_raw_chunk_messages_before_storing() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let publish = |session_id: &str, raw_chunk_messages: &str| {
-            store
-                .commit(session_id, None, &CoreState::empty(), &publishing_meta())
-                .unwrap();
-            let expected = store.load(session_id).unwrap().row_version;
-            store.publish_historian_chunk(HistorianPublishRequest {
-                session_id,
-                expected_row_version: expected,
-                expected_revert_epoch: 0,
-                predicate: &publish_predicate(),
-                project_path: "git:proj",
-                compartments: &[publish_compartment()],
-                events: &[],
-                primer_candidates: &[],
-                user_memory_candidates: &[],
-                publication_floor_ordinal: 21,
-                chunk_transcript: Some("U: password=transcript-secret"),
-                raw_chunk_messages: Some(raw_chunk_messages),
-            })
-        };
-
-        let error = publish("ses-reject", r#"{"password":"hunter-two"}"#).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                HistorianPublishError::Store(MemoryStoreError::Redaction(
-                    RedactionErrorKind::SecretDetected
-                ))
-            ),
-            "{error:?}"
-        );
-        assert!(!error.to_string().contains("hunter-two"), "{error}");
-        assert!(
-            store
-                .load_chunk_transcripts_for_range("ses-reject", 10, 21)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(store.load_compartments("ses-reject").unwrap().is_empty());
-
-        let clean = r#"[{"content":"hello raw","role":"user"}]"#;
-        publish("ses-clean", clean).unwrap();
-        let rows = store
-            .load_chunk_transcripts_for_range("ses-clean", 10, 21)
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].compartment_seq, 1);
-        assert_eq!(
-            rows[0].transcript.as_deref(),
-            Some("U: password=<REDACTED:password>")
-        );
-        assert_eq!(rows[0].raw_messages_json.as_deref(), Some(clean));
-    }
-
-    #[test]
-    fn publish_historian_chunk_cas_conflict_leaves_no_transcript_row() {
+    fn publish_history_summarizer_chunk_cas_conflict_leaves_no_transcript_row() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         store
             .commit("ses", None, &CoreState::empty(), &publishing_meta())
             .unwrap();
-        let event = HistorianEventCandidate {
+        let event = HistorySummarizerEventCandidate {
             kind: "orphan".into(),
             fields_json: "{}".into(),
             ..Default::default()
         };
         let err = store
-            .publish_historian_chunk(HistorianPublishRequest {
+            .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                 session_id: "ses",
                 expected_row_version: Some(99),
                 expected_revert_epoch: 0,
                 predicate: &publish_predicate(),
                 project_path: "git:proj",
-                compartments: &[publish_compartment()],
+                history_segments: &[publish_history_segment()],
                 events: std::slice::from_ref(&event),
                 primer_candidates: &[],
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: Some("U: orphan"),
-                raw_chunk_messages: None,
             })
             .unwrap_err();
-        assert!(matches!(err, HistorianPublishError::CasConflict { .. }));
+        assert!(matches!(
+            err,
+            HistorySummarizerPublishError::CasConflict { .. }
+        ));
         assert!(
             store
                 .load_chunk_transcripts_for_range("ses", 10, 21)
                 .unwrap()
                 .is_empty()
         );
-        assert!(store.load_compartment_events("ses").unwrap().is_empty());
+        assert!(store.load_history_segment_events("ses").unwrap().is_empty());
         assert_eq!(
             store
-                .historian_side_channel_status("ses")
+                .history_summarizer_side_channel_status("ses")
                 .unwrap()
                 .pending_count,
             0,
@@ -21162,24 +20920,23 @@ mod tests {
         );
         let expected = store.load("ses").unwrap().row_version;
         let error = store
-            .publish_historian_chunk(HistorianPublishRequest {
+            .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                 session_id: "ses",
                 expected_row_version: expected,
                 expected_revert_epoch: 0,
                 predicate: &publish_predicate(),
                 project_path: "git:proj",
-                compartments: &[publish_compartment()],
+                history_segments: &[publish_history_segment()],
                 events: &[],
                 primer_candidates: &[],
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: Some(&transcript),
-                raw_chunk_messages: None,
             })
             .unwrap_err();
         assert!(matches!(
             error,
-            HistorianPublishError::Store(MemoryStoreError::Redaction(
+            HistorySummarizerPublishError::Store(MemoryStoreError::Redaction(
                 RedactionErrorKind::InputLimit
             ))
         ));
@@ -21198,8 +20955,8 @@ mod tests {
         store
             .commit("ses", None, &CoreState::empty(), &publishing_meta())
             .unwrap();
-        let compartments = (0..8)
-            .map(|index| StoredCompartment {
+        let history_segments = (0..8)
+            .map(|index| StoredHistorySegment {
                 start_message: 10 + index * 2,
                 end_message: 11 + index * 2,
                 end_message_id: format!("m{}", 11 + index * 2),
@@ -21210,26 +20967,25 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = store.load("ses").unwrap().row_version;
         store
-            .publish_historian_chunk(HistorianPublishRequest {
+            .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                 session_id: "ses",
                 expected_row_version: expected,
                 expected_revert_epoch: 0,
                 predicate: &publish_predicate(),
                 project_path: "git:proj",
-                compartments: &compartments,
+                history_segments: &history_segments,
                 events: &[],
                 primer_candidates: &[],
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 25,
                 chunk_transcript: Some("U: bounded row"),
-                raw_chunk_messages: None,
             })
             .unwrap();
 
         assert_eq!(store.last_compacted_ordinal("ses").unwrap(), 25);
         assert_eq!(
             store
-                .load_compartments_for_range("ses", 1, 100, 3)
+                .load_history_segments_for_range("ses", 1, 100, 3)
                 .unwrap()
                 .len(),
             3
@@ -21248,7 +21004,9 @@ mod tests {
         );
         let loaded = store.load("ses").unwrap();
         let mut replay_meta = publishing_meta();
-        replay_meta.historian.compartment_set_generation = CompartmentSetGeneration {
+        replay_meta
+            .history_summarizer
+            .history_segment_set_generation = HistorySegmentSetGeneration {
             max_sequence: 8,
             count: 8,
         };
@@ -21256,18 +21014,20 @@ mod tests {
             .commit("ses", loaded.row_version, &loaded.core, &replay_meta)
             .unwrap();
         let expected = store.load("ses").unwrap().row_version;
-        let replay_predicate = HistorianPublishPredicate {
-            compartment_set_generation: replay_meta.historian.compartment_set_generation,
+        let replay_predicate = HistorySummarizerPublishPredicate {
+            history_segment_set_generation: replay_meta
+                .history_summarizer
+                .history_segment_set_generation,
             ..publish_predicate()
         };
         let error = store
-            .publish_historian_chunk(HistorianPublishRequest {
+            .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                 session_id: "ses",
                 expected_row_version: expected,
                 expected_revert_epoch: 0,
                 predicate: &replay_predicate,
                 project_path: "git:proj",
-                compartments: &[StoredCompartment {
+                history_segments: &[StoredHistorySegment {
                     start_message: 100,
                     end_message: 101,
                     end_message_id: "m101".to_string(),
@@ -21280,12 +21040,11 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 101,
                 chunk_transcript: Some(&oversized),
-                raw_chunk_messages: None,
             })
             .unwrap_err();
         assert!(matches!(
             error,
-            HistorianPublishError::Store(MemoryStoreError::Redaction(
+            HistorySummarizerPublishError::Store(MemoryStoreError::Redaction(
                 RedactionErrorKind::InputLimit
             ))
         ));
@@ -21298,7 +21057,7 @@ mod tests {
     }
 
     #[test]
-    fn note_search_is_scoped_to_the_requested_composite_session_and_smart_notes() {
+    fn note_search_is_scoped_to_the_requested_composite_session_and_conditional_notes() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let project = "git:shared-project";
@@ -21532,7 +21291,7 @@ mod tests {
                                 "git:proj",
                                 "notes",
                                 "writer-session",
-                                "ctx_note",
+                                "eidnara_note",
                                 "update",
                                 None,
                                 |txn| {
@@ -21789,7 +21548,7 @@ mod tests {
                 project_path: "git:proj",
                 route_project_root: None,
                 session_id: Some("writer"),
-                content: "shared smart note",
+                content: "shared conditional note",
                 surface_condition: Some("condition"),
                 anchor_block_id: None,
                 anchor_ordinal: None,
@@ -22042,7 +21801,7 @@ mod tests {
         assert!(page.iter().all(|note| note.project_path == "git:proj"));
     }
 
-    fn insert_smart_note_with_compile(
+    fn insert_conditional_note_with_compile(
         store: &MemoryStore,
         project: &str,
         content: &str,
@@ -22072,8 +21831,13 @@ mod tests {
     fn note_create_initializes_revisions_equal_and_content_edits_keep_them_equal() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let note =
-            insert_smart_note_with_compile(&store, "git:proj", "first body", Some("cond"), None);
+        let note = insert_conditional_note_with_compile(
+            &store,
+            "git:proj",
+            "first body",
+            Some("cond"),
+            None,
+        );
         assert_eq!(note.source_revision, 0);
         assert_eq!(note.state_version, 0);
         assert_eq!(note.status_version, 0);
@@ -22106,13 +21870,13 @@ mod tests {
     fn note_content_edit_advances_source_revision_and_resets_evaluation_state() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let note = insert_smart_note_with_compile(
+        let note = insert_conditional_note_with_compile(
             &store,
             "git:proj",
             "watch the release",
             Some("release exists"),
             Some(NoteConditionCompile {
-                compiled_provider: Some("retina-1"),
+                compiled_provider: Some("observer-1"),
                 compiled_config: Some("{\"model\":\"a\"}"),
                 compiled_at: Some(7),
                 compile_status: Some("compiled"),
@@ -22184,7 +21948,7 @@ mod tests {
         assert_eq!(edited.last_checked_at, None);
         assert_eq!(edited.ready_at, None);
         assert_eq!(edited.ready_reason, None);
-        assert_eq!(edited.compiled_provider.as_deref(), Some("retina-1"));
+        assert_eq!(edited.compiled_provider.as_deref(), Some("observer-1"));
         assert_eq!(edited.compiled_config.as_deref(), Some("{\"model\":\"a\"}"));
         assert_eq!(edited.compiled_at, Some(7));
         assert_eq!(edited.compile_status.as_deref(), Some("compiled"));
@@ -22194,13 +21958,13 @@ mod tests {
     fn note_condition_edit_resets_evaluation_state_and_replaces_compile_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let note = insert_smart_note_with_compile(
+        let note = insert_conditional_note_with_compile(
             &store,
             "git:proj",
             "watch the release",
             Some("release exists"),
             Some(NoteConditionCompile {
-                compiled_provider: Some("retina-1"),
+                compiled_provider: Some("observer-1"),
                 compiled_config: Some("{\"model\":\"a\"}"),
                 compiled_at: Some(7),
                 compile_status: Some("compiled"),
@@ -22228,7 +21992,7 @@ mod tests {
                 None,
                 Some(Some("tag advances")),
                 Some(NoteConditionCompile {
-                    compiled_provider: Some("retina-2"),
+                    compiled_provider: Some("observer-2"),
                     compiled_config: Some("{\"model\":\"b\"}"),
                     compiled_at: Some(9),
                     compile_status: Some("plain"),
@@ -22252,7 +22016,7 @@ mod tests {
         assert_eq!(recompiled.manifest_json, None);
         assert_eq!(recompiled.check_hash, None);
         assert_eq!(recompiled.check_status.as_deref(), Some("uncompiled"));
-        assert_eq!(recompiled.compiled_provider.as_deref(), Some("retina-2"));
+        assert_eq!(recompiled.compiled_provider.as_deref(), Some("observer-2"));
         assert_eq!(
             recompiled.compiled_config.as_deref(),
             Some("{\"model\":\"b\"}")
@@ -22287,7 +22051,7 @@ mod tests {
     fn note_lifecycle_transitions_advance_state_but_not_source_and_keep_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let note = insert_smart_note_with_compile(
+        let note = insert_conditional_note_with_compile(
             &store,
             "git:proj",
             "surface me",
@@ -22351,8 +22115,13 @@ mod tests {
         assert_eq!(dismissed.manifest_json.as_deref(), Some("{}"));
         assert_eq!(dismissed.check_hash.as_deref(), Some("hash"));
 
-        let due =
-            insert_smart_note_with_compile(&store, "git:proj", "due note", Some("cond"), None);
+        let due = insert_conditional_note_with_compile(
+            &store,
+            "git:proj",
+            "due note",
+            Some("cond"),
+            None,
+        );
         let claimed = store.claim_due_note("git:proj", 10).unwrap().unwrap();
         assert_eq!(claimed.id, due.id);
         assert_eq!(claimed.status_version, 1);
@@ -22380,8 +22149,10 @@ mod tests {
     fn seeded_compiled_check_is_adopted_on_digest_match_and_cleared_on_mismatch() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let good = insert_smart_note_with_compile(&store, "git:proj", "good", Some("cond"), None);
-        let bad = insert_smart_note_with_compile(&store, "git:proj", "bad", Some("cond"), None);
+        let good =
+            insert_conditional_note_with_compile(&store, "git:proj", "good", Some("cond"), None);
+        let bad =
+            insert_conditional_note_with_compile(&store, "git:proj", "bad", Some("cond"), None);
         let manifest = "{\"hosts\":[]}";
         let good_hash = note_check_digest(
             Some("cond"),
@@ -22391,7 +22162,8 @@ mod tests {
         );
         // `stale` carries a digest computed over a different cron, so a verifier
         // that left `check_cron` out of the digest would wrongly adopt it.
-        let stale = insert_smart_note_with_compile(&store, "git:proj", "stale", Some("cond"), None);
+        let stale =
+            insert_conditional_note_with_compile(&store, "git:proj", "stale", Some("cond"), None);
         store
             .inner
             .with_conn_unfenced(|conn| {
@@ -22468,7 +22240,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_historian_chunk_fails_loud_from_non_publish_state() {
+    fn publish_history_summarizer_chunk_fails_loud_from_non_publish_state() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         store
@@ -22477,29 +22249,28 @@ mod tests {
         let expected = store.load("ses").unwrap().row_version;
 
         let err = store
-            .publish_historian_chunk(HistorianPublishRequest {
+            .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                 session_id: "ses",
                 expected_row_version: expected,
                 expected_revert_epoch: 0,
                 predicate: &publish_predicate(),
                 project_path: "git:proj",
-                compartments: &[publish_compartment()],
+                history_segments: &[publish_history_segment()],
                 events: &[],
                 primer_candidates: &[],
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                raw_chunk_messages: None,
             })
             .unwrap_err();
         assert!(
-            matches!(err, HistorianPublishError::InvalidState { ref state } if state == "idle"),
+            matches!(err, HistorySummarizerPublishError::InvalidState { ref state } if state == "idle"),
             "idle state must fail loudly: {err:?}"
         );
-        assert!(store.load_compartments("ses").unwrap().is_empty());
+        assert!(store.load_history_segments("ses").unwrap().is_empty());
     }
-    fn recut_comp(seq: i64, start: i64, end: i64, end_id: &str) -> StoredCompartment {
-        StoredCompartment {
+    fn recut_comp(seq: i64, start: i64, end: i64, end_id: &str) -> StoredHistorySegment {
+        StoredHistorySegment {
             sequence: seq,
             start_message: start,
             end_message: end,
@@ -22514,19 +22285,19 @@ mod tests {
     }
 
     #[test]
-    fn truncate_compartments_for_revert_deletes_suffix_and_bumps_epoch() {
+    fn truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let meta = ModuleMeta {
             coverage_ordinal: Some(3),
-            folded_compartment_seq: 3,
+            folded_history_segment_seq: 3,
             ..Default::default()
         };
         let rv = store
             .commit("ses", None, &CoreState::empty(), &meta)
             .unwrap();
         store
-            .replace_compartments(
+            .replace_history_segments(
                 "ses",
                 &[
                     recut_comp(1, 1, 1, "a#0"),
@@ -22537,7 +22308,7 @@ mod tests {
             .unwrap();
 
         let outcome = store
-            .truncate_compartments_for_revert("ses", 1, Some(rv))
+            .truncate_history_segments_for_revert("ses", 1, Some(rv))
             .unwrap();
         assert_eq!(outcome.revert_epoch, 1);
         assert_eq!(outcome.row_version, rv + 1);
@@ -22551,27 +22322,27 @@ mod tests {
         let loaded = store.load("ses").unwrap();
         assert_eq!(loaded.meta.revert_epoch, 1);
         assert_eq!(loaded.meta.last_recut, outcome.last_recut);
-        let compartments = store.load_compartments("ses").unwrap();
-        assert_eq!(compartments.len(), 1);
-        assert_eq!(compartments[0].sequence, 1);
+        let history_segments = store.load_history_segments("ses").unwrap();
+        assert_eq!(history_segments.len(), 1);
+        assert_eq!(history_segments[0].sequence, 1);
 
         let no_op = store
-            .truncate_compartments_for_revert("ses", 1, Some(outcome.row_version))
+            .truncate_history_segments_for_revert("ses", 1, Some(outcome.row_version))
             .unwrap();
         assert_eq!(no_op.revert_epoch, 1);
         assert_eq!(no_op.row_version, outcome.row_version);
-        assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
     }
 
     #[test]
-    fn truncate_compartments_for_revert_removes_anchored_events_and_crossing_ranges() {
+    fn truncate_history_segments_for_revert_removes_anchored_events_and_crossing_ranges() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let rv = store
             .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
             .unwrap();
         store
-            .replace_compartments(
+            .replace_history_segments(
                 "ses",
                 &[
                     recut_comp(1, 1, 10, "a#0"),
@@ -22584,18 +22355,18 @@ mod tests {
             .inner
             .with_conn_unfenced(|conn| {
                 conn.execute_batch(
-                    "INSERT INTO compartment_events(session_id, compartment_id, at_compartment, kind)
+                    "INSERT INTO history_segment_events(session_id, history_segment_id, at_history_segment, kind)
                      VALUES ('ses', NULL, 1, 'kept'), ('ses', NULL, 3, 'anchored-late');
                      INSERT INTO primer_candidates
                          (project_path, session_id, question, normalized_question,
-                          source_compartment_start, source_compartment_end,
+                          source_history_segment_start, source_history_segment_end,
                           source_start_message_id, source_end_message_id)
                      VALUES ('p', 'ses', 'kept?', 'kept', 1, 10, 'a', 'b'),
                             ('p', 'ses', 'crossing?', 'crossing', 5, 25, 'c', 'd');
                      INSERT INTO user_memory_candidates
-                         (content, session_id, source_compartment_start, source_compartment_end)
+                         (content, session_id, source_history_segment_start, source_history_segment_end)
                      VALUES ('kept', 'ses', 1, 10), ('crossing', 'ses', 5, 25);
-                     INSERT INTO historian_side_channel_outbox
+                     INSERT INTO history_summarizer_side_channel_outbox
                          (session_id, firing_seq, kind, source_start, source_end, item_index,
                           payload_json, created_at_ms)
                      VALUES ('ses', 1, 'event', 1, 10, 0, '{}', 0),
@@ -22605,10 +22376,10 @@ mod tests {
             .unwrap();
 
         store
-            .truncate_compartments_for_revert("ses", 1, Some(rv))
+            .truncate_history_segments_for_revert("ses", 1, Some(rv))
             .unwrap();
 
-        let events = store.load_compartment_events("ses").unwrap();
+        let events = store.load_history_segment_events("ses").unwrap();
         assert_eq!(
             events
                 .iter()
@@ -22631,7 +22402,7 @@ mod tests {
                         |row| row.get::<_, String>(0),
                     )?,
                     conn.query_row(
-                        "SELECT group_concat(firing_seq) FROM historian_side_channel_outbox WHERE session_id = 'ses'",
+                        "SELECT group_concat(firing_seq) FROM history_summarizer_side_channel_outbox WHERE session_id = 'ses'",
                         [],
                         |row| row.get::<_, String>(0),
                     )?,
@@ -22645,7 +22416,7 @@ mod tests {
     }
 
     #[test]
-    fn assembly_snapshot_reads_compartments_and_revert_epoch_together() {
+    fn assembly_snapshot_reads_history_segments_and_revert_epoch_together() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let meta = ModuleMeta {
@@ -22656,17 +22427,19 @@ mod tests {
             .commit("ses", None, &CoreState::empty(), &meta)
             .unwrap();
         store
-            .replace_compartments("ses", &[recut_comp(1, 1, 1, "a#0")])
+            .replace_history_segments("ses", &[recut_comp(1, 1, 1, "a#0")])
             .unwrap();
 
-        let snapshot = store.load_historian_assembly_snapshot("ses").unwrap();
+        let snapshot = store
+            .load_history_summarizer_assembly_snapshot("ses")
+            .unwrap();
         assert_eq!(snapshot.revert_epoch, 4);
-        assert_eq!(snapshot.compartments.len(), 1);
-        assert_eq!(snapshot.compartments[0].end_message_id, "a#0");
+        assert_eq!(snapshot.history_segments.len(), 1);
+        assert_eq!(snapshot.history_segments[0].end_message_id, "a#0");
     }
 
     #[test]
-    fn publish_historian_chunk_rejects_recut_epoch_mismatch_as_conflict() {
+    fn publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let mut meta = publishing_meta();
@@ -22677,32 +22450,31 @@ mod tests {
         let expected = store.load("ses").unwrap().row_version;
 
         let err = store
-            .publish_historian_chunk(HistorianPublishRequest {
+            .publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
                 session_id: "ses",
                 expected_row_version: expected,
                 expected_revert_epoch: 0,
                 predicate: &publish_predicate(),
                 project_path: "git:proj",
-                compartments: &[publish_compartment()],
+                history_segments: &[publish_history_segment()],
                 events: &[],
                 primer_candidates: &[],
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                raw_chunk_messages: None,
             })
             .unwrap_err();
         assert!(matches!(
             err,
-            HistorianPublishError::CasConflict {
+            HistorySummarizerPublishError::CasConflict {
                 reason: Some(ref reason),
                 ..
             } if reason == "revert epoch mismatch (session was re-cut mid-firing)"
         ));
-        assert!(store.load_compartments("ses").unwrap().is_empty());
+        assert!(store.load_history_segments("ses").unwrap().is_empty());
         assert_eq!(
-            store.load("ses").unwrap().meta.historian.state,
-            HistorianPhase::Publishing
+            store.load("ses").unwrap().meta.history_summarizer.state,
+            HistorySummarizerPhase::Publishing
         );
     }
 
@@ -24024,15 +23796,15 @@ mod tests {
             .generation
     }
 
-    fn dreamer_acquire(
+    fn memory_classifier_acquire(
         store: &MemoryStore,
         acquisition_id: &str,
         registration_generation: i64,
         due_at_ms: i64,
         now_ms: i64,
-    ) -> DreamerTaskAcquireOutcome {
+    ) -> MemoryClassifierTaskAcquireOutcome {
         store
-            .acquire_dreamer_task(
+            .acquire_memory_classifier_task(
                 EVAL_PROJECT,
                 acquisition_id,
                 "sched",
@@ -24045,19 +23817,19 @@ mod tests {
             .unwrap()
     }
 
-    /// A Dreamer task leases under the memories authority, not the notes
+    /// A MemoryClassifier task leases under the memories authority, not the notes
     /// authority the note-evaluation kind uses.
     #[test]
-    fn dreamer_task_lease_is_gated_by_memories_authority_only() {
+    fn memory_classifier_task_lease_is_gated_by_memories_authority_only() {
         let dir = tempfile::tempdir().unwrap();
         let store = note_eval_store(dir.path());
         assert_eq!(
-            dreamer_acquire(&store, "acq-1", 1, 100, 100),
+            memory_classifier_acquire(&store, "acq-1", 1, 100, 100),
             LeaseAcquireOutcome::AuthorityChanged,
-            "notes authority alone does not admit a Dreamer task"
+            "notes authority alone does not admit a MemoryClassifier task"
         );
         let memories_generation = activate_domain(&store, "memories");
-        let claim = match dreamer_acquire(&store, "acq-1", 1, 100, 100) {
+        let claim = match memory_classifier_acquire(&store, "acq-1", 1, 100, 100) {
             LeaseAcquireOutcome::Claim { claim, .. } => claim,
             other => panic!("{other:?}"),
         };
@@ -24071,17 +23843,17 @@ mod tests {
     /// leased it replays its claim; expiry frees the task for a fresh lease and
     /// turns the old claim's completion into a conflict.
     #[test]
-    fn dreamer_task_lease_is_exclusive_until_completion_or_expiry() {
+    fn memory_classifier_task_lease_is_exclusive_until_completion_or_expiry() {
         let dir = tempfile::tempdir().unwrap();
         let store = note_eval_store(dir.path());
         activate_domain(&store, "memories");
-        let claim = match dreamer_acquire(&store, "acq-1", 1, 100, 100) {
+        let claim = match memory_classifier_acquire(&store, "acq-1", 1, 100, 100) {
             LeaseAcquireOutcome::Claim { claim, .. } => claim,
             other => panic!("{other:?}"),
         };
         // The holder's own acquisition id replays the live claim and renews
         // its lease from that instant.
-        let renewed = match dreamer_acquire(&store, "acq-1", 1, 100, 200) {
+        let renewed = match memory_classifier_acquire(&store, "acq-1", 1, 100, 200) {
             LeaseAcquireOutcome::Claim {
                 claim,
                 replayed: true,
@@ -24090,13 +23862,22 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!(renewed.claim_id, claim.claim_id);
-        let expired_at = 200 + DREAMER_TASK_LEASE_MS;
+        let expired_at = 200 + MEMORY_CLASSIFIER_TASK_LEASE_MS;
         assert_eq!(renewed.expires_at, expired_at);
         // A different scheduler instance asking for the same task gets no work
         // while the lease is live, right up to the expiry instant.
         let other = |acquisition_id: &str, now_ms: i64| {
             store
-                .acquire_dreamer_task(EVAL_PROJECT, acquisition_id, "other", 0, 1, 1, 100, now_ms)
+                .acquire_memory_classifier_task(
+                    EVAL_PROJECT,
+                    acquisition_id,
+                    "other",
+                    0,
+                    1,
+                    1,
+                    100,
+                    now_ms,
+                )
                 .unwrap()
         };
         assert_eq!(
@@ -24128,7 +23909,7 @@ mod tests {
         assert_ne!(fresh.claim_id, claim.claim_id);
         assert_eq!(
             store
-                .complete_dreamer_task(
+                .complete_memory_classifier_task(
                     EVAL_PROJECT,
                     &claim.claim_id,
                     "comp-1",
@@ -24143,7 +23924,7 @@ mod tests {
         // The live claim completes once and replays its response after that.
         assert!(matches!(
             store
-                .complete_dreamer_task(
+                .complete_memory_classifier_task(
                     EVAL_PROJECT,
                     &fresh.claim_id,
                     "comp-2",
@@ -24157,7 +23938,7 @@ mod tests {
         ));
         assert!(matches!(
             store
-                .complete_dreamer_task(
+                .complete_memory_classifier_task(
                     EVAL_PROJECT,
                     &fresh.claim_id,
                     "comp-2",
@@ -24180,7 +23961,13 @@ mod tests {
         };
         assert_eq!(
             store
-                .abandon_dreamer_task(EVAL_PROJECT, &claim.claim_id, "other", 0, expired_at + 6)
+                .abandon_memory_classifier_task(
+                    EVAL_PROJECT,
+                    &claim.claim_id,
+                    "other",
+                    0,
+                    expired_at + 6
+                )
                 .unwrap(),
             NoteEvalAbandonOutcome::Abandoned
         );
@@ -24197,13 +23984,13 @@ mod tests {
     /// claim on another task hands that claim back, marked `Held`, and the
     /// requested task stays free.
     #[test]
-    fn dreamer_task_slot_recovery_names_the_task_it_returns() {
+    fn memory_classifier_task_slot_recovery_names_the_task_it_returns() {
         let dir = tempfile::tempdir().unwrap();
         let store = note_eval_store(dir.path());
         activate_domain(&store, "memories");
         let acquire = |acquisition_id: &str, slot: i64, task_id: i64, now_ms: i64| {
             store
-                .acquire_dreamer_task(
+                .acquire_memory_classifier_task(
                     EVAL_PROJECT,
                     acquisition_id,
                     "sched",
@@ -24218,7 +24005,7 @@ mod tests {
         let first = match acquire("acq-1", 0, 1, 100) {
             LeaseAcquireOutcome::Claim {
                 claim,
-                task: DreamerLeasedTask::Requested,
+                task: MemoryClassifierLeasedTask::Requested,
                 replayed: false,
             } => claim,
             other => panic!("{other:?}"),
@@ -24226,7 +24013,7 @@ mod tests {
         let recovered = match acquire("acq-2", 0, 2, 200) {
             LeaseAcquireOutcome::Claim {
                 claim,
-                task: DreamerLeasedTask::Held,
+                task: MemoryClassifierLeasedTask::Held,
                 replayed: true,
             } => claim,
             other => panic!("{other:?}"),
@@ -24234,12 +24021,16 @@ mod tests {
         assert_eq!(recovered.claim_id, first.claim_id);
         assert_eq!(recovered.note_id, 1, "the task the slot still held");
         assert_eq!(recovered.acquisition_id, "acq-2");
-        assert_eq!(recovered.expires_at, 200 + DREAMER_TASK_LEASE_MS, "renewed");
+        assert_eq!(
+            recovered.expires_at,
+            200 + MEMORY_CLASSIFIER_TASK_LEASE_MS,
+            "renewed"
+        );
         // A replay of `acq-2` is still marked `Held`.
         assert!(matches!(
             acquire("acq-2", 0, 2, 201),
             LeaseAcquireOutcome::Claim {
-                task: DreamerLeasedTask::Held,
+                task: MemoryClassifierLeasedTask::Held,
                 replayed: true,
                 ..
             }
@@ -24248,7 +24039,7 @@ mod tests {
         assert!(matches!(
             acquire("acq-3", 1, 2, 202),
             LeaseAcquireOutcome::Claim {
-                task: DreamerLeasedTask::Requested,
+                task: MemoryClassifierLeasedTask::Requested,
                 replayed: false,
                 ..
             }
@@ -24256,14 +24047,14 @@ mod tests {
         // Once the held claim is released, the slot leases what it asks for.
         assert_eq!(
             store
-                .abandon_dreamer_task(EVAL_PROJECT, &recovered.claim_id, "sched", 0, 203)
+                .abandon_memory_classifier_task(EVAL_PROJECT, &recovered.claim_id, "sched", 0, 203)
                 .unwrap(),
             NoteEvalAbandonOutcome::Abandoned
         );
         assert!(matches!(
             acquire("acq-4", 0, 3, 204),
             LeaseAcquireOutcome::Claim {
-                task: DreamerLeasedTask::Requested,
+                task: MemoryClassifierLeasedTask::Requested,
                 replayed: false,
                 ..
             }
@@ -24271,27 +24062,28 @@ mod tests {
     }
 
     /// An authority transition fences only the lease kinds its domain governs:
-    /// a memories drain ends Dreamer claims and leaves note-evaluation claims
+    /// a memories drain ends MemoryClassifier claims and leaves note-evaluation claims
     /// usable, and a notes drain does the reverse.
     #[test]
     fn authority_transitions_fence_leases_per_domain() {
-        for (drained, fenced_dreamer) in [("memories", true), ("notes", false)] {
+        for (drained, fenced_memory_classifier) in [("memories", true), ("notes", false)] {
             let dir = tempfile::tempdir().unwrap();
             let store = note_eval_store(dir.path());
             activate_domain(&store, "memories");
             eval_note(&store, "watch the build");
             let note_claim = eval_claim(&store, "note-acq", 0, 10);
-            let dreamer_claim = match dreamer_acquire(&store, "acq-1", 1, 100, 10) {
-                LeaseAcquireOutcome::Claim { claim, .. } => claim,
-                other => panic!("{other:?}"),
-            };
+            let memory_classifier_claim =
+                match memory_classifier_acquire(&store, "acq-1", 1, 100, 10) {
+                    LeaseAcquireOutcome::Claim { claim, .. } => claim,
+                    other => panic!("{other:?}"),
+                };
             store
                 .authority_begin_drain("ctx", EVAL_PROJECT, drained, "lease", 1_000_000, 20)
                 .unwrap();
-            let dreamer_completion = store
-                .complete_dreamer_task(
+            let memory_classifier_completion = store
+                .complete_memory_classifier_task(
                     EVAL_PROJECT,
-                    &dreamer_claim.claim_id,
+                    &memory_classifier_claim.claim_id,
                     "comp-d",
                     "sched",
                     0,
@@ -24302,9 +24094,9 @@ mod tests {
             let note_renewal = store
                 .renew_note_evaluation_claim(EVAL_PROJECT, &note_claim.claim_id, "eval-a", 0, 1, 30)
                 .unwrap();
-            if fenced_dreamer {
+            if fenced_memory_classifier {
                 assert_eq!(
-                    dreamer_completion,
+                    memory_classifier_completion,
                     LeaseCompleteOutcome::Conflict {
                         kind: "authority_changed"
                     },
@@ -24315,14 +24107,17 @@ mod tests {
                     "{drained}: {note_renewal:?}"
                 );
                 assert_eq!(
-                    dreamer_acquire(&store, "acq-2", 1, 100, 40),
+                    memory_classifier_acquire(&store, "acq-2", 1, 100, 40),
                     LeaseAcquireOutcome::AuthorityChanged,
                     "{drained}"
                 );
             } else {
                 assert!(
-                    matches!(dreamer_completion, LeaseCompleteOutcome::Applied { .. }),
-                    "{drained}: {dreamer_completion:?}"
+                    matches!(
+                        memory_classifier_completion,
+                        LeaseCompleteOutcome::Applied { .. }
+                    ),
+                    "{drained}: {memory_classifier_completion:?}"
                 );
                 assert!(
                     matches!(
@@ -24490,8 +24285,8 @@ mod shadow_tests {
         MemoryStore::open_for_test(dir, "eidnara-test")
     }
 
-    fn comp(sequence: i64, end: i64, end_id: &str) -> StoredCompartment {
-        StoredCompartment {
+    fn comp(sequence: i64, end: i64, end_id: &str) -> StoredHistorySegment {
+        StoredHistorySegment {
             sequence,
             start_message: 0,
             end_message: end,
@@ -24506,7 +24301,7 @@ mod shadow_tests {
     }
 
     /// A state sync whose metadata fails preparation must roll back. Pending drops, hint
-    /// seeds, compartments, the workspace, and the profile are written before that scan runs,
+    /// seeds, history_segments, the workspace, and the profile are written before that scan runs,
     /// so reporting the refusal through a successful disposition commits them.
     #[test]
     fn state_sync_metadata_scan_failure_rolls_back_earlier_writes() {
@@ -24564,7 +24359,7 @@ mod shadow_tests {
                 strip_seeds: &[],
                 strip_seed_skipped: 0,
                 reasoning_cleared_through_tag: None,
-                compartments: &[],
+                history_segments: &[],
                 user_profile: &[],
                 user_profile_present: false,
                 workspace: None,
@@ -24644,7 +24439,7 @@ mod shadow_tests {
                 strip_seeds: &[],
                 strip_seed_skipped: 0,
                 reasoning_cleared_through_tag: None,
-                compartments: &[],
+                history_segments: &[],
                 user_profile: &[],
                 user_profile_present: false,
                 workspace: None,
@@ -24774,7 +24569,7 @@ mod shadow_tests {
                 strip_seeds: &[],
                 strip_seed_skipped: 0,
                 reasoning_cleared_through_tag: None,
-                compartments: &[],
+                history_segments: &[],
                 user_profile: user_profile.unwrap_or(&[]),
                 user_profile_present: user_profile.is_some(),
                 workspace,
@@ -25027,7 +24822,7 @@ mod shadow_tests {
                 "seed",
                 "memories",
                 "notes",
-                "compartments",
+                "history_segments",
                 "reconcile",
                 "verify",
             ];
@@ -25091,7 +24886,7 @@ mod shadow_tests {
         "seed",
         "memories",
         "notes",
-        "compartments",
+        "history_segments",
         "reconcile",
         "verify",
     ];
@@ -25181,7 +24976,7 @@ mod shadow_tests {
             !(resumed.step_seed
                 || resumed.step_memories
                 || resumed.step_notes
-                || resumed.step_compartments
+                || resumed.step_history_segments
                 || resumed.step_reconcile
                 || resumed.step_verify),
             "a wider capture must clear every completed step: {resumed:?}"
@@ -25432,14 +25227,14 @@ mod shadow_tests {
     }
 
     #[test]
-    fn appended_compartments_must_carry_an_ordered_non_negative_range() {
+    fn appended_history_segments_must_carry_an_ordered_non_negative_range() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         store
             .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
             .unwrap();
         for (start, end) in [(-1, 3), (5, 3)] {
-            let malformed = StoredCompartment {
+            let malformed = StoredHistorySegment {
                 sequence: 1,
                 start_message: start,
                 end_message: end,
@@ -25451,24 +25246,24 @@ mod shadow_tests {
                 ..Default::default()
             };
             let error = store
-                .append_compartments("ses", std::slice::from_ref(&malformed))
+                .append_history_segments("ses", std::slice::from_ref(&malformed))
                 .unwrap_err();
             assert!(
                 matches!(error, MemoryStoreError::Serde(ref message) if message.contains("ordinal range")),
                 "{error:?}"
             );
         }
-        assert!(store.load_compartments("ses").unwrap().is_empty());
+        assert!(store.load_history_segments("ses").unwrap().is_empty());
     }
 
     #[test]
-    fn appended_compartments_must_start_after_the_current_ordinal_tail() {
+    fn appended_history_segments_must_start_after_the_current_ordinal_tail() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         store
             .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
             .unwrap();
-        let compartment = |start: i64, end: i64| StoredCompartment {
+        let history_segment = |start: i64, end: i64| StoredHistorySegment {
             sequence: 0,
             start_message: start,
             end_message: end,
@@ -25480,27 +25275,27 @@ mod shadow_tests {
             ..Default::default()
         };
         store
-            .append_compartments("ses", &[compartment(10, 20)])
+            .append_history_segments("ses", &[history_segment(10, 20)])
             .unwrap();
 
         // Disjoint but behind the tail, and an internally reversed batch, both refused.
         for batch in [
-            vec![compartment(1, 9)],
-            vec![compartment(30, 40), compartment(21, 29)],
+            vec![history_segment(1, 9)],
+            vec![history_segment(30, 40), history_segment(21, 29)],
         ] {
-            let error = store.append_compartments("ses", &batch).unwrap_err();
+            let error = store.append_history_segments("ses", &batch).unwrap_err();
             assert!(
-                matches!(error, MemoryStoreError::CompartmentRangeOverlap { .. }),
+                matches!(error, MemoryStoreError::HistorySegmentRangeOverlap { .. }),
                 "{error:?}"
             );
         }
-        assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
 
         store
-            .append_compartments("ses", &[compartment(21, 29), compartment(30, 40)])
+            .append_history_segments("ses", &[history_segment(21, 29), history_segment(30, 40)])
             .unwrap();
         let sequences: Vec<(i64, i64)> = store
-            .load_compartments("ses")
+            .load_history_segments("ses")
             .unwrap()
             .iter()
             .map(|row| (row.sequence, row.start_message))
@@ -25509,13 +25304,13 @@ mod shadow_tests {
     }
 
     #[test]
-    fn replacing_compartments_rejects_ranges_that_overlap_in_sequence_order() {
+    fn replacing_history_segments_rejects_ranges_that_overlap_in_sequence_order() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         store
             .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
             .unwrap();
-        let compartment = |sequence: i64, start: i64, end: i64| StoredCompartment {
+        let history_segment = |sequence: i64, start: i64, end: i64| StoredHistorySegment {
             sequence,
             start_message: start,
             end_message: end,
@@ -25527,25 +25322,34 @@ mod shadow_tests {
             ..Default::default()
         };
         let error = store
-            .replace_compartments("ses", &[compartment(1, 1, 10), compartment(2, 8, 15)])
+            .replace_history_segments(
+                "ses",
+                &[history_segment(1, 1, 10), history_segment(2, 8, 15)],
+            )
             .unwrap_err();
         assert!(
             matches!(error, MemoryStoreError::Serde(ref message) if message.contains("overlap")),
             "{error:?}"
         );
         let error = store
-            .replace_compartments("ses", &[compartment(1, 1, 10), compartment(1, 11, 15)])
+            .replace_history_segments(
+                "ses",
+                &[history_segment(1, 1, 10), history_segment(1, 11, 15)],
+            )
             .unwrap_err();
         assert!(
             matches!(error, MemoryStoreError::Serde(ref message) if message.contains("unique")),
             "{error:?}"
         );
-        assert!(store.load_compartments("ses").unwrap().is_empty());
+        assert!(store.load_history_segments("ses").unwrap().is_empty());
 
         store
-            .replace_compartments("ses", &[compartment(2, 11, 15), compartment(1, 1, 10)])
+            .replace_history_segments(
+                "ses",
+                &[history_segment(2, 11, 15), history_segment(1, 1, 10)],
+            )
             .unwrap();
-        assert_eq!(store.load_compartments("ses").unwrap().len(), 2);
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
     }
 
     #[test]
@@ -25578,7 +25382,7 @@ mod shadow_tests {
         store
             .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
             .unwrap();
-        let mut compartments = vec![StoredCompartment {
+        let mut history_segments = vec![StoredHistorySegment {
             sequence: 1,
             start_message: 0,
             end_message: 1,
@@ -25590,7 +25394,7 @@ mod shadow_tests {
             ..Default::default()
         }];
         for sequence in 2..=120 {
-            compartments.push(StoredCompartment {
+            history_segments.push(StoredHistorySegment {
                 sequence,
                 start_message: sequence * 2,
                 end_message: sequence * 2 + 1,
@@ -25602,9 +25406,11 @@ mod shadow_tests {
                 ..Default::default()
             });
         }
-        store.replace_compartments("ses", &compartments).unwrap();
+        store
+            .replace_history_segments("ses", &history_segments)
+            .unwrap();
 
-        let rows = store.search_compartments_like("ses", "needle").unwrap();
+        let rows = store.search_history_segments_like("ses", "needle").unwrap();
         assert_eq!(rows.len(), 100);
         assert_eq!(rows[0].sequence, 1, "the title hit ranks first");
         assert!(
@@ -25624,9 +25430,9 @@ mod shadow_tests {
             .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
             .unwrap();
         store
-            .replace_compartments(
+            .replace_history_segments(
                 "ses",
-                &[StoredCompartment {
+                &[StoredHistorySegment {
                     sequence: 1,
                     start_message: 0,
                     end_message: 1,
@@ -25640,17 +25446,23 @@ mod shadow_tests {
             )
             .unwrap();
         assert_eq!(
-            store.search_compartments_like("ses", "CAFÉ").unwrap().len(),
+            store
+                .search_history_segments_like("ses", "CAFÉ")
+                .unwrap()
+                .len(),
             1
         );
         assert_eq!(
-            store.search_compartments_like("ses", "café").unwrap().len(),
+            store
+                .search_history_segments_like("ses", "café")
+                .unwrap()
+                .len(),
             1,
             "a lowercase non-ASCII query must reach a stored uppercase spelling"
         );
         assert_eq!(
             store
-                .search_compartments_like("ses", "visited")
+                .search_history_segments_like("ses", "visited")
                 .unwrap()
                 .len(),
             1
@@ -25804,7 +25616,7 @@ mod shadow_tests {
                 strip_seeds: &[],
                 strip_seed_skipped: 0,
                 reasoning_cleared_through_tag: None,
-                compartments: &[comp(0, 0, "first#0")],
+                history_segments: &[comp(0, 0, "first#0")],
                 user_profile: &[],
                 user_profile_present: true,
                 workspace: None,
@@ -25840,7 +25652,7 @@ mod shadow_tests {
                 strip_seeds: &[],
                 strip_seed_skipped: 0,
                 reasoning_cleared_through_tag: None,
-                compartments: &[comp(1, 1, "second#0")],
+                history_segments: &[comp(1, 1, "second#0")],
                 user_profile: &[],
                 user_profile_present: true,
                 workspace: None,
@@ -25875,7 +25687,7 @@ mod shadow_tests {
         assert_eq!(loaded.meta.shadow_seq, 1);
         assert_eq!(loaded.meta.last_todo_state.as_deref(), Some("first"));
         assert_eq!(
-            store.load_compartments(session).unwrap()[0].end_message_id,
+            store.load_history_segments(session).unwrap()[0].end_message_id,
             "first#0"
         );
     }
@@ -25889,8 +25701,8 @@ mod lineage_descent_tests {
         MemoryStore::open_for_test(dir, "eidnara-lineage-test")
     }
 
-    fn compartment(sequence: i64, start: i64, end: i64, end_id: &str) -> StoredCompartment {
-        StoredCompartment {
+    fn history_segment(sequence: i64, start: i64, end: i64, end_id: &str) -> StoredHistorySegment {
+        StoredHistorySegment {
             sequence,
             start_message: start,
             end_message: end,
@@ -25917,9 +25729,12 @@ mod lineage_descent_tests {
         };
         store.commit(key, None, &core, &meta).unwrap();
         store
-            .append_compartments(
+            .append_history_segments(
                 key,
-                &[compartment(1, 1, 3, "m3#0"), compartment(2, 4, 6, "m6#0")],
+                &[
+                    history_segment(1, 1, 3, "m3#0"),
+                    history_segment(2, 4, 6, "m6#0"),
+                ],
             )
             .unwrap();
     }
@@ -26086,7 +25901,7 @@ mod lineage_descent_tests {
                     [source_note.id],
                 )?;
                 conn.execute(
-                    "UPDATE compartments
+                    "UPDATE history_segments
                         SET title = 'password=legacy-title-secret',
                             content = 'password=legacy-content-secret'
                       WHERE session_id = 'A'",
@@ -26105,7 +25920,7 @@ mod lineage_descent_tests {
                 )?;
                 conn.execute(
                     "INSERT INTO chunk_transcripts(
-                         session_id, compartment_seq, start_ordinal, end_ordinal,
+                         session_id, history_segment_seq, start_ordinal, end_ordinal,
                          transcript_deflate, created_at_ms
                      ) VALUES ('A', 1, 1, 3, ?1, 1)",
                     params![compress_transcript("U: password=legacy-transcript-secret").unwrap()],
@@ -26135,7 +25950,7 @@ mod lineage_descent_tests {
         assert_eq!(outcome.prior_last_ordinal, Some(10));
         assert!(outcome.materialization_required && outcome.acknowledge);
 
-        let copied = store.load_compartments("B").unwrap();
+        let copied = store.load_history_segments("B").unwrap();
         assert_eq!(
             copied
                 .iter()
@@ -26156,7 +25971,7 @@ mod lineage_descent_tests {
         assert_eq!(
             store.load("A").unwrap().meta.revert_epoch,
             before_epoch + 1,
-            "descent must activate the shipped prior-key historian fence"
+            "descent must activate the shipped prior-key history_summarizer fence"
         );
         let copied_markers = store
             .inner
@@ -26245,99 +26060,6 @@ mod lineage_descent_tests {
         }
     }
 
-    fn seed_raw_messages(store: &MemoryStore, session_id: &str, raw_messages: &str) {
-        store
-            .inner
-            .with_conn_unfenced(|conn| {
-                conn.execute(
-                    "INSERT INTO chunk_transcripts(
-                         session_id, compartment_seq, start_ordinal, end_ordinal,
-                         transcript_deflate, raw_messages_deflate, created_at_ms
-                     ) VALUES (?1, 1, 1, 3, ?2, ?3, 1)",
-                    params![
-                        session_id,
-                        compress_transcript("U: condensed").unwrap(),
-                        compress_raw_messages(raw_messages).unwrap(),
-                    ],
-                )?;
-                Ok(())
-            })
-            .unwrap();
-        let raw_present: bool = store
-            .inner
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT raw_messages_deflate IS NOT NULL FROM chunk_transcripts
-                      WHERE session_id = ?1 AND compartment_seq = 1",
-                    params![session_id],
-                    |row| row.get(0),
-                )
-            })
-            .unwrap();
-        assert!(raw_present, "the source row must carry raw messages");
-    }
-
-    fn descend_a_to_b(store: &MemoryStore) -> Result<LineageDescentOutcome, MemoryStoreError> {
-        let hops = direct_hop("A", "B", 2);
-        let anchor = anchor();
-        store.descend_lineage(LineageDescentRequest {
-            target_key: "B",
-            expected_target_row_version: None,
-            edge_id: 44,
-            prior_key: "A",
-            prior_epoch: 1,
-            new_epoch: 2,
-            constituents: &hops,
-            compaction_observed: true,
-            anchor: Some(&anchor),
-            now_ms: 10,
-        })
-    }
-
-    #[test]
-    fn descent_copies_raw_chunk_messages_through_transaction_redaction() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        seed_lineage(&store, "A", 10);
-        seed_raw_messages(
-            &store,
-            "A",
-            r#"[{"content":"password=legacy-raw-secret","role":"user"}]"#,
-        );
-        let outcome = descend_a_to_b(&store).unwrap();
-        assert_eq!(outcome.disposition, LineageDescentDisposition::Descended);
-        let copied = store.load_chunk_transcripts_for_range("B", 1, 3).unwrap();
-        assert_eq!(copied.len(), 1);
-        assert_eq!(
-            copied[0].raw_messages_json.as_deref(),
-            Some(r#"[{"content":"password=<REDACTED:password>","role":"user"}]"#)
-        );
-        assert_eq!(copied[0].transcript.as_deref(), Some("U: condensed"));
-    }
-
-    #[test]
-    fn descent_refuses_raw_chunk_messages_under_a_protected_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        seed_lineage(&store, "A", 10);
-        seed_raw_messages(&store, "A", r#"{"password":"legacy-raw-secret"}"#);
-        let prior_before = store.load("A").unwrap();
-        let error = descend_a_to_b(&store).unwrap_err();
-        assert!(!error.to_string().contains("legacy-raw-secret"), "{error}");
-        assert!(store.load_compartments("B").unwrap().is_empty());
-        assert!(
-            store
-                .load_chunk_transcripts_for_range("B", 1, 3)
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            store.load("A").unwrap().meta.revert_epoch,
-            prior_before.meta.revert_epoch,
-            "a refused descent must not arm the prior fence"
-        );
-    }
-
     #[test]
     fn newest_completed_constituent_wins_and_unmarked_rows_are_skipped() {
         let dir = tempfile::tempdir().unwrap();
@@ -26360,7 +26082,7 @@ mod lineage_descent_tests {
             })
             .unwrap();
         store
-            .append_compartments("B", &[compartment(4, 12, 13, "b-work#0")])
+            .append_history_segments("B", &[history_segment(4, 12, 13, "b-work#0")])
             .unwrap();
         let mut b = store.load("B").unwrap();
         b.meta.newest_live_ordinal = 14;
@@ -26394,7 +26116,7 @@ mod lineage_descent_tests {
         assert_eq!(c.source_key.as_deref(), Some("B"));
         assert!(
             store
-                .load_compartments("C")
+                .load_history_segments("C")
                 .unwrap()
                 .iter()
                 .any(|row| row.end_message_id == "b-work#0")
@@ -26411,7 +26133,7 @@ mod lineage_descent_tests {
             .commit("D", None, &unmarked_core, &unmarked_meta)
             .unwrap();
         store
-            .append_compartments("D", &[compartment(1, 18, 19, "aborted-own-row#0")])
+            .append_history_segments("D", &[history_segment(1, 18, 19, "aborted-own-row#0")])
             .unwrap();
         unmarked_meta = store.load("D").unwrap().meta;
         assert!(!unmarked_meta.descent_completed);
@@ -26444,7 +26166,7 @@ mod lineage_descent_tests {
         assert_eq!(e.source_key.as_deref(), Some("A"));
         assert!(
             !store
-                .load_compartments("E")
+                .load_history_segments("E")
                 .unwrap()
                 .iter()
                 .any(|row| row.end_message_id == "aborted-own-row#0")
@@ -26544,7 +26266,7 @@ mod lineage_descent_tests {
             rewind.disposition,
             LineageDescentDisposition::NotCompactionShape
         );
-        assert!(store.load_compartments("rewind").unwrap().is_empty());
+        assert!(store.load_history_segments("rewind").unwrap().is_empty());
 
         let flag_hops = direct_hop("A", "restart-window", 2);
         let flag_missing = store
@@ -26690,13 +26412,16 @@ mod lineage_descent_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         seed_lineage(&store, "A", 10);
-        // Direct inserts bypass `replace_compartments` validation to exercise the descent range guard.
+        // Direct inserts bypass `replace_history_segments` validation to exercise the descent range guard.
         store
             .inner
             .with_conn_fenced(|tx| {
-                tx.execute("DELETE FROM compartments WHERE session_id = 'A'", [])?;
-                for compartment in [compartment(1, 1, 6, "m6#0"), compartment(2, 5, 8, "m8#0")] {
-                    insert_compartment_tx(tx, "A", compartment.sequence, &compartment)?;
+                tx.execute("DELETE FROM history_segments WHERE session_id = 'A'", [])?;
+                for history_segment in [
+                    history_segment(1, 1, 6, "m6#0"),
+                    history_segment(2, 5, 8, "m8#0"),
+                ] {
+                    insert_history_segment_tx(tx, "A", history_segment.sequence, &history_segment)?;
                 }
                 Ok(())
             })
@@ -26724,7 +26449,7 @@ mod lineage_descent_tests {
                 .contains("lineage descent validation failed")
         );
         assert!(store.load("B").unwrap().row_version.is_none());
-        assert!(store.load_compartments("B").unwrap().is_empty());
+        assert!(store.load_history_segments("B").unwrap().is_empty());
         let prior_after = store.load("A").unwrap();
         assert_eq!(prior_after.row_version, prior_before.row_version);
         assert_eq!(

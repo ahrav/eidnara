@@ -6,7 +6,7 @@ import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     collectDiagnostics,
-    collectHistorianDumps,
+    collectHistorySummarizerDumps,
     renderDiagnosticsMarkdown,
 } from "./diagnostics-opencode";
 
@@ -57,7 +57,9 @@ describe("collectDiagnostics plugin registration", () => {
         const { configHome, cwd } = isolatedRoot();
         writeFileSync(
             join(configHome, "opencode", "opencode.json"),
-            JSON.stringify({ plugin: [["@eidnara/opencode", { historian: { disable: true } }]] }),
+            JSON.stringify({
+                plugin: [["@eidnara/opencode", { history_summarizer: { disable: true } }]],
+            }),
         );
         writeFileSync(
             join(configHome, "opencode", "tui.json"),
@@ -268,21 +270,21 @@ describe("collectDiagnostics Eidnara config tiers", () => {
         const { configHome, cwd } = isolatedRoot();
         writeFileSync(
             join(configHome, "eidnara", "eidnara.json"),
-            JSON.stringify({ historian: { disable: true } }),
+            JSON.stringify({ history_summarizer: { disable: true } }),
         );
         writeFileSync(
             join(cwd, ".eidnara", "eidnara.jsonc"),
-            '// project override\n{ "sidekick": { "disable": true } }',
+            '// project override\n{ "context_researcher": { "disable": true } }',
         );
 
         const report = await collectDiagnostics(cwd);
 
         expect(report.eidnaraConfig.path).toBe(join(configHome, "eidnara", "eidnara.json"));
         expect(report.eidnaraConfig.exists).toBe(true);
-        expect(report.eidnaraConfig.flags).toEqual({ historian: { disable: true } });
+        expect(report.eidnaraConfig.flags).toEqual({ history_summarizer: { disable: true } });
         expect(report.projectConfig.path).toBe(join(cwd, ".eidnara", "eidnara.jsonc"));
         expect(report.projectConfig.exists).toBe(true);
-        expect(report.projectConfig.flags).toEqual({ sidekick: { disable: true } });
+        expect(report.projectConfig.flags).toEqual({ context_researcher: { disable: true } });
     });
 
     it("captures a project parse error and renders it sanitized", async () => {
@@ -311,17 +313,23 @@ describe("collectDiagnostics Eidnara config tiers", () => {
     });
 });
 
-describe("collectHistorianDumps", () => {
+describe("collectHistorySummarizerDumps", () => {
     it("merges sessions that share a project into one bucket and skips projects without dumps", () => {
         const { root } = isolatedRoot();
         const projectA = join(root, "project-a");
         const projectB = join(root, "project-b");
-        mkdirSync(join(projectA, ".eidnara", "context", "historian"), { recursive: true });
-        mkdirSync(join(projectB, ".eidnara", "context", "historian"), { recursive: true });
-        writeFileSync(join(projectA, ".eidnara", "context", "historian", "dump-1.xml"), "<x/>");
-        writeFileSync(join(projectA, ".eidnara", "context", "historian", "dump-2.xml"), "<x/>");
+        mkdirSync(join(projectA, ".eidnara", "context", "history_summarizer"), { recursive: true });
+        mkdirSync(join(projectB, ".eidnara", "context", "history_summarizer"), { recursive: true });
+        writeFileSync(
+            join(projectA, ".eidnara", "context", "history_summarizer", "dump-1.xml"),
+            "<x/>",
+        );
+        writeFileSync(
+            join(projectA, ".eidnara", "context", "history_summarizer", "dump-2.xml"),
+            "<x/>",
+        );
 
-        const dumps = collectHistorianDumps([
+        const dumps = collectHistorySummarizerDumps([
             { sessionId: "ses_a1", title: "", directory: projectA, lastActiveAt: "" },
             { sessionId: "ses_a2", title: "", directory: projectA, lastActiveAt: "" },
             { sessionId: "ses_b1", title: "", directory: projectB, lastActiveAt: "" },
@@ -478,17 +486,17 @@ describe("collectDiagnostics log file", () => {
     });
 });
 
-describe("collectHistorianDumps entry failures", () => {
+describe("collectHistorySummarizerDumps entry failures", () => {
     it("keeps the valid dumps when one directory entry cannot be statted", () => {
         const { root } = isolatedRoot();
         const project = join(root, "project-a");
-        const historianDir = join(project, ".eidnara", "context", "historian");
-        mkdirSync(historianDir, { recursive: true });
-        writeFileSync(join(historianDir, "dump-1.xml"), "<x/>");
+        const history_summarizerDir = join(project, ".eidnara", "context", "history_summarizer");
+        mkdirSync(history_summarizerDir, { recursive: true });
+        writeFileSync(join(history_summarizerDir, "dump-1.xml"), "<x/>");
         // A dangling symlink is listed by readdir but fails stat, like a file removed mid-walk.
-        symlinkSync(join(root, "gone.xml"), join(historianDir, "dump-2.xml"));
+        symlinkSync(join(root, "gone.xml"), join(history_summarizerDir, "dump-2.xml"));
 
-        const dumps = collectHistorianDumps([
+        const dumps = collectHistorySummarizerDumps([
             { sessionId: "ses_a1", title: "", directory: project, lastActiveAt: "" },
         ]);
 

@@ -246,7 +246,7 @@ describe("referenceable JSON domain guard", () => {
         "model",
         "signature",
         "input",
-        "ctx_reduce",
+        "eidnara_reduce",
     ])("rejects hidden accessors on production-read field %s", (key) => {
         const counter = trapCounter();
         const value = { ordinary: "data" };

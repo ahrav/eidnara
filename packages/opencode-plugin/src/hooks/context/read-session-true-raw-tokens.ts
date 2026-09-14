@@ -957,17 +957,17 @@ function fenceBoundaryForCompletedToolArcs(
     return minInvocation < publicationFloorOrdinal ? maxResult + 1 : minInvocation;
 }
 
-/** `lastCompartmentEndOrdinal + 1` is the publication floor: the first ordinal the fence can still protect. */
+/** `lastHistorySegmentEndOrdinal + 1` is the publication floor: the first ordinal the fence can still protect. */
 export function fenceBoundaryForToolArcs(
     candidate: number,
     arcs: readonly ToolArc[],
-    lastCompartmentEndOrdinal: number,
+    lastHistorySegmentEndOrdinal: number,
     recentOpenArcCutoff: number,
 ): number {
-    const publicationFloorOrdinal = lastCompartmentEndOrdinal + 1;
+    const publicationFloorOrdinal = lastHistorySegmentEndOrdinal + 1;
     let boundary = fenceBoundaryForCompletedToolArcs(candidate, arcs, publicationFloorOrdinal);
     for (const arc of arcs) {
-        // The historian protects only open arcs inside the live protected-tail window.
+        // The history_summarizer protects only open arcs inside the live protected-tail window.
         // Protecting stale open arcs can block compaction of the eligible region.
         // Compaction emits no dangling `tool_use`.
         if (arc.resOrdinal !== null || arc.invOrdinal < recentOpenArcCutoff) continue;

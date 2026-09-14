@@ -166,5 +166,5 @@
     "log_root": "/tmp/opencode",
     "log_names": ["memo-integrated-bench.log", "memo-integrated-check-no-default.log", "memo-integrated-check-repo.log", "memo-integrated-clippy.log", "memo-integrated-doc-test.log", "memo-integrated-doc.log", "memo-integrated-fmt.log", "memo-integrated-forbid-comment-markers.log", "memo-integrated-nextest.log", "memo-integrated-opencode-smoke.log", "memo-integrated-storage-no-default.log", "memo-integrated-test.log", "memo-integrated-validate-incident-history.log", "memo-integrated-validate-incident-verifiers.log"]
   },
-  "excluded_claims": ["production representativeness", "concurrent-session payoff", "cold-call latency", "delta-ingress latency", "total-turn or session latency", "populated attribution or caveman invalidation payoff", "peak allocation", "allocator RSS", "host/build population calibration", "independent pre-memo characterization replay"]
+  "excluded_claims": ["production representativeness", "concurrent-session payoff", "cold-call latency", "delta-ingress latency", "total-turn or session latency", "populated attribution or terse_text_compression invalidation payoff", "peak allocation", "allocator RSS", "host/build population calibration", "independent pre-memo characterization replay"]
 }

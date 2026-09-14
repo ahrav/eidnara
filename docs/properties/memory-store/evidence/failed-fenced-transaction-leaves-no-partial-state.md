@@ -42,9 +42,9 @@ statement is written inside one transaction:
   `sqlite_master` (`:5439-5446`), then loops issuing one `DELETE` per table that
   has a `session_id` column (`:5448-5472`), all inside the single
   `with_note_conn_fenced` at `:5437`.
-- `lib.rs:7152-7191` `commit_state_import`. N `insert_compartment_tx` calls
+- `lib.rs:7152-7191` `commit_state_import`. N `insert_history_segment_tx` calls
   (`:7177-7179`) then the `state_imports` insert (`:7180-7190`).
-- `lib.rs:12609` `append_compartments_tx` and `lib.rs:12671`
+- `lib.rs:12609` `append_history_segments_tx` and `lib.rs:12671`
   `insert_chunk_transcripts_tx`, both loop-per-row helpers called from within a
   caller's transaction.
 
@@ -55,9 +55,9 @@ The existing coverage:
   roll back." This is the right test, but it is the dependency's own test on a
   two-statement toy closure.
 - In `memory-store` the only failure-injection hook of this shape is
-  `historian_side_channel_fail_once` (`lib.rs:9667-9678`, set via
-  `fail_next_historian_side_channel_for_test` at `:5249`). It returns `Err`
-  at the top of `deliver_historian_side_channel`, before `with_conn_fenced` is
+  `history_summarizer_side_channel_fail_once` (`lib.rs:9667-9678`, set via
+  `fail_next_history_summarizer_side_channel_for_test` at `:5249`). It returns `Err`
+  at the top of `deliver_history_summarizer_side_channel`, before `with_conn_fenced` is
   even entered (`:9684` is the first transaction). So it tests the retry and
   backoff bookkeeping at `:9720-9760`, not mid-transaction rollback.
 
@@ -145,7 +145,7 @@ unrelated concurrent effect.
   should commit but the domain outcome is a rejection" from "this transaction
   must roll back", by returning `Ok(SomeRejection)` for the former. In every case
   I read, the rejecting return happens *before* any write in that closure:
-  `:7164` and `:7171` precede the compartment inserts at `:7177`.
+  `:7164` and `:7171` precede the history_segment inserts at `:7177`.
 - Missing evidence: I did not audit all 40 fenced call sites for a rejection
   return that occurs after a write.
 - Conclusion: unresolved, needs an audit of the remaining fenced closures. This

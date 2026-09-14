@@ -19,7 +19,8 @@ they diverge on two of the four, and the divergence on `NetworkFailed` costs a
    attempted.updated_at = now;
    match outcome {
    ```
-   (`crates/daemon/src/smart_note_evaluation.rs:591-594`)
+
+   (`crates/daemon/src/conditional_note_evaluation.rs:591-594`)
 
    The variable name `attempted` is honest about the intent: the timestamp
    records an attempt, not a result.
@@ -27,11 +28,12 @@ they diverge on two of the four, and the divergence on `NetworkFailed` costs a
 2. The `NetworkFailed` arm returns that state unchanged:
 
    ```
-   CheckOutcome::NetworkFailed => SmartNoteReduction {
+   CheckOutcome::NetworkFailed => ConditionalNoteReduction {
        next: attempted,
        surfaced: false,
    },
    ```
+
    (`:623-626`)
 
    No `check_network_failure_count`, no `check_quarantined_until`, no
@@ -55,6 +57,7 @@ they diverge on two of the four, and the divergence on `NetworkFailed` costs a
    next.check_next_due_at = Some(quarantined_until);
    next.check_quarantined_until = Some(quarantined_until);
    ```
+
    (`:536-546`)
 
 4. `check_last_liveness_at` is the liveness selector's spacing gate:
@@ -64,7 +67,8 @@ they diverge on two of the four, and the divergence on `NetworkFailed` costs a
        .check_last_liveness_at
        .is_none_or(|l| l <= liveness_before)
    ```
-   (`:775-777`), where `liveness_before = now - SMART_NOTE_CHECK_LIVENESS_RECHECK_MS`
+
+   (`:775-777`), where `liveness_before = now - CONDITIONAL_NOTE_CHECK_LIVENESS_RECHECK_MS`
    (`:766`) and the constant is 24 hours (`:26`, doc comment "Minimum spacing
    between liveness recheck attempts").
 
@@ -78,18 +82,18 @@ they diverge on two of the four, and the divergence on `NetworkFailed` costs a
    error and says nothing about a network error, so the `NetworkFailed` arm is
    not covered by it.
 
-6. Nothing else observes the failure. `SmartNoteReduction.surfaced` is `false`
+6. Nothing else observes the failure. `ConditionalNoteReduction.surfaced` is `false`
    (`:625`), which is correct but carries no failure information. The
    `NoteEvalCompleteOutcome::Applied` response the client receives is the
    reducer's own response JSON (`lib.rs:11393-11395`), so the client knows it
    reported a network failure, but no other party does. There is no log, metric,
-   or counter anywhere in the path: `smart_note_evaluation.rs` has zero
+   or counter anywhere in the path: `conditional_note_evaluation.rs` has zero
    `tracing`/`log` calls (whole-file grep, count 0) and so does
    `lib.rs:10880-11560`.
 
 ## Failure scenario
 
-A compiled smart note has been false for 8 days, so it is eligible for the
+A compiled conditional note has been false for 8 days, so it is eligible for the
 liveness recheck that exists to catch a check whose logic silently stopped
 matching. The compiled check calls `httpGet` against a service the evaluator
 host cannot currently reach; `docs/AUDIT-KNOWN-ISSUES.md:823-830` (source-catalog path, not present at HEAD) (A50) confirms
@@ -108,7 +112,7 @@ exactly what a correctly-working stale note looks like. The escalation the
 says why.
 
 Contrast the due phase under the same egress failure: three network failures push
-`check_status` to `"failing"` (`:539-543`), which is visible in a `ctx_note read`
+`check_status` to `"failing"` (`:539-543`), which is visible in a `eidnara_note read`
 and is what the compile selector acts on (`:747`).
 
 ## Timing windows and dependencies
@@ -116,7 +120,7 @@ and is what the compile selector acts on (`:747`).
 The window is 24 hours wide per occurrence and repeats. No interleaving is
 required. The enabling state has three parts, all durable and all constructible:
 `check_status == "compiled"` with an artifact, `check_false_since_at` at least 7
-days old (`SMART_NOTE_CHECK_MAX_STALENESS_MS`, `:24`), and
+days old (`CONDITIONAL_NOTE_CHECK_MAX_STALENESS_MS`, `:24`), and
 `check_last_liveness_at` either NULL or at least 24 hours old.
 
 The fault required is a network failure inside the sandbox check, which the
@@ -128,11 +132,11 @@ injection into the module is needed: a test simply completes with
 
 The pure oracle:
 
-1. Build a `SmartNoteLifecycleState` with `check_status = "compiled"`,
+1. Build a `ConditionalNoteLifecycleState` with `check_status = "compiled"`,
    `check_network_failure_count = 0`, `check_last_liveness_at = None`, and a
    `check_false_since_at` 8 days in the past.
 2. Reduce with
-   `SmartNoteEvaluationOutcome::Liveness(CheckOutcome::NetworkFailed)`.
+   `ConditionalNoteEvaluationOutcome::Liveness(CheckOutcome::NetworkFailed)`.
 3. Assert either that `next.check_last_liveness_at == pre.check_last_liveness_at`
    (the window was not consumed) or that some other field records the failure,
    for instance `next.check_network_failure_count > pre.check_network_failure_count`.
@@ -141,8 +145,8 @@ The pure oracle:
 The behavioural oracle, which is the one that shows the cost:
 
 1. Same pre-state. Reduce with `Liveness(NetworkFailed)`.
-2. Feed the reduced state into a `SmartNoteSelectionSnapshot` and call
-   `get_stale_compiled_smart_notes(&[snapshot], now + 1, 1, false)`.
+2. Feed the reduced state into a `ConditionalNoteSelectionSnapshot` and call
+   `get_stale_compiled_conditional_notes(&[snapshot], now + 1, 1, false)`.
 3. Assert the note is still selected. It is not, and it will not be until
    `now + 24h`.
 
@@ -155,7 +159,7 @@ twice with the clock advanced by 23 hours between them and assert the second
 ### Q: Is burning the window deliberate, to damp a flapping network?
 
 - Sources examined: the `LogicFailed` arm's explanatory comment
-  (`smart_note_evaluation.rs:614-615`), the `NetworkFailed` arm (`:623-626`,
+  (`conditional_note_evaluation.rs:614-615`), the `NetworkFailed` arm (`:623-626`,
   which has no comment), `reduce_due`'s handling of the same variant
   (`:577-580`), `reduce_check_failure`'s network branch (`:536-547`), and the
   spacing constant's doc comment (`:25-26`).
@@ -179,7 +183,7 @@ twice with the clock advanced by 23 hours between them and assert the second
 ### Q: Does anything else eventually escalate a permanently stale note?
 
 - Sources examined: all four selectors (`:711-806`), the four reducer entry
-  points (`:661-674`), `SMART_NOTE_CHECK_MAX_STALENESS_MS` (`:24`) and its only
+  points (`:661-674`), `CONDITIONAL_NOTE_CHECK_MAX_STALENESS_MS` (`:24`) and its only
   reader (`:765`).
 - Findings: no. The liveness phase is the only consumer of the staleness window,
   and its only escalation is the `LogicFailed` arm's immediate `"failing"`

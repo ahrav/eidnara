@@ -21,7 +21,7 @@ state-machine tests are unchanged and still pass. `crates/context-core/src/claim
 followed: the encoder and its fixture-driven checks moved to
 `src/canonical_json.rs` (`canonical_bytes_match_fixture`,
 `non_canonical_numbers_are_rejected`, `integer_above_i64_max_is_not_canonical`,
-plus `dreamer_request_digest_is_sha256_over_protocol_and_canonical_bytes`,
+plus `memory_classifier_request_digest_is_sha256_over_protocol_and_canonical_bytes`,
 `digest_protocols_are_the_recorded_literals`, and
 `lower_hex_check_is_exact_in_length_and_alphabet`); the public-claim-id,
 revision-locator, mutation-token, heads-digest, snapshot-vector, and
@@ -121,8 +121,8 @@ search across `crates/memory-store/src`, `crates/memory-store/tests`,
 | Pass-scheduler interest history: selection, ordering, byte bounds, mural upsert | 15,583-16,008 | 7 |
 | Schema version probe, pre-cutover refusal, fresh-and-current open, open lease | 16,068-16,159 | 4 |
 | State import: atomic bootstrap-only, per-kind preflight, rejection leaves no rows | 16,188-16,319 | 3 |
-| Compartments roundtrip, tail append, overlap refusal, memory ordering | 16,339-16,540 | 5 |
-| Historian publish, abandon fencing, side-channel isolation, transcript bounds | 16,624-17,096 | 9 |
+| HistorySegments roundtrip, tail append, overlap refusal, memory ordering | 16,339-16,540 | 5 |
+| HistorySummarizer publish, abandon fencing, side-channel isolation, transcript bounds | 16,624-17,096 | 9 |
 | Note search scoping, CRUD, at-least-once delivery, ack scoping, paging | 17,202-17,680 | 7 |
 | Note revisions, evaluation-state reset, migration v51 backfill | 17,755-18,071 | 5 |
 | Artifact repair, `notes` writer fence, revert truncation, recut epoch | 18,123-18,335 | 6 |
@@ -178,7 +178,7 @@ All four of its tests are integration.
 
 ## Integration tests, per test function
 
-### `crates/memory-store/tests/claim_mirror.rs`, 625 lines, 9 tests. Unnamed in CI.
+### `crates/memory-store/tests/claim_mirror.rs`, 625 lines, 9 tests. Unnamed in CI
 
 | Line | Test | Claim it asserts |
 | --- | --- | --- |
@@ -192,7 +192,7 @@ All four of its tests are integration.
 | 527 | `receipt_advances_generation_stamps_on_untouched_rows_so_restart_seed_matches` | A receipt restamps untouched rows so the restart seed matches durable state. Regression for the ordinary-receipt wedge. |
 | 591 | `receipt_rejects_equal_revision_carrying_different_content` | An equal revision carrying different content is rejected. |
 
-### `crates/memory-store/tests/claim_intent_ledger.rs`, 401 lines, 6 tests. Unnamed in CI.
+### `crates/memory-store/tests/claim_intent_ledger.rs`, 401 lines, 6 tests. Unnamed in CI
 
 | Line | Test | Claim it asserts |
 | --- | --- | --- |
@@ -203,7 +203,7 @@ All four of its tests are integration.
 | 288 | `store_rebuild_is_refused_until_intents_drain_then_freezes_new_stages` | Rebuild is refused until intents drain, then new stages are frozen. |
 | 345 | `replaying_a_staged_intent_refuses_after_authority_begins_draining` | A staged replay refuses once the authority is draining. Regression for the replay that skipped every fresh-insert check. |
 
-### `crates/memory-store/tests/sqlite_runtime.rs` (source-catalog path, not present at HEAD), 231 lines, 3 tests. Unnamed in CI.
+### `crates/memory-store/tests/sqlite_runtime.rs` (source-catalog path, not present at HEAD), 231 lines, 3 tests. Unnamed in CI
 
 | Line | Test | Claim it asserts |
 | --- | --- | --- |
@@ -211,7 +211,7 @@ All four of its tests are integration.
 | 172 | `sqlite_runtime_source_connection_contract` | `verify_sqlite_connection_contract` reports foreign keys, WAL mode, and busy-timeout violations. |
 | 204 | `sqlite_runtime_source_id_gate_fails_closed_on_non_ascii_stamps` | The source-id gate fails closed on a non-ASCII version stamp. |
 
-### `crates/tokenizer/tests/token_golden.rs`, 73 lines, 4 tests. Unnamed in CI.
+### `crates/tokenizer/tests/token_golden.rs`, 73 lines, 4 tests. Unnamed in CI
 
 | Line | Test | Claim it asserts |
 | --- | --- | --- |
@@ -242,8 +242,8 @@ Clustered:
   return already establishes the condition, so neither can fire even in a debug
   build. They are restatements, not checks.
 - **`assert!`, 1, and it is not production.** `lib.rs:5250` asserts a known
-  historian side-channel kind, but it sits inside
-  `fail_next_historian_side_channel_for_test`, gated `#[cfg(any(test, feature =
+  history_summarizer side-channel kind, but it sits inside
+  `fail_next_history_summarizer_side_channel_for_test`, gated `#[cfg(any(test, feature =
   "test-support"))]`. Reachability class: test-only.
 - **`.expect(`, 5.** Three are test-support hook mutexes (`lib.rs:5287`, `:5298`,
   `:9250`). Two are live production invariant claims and both panic if the
@@ -260,7 +260,7 @@ Clustered:
   `:3924`, `:4013`, `:4199`). Variants include `PreCutoverModuleStore`,
   `CasConflict`, `AuthorityStateMismatch`, `AuthorityGenerationMismatch`,
   `AuthorityFeedHeadAdvanced`, `NoteCasConflict`, `NoteOwnershipMismatch`,
-  `CompartmentRangeOverlap`, `FacadeProjectVocabularyMismatch`, and six
+  `HistorySegmentRangeOverlap`, `FacadeProjectVocabularyMismatch`, and six
   `ClaimIntent*` variants.
 - **The open-path preflight is two calls.** `MemoryStore::open` runs
   `refuse_pre_cutover_store(&inner)?` at `lib.rs:4873` and
@@ -316,8 +316,8 @@ refusal. That matters for any test asserting a specific refusal shape.
 project_id) REFERENCES claim_mirror_projects(database_incarnation_id,
 project_id)`. `foreign_keys = ON` is set at `storage:291`, so the pragma is
 enabled and has exactly **one edge to enforce**. Every other cross-table
-relationship in the schema, including every claim, note, compartment, and
-historian linkage, is maintained by application code and by convention with no
+relationship in the schema, including every claim, note, history_segment, and
+history_summarizer linkage, is maintained by application code and by convention with no
 database-level enforcement. Enabling the pragma is therefore close to a no-op as
 a safety measure, and its presence should not be read as evidence that
 referential integrity is checked.
@@ -438,7 +438,7 @@ proves.
 
 5. **Regions of the monolith with no executed check at all.** 87 tests over
    13,930 production lines is roughly one per 160 lines, and the distribution is
-   uneven: notes, note-eval claims, and the historian account for 43 of the 87.
+   uneven: notes, note-eval claims, and the history_summarizer account for 43 of the 87.
    Sparse by comparison: the `MIGRATIONS` DDL itself (881 lines) has no structural
    assertion, only incidental execution; and the authority state-machine and
    drain-journal logic around `lib.rs:11300-11900`, including the four

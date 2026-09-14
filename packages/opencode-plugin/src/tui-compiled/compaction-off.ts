@@ -1,7 +1,7 @@
 import { formatMemoryStatus, type SidebarSnapshot } from "../shared/rpc-types";
 
 export interface CompactionOffSidebarRow {
-    label: "Memories" | "Notes" | "Archived compartments";
+    label: "Memories" | "Notes" | "Archived history_segments";
     value: string;
 }
 
@@ -46,9 +46,9 @@ export function compactionOffSidebarRows(snapshot: SidebarSnapshot): CompactionO
     if (snapshot.sessionNoteCount > 0) {
         rows.push({ label: "Notes", value: String(snapshot.sessionNoteCount) });
     }
-    const archivedCount = snapshot.archivedCompartmentCount ?? 0;
+    const archivedCount = snapshot.archivedHistorySegmentCount ?? 0;
     if (archivedCount > 0) {
-        rows.push({ label: "Archived compartments", value: String(archivedCount) });
+        rows.push({ label: "Archived history_segments", value: String(archivedCount) });
     }
     return rows;
 }

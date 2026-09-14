@@ -502,7 +502,7 @@ mod tests {
             send_grant(
                 &mut server,
                 &GrantMessage {
-                    wire_version: 2,
+                    wire_version: 3,
                     descriptor_schema: shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                     activation_token: "token".to_owned(),
                     descriptor: serde_json::json!({"ring": "v1"}),
@@ -646,7 +646,7 @@ mod tests {
                 &mut server,
                 &descriptors,
                 &serde_json::json!({"ring": "v1"}),
-                2,
+                3,
                 shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
                 Instant::now() + Duration::from_secs(1),
@@ -677,7 +677,7 @@ mod tests {
                 &mut server,
                 &descriptors,
                 &serde_json::json!({"ring": "v1"}),
-                2,
+                3,
                 shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
                 Instant::now() + Duration::from_secs(1),
@@ -690,7 +690,7 @@ mod tests {
         write_message(
             &mut client,
             &ClientMessage::Activate {
-                wire_version: 2,
+                wire_version: 3,
                 descriptor_schema: shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 activation_token: "token".to_owned(),
             },
@@ -743,7 +743,7 @@ mod tests {
                 &mut server,
                 &descriptors,
                 &serde_json::json!({"ring": "v1"}),
-                2,
+                3,
                 shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 "token",
                 Instant::now() + Duration::from_secs(1),
@@ -771,7 +771,7 @@ mod tests {
         write_message(
             &mut client,
             &ClientMessage::Activate {
-                wire_version: 2,
+                wire_version: 3,
                 descriptor_schema: shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
                 activation_token: "token".to_owned(),
             },

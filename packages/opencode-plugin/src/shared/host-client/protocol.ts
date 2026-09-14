@@ -7,7 +7,7 @@
 
 import { AdmissionClass, type Priority } from "./types";
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const HEADER_LEN = 21;
 /** Bytes 0..4 (`len` then `ver`) never change layout across versions. */
 export const FROZEN_PREFIX_LEN = 5;

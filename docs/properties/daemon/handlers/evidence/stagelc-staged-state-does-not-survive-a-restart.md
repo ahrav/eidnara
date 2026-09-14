@@ -56,9 +56,9 @@ silently:
   later arms with the phase still `Idle`.
 
 The deliberate contrast inside the same crate, which is what makes this an
-intentional design rather than an oversight: the historian *does* reconstruct
+intentional design rather than an oversight: the history_summarizer *does* reconstruct
 across a restart. Its durable phase machine is described at
-`src/historian.rs:1-7` and the recovery is tested at `lib.rs:29793-29832`,
+`src/history_summarizer.rs:1-7` and the recovery is tested at `lib.rs:29793-29832`,
 `assert_seeded_phase_recovers_then_refires_after_backoff` plus the three
 per-phase wrappers `handler_seeded_publishing_recovers_then_refires_after_backoff`
 (`:29822`), `..._firing_...` (`:29827`), and `..._validating_...` (`:29832`). So

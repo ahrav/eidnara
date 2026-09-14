@@ -28,7 +28,7 @@ The write:
 `descend_lineage` (`memory-store/src/lib.rs:8177`) is one fenced transaction. It
 copies rows into the target key:
 
-- `:8705-8716` — `INSERT INTO compartments ... SELECT ... WHERE session_id = ?2`
+- `:8705-8716` — `INSERT INTO history_segments ... SELECT ... WHERE session_id = ?2`
 - `:8717-8726` — `chunk_transcripts`
 - `:8727-8734` — `tags`
 - `:8735-8740` — `temporal_marks`
@@ -70,7 +70,7 @@ harness-supplied and decoded through the hand-written `Deserialize` at
 A lineage switch fires on a session whose array also carries a duplicate flat
 block id, for example because a harness adapter emitted the same
 `mid#block_index` twice. `descend_lineage` commits: the prior session's
-compartments, chunk transcripts and tags are now present under the new key and
+history_segments, chunk transcripts and tags are now present under the new key and
 the new key's `row_version` has advanced. `apply_once` then returns
 `DuplicateBlockId`. The handler maps it to a clean error frame
 (`lib.rs:8329-8337`, `reject_transform`) and the host serves the raw array. The
@@ -90,14 +90,14 @@ verdict.
 
 ## What a test must construct
 
-1. Seed a prior session key with compartments and tags.
+1. Seed a prior session key with history_segments and tags.
 2. Build a `TransformRequest` with `lineage_switched: true`, `is_subagent:
    false`, a non-zero `descent_edge_id`, a non-empty `prior_conversation_key`,
    at most five `constituents` whose last `new_key` equals `session_id`, so the
    precheck at `:3282-3292` passes.
 3. Put a duplicate flat block id in the array, or a live block whose id starts
    with `eidnara_`, or two non-synthetic messages with non-increasing ordinals.
-4. Snapshot the target key's `row_version`, compartment count and tag count.
+4. Snapshot the target key's `row_version`, history_segment count and tag count.
 5. Call `transform`, assert the expected `TransformError`.
 6. Re-read the three values and assert none changed. This is the assertion that
    fails today.
@@ -120,11 +120,11 @@ Repeat with each of the three guards to show the window is not specific to one.
   version and the CAS would pass.
 - Missing evidence: the exact disposition returned when the edge has already
   been applied, and whether the row copies are `INSERT OR IGNORE` or plain
-  `INSERT` that would duplicate. The `INSERT INTO compartments ... SELECT`
+  `INSERT` that would duplicate. The `INSERT INTO history_segments ... SELECT`
   at `:8705` is a plain insert; whether a duplicate is prevented by a unique
   constraint on `(session_id, sequence)` was not checked.
 - Conclusion: unresolved, needs a targeted read of
-  `memory-store/src/lib.rs:8177-8500` plus the `compartments` schema. That is
+  `memory-store/src/lib.rs:8177-8500` plus the `history_segments` schema. That is
   Part 4a and 4c territory; recorded here as a dependency rather than guessed.
 
 ### Q: Is the guard ordering deliberate, so that a descent must happen before the array is validated?

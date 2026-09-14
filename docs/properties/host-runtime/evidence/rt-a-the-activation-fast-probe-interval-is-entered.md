@@ -41,7 +41,7 @@ The predicate is the nested `fn` at `:1051-1074`. It requires, in order:
 3. That key's value is a JSON object.
 4. At least one of its values has a `"metrics"` key whose value is an object.
 5. That inner object has `"storage_state"` equal to the string `"starting"`, or
-   `"synapse_state"` equal to `"starting"`.
+   `"local_embeddings_state"` equal to `"starting"`.
 
 Five conditions, all on handler-authored JSON. The host supplies only the three
 string literals.
@@ -72,7 +72,7 @@ Current coverage is zero. `tests/lifecycle.rs:165` sets
 `config.timing.health_interval = Duration::from_millis(50)` - the same value as
 the hardcoded literal - so even if that test happened to enter the branch, it
 could not tell. No test in the repository constructs a component report carrying
-`storage_state` or `synapse_state`. The only occurrences of those keys are the
+`storage_state` or `local_embeddings_state`. The only occurrences of those keys are the
 host's own literals at `runtime.rs:1065` and `:1069`, and
 `control.rs:1071` in a control-response test.
 
@@ -157,7 +157,7 @@ post-publication activation path this situation belongs to.
 ### Q: does any existing test produce a component report with these keys?
 
 - Sources examined: repository-wide search for `storage_state` and
-  `synapse_state`.
+  `local_embeddings_state`.
 - Findings: `runtime.rs:1065` and `:1069` are the host's literals.
   `control.rs:1071` asserts on
   `response["metrics"]["components"]["context"]["metrics"]["storage_state"]`

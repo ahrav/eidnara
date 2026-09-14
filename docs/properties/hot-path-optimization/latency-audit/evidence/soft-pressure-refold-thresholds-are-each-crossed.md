@@ -18,7 +18,7 @@ is never distinguished from the reference. The parent's
   `m1.memory_update_count > 40`; `m1_has_content && m1_tokens as f64 >
   history_budget_tokens * 0.20 && history_budget_tokens > 0.0`;
   `m1_has_content && m0_tokens >= 500 && m1_tokens as f64 > m0_tokens as f64
-  * 0.15`.
+  - 0.15`.
 - `m0_tokens` is the direct count of the frozen unit with key `m0`
   ([`:4309-4314`][m0-count]); the HARD arm writes that unit at
   [`:4228`][m0-unit] and the refold branch rewrites it at
@@ -26,7 +26,7 @@ is never distinguished from the reference. The parent's
   `m1.body` when it differs from [`M1_PLACEHOLDER`][placeholder]
   ([`:4315-4320`][m1-count]).
 - `m1.body` has content when [`compose_m160-237`][m1-compose] renders at least one
-  of: new compartments past `folded_compartment_seq`, a changed user profile
+  of: new history_segments past `folded_history_segment_seq`, a changed user profile
   under `memory_enabled`, or newly claimed notes ([`:174-222`][m1-pieces]).
 - `history_budget_tokens` is the request value filtered to finite and
   `>= 0.0`, else the binding's frozen budget
@@ -48,8 +48,8 @@ that rounds `m1_tokens` or reads a stale cached count.
 ## Timing windows and dependencies
 
 None in time. Each marker depends on session state built by earlier passes:
-compartments folded into a frozen m0 of at least 500 tokens, then new
-compartments or notes that give m1 content, then a SOFT pass.
+history_segments folded into a frozen m0 of at least 500 tokens, then new
+history_segments or notes that give m1 content, then a SOFT pass.
 
 ## What a test must construct
 
@@ -64,7 +64,7 @@ Four constant markers, each recording the independently measured inputs, not
   few hundred tokens reaches it.
 - `...-m0-ratio`: content, `m0_tokens >= 500`, and `m1_tokens > m0_tokens *
   0.15`, with the share false. A HARD pass over enough covered messages to
-  freeze a 500-token m0, then compartments or notes that render an m1 above
+  freeze a 500-token m0, then history_segments or notes that render an m1 above
   15 percent of it, under a large budget.
 - `...-below`: a SOFT pass with content where all three are false.
 
@@ -109,7 +109,7 @@ The other three constant markers are asserted by the 48-case real-store
 threshold test. They observe budget-only pressure, ratio-only pressure, and
 neither condition from direct counts before the candidate runs. The m0
 payload is constructed at 499/500 tokens; m1 is genuinely composed from
-stored compartments at 74/75/76 tokens. The test drives a SOFT plan and checks
+stored history_segments at 74/75/76 tokens. The test drives a SOFT plan and checks
 its SOFT-or-HARD result. This is bounded characterization, not evidence that
 these shapes represent production traffic.
 

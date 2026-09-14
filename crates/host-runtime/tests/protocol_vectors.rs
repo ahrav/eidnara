@@ -34,12 +34,12 @@ fn committed_auth_proof_vectors_pin_the_construction() {
     let (key, client_nonce, server_nonce, daemon_id) = vector_inputs();
 
     let expected_server_proof: [u8; 32] = [
-        89, 41, 95, 101, 15, 43, 108, 51, 132, 228, 206, 117, 229, 243, 55, 238, 35, 54, 116, 7,
-        168, 92, 82, 74, 242, 210, 114, 64, 98, 38, 64, 56,
+        8, 85, 246, 183, 53, 167, 124, 30, 98, 139, 55, 104, 107, 155, 175, 182, 20, 23, 143, 13,
+        243, 82, 19, 62, 37, 43, 103, 85, 123, 176, 4, 192,
     ];
     let expected_client_auth: [u8; 32] = [
-        140, 161, 69, 27, 18, 230, 236, 54, 6, 199, 49, 76, 154, 250, 81, 84, 78, 160, 182, 108,
-        253, 146, 214, 55, 25, 147, 137, 168, 222, 41, 215, 159,
+        96, 31, 69, 109, 112, 178, 81, 45, 173, 45, 35, 155, 120, 185, 24, 14, 40, 8, 205, 217, 4,
+        190, 7, 244, 224, 111, 20, 3, 121, 200, 83, 101,
     ];
 
     assert_eq!(
@@ -97,8 +97,8 @@ fn doc_committed_auth_vectors_match_the_pinned_arrays() {
     assert_eq!(
         bytes(&server["server_proof"]),
         [
-            89, 41, 95, 101, 15, 43, 108, 51, 132, 228, 206, 117, 229, 243, 55, 238, 35, 54, 116,
-            7, 168, 92, 82, 74, 242, 210, 114, 64, 98, 38, 64, 56
+            8, 85, 246, 183, 53, 167, 124, 30, 98, 139, 55, 104, 107, 155, 175, 182, 20, 23, 143,
+            13, 243, 82, 19, 62, 37, 43, 103, 85, 123, 176, 4, 192
         ],
         "doc server_proof drifted from the committed vector"
     );
@@ -120,8 +120,8 @@ fn doc_committed_auth_vectors_match_the_pinned_arrays() {
     assert_eq!(
         bytes(&client["client_auth"]),
         [
-            140, 161, 69, 27, 18, 230, 236, 54, 6, 199, 49, 76, 154, 250, 81, 84, 78, 160, 182,
-            108, 253, 146, 214, 55, 25, 147, 137, 168, 222, 41, 215, 159
+            96, 31, 69, 109, 112, 178, 81, 45, 173, 45, 35, 155, 120, 185, 24, 14, 40, 8, 205, 217,
+            4, 190, 7, 244, 224, 111, 20, 3, 121, 200, 83, 101
         ],
         "doc client_auth drifted from the committed vector"
     );
@@ -240,7 +240,7 @@ fn production_proof_matches_the_oracle_across_perturbed_tuples() {
 
 /// The committed `route.open` control header: length 167, version 2, request,
 /// Interactive/Normal, channel 0, epoch 0, correlation 1.
-const ROUTE_OPEN_CONTROL_HEADER_HEX: &str = "a70000000200020000000000000100000000000000";
+const ROUTE_OPEN_CONTROL_HEADER_HEX: &str = "a70000000300020000000000000100000000000000";
 
 #[test]
 fn committed_header_vectors_decode_to_their_documented_fields() {
@@ -248,7 +248,7 @@ fn committed_header_vectors_decode_to_their_documented_fields() {
     assert_eq!(control.len(), HEADER_LEN);
     let decoded = raw_client::decode_header(&control);
     assert_eq!(decoded.len, 167);
-    assert_eq!(decoded.ver, 2);
+    assert_eq!(decoded.ver, 3);
     assert_eq!(decoded.ty, TY_REQUEST);
     assert_eq!(decoded.flags, FLAGS_INTERACTIVE);
     assert_eq!(decoded.channel, 0);
@@ -262,7 +262,7 @@ fn committed_header_vectors_decode_to_their_documented_fields() {
 
     // The routed request uses header values: length 44, Background/Normal, channel 7, and epoch 77.
     // correlation 2.
-    let routed = hex_to_bytes("2c00000002000407004d0000000200000000000000");
+    let routed = hex_to_bytes("2c00000003000407004d0000000200000000000000");
     let decoded = raw_client::decode_header(&routed);
     assert_eq!(decoded.len, 44);
     assert_eq!(decoded.ty, TY_REQUEST);
@@ -827,8 +827,8 @@ async fn host_shutdown_response_bytes_are_pinned() {
 
 #[tokio::test]
 async fn three_component_catalog_order_is_pinned() {
-    let (context, synapse, broca) = support::stub_trio();
-    let composite = host_runtime::StaticComposite::new(context, synapse, broca)
+    let (context, local_embeddings, model_execution) = support::stub_trio();
+    let composite = host_runtime::StaticComposite::new(context, local_embeddings, model_execution)
         .expect("distinct component ids");
     let host = support::CompositeTestHost::start(composite, |_config| {}).await;
     let mut client = host.client().await;
@@ -847,7 +847,7 @@ async fn three_component_catalog_order_is_pinned() {
         .iter()
         .map(|module| module["module_id"].as_str().expect("module_id"))
         .collect();
-    assert_eq!(ids, ["context", "synapse", "broca"]);
+    assert_eq!(ids, ["context", "local_embeddings", "model_execution"]);
     assert_eq!(
         body["host_ops"],
         serde_json::json!(["route.open", "catalog.list", "host.shutdown", "host.status",])

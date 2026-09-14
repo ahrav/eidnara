@@ -10,7 +10,7 @@ import type { SubagentRunOptions } from "@eidnara/opencode/shared/subagent-runne
 import { __test, PiSubagentRunner } from "./subagent-runner";
 
 const baseOptions: SubagentRunOptions = {
-    agent: "sidekick",
+    agent: "context-researcher",
     systemPrompt: "system guidance",
     userMessage: "summarize this session",
 };
@@ -202,7 +202,7 @@ describe("subagent-runner pure helpers", () => {
     it("builds argv with system prompt, primary model, and prompt last", () => {
         // Exact argv for the stock Pi host: extension discovery stays enabled (no
         // `--no-extensions`), the source tree has no `dist/subagent-entry.js` so no
-        // `--extension`/`-x` appears, sidekick gets its read-only `--tools` allow-list,
+        // `--extension`/`-x` appears, context_researcher gets its read-only `--tools` allow-list,
         // `--no-context-files` precedes `--tools`, and the prompt is last without a `--` sentinel.
         expect(
             buildArgsForTest({
@@ -213,13 +213,13 @@ describe("subagent-runner pure helpers", () => {
             "--print",
             "--mode",
             "json",
-            // `--no-session` keeps sidekick child sessions out of `pi resume` and Pi's session picker.
+            // `--no-session` keeps context_researcher child sessions out of `pi resume` and Pi's session picker.
             "--no-session",
             "--no-skills",
             "--no-prompt-templates",
             "--no-context-files",
             "--tools",
-            "read,grep,find,ls,ctx_search",
+            "read,grep,find,ls,eidnara_search",
             "--system-prompt",
             TEST_SYSTEM_PROMPT_PATH,
             "--model",
@@ -396,14 +396,16 @@ describe("subagent-runner pure helpers", () => {
         );
         process.env.PI_PACKAGE_DIR = `~/${basename(root)}`;
         try {
-            const sidekickArgs = buildArgsForTest({
+            const context_researcherArgs = buildArgsForTest({
                 ...baseOptions,
-                agent: "sidekick",
+                agent: "context-researcher",
             });
-            expect(sidekickArgs).toContain("--no-rules");
-            expect(sidekickArgs).not.toContain("--no-prompt-templates");
-            expect(sidekickArgs).not.toContain("--no-context-files");
-            expect(sidekickArgs).toEqual(expect.arrayContaining(["--tools", "read,grep,glob"]));
+            expect(context_researcherArgs).toContain("--no-rules");
+            expect(context_researcherArgs).not.toContain("--no-prompt-templates");
+            expect(context_researcherArgs).not.toContain("--no-context-files");
+            expect(context_researcherArgs).toEqual(
+                expect.arrayContaining(["--tools", "read,grep,glob"]),
+            );
         } finally {
             rmSync(root, { recursive: true, force: true });
             if (previousPackageDir === undefined) delete process.env.PI_PACKAGE_DIR;
@@ -435,9 +437,9 @@ describe("subagent-runner pure helpers", () => {
             "grep",
             "glob",
         ]);
-        expect(__test.resolveHostToolAllowlist(["read", "aft_search", "ctx_search"], true)).toEqual(
-            ["read"],
-        );
+        expect(
+            __test.resolveHostToolAllowlist(["read", "aft_search", "eidnara_search"], true),
+        ).toEqual(["read"]);
         expect(
             __test.resolveHostToolAllowlist(["read", "find", "ls", "aft_search"], false),
         ).toEqual(["read", "find", "ls", "aft_search"]);
@@ -1920,7 +1922,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         const args = buildArgsForTest(
             {
                 ...baseOptions,
-                agent: "sidekick",
+                agent: "context-researcher",
                 model: "anthropic/claude-sonnet",
             },
             {
@@ -1955,8 +1957,8 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 
         const resultPromise = runner.run({
             ...baseOptions,
-            // Sidekick's --tools allow-list must not alter the model, cwd, prompt, or env passed to spawn.
-            agent: "sidekick",
+            // ContextResearcher's --tools allow-list must not alter the model, cwd, prompt, or env passed to spawn.
+            agent: "context-researcher",
             model: "anthropic/primary",
             fallbackModels: ["openai/fallback"],
             cwd: "/workspace/project",
@@ -1989,7 +1991,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
             "--no-prompt-templates",
             "--no-context-files",
             "--tools",
-            "read,grep,find,ls,ctx_search",
+            "read,grep,find,ls,eidnara_search",
             "--system-prompt",
             expect.stringMatching(/system-prompt\.txt$/),
             "--model",

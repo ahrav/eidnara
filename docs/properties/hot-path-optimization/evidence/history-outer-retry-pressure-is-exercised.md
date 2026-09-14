@@ -14,7 +14,7 @@ demotion. A body that fits can still exceed the wrapped-slice retry threshold.
   `cost > budget * 1.05`, and retries at most three times after the initial render.
 - [memory_render.rs:191-200][wrapper] tightens the inner budget by pressure but
   retains a wrapper even for empty history, using [M0_EMPTY_BODY][empty].
-- [decay_render.rs:301-303][inner] returns empty for no compartments. Thus the
+- [decay_render.rs:301-303][inner] returns empty for no history_segments. Thus the
   nonempty wrapper does not disappear when the inner body is empty.
 - [tokenizer/lib.rs:123-149][tokenizer] counts token IDs for the rendered text;
   the nonempty wrapper has positive integral cost, unlike empty inner text.
@@ -54,7 +54,7 @@ bounded retry contract remain intact. All existing checks are unaudited.
 
 - Sources examined: [The retry loop][retry], [empty wrapper][empty], and
   [wrapper construction][wrapper].
-- Findings: Empty compartments and a small positive budget preserve the wrapper
+- Findings: Empty history_segments and a small positive budget preserve the wrapper
   through every attempt, so source semantics permit three-attempt exhaustion.
 - Missing evidence: No boundary matrix or independent H4 campaign runs here.
 - Conclusion: The constructor is resolved from source. Execution remains

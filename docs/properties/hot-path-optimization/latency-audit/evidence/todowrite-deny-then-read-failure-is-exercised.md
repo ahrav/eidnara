@@ -94,11 +94,11 @@ placing the marker.
 [combined]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L77-L107
 [combinedseed]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L85-L96
 [combinedcatch]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L97-L104
-[permdenied]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L277-L308
-[permstore]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L306
-[permkey]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L71-L73
-[permmap]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L57-L59
-[clearperm]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L326-L334
+[permdenied]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L277-L308
+[permstore]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L306
+[permkey]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L71-L73
+[permmap]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L57-L59
+[clearperm]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L326-L334
 [capture]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L270-L292
 [hookclear]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook.ts#L375
 [timeout]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/shared/with-timeout.ts#L2
@@ -182,4 +182,4 @@ implementation; the single-flight investigation has commit-pinned links.
   witness. It makes no claim that the cached deny changes fallback output.
 
 [current-witness]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/hook.test.ts#L166-L243
-[current-peek]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L393-L417
+[current-peek]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L393-L417

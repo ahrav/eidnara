@@ -48,7 +48,7 @@ fixture corpus rather than by the assertions.
 `decay.rs` is four public functions over a shared kernel:
 
 - `z_value` (`decay.rs:63-71`), private. Computes the half-life-scaled age
-  `z = a / H` where `a = (compartment_index.max(1) - 1) as f64`
+  `z = a / H` where `a = (history_segment_index.max(1) - 1) as f64`
   (`decay.rs:65`), `p = budget_pressure.max(P_FLOOR)` (`decay.rs:67`),
   `f = 2^((imp - 50)/D)` (`decay.rs:68`), `h = (H50 * f) / p` (`decay.rs:69`).
 - `tier` (`decay.rs:77-90`), a five-way step function over the boundaries
@@ -62,13 +62,13 @@ fixture corpus rather than by the assertions.
   the budget and floored at `P_FLOOR` (`decay.rs:144`).
 
 **Clock source: none. There is no clock, no timestamp, and no time type
-anywhere in `decay.rs`.** The only "time" input is `compartment_index: u32`, a
+anywhere in `decay.rs`.** The only "time" input is `history_segment_index: u32`, a
 1-based ordinal position from newest (`decay.rs:51`, `decay.rs:75`). The
-module doc calls this "compartment age" (`decay.rs:6`), which is ordinal age,
+module doc calls this "history_segment age" (`decay.rs:6`), which is ordinal age,
 not elapsed wall-clock time. Nothing in the file reads `SystemTime`,
 `Instant`, or an injected clock; there is no `use std::time` import. The
 result is therefore **reproducible for a fixed input tuple**
-`(compartment_index, importance, budget_pressure, anchor_overlap)`: the
+`(history_segment_index, importance, budget_pressure, anchor_overlap)`: the
 functions are pure `f64` arithmetic with no interior mutability, no ambient
 state, and no allocation.
 
@@ -87,7 +87,7 @@ Two qualifications on that reproducibility:
 
 Boundary behaviour, verified by running the extracted kernel in a scratch
 program outside the repository (see
-`evidence/core-decay-newest-compartment-tier-floor.md` for the transcript):
+`evidence/core-decay-newest-history_segment-tier-floor.md` for the transcript):
 
 | Input | Result | Note |
 | --- | --- | --- |
@@ -454,7 +454,7 @@ Eight guards, first match wins, no fallthrough gaps:
 
 ## Candidate properties
 
-### core-decay-newest-compartment-tier-floor
+### core-decay-newest-history_segment-tier-floor
 
 Type: safety
 Reachability: default-production
@@ -462,7 +462,7 @@ Status: active
 Exercised: partial — `decay.rs:154-162` asserts `tier(1, imp, p) == 1` for
 `imp` in `{1, 50, 100}` and `p` in `{0.1, 1.0, 5.0}` only, so the non-finite
 pressure case is unexercised.
-Guarantee: the newest compartment always renders at tier 1, for every
+Guarantee: the newest history_segment always renders at tier 1, for every
 importance and every pressure value the public API accepts.
 Check: `always` — for all `importance: i32` and all `budget_pressure: f64`
 including non-finite values, `tier(1, importance, budget_pressure) == 1` and
@@ -474,18 +474,19 @@ Required faults and enabling state: `budget_pressure = f64::INFINITY`, which
 `compute_budget_pressure` (`decay.rs:130-145`) returns when `history_budget`
 is positive but subnormal (measured at `5e-324`). No fault injection needed;
 the input alone is the enabling state.
-Confidence: high — [evidence](evidence/core-decay-newest-compartment-tier-floor.md).
+Confidence: high — [evidence](evidence/core-decay-newest-history_segment-tier-floor.md).
 I extracted the exact kernel from `decay.rs:56-124` into a scratch program and
 measured `tier(1, 50, f64::INFINITY) == 5`, `should_archive == false`,
 `rendered_tier == 4`, with `z = 0.0/0.0 = NaN`.
-Existing check: `crates/context-core/src/decay.rs:154` `newest_compartment_is_tier_1`
+Existing check: `crates/context-core/src/decay.rs:154` `newest_history_segment_is_tier_1`
 covers three finite pressures. Status `unaudited`.
-Impact: the newest, most relevant compartment renders as an anchor-level P4
+Impact: the newest, most relevant history_segment renders as an anchor-level P4
 summary instead of the verbose P1 form, silently dropping the most recent
 session content from the prompt. Because `rendered_tier` returns 4 while
 `tier` returns 5, the two functions also disagree, so any caller that reads
 `tier` directly to decide archival diverges from the renderer.
 Open questions:
+
 - Is a subnormal `history_budget` reachable from configuration, or is the
   budget always a whole-token count bounded well away from zero? Requires
   tracing `history_budget_tokens` back to its config surface, which is
@@ -521,12 +522,13 @@ I confirmed the disagreement window empirically: at `importance = 50`,
 documented P4 protection at `decay.rs:94` and `:107-108`.
 Existing check: `crates/context-core/src/decay.rs:165`, `:176`, `:186`, `:201`.
 Status `unaudited`.
-Impact: a monotonicity break means a compartment gets *more* verbose as it
+Impact: a monotonicity break means a history_segment gets *more* verbose as it
 ages or *less* protected as its importance rises, which is a direct
 contradiction of the council-validated model at `decay.rs:12-13`. An
 agreement break means the renderer and any archival consumer disagree about
-whether a compartment is retired.
+whether a history_segment is retired.
 Open questions:
+
 - Is `tier() == 5` a legitimate public answer, or should the archive-candidate
   boundary be expressed only through `should_archive`? The two disagree by
   design today. (needs human input)
@@ -540,7 +542,7 @@ Exercised: partial — `decay.rs:208-221` asserts only that a tighter budget
 raises pressure and that the loose case is at least `P_FLOOR`.
 Guarantee: `compute_budget_pressure` is total, never returns NaN, and always
 returns a value at or above `P_FLOOR`.
-Check: `always` — for every compartment slice and every `history_budget: f64`
+Check: `always` — for every history_segment slice and every `history_budget: f64`
 including 0, negative, subnormal, `f64::MAX`, `+inf`, and NaN:
 `!result.is_nan() && result >= P_FLOOR`. Additionally record whether
 `result.is_finite()`; if the contract intends finiteness, assert it too.
@@ -557,10 +559,11 @@ yield `+inf`, so the finiteness clause does not hold. `TIER_COST` indexing at
 Existing check: `crates/context-core/src/decay.rs:208`
 `pressure_self_tunes_toward_budget`. Status `unaudited`.
 Impact: an `+inf` pressure propagates into `z_value` and produces the
-`core-decay-newest-compartment-tier-floor` failure. A NaN pressure would be
+`core-decay-newest-history_segment-tier-floor` failure. A NaN pressure would be
 worse, collapsing every comparison, but the `f64::max` at `decay.rs:144`
 already prevents it.
 Open questions:
+
 - Does the contract intend `compute_budget_pressure` to be finite, or is
   `+inf` an accepted "archive everything" signal? The doc at `decay.rs:127-129`
   discusses overshoot but not saturation. (needs human input)
@@ -572,7 +575,7 @@ Reachability: test-only
 Status: active
 Exercised: partial — `decay.rs:194-198` asserts termination at one point,
 `should_archive(100_000, 100, 1.0, 0.0)`, with `anchor_overlap` fixed at 0.
-Guarantee: every compartment eventually archives; no input produces an
+Guarantee: every history_segment eventually archives; no input produces an
 immortal row.
 Check: `always` — for every `importance` and every finite `pressure >= P_FLOOR`
 and every `anchor_overlap` the API accepts, there exists a finite `index` at
@@ -601,6 +604,7 @@ prompt grows without limit and the budget guard at
 anchors become a first-class primitive as `decay.rs:94` anticipates, a NaN or
 uninitialised overlap becomes production-reachable.
 Open questions:
+
 - When anchor overlap becomes a real storage primitive, where should the
   overlap value be validated: at the storage boundary or inside
   `should_archive`? (needs human input)
@@ -644,6 +648,7 @@ for the same semantic command, so the intent ledger's replay detection and the
 mutation-token fence both misfire: a replay looks like a new command, or two
 different commands collide on one identity.
 Open questions:
+
 - Is the `U+FFFD` key in the `astral-key-order` fixture deliberate, or is it a
   mangled `U+E000` or lone surrogate from an earlier generator run? It
   discriminates correctly either way, but the intent matters for future edits.
@@ -693,6 +698,7 @@ outcome carrying a stale reason, or a `stale` outcome carrying none, misleads
 every consumer that branches on the pair, including
 `crates/memory-store/src/lib.rs:3943` which treats `Applied | Noop` as one class.
 Open questions:
+
 - Is `payload` intentionally opaque, so that non-canonical payloads are
   legal by design and only the envelope is canonical? The module doc at
   `claim_operation.rs:6-15` describes one vocabulary for all values, which
@@ -736,6 +742,7 @@ Impact: an order-sensitive digest makes the mutation token
 caller that lists the same heads in a different order sees a spurious fence
 mismatch and retries or rejects a legitimate mutation.
 Open questions:
+
 - Can a duplicate stream key occur in a real head list? If it can, the digest
   is ill-defined and the function should dedupe or reject rather than silently
   depend on input order. Resolving it needs the head-collection query in
@@ -824,6 +831,7 @@ entire purpose. A reopened `TerminalRejected` intent could be re-applied; an
 `Acknowledged` intent knocked back to `ContextCommitted` could be
 double-applied.
 Open questions:
+
 - Is transition legality enforced in `memory-store` SQL, and if so is the guard a
   `CHECK`, a conditional `UPDATE ... WHERE state = ?`, or application logic?
   (unresolved, needs the `memory-store` claim-intent-ledger lens)
@@ -870,6 +878,7 @@ rather than cleanly rejected, which is the exact outcome `lib.rs:53-56` and
 caller, today the blast radius is confined to whatever adopts it next, which
 is precisely when an exhaustive check is cheapest to install.
 Open questions:
+
 - Is `classify` dead code awaiting adoption, or has `daemon` diverged with a
   second copy of this routing logic? If the latter, the two must be compared,
   because a silent divergence between an unused reference implementation and
@@ -916,6 +925,7 @@ difference changes the tier or truncation decision, changes the rendered m0
 bytes, and busts the cached prefix on resume, which is the failure the whole
 cache-stability core exists to prevent.
 Open questions:
+
 - Is `f64`-free integer counting enough to make the tokenizer bit-portable
   across architectures, or does `fancy-regex` carry any target-dependent
   behaviour? Nothing I read suggests it does, but nothing establishes it
@@ -963,6 +973,7 @@ faithful to a different oracle than the plugin runs. Combined with 0.87% vocab
 coverage (564 of 64,995 token IDs across the 36 cases), the residual risk is
 larger than the green check suggests.
 Open questions:
+
 - Does `ai-tokenizer` expose a version constant the generator can stamp into
   the fixture? (unresolved, needs the `ai-tokenizer` package surface)
 - Should the vocab asset carry a checked-in digest so an accidental edit fails
@@ -985,7 +996,7 @@ Open questions:
    non-NaN overlap. Not production-reachable today
    (`decay_render.rs:295` passes `0.0`), but the doc overstates.
 
-3. **`decay.rs:75` and `:51` document `compartment_index` as 1-based, and
+3. **`decay.rs:75` and `:51` document `history_segment_index` as 1-based, and
    `decay.rs:65` silently accepts 0** by mapping it to the newest position via
    `.max(1)`. The contract says 1-based; the code is total over `u32` and
    conflates 0 with 1. No panic, but an off-by-one caller gets a plausible
@@ -993,12 +1004,12 @@ Open questions:
 
 4. **`context-core/src/lib.rs:26-27` insists an item ordinal is "Monotonic absolute
    ordinal — strictly increasing across the lineage, NEVER positional", while
-   the decay curve's `compartment_index` is explicitly positional** (1-based
+   the decay curve's `history_segment_index` is explicitly positional** (1-based
    from newest, `decay.rs:51`) and `decay_render.rs:267` computes it as
    `v2_total - v2_ordinal`. These are two different index notions in one crate
    with similar names. Not a defect, but a naming hazard worth a doc note, and
    a real risk if a future caller passes a `FlatBlock::ordinal` where a
-   `compartment_index` is expected.
+   `history_segment_index` is expected.
 
 5. **`claim_operation.rs:6-15` describes one canonical vocabulary for "values",
    yet `decode_claim_operation_result` exempts `payload` from it**
@@ -1015,7 +1026,7 @@ Open questions:
 7. **`decay.rs:127-129` describes `compute_budget_pressure` overshoot
    behaviour but not saturation.** The function can return `+inf`
    (measured, positive subnormal budget), which the doc does not contemplate
-   and which breaks the tier-1 floor for the newest compartment.
+   and which breaks the tier-1 floor for the newest history_segment.
 
 ## Open questions
 

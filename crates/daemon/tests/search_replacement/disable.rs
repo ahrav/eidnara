@@ -215,9 +215,9 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
         let engine = fixtures::TestEngine::new();
         let block = engine.block_calls();
         let release = fixtures::GateGuard(Arc::clone(&block));
-        let synapse = Arc::new(fixtures::component(
+        let local_embeddings = Arc::new(fixtures::component(
             &engine,
-            host_runtime::synapse::SynapseLimits::default(),
+            host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
         ));
         let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
         selection
@@ -226,7 +226,7 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
                     gate: Arc::clone(&gate),
                     kernel: Arc::clone(&corpus.kernel),
                     projection: Arc::clone(reader.projection()),
-                    synapse: Arc::clone(&synapse),
+                    local_embeddings: Arc::clone(&local_embeddings),
                     project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
                     destination: kernel::ArtifactDestination::Remote,
                 },
@@ -284,8 +284,8 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
                 )
                 .is_err()
             );
-            assert!(synapse.embed_blocking(&["probe"]).is_err());
-            assert_eq!(synapse.job_status(&held.0), Some("running"));
+            assert!(local_embeddings.embed_blocking(&["probe"]).is_err());
+            assert_eq!(local_embeddings.job_status(&held.0), Some("running"));
             assert_eq!(
                 corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
                 Some(corpus.tip())
@@ -360,8 +360,8 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
         assert_eq!(waiting.handoff, before.handoff);
         assert_eq!(waiting.episodes.unwrap().consumed, 0);
         assert_eq!((engine.calls(), engine.completed()), (1, 0));
-        assert_eq!(synapse.job_status(&held.0), Some("running"));
-        assert!(synapse.embed_blocking(&["probe"]).is_err());
+        assert_eq!(local_embeddings.job_status(&held.0), Some("running"));
+        assert!(local_embeddings.embed_blocking(&["probe"]).is_err());
         assert!(weak.upgrade().is_some());
         assert!(
             rustix::fs::flock(
@@ -420,7 +420,7 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
             Some(corpus.tip())
         );
         assert_eq!(admissions(&selection, &corpus, &gate), (0, 0));
-        assert!(synapse.embed_blocking(&["probe"]).is_ok());
+        assert!(local_embeddings.embed_blocking(&["probe"]).is_ok());
     }
 }
 
@@ -1141,9 +1141,9 @@ async fn a_supervisor_stopped_before_disable_still_reconciles() {
         .unwrap();
     let weak = Arc::downgrade(reader.projection());
     let engine = fixtures::TestEngine::new();
-    let synapse = Arc::new(fixtures::component(
+    let local_embeddings = Arc::new(fixtures::component(
         &engine,
-        host_runtime::synapse::SynapseLimits::default(),
+        host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
     ));
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     selection
@@ -1152,7 +1152,7 @@ async fn a_supervisor_stopped_before_disable_still_reconciles() {
                 gate: Arc::clone(&gate),
                 kernel: Arc::clone(&corpus.kernel),
                 projection: Arc::clone(reader.projection()),
-                synapse,
+                local_embeddings,
                 project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
                 destination: kernel::ArtifactDestination::Remote,
             },
@@ -1410,9 +1410,9 @@ async fn selecting_a_replacement_is_refused_while_maintenance_is_bound() {
         .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
         .unwrap();
     let engine = fixtures::TestEngine::new();
-    let synapse = Arc::new(fixtures::component(
+    let local_embeddings = Arc::new(fixtures::component(
         &engine,
-        host_runtime::synapse::SynapseLimits::default(),
+        host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
     ));
     let (events, _received) = tokio::sync::mpsc::unbounded_channel();
     selection
@@ -1421,7 +1421,7 @@ async fn selecting_a_replacement_is_refused_while_maintenance_is_bound() {
                 gate: Arc::clone(&gate),
                 kernel: Arc::clone(&corpus.kernel),
                 projection: Arc::clone(reader.projection()),
-                synapse,
+                local_embeddings,
                 project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
                 destination: kernel::ArtifactDestination::Remote,
             },
@@ -1600,15 +1600,15 @@ async fn a_finished_maintenance_owner_releases_selection_and_restart() {
         .unwrap();
     let weak = Arc::downgrade(reader.projection());
     let engine = fixtures::TestEngine::new();
-    let synapse = Arc::new(fixtures::component(
+    let local_embeddings = Arc::new(fixtures::component(
         &engine,
-        host_runtime::synapse::SynapseLimits::default(),
+        host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
     ));
     let maintained = || Maintained {
         gate: Arc::clone(&gate),
         kernel: Arc::clone(&corpus.kernel),
         projection: weak.upgrade().unwrap(),
-        synapse: Arc::clone(&synapse),
+        local_embeddings: Arc::clone(&local_embeddings),
         project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
         destination: kernel::ArtifactDestination::Remote,
     };
@@ -1691,9 +1691,9 @@ async fn selection_and_maintenance_refuse_foreign_bindings() {
         .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
         .unwrap();
     let engine = fixtures::TestEngine::new();
-    let synapse = Arc::new(fixtures::component(
+    let local_embeddings = Arc::new(fixtures::component(
         &engine,
-        host_runtime::synapse::SynapseLimits::default(),
+        host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
     ));
     let bounds = || SliceBounds {
         dispatch: fixtures::bounds(),
@@ -1707,7 +1707,7 @@ async fn selection_and_maintenance_refuse_foreign_bindings() {
             gate: open_gate(),
             kernel: Arc::clone(&corpus.kernel),
             projection: Arc::clone(reader.projection()),
-            synapse: Arc::clone(&synapse),
+            local_embeddings: Arc::clone(&local_embeddings),
             project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
             destination: kernel::ArtifactDestination::Remote,
         },
@@ -1735,7 +1735,7 @@ async fn selection_and_maintenance_refuse_foreign_bindings() {
             gate: Arc::clone(&gate),
             kernel: Arc::clone(&foreign_corpus.kernel),
             projection: Arc::clone(reader.projection()),
-            synapse,
+            local_embeddings,
             project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
             destination: kernel::ArtifactDestination::Remote,
         },
@@ -1799,9 +1799,9 @@ async fn maintenance_refuses_bounds_larger_than_the_manifest_limits() {
         .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
         .unwrap();
     let engine = fixtures::TestEngine::new();
-    let synapse = Arc::new(fixtures::component(
+    let local_embeddings = Arc::new(fixtures::component(
         &engine,
-        host_runtime::synapse::SynapseLimits::default(),
+        host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
     ));
     let bounds = || SliceBounds {
         dispatch: fixtures::bounds(),
@@ -1827,7 +1827,7 @@ async fn maintenance_refuses_bounds_larger_than_the_manifest_limits() {
                 gate: Arc::clone(&gate),
                 kernel: Arc::clone(&corpus.kernel),
                 projection: Arc::clone(reader.projection()),
-                synapse: Arc::clone(&synapse),
+                local_embeddings: Arc::clone(&local_embeddings),
                 project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
                 destination: kernel::ArtifactDestination::Remote,
             },
@@ -1870,9 +1870,9 @@ async fn grace_expiry_counts_only_the_held_slice_for_pinned_maintenance() {
     blocker.busy_timeout(Duration::ZERO).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let engine = fixtures::TestEngine::new();
-    let synapse = Arc::new(fixtures::component(
+    let local_embeddings = Arc::new(fixtures::component(
         &engine,
-        host_runtime::synapse::SynapseLimits::default(),
+        host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
     ));
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     selection
@@ -1881,7 +1881,7 @@ async fn grace_expiry_counts_only_the_held_slice_for_pinned_maintenance() {
                 gate: Arc::clone(&gate),
                 kernel: Arc::clone(&corpus.kernel),
                 projection: Arc::clone(reader.projection()),
-                synapse,
+                local_embeddings,
                 project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
                 destination: kernel::ArtifactDestination::Remote,
             },

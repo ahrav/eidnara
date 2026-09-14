@@ -1,4 +1,4 @@
-//! The embedding maintenance supervisor against a real kernel, projection, and in-process Synapse host.
+//! The embedding maintenance supervisor against a real kernel, projection, and in-process LocalEmbeddings host.
 //! One budget bounds every stage of a pass and stops it at its deadline or cancellation; slices alternate so a sweep runs while backfill work is held; shutdown joins its slices, keeps native work owned until it exits, reports panics, and leaves durable unfinished work for the next incarnation.
 
 mod support;
@@ -18,7 +18,9 @@ use daemon::embedding_supervisor::{
     Unresolved,
 };
 use daemon::search_projection::SearchProjection;
-use host_runtime::synapse::{EmbeddingEngine, SynapseComponent, SynapseLimits};
+use host_runtime::local_embeddings::{
+    EmbeddingEngine, LocalEmbeddingsComponent, LocalEmbeddingsLimits,
+};
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, ProjectScope};
 use retrieval::dispatch::{Recovery, authorize_recovery};
@@ -66,7 +68,7 @@ async fn one_budget_bounds_every_stage_of_every_job() {
         .collect();
     let (projection, rows) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
 
     // An exhausted budget admits nothing and runs no inference.
@@ -75,7 +77,7 @@ async fn one_budget_bounds_every_stage_of_every_job() {
         Arc::new(AtomicBool::new(false)),
     );
     let mut events = Vec::new();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let end = tokio::task::block_in_place(|| {
         dispatcher
             .run_pass(eligibility(&project), &bounds(), &spent, NOW, &mut |e| {
@@ -139,13 +141,13 @@ async fn sticky_cancellation_stops_the_pass_and_keeps_native_work_owned() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
     let cancelled = budget(Duration::from_secs(30));
     let canceller = cancelled.clone();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let started = Instant::now();
     // The pass reports the poll stage once the row is admitted and charged, so the cancellation lands mid-poll rather than at a time the scheduler chooses.
     let end = tokio::task::block_in_place(|| {
@@ -178,7 +180,7 @@ async fn sticky_cancellation_stops_the_pass_and_keeps_native_work_owned() {
     assert_eq!((held.0.as_str(), held.1), ("admitted", 1));
     // The host owns the call whether its worker has taken the CPU permit yet or is still queued for it.
     assert!(matches!(
-        synapse.job_status(held.2.as_deref().unwrap()),
+        local_embeddings.job_status(held.2.as_deref().unwrap()),
         Some("queued" | "running")
     ));
     TestEngine::release(&gate);
@@ -214,13 +216,13 @@ fn slice_bounds(slice: Duration) -> SliceBounds {
 fn maintained(
     corpus: &Corpus,
     projection: Arc<SearchProjection>,
-    synapse: Arc<SynapseComponent>,
+    local_embeddings: Arc<LocalEmbeddingsComponent>,
 ) -> Maintained {
     Maintained {
         gate: support::projection_gate::open_gate(),
         kernel: Arc::clone(&corpus.kernel),
         projection,
-        synapse,
+        local_embeddings,
         project: ProjectScope::new(PROJECT).unwrap(),
         destination: ArtifactDestination::Remote,
     }
@@ -272,10 +274,14 @@ async fn shutdown_joins_slices_and_stays_unresolved_while_native_work_is_held() 
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::clone(&projection), Arc::clone(&synapse)),
+        maintained(
+            &corpus,
+            Arc::clone(&projection),
+            Arc::clone(&local_embeddings),
+        ),
         slice_bounds(Duration::from_secs(2)),
         Arc::new(|| NOW),
         sender,
@@ -327,7 +333,7 @@ async fn shutdown_joins_slices_and_stays_unresolved_while_native_work_is_held() 
     let held = row(dir.path(), &occurrence);
     assert_eq!((held.0.as_str(), held.1), ("admitted", 1));
     let host_job = held.2.clone().unwrap();
-    assert_eq!(synapse.job_status(&host_job), Some("running"));
+    assert_eq!(local_embeddings.job_status(&host_job), Some("running"));
 
     // Shutdown joins the slice threads but the native call is still owned: unresolved, twice, with no second inference and nothing released.
     let first = supervisor.shutdown(Duration::from_secs(2)).await;
@@ -347,7 +353,7 @@ async fn shutdown_joins_slices_and_stays_unresolved_while_native_work_is_held() 
         })
     );
     assert_eq!(engine.calls(), 1);
-    assert_eq!(synapse.job_status(&host_job), Some("running"));
+    assert_eq!(local_embeddings.job_status(&host_job), Some("running"));
     assert_eq!(
         row(dir.path(), &occurrence),
         held,
@@ -368,7 +374,7 @@ async fn shutdown_joins_slices_and_stays_unresolved_while_native_work_is_held() 
     // Native exit resolves the drain; the result is a held lease, not a published vector.
     TestEngine::release(&gate);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while synapse.job_status(&host_job) == Some("running") && Instant::now() < deadline {
+    while local_embeddings.job_status(&host_job) == Some("running") && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(engine.completed(), 1, "the native call exited");
@@ -380,7 +386,7 @@ async fn shutdown_joins_slices_and_stays_unresolved_while_native_work_is_held() 
 
     // The next incarnation reconciles the admitted row and finishes it.
     drop(supervisor);
-    let next = Arc::new(component(&engine, SynapseLimits::default()));
+    let next = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let restarted = EmbeddingSupervisor::new(
         maintained(&corpus, Arc::clone(&projection), next),
@@ -431,13 +437,13 @@ async fn a_stopped_row_keeps_its_running_native_call_in_the_census() {
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     // The clock is advanced past the episode deadline once the row is admitted, so a later pass stops the row while its call runs.
     let clock = Arc::new(AtomicI64::new(NOW));
     let now = Arc::clone(&clock);
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         SliceBounds {
             dispatch: DispatchBounds {
                 grant: grant(1, NOW + DAY_MS),
@@ -490,7 +496,7 @@ async fn a_stopped_row_keeps_its_running_native_call_in_the_census() {
         (stopped.0.as_str(), stopped.1, stopped.2.as_deref()),
         ("failed", 1, None)
     );
-    assert_eq!(synapse.job_status(&host_job), Some("running"));
+    assert_eq!(local_embeddings.job_status(&host_job), Some("running"));
     assert_eq!((engine.calls(), engine.completed()), (1, 0));
 
     // Shutdown joins the slices but the call this supervisor admitted is still running: nothing is resolved.
@@ -509,7 +515,7 @@ async fn a_stopped_row_keeps_its_running_native_call_in_the_census() {
     // Once the call exits, shutdown resolves; the stopped row expects no result, so the supervisor reports no held lease.
     TestEngine::release(&gate);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while synapse.job_status(&host_job) == Some("running") && Instant::now() < deadline {
+    while local_embeddings.job_status(&host_job) == Some("running") && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(engine.completed(), 1);
@@ -529,10 +535,10 @@ async fn a_blocked_backfill_takes_the_idle_wait() {
     let (projection, _) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
     // The lane's fingerprint differs from the projection's, so every backfill returns `BindingMismatch`.
-    let mismatched = SynapseComponent::ready_with_engine(
+    let mismatched = LocalEmbeddingsComponent::ready_with_engine(
         lane("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
         Arc::clone(&engine) as Arc<dyn EmbeddingEngine>,
-        SynapseLimits::default(),
+        LocalEmbeddingsLimits::default(),
     )
     .unwrap();
     let idle = Duration::from_millis(300);
@@ -595,12 +601,12 @@ async fn a_backfill_of_dispositions_alone_does_not_idle() {
     corpus.publish("b", "b text");
     let (projection, _) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let idle = Duration::from_secs(5);
     let (sender, mut events) = unbounded_channel();
     // An expired grant stops every pending row before admission; one row per pass leaves a backlog behind the first.
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), synapse),
+        maintained(&corpus, Arc::new(projection), local_embeddings),
         SliceBounds {
             dispatch: DispatchBounds {
                 max_jobs: NonZeroUsize::new(1).unwrap(),
@@ -655,10 +661,10 @@ async fn a_failed_eligibility_read_is_retried_not_terminal() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object).to_string();
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), synapse),
+        maintained(&corpus, Arc::new(projection), local_embeddings),
         slice_bounds(Duration::from_secs(5)),
         Arc::new(|| NOW),
         sender,
@@ -700,10 +706,10 @@ async fn a_panicking_slice_is_reported_and_stops_the_supervisor() {
     corpus.publish("a", "a text");
     let (projection, _) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), synapse),
+        maintained(&corpus, Arc::new(projection), local_embeddings),
         slice_bounds(Duration::from_secs(5)),
         Arc::new(|| NOW),
         sender,
@@ -754,14 +760,14 @@ async fn grace_expiry_reports_an_unjoined_slice_and_a_later_request_joins_it() {
     corpus.publish("a", "a text");
     let (projection, _) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     // Another writer holds the projection file, so the slice's first write waits on the store's busy timeout.
     let blocker = Connection::open(search_path(dir.path())).unwrap();
     blocker.busy_timeout(Duration::ZERO).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), synapse),
+        maintained(&corpus, Arc::new(projection), local_embeddings),
         slice_bounds(Duration::from_secs(10)),
         Arc::new(|| NOW),
         sender,
@@ -813,7 +819,7 @@ async fn a_budget_spent_during_binding_stops_before_the_eligibility_read() {
     corpus.publish("a", "a text");
     let (projection, _) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
     // Another writer holds the projection file past the budget's deadline, so the binding write returns from its busy wait only after the budget ended.
     let blocker = Connection::open(search_path(dir.path())).unwrap();
@@ -823,7 +829,7 @@ async fn a_budget_spent_during_binding_stops_before_the_eligibility_read() {
         std::thread::sleep(Duration::from_millis(600));
         blocker.execute_batch("COMMIT").unwrap();
     });
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     // The injected read failure distinguishes budget exhaustion before the eligibility read from a read that ran.
     dispatcher.inject_fault_for_test(DispatchFault::RefuseEligibilityRead);
     let spent_during_bind = budget(Duration::from_millis(200));
@@ -853,12 +859,12 @@ async fn an_exhausted_slice_without_progress_takes_the_idle_wait() {
     corpus.publish("a", "a text");
     let (projection, _) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let idle = Duration::from_millis(300);
     let (sender, mut events) = unbounded_channel();
     // A zero slice is exhausted the moment it starts, so every backfill and every sweep ends with the budget and nothing done.
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), synapse),
+        maintained(&corpus, Arc::new(projection), local_embeddings),
         SliceBounds {
             idle,
             ..slice_bounds(Duration::ZERO)
@@ -914,10 +920,10 @@ async fn shutdown_before_the_loop_is_polled_reports_a_final_stop() {
     corpus.publish("a", "a text");
     let (projection, _) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), synapse),
+        maintained(&corpus, Arc::new(projection), local_embeddings),
         slice_bounds(Duration::from_secs(5)),
         Arc::new(|| NOW),
         sender,
@@ -957,13 +963,17 @@ async fn a_reauthorized_row_keeps_its_earlier_native_call_in_the_census() {
     let engine = TestEngine::new();
     let first_gate = engine.block_calls();
     let _release_first = GateGuard(Arc::clone(&first_gate));
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     // The clock is advanced past the first episode's deadline once the row is admitted, so a later pass stops the row while its call runs.
     let clock = Arc::new(AtomicI64::new(NOW));
     let now = Arc::clone(&clock);
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::clone(&projection), Arc::clone(&synapse)),
+        maintained(
+            &corpus,
+            Arc::clone(&projection),
+            Arc::clone(&local_embeddings),
+        ),
         SliceBounds {
             dispatch: DispatchBounds {
                 grant: grant(1, NOW + DAY_MS),
@@ -1011,7 +1021,7 @@ async fn a_reauthorized_row_keeps_its_earlier_native_call_in_the_census() {
     })
     .await;
     assert_eq!(row(dir.path(), &occurrence).0, "failed");
-    assert_eq!(synapse.job_status(&first_job), Some("running"));
+    assert_eq!(local_embeddings.job_status(&first_job), Some("running"));
 
     // The next admitting backfill submits a second host job before the first host call returns.
     let second_gate = engine.block_calls();
@@ -1048,10 +1058,10 @@ async fn a_reauthorized_row_keeps_its_earlier_native_call_in_the_census() {
     assert_eq!((reopened.0.as_str(), reopened.1), ("admitted", 1));
     let second_job = reopened.2.unwrap();
     assert_ne!(first_job, second_job, "a new episode is a new host job");
-    assert_eq!(synapse.job_status(&first_job), Some("running"));
+    assert_eq!(local_embeddings.job_status(&first_job), Some("running"));
     // The single CPU permit serializes the two calls, so the second call is queued until the first returns.
     assert!(matches!(
-        synapse.job_status(&second_job),
+        local_embeddings.job_status(&second_job),
         Some("queued" | "running")
     ));
     assert_eq!(engine.calls(), 1);
@@ -1071,10 +1081,10 @@ async fn a_reauthorized_row_keeps_its_earlier_native_call_in_the_census() {
 
     TestEngine::release(&first_gate);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while synapse.job_status(&second_job) != Some("running") && Instant::now() < deadline {
+    while local_embeddings.job_status(&second_job) != Some("running") && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    assert_eq!(synapse.job_status(&first_job), Some("ready"));
+    assert_eq!(local_embeddings.job_status(&first_job), Some("ready"));
     assert_eq!(
         supervisor.shutdown(Duration::from_secs(2)).await,
         Err(Unresolved {
@@ -1086,7 +1096,7 @@ async fn a_reauthorized_row_keeps_its_earlier_native_call_in_the_census() {
 
     TestEngine::release(&second_gate);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while synapse.job_status(&second_job) == Some("running") && Instant::now() < deadline {
+    while local_embeddings.job_status(&second_job) == Some("running") && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(engine.completed(), 2);
@@ -1126,10 +1136,10 @@ async fn a_held_head_of_the_sweep_order_does_not_starve_identities_behind_it() {
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::clone(&projection), synapse),
+        maintained(&corpus, Arc::clone(&projection), local_embeddings),
         SliceBounds {
             dispatch: DispatchBounds {
                 result_wait: Duration::from_millis(50),
@@ -1210,12 +1220,12 @@ async fn a_settled_call_no_row_expects_leaves_the_census_during_maintenance() {
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let clock = Arc::new(AtomicI64::new(NOW));
     let now = Arc::clone(&clock);
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         SliceBounds {
             dispatch: DispatchBounds {
                 grant: grant(1, NOW + DAY_MS),
@@ -1248,7 +1258,7 @@ async fn a_settled_call_no_row_expects_leaves_the_census_during_maintenance() {
     })
     .await;
     assert_eq!(row(dir.path(), &occurrence).0, "failed");
-    assert_eq!(synapse.job_status(&host_job), Some("running"));
+    assert_eq!(local_embeddings.job_status(&host_job), Some("running"));
     assert_eq!(
         supervisor.tracked_host_jobs_for_test(),
         1,
@@ -1260,7 +1270,7 @@ async fn a_settled_call_no_row_expects_leaves_the_census_during_maintenance() {
     within(Duration::from_secs(30), async {
         loop {
             ended(&mut events, SliceKind::Backfill).await;
-            if synapse.job_status(&host_job) == Some("ready")
+            if local_embeddings.job_status(&host_job) == Some("ready")
                 && supervisor.tracked_host_jobs_for_test() == 0
             {
                 break;
@@ -1289,10 +1299,10 @@ async fn shutdown_waits_the_grace_for_an_admitted_call_to_exit() {
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         slice_bounds(Duration::from_secs(2)),
         Arc::new(|| NOW),
         sender,
@@ -1303,7 +1313,7 @@ async fn shutdown_waits_the_grace_for_an_admitted_call_to_exit() {
         SliceOutcome::Backfill { admitted: 1, .. }
     ));
     let host_job = row(dir.path(), &occurrence).2.unwrap();
-    assert_eq!(synapse.job_status(&host_job), Some("running"));
+    assert_eq!(local_embeddings.job_status(&host_job), Some("running"));
 
     // The call exits well inside the grace, after the slices have joined.
     let releasing = Arc::clone(&gate);
@@ -1317,7 +1327,7 @@ async fn shutdown_waits_the_grace_for_an_admitted_call_to_exit() {
         .await
         .expect("a call that exits within the grace resolves shutdown");
     assert!(asked.elapsed() < Duration::from_secs(5));
-    assert_eq!(synapse.job_status(&host_job), Some("ready"));
+    assert_eq!(local_embeddings.job_status(&host_job), Some("ready"));
     assert_eq!(
         report.held_results, 1,
         "the admitted row still expects the result the host now holds"
@@ -1341,10 +1351,14 @@ async fn a_submission_whose_row_is_retired_before_its_charge_claims_no_result() 
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::clone(&projection), Arc::clone(&synapse)),
+        maintained(
+            &corpus,
+            Arc::clone(&projection),
+            Arc::clone(&local_embeddings),
+        ),
         slice_bounds(Duration::from_secs(2)),
         Arc::new(|| NOW),
         sender,
@@ -1408,10 +1422,10 @@ async fn a_census_during_a_blocked_charge_keeps_the_result_the_charge_then_claim
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object).to_string();
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         slice_bounds(Duration::from_secs(2)),
         Arc::new(|| NOW),
         sender,
@@ -1448,7 +1462,7 @@ async fn a_census_during_a_blocked_charge_keeps_the_result_the_charge_then_claim
     })
     .await;
     within(Duration::from_secs(10), async {
-        while synapse.job_status(&host_job) != Some("ready") {
+        while local_embeddings.job_status(&host_job) != Some("ready") {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -1497,10 +1511,10 @@ async fn a_second_run_returns_while_the_first_loop_owns_the_schedule() {
     corpus.publish("a", "a text");
     let (projection, _) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), synapse),
+        maintained(&corpus, Arc::new(projection), local_embeddings),
         slice_bounds(Duration::from_secs(5)),
         Arc::new(|| NOW),
         sender,
@@ -1545,10 +1559,10 @@ async fn an_unsettled_charge_keeps_its_ready_result_through_quarantine() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object).to_string();
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         slice_bounds(Duration::from_secs(5)),
         Arc::new(|| NOW),
         sender,
@@ -1575,7 +1589,7 @@ async fn an_unsettled_charge_keeps_its_ready_result_through_quarantine() {
     assert_eq!(admitted.0, "admitted");
     let host_job = admitted.2.unwrap();
     within(Duration::from_secs(10), async {
-        while synapse.job_status(&host_job) != Some("ready") {
+        while local_embeddings.job_status(&host_job) != Some("ready") {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -1600,10 +1614,10 @@ async fn a_grace_lapsing_after_native_exit_resolves_the_drain() {
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         slice_bounds(Duration::from_millis(200)),
         Arc::new(|| NOW),
         sender,
@@ -1643,7 +1657,7 @@ async fn a_grace_lapsing_after_native_exit_resolves_the_drain() {
     }
     TestEngine::release(&gate);
     let exit = Instant::now() + Duration::from_secs(10);
-    while synapse.job_status(&host_job) == Some("running") {
+    while local_embeddings.job_status(&host_job) == Some("running") {
         assert!(Instant::now() < exit, "the released call exits");
         tokio::task::yield_now().await;
     }

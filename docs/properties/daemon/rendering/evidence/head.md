@@ -5,7 +5,7 @@ units. `src/transform.rs:7511-12623` (5,113 lines) carries the byte-producing
 splice `build_output_with_tags_inner` (`:11678-12156`), the overlay application
 site (`:8208-8269`), the tag caches (`:7597-7727`) and the nudge decisions
 (`:9142-9627`). The other six are `src/tail_hygiene.rs` (1,278),
-`src/decay_render.rs` (849), `src/caveman.rs` (651), `src/memory_render.rs`
+`src/decay_render.rs` (849), `src/terse_text_compression.rs` (651), `src/memory_render.rs`
 (538), `src/classify.rs` (490) and `src/prompt_surface.rs` (385). All seven line
 counts were re-derived at `HEAD` and sum to 9,304, matching
 [../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md)

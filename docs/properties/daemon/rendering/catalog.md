@@ -5,7 +5,7 @@ units. `src/transform.rs:7511-12623` (5,113 lines) carries the byte-producing
 splice `build_output_with_tags_inner` (`:11678-12156`), the overlay application
 site (`:8208-8269`), the tag caches (`:7597-7727`) and the nudge decisions
 (`:9142-9627`). The other six are `src/tail_hygiene.rs` (1,278),
-`src/decay_render.rs` (849), `src/caveman.rs` (651), `src/memory_render.rs`
+`src/decay_render.rs` (849), `src/terse_text_compression.rs` (651), `src/memory_render.rs`
 (538), `src/classify.rs` (490) and `src/prompt_surface.rs` (385). All seven line
 counts were re-derived at `HEAD` and sum to 9,304, matching
 [../_lenses/scope-map-and-risk-ranking.md](../_lenses/scope-map-and-risk-ranking.md)
@@ -499,6 +499,7 @@ Impact: A duplicated or reordered message is a provider-visible prefix change,
 which busts the prompt cache at best and produces an invalid conversation at
 worst.
 Open questions:
+
 - Can the anchored and unanchored synthetic-todo branches both fire in one
   pass? The anchored branch requires `anchor_mid.is_some()` and the unanchored
   branch requires `anchor_mid.is_none()` on the same `meta.synthetic_todo`, so
@@ -542,6 +543,7 @@ Impact: The whole cache discipline in the module header (`transform.rs:1-16`)
 rests on a replay producing identical bytes. A seed-dependent render would bust
 the provider prefix cache on every process restart.
 Open questions:
+
 - None. The one `HashMap` iteration is order-independent for the reason
   recorded above; a regression test pinning the disjointness assumption would
   be cheap.
@@ -579,10 +581,11 @@ The index shift is verified from source: `filter_map` rebuilds `content` at
 message with a full-drop tool block followed by two taggable blocks.
 Existing check: `transform.rs:27216`, `:27131`; neither runs in CI.
 Impact: A `§N§` prefix on the wrong block breaks the tag-to-block mapping that
-`ctx_reduce` resolves against, so the agent's reduce request hits content it
+`eidnara_reduce` resolves against, so the agent's reduce request hits content it
 did not choose. The bytes are already frozen into the provider prefix by the
 time it could be noticed.
 Open questions:
+
 - Can one wire message carry a full-drop tool block followed by two or more
   taggable blocks? Depends on the harness codecs, which are 4f scope.
   Unresolved, needs 4f.
@@ -615,6 +618,7 @@ Impact: A message the module intended to keep leaves the served context
 silently. If it was an authored user message, the agent loses a directive with
 no signal that it happened.
 Open questions:
+
 - Is the omission intended for every producer, or only for the strip path? The
   `present` predicate accepts a message absent from `blocks_by_mid`, which
   suggests the author's target was messages with no projected blocks, not
@@ -655,6 +659,7 @@ response field. If it carried a real tool result, the matching tool call
 becomes an orphan, which is exactly the shape the sibling lens found has no
 production detection (`render-a-orphan-tool-arc-has-no-production-detection`).
 Open questions:
+
 - Can a tool-call id reaching `decode_opencode` or `decode_pi` be chosen by
   anything other than the harness itself? Unresolved, needs 4f.
 - Is the prefix check deliberately loose so that a pair frozen under an older
@@ -708,6 +713,7 @@ pass, release silently removes content and continues. Whichever profile ships
 is the only one whose behaviour was ever executed, and today neither arm's test
 runs in CI.
 Open questions:
+
 - Which profile does the shipped `eidnara-host` use? `ci.yml:164-165` builds it
   without `--release`, so the CI artifact is a debug build with the panicking
   arm. Whether the distributed artifact matches is unresolved, needs the
@@ -744,6 +750,7 @@ Impact: An orphaned arc is a deterministic provider 400 for the whole session
 until the array changes. In production nothing detects it, so the first signal
 is the provider error.
 Open questions:
+
 - Is the guard test-only deliberately, on the argument that its cost is
   O(messages × blocks) per pass? The sibling `enforce_unique_tool_use_ids` runs
   in production with a comparable cost, so the asymmetry looks unintentional.
@@ -796,6 +803,7 @@ Impact: This is the enabling condition for the sibling record
 If it holds, that record's divergence is unreachable through the public path;
 if the generation trigger has a gap, it is reachable.
 Open questions:
+
 - Do the `tags` SQLite triggers advance `generation` on delete and on
   update, not only on insert? Unresolved, needs an `memory-store` read.
 
@@ -824,14 +832,15 @@ the state in which no durable row exists.
 Confidence: medium - [evidence](evidence/render-a-channel2-derived-tag-numbers-name-no-durable-row.md).
 Verified the derived numbering, verified it reaches `oldest_channel2_hint`
 (`:9396`) and `format_reclaimable_hint` (`:9872`), and verified the rendered
-form is `§N§ tool`. Not verified: what `ctx_reduce` does with a tag number that
+form is `§N§ tool`. Not verified: what `eidnara_reduce` does with a tag number that
 has no row, which is 4d's surface.
 Existing check: none.
 Impact: The agent is told to reduce `§3§` when no `§3§` exists, so a compliant
-`ctx_reduce` either no-ops or resolves to a different block. The second is a
+`eidnara_reduce` either no-ops or resolves to a different block. The second is a
 misattributed reduction.
 Open questions:
-- Does `ctx_reduce` reject an unresolvable tag number or silently resolve it?
+
+- Does `eidnara_reduce` reject an unresolvable tag number or silently resolve it?
   `parse_tag_range_string` is `lib.rs:15165-15210`, which is 4d scope.
   Unresolved, needs 4d.
 
@@ -868,7 +877,7 @@ on the wire (`default_auto_search_enabled`, `:865-867`) and in the shipped
 producer
 (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2010` (source-catalog path, not present at HEAD)).
 Confidence: high - [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the
-maximum: 18 (`<ctx-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 +
+maximum: 18 (`<eidnara-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 +
 2 + 1 + 127 (footer) + 19 = 458 UTF-16 units against a cap of 800.
 `USER_HINT_RESULT_LIMIT` is 3 (`:117`, applied `:9090`) and `one_line_fragment`
 caps each fragment at 80 UTF-16 units (`:113`, applied `:9096`, enforced
@@ -879,6 +888,7 @@ Impact: A dead truncation path plus a `debug_assert` that can never fail. It is
 also a latent trap: raising `USER_HINT_RESULT_LIMIT` or the fragment cap
 silently activates a path that has never executed.
 Open questions:
+
 - Is `truncate_hint_to_total_cap` reachable from any other caller? Grep found
   only `:9114`. Recorded as resolved in the evidence file.
 
@@ -919,6 +929,7 @@ says light assets "are not available yet", which is stale, and a reader who
 trusts it will conclude the light preset is inert when the mapping document and
 the assets show it is not.
 Open questions:
+
 - None.
 
 ### nudge-b-todo-availability-fail-open-is-unreachable
@@ -959,6 +970,7 @@ the `injection.rs` wording would manufacture a synthetic tool call without host
 authority, which is precisely what `transform.rs:739-741` says must never
 happen.
 Open questions:
+
 - Which of the two doc comments is the intended contract? Fail-closed is what
   ships and is the safer reading; the `injection.rs` wording is at minimum
   stale. (needs human input)
@@ -1010,6 +1022,7 @@ Impact: A defer pass that swapped the pair would change bytes mid-prefix,
 busting the provider prompt cache and, on Anthropic, presenting a tool result
 the model never asked for at a position it has already reasoned past.
 Open questions:
+
 - The stale-anchor arm at `transform.rs:7495-7500` drops the pair on a *bust*
   when the anchor vanished without a coverage move. Can the same vanish happen
   on a defer pass, where `reanchor_kept_synthetic_todo_if_folded_or_shrunk` is
@@ -1061,6 +1074,7 @@ discarded. On the divergence path this also shows up as a served-fingerprint
 mismatch (`transform.rs:5513-5520`), which is a report of the symptom, not a
 prevention.
 Open questions:
+
 - Is the missing gate deliberate on the grounds that Channel-1 only ever
   targets a fresh tool result? The selector does not encode that assumption,
   and the three fallback conditions above defeat it. (needs human input)
@@ -1112,6 +1126,7 @@ mode the arming watermark exists to prevent on the other arm. It also means the
 two module rearm helpers are dead code in the shipped configuration, which is a
 maintenance hazard: a reader sees a rearm protocol that is not wired up.
 Open questions:
+
 - Is the delegation deliberate, with the module treating the OpenCode host as
   the sole lease owner? The comment at `transform.rs:3509-3511` says tags are
   kept available on non-CC profiles so "the OpenCode host can receive the same
@@ -1164,6 +1179,7 @@ housekeeping warning for that cycle. The TTL bounds the damage to one arming
 cycle, which is the right shape; the concern is that the primary retirement
 path has no corroboration at all.
 Open questions:
+
 - Is the CC leg live? If not, this whole arm plus `channel2_directive_id`, the
   arming watermark, and the lease TTL are unreached in the shipped
   configuration, which would change the label to something closer to
@@ -1231,6 +1247,7 @@ high. Nothing counts arms or retirements
 ([nudge-b-overlay-suppression-and-firing-are-unreportable](#nudge-b-overlay-suppression-and-firing-are-unreportable)),
 so the wedge would be invisible.
 Open questions:
+
 - Is the CC leg live? Inherited from the parent record and unresolved for the same
   reason: no TypeScript sender in this repository emits the profile. (needs human
   input)
@@ -1298,13 +1315,14 @@ block is out of the projection; if a block id is ever reconstructed on a later
 pass the old reminder reappears, quoting a token count from a session state
 that no longer exists.
 Open questions:
+
 - Can a `block_id` be reconstructed after leaving the projection? Block ids are
   `wire::block_id(&message_id, block_index)`, so a message that re-enters
   the request with the same mid and block layout would collide. Whether that
   happens depends on the projection cache and lineage handling, which is 4b
   scope. Unresolved, needs 4b.
 - Should the reaper key on the overlay frontier, on tag retirement, or on
-  compartment coverage? A design decision. (needs human input) The same decision
+  history_segment coverage? A design decision. (needs human input) The same decision
   fixes the window in
   [nudge-b-channel1-append-row-removal-has-no-bounded-window](#nudge-b-channel1-append-row-removal-has-no-bounded-window),
   which is why neither half of the original check can be written today.
@@ -1372,6 +1390,7 @@ the table turned out to be, which is why the two halves needed separating: fixin
 the count bound does not fix this, and fixing this bounds the count as a
 side-effect.
 Open questions:
+
 - What is N, and in what unit? Passes is the unit this record proposes because the
   module's own removability test is evaluated per pass, but a wall-clock TTL keyed
   on `fired_at_ms` is the cheaper implementation and the schema already supports
@@ -1440,10 +1459,11 @@ made, with a `completed` status and a zero timestamp (`injection.rs:345`,
 `:355-358`). It cannot tell that from its own work, so it may reason about the
 todo list as something it already did. The three text overlays are better off:
 Channel-1 and Channel-2 carry `<system-reminder>` (`transform.rs:9859`,
-`:9559`), the hint carries `<ctx-search-hint>` (`:9111`), and the temporal mark
+`:9559`), the hint carries `<eidnara-search-hint>` (`:9111`), and the temporal mark
 is an HTML comment (`:8205`). All four of those markers are plain text a user
 or a tool result can forge, so they are a convention, not a boundary.
 Open questions:
+
 - Is the `synthetic_todo_` id prefix intended as the provenance marker for
   the model? It is deterministic and visible in the Anthropic `tool_use` id, so
   it is a real signal, but nothing documents it as one. (needs human input)
@@ -1481,24 +1501,25 @@ checked `:8955-8959`).
 Confidence: high - [evidence](evidence/nudge-b-auto-search-hint-injects-unauthored-text-into-a-user-block.md).
 Verified the append target is the user's own text block
 (`transform.rs:8249-8250`, `append_user_hint_to_block` at `:8345-8355` pushes
-onto `BlockKind::Text`), that the envelope is the plain string `<ctx-search-hint>`
+onto `BlockKind::Text`), that the envelope is the plain string `<eidnara-search-hint>`
 (`:9111`), and that the same string in ingress bytes is treated as an existing
 augmentation (`has_stacked_user_hint_augmentation`, `:8989-8997`), which proves
 the envelope is forgeable from the user side. Verified the injected fragments
-come from stored compartment bodies (`run_user_hint_lexical_search` reads only
-`load_compartment_candidates`, `:8866`), so the content is earlier-conversation
+come from stored history_segment bodies (`run_user_hint_lexical_search` reads only
+`load_history_segment_candidates`, `:8866`), so the content is earlier-conversation
 material this turn's author did not write.
 Existing check: `transform.rs:23075-23090`, `:23030-23048`, `:23049-23073`;
 none run in CI.
 Impact: The provider sees a user message that ends with three fragments of
 earlier conversation plus the instruction "If the fragments above seem relevant
-to the current request, you may run ctx_search to retrieve full context"
+to the current request, you may run eidnara_search to retrieve full context"
 (`:9109`). Attributed to the user, that reads as the user's own instruction.
 The module's own code shows it knows this is a text convention and not a
 boundary: `is_system_reminder_transport_message`'s comment says wire
 "intentionally has no transport-origin field" and settles for a text-shape
 discriminator (`:8525-8527`).
 Open questions:
+
 - Is a caller-supplied value causing this? Yes, indirectly and by design: the
   user's own prompt is the search query, so the caller's bytes select which
   unauthored content gets injected. Recorded as resolved in the evidence file.
@@ -1527,17 +1548,17 @@ Exercised: partial - `channel1_hygiene_ratio_nudge_replays_and_suppresses_refire
 (`transform.rs:23551-23590`) covers the suppression *effect*, but only by
 writing the flag directly into the store at `:23577`. That is the only write to
 `true` in the repository. The test does not run in CI.
-Guarantee: The documented ctx_reduce feedback loop exists: after the agent acts
+Guarantee: The documented eidnara_reduce feedback loop exists: after the agent acts
 on a reminder, the next transform suppresses new Channel-1 appends.
-Check: `always` - assert that on any pass following a `ctx_reduce` that froze
+Check: `always` - assert that on any pass following a `eidnara_reduce` that froze
 at least one reduction, `decide_channel1` takes the suppressed arm
 (`transform.rs:9593-9595`) on the next transform for that session. `always`
 because the documented contract is unconditional once the antecedent holds.
-Fault/timing angle: The window is between the `ctx_reduce` facade commit and
+Fault/timing angle: The window is between the `eidnara_reduce` facade commit and
 the next transform pass. If the flag were ever set, the clear at
 `transform.rs:9157` would consume it on the first `tagging_active` pass, so the
 suppression is a single-pass token.
-Required faults and enabling state: A `ctx_reduce` call that applies a
+Required faults and enabling state: A `eidnara_reduce` call that applies a
 reduction, followed by a `tagging_active` transform pass. The suppression
 cannot be observed because nothing sets the flag.
 Confidence: high - [evidence](evidence/nudge-b-channel1-suppression-flag-is-never-set.md).
@@ -1555,6 +1576,7 @@ the `reset_cycle` arm at `:9565-9566` fires instead and zeroes the memo, which
 re-arms the ladder from `Gentle`. So compliance resets the nudge cycle rather
 than suppressing it, which is a different behaviour from the documented one.
 Open questions:
+
 - Was the writer removed, or never written? `memory_store::ModuleMeta` carries the
   field with `#[serde(default)]` (`:2460`), so a stored `true` from an older
   writer would still be honoured. Whether such a writer ever shipped needs the
@@ -1595,6 +1617,7 @@ delivery: none of them leave a counter. The only adjacent signal is the
 served-output divergence record (`:5513-5520`), which reports the byte symptom
 without naming the cause.
 Open questions:
+
 - Is `tag_mint_new` the intended precedent, meaning the other overlays were
   simply never given counters, or is there a deliberate reason tags are counted
   and reminders are not? (needs human input)
@@ -1606,7 +1629,7 @@ Reachability: default-production
 Status: active
 Exercised: partial - `recurring_raw_call_id_orphan_is_conservative_t_only`
 (`tail_hygiene.rs:1211`) and the surrounding suite cover exclusion for `red:`,
-caveman and sentinel content. Nothing covers a `strip:` unit.
+terse_text_compression and sentinel content. Nothing covers a `strip:` unit.
 Guarantee: The tail-hygiene metric's total `t` counts only tokens the render
 actually serves.
 Check: `always` - for a pass with at least one `strip:` frozen unit whose
@@ -1641,6 +1664,7 @@ the code does not make
 (`docs/nudge-hygiene-calibration-2026-08-16.md:10` (source-catalog path, not present at HEAD), cited in
 [fault-map.md](fault-map.md)).
 Open questions:
+
 - Is the divergence bounded? A whole-message strip replaces every block, so the
   overstatement is the whole message. Whether any strip class can dominate the
   tail is unresolved, needs a measurement on a real session.
@@ -1664,10 +1688,10 @@ Status: active
 Exercised: not yet - no test observes a truncated fragment inside a served
 array.
 Guarantee: A campaign reaches a render in which the user-hint fragment cap
-actually binds, and the served bytes are still a balanced `<ctx-search-hint>`
+actually binds, and the served bytes are still a balanced `<eidnara-search-hint>`
 element with no broken scalar.
 Check: `sometimes` - marker `USER_HINT_FRAGMENT_TRUNCATION_SERVED`. At least once
-per campaign, observe a served array containing a `<ctx-search-hint>` block whose
+per campaign, observe a served array containing a `<eidnara-search-hint>` block whose
 body has a line ending in `…`, and assert on that same render that the element is
 balanced, that every fragment line is at most `USER_HINT_FRAGMENT_CHAR_CAP + 2`
 UTF-16 units, and that the whole message is valid UTF-8 with no lone surrogate.
@@ -1681,8 +1705,8 @@ Fault/timing angle: None.
 Required faults and enabling state: `auto_search_active` (default true, see the
 record above), an authored user tail that is the last message (`:8776-8780`),
 no existing hint row for its block, and at least one memory search result whose
-caveman-compressed snippet exceeds 80 UTF-16 units. The last is the ordinary
-case for a real memory hit, since `caveman::compress` at `Ultra` shortens but
+terse_text_compression-compressed snippet exceeds 80 UTF-16 units. The last is the ordinary
+case for a real memory hit, since `terse_text_compression::compress` at `Ultra` shortens but
 does not cap.
 Confidence: high - [evidence](evidence/render-a-hint-fragment-cap-binds-in-a-served-render.md).
 Verified the cap application at `:9096`, the truncation at `:9135-9139`, the
@@ -1693,6 +1717,7 @@ a `sometimes` record a campaign can run for hours, execute the truncation lines
 from a unit test, and never once serve a truncated hint, so the envelope and
 scalar guarantees stay unproven on real data.
 Open questions:
+
 - None.
 
 ### nudge-b-one-block-carries-several-overlay-kinds
@@ -1748,6 +1773,7 @@ pass. Third, whether the sibling's index-shift hazard
 (`render-a-overlay-targets-stale-indices-after-full-drop-filter`) misapplies
 two or three overlays at once rather than one.
 Open questions:
+
 - Can a single block ever carry all four? A tool result is not eligible for the
   temporal marker (that requires an authored user message, `:8642-8647`) and
   not eligible for the user hint (that requires `role == "user"`, `:8789`), so
@@ -1994,7 +2020,7 @@ that the serialized-output cache records what was built rather than what was
 served, since every `record_output_item` call precedes
 `enforce_unique_tool_use_ids`; the two need a joint reading of the cache's
 contract rather than a fix on one side. 4d owns `parse_tag_range_string`
-(`lib.rs:15165-15210`) and `handle_ctx_reduce_facade` (`:10482-10588`), which
+(`lib.rs:15165-15210`) and `handle_eidnara_reduce_facade` (`:10482-10588`), which
 decide whether
 [render-a-channel2-derived-tag-numbers-name-no-durable-row](#render-a-channel2-derived-tag-numbers-name-no-durable-row)
 is a no-op or a misattributed reduction; lens A left that open for 4d. And 4f owns

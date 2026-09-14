@@ -15,7 +15,7 @@ root, not `docs/CONFIGURATION.md`) and `packages/pi-plugin/PARITY.md` (983).
 Also mined: module headers and doc comments in `crates/daemon/src/codec/`
 (`mod.rs` 299, `opencode.rs` 2,186, `pi.rs` 1,499, `sidecar.rs` 339),
 `config.rs` (1,229), `scheduler.rs` (1,449), `boundary.rs` (3,053),
-`selection.rs` (3,365), `caveman.rs` (651), plus the call sites in `lib.rs` and
+`selection.rs` (3,365), `terse_text_compression.rs` (651), plus the call sites in `lib.rs` and
 `transform.rs` that consume them.
 
 Two scope-map file names do not exist at `HEAD`. There is no
@@ -96,7 +96,7 @@ document describes.
 
 **C1-05. The `pi-msg-<index>` id scheme was migrated away.**
 Quote: "**`pi_stable_id_scheme` (migration v25):** a one-time forced-execute
-cutover that re-keys persisted tag/drop/caveman/placeholder state from
+cutover that re-keys persisted tag/drop/terse_text_compression/placeholder state from
 `pi-msg-<index>` ids to real `SessionEntry` ids." (`PARITY.md:172-175`)
 Implied property: no live code path mints a `pi-msg-<index>` id.
 Implementing code: contradicted. `pi_stable_key` (`codec/pi.rs:712-717`) falls
@@ -117,26 +117,26 @@ reader would not guess.
 
 **C1-07. Text and tool I/O parity is tested.**
 Quote: "Pi still preserves text and tool invocation/result I/O, so
-protected-tail sizing, tool-arc fencing, and historian eligibility are
+protected-tail sizing, tool-arc fencing, and history_summarizer eligibility are
 parity-tested for those fields." (`PARITY.md:794-796`)
 Implied property: a test drives the same text and tool-I/O input through both
 legs and compares protected-tail sizing, arc fencing, and eligibility.
 Implementing code: `NOT FOUND` in `daemon`. Nothing composes `decode_pi` with
 `boundary::resolve_protected_tail_boundary` or with
-`boundary::check_compartment_trigger*`.
+`boundary::check_history_segment_trigger*`.
 
-**C1-08. Caveman is a byte-for-byte port of the TypeScript twin.**
+**C1-08. TerseTextCompression is a byte-for-byte port of the TypeScript twin.**
 Quote: "This is a byte-for-byte Rust port of
-`packages/plugin/src/hooks/eidnara/caveman.ts`. Keep the transformation
+`packages/plugin/src/hooks/eidnara/terse_text_compression.ts`. Keep the transformation
 order and ASCII word-boundary rules aligned with that source: the committed
-differential fixture is the compatibility contract." (`caveman.rs:3-6`)
+differential fixture is the compatibility contract." (`terse_text_compression.rs:3-6`)
 Implied property: for every input, `compress(text, level)` equals the TypeScript
 oracle's output.
-Implementing code: `caveman.rs:626-650`, the single test in the file, over
-`testdata/caveman-golden.json`. The fixture holds 42 cases, each carrying `lite`,
+Implementing code: `terse_text_compression.rs:626-650`, the single test in the file, over
+`testdata/terse_text_compression-golden.json`. The fixture holds 42 cases, each carrying `lite`,
 `full`, and `ultra` expectations, so the contract is discharged on 42 strings in
 one direction. The transformation order the header asks a maintainer to preserve
-lives at `caveman.rs:587-610`.
+lives at `terse_text_compression.rs:587-610`.
 
 **C1-09. The execute-threshold default must equal the TypeScript schema.**
 Quote: "The Rust module reads config without the plugin, so this must stay
@@ -332,8 +332,8 @@ comparator staying strict, which is also C1-02's claim.
 Quote A: "Project config always merges on top of user config."
 (`CONFIGURATION.md:14`)
 Quote B: "project config may only raise the execute threshold (fire less often),
-and may override trusted memory, auto-search, caveman, promotion, and privacy
-settings. User-profile and historian budgets remain user-tier only."
+and may override trusted memory, auto-search, terse_text_compression, promotion, and privacy
+settings. User-profile and history_summarizer budgets remain user-tier only."
 (`config.rs:4-7`)
 Implied property: for each leaf, exactly one tier policy holds, and the two
 sources name the same one.
@@ -356,23 +356,23 @@ only to a provider-reported limit (`scheduler.rs:697`, `lib.rs:15610`,
 composition the module never performs. New lead; the sibling classified
 `output_reserve` as out of scope, before this sentence was read.
 
-**C1-29. Caveman tier shifts are path-independent.**
-Quote: "**Always compressed from the original.** The pristine pre-caveman text is
+**C1-29. TerseTextCompression tier shifts are path-independent.**
+Quote: "**Always compressed from the original.** The pristine pre-terse_text_compression text is
 persisted in `source_contents` per tag. When a tag shifts deeper (lite -> full ->
-ultra), caveman compresses the ORIGINAL text at the new target depth rather than
-the already-cavemaned intermediate, so repeated tier shifts converge to exactly
+ultra), terse_text_compression compresses the ORIGINAL text at the new target depth rather than
+the already-terse_text_compressioned intermediate, so repeated tier shifts converge to exactly
 the same output as direct compression at the final depth."
 (`CONFIGURATION.md:740`)
 Implied property: the bytes at depth `d` are independent of the sequence of
 depths traversed to reach `d`.
 Implementing code: `transform.rs:6339` reads `row.source_bytes` and
-`transform.rs:6358` calls `caveman::compress(&source, level)` on it, so the
+`transform.rs:6358` calls `terse_text_compression::compress(&source, level)` on it, so the
 claim's mechanism is real and lives outside 4f. `transform.rs:6352-6354` refuses
-a non-increasing depth. The property is not asserted anywhere; `caveman.rs`'s
+a non-increasing depth. The property is not asserted anywhere; `terse_text_compression.rs`'s
 only test compares single-shot output against the golden. Note the claim is
 load-bearing precisely because `compress` is not idempotent by construction:
 `apply_ultra_connectives` and `apply_ultra_abbreviations`
-(`caveman.rs:472`, `:501`) rewrite words into symbols that a second pass would
+(`terse_text_compression.rs:472`, `:501`) rewrite words into symbols that a second pass would
 see as different input.
 
 **C1-30. `smart_drops` off is byte-identical to the previous behaviour.**
@@ -422,15 +422,15 @@ a decision inside `daemon`.
 | `memory.auto_search.enabled` | `true` (`config.rs:60`) | `true` (`:682`) | none | Yes, both tiers (`:584-590`) |
 | `memory.auto_search.score_threshold` | `0.6` (`config.rs:39`) | `0.6`, prose range `0.3-0.95` (`:683`, `:706`) | `clamp(0.3, 0.95)`, silent (`config.rs:591`) | Yes. Bound matches the prose; the clamp is invisible to the caller |
 | `memory.auto_search.min_prompt_chars` | `20` (`config.rs:40`) | `20`, **no range documented** (`:684`, `:707`) | `clamp(5, 500)` (`config.rs:595`); a `0` is silently discarded by `positive_usize_at` (`:623-629`) | Yes. **Divergent**: an undocumented bound and an undocumented discard |
-| `caveman_text_compression.enabled` | `false` (`config.rs:75`) | `false` (`:724`) | none | Yes, both tiers (`:600-606`) |
-| `caveman_text_compression.min_chars` | `500` (`config.rs:42`, `:77`) | `500`, **no range documented** (`:725`) | `clamp(100, 10_000)` (`config.rs:607`); a `0` discarded | Yes. **Divergent**: undocumented bound |
+| `terse_text_compression.enabled` | `false` (`config.rs:75`) | `false` (`:724`) | none | Yes, both tiers (`:600-606`) |
+| `terse_text_compression.min_chars` | `500` (`config.rs:42`, `:77`) | `500`, **no range documented** (`:725`) | `clamp(100, 10_000)` (`config.rs:607`); a `0` discarded | Yes. **Divergent**: undocumented bound |
 | `smart_drops` | `false` (`config.rs:135`) | `false` (`:752`) | none | Yes, both tiers (`:467-469`, `:541-543`) |
-| `dreamer.inject_docs` | `true` (`config.rs:132`) | `true` (`:501`) | none | Yes, both tiers (`:470-475`, `:544-549`) |
+| `memory_classifier.inject_docs` | `true` (`config.rs:132`) | `true` (`:501`) | none | Yes, both tiers (`:470-475`, `:544-549`) |
 | `temporal_awareness` | `true` (`config.rs:133`) | `true` (`:650`) | none | Yes, both tiers (`:476-478`, `:550-555`) |
-| `dreamer.tasks.review-user-memories.schedule`, legacy `user_memories.enabled` | privacy gate defaults `false` (`config.rs:128`) | task default schedule `0 3 * * *`, i.e. on (`:527`) | none; a non-empty trimmed string reads as consent (`config.rs:611-621`) | Yes as a presence test. **Divergent**: module default is closed, documented default is scheduled |
-| `historian.model`, `historian.fallback_models` | empty chain (`config.rs:121`) | documented with **no user-only marker** (`:448-449`) | `model_chain.dedup()` (`config.rs:571`), adjacent-only | Yes, user tier only (`:411-424`). **Divergent**: a project-tier value is dropped with no warning; `warn_ignored_project_key` is never called for it |
-| `historian.module_model`, `historian.module_fallback_models` | absent | **undocumented** | none | Yes, user tier only, and it replaces the whole chain (`config.rs:390-409`) |
-| `historian.context_limit_tokens` | `128_000` (`config.rs:37`, `:129`) | **undocumented** | `> 0` via `positive_usize_at` (`config.rs:464-466`) | Yes; project tier warns (`:540`) |
+| `memory_classifier.tasks.review-user-memories.schedule`, legacy `user_memories.enabled` | privacy gate defaults `false` (`config.rs:128`) | task default schedule `0 3 * * *`, i.e. on (`:527`) | none; a non-empty trimmed string reads as consent (`config.rs:611-621`) | Yes as a presence test. **Divergent**: module default is closed, documented default is scheduled |
+| `history_summarizer.model`, `history_summarizer.fallback_models` | empty chain (`config.rs:121`) | documented with **no user-only marker** (`:448-449`) | `model_chain.dedup()` (`config.rs:571`), adjacent-only | Yes, user tier only (`:411-424`). **Divergent**: a project-tier value is dropped with no warning; `warn_ignored_project_key` is never called for it |
+| `history_summarizer.module_model`, `history_summarizer.module_fallback_models` | absent | **undocumented** | none | Yes, user tier only, and it replaces the whole chain (`config.rs:390-409`) |
+| `history_summarizer.context_limit_tokens` | `128_000` (`config.rs:37`, `:129`) | **undocumented** | `> 0` via `positive_usize_at` (`config.rs:464-466`) | Yes; project tier warns (`:540`) |
 | `cache_ttl` (string or object) | `"5m"` (`config.rs:136`) | `"5m"` (`:163`), **no user-only marker** | parse is total; invalid falls back to `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:810-812`); `"never"` maps to `u64::MAX` (`:387-389`) | Yes, user tier only (`config.rs:486-511`). **Divergent**: project-tier value dropped with no warning, and `"0"` parses to `0` ms and forces execution every pass, undocumented |
 | `prompt_surface.guidance_override_path` | `None` | documented, user-only (`:75`, `:80-88`) | must be a readable section with exactly one marker (documented at `:88`) | Yes (`config.rs:281-358`); project warns (`:561-565`) |
 | `prompt_surface.guidance_override_text` | `None` | **undocumented** | none | Yes (`config.rs:479-485`), but a configured path resets it to `None` first (`:299`); project warns (`:556-560`) |
@@ -438,7 +438,7 @@ a decision inside `daemon`.
 | `commit_cluster_trigger.min_clusters` | not parsed | `3`, **minimum `1`** (`:232`, `:238`) | none | **No.** Hardwired `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:607`) at `lib.rs:4964` |
 | `protected_tags` | not parsed | `20`, range `1-100` (`:165`) | none from config; a separate hardwired `20` at `lib.rs:603` | **No.** 4b's `sel-protected-tags-not-read-from-module-config` |
 | `clear_reasoning_age` | not parsed | `50` (`:169`) | none | **No.** Present in `daemon/src` only as a request field, never as a config pointer |
-| `historian_timeout_ms` | not parsed | `300_000` (`:170`) | none | **No.** Zero occurrences in `crates/daemon/src`; `historian_producer.rs:209-227` carries private timeouts. 4a scope, lead only |
+| `history_summarizer_timeout_ms` | not parsed | `300_000` (`:170`) | none | **No.** Zero occurrences in `crates/daemon/src`; `history_summarizer_producer.rs:209-227` carries private timeouts. 4a scope, lead only |
 | `history_budget_percentage` | not parsed | `0.15`, range `0.05-0.5` (`:171`) | none | **No.** Zero occurrences in `crates/daemon/src` |
 | `output_reserve` | not parsed | automatic; `0` disables (`:164`, `:308-315`) | none in this crate, though `:315` names "the module's plausibility floor" | **No.** Zero occurrences in `crates/daemon/src`; see C1-28 |
 
@@ -451,10 +451,10 @@ named leaves as a subset.
 | Category | Count | Members |
 | --- | --- | --- |
 | Documented leaves in the table | 26 | all rows except the four undocumented leaves and the deprecated `memory.budget_tokens` |
-| Undocumented but effective | 4 | `memory.user_profile_budget_tokens`, `historian.module_model` with `module_fallback_models`, `historian.context_limit_tokens`, `prompt_surface.guidance_override_text` |
+| Undocumented but effective | 4 | `memory.user_profile_budget_tokens`, `history_summarizer.module_model` with `module_fallback_models`, `history_summarizer.context_limit_tokens`, `prompt_surface.guidance_override_text` |
 | Documented but **inert** (parsed nowhere; behaviour hardwired or missing) | 6 | `execute_threshold_percentage` object form, `execute_threshold_tokens`, `commit_cluster_trigger.enabled`, `commit_cluster_trigger.min_clusters`, `protected_tags`, `clear_reasoning_age` |
-| Documented and effective but **divergent** (bound, tier policy, or default disagrees) | 7 | `execute_threshold_percentage` scalar, `memory.injection_budget_tokens`, `memory.auto_search.min_prompt_chars`, `caveman_text_compression.min_chars`, `review-user-memories` schedule, `historian.model` with `fallback_models`, `cache_ttl` |
-| Absent everywhere (documented, zero occurrences in `crates/daemon/src`, description names module behaviour) | 3 | `historian_timeout_ms`, `history_budget_percentage`, `output_reserve` |
+| Documented and effective but **divergent** (bound, tier policy, or default disagrees) | 7 | `execute_threshold_percentage` scalar, `memory.injection_budget_tokens`, `memory.auto_search.min_prompt_chars`, `terse_text_compression.min_chars`, `review-user-memories` schedule, `history_summarizer.model` with `fallback_models`, `cache_ttl` |
+| Absent everywhere (documented, zero occurrences in `crates/daemon/src`, description names module behaviour) | 3 | `history_summarizer_timeout_ms`, `history_budget_percentage`, `output_reserve` |
 | Deprecated, absent from the documented table, still honoured | 1 | `memory.budget_tokens` |
 
 Inert plus divergent gives **13** keys that are documented but inert or
@@ -463,7 +463,7 @@ divergent. This is a superset of the sibling's headline nine
 The four this lens adds, and why the sibling did not count them:
 `clear_reasoning_age` (named inside a 4b evidence file but not among the
 headline keys), `memory.auto_search.min_prompt_chars` and
-`caveman_text_compression.min_chars` (the sibling recorded the clamps as
+`terse_text_compression.min_chars` (the sibling recorded the clamps as
 invisible to the caller but not as documentation divergences), and the
 `review-user-memories` default (the sibling filed it as a lead rather than
 counting it). The sibling's nine and this thirteen are the same finding at two
@@ -474,7 +474,7 @@ and describe behaviour outside the module: `toast_duration_ms` (`:166`),
 `memory.retrieval_count_promotion_threshold` (`:593`),
 `memory.git_commit_indexing.*` (`:665-667`), `fail_closed_blocking` (`:161`),
 `allow_home_project` (`:159`), `auto_update` (`:160`), `keep_subagents` (`:174`),
-`historian.thinking_level` (`:452`), and `historian.two_pass` (`:454`, present in
+`history_summarizer.thinking_level` (`:452`), and `history_summarizer.two_pass` (`:454`, present in
 `daemon/src` as a request field only). They are not defects in 4f and are
 listed so a future conformance check can exclude them deliberately rather than by
 omission.
@@ -532,8 +532,8 @@ repeated. Each lead cites both sides.
    of user config." `config.rs:4-7` states the real policy, and
    `config.rs:515-518` implements raise-only for the execute threshold. Six
    pointers are dropped from the project tier with an explicit warning; at least
-   six more (`/historian/model`, `/historian/fallback_models`,
-   `/historian/module_model`, `/historian/module_fallback_models`, `/cache_ttl`,
+   six more (`/history_summarizer/model`, `/history_summarizer/fallback_models`,
+   `/history_summarizer/module_model`, `/history_summarizer/module_fallback_models`, `/cache_ttl`,
    and the object form of `/execute_threshold_percentage`) are dropped with no
    warning at all. The configuration document marks some leaves "user-config-only"
    in prose (`:159`, `:160`, `:161`, `:178`) but not these.
@@ -562,7 +562,7 @@ repeated. Each lead cites both sides.
 
 Three `debug_assert!` sites exist in 4f scope. All three are in
 `codec/opencode.rs`; `codec/mod.rs`, `codec/pi.rs`, `codec/sidecar.rs`,
-`config.rs`, `scheduler.rs`, `boundary.rs`, `selection.rs`, and `caveman.rs`
+`config.rs`, `scheduler.rs`, `boundary.rs`, `selection.rs`, and `terse_text_compression.rs`
 contain none.
 
 **1. `decode_opencode_sidecar_incremental` panics in release on an out-of-range
@@ -604,7 +604,7 @@ itself `#[cfg(debug_assertions)]`-gated
 either the guard or its test.
 
 **3. No divergence found in the config or decision units.** `config.rs`,
-`scheduler.rs`, `boundary.rs`, `selection.rs`, and `caveman.rs` contain no
+`scheduler.rs`, `boundary.rs`, `selection.rs`, and `terse_text_compression.rs` contain no
 `debug_assert!`, no `#[cfg(debug_assertions)]` production code, and no
 `unreachable!`. Their clamps (`config.rs:47`, `:570`, `:591`, `:595`, `:607`;
 `boundary.rs:346`) and their totality guards
@@ -649,10 +649,10 @@ and no test.
    equal to a TypeScript value. The enforcement is that a reviewer notices. C1-09
    through C1-11.
 
-6. **Caveman path-independence.** `CONFIGURATION.md:740` promises convergence, and
+6. **TerseTextCompression path-independence.** `CONFIGURATION.md:740` promises convergence, and
    the mechanism is the caller reading `row.source_bytes`
    (`transform.rs:6339`) rather than any property of `compress`
-   (`caveman.rs:587-610`). A future caller that passed the already-compressed text
+   (`terse_text_compression.rs:587-610`). A future caller that passed the already-compressed text
    would satisfy every type in sight and break the documented guarantee. C1-29.
 
 7. **The harness-supplied absolute ordinal.** Recorded as

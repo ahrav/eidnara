@@ -2,7 +2,7 @@
 
 One attention focus: the boundary where a caller request enters `Handler` and
 where a response is assembled, and what that boundary validates, guarantees, and
-leaks. A sibling lens owns note evaluation (`smart_note_evaluation.rs`, the
+leaks. A sibling lens owns note evaluation (`conditional_note_evaluation.rs`, the
 `note.evaluation.*` protocol at `lib.rs:10880-11481`, and note delivery at
 `lib.rs:11483-11545`); this lens touches those only as validation contrast.
 
@@ -13,7 +13,7 @@ Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927`
 
 Scope consumed, all six units of sub-part 4d: `src/lib.rs:10042-11917`,
 `src/lib.rs:11919-16001`, `src/dispatch.rs` (whole), `src/memory_tool.rs`
-(whole), `src/project_docs.rs` (whole), and `src/smart_note_evaluation.rs` read
+(whole), `src/project_docs.rs` (whole), and `src/conditional_note_evaluation.rs` read
 only for the validation-strictness comparison. `src/lib.rs:16001-30517` was read
 as evidence for existing checks. Every line reference below was read back at
 `HEAD` individually; the two corrections found are noted inline.
@@ -59,13 +59,13 @@ surfaces:
 The precedence is `method`/`kind` first, unconditionally. A body carrying both a
 `kind` and a facade `name` routes on `kind` and the `name` is ignored; the
 existing test
-`facade_flat_envelope_precedence_keeps_kind_arm_and_gates_ctx_reduce_name`
-(`:25299-25323`) asserts exactly that with `{kind:"echo", name:"ctx_memory"}`.
+`facade_flat_envelope_precedence_keeps_kind_arm_and_gates_eidnara_reduce_name`
+(`:25299-25323`) asserts exactly that with `{kind:"echo", name:"eidnara_memory"}`.
 
 ### The facade envelope routes eleven names, not two
 
-`handle_facade_value` (`:10042-10060`) routes: `ctx_memory`, `ctx_search`,
-`ctx_expand`, `ctx_reduce`, `ctx_note`, and six claim commands
+`handle_facade_value` (`:10042-10060`) routes: `eidnara_memory`, `eidnara_search`,
+`ctx_expand`, `eidnara_reduce`, `eidnara_note`, and six claim commands
 (`claim.intent.stage`, `claim.intent.inspect`, `claim.intent.ack`,
 `claim.effects.apply`, `claim.mirror.replace`, `claim.mirror.apply`). Anything
 else falls to `unrecognized_request_error` (`:10058`).
@@ -74,11 +74,11 @@ else falls to `unrecognized_request_error` (`:10058`).
 
 | Handler | Route/scope gate | Argument decode | Field validation |
 | --- | --- | --- | --- |
-| `handle_ctx_reduce_facade` `:10482-10588` | `resolve_facade_scope` AFTER parsing `drop` (`:10493`, `:10501`) | `facade_arguments(request, &["drop"])` `:10487` | `parse_tag_range_string` `:10493`; nothing else |
-| `handle_ctx_memory_facade` `:10590-10697` | `resolve_facade_scope` `:10601`; `dreamer_run_registered` for `list` `:10626` | `facade_arguments(request, &["action"])` `:10595` | claim-id shape `:10656-10661`; 1..=20 count `:10651`; `limit` clamp `:10667` |
-| `handle_ctx_search_facade` `:10699-10759` | `resolve_facade_scope` `:10715` | `facade_arguments(request, &["query"])` `:10704` | non-empty `query` `:10708`; `MAX_QUERY_BYTES` `:10711`; `limit` clamp `:10714` |
+| `handle_eidnara_reduce_facade` `:10482-10588` | `resolve_facade_scope` AFTER parsing `drop` (`:10493`, `:10501`) | `facade_arguments(request, &["drop"])` `:10487` | `parse_tag_range_string` `:10493`; nothing else |
+| `handle_eidnara_memory_facade` `:10590-10697` | `resolve_facade_scope` `:10601`; `memory_classifier_run_registered` for `list` `:10626` | `facade_arguments(request, &["action"])` `:10595` | claim-id shape `:10656-10661`; 1..=20 count `:10651`; `limit` clamp `:10667` |
+| `handle_eidnara_search_facade` `:10699-10759` | `resolve_facade_scope` `:10715` | `facade_arguments(request, &["query"])` `:10704` | non-empty `query` `:10708`; `MAX_QUERY_BYTES` `:10711`; `limit` clamp `:10714` |
 | `handle_ctx_expand_facade` `:10761-10878` | `resolve_facade_scope` `:10770` | `facade_arguments(request, &["message","start"])` `:10766` | ordinal signs and order `:10823`; span and row caps `:10840-10847` |
-| `handle_ctx_note_facade` `:11547-11916` | `resolve_facade_scope` `:11568`; vocabulary recheck for mutations `:11584-11591` | `facade_arguments(request, &["action","content"])` `:11552` | five string caps `:11556-11563`; `filter` enum `:11730`; `command_id` `:11592-11599` |
+| `handle_eidnara_note_facade` `:11547-11916` | `resolve_facade_scope` `:11568`; vocabulary recheck for mutations `:11584-11591` | `facade_arguments(request, &["action","content"])` `:11552` | five string caps `:11556-11563`; `filter` enum `:11730`; `command_id` `:11592-11599` |
 | `handle_claim_intent_stage` `:10082-10113` | `claim_route_root` `:10083`, and the root is PASSED to the store `:10123` (correction: the call is at `:10100`) | typed `serde_json::from_value` `:10090` | protocol and encoding version in `memory_tool` `:115-121` |
 | `handle_claim_intent_inspect` `:10115-10151` | `claim_route_root` called and DISCARDED `:10120-10122` | typed `from_value` `:10127` | protocol version and `limit` 1..=10000 (`memory_tool.rs:140-145`) |
 | `handle_claim_intent_ack` `:10153-10182` | `claim_route_root` called and DISCARDED `:10154-10156` | typed `from_value` `:10160` | protocol version (`memory_tool.rs:166`) |
@@ -104,8 +104,8 @@ handlers do not use it at all.
   and the two mirror request structs (`lib.rs:140`, `:147`).
 - Open map clone, unknown field ignored: `facade_arguments` (`:14419-14435`)
   for all five `ctx_*` tools. The advertised schemas match that openness
-  deliberately: `additionalProperties: true` at `:15846` (`ctx_memory`),
-  `:15929` (`ctx_search`), `:15950` (`ctx_expand`), `:15963` (`ctx_note`).
+  deliberately: `additionalProperties: true` at `:15846` (`eidnara_memory`),
+  `:15929` (`eidnara_search`), `:15950` (`ctx_expand`), `:15963` (`eidnara_note`).
 
 ## Response assembly map
 
@@ -157,7 +157,7 @@ There is no single response envelope. Three families:
    `HealthStatus::Ok` while every facade call fails, because
    `DispatchHealth::report` only degrades on staleness, never on
    `consecutive_errors` (`:403-407`, `:418-421`).
-2. **Success without writing, `ctx_reduce`.** `handle_ctx_reduce_facade`
+2. **Success without writing, `eidnara_reduce`.** `handle_eidnara_reduce_facade`
    returns `mcp_text_result(format!("Queued: {}.", ...), false)` (`:10587`)
    after the comment at `:10585-10586` states it "deliberately does not
    mutate" durable state. `isError` is false and no field distinguishes an
@@ -165,7 +165,7 @@ There is no single response envelope. Three families:
 3. **Success without writing, `claim.effects.apply`.** `:10184-10255` never
    calls `self.store()`. It validates and returns `ackedEffectId` (`:10253`).
 4. **An error text recorded as the command's durable success.** Two arms in
-   `handle_ctx_note_facade` return `Ok(facade_text_response(..., true))` from
+   `handle_eidnara_note_facade` return `Ok(facade_text_response(..., true))` from
    inside the `with_facade_command` closure: the note CAS conflict
    (`:11865-11870`) and dismiss-not-found (`:11902-11907`). `Ok` is the
    ledger's commit signal (`memory-store/src/lib.rs:5022-5041`), so the failure
@@ -177,13 +177,13 @@ There is no single response envelope. Three families:
 `Duplicate` envelope (`:15303`). `stage_claim_intent` and
 `acknowledge_claim_intent` return `replayed` from the store outcome
 (`memory_tool.rs:131`, `:177`). `claim.mirror.apply` returns `replayed`
-(`:10331`). `ctx_reduce` returns nothing of the kind, and neither does
+(`:10331`). `eidnara_reduce` returns nothing of the kind, and neither does
 `claim.effects.apply`.
 
 ## Observations
 
 - `lib.rs:12344-12351`. The doc comment on `unrecognized_request_error` says
-  "Only ctx_memory and ctx_search are accepted on that surface". The router at
+  "Only eidnara_memory and eidnara_search are accepted on that surface". The router at
   `:10046-10058` accepts eleven names. Stale doc, and it is the only prose
   statement of the facade's admitted name set.
 - `lib.rs:12352-12362`. A body with an unknown `method` plus a valid facade
@@ -202,7 +202,7 @@ There is no single response envelope. Three families:
   TypeScript side has a hardened equivalent
   (`packages/plugin/src/tools/unwrap-imitated-reduced-args.ts:1-60`) with
   per-field rules and an undeclared-field rejection; the Rust side has none.
-- `lib.rs:11564-11566`. `ctx_note`'s action defaults to `write` when `content`
+- `lib.rs:11564-11566`. `eidnara_note`'s action defaults to `write` when `content`
   is non-empty and to `read` otherwise. A misspelled `surface_condition` key is
   dropped by `string_arg` (`:11615`), which skips the live-evaluator gate at
   `:11618` and takes the plain-note branch at `:11679-11711`, answering
@@ -280,6 +280,7 @@ Impact: a large transform body from a caller that sets only `method` is refused
 with "request body exceeds the 1 MiB limit", which names the wrong limit and
 tells the caller nothing about the field it omitted.
 Open questions:
+
 - Is the field split deliberate, encoding that `state_sync` is method-only and
   `transform` is kind-primary, or an artifact of the two senders being written
   at different times? (needs human input)
@@ -304,7 +305,7 @@ Confidence: high — [evidence](../evidence/facade-a-open-tool-schemas-accept-un
 Verified `facade_arguments` clones the map with no key walk (`:14419-14435`),
 verified all four advertised schemas set `additionalProperties: true`
 (`:15846`, `:15929`, `:15950`, `:15963`), and verified the inline test at
-`:25636-25641` asserts every tool except `ctx_reduce` "must preserve
+`:25636-25641` asserts every tool except `eidnara_reduce` "must preserve
 compatibility arguments".
 Existing check: `lib.rs:25632-25641`, status `unaudited`. It asserts the schema
 shape, not the runtime consequence. Does not run in CI.
@@ -312,7 +313,8 @@ Impact: silent acceptance is the documented intent, so the risk is not the
 acceptance but the absence of any signal: a caller cannot distinguish "the
 module honoured my field" from "the module never looked at it".
 Open questions:
-- `ctx_reduce`'s advertised schema is closed (`prompt_surface.rs:197-204`) yet
+
+- `eidnara_reduce`'s advertised schema is closed (`prompt_surface.rs:197-204`) yet
   the handler accepts `command_id` and the `reduced`/`summary` envelope, none
   of which the schema permits. Which side is the contract? (needs human input)
 
@@ -322,16 +324,16 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: not yet — no test writes a note with a near-miss condition key.
-Guarantee: A `ctx_note` write that the caller intended as conditioned either
+Guarantee: A `eidnara_note` write that the caller intended as conditioned either
 records the condition or refuses; it never reports plain-note success.
-Check: `always` — assert that for every `ctx_note` write whose arguments
+Check: `always` — assert that for every `eidnara_note` write whose arguments
 contain any key differing from `surface_condition` only by case, separator, or
 a single edit, the response is not a plain `isError: false` "Saved session note
-#N." `always` because it must hold on every write evaluated.
+# N." `always` because it must hold on every write evaluated.
 Fault/timing angle: none, but the enabling state matters: with no live
 evaluator, the correctly spelled key refuses, so the misspelling converts a
 refusal into a success.
-Required faults and enabling state: a `ctx_note` write carrying
+Required faults and enabling state: a `eidnara_note` write carrying
 `surfaceCondition` (or similar) and non-empty `content`, with
 `has_live_note_evaluator(project, now)` false.
 Confidence: high — [evidence](../evidence/facade-a-misspelled-surface-condition-silently-writes-a-plain-note.md).
@@ -373,11 +375,12 @@ Impact: the unwrapped map bypasses nothing structurally, but it is the one
 place where the argument object's provenance is model text rather than the
 harness, and no cap or shape check is applied to `summary` before parsing.
 Open questions:
+
 - Does the shipped plugin always unwrap before the module sees the body, making
   the Rust branch dead defence in depth? Unresolved, needs a trace of
   `unwrap-imitated-reduced-args` call sites against the module send path.
 
-### facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes
+### facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes
 
 Type: safety
 Reachability: default-production
@@ -387,31 +390,32 @@ the later delivery, so the behaviour is pinned; nothing asserts the
 caller-visible ambiguity.
 Guarantee: The number of drops actually queued for a session is at least the
 number the response observer acknowledged as delivered and at most the number
-`ctx_reduce` reported as "Queued".
+`eidnara_reduce` reported as "Queued".
 Check: `always` — per session id, assert
-`acknowledged_queued <= observed_pending_drops <= ctx_reduce_reported_queued`,
-and separately assert that no `ctx_reduce` response claims a tag number that
+`acknowledged_queued <= observed_pending_drops <= eidnara_reduce_reported_queued`,
+and separately assert that no `eidnara_reduce` response claims a tag number that
 `parse_tag_range_string` did not accept. `always` because it must hold at every
 observation point; the two-sided bound is the effect-accounting form required
 when the delivering message can be lost.
-Fault/timing angle: the window between the `ctx_reduce` acknowledgement
+Fault/timing angle: the window between the `eidnara_reduce` acknowledgement
 (`:10587`) and the observer's `agent_drops.append`. If the response observer
 never fires, the gap is permanent and the caller has no signal.
-Required faults and enabling state: a `ctx_reduce` call with at least one
+Required faults and enabling state: a `eidnara_reduce` call with at least one
 queueable tag, followed by a dropped or never-issued `agent_drops.append`.
-Confidence: high — [evidence](../evidence/facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes.md).
+Confidence: high — [evidence](../evidence/facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes.md).
 Verified the handler performs only reads (`load_tags_for_session` `:10513`,
 `load_pending_agent_drops` `:10517`), verified the response is
 `isError: false` (`:10587`), and verified the existing test asserts
 `load_pending_agent_drops` is empty after the acknowledgement (`:25474`).
 Existing check: `lib.rs:25445-25500`
-(`facade_ctx_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing`),
+(`facade_eidnara_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing`),
 status `unaudited`. Does not run in CI.
 Impact: the model is told "Queued: drop 1; deferred drop 21" and cannot tell
 whether the drop will ever happen. `command_id`, which the test supplies and
 the delivery path honours (`:25486-25501`), is accepted and ignored by the
 facade handler.
 Open questions:
+
 - Should the acknowledgement carry a delivery-pending marker so the caller can
   distinguish acknowledgement from effect? (needs human input)
 
@@ -453,6 +457,7 @@ If the ack is deliberately validation-only, nothing in the module says so, and
 the handler also never verifies that `consumer` is the consumer it expects
 (`:10198-10204` checks only non-emptiness).
 Open questions:
+
 - Is `claim.effects.apply` intentionally a protocol-conformance ack, with the
   claim mirror as the only module-side writer? The handler name, the
   `ackedEffectId` field, and the producer's checkpoint advance all read as
@@ -493,6 +498,7 @@ reproduce that row's `request_digest` and binding, which `inspect` hands it in
 the same response. The doc comment at `:10062-10067` asserts the opposite
 guarantee.
 Open questions:
+
 - Is the ack's reliance on the stored binding intended as sufficient, on the
   reasoning that reproducing a 64-hex digest plus generation is itself proof of
   authority? If so the doc comment is wrong; if not the route root must be
@@ -530,6 +536,7 @@ Impact: a genuine identity reuse, which is a caller bug that must not be
 retried, is reported with the same code as a retryable store fault. The
 distinction survives only in the free-text message.
 Open questions:
+
 - Should the three claim-intent handlers get a `claim_mirror_error`-style
   classifier? The variants exist and carry the producer and operation key
   (`memory-store/src/lib.rs:3420-3422`). (needs human input)
@@ -550,7 +557,7 @@ ledger is consulted on every mutation carrying a `command_id`.
 Fault/timing angle: the concurrent-update window that produces
 `NoteCasOutcome::Conflict`. The conflict is by definition transient, and the
 memoization makes it permanent for that `command_id`.
-Required faults and enabling state: a `ctx_note` `update` with a `command_id`
+Required faults and enabling state: a `eidnara_note` `update` with a `command_id`
 that loses a note CAS race, or a `dismiss` for a note id that is momentarily
 absent, followed by a retry with the same `command_id`.
 Confidence: high — [evidence](../evidence/facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes.md).
@@ -562,13 +569,14 @@ later same-key call returns `Duplicate(response)` before running the closure
 (`:5006-5019`); verified `facade_command_outcome` then adds
 `"replayed": true` alongside the stored `content`/`isError` (`lib.rs:15298-15305`).
 Existing check: none for the error-bearing case. The ledger's happy path is
-covered by `ctx_reduce`-adjacent tests at `lib.rs:27555` and `:27668`, which
-exercise `agent_drops.append`, not `ctx_note`.
+covered by `eidnara_reduce`-adjacent tests at `lib.rs:27555` and `:27668`, which
+exercise `agent_drops.append`, not `eidnara_note`.
 Impact: the conflict text tells the caller to "retry with a fresh read", and
 the retry returns the same conflict text forever unless the caller mints a new
 `command_id`. The `replayed` marker is a sibling of `content`, so a model
 reading only the text sees an unchanging failure.
 Open questions:
+
 - Should the closure return `Err` for these two arms so the transaction rolls
   back and nothing is ledgered? That changes the response the caller sees from
   an MCP error result to a typed error. (needs human input)
@@ -608,6 +616,7 @@ Impact: a short body on a length-prefixed wire desynchronizes the frame stream.
 The guard is the thing that prevents it, and it is proven only by an
 uninvoked test.
 Open questions:
+
 - On `LengthMismatch` the reserved output buffer already holds the partial
   bytes; `tests/prepared_output.rs:274` asserts exactly that. Whether the host
   discards a reserved output frame when the module returns
@@ -629,7 +638,7 @@ substring matching an absolute path prefix of the bound
 `always` because it must hold on every response evaluated.
 Fault/timing angle: none.
 Required faults and enabling state: a route whose authority-managed project
-differs from its `route_project_root`, then any `ctx_note` mutation or a
+differs from its `route_project_root`, then any `eidnara_note` mutation or a
 `memory_project` argument that disagrees.
 Confidence: high — [evidence](../evidence/facade-a-facade-error-text-carries-absolute-route-paths-to-the-model.md).
 Verified `resolve_facade_scope` formats `route_project_root` into a returned
@@ -648,6 +657,7 @@ there the provider's prefix cache and any transcript. There is no stated
 contract forbidding it, which is itself the finding: the redaction discipline
 visible in `dispatch.rs` stops at the diagnostic boundary.
 Open questions:
+
 - Is there a documented rule anywhere that facade responses must not carry host
   paths? I found none in `crates/daemon`, `crates/host-runtime`, or `docs/`.
   Unresolved, needs the prompt-surface or security owner.
@@ -670,7 +680,7 @@ test is that a real second call with the same `command_id` and a committed
 first attempt occurred.
 Fault/timing angle: the replay window is exactly what the ledger exists for: a
 response lost after commit, a module restart, or a client retry.
-Required faults and enabling state: a `ctx_note` mutation carrying a
+Required faults and enabling state: a `eidnara_note` mutation carrying a
 `command_id` that commits, then the same `command_id` re-sent. The ledger
 retains only the newest 512 commands per identity scope
 (`memory-store/src/lib.rs:5042-5046`), so the retry must land inside that horizon.
@@ -686,15 +696,15 @@ Impact: without this situation, the three records that depend on ledger replay
 semantics
 (`facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes`,
 and the replay-distinguishability claims behind
-`facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes`) pass vacuously.
+`facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes`) pass vacuously.
 Open questions: None.
 
 ## Contract-vs-code leads
 
 1. **The facade's admitted name set.** `lib.rs:12344-12351` says "Only
-   ctx_memory and ctx_search are accepted on that surface"; `:10046-10057`
+   eidnara_memory and eidnara_search are accepted on that surface"; `:10046-10057`
    routes eleven names, including five that write durable state.
-2. **`ctx_reduce`'s advertised schema versus its accepted arguments.**
+2. **`eidnara_reduce`'s advertised schema versus its accepted arguments.**
    `prompt_surface.rs:195-204` calls the shape "the Thalamus authorization
    contract" and declares `required: ["drop"]` with
    `additionalProperties: false`. The handler accepts `command_id`

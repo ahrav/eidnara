@@ -247,7 +247,7 @@ snapshot vector**. Three production read paths, three different strengths:
    reads the state, compares its canonical vector against the host-supplied
    `lane.snapshot_vector` (`:1988-1990`), lists the claims (`:1995-1999`), then
    re-reads the state and re-compares (`:2004-2010`), bailing out on any
-   difference. `crates/daemon/src/historian_chunk.rs:563-608` does the same
+   difference. `crates/daemon/src/history_summarizer_chunk.rs:563-608` does the same
    shape but compares the whole `ClaimMirrorState` for equality at `:605`, which
    is strictly stronger than transform's canonical-vector comparison because it
    also covers `acked_effect_id`.
@@ -270,7 +270,7 @@ does **not** include `acked_effect_id`. That comparison is a sufficient
 change-detector only because `apply_claim_mirror_receipt` guarantees every
 touched project's generation advances (`claim_mirror.rs:963-990`), and
 `acked_effect_id` changes only for touched projects (`:1064-1096`). The coupling
-holds today. Nothing states it at either site, and `historian_chunk.rs:605`
+holds today. Nothing states it at either site, and `history_summarizer_chunk.rs:605`
 independently chose the stronger comparison, which suggests the two authors did
 not agree on what the fence needed.
 
@@ -310,6 +310,7 @@ Confidence: high — [evidence](evidence/mirror-receipt-replay-applies-effects-o
 Existing check: `crates/memory-store/tests/claim_mirror.rs:177-250` (`u10_scenario_2_complete_receipt_group_is_atomic_and_replay_safe`), status `unaudited`.
 Impact: A replayed receipt applied twice would double-advance `acked_effect_id`, which then rejects the genuine next receipt with `CheckpointMismatch` and wedges the claim lane for that project until a reseed, which O5 shows production cannot perform.
 Open questions:
+
 - Does the facade retry `claim.mirror.apply` on a lost response, and with byte-identical bytes? `daemon/src/lib.rs:10326` is the call site; the retry policy above it was not traced in this pass.
 
 ### mirror-receipt-conflict-rejects-divergent-replay
@@ -341,6 +342,7 @@ Confidence: high — [evidence](evidence/mirror-project-effect-chain-detects-omi
 Existing check: `crates/memory-store/tests/claim_mirror.rs:304-320`, status `unaudited`.
 Impact: A silently accepted omission leaves the mirror missing a claim the authority has, with `acked_effect_id` advanced past it, so no future receipt can repair it. That is the "omits one it does have" divergence, made permanent.
 Open questions:
+
 - `previous_project_effect_id` is validated only as `0 <= value < effect_id` (`claim_mirror.rs:454-461`). Is a source permitted to emit `0` for a project's first effect after a reseed whose checkpoint is nonzero? The reseed sets `acked_effect_id` from `project_checkpoints` (`:842`), so a nonzero checkpoint plus a `0` predecessor is a `CheckpointMismatch`. Whether the host can produce that pair is a host-side question. (needs human input)
 
 ### mirror-generation-advances-exactly-one-per-touched-project
@@ -357,6 +359,7 @@ Confidence: high — [evidence](evidence/mirror-generation-advances-exactly-one-
 Existing check: `crates/memory-store/tests/claim_mirror.rs:252-342` and `:528-591`, status `unaudited`.
 Impact: A generation that advances by the wrong amount breaks the reseed comparison, producing a permanent `ResetRequired` that production cannot clear, and silently weakens the read fence that consumers rely on to notice a mirror change.
 Open questions:
+
 - Policy generation is required to move in lockstep with project generation (`claim_mirror.rs:972-989`), yet `ClaimMirrorChangeKind` distinguishes an `Applicability` or `Verification` change from an `Upsert` (`:58-68`). Is a policy-only change really required to bump the project generation too? Nothing in this crate explains why the two counters cannot move independently. (needs human input)
 
 ### mirror-read-fence-relies-on-generation-advance
@@ -367,13 +370,14 @@ Status: active
 Exercised: not yet — nothing constructs a mirror mutation that changes `acked_effect_id` without changing a generation, which is the only case that would distinguish the two fence strengths.
 Guarantee: The optimistic double-read fence in `transform.rs` detects every mirror mutation that lands between its two state reads, even though it compares only the canonical snapshot vector and not `acked_effect_id`.
 Check: `always` — for every mirror mutation, the canonical snapshot vector before and after differ. Equivalently: no accepted mutation changes any project's `acked_effect_id` while leaving that project's generation pair unchanged. `always` because it must hold for every mutation for the fence to be sound; there is no optional path.
-Fault/timing angle: The window is `transform.rs:1978` to `:2004`, three separate store calls with no shared transaction. A receipt applied concurrently in that window must be caught by the `:2008` comparison. `historian_chunk.rs:605` compares the whole `ClaimMirrorState` and so does not depend on this property; `transform.rs` does.
+Fault/timing angle: The window is `transform.rs:1978` to `:2004`, three separate store calls with no shared transaction. A receipt applied concurrently in that window must be caught by the `:2008` comparison. `history_summarizer_chunk.rs:605` compares the whole `ClaimMirrorState` and so does not depend on this property; `transform.rs` does.
 Required faults and enabling state: A seeded mirror and a concurrent `apply_claim_mirror_receipt` landing between the two `claim_mirror_state()` calls. The coverage form asserts the independent preconditions: the fence executed both reads, and at least one receipt committed between them.
 Confidence: medium — [evidence](evidence/mirror-read-fence-relies-on-generation-advance.md). The coupling holds in the code as read: `:963-990` forces a generation bump for touched projects and `:1064-1096` restamps only touched projects. Confidence is medium because neither site documents the dependency and I could not find a design note stating it is intended to be permanent.
 Existing check: none. `transform.rs:1978-2011` is the mechanism, not a check of it.
-Impact: If a future mutation advanced a checkpoint without a generation bump, `transform.rs` would serve claim memory assembled from a mirror that changed mid-read, and the mismatch would be invisible. `historian_chunk.rs` would still catch it, so the two paths would disagree.
+Impact: If a future mutation advanced a checkpoint without a generation bump, `transform.rs` would serve claim memory assembled from a mirror that changed mid-read, and the mismatch would be invisible. `history_summarizer_chunk.rs` would still catch it, so the two paths would disagree.
 Open questions:
-- Why do `transform.rs:2008` and `historian_chunk.rs:605` compare different things? If the full-state comparison is correct, transform's is weaker than intended; if the vector comparison is correct, historian's is needlessly strict and will bail out more often. (needs human input)
+
+- Why do `transform.rs:2008` and `history_summarizer_chunk.rs:605` compare different things? If the full-state comparison is correct, transform's is weaker than intended; if the vector comparison is correct, history_summarizer's is needlessly strict and will bail out more often. (needs human input)
 
 ### mirror-reset-cycle-requires-a-rebuild-grant
 
@@ -389,6 +393,7 @@ Confidence: high — [evidence](evidence/mirror-reset-cycle-requires-a-rebuild-g
 Existing check: `crates/memory-store/tests/claim_mirror.rs:377-458`, `:461-479`, `:482-517`; `crates/memory-store/tests/claim_intent_ledger.rs:288-335`. All status `unaudited`. Every one supplies the grant from test code, so none of them witnesses production reachability.
 Impact: In production the mirror is write-once per incarnation. Once seeded, any snapshot that is not byte-identical returns `ResetRequired` (`claim_mirror.rs:806-808`) and `delete_claim_mirror` always returns `ResetRequired`. A mirror that has diverged, or a source that wants to re-baseline, has no recovery short of a new `database_incarnation_id`. The doc comments at `claim_mirror.rs:754-755` and `:1126-1127` describe an operable reset cycle that production cannot enter.
 Open questions:
+
 - Is `begin_claim_store_rebuild` intended to be reachable from the host, and if so through which facade method? Nothing in `daemon` exposes it. (needs human input)
 - Does a new `database_incarnation_id` fully substitute for a reset? The data tables are all keyed by incarnation (`lib.rs:1268`, `:1289`, `:1309`), so a fresh incarnation gives a clean namespace, but `replace_claim_mirror_snapshot` also compares the control row's incarnation (`claim_mirror.rs:778-785`), and old rows are never garbage-collected.
 
@@ -406,6 +411,7 @@ Confidence: high — [evidence](evidence/mirror-accepting-gate-is-skipped-when-c
 Existing check: none.
 Impact: Today the absent row is the production norm and no reset ever runs, so the hole is latent. If `begin_claim_store_rebuild` is ever wired to production, this becomes the difference between a reset that fences in-flight receipts and one that races them.
 Open questions:
+
 - Is fail-open correct here on the reasoning that a store with no control row has no ledger to fence? If so, the reasoning is nowhere in the file, and the neighbouring `delete_claim_mirror` chose the opposite default.
 
 ### intent-control-transition-write-is-silently-dropped
@@ -422,6 +428,7 @@ Confidence: high — [evidence](evidence/intent-control-transition-write-is-sile
 Existing check: none.
 Impact: The `draining` and `accepting` states are never recorded from authority transitions, so three of the mirror's four control-row readers never see the state the authority is actually in. The visible consequences are `mirror-reset-cycle-requires-a-rebuild-grant` and `mirror-accepting-gate-is-skipped-when-control-is-absent`. A second consequence is that the column named `database_incarnation_id` (`lib.rs:1242-1243`) would, if the guard ever passed, hold a `context_store_uuid`, which `claim_mirror.rs:778-785` and `:909-915` compare for equality against a real incarnation ID and would reject.
 Open questions:
+
 - Is the early return a deliberate "callers may pass a non-incarnation identity, ignore it" contract, or an unnoticed mismatch between the parameter's name and what every caller supplies? The parameter is named `database_incarnation_id` and every call site passes `context_store_uuid`, which `lib.rs:4062-4065` explicitly says are minted independently. (needs human input)
 
 ### intent-identity-is-producer-and-operation-key
@@ -438,6 +445,7 @@ Confidence: high — [evidence](evidence/intent-identity-is-producer-and-operati
 Existing check: `crates/memory-store/tests/claim_intent_ledger.rs:133-166`, status `unaudited`.
 Impact: If the digest check were bypassed, a reused operation key would return another request's committed result to the caller, which is a wrong-answer bug rather than a lost-work bug. `producer` is caller-supplied and unvalidated beyond length (`lib.rs:1216`, `:3838-3847`), so the namespace's integrity is entirely the caller's to maintain.
 Open questions:
+
 - Is `producer` authenticated anywhere above this layer? Within `memory-store` it is an opaque 1..=256-byte string, so any caller can stage into any producer's namespace. Not traced in this pass.
 
 ### intent-terminal-state-is-entered-at-most-once
@@ -454,6 +462,7 @@ Confidence: high — [evidence](evidence/intent-terminal-state-is-entered-at-mos
 Existing check: `crates/memory-store/tests/claim_intent_ledger.rs:85-131`, `:169-228`, `:346-401`. All status `unaudited`.
 Impact: A terminal state that could be re-entered or overwritten would let a rejection replace a committed result, or let a retry rewrite `result_json` under a caller that already read the first value.
 Open questions:
+
 - `(Acknowledged, TerminalRejected)` returns `replayed: true` and writes nothing (`lib.rs:11235-11236`), so the fact that a rejection was delivered to its producer is recorded nowhere. Is settlement of a rejection meant to be observable? The doc at `context-core/src/claim_operation.rs:368-369` calls `acknowledged` "transport settlement, not a second semantic claim state", which argues the no-op is deliberate, but then a rejection's settlement is simply unobservable.
 
 ### intent-staged-replay-produces-one-context-effect
@@ -470,6 +479,7 @@ Confidence: medium — [evidence](evidence/intent-staged-replay-produces-one-con
 Existing check: `crates/memory-store/tests/claim_intent_ledger.rs:337-401` covers the drain fence on replay, status `unaudited`. No check covers the effect count.
 Impact: If the context mutation is not idempotent under the operation key, a crash in the second window produces a duplicate claim effect, and the mirror will faithfully project it. The ledger records one intent, so the duplication is invisible from the store side.
 Open questions:
+
 - Is the context mutation keyed by `(producer, operation_key)` such that re-execution is a no-op? Unresolved; needs the host's claim-apply path, which is outside this scope. (needs human input)
 - Should the ledger record an intermediate "mutation attempted" state to close the second window? That is a design decision. (needs human input)
 
@@ -483,10 +493,11 @@ Guarantee: Every production consumer of committed mirror claims either verifies 
 Check: `always` — for every production read of `list_claim_mirror`, the reading function either compares the mirror's canonical snapshot vector against a caller-supplied expected vector, or carries an explicit statement that staleness is acceptable. `always` because it is a property of the whole read surface, evaluable at every read site.
 Fault/timing angle: The window is unbounded: there is no freshness bound anywhere. `claim_mirror_state.updated_at_ms` is written at `claim_mirror.rs:827` and `:1114-1117` and never read by any statement in the tree, so age is not even observable.
 Required faults and enabling state: A seeded mirror plus a source that stops delivering receipts, for example because a receipt was refused with `CheckpointMismatch` and the lane wedged. Then read through `list_committed_claims`.
-Confidence: high — [evidence](evidence/mirror-staleness-undetectable-on-memory-tool-read-path.md). Enumerated the production read sites: `lib.rs:7368-7377` (atomic, in-transaction), `transform.rs:1978-2011` (optimistic double-read against an expected vector), `historian_chunk.rs:563-608` (same, stronger comparison), and `memory_tool.rs:57-67` (no comparison). Verified `updated_at_ms` is written but never selected.
+Confidence: high — [evidence](evidence/mirror-staleness-undetectable-on-memory-tool-read-path.md). Enumerated the production read sites: `lib.rs:7368-7377` (atomic, in-transaction), `transform.rs:1978-2011` (optimistic double-read against an expected vector), `history_summarizer_chunk.rs:563-608` (same, stronger comparison), and `memory_tool.rs:57-67` (no comparison). Verified `updated_at_ms` is written but never selected.
 Existing check: none for the unfenced path. The fenced paths are mechanisms, not checks.
 Impact: `list_committed_claims` can surface committed claim memory from a wedged mirror indefinitely, with no error and no signal to the caller, while the two assembly paths correctly go quiet. The system degrades inconsistently: some surfaces notice, one does not.
 Open questions:
+
 - Is `list_committed_claims` a tool-facing read where the caller already knows the mirror may lag? Its signature takes no expected vector, so it cannot check even if it wanted to. Whether that is intended is a design decision. (needs human input)
 
 ## Contract-vs-code leads
@@ -552,7 +563,7 @@ this shape. The error a caller receives names the wrong cause and reports an
 ### L5. Two read fences over the same state compare different things
 
 `transform.rs:2008` compares canonical snapshot vectors.
-`historian_chunk.rs:605` compares the whole `ClaimMirrorState`, which also covers
+`history_summarizer_chunk.rs:605` compares the whole `ClaimMirrorState`, which also covers
 `acked_effect_id`. Both are guarding the same non-atomic read of the same tables
 for the same purpose. One of them is wrong about what the fence needs. See
 `mirror-read-fence-relies-on-generation-advance` and Q2.
@@ -584,9 +595,9 @@ Missing evidence: the host-side sender and its retry policy, which are outside
 this scope.
 Conclusion: unresolved, needs the host claim-outbox sender.
 
-### Q2. Which read fence is correct, transform's or historian's?
+### Q2. Which read fence is correct, transform's or history_summarizer's?
 
-Sources examined: `transform.rs:1978-2011`, `historian_chunk.rs:563-608`,
+Sources examined: `transform.rs:1978-2011`, `history_summarizer_chunk.rs:563-608`,
 `claim_mirror.rs:963-990` and `:1064-1096`,
 `context-core/src/claim_operation.rs:330-337`.
 Findings: today the two are equivalent in effect, because every accepted receipt

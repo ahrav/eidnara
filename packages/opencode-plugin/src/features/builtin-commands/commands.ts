@@ -8,31 +8,32 @@ export function getEidnaraBuiltinCommands(compactionEnabled = true): BuiltinComm
         `Unavailable when ${COMPACTION_ENABLED_PATH} is false: /${command} manages compacted history.`;
 
     return {
-        "ctx-status": {
-            template: "ctx-status",
+        "eidnara-status": {
+            template: "eidnara-status",
             description: "Show Eidnara status, pending queue, cache TTL, and debug info",
         },
-        "ctx-recomp": {
-            template: "ctx-recomp",
+        "eidnara-recomp": {
+            template: "eidnara-recomp",
             description: compactionEnabled
-                ? "Rebuild compartments and facts from raw history"
-                : unavailableInCompactionOff("ctx-recomp"),
+                ? "Rebuild history_segments and facts from raw history"
+                : unavailableInCompactionOff("eidnara-recomp"),
         },
-        "ctx-wrapup": {
-            template: "ctx-wrapup",
+        "eidnara-wrapup": {
+            template: "eidnara-wrapup",
             description: compactionEnabled
                 ? "Compact older live history while keeping the newest messages raw"
-                : unavailableInCompactionOff("ctx-wrapup"),
+                : unavailableInCompactionOff("eidnara-wrapup"),
         },
-        "ctx-flush": {
-            template: "ctx-flush",
+        "eidnara-flush": {
+            template: "eidnara-flush",
             description: compactionEnabled
                 ? "Force-process all pending Eidnara operations immediately"
-                : unavailableInCompactionOff("ctx-flush"),
+                : unavailableInCompactionOff("eidnara-flush"),
         },
-        "ctx-aug": {
-            template: "ctx-aug",
-            description: "Augment your prompt with project memory context via sidekick agent",
+        "eidnara-aug": {
+            template: "eidnara-aug",
+            description:
+                "Augment your prompt with project memory context via context_researcher agent",
         },
         [MEMORY_MARK_COMMAND]: {
             template: MEMORY_MARK_COMMAND,

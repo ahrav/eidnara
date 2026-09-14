@@ -1,6 +1,6 @@
 import type { PromptIO, SelectOption } from "./prompts";
 
-export type ModelRole = "historian" | "sidekick";
+export type ModelRole = "history_summarizer" | "context-researcher";
 
 interface RoleCopy {
     title: string;
@@ -10,23 +10,23 @@ interface RoleCopy {
 }
 
 const ROLE_COPY: Record<ModelRole, RoleCopy> = {
-    historian: {
-        title: "Historian",
+    history_summarizer: {
+        title: "HistorySummarizer",
         blurb:
-            "The historian runs in the background and condenses older conversation into\n" +
+            "The history_summarizer runs in the background and condenses older conversation into\n" +
             "compact summaries, so your context never overflows. It works on one bounded\n" +
             "chunk at a time and runs often — it does NOT need a frontier model. A smaller,\n" +
             "cheaper, faster model (a mini / flash / haiku tier) works well here and keeps\n" +
             "your costs down.",
-        pickMessage: "Select a model for the historian",
+        pickMessage: "Select a model for the history_summarizer",
         placeholder: "type to filter (e.g. haiku, flash, mini)…",
     },
-    sidekick: {
-        title: "Sidekick",
+    "context-researcher": {
+        title: "ContextResearcher",
         blurb:
-            "The sidekick augments your prompt with relevant project context when you run\n" +
-            "/ctx-aug. Fast models are preferred here.",
-        pickMessage: "Select a model for the sidekick",
+            "The context_researcher augments your prompt with relevant project context when you run\n" +
+            "/eidnara-aug. Fast models are preferred here.",
+        pickMessage: "Select a model for the context_researcher",
         placeholder: "type to filter…",
     },
 };
@@ -41,7 +41,7 @@ export function modelOptions(models: string[]): SelectOption[] {
     return sortModelsForPicker(models).map((model) => ({ label: model, value: model }));
 }
 
-/** Matches `MAX_MODEL_FIELD_BYTES` in `crates/host-runtime/src/broca/protocol.rs`. */
+/** Matches `MAX_MODEL_FIELD_BYTES` in `crates/host-runtime/src/model_execution/protocol.rs`. */
 const MAX_MODEL_SEGMENT_BYTES = 256;
 
 export function validateModelId(value: string): string | undefined {

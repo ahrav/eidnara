@@ -50,13 +50,13 @@ Quotes are verbatim and shortened only by ellipsis.
 
 | # | Claim (verbatim, shortened) | Source | Implied property | Implemented at |
 | --- | --- | --- | --- | --- |
-| 1 | "exactly one `dreamer.run_task` executes per durable command identity. A concurrent duplicate — byte-identical or not, same first model or not — must not start its own billable chain or race the ledger's INSERT OR IGNORE with a different outcome" | `:3072-3077` | At most one billable producer chain runs per `(ledger_session, command_id)`, across concurrency and across retry | Partial. In-flight guard `:9796-9814`, ledger read `:9819-9828`, success write `:10016`. **NOT FOUND for the failure path:** `:9989` discards the write result, so a failed run leaves no proven row and a retry re-runs |
-| 2 | "A ledger read failure must not look like 'no record': replaying a command whose durable response exists would start a second billable run, so the read fails closed and the caller retries" | `:9816-9818` | A `load_dream_task_command` error never admits a producer run | `:9822-9827` returns `dreamer_ledger_failed` before the producer is constructed at `:9848` |
+| 1 | "exactly one `memory_classifier.run_task` executes per durable command identity. A concurrent duplicate — byte-identical or not, same first model or not — must not start its own billable chain or race the ledger's INSERT OR IGNORE with a different outcome" | `:3072-3077` | At most one billable producer chain runs per `(ledger_session, command_id)`, across concurrency and across retry | Partial. In-flight guard `:9796-9814`, ledger read `:9819-9828`, success write `:10016`. **NOT FOUND for the failure path:** `:9989` discards the write result, so a failed run leaves no proven row and a retry re-runs |
+| 2 | "A ledger read failure must not look like 'no record': replaying a command whose durable response exists would start a second billable run, so the read fails closed and the caller retries" | `:9816-9818` | A `load_dream_task_command` error never admits a producer run | `:9822-9827` returns `memory_classifier_ledger_failed` before the producer is constructed at `:9848` |
 | 3 | "Taken BEFORE the ledger read so it also closes the read-to-registration window: reading first would let a duplicate observe no row, lose the CPU while the winner ran to completion and released the guard, then acquire it and start a second billable chain" | `:9791-9795` | The guard-acquire precedes the ledger read, with no reordering | `:9796-9814` (guard) strictly precedes `:9819` (read) |
-| 4 | "the module's own producer sessions must NEVER be transformed ... a transform here would recurse the historian into itself" | `:8040-8043` | No historian or dreamer child session reaches the pass engine | `:8044-8056` (prefix test on the caller-supplied `session_id`), `:8057-8074` (dreamer arm, route-validated). The two arms use different trust bases; see lead L1 |
-| 5 | "Registration is the authority for a dreamer exemption. Validate the route before trusting it so a stale or cross-project channel cannot bypass transform" | `:8058-8059` | A transform bypass requires a registration plus a matching route binding | `:8057` `dreamer_run_registered` then `:8060` `resolve_binding` |
+| 4 | "the module's own producer sessions must NEVER be transformed ... a transform here would recurse the history_summarizer into itself" | `:8040-8043` | No history_summarizer or memory_classifier child session reaches the pass engine | `:8044-8056` (prefix test on the caller-supplied `session_id`), `:8057-8074` (memory_classifier arm, route-validated). The two arms use different trust bases; see lead L1 |
+| 5 | "Registration is the authority for a memory_classifier exemption. Validate the route before trusting it so a stale or cross-project channel cannot bypass transform" | `:8058-8059` | A transform bypass requires a registration plus a matching route binding | `:8057` `memory_classifier_run_registered` then `:8060` `resolve_binding` |
 | 6 | "An idempotency conflict means a concurrent command ... owns this child session and its live, billable run: purging would cancel the other caller's run ... Return without any ledger write" | `:9953-9962` | A losing duplicate neither purges the winner's session nor writes a ledger row | `:9963-9970` returns before any purge or write |
-| 7 | "Each non-final attempt must purge its session before advancing or returning ... A failed purge is therefore terminal for the command" | `:9913-9923` | No dreamer child session with a memory-pool snapshot is orphaned by chain advance | `:9940-9950` (invalid-manifest arm) and `:9972-9980` (error arm); both `break` on purge failure |
+| 7 | "Each non-final attempt must purge its session before advancing or returning ... A failed purge is therefore terminal for the command" | `:9913-9923` | No memory_classifier child session with a memory-pool snapshot is orphaned by chain advance | `:9940-9950` (invalid-manifest arm) and `:9972-9980` (error arm); both `break` on purge failure |
 | 8 | "Purge only after the response is durable. A purge failure here cannot fail the command — the recorded response is already the command's outcome (any retry replays it)" | `:10023-10027` | Ledger durability precedes session purge on the success path | `:10016` (write, result checked) then `:10028` (`let _` purge) |
 | 9 | "Validated against the requested IDs before the attempt is accepted: an enveloped-but-invalid manifest must advance the chain, not end it and be ledgered as this command's durable response" | `:9925-9934` | An invalid or length-capped manifest never becomes the command's durable response | `:9935` `length_capped_or_invalid(&result, &expected_ids)` |
 | 10 | "Batch zero is checked against durable metadata before the process-local state is touched. A stale retry therefore cannot evict or allocate another live attempt" | `:8816-8817` | A stale seed batch zero cannot destroy a live seed collection | `:8818-8830` loads and compares before staging |
@@ -69,7 +69,7 @@ Quotes are verbatim and shortened only by ellipsis.
 | 17 | "The root is part of provenance; a cache row for the same session cannot authenticate a facade opened on another root" | `:2940-2941` | Cache provenance is root-scoped | Exercised by `:24738 opencode_cache_provenance_cannot_rebind_a_second_project_root` |
 | 18 | "The project key is resolved from the server-side route binding, never from a request body" | `:2974-2975`, restated at `:3908-3909` | No request body can select the notes-authority project | `resolve_note_evaluator_project` `:3908-3976` region |
 | 19 | "the channel is the daemon-controlled identity; the request's session must agree with it" ... "Both fail LOUD — never default to a project" | `:234-236`, `:241-243`, restated `:4300-4304` | Session identity is cross-checked against the channel binding on every transform request | `resolve_binding` `:4305-4343`; exercised by `:17422 resolve_fails_loud_unbound_and_on_session_mismatch` |
-| 20 | "the deadline ... is the ONLY bound relating this handler's work to the caller's transport budget" | `:9758-9766` | A dreamer run cannot outlive the caller's supplied budget | `:9767-9781` deadline construction; exercised by `:25977 dreamer_run_task_requires_a_positive_timeout_ms` |
+| 20 | "the deadline ... is the ONLY bound relating this handler's work to the caller's transport budget" | `:9758-9766` | A memory_classifier run cannot outlive the caller's supplied budget | `:9767-9781` deadline construction; exercised by `:25977 memory_classifier_run_task_requires_a_positive_timeout_ms` |
 | 21 | "Enumerating the task here is a capability boundary: callers cannot use this route to select an arbitrary system prompt, model, or tool-enabled run" | `:9622-9623` | The task enum is closed against caller-chosen prompts and models | `:9605-9640`; the fixture at `:25806-25810` poisons the route model chain to prove the classify loop ignores it |
 | 22 | "This trace is intentionally outside the fenced cache-state commit: a rejected pass must still leave a durable breadcrumb, and a trace failure must never change the transform result" | `:8258-8260` | Trace writes are best-effort and never alter the pass outcome | `:8262`, `:8332`, `:8560`, all `let _` |
 | 23 | "A panic skips this method and is handled by Drop, so it cannot falsely advance the heartbeat" | `:479-480` | Dispatch-health completion cannot be advanced by a panicking handler | `TransformDispatchTicket::accept` `:479-495` plus `Drop` `:497-508`; exercised by `:18944 transform_dispatch_panic_drop_guard_decrements_without_completion_stamp` |
@@ -93,17 +93,17 @@ claims rather than as a disagreement.
 
 Each lead cites both sides. None is resolved in the doc's favour.
 
-**L1. The historian transform bypass trusts a request-body prefix; the dreamer
+**L1. The history_summarizer transform bypass trusts a request-body prefix; the memory_classifier
 bypass next to it does not, and only the second says why.** Doc side: `:8040-8043`
 states the strong obligation, producer sessions "must NEVER be transformed", and
-`:8058-8059` states the defence for the dreamer arm, "Validate the route before
+`:8058-8059` states the defence for the memory_classifier arm, "Validate the route before
 trusting it so a stale or cross-project channel cannot bypass transform". Code
 side: `:8044-8046` tests
-`parsed.session_id.starts_with(historian::HISTORIAN_CHILD_SESSION_PREFIX)`
+`parsed.session_id.starts_with(history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX)`
 and returns a passthrough at `:8055` with **no** `resolve_binding` call, while
-`:8060` does call it for the dreamer arm. The asymmetry is acknowledged in the
-code at `:8048-8050`: "The established historian namespace remains accepted for
-compatibility with existing producer sessions. Dreamer IDs instead require
+`:8060` does call it for the memory_classifier arm. The asymmetry is acknowledged in the
+code at `:8048-8050`: "The established history_summarizer namespace remains accepted for
+compatibility with existing producer sessions. MemoryClassifier IDs instead require
 registration and route validation before they may bypass the transform." So the
 weaker arm is documented as a compatibility carve-out, not as an oversight, which
 is exactly why it belongs here as a lead rather than as a defect: the two arms
@@ -127,18 +127,18 @@ persistence field among its twelve keys. Verified independently of lens A: the
 only `Err` return in the function is `:7754`. Lens A owns the record; recorded
 here as the prose side it disagrees with.
 
-**L3. The dreamer's failure path discards the write its own file argues is
+**L3. The memory_classifier's failure path discards the write its own file argues is
 load-bearing.** Doc side: `:9816-9818` names "a second billable run" as the
 hazard and hardens the read against it; `:10023-10027` reasons at length about
 ledger durability preceding purge on the success path. Code side: `:9989` binds
 `record_dream_task_command` to `let _`. Lens A owns the record. New here: the
-**error code collides three ways**. `dreamer_run_failed` is returned at `:9804`
+**error code collides three ways**. `memory_classifier_run_failed` is returned at `:9804`
 (duplicate in flight, no ledger row by design), `:9968` (idempotency conflict, no
 ledger row by design, per claim 6), and `:9996` (chain exhausted, ledger row
-attempted and unchecked). A caller receiving `dreamer_run_failed` therefore cannot
+attempted and unchecked). A caller receiving `memory_classifier_run_failed` therefore cannot
 tell whether a durable row exists, and in two of the three cases the correct
 answer is "no, by design". The success path does distinguish, using
-`dreamer_ledger_failed` at `:10036`.
+`memory_classifier_ledger_failed` at `:10036`.
 
 **L4. `TransformPageCoordinator::discard` names a full release and performs a
 partial one.** Doc side: `:1129-1130`. Code side: `:1131-1144` uses
@@ -213,7 +213,7 @@ grep, with no type, test, or runtime guard that would catch a violation.
    labels). The convention that each label matches its mutex is enforced by
    nothing; a copy-paste mismatch would produce a misleading panic message and no
    test would notice.
-4. **The `eidnara_*` and `HISTORIAN_CHILD_SESSION_PREFIX` namespace reservations.** Claim 4's
+4. **The `eidnara_*` and `HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX` namespace reservations.** Claim 4's
    bypass rests on a prefix convention. `:25110` covers suffix collisions only.
 5. **The source-text architecture assertions in `tests/host_adapter.rs:137-173`.**
    Nine string assertions over `include_str!("../src/lib.rs")`: production must
@@ -254,14 +254,14 @@ Attribution then ran three ways, because a single number would be misleading:
    Computed by matching 4c production entry points in each test body, then taking
    a fixpoint over the 119 non-test helper functions in the test modules so that
    tests calling a request-builder or a fixture helper are attributed
-   transitively. This transitive step is load-bearing: the four dreamer tests
-   invoke `handle_dreamer_run_task` only through the helper
-   `dreamer_classify_outcome` (`:25798-25830`), and a naive body scan finds none
+   transitively. This transitive step is load-bearing: the four memory_classifier tests
+   invoke `handle_memory_classifier_run_task` only through the helper
+   `memory_classifier_classify_outcome` (`:25798-25830`), and a naive body scan finds none
    of them. **Result: 212 of 256.**
 2. **Op-specific** — does the test name or body reference a 4c-owned operation,
    coordinator, cache, route structure, or dispatch-health type? **Result: 120.**
 3. **Claim-bearing on 4c** — op-specific, minus tests whose subject a sibling
-   part owns, classified by test name: 11 to 4a (historian, wrapup, reattach,
+   part owns, classified by test name: 11 to 4a (history_summarizer, wrapup, reattach,
    firing, side-channel, seeded-phase), 28 to 4d (facade, `ctx_*`, note
    evaluation, native attachment, prepared output, schemas, byte caps), 12 to
    4b/4e (Channel-2, renderer transition, duplicate `tool_use`, reasoning
@@ -284,13 +284,13 @@ reference or transitive helper reference to the named handler or method literal)
 | `status` / `health` / `diagnostics` | 33 | `:18730-30278` | The single most-reached read-only handler |
 | `bind_authority_route` (as setup) | 22 | `:23111-…` | Setup, not an assertion target |
 | `state_import` | 10 | `:26739-27124` | The best-covered durable op in scope |
-| `agent_drops.append` | 10 | `:25445-27852` | Includes the `ctx_reduce` command-id family |
+| `agent_drops.append` | 10 | `:25445-27852` | Includes the `eidnara_reduce` command-id family |
 | `session.status` | 9 | `:17454-27534` | |
 | `guidance.get` | 6 | `:22491-23009` | |
 | store open (`begin_store_open`, `StoreOpenPolicy`) | 6 | `:16848-17059` | Lease wait, waiter dedup, shutdown cancel |
 | in-scope caches (snapshot, boundary token, native, projection) | 27 | `:16391-28864` | Overlaps 4d, which owns native-attachment plumbing |
 | dispatch health / wedge detector | 6 | `:18847-18957` | Includes the panic-drop-guard test |
-| `dreamer.run_task` | 4 | `:25872-26009` | All four via `dreamer_classify_outcome` |
+| `memory_classifier.run_task` | 4 | `:25872-26009` | All four via `memory_classifier_classify_outcome` |
 | `state_sync` (handler) | 4 | `:17542-30357` | |
 | note-evaluator registry | 4 | `:23111-23381` | |
 | `unbind_route` / `route_gone` | 3 | `:17406-23381` | |
@@ -384,7 +384,7 @@ mentions `check:all` in a comment).
 | `tests/host_adapter.rs` (173 lines) | 4 | **Yes** | `Handler::new()` at `:39`, `:74`, `:84`, `:106`. `:66` and `:69` call `route_gone`, reaching `unbind_route` (`:4233-4298`). `:102 shutdown_cancels_and_joins_blocked_store_open` holds a real single-writer lease at `:105`, polls health for `"waiting on storage lease"` at `:119`, then asserts shutdown joins the blocked waiter and retains no lease at `:134` — a direct check on `StoreOpenCoordinator` and `run_store_open`. `:137` is the nine-assertion source-text architecture check |
 | `tests/prepared_output.rs` (282 lines) | 10 | **No** | Imports `daemon::dispatch::{...}` only. Its `"status"` occurrences (`:45`, `:49`) are JSON payload fields, not dispatch methods. This binary tests `dispatch.rs`, which the scope map assigns to 4d |
 | `tests/boundary_counter_durability.rs` | 1 | No | Zero 4c method literals, zero `Handler` |
-| `tests/broca_roundtrip.rs` | 2 | No | Zero `Handler`, zero `bind_route`, zero `route_gone` |
+| `tests/model_execution_roundtrip.rs` | 2 | No | Zero `Handler`, zero `bind_route`, zero `route_gone` |
 | `tests/release_contract_conformance.rs` | 3 | No | Zero 4c method literals |
 | `tests/lifecycle_cli.rs` | 12 | No | Uses `"status"` (5×) against the CLI, not the handler. Part 2a owns it |
 
@@ -422,7 +422,7 @@ either side.
 **The host e2e suite runs in TypeScript mode only, and says so.** `ci.yml:658`
 `e2e-host-opencode` sets `EIDNARA_E2E_MODE: ts` (`:714`, under the step at `:711`) and
 the step comment at `:719-721` states: "Rust is intentionally absent from public
-CI because its private ../commons and ../subconscious path-deps are not
+CI because its private ../commons and ../hostonscious path-deps are not
 provisioned here; the local release gate runs that host group." `e2e-host-pi`
 (`:724`) has the same shape. So the absence of Rust end-to-end coverage in CI is
 deliberate and documented, with a named cause, and the compensating gate is a
@@ -434,11 +434,11 @@ the same constraint one layer down.
 hermetic daemon over `Handler` is named (`:110`), and its strict assertions are
 gated behind `EIDNARA_RUST_E2E_STRICT_PERF=1` (`:113`).
 
-**A parallel-implementation pattern also exists here, as in 4a.** The dreamer,
+**A parallel-implementation pattern also exists here, as in 4a.** The memory_classifier,
 classify, and task-executor lanes have TypeScript tests
-(`features/eidnara/dreamer/task-executor.test.ts`,
-`dreamer/classify.test.ts`) that run under `ci.yml:257`, while the Rust
-`handle_dreamer_run_task` has 4 in-crate tests that run nowhere. Establishing
+(`features/eidnara/memory_classifier/task-executor.test.ts`,
+`memory_classifier/classify.test.ts`) that run under `ci.yml:257`, while the Rust
+`handle_memory_classifier_run_task` has 4 in-crate tests that run nowhere. Establishing
 whether those two implement the same contract is out of this lens's reach and is
 recorded as an open question.
 
@@ -475,14 +475,14 @@ the largest being `"state sync seed mutex"` (8), `"transform snapshots mutex"`
 `"bindings mutex"` (6). Each is infallible only while no thread panics holding
 that lock, which interacts with lens B's finding that the `Applying` phase has no
 unwind guard. The three non-mutex expects are the ones worth naming:
-`"session.status response is an object"`, `"historian status serializes as an
+`"session.status response is an object"`, `"history_summarizer status serializes as an
 object"`, and `"classifier output set"`. None has a named test.
 
 **Discarded results: six `let _` sites, four licensed and two not.**
 
 | Line | Call | Licensed by a comment? |
 | --- | --- | --- |
-| `:8252` | `store.drain_historian_side_channels(...)` | Partly, `:8249-8250`. Lens A's O5 |
+| `:8252` | `store.drain_history_summarizer_side_channels(...)` | Partly, `:8249-8250`. Lens A's O5 |
 | `:8262` | `store.trace_pass_received(...)` | Yes, `:8258-8260` |
 | `:8332` | `store.trace_pass_rejected(...)` | By the same convention, not restated |
 | `:8560` | `store.trace_pass_completed(...)` | By the same convention, not restated |
@@ -533,7 +533,7 @@ Ranked by the gap between what the code decides and what any check proves.
    five findings on the one structure with no tests.
 2. **`apply_state_sync_wire` has zero tests and it is the durable write.**
    207 lines (`:9127-9333`) containing the `expected_shadow_seq` fence, the
-   historian-phase pre-check, the `AuthoritySeqMismatch` and `HistorianBusy`
+   history_summarizer-phase pre-check, the `AuthoritySeqMismatch` and `HistorySummarizerBusy`
    arms, and the note-evaluation capability effect — the exact code behind lens
    A's O8 and O10 and the fence that lens B relies on to bound its restart
    record. Four tests reach `handle_state_sync_value`; none names the function
@@ -551,9 +551,9 @@ Ranked by the gap between what the code decides and what any check proves.
    numbered entries and contains **zero occurrences of `daemon` or
    `crates/`**; its only apparent "rust" matches are substrings of "trust". Every
    entry analyses the TypeScript implementation, including four that are direct
-   analogues of 4c concerns: A27 (historian lease atomicity), A33 (dreamer drain
+   analogues of 4c concerns: A27 (history_summarizer lease atomicity), A33 (memory_classifier drain
    dedup-guarded not lease-locked), A24 (transform wrapper fails open), A4 and
-   A29 (dreamer authority scope). So the repository has a mature
+   A29 (memory_classifier authority scope). So the repository has a mature
    accepted-issues register for one implementation of these contracts and none
    for the other, and none of the three 4c lenses' contract-versus-code gaps is
    tracked anywhere.
@@ -568,7 +568,7 @@ Ranked by the gap between what the code decides and what any check proves.
    The only unconditional assertion in scope is the compile-time `const _`
    at `:2309`. Every other invariant is a typed `Result`, which means a violated
    invariant becomes an error code a caller may or may not surface, never a loud
-   failure. Compare 4a, which found the same shape in `historian.rs`.
+   failure. Compare 4a, which found the same shape in `history_summarizer.rs`.
 7. **The one panic site has no test.** `:3661` `panic!("store open worker
    failed")` on a `JoinError`. Six tests cover store open; none constructs a
    worker-panic or cancellation that would reach this line.
@@ -600,12 +600,12 @@ Ranked by the gap between what the code decides and what any check proves.
 
 ## Open questions
 
-- Do the TypeScript dreamer lanes (`dreamer/task-executor.test.ts`,
-  `dreamer/classify.test.ts`, both CI-gated via `ci.yml:257`) and the Rust
-  `handle_dreamer_run_task` implement the same contract, making the TypeScript
-  suite a parallel-implementation gate as 4a found for the historian validator?
+- Do the TypeScript memory_classifier lanes (`memory_classifier/task-executor.test.ts`,
+  `memory_classifier/classify.test.ts`, both CI-gated via `ci.yml:257`) and the Rust
+  `handle_memory_classifier_run_task` implement the same contract, making the TypeScript
+  suite a parallel-implementation gate as 4a found for the history_summarizer validator?
   Unresolved; needs a contract comparison outside this lens's scope.
-- Can a harness-supplied `session_id` carry `historian::HISTORIAN_CHILD_SESSION_PREFIX`
+- Can a harness-supplied `session_id` carry `history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX`
   and so take the unvalidated transform bypass at `:8044-8055`? The code
   documents the arm as a compatibility carve-out (`:8048-8050`), which is a
   reason to keep it, not evidence that it is unreachable. Unresolved; needs the

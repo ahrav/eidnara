@@ -20,7 +20,7 @@
                         "omitted": []
                     },
                     "semantic_revision": {
-                        "id": "rev-parity-a1-6",
+                        "id": "rev-parity-a1-7",
                         "fingerprint": "caa136d080a500e76c431cd9a8ab2362c88176d4c52c90c97cbcae47796d7e08"
                     },
                     "normative_checks": [
@@ -61,8 +61,8 @@
                         "omitted": []
                     },
                     "semantic_revision": {
-                        "id": "rev-parity-a3-9",
-                        "fingerprint": "e496498df741d824c5960ee0f416bd377c9d7fe858c3f84753a71480b924df61"
+                        "id": "rev-parity-a3-10",
+                        "fingerprint": "b1ee11e9a9d42ad06a9f78e887206ec77b64de8062745ea7ee52688f1741792b"
                     },
                     "normative_checks": [
                         "check-a3-defer-request-floor",
@@ -74,11 +74,11 @@
                         "check-a3-pure-defer"
                     ],
                     "verifier_binding": {
-                        "driver": "src/incident-pool/scenarios/source-linked-regressions.ts#driveAgedCtxReduceSurvival",
-                        "verifier": "src/incident-pool/scenarios/source-linked-regressions.ts#verifyAgedCtxReduceSurvival",
+                        "driver": "src/incident-pool/scenarios/source-linked-regressions.ts#driveAgedEidnaraReduceSurvival",
+                        "verifier": "src/incident-pool/scenarios/source-linked-regressions.ts#verifyAgedEidnaraReduceSurvival",
                         "binding_status": "live",
                         "invalid_state_evidence": [
-                            "crafted vanished-ctx_reduce final wire is rejected (source-linked-regressions.test.ts)",
+                            "crafted vanished-eidnara_reduce final wire is rejected (source-linked-regressions.test.ts)",
                             "crafted bust observation is rejected (source-linked-regressions.test.ts)",
                             "crafted uncached-transition count is rejected (source-linked-regressions.test.ts)",
                             "crafted raw-served or missing rust pass is rejected (source-linked-regressions.test.ts)",

@@ -390,6 +390,7 @@ none checks derived RP2.1 input currentness.
 Impact: A projection can report remediated source bytes or vectors as current
 if it treats an unchanged occurrence tuple as proof of unchanged input.
 Open questions:
+
 - Which approved bounded source mapping includes remediated fields, and how does it independently reconstruct current projection/embedding input? (needs human input)
 - What at-rest residue policy applies to old payloads, vectors, WAL and historical state? No new erasure SLA or permission is inferred. (needs human input)
 
@@ -426,6 +427,7 @@ unaudited evidence that declared boundaries can be checked against driven ones.
 Impact: Safety checks can pass without exercising required source classes,
 production inference, crash windows or successful bounded recovery.
 Open questions:
+
 - What approved campaign manifest freezes required marker/scenario cells and records their independent witnesses without post-run scope reduction? (needs human input)
 
 ## Relationships and reuse
@@ -462,7 +464,7 @@ proofs of implication.
 
 Exact existing guarantees are reused in the
 [overlap register](existing-checks.md#overlap-register). Codec round trips,
-historian raw publication, canonical withheld-read reporting and Dreamer
+history_summarizer raw publication, canonical withheld-read reporting and MemoryClassifier
 lease/receipt semantics are not re-authored here. Invalidated mirror records
 are not implementation scope or current check evidence.
 

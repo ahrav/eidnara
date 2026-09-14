@@ -78,7 +78,7 @@ an explicit handoff, not a fabricated finite-liveness property.
 ## Bug history and density
 
 Scoped local history includes `f7ccbb6d` (absent-hook checks), `7af2ec9c`
-(Dreamer scheduling), and `ffe12796` (retired memory-plane identifiers).
+(MemoryClassifier scheduling), and `ffe12796` (retired memory-plane identifiers).
 Titles guided inspection of current code; none establishes a defect.
 No incident or reproduction was supplied. The dense historical mirror
 catalog concerns deleted code and does not establish search replay coverage.
@@ -101,7 +101,7 @@ teardown and rebuild protocol belong to the export/rebuild owner.
 ## Dependencies
 
 SQLite spans two independent stores. `Cargo.toml:43` declares rusqlite with
-bundled SQLite. Existing Synapse execution is a downstream dependency, not
+bundled SQLite. Existing LocalEmbeddings execution is a downstream dependency, not
 durable local job truth. The embedding owner supplies result validity and
 token limits. The export owner supplies complete source prefixes. No new
 network coordinator or queue is implied.

@@ -126,10 +126,10 @@ violation.
 ### Q: does any existing test exercise the runtime subtraction at a floor?
 
 - Sources examined: `config.rs:463-673` (all nine unit tests),
-  `handler_contract.rs:252-300` and `:437-530`, `synapse_bundle.rs:828`.
+  `handler_contract.rs:252-300` and `:437-530`, `local_embeddings_bundle.rs:828`.
 - Findings: `handler_contract.rs:437` starts a host at the exact floor and one
   byte below, asserting success and `InitFailed`. So the *gate* is covered at
-  its boundary. `synapse_bundle.rs:828` uses `MIN_RESIDENT_BYTES * 2`. No test
+  its boundary. `local_embeddings_bundle.rs:828` uses `MIN_RESIDENT_BYTES * 2`. No test
   reads the resulting `ingress_budget` capacity, and `ByteBudget::capacity` is
   `pub(crate)` (`wire.rs:405`), so an integration test cannot.
 - Missing evidence: none; the gap is real.

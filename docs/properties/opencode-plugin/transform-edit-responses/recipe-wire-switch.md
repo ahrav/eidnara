@@ -13,7 +13,7 @@ PATH: `bun run check:repo` exits 0 (`packages/opencode-plugin` 3511 pass, 0
 fail); `cargo +1.98 test -p daemon --all-features --locked --no-fail-fast
 --tests --examples` reports 1552 passed, 0 failed with the four tests skipped
 that also fail on the predecessor under full-suite load
-(`dreamer_run_task_bounds_*`,
+(`memory_classifier_run_task_bounds_*`,
 `publication_search_deadline_preserves_admission_without_recharging`,
 `full_constructor_observation_covers_receipts_hashing_and_arc_conversion`);
 `cargo +1.98 clippy --workspace --all-targets --all-features --locked -- -D
@@ -75,6 +75,7 @@ defaults, so typed equality cannot prove equality with raw client input. Native
 input keeps remain enabled because native values retain their JSON representation.
 
 Witnesses in `rust-mode-transform.test.ts`:
+
 - "rejects mutated retained output before request"
 - "rejects mutated retained output pending response"
 - "keeps from the applied previous output and the submitted input, then acks

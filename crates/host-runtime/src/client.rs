@@ -498,7 +498,7 @@ impl Client {
         // connection `Goodbye` right after setup does exactly that.
         // Returning a "ready" client then defers the failure to the first
         // operation, which reports `connection_retired` as `NotSent`; the
-        // historian does not reconnect on that path, so a daemon reload race
+        // history_summarizer does not reconnect on that path, so a daemon reload race
         // would abort the run instead of establishing a replacement.
         if inner.retired.load(Ordering::Acquire) {
             return Err(ClientError::new(
@@ -5975,7 +5975,7 @@ mod tests {
             module_id: "context".to_owned(),
         };
         let mut identity = identity_fixture();
-        identity.consumer_module_id = Some("synapse".to_owned());
+        identity.consumer_module_id = Some("local_embeddings".to_owned());
         let error = route_open_body(&target, &identity).expect_err("nonce is missing");
         assert_eq!(error.outcome(), SendOutcome::NotSent);
         assert_eq!(error.code(), "invalid_identity");
@@ -5985,12 +5985,12 @@ mod tests {
         let error = route_open_body(&target, &identity).expect_err("module id is missing");
         assert_eq!(error.code(), "invalid_identity");
 
-        identity.consumer_module_id = Some("synapse".to_owned());
+        identity.consumer_module_id = Some("local_embeddings".to_owned());
         let body = route_open_body(&target, &identity).expect("both members encode");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         assert_eq!(
             value["consumer_identity"],
-            serde_json::json!({"module_id": "synapse", "launch_nonce": "nonce"})
+            serde_json::json!({"module_id": "local_embeddings", "launch_nonce": "nonce"})
         );
     }
 

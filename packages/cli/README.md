@@ -26,7 +26,7 @@ several are installed. Add `--harness opencode`, `--harness pi`, or
 
 ## Setup
 
-`setup` detects the harness, asks for the historian and Sidekick models, and
+`setup` detects the harness, asks for the history_summarizer and ContextResearcher models, and
 writes:
 
 - OpenCode: the `@eidnara/opencode` plugin entry in `opencode.jsonc` and
@@ -50,7 +50,7 @@ for the other harnesses only.
 ## Doctor
 
 `doctor` reports the harness installation, the plugin entry, the user and
-project configuration, configuration conflicts, the log file, and historian
+project configuration, configuration conflicts, the log file, and history_summarizer
 dumps. It writes nothing. `doctor --force` repairs configuration only, and what
 it repairs depends on the harness:
 

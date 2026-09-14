@@ -1,4 +1,4 @@
-//! Shared text processing for boundary summaries and historian chunks.
+//! Shared text processing for boundary summaries and history_summarizer chunks.
 //!
 //! Helpers operate only on strings and JSON values. Commit hashes preserve first
 //! appearance order, role labels use compact display forms, and normalization

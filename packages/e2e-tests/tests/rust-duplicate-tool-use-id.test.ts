@@ -1,5 +1,5 @@
 /**
- * A warm Rust output cache can serve duplicate Anthropic tool_use IDs when a cache-busting selection pass consumes a queued ctx_reduce drop.
+ * A warm Rust output cache can serve duplicate Anthropic tool_use IDs when a cache-busting selection pass consumes a queued eidnara_reduce drop.
  * Anthropic rejects duplicate tool_use IDs with HTTP 400, so a continued transform does not prove that Anthropic accepted the request.
  *
  * A historical tool call may replay in later requests but may occur only once per served messages array.
@@ -45,7 +45,7 @@ function visibleTags(wire: string): number[] {
 const active = rustPrereqs.ok && duplicateIdInfraEnabled();
 
 describe.skipIf(!rustPrereqs.ok)("rust incident regression: duplicate tool-use ids", () => {
-    it.skipIf(active)("is gated on a broca-capable selection-bust runner", () => {
+    it.skipIf(active)("is gated on a model_execution-capable selection-bust runner", () => {
         printSkip("duplicate-tool-use-ids", DUPLICATE_ID_SKIP_REASON);
         expect(duplicateIdInfraEnabled()).toBe(false);
     });
@@ -84,7 +84,7 @@ describe.skipIf(!rustPrereqs.ok)("rust incident regression: duplicate tool-use i
             expect(tags.length).toBeGreaterThan(0);
             const dropTag = tags[0]!;
 
-            // OpenCode persists the real model's ctx_reduce tool call, and the plugin queues the requested drop.
+            // OpenCode persists the real model's eidnara_reduce tool call, and the plugin queues the requested drop.
             let dropEmitted = false;
             h.mock.addMatcher((body) => {
                 if (dropEmitted || !JSON.stringify(body.system ?? "").includes("## Eidnara")) {
@@ -93,7 +93,7 @@ describe.skipIf(!rustPrereqs.ok)("rust incident regression: duplicate tool-use i
                 if (!Array.isArray(body.tools)) return null;
                 const name = (
                     body.tools.find((tool) =>
-                        /ctx_reduce/.test(String((tool as { name?: unknown })?.name ?? "")),
+                        /eidnara_reduce/.test(String((tool as { name?: unknown })?.name ?? "")),
                     ) as { name?: string } | undefined
                 )?.name;
                 if (!name) return null;

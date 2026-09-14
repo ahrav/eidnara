@@ -4,21 +4,21 @@ use shm_transport::arena::{
 use shm_transport::backend::sample::{SAMPLE_PREFIX_BYTES, SamplePrefix};
 use shm_transport::descriptor::{
     DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor,
-    HardwareProfileId, Incarnation, ReleaseIdentity, TransportDescriptor, WIRE_V2_HEADER_BYTES,
-    WIRE_V2_VERSION,
+    HardwareProfileId, Incarnation, ReleaseIdentity, TransportDescriptor, WIRE_V3_HEADER_BYTES,
+    WIRE_V3_VERSION,
 };
 use shm_transport::lifecycle::{CloseState, Lifecycle, LifecycleError};
 
-fn header(len: usize) -> [u8; WIRE_V2_HEADER_BYTES] {
-    let mut header = [0u8; WIRE_V2_HEADER_BYTES];
+fn header(len: usize) -> [u8; WIRE_V3_HEADER_BYTES] {
+    let mut header = [0u8; WIRE_V3_HEADER_BYTES];
     header[..4].copy_from_slice(&(len as u32).to_le_bytes());
-    header[4] = WIRE_V2_VERSION;
+    header[4] = WIRE_V3_VERSION;
     header
 }
 
 fn sample_payload(
     schema: u16,
-    wire_header: [u8; WIRE_V2_HEADER_BYTES],
+    wire_header: [u8; WIRE_V3_HEADER_BYTES],
     identity: ReleaseIdentity,
     declared_body_len: u64,
     body: &[u8],
@@ -249,7 +249,7 @@ fn descriptor_rejects_every_untrusted_identity_span_and_allocation_failure() {
                 DESCRIPTOR_SCHEMA_VERSION,
                 {
                     let mut stale_version = header(8);
-                    stale_version[4] = WIRE_V2_VERSION - 1;
+                    stale_version[4] = WIRE_V3_VERSION - 1;
                     stale_version
                 },
                 identity(),
@@ -598,7 +598,7 @@ fn sample_prefix_rejects_every_truncation_point_and_bounds_the_body() {
 fn sample_prefix_rejects_identity_schema_length_and_wire_failures() {
     let body = [9u8; 4];
     let expected = identity();
-    let base = |schema: u16, wire: [u8; WIRE_V2_HEADER_BYTES], id: ReleaseIdentity, len: u64| {
+    let base = |schema: u16, wire: [u8; WIRE_V3_HEADER_BYTES], id: ReleaseIdentity, len: u64| {
         sample_payload(schema, wire, id, len, &body)
     };
 
@@ -666,7 +666,7 @@ fn sample_prefix_rejects_identity_schema_length_and_wire_failures() {
         (
             {
                 let mut wire = header(4);
-                wire[4] = WIRE_V2_VERSION - 1;
+                wire[4] = WIRE_V3_VERSION - 1;
                 base(DESCRIPTOR_SCHEMA_VERSION, wire, expected, 4)
             },
             expected,
@@ -713,7 +713,7 @@ fn sample_prefix_rejects_identity_schema_length_and_wire_failures() {
 #[test]
 fn sample_errors_redact_every_sentinel() {
     let sentinel = b"SENTINEL";
-    let mut wire = [0u8; WIRE_V2_HEADER_BYTES];
+    let mut wire = [0u8; WIRE_V3_HEADER_BYTES];
     wire[..sentinel.len()].copy_from_slice(sentinel);
     let incarnation = Incarnation::from_bytes(*b"SENTINEL-SECRET!");
     let sentinel_identity = ReleaseIdentity::new(incarnation, 0x5345_4e54, 0x494e_454c);

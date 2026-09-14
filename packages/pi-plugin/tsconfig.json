@@ -24,9 +24,9 @@
             "@eidnara/opencode/*": [
                 "../opencode-plugin/src/*"
             ],
-            "@eidnara/retina-local-fs/*": [
-                "../retina-local-fs/dist/types/*",
-                "../retina-local-fs/src/*"
+            "@eidnara/fs-observer/*": [
+                "../fs-observer/dist/types/*",
+                "../fs-observer/src/*"
             ]
         }
     },
@@ -42,7 +42,7 @@
     ],
     "references": [
         {
-            "path": "../retina-local-fs/tsconfig.build.json"
+            "path": "../fs-observer/tsconfig.build.json"
         }
     ]
 }

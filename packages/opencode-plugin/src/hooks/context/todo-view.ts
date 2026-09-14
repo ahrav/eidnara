@@ -10,7 +10,7 @@
  * Snapshot capture in `hook-handlers.ts` on `tool.execute.after` writes only to the DB; it does not mutate messages.
  * Injection in `transform-postprocess-phase.ts` runs after tagging and `applyPendingOperations`.
  * Injection runs after `applyPendingOperations`, so tagging cannot process the synthetic part.
- * The synthetic part is invisible to `ctx_reduce` and heuristic cleanup.
+ * The synthetic part is invisible to `eidnara_reduce` and heuristic cleanup.
  * A stable `stateJson` produces a stable `callID` across passes.
  * On defer passes, injection reuses the same part at the same anchor.
  * A matching `callID` makes reinjection idempotent.

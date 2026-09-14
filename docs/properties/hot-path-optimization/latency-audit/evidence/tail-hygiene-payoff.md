@@ -82,7 +82,7 @@ The full `candidate.patch` also captures the documentation state at build time;
 its hash is historical, not the hash of this later documentation update.
 
 B is the fixed-slot memo revision. The later session-table revision, which
-refuses over-budget blocks instead of resetting the memo, fingerprints caveman
+refuses over-budget blocks instead of resetting the memo, fingerprints terse_text_compression
 units instead of cloning them, and replaces sixteen hashed slots with a
 least-recently-used table behind per-session locks, has not been measured
 under this schedule. This schedule supplies no timing for its table lookup
@@ -159,7 +159,7 @@ The linked [benchmark](../../../../../crates/daemon/benches/hot_path.rs#L161-L19
 and [wrapper](../../../../../crates/daemon/src/lib.rs#L155-L181) show the
 current session-table source, with namespace 0 and session ID `benchmark`,
 not measured B. Its table lookup and `Arc` clone are unmeasured by this run.
-The fixture has empty core state, no populated tags or caveman units, no
+The fixture has empty core state, no populated tags or terse_text_compression units, no
 coverage ordinal, empty protected IDs, and `protected_tags = 20`; U is zero.
 
 This result concerns repeated warm in-process hygiene calls at one synthetic

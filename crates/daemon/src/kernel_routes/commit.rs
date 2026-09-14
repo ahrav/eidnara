@@ -242,7 +242,10 @@ pub(crate) fn derive_classes(source_kind: &str) -> Option<(SourceClass, TaintCla
         "assistant" | "model" => {
             Some((SourceClass::ModelInference, TaintClass::AssistantInference))
         }
-        "dreamer" => Some((SourceClass::ModelInference, TaintClass::DreamerInference)),
+        "memory_classifier" => Some((
+            SourceClass::ModelInference,
+            TaintClass::MemoryClassifierInference,
+        )),
         "user" => Some((SourceClass::ModelInference, TaintClass::UserInferred)),
         _ => None,
     }
@@ -267,7 +270,7 @@ const fn taint_rank(class: TaintClass) -> u8 {
         TaintClass::CurrentCode | TaintClass::CurrentTest | TaintClass::CurrentConfig => 1,
         TaintClass::UserInferred => 2,
         TaintClass::RepoUntrustedText | TaintClass::ToolUntrustedOutput => 3,
-        TaintClass::AssistantInference | TaintClass::DreamerInference => 4,
+        TaintClass::AssistantInference | TaintClass::MemoryClassifierInference => 4,
         TaintClass::Personal | TaintClass::Unclassifiable => 5,
     }
 }
@@ -1112,7 +1115,7 @@ mod tests {
 
     #[test]
     fn a_pair_is_accepted_exactly_when_not_raised_and_legal_for_admission() {
-        for source_kind in ["assistant", "model", "dreamer", "user"] {
+        for source_kind in ["assistant", "model", "memory_classifier", "user"] {
             let (derived_source, derived_taint) = derive_classes(source_kind).unwrap();
             for source in SourceClass::ALL {
                 for taint in TaintClass::ALL {

@@ -1,5 +1,11 @@
 # note-b-wake-owned-and-retina-handoff-are-project-wide-not-per-registration
 
+Current disposition: [catalog record](../catalog.md#note-b-wake-owned-and-retina-handoff-are-project-wide-not-per-registration)
+is invalidated as authored because `retina_handoff` is absent from the current
+source. `wake_owned` remains and needs separate review; removal does not prove
+its policy correct. The quotations and line references below remain historical
+evidence. No tests were rerun.
+
 ## Discovery trigger
 
 `NoteEvaluatorRegistration` stores `retina_handoff` and `wake_owned` per entry
@@ -30,6 +36,7 @@ instead.
        (retina_handoff, wake_owned)
    }
    ```
+
    (`lib.rs:3888-3906`)
 
    Its doc comment is accurate and states the semantics plainly: "Returns whether
@@ -41,6 +48,7 @@ instead.
    ```
    let (retina_handoff, wake_owned) = self.live_note_evaluator_policy(&project, now);
    ```
+
    (`:11166`)
 
    The registration obtained at `:11147-11159` is used for `capacity`
@@ -56,19 +64,21 @@ instead.
        return respond(json!({ "result": "no_work", "wake_owned": true }));
    }
    ```
+
    (`:11166-11172`)
 
 4. `retina_handoff` flows into the selector's eligibility predicate:
 
    ```
-   fn eligible(note: &SmartNoteSelectionSnapshot, retina_handoff: bool) -> bool {
+   fn eligible(note: &ConditionalNoteSelectionSnapshot, retina_handoff: bool) -> bool {
        note.status == "pending"
            && (!retina_handoff || note.compile_status.as_deref() != Some("compiled"))
    }
    ```
-   (`crates/daemon/src/smart_note_evaluation.rs:704-707`)
 
-   It is passed to `select_smart_note_evaluation_cycle` at `lib.rs:11208` and to
+   (`crates/daemon/src/conditional_note_evaluation.rs:704-707`)
+
+   It is passed to `select_conditional_note_evaluation_cycle` at `lib.rs:11208` and to
    the `cycle_exhausted` re-run at `:11223`, so it changes both the selection and
    the classification of an empty answer.
 
@@ -90,7 +100,7 @@ instead.
    for one authority project is expected.
 
 7. The shipped bridge sets `wakeOwned: false` and derives `retinaHandoff` from
-   config: `{ retinaHandoff: deps.config.smart_notes?.retina_handoff === true,
+   config: `{ retinaHandoff: deps.config.conditional_notes?.retina_handoff === true,
    wakeOwned: false }` (`hook.ts:1110-1113`). `retina_handoff` defaults to
    `false` in the schema (`packages/plugin/src/config/schema/eidnara.ts:711-715` (source-catalog path, not present at HEAD)).
    So in the default shipped configuration both flags are `false` for every
@@ -108,7 +118,7 @@ instead.
 
 Two worktrees of one repository are open, each with a plugin instance, so two
 bridges register against the same authority project from two different routes.
-Worktree A's config sets `smart_notes.retina_handoff = true`; worktree B's does
+Worktree A's config sets `conditional_notes.retina_handoff = true`; worktree B's does
 not.
 
 1. Both register. The project's `Vec` holds two live entries with
@@ -116,7 +126,7 @@ not.
 2. Worktree B polls `note.evaluation.next`. `live_note_evaluator_policy` ORs to
    `true`.
 3. `eligible` now excludes every note whose `compile_status` is already
-   `"compiled"` (`smart_note_evaluation.rs:706`), which is the retina-handoff
+   `"compiled"` (`conditional_note_evaluation.rs:706`), which is the retina-handoff
    contract: skip notes another pipeline already compiled.
 4. Worktree B, which never opted into a retina handoff and has no retina pipeline,
    silently stops being offered those notes. They are not evaluated by B and, if
@@ -153,7 +163,7 @@ Entirely within the module, no plugin needed:
 2. `note.evaluation.register` on route 1 with `retina_handoff: true`, and on
    route 2 with `retina_handoff: false`. Both must succeed; the registry allows up
    to 32 entries per project.
-3. Insert two smart notes, one with `compile_status = "compiled"`.
+3. Insert two conditional notes, one with `compile_status = "compiled"`.
 4. `note.evaluation.next` on route 2.
 5. Assert the compiled-`compile_status` note can still be claimed by route 2,
    which is what route 2's own `retina_handoff: false` asked for. It cannot.
@@ -175,7 +185,7 @@ two-registration state.
   `wake_owned` veto comment (`:11167-11168`), the registrations-per-project `Vec`
   and its cap (`:2967-2969`, `:10945-10956`), the plugin's two-worktree and
   two-instance comments (`hook.ts:1030-1039`), and the file list of
-  `packages/plugin/src/features/eidnara/smart-notes/`, which includes
+  `packages/plugin/src/features/eidnara/conditional-notes/`, which includes
   `wake-plane.ts` and `wake-plane.test.ts`.
 - Findings: the existence of a file called `wake-plane.ts` is meaningful evidence
   that `wake_owned` describes a *plane*, that is, a project-level or
@@ -199,7 +209,7 @@ two-registration state.
 ### Q: Does the same aggregation affect any other handler?
 
 - Sources examined: every call site of `live_note_evaluator_policy` (one, at
-  `lib.rs:11166`) and of `has_live_note_evaluator` (`:11618` in the `ctx_note`
+  `lib.rs:11166`) and of `has_live_note_evaluator` (`:11618` in the `eidnara_note`
   write path, `:11828` in the update path).
 - Findings: no. `has_live_note_evaluator` (`:3880-3886`) is a pure existence
   check over live entries and does not read policy at all, which is correct for

@@ -23,7 +23,7 @@ seams rather than execution coverage.
 | F10 | More than two WrongScope pages precede eligible work, a deferred row becomes due behind a carried cursor, or selected and terminal candidates compete for one pass budget. | The dispatcher has a private two-page cursor with a deferred-revisit time and a shared action counter; integration tests exercise each case. |
 
 The deterministic engine records calls before its blocking gate and increments
-completed-text count afterward (`crates/host-runtime/tests/support/synapse.rs:99-122`).
+completed-text count afterward (`crates/host-runtime/tests/support/local_embeddings.rs:99-122`).
 Use that separation to observe physical work, not to infer tokenizer semantics.
 Ignored external-runtime checks remain opt-in and are not run in this pass.
 
@@ -112,7 +112,7 @@ reachability premise to investigate, not evidence that the safety rule passed.
 RP2.9 owns the values for L. Before execution it must approve pending and batch
 caps, retry attempts, fault-free recovery duration, query occupancy and waiting
 limits, native service envelope, supervisor slice work, lease duration, and
-cancellation observation bounds. Do not substitute existing Synapse defaults.
+cancellation observation bounds. Do not substitute existing LocalEmbeddings defaults.
 
 The restart episode fixes a finite pending set, leaves each target current, and
 provides declared service opportunities after faults cease. The saturation

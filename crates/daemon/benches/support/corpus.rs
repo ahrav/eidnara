@@ -74,7 +74,7 @@ impl Rng {
 const PROSE_FRAGMENTS: &[&str] = &[
     "The retry loop needs a jittered backoff so concurrent clients do not synchronize their reconnect storms against the store. ",
     "We should keep the projection cache keyed by the served fingerprint; invalidating on every pass defeats the point of incremental reuse. ",
-    "That failure only reproduces when the boundary compartment ends exactly at the coverage ordinal, which the fixture never exercised before. ",
+    "That failure only reproduces when the boundary history_segment ends exactly at the coverage ordinal, which the fixture never exercised before. ",
     "Latency on the second pass is dominated by output identity hashing, so caching the serialized form by content hash should remove most of it. ",
     "Please double-check whether the scheduler defers the reduction when the drain latch is active, because the trace shows two hard passes back to back. ",
     "The token estimator is deterministic by construction, so any divergence between passes has to come from the overlay text, not the vocabulary. ",

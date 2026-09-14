@@ -13,27 +13,31 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use daemon::boundary::{
-    BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext, check_compartment_trigger,
-    resolve_protected_tail_boundary,
+    BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext,
+    check_history_segment_trigger, resolve_protected_tail_boundary,
 };
-use daemon::caveman::{CavemanLevel, compress};
-use daemon::decay_render::{DecayRenderCompartment, render_decayed_compartments};
-use daemon::historian_chunk::truncate_historian_input_if_needed;
+use daemon::decay_render::{DecayRenderHistorySegment, render_decayed_history_segments};
+use daemon::history_summarizer_chunk::truncate_history_summarizer_input_if_needed;
 use daemon::selection::{
     PassClass, SelItem, SelKind, SelMessageRole, SelectionConfig, SelectionContext,
     select_reductions,
 };
+use daemon::terse_text_compression::{TerseTextCompressionLevel, compress};
 use tokenizer::estimate_tokens;
 
-fn caveman_corpus(target_bytes: usize) -> String {
-    let golden: Vec<serde_json::Value> =
-        serde_json::from_str(include_str!("../testdata/caveman-golden.json"))
-            .expect("parse caveman-golden.json");
+fn terse_text_compression_corpus(target_bytes: usize) -> String {
+    let golden: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../testdata/terse_text_compression-golden.json"
+    ))
+    .expect("parse terse_text_compression-golden.json");
     let inputs: Vec<&str> = golden
         .iter()
         .filter_map(|case| case.get("text").and_then(|t| t.as_str()))
         .collect();
-    assert!(!inputs.is_empty(), "caveman golden must supply inputs");
+    assert!(
+        !inputs.is_empty(),
+        "terse_text_compression golden must supply inputs"
+    );
     let mut doc = String::with_capacity(target_bytes + 1024);
     let mut i = 0usize;
     while doc.len() < target_bytes {
@@ -49,19 +53,19 @@ fn caveman_corpus(target_bytes: usize) -> String {
     doc
 }
 
-fn bench_caveman(c: &mut Criterion) {
-    let mut group = c.benchmark_group("caveman");
+fn bench_terse_text_compression(c: &mut Criterion) {
+    let mut group = c.benchmark_group("terse_text_compression");
     group.sample_size(20);
     for (size_name, bytes) in [
         ("small", 4 << 10),
         ("medium", 32 << 10),
         ("large", 256 << 10),
     ] {
-        let doc = caveman_corpus(bytes);
+        let doc = terse_text_compression_corpus(bytes);
         for (level_name, level) in [
-            ("lite", CavemanLevel::Lite),
-            ("full", CavemanLevel::Full),
-            ("ultra", CavemanLevel::Ultra),
+            ("lite", TerseTextCompressionLevel::Lite),
+            ("full", TerseTextCompressionLevel::Full),
+            ("ultra", TerseTextCompressionLevel::Ultra),
         ] {
             group.bench_with_input(BenchmarkId::new(level_name, size_name), &doc, |b, doc| {
                 b.iter(|| compress(black_box(doc), level))
@@ -71,19 +75,19 @@ fn bench_caveman(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_historian_truncate(c: &mut Criterion) {
-    let mut group = c.benchmark_group("historian_truncate");
+fn bench_history_summarizer_truncate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("history_summarizer_truncate");
     group.sample_size(10);
     for (size_name, bytes, budget) in [
         ("medium", 64 << 10, 2_000usize),
         ("large", 512 << 10, 8_000usize),
     ] {
-        let doc = caveman_corpus(bytes);
+        let doc = terse_text_compression_corpus(bytes);
         group.bench_with_input(
             BenchmarkId::new("over_budget", size_name),
             &(doc, budget),
             |b, (doc, budget)| {
-                b.iter(|| truncate_historian_input_if_needed(black_box(doc), *budget))
+                b.iter(|| truncate_history_summarizer_input_if_needed(black_box(doc), *budget))
             },
         );
     }
@@ -269,10 +273,12 @@ fn bench_boundary(c: &mut Criterion) {
             probe.true_raw_eligible_tokens
         );
         group.bench_with_input(
-            BenchmarkId::new("check_compartment_trigger", arcs),
+            BenchmarkId::new("check_history_segment_trigger", arcs),
             &messages,
             |b, messages| {
-                b.iter(|| check_compartment_trigger(black_box(messages), black_box(&trigger_ctx)))
+                b.iter(|| {
+                    check_history_segment_trigger(black_box(messages), black_box(&trigger_ctx))
+                })
             },
         );
         let boundary_ctx = trigger_ctx.boundary.clone();
@@ -361,15 +367,15 @@ fn bench_selection(c: &mut Criterion) {
     group.finish();
 }
 
-fn shape_compartments() -> Vec<DecayRenderCompartment> {
+fn shape_history_segments() -> Vec<DecayRenderHistorySegment> {
     let shape: serde_json::Value =
         serde_json::from_str(include_str!("../testdata/decay-store-shape.json"))
             .expect("parse decay-store-shape.json");
-    let raw = shape["compartments"]
+    let raw = shape["history_segments"]
         .as_array()
-        .expect("compartments array");
+        .expect("history_segments array");
     raw.iter()
-        .map(|c| DecayRenderCompartment {
+        .map(|c| DecayRenderHistorySegment {
             start_message: c["startMessage"].as_i64().unwrap_or(0),
             end_message: c["endMessage"].as_i64().unwrap_or(0),
             title: c["title"].as_str().unwrap_or_default().to_string(),
@@ -387,8 +393,8 @@ fn shape_compartments() -> Vec<DecayRenderCompartment> {
 }
 
 fn bench_decay_render(c: &mut Criterion) {
-    let compartments = shape_compartments();
-    assert_eq!(compartments.len(), 388, "store-shape fixture drifted");
+    let history_segments = shape_history_segments();
+    assert_eq!(history_segments.len(), 388, "store-shape fixture drifted");
     let mut group = c.benchmark_group("decay_render");
     group.sample_size(10);
     // Only the 8k budget sits below the rendered-body token count, so only the
@@ -396,10 +402,14 @@ fn bench_decay_render(c: &mut Criterion) {
     for (name, budget) in [("no_demotion", 200_000.0f64), ("demotion_loop", 8_000.0f64)] {
         group.bench_with_input(
             BenchmarkId::new("render_388", name),
-            &compartments,
-            |b, compartments| {
+            &history_segments,
+            |b, history_segments| {
                 b.iter(|| {
-                    render_decayed_compartments(black_box(compartments), budget, estimate_tokens)
+                    render_decayed_history_segments(
+                        black_box(history_segments),
+                        budget,
+                        estimate_tokens,
+                    )
                 })
             },
         );
@@ -409,8 +419,8 @@ fn bench_decay_render(c: &mut Criterion) {
 
 criterion_group!(
     kernels,
-    bench_caveman,
-    bench_historian_truncate,
+    bench_terse_text_compression,
+    bench_history_summarizer_truncate,
     bench_boundary,
     bench_selection,
     bench_decay_render

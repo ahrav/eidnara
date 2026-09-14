@@ -13,9 +13,9 @@ use daemon::harness_sources::{
     SourceUnit, opencode_units, pi_units,
 };
 use daemon::search_projection::SearchProjection;
-use host_runtime::synapse::inference::InferenceError;
-use host_runtime::synapse::{
-    EmbedTokens, EmbeddingEngine, LaneInfo, SynapseComponent, SynapseLimits,
+use host_runtime::local_embeddings::inference::InferenceError;
+use host_runtime::local_embeddings::{
+    EmbedTokens, EmbeddingEngine, LaneInfo, LocalEmbeddingsComponent, LocalEmbeddingsLimits,
 };
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
@@ -109,8 +109,8 @@ fn lane(fingerprint: &str) -> LaneInfo {
     }
 }
 
-fn component(engine: &Arc<TestEngine>, limits: SynapseLimits) -> SynapseComponent {
-    SynapseComponent::ready_with_engine(
+fn component(engine: &Arc<TestEngine>, limits: LocalEmbeddingsLimits) -> LocalEmbeddingsComponent {
+    LocalEmbeddingsComponent::ready_with_engine(
         lane(FINGERPRINT),
         Arc::clone(engine) as Arc<dyn EmbeddingEngine>,
         limits,
@@ -1688,10 +1688,10 @@ async fn mixed_sessions_create_pending_only_for_message_text() {
 
     // A real pass: one inference per message block, none for tool rows, and the raw rows stay lexical.
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut events = Vec::new();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let end = tokio::task::block_in_place(|| {
         dispatcher
             .run_pass(

@@ -11,17 +11,17 @@ verified untruncated counting to dispatch at the pinned revision.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/synapse/protocol.rs:810-817` checks text bytes.
+- `crates/host-runtime/src/local_embeddings/protocol.rs:810-817` checks text bytes.
 - `protocol.rs:825-842` checks query identity, bytes, and deadline shape.
 - `protocol.rs:850-887` checks batch identity, aggregate/per-item bytes, input
   hashes, and duplicate IDs before building the request.
-- `crates/host-runtime/src/synapse/mod.rs:344-399` checks in-process item and
+- `crates/host-runtime/src/local_embeddings/mod.rs:344-399` checks in-process item and
   byte limits before calling the engine. It has no exact-token check.
-- `crates/host-runtime/src/synapse/inference.rs:344-376` rejects empty and
+- `crates/host-runtime/src/local_embeddings/inference.rs:344-376` rejects empty and
   zero-token input but relies on the inference tokenizer's truncation window.
 - `docs/host-wire-protocol.md:472` explicitly permits silent truncation while
   the hash covers all input bytes. Product preflight is an additional boundary.
-- [Existing request validation](../../../host-runtime/catalog.md#synapse-requests-are-validated-before-any-inference)
+- [Existing request validation](../../../host-runtime/catalog.md#local_embeddings-requests-are-validated-before-any-inference)
   owns the current wire constraint checks and is reused without duplication.
 
 ## Failure scenario
@@ -41,7 +41,7 @@ including backfill and query embedding. Startup certification itself invokes
 the engine, so the assertion needs a post-startup call-count baseline.
 An accepted boundary input passes preflight without text rewriting; queue
 admission or a later deadline may still reject the otherwise valid attempt.
-No existing Synapse wire literal is renamed by this discovery record.
+No existing LocalEmbeddings wire literal is renamed by this discovery record.
 
 ## What a test must construct
 
@@ -55,7 +55,7 @@ product completion for that K. Projection owns the coverage-state encoding.
 and readiness, not the desired zero-call outcome. Inspect captured engine text
 for accepted cases to detect silent preflight trimming or replacement.
 Existing DeterministicEngine captures calls and text at
-`crates/host-runtime/tests/support/synapse.rs:99-105`.
+`crates/host-runtime/tests/support/local_embeddings.rs:99-105`.
 
 ## Investigation log
 

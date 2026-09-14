@@ -197,12 +197,12 @@ function resolveSubagentExtensionEntry(entry: string): string {
 const PI_READ_ONLY_BUILTINS = ["read", "grep", "find", "ls"] as const;
 
 /**
- * Agents in `SEARCH_ONLY_SUBAGENT_TOOL_AGENTS` load the lean child extension for `ctx_search`.
- * Sidekick is retrieval-only and uses `ctx_search`.
+ * Agents in `SEARCH_ONLY_SUBAGENT_TOOL_AGENTS` load the lean child extension for `eidnara_search`.
+ * ContextResearcher is retrieval-only and uses `eidnara_search`.
  *
- * The set must contain the exact agent IDs passed by Pi callers; mismatches leave the child without `ctx_search`.
+ * The set must contain the exact agent IDs passed by Pi callers; mismatches leave the child without `eidnara_search`.
  */
-const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set(["sidekick"]);
+const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set(["context-researcher"]);
 
 /**
  * Agents in `STRICT_TOOL_ALLOWLIST_ENTRIES` must run under Pi's hard `--tools` allow-list, not merely a narrowed extension.
@@ -211,8 +211,8 @@ const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set(["sidekick
  * Pi enforces this capability boundary; OMP appends discovered extension tools after applying `--tools` to built-ins.
  */
 const STRICT_TOOL_ALLOWLIST_ENTRIES: readonly (readonly [string, readonly string[]])[] = [
-    // Sidekick excludes `write`, `bash`, and `ctx_memory`.
-    ["sidekick", [...PI_READ_ONLY_BUILTINS, "ctx_search"]],
+    // ContextResearcher excludes `write`, `bash`, and `eidnara_memory`.
+    ["context-researcher", [...PI_READ_ONLY_BUILTINS, "eidnara_search"]],
 ];
 
 const STRICT_TOOL_ALLOWLIST: ReadonlyMap<string, readonly string[]> = new Map(
@@ -260,7 +260,7 @@ function resolveHostTools(agent: string, ompHost: boolean): readonly string[] {
     return resolveHostToolAllowlist(STRICT_TOOL_ALLOWLIST.get(agent) ?? [], ompHost);
 }
 
-const KNOWN_PI_SUBAGENT_AGENTS = ["sidekick"] as const;
+const KNOWN_PI_SUBAGENT_AGENTS = ["context-researcher"] as const;
 
 type FailedRunResult = Extract<SubagentRunResult, { ok: false }>;
 
@@ -1174,12 +1174,12 @@ export function buildArgs(
         }
     }
 
-    // The runner loads the lean subagent extension only for children that need scoped `ctx_*` tools.
+    // The runner loads the lean subagent extension only for children that need scoped `eidnara_*` tools.
     // Without an allowlist, discovered extensions remain enabled so provider extensions can register models.
     // The full Eidnara entry receives `EIDNARA_PI_SUBAGENT=1`.
     // With `EIDNARA_PI_SUBAGENT=1`, the full Eidnara entry returns before registering hooks, tools, or timers.
     // The lean entry does not check `EIDNARA_PI_SUBAGENT`; it registers only subagent-scoped tools.
-    // The runner omits `--extension` when the bundle is absent, so the child lacks Eidnara `ctx_*` tools.
+    // The runner omits `--extension` when the bundle is absent, so the child lacks Eidnara `eidnara_*` tools.
     //
     // The runner uses `--extension`, not `-e`, because extension-registered flags can conflict with `-e`.
     const subagentEntryPath = opts?.subagentEntryPath ?? SUBAGENT_ENTRY_PATH;

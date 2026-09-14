@@ -178,13 +178,13 @@ timed call. A uses the original non-memo wrapper with its warm token cache.
 Tokenizer initialization is outside timing.
 
 B is the fixed-slot memo revision. The later session-table revision, which
-refuses over-budget blocks instead of resetting the memo, fingerprints caveman
+refuses over-budget blocks instead of resetting the memo, fingerprints terse_text_compression
 units instead of cloning them, and replaces the sixteen hashed slots with a
 least-recently-used table behind per-session locks, is not measured here; no
 timing is claimed for it.
 
 Core, tag rows, and protected IDs are empty; coverage is `None` and
-`protected_tags` is 20. U is zero. Populated attribution and caveman
+`protected_tags` is 20. U is zero. Populated attribution and terse_text_compression
 invalidation are not exercised. This is repeated warm in-process service
 time at one synthetic point, not production, concurrent-session, cold-call,
 delta-ingress, total-turn, or session latency. No peak-allocation or RSS

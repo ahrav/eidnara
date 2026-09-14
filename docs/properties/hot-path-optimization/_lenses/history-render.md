@@ -7,7 +7,7 @@ task, not a new test run or portfolio evaluation. Anchors are rechecked in
 [external-evidence scope](../catalog.md#scope-and-provenance) is pending final
 confirmation; historical citations and exercise are not carried forward.
 
-[The inner renderer][inner] joins nonempty compartment bodies with two newlines
+[The inner renderer][inner] joins nonempty history_segment bodies with two newlines
 and demotes oldest input positions until its positive body budget fits.
 Nonpositive direct-API budgets disable that guard. [The outer retry][outer]
 measures the wrapped history slice and can still exceed 105% after three

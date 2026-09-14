@@ -19,7 +19,7 @@ distinct saturation state:
 | 4 | `reserved_task_permits` | `dispatch.rs:896` via the same match | 96 |
 | 5 | `busy_rejects` | `dispatch.rs:620`, `connection.rs:430` | 32, per generation |
 
-Sizes derive from `config.rs:131-132` (1024, 256), `broca/config.rs:185`, `:188`
+Sizes derive from `config.rs:131-132` (1024, 256), `model_execution/config.rs:185`, `:188`
 (96, 96), and `runtime.rs:905-912` for the subtraction.
 
 **Why these are five different situations, not one branch.** The consequence
@@ -56,8 +56,8 @@ contended egress budget as well.
   `mode_body(json!({"mode": "hang"}))`, waits for `dispatch_count() != 0`, then
   sends a second request and asserts `server_busy` with `dispatch_count()`
   unchanged. That is **state 1**.
-- `tests/dispatch.rs:976` (`saturated_broca_reserve_cannot_consume_a_general_slot`)
-  and `:1074` (`saturated_general_capacity_cannot_consume_the_broca_reserve`) are
+- `tests/dispatch.rs:976` (`saturated_model_execution_reserve_cannot_consume_a_general_slot`)
+  and `:1074` (`saturated_general_capacity_cannot_consume_the_model_execution_reserve`) are
   the isolation pair. Between them they saturate the reserved and general pending
   pools, so **state 3** is reached.
 - **States 2, 4, and 5 are reached by no test.** Grep for `max_handler_tasks` in
@@ -80,7 +80,7 @@ the comment at `:881-883` warns against, with no test to catch it.
 
 **State 4 uncovered.** `runtime.rs:118-119` claims the reserved pools may be
 "unreachable because every route is general-class". That claim is false in
-production (Broca declares `RouteClass::Reserved`), and it is the kind of comment
+production (ModelExecution declares `RouteClass::Reserved`), and it is the kind of comment
 that, left unchallenged by a test, propagates into a future decision to delete the
 reserved task pool as dead code. State 3's coverage protects the pending half;
 nothing protects the task half.
@@ -129,8 +129,8 @@ constant and globally unique per METHOD's coverage rules, so:
    assert `server_busy` and that the message is "handler task capacity exhausted"
    rather than the pending one, distinguishing state 2 from state 1.
 3. `admission_reserved_pending_saturated` - exists as `tests/dispatch.rs:976`.
-4. `admission_reserved_task_saturated` - shrink Broca's effective task reserve,
-   park that many Broca-route requests, assert `server_busy` on a Broca route
+4. `admission_reserved_task_saturated` - shrink ModelExecution's effective task reserve,
+   park that many ModelExecution-route requests, assert `server_busy` on a ModelExecution route
    while a general route still dispatches.
 5. `rejection_bound_saturated` - tight egress budget, closed route, pipeline 33+
    requests without reading, assert the generation retires and a previously
@@ -166,21 +166,21 @@ entered.
 - Conclusion: resolved with answer - the test must assert on the message or on
   host state, and must not treat message-matching as a client-side capability.
 
-### Q: Is state 4 reachable without modifying Broca?
+### Q: Is state 4 reachable without modifying ModelExecution?
 
-- Sources examined: `broca/config.rs:183-188` (constants, not limits - the comment
-  at `broca/mod.rs:169-170` says "Constants rather than limits so a test-shrunken
+- Sources examined: `model_execution/config.rs:183-188` (constants, not limits - the comment
+  at `model_execution/mod.rs:169-170` says "Constants rather than limits so a test-shrunken
   supervisor still declares the product contract"), `runtime.rs:537-560`
   (declaration validation), `handler.rs:565-567` (the trait default).
-- Findings: Broca's declaration is hard-coded to 96/96 and deliberately not
-  configurable. So reaching state 4 with the real Broca requires 96 concurrently
-  parked Broca-route requests. The alternative is a test composite with a
+- Findings: ModelExecution's declaration is hard-coded to 96/96 and deliberately not
+  configurable. So reaching state 4 with the real ModelExecution requires 96 concurrently
+  parked ModelExecution-route requests. The alternative is a test composite with a
   reserved-class child declaring a small reserve, which is how
   `tests/dispatch.rs:976` reaches state 3 - worth checking whether it uses the
-  real Broca or a substitute.
+  real ModelExecution or a substitute.
 - Missing evidence: whether `tests/dispatch.rs:976`'s fixture uses
-  `tests/support/broca.rs`'s substitute (which `tests/support/broca.rs:184`
+  `tests/support/model_execution.rs`'s substitute (which `tests/support/model_execution.rs:184`
   composes) or the real component.
-- Conclusion: unresolved, needs a read of `tests/support/broca.rs`. Either way the
+- Conclusion: unresolved, needs a read of `tests/support/model_execution.rs`. Either way the
   path to state 4 exists; which fixture is cheaper is an implementation choice for
   the test author.

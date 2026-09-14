@@ -12,13 +12,13 @@ describe("redactConfigIssuePath", () => {
             ],
             [
                 "record keys under a hidden-agent tools block are withheld",
-                ["historian", "tools", "SECRET-TOOL"],
-                ["historian", "tools", "<key>"],
+                ["history_summarizer", "tools", "SECRET-TOOL"],
+                ["history_summarizer", "tools", "<key>"],
             ],
             [
                 "record keys under a hidden-agent permission block are withheld",
-                ["historian", "permission", "SECRET-TOOL"],
-                ["historian", "permission", "<key>"],
+                ["history_summarizer", "permission", "SECRET-TOOL"],
+                ["history_summarizer", "permission", "<key>"],
             ],
             [
                 "prompt_surface.tool_descriptions keys are withheld",
@@ -37,8 +37,8 @@ describe("redactConfigIssuePath", () => {
             ],
             [
                 "array indices print as [n]",
-                ["historian", "disallowed_tools", 0],
-                ["historian", "disallowed_tools", "[0]"],
+                ["history_summarizer", "disallowed_tools", 0],
+                ["history_summarizer", "disallowed_tools", "[0]"],
             ],
             [
                 "every segment below an unknown key is withheld",

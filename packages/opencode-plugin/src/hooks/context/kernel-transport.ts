@@ -100,7 +100,7 @@ export function createKernelTransport(transport: HostModuleTransport): KernelTra
 /** The configuration slice the factory reads; `EidnaraConfig` satisfies it. */
 export interface KernelClientConfig {
     memory?: { enabled?: boolean };
-    subc?: { connection_file?: string };
+    host?: { connection_file?: string };
 }
 
 interface SharedKernelState {
@@ -327,7 +327,7 @@ export type CreateKernelClientArgs = KernelClientIdentity & {
 export function createKernelClient(args: CreateKernelClientArgs): KernelClient {
     const enabled = args.config.memory?.enabled !== false;
     const shared =
-        args.transport || !enabled ? null : sharedState(args.config.subc?.connection_file);
+        args.transport || !enabled ? null : sharedState(args.config.host?.connection_file);
     const projectRoot = shared ? shared.module.canonicalRoot(args.projectRoot) : args.projectRoot;
     if (shared) {
         currentTokens(shared);
@@ -335,7 +335,7 @@ export function createKernelClient(args: CreateKernelClientArgs): KernelClient {
     }
     const tokens: TokenStore =
         shared && args.tokens
-            ? fencedTokenStore(args.config.subc?.connection_file, args.tokens)
+            ? fencedTokenStore(args.config.host?.connection_file, args.tokens)
             : (args.tokens ?? shared?.tokenStore ?? new TokenCache());
     return new KernelClient({
         transport: args.transport ?? shared?.transport ?? DISABLED_TRANSPORT,
@@ -354,7 +354,7 @@ export function kernelClientResolver(config: KernelClientConfig): KernelClientRe
 /** Releases every route the shared transport for `config` holds for `sessionId`. Each session's first call opens a host route per project root, and the host's route capacity is finite and shared across connections, so a long-lived process that serves many sessions must release them at session end rather than at connection teardown. A connection file with no live shared state has no routes to release. */
 export function closeKernelSession(config: KernelClientConfig, sessionId: string): void {
     sharedByConnectionFile
-        .get(connectionFileKey(config.subc?.connection_file))
+        .get(connectionFileKey(config.host?.connection_file))
         ?.module.closeSession(sessionId);
 }
 
@@ -373,6 +373,6 @@ export function sharedConnectionFilesForTest(): string[] {
 export function sharedStateForTest(
     config: KernelClientConfig,
 ): Pick<SharedKernelState, "module" | "transport"> | undefined {
-    const shared = sharedByConnectionFile.get(connectionFileKey(config.subc?.connection_file));
+    const shared = sharedByConnectionFile.get(connectionFileKey(config.host?.connection_file));
     return shared ? { module: shared.module, transport: shared.transport } : undefined;
 }

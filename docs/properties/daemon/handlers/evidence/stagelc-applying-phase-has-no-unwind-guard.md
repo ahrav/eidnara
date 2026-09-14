@@ -55,7 +55,7 @@ inconsistency rather than a judgement call:
   advanced." The `in_flight_count` is decremented on unwind at `:505`.
 - `:1875-1881` — `impl Drop for SnapshotLease`.
 - `:3198-3220` — `WrapupSessionGuard` with its `Drop`.
-- `:3063` — `impl Drop for DreamerRunGuard`.
+- `:3063` — `impl Drop for MemoryClassifierRunGuard`.
 - `:324-332` — `StoreOpenWaiterGuard` with its `Drop`.
 
 Five guards in this file protect per-request accounting against unwind. The
@@ -138,11 +138,11 @@ Panic arm, which needs no host cooperation:
 
 Cancellation arm, if the host permits it:
 
-6. Drive the dispatch future and drop it partway through the terminal await, for
+1. Drive the dispatch future and drop it partway through the terminal await, for
    example with `tokio::time::timeout` around
    `handler.dispatch_value(...)` in a `current_thread` runtime, matching the
    flavour used by the inline tests such as `:27013`.
-7. Apply the same assertions as steps 4 and 5.
+2. Apply the same assertions as steps 4 and 5.
 
 Step 4 asserts that a legitimate fresh series succeeds, which holds on a correct
 system, so it does not assert the violation directly.

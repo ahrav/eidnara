@@ -33,7 +33,7 @@ The skip. `transform.rs:4201-4258`. The `if producer_gate` arm calls
 no timings field set on the else arm. `timings.selection` is recorded either way
 (`:4260`), so even the timing cannot distinguish a skip from a fast selector run.
 
-The second, narrower skip. `ordinary_historian_veto` (`transform.rs:4098-4104`)
+The second, narrower skip. `ordinary_history_summarizer_veto` (`transform.rs:4098-4104`)
 does not stop the selector but forces `selection_class` to `PassClass::Defer`
 (`:4131-4135`), which suppresses age reclaim. No logging accompanies it either.
 
@@ -63,7 +63,7 @@ when timings are present and writes `format_pass_timing_line`
 (`:1336-1360`): it carries 60-plus timing and count fields including
 `selection={:.1}`, `emergency_reasoning_exclusions={}`, and
 `tag_mint_candidates={}`, and it carries no field for the scheduler pass
-decision, `producer_gate`, `ordinary_historian_veto`, `selection_class`, or the
+decision, `producer_gate`, `ordinary_history_summarizer_veto`, `selection_class`, or the
 pending-drop queue depth.
 
 The response surface. `TransformResponse` (`transform.rs:1455-1535`) carries
@@ -82,7 +82,7 @@ exception.
 
 ## Failure scenario
 
-An agent calls `ctx_reduce` on three spent tool outputs. The facade queues three
+An agent calls `eidnara_reduce` on three spent tool outputs. The facade queues three
 `pending_agent_drops` rows. The session then goes quiet: usage sits at 40 percent,
 the provider cache stays warm so no idle TTL fires, the session is initialized,
 the render config is unchanged, and no reconcile is pending. Every subsequent pass

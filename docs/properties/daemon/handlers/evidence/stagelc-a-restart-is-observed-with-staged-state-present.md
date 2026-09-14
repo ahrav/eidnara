@@ -42,7 +42,7 @@ The pre-boundary state that must be present for the marker to mean anything:
 - `:906-911` — the seed equivalent, `Collecting(PendingStateSyncSeed)` with
   `batches` and `total`.
 - `:1334-1337` — the import equivalent, `Collecting(PendingStateImport)` with
-  `compartments` and `batch_count`.
+  `history_segments` and `batch_count`.
 
 The abrupt side of the boundary, which behaves differently and must be covered
 separately:
@@ -126,7 +126,7 @@ Construction, graceful arm:
 
 Construction, abrupt arm:
 
-6. Repeat steps 1 to 3, then drop H1 without calling `shutdown`, build H2, and
+1. Repeat steps 1 to 3, then drop H1 without calling `shutdown`, build H2, and
    fire the marker on precondition 3's second witness form. This arm is the one
    that matters for a crash, and it is cheaper than it looks because dropping the
    handler in-process is sufficient; a real process kill is not required to
@@ -139,12 +139,12 @@ satisfied only by the page coordinator.
 
 ### Q: Does an existing test cross a restart boundary with staging state present?
 
-- Sources examined: the inline test module (`:16001-30279`); the historian's
+- Sources examined: the inline test module (`:16001-30279`); the history_summarizer's
   seeded-phase recovery family, `assert_seeded_phase_recovers_then_refires_after_backoff`
   (`:29793`) and its three wrappers at `:29822`, `:29827`, `:29832`, plus the
-  `seed_historian_phase` helper (`:29717`) and `seed_awaiting` (`:29658`); and
+  `seed_history_summarizer_phase` helper (`:29717`) and `seed_awaiting` (`:29658`); and
   `state_import_batch_gap_and_staleness_evict_partial_attempts` (`:27013`).
-- Findings: the historian family does cross a boundary with durable phase state
+- Findings: the history_summarizer family does cross a boundary with durable phase state
   present, which is the closest analogue in the crate and a good structural
   model, but it seeds `memory-store` rows rather than a coordinator, so it exercises
   the durable-resume path this lens's records are contrasted against. The state
@@ -152,9 +152,9 @@ satisfied only by the page coordinator.
   same store with a coordinator mid-sequence.
 - Missing evidence: none; the search covered test function names plus the
   scope map's keyword histogram, which reports 18 `lib.rs` tests in the state
-  sync/import/page bucket and 49 in the historian/wrapup bucket.
+  sync/import/page bucket and 49 in the history_summarizer/wrapup bucket.
 - Conclusion: resolved with answer. No existing coverage. The record's Existing
-  check line says so and names the historian family as the nearest analogue.
+  check line says so and names the history_summarizer family as the nearest analogue.
 
 ### Q: Should the marker require both crossing modes, or is one enough?
 

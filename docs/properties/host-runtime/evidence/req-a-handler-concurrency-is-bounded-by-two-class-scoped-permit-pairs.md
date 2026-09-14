@@ -73,7 +73,7 @@ intended behaviour: a blocked terminal holds an unsettled slot but not handler
 capacity.
 
 **The reserved class is live in production, contrary to the comment at
-`runtime.rs:118-119`.** `broca/mod.rs:164-176`:
+`runtime.rs:118-119`.** `model_execution/mod.rs:164-176`:
 
 ```
 ResourceDeclaration {
@@ -85,10 +85,10 @@ ResourceDeclaration {
 }
 ```
 
-with `RESERVED_PENDING_REQUESTS = 96` (`broca/config.rs:185`) and
+with `RESERVED_PENDING_REQUESTS = 96` (`model_execution/config.rs:185`) and
 `RESERVED_HANDLER_TASKS = 96` (`:188`). The production binary composes that exact
 component: `crates/daemon/src/bin/eidnara_host/serve.rs:571-580` builds
-`BrocaComponent::new` or `new_with_credentials` and passes it to
+`ModelExecutionComponent::new` or `new_with_credentials` and passes it to
 `StaticComposite::new` at `:575`, which reaches `host_runtime::run` at `:632`. So at
 defaults the general pools are 1024-96 = 928 pending and 256-96 = 160 tasks, and
 the reserved pools are 96 and 96.
@@ -147,8 +147,8 @@ permit.
    `max_handler_tasks` to a small value, park that many handlers, and assert the
    next request gets `server_busy` with `dispatch_count()` unchanged.
 2. **Class isolation both ways**, which two tests already do:
-   `tests/dispatch.rs:976` (`saturated_broca_reserve_cannot_consume_a_general_slot`)
-   and `:1074` (`saturated_general_capacity_cannot_consume_the_broca_reserve`).
+   `tests/dispatch.rs:976` (`saturated_model_execution_reserve_cannot_consume_a_general_slot`)
+   and `:1074` (`saturated_general_capacity_cannot_consume_the_model_execution_reserve`).
 3. **Acquisition-before-spawn**, which no test asserts directly: pipeline more
    requests than the pool holds without reading the socket, and assert the host's
    task count does not grow past the pool size. This is the property the comment
@@ -167,10 +167,10 @@ permit.
 ### Q: Is `RouteClass::Reserved` production or test-only?
 
 - Sources examined: `runtime.rs:117-121` (the comment claiming possible
-  unreachability), `broca/mod.rs:164-176`, `broca/config.rs:183-188`,
+  unreachability), `model_execution/mod.rs:164-176`, `model_execution/config.rs:183-188`,
   `crates/daemon/src/bin/eidnara_host/serve.rs:560-580` and `:632`,
   `composite.rs:11-14` (the fixed occupant list).
-- Findings: Broca declares 96/96 with `route_class: RouteClass::Reserved`, and the
+- Findings: ModelExecution declares 96/96 with `route_class: RouteClass::Reserved`, and the
   production binary composes it. The `runtime.rs` comment describes a
   configuration that does not ship. This is the third misleading in-crate comment
   this catalog has hit, after the three the ring resolution had to overcome, so it

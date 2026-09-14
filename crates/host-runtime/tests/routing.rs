@@ -44,7 +44,7 @@ async fn catalog_is_truthful_and_filters_exactly() {
     assert_eq!(modules[0]["module_version"], MODULE_VERSION);
     // The host preserves manifest fields it does not understand.
     assert_eq!(
-        modules[0]["roles"][0]["tools"][0]["name"], "ctx_reduce",
+        modules[0]["roles"][0]["tools"][0]["name"], "eidnara_reduce",
         "tool schemas must reach the client intact"
     );
     assert_eq!(

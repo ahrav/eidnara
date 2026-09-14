@@ -126,7 +126,7 @@ const COLORS = {
     // Plugin-injected structured traffic occupies `message[0]`.
     system: "#c084fc", // Purple
     docs: "#22d3ee", // Cyan — <project-docs>
-    compartments: "#60a5fa", // Blue
+    history_segments: "#60a5fa", // Blue
     facts: "#fbbf24", // Yellow/orange
     memories: "#34d399", // Green
     profile: "#a3e635", // Lime — <user-profile>
@@ -170,12 +170,12 @@ const TokenBreakdown = (props: {
             });
         }
 
-        // Compartments (blue)
-        if (s.compaction_enabled !== false && s.compartmentTokens > 0) {
+        // HistorySegments (blue)
+        if (s.compaction_enabled !== false && s.history_segmentTokens > 0) {
             result.push({
-                tokens: s.compartmentTokens,
-                color: COLORS.compartments,
-                label: "Compartments",
+                tokens: s.history_segmentTokens,
+                color: COLORS.history_segments,
+                label: "HistorySegments",
             });
         }
 
@@ -376,7 +376,7 @@ const RecompProgressSection = (props: {
                 </text>
                 <text fg={label().color}>{label().text}</text>
             </box>
-            {/* Determinate bar during the compartment-rebuild phase. */}
+            {/* Determinate bar during the history_segment-rebuild phase. */}
             {phase() === "recomp" && props.progress.totalMessages > 0 && (
                 <box width="100%" flexDirection="row" justifyContent="space-between">
                     <text fg={props.theme.accent}>{progressBar(fraction())}</text>
@@ -392,15 +392,15 @@ const RecompProgressSection = (props: {
             {phase() === "recomp" && props.progress.kind !== "embed" && (
                 <StatRow
                     theme={props.theme}
-                    label="Compartments"
-                    value={`${props.progress.compartmentsCreated} (${props.progress.passCount} pass${props.progress.passCount === 1 ? "" : "es"})`}
+                    label="HistorySegments"
+                    value={`${props.progress.history_segmentsCreated} (${props.progress.passCount} pass${props.progress.passCount === 1 ? "" : "es"})`}
                     dim
                 />
             )}
             {phase() === "recomp" && props.progress.kind === "embed" && (
                 <StatRow
                     theme={props.theme}
-                    label="Compartments"
+                    label="HistorySegments"
                     value={`${props.progress.processedMessages}/${props.progress.totalMessages} embedded`}
                     dim
                 />
@@ -665,11 +665,12 @@ const SidebarContent = (props: {
                 </box>
             )}
 
-            {s()?.dreamerProgress && (
+            {s()?.memory_classifierProgress && (
                 <box marginTop={1} width="100%">
                     <text fg={props.theme.warning}>
-                        Dreamer {s()!.dreamerProgress!.task}: {s()!.dreamerProgress!.processed}/
-                        {s()!.dreamerProgress!.total} processed
+                        MemoryClassifier {s()!.memory_classifierProgress!.task}:{" "}
+                        {s()!.memory_classifierProgress!.processed}/
+                        {s()!.memory_classifierProgress!.total} processed
                     </text>
                 </box>
             )}
@@ -721,7 +722,7 @@ const SidebarContent = (props: {
             )}
 
             {/* Collapsed view — progress bar (above) + 3 summary lines:
-                Historian (with compartment count), Memories (injected/total),
+                HistorySummarizer (with history_segment count), Memories (injected/total),
                 Status (Q=queued ops, N=session notes). */}
             {collapsed() && (
                 <box width="100%" flexDirection="column">
@@ -738,21 +739,21 @@ const SidebarContent = (props: {
                     ) : (
                         <>
                             <box width="100%" flexDirection="row" justifyContent="space-between">
-                                <text fg={props.theme.textMuted}>Historian</text>
-                                {s()?.historianRunning ? (
+                                <text fg={props.theme.textMuted}>HistorySummarizer</text>
+                                {s()?.history_summarizerRunning ? (
                                     <text fg={props.theme.warning}>comparting ⟳</text>
                                 ) : (
                                     <text fg={props.theme.textMuted}>idle</text>
                                 )}
                             </box>
-                            <Show when={s()?.dreamerProgress}>
+                            <Show when={s()?.memory_classifierProgress}>
                                 {(progress) => (
                                     <box
                                         width="100%"
                                         flexDirection="row"
                                         justifyContent="space-between"
                                     >
-                                        <text fg={props.theme.textMuted}>Dreamer</text>
+                                        <text fg={props.theme.textMuted}>MemoryClassifier</text>
                                         <text fg={props.theme.warning}>
                                             {progress().task} {progress().processed}/
                                             {progress().total}
@@ -779,7 +780,7 @@ const SidebarContent = (props: {
                             <box width="100%" flexDirection="row" justifyContent="space-between">
                                 <text fg={props.theme.textMuted}>Status</text>
                                 <text fg={props.theme.textMuted}>
-                                    C:{s()?.compartmentCount ?? 0} Q:{s()?.pendingOpsCount ?? 0}
+                                    C:{s()?.history_segmentCount ?? 0} Q:{s()?.pendingOpsCount ?? 0}
                                     {(s()?.sessionNoteCount ?? 0) > 0
                                         ? ` N:${s()!.sessionNoteCount}`
                                         : ""}
@@ -801,8 +802,8 @@ const SidebarContent = (props: {
             {/* Expanded view — full section grid. */}
             {!collapsed() && (
                 <>
-                    {/* Historian section */}
-                    {!compactionOff() && sections().historian && (
+                    {/* HistorySummarizer section */}
+                    {!compactionOff() && sections().history_summarizer && (
                         <>
                             <box
                                 width="100%"
@@ -811,9 +812,9 @@ const SidebarContent = (props: {
                                 justifyContent="space-between"
                             >
                                 <text fg={props.theme.text}>
-                                    <b>Historian</b>
+                                    <b>HistorySummarizer</b>
                                 </text>
-                                {s()?.historianRunning ? (
+                                {s()?.history_summarizerRunning ? (
                                     <text fg={props.theme.warning}>comparting ⟳</text>
                                 ) : (
                                     <text fg={props.theme.textMuted}>idle</text>
@@ -821,8 +822,8 @@ const SidebarContent = (props: {
                             </box>
                             <StatRow
                                 theme={props.theme}
-                                label="Compartments"
-                                value={String(s()?.compartmentCount ?? 0)}
+                                label="HistorySegments"
+                                value={String(s()?.history_segmentCount ?? 0)}
                             />
 
                             {/* Recomp / session-upgrade live progress */}
@@ -881,7 +882,7 @@ const SidebarContent = (props: {
                             ? compactionOffSidebarRows(s()!).some((row) => row.label !== "Memories")
                             : (s()?.pendingOpsCount ?? 0) > 0 ||
                               (s()?.sessionNoteCount ?? 0) > 0 ||
-                              (s()?.readySmartNoteCount ?? 0) > 0) && (
+                              (s()?.readyConditionalNoteCount ?? 0) > 0) && (
                             <>
                                 <SectionHeader theme={props.theme} title="Status" />
                                 {compactionOff() ? (
@@ -912,11 +913,11 @@ const SidebarContent = (props: {
                                                 value={String(s()!.sessionNoteCount)}
                                             />
                                         )}
-                                        {(s()?.readySmartNoteCount ?? 0) > 0 && (
+                                        {(s()?.readyConditionalNoteCount ?? 0) > 0 && (
                                             <StatRow
                                                 theme={props.theme}
-                                                label="Smart Notes"
-                                                value={`${s()!.readySmartNoteCount} ready`}
+                                                label="Conditional Notes"
+                                                value={`${s()!.readyConditionalNoteCount} ready`}
                                                 accent
                                             />
                                         )}
@@ -925,42 +926,43 @@ const SidebarContent = (props: {
                             </>
                         )}
 
-                    {/* Dreamer */}
-                    {sections().dreamer && (s()?.lastDreamerRunAt || s()?.dreamerProgress) && (
-                        <>
-                            <SectionHeader theme={props.theme} title="Dreamer" />
-                            <Show when={s()?.dreamerProgress}>
-                                {(progress) => (
-                                    <StatRow
-                                        theme={props.theme}
-                                        label="Current"
-                                        value={`${progress().task} ${progress().processed}/${progress().total}`}
-                                        warning
-                                    />
-                                )}
-                            </Show>
-                            <Show when={s()?.lastDreamerRunAt}>
-                                {(lastRunAt) => (
-                                    <StatRow
-                                        theme={props.theme}
-                                        label="Last run"
-                                        value={relativeTime(lastRunAt())}
-                                        dim
-                                    />
-                                )}
-                            </Show>
-                            <For each={Object.entries(s()?.dreamerBacklog ?? {})}>
-                                {([task, backlog]) => (
-                                    <StatRow
-                                        theme={props.theme}
-                                        label={task}
-                                        value={`${backlog.pending}/${backlog.total}`}
-                                        dim
-                                    />
-                                )}
-                            </For>
-                        </>
-                    )}
+                    {/* MemoryClassifier */}
+                    {sections().memory_classifier &&
+                        (s()?.lastMemoryClassifierRunAt || s()?.memory_classifierProgress) && (
+                            <>
+                                <SectionHeader theme={props.theme} title="MemoryClassifier" />
+                                <Show when={s()?.memory_classifierProgress}>
+                                    {(progress) => (
+                                        <StatRow
+                                            theme={props.theme}
+                                            label="Current"
+                                            value={`${progress().task} ${progress().processed}/${progress().total}`}
+                                            warning
+                                        />
+                                    )}
+                                </Show>
+                                <Show when={s()?.lastMemoryClassifierRunAt}>
+                                    {(lastRunAt) => (
+                                        <StatRow
+                                            theme={props.theme}
+                                            label="Last run"
+                                            value={relativeTime(lastRunAt())}
+                                            dim
+                                        />
+                                    )}
+                                </Show>
+                                <For each={Object.entries(s()?.memory_classifierBacklog ?? {})}>
+                                    {([task, backlog]) => (
+                                        <StatRow
+                                            theme={props.theme}
+                                            label={task}
+                                            value={`${backlog.pending}/${backlog.total}`}
+                                            dim
+                                        />
+                                    )}
+                                </For>
+                            </>
+                        )}
 
                     {/* Stats — v0.21.8 ships a single "Total tokens" number while we
                 figure out how to present the new-work / reprocessed

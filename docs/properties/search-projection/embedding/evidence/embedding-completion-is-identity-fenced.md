@@ -10,17 +10,17 @@ Reachability is test-only: no production RP2.1 completion transaction exists.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/synapse/protocol.rs:781-805` checks requested model,
+- `crates/host-runtime/src/local_embeddings/protocol.rs:781-805` checks requested model,
   fingerprint, and table epoch against the served lane before inference.
 - `protocol.rs:873-885` verifies each input hash against exact text bytes.
-- `crates/host-runtime/src/synapse/jobs.rs:108-127` retains item ID/hash and
+- `crates/host-runtime/src/local_embeddings/jobs.rs:108-127` retains item ID/hash and
   requested dimension, not a canonical source revision or current-model view.
 - `jobs.rs:502-535` ignores late publication to a completed local job and
   rejects wrong item count or dimensions. These are narrower local fences.
 - `jobs.rs:640-654` returns stored ID/hash metadata paired with result vectors.
-- `crates/host-runtime/src/synapse/inference.rs:222-240` validates vector
+- `crates/host-runtime/src/local_embeddings/inference.rs:222-240` validates vector
   dimensions, finiteness, and norm; numerical validity does not imply freshness.
-- `crates/host-runtime/src/synapse/bundle.rs:652-702` excludes model name from
+- `crates/host-runtime/src/local_embeddings/bundle.rs:652-702` excludes model name from
   fingerprint. Equal fingerprints therefore do not prove equal model labels.
 - `crates/kernel/src/envelope.rs:395-438` rewrites `domains.name` through
   operator remediation and carries the loaded object into PendingChange

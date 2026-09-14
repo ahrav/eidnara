@@ -4,7 +4,7 @@
 
 Task 2 asked whether an error path can produce a response that looks successful.
 The most consequential answer is not in the response the caller reads. It is in
-what the durable facade mutation ledger records: two `ctx_note` arms hand a
+what the durable facade mutation ledger records: two `eidnara_note` arms hand a
 failure text back to the ledger as the command's successful outcome, so the
 failure becomes permanent for that `command_id`.
 
@@ -12,7 +12,7 @@ failure becomes permanent for that `command_id`.
 
 ### The two arms
 
-`crates/daemon/src/lib.rs`, inside `handle_ctx_note_facade`.
+`crates/daemon/src/lib.rs`, inside `handle_eidnara_note_facade`.
 
 The `update` action's CAS conflict, `:11858-11871`:
 
@@ -105,13 +105,13 @@ as a replay of the ORIGINAL OUTCOME, whatever it was.
 ### Coverage
 
 `lib.rs:27555`, `:27668`, `:27695`, `:27734`, `:27808` are the `command_id`
-idempotency tests, and all of them exercise `ctx_reduce` plus
-`agent_drops.append`, not `ctx_note`. Nothing replays a `ctx_note` command whose
+idempotency tests, and all of them exercise `eidnara_reduce` plus
+`agent_drops.append`, not `eidnara_note`. Nothing replays a `eidnara_note` command whose
 first attempt produced `isError: true`.
 
 ## Failure scenario
 
-1. A model calls `ctx_note` with `action: "update"`, `note_id: 7`, new content,
+1. A model calls `eidnara_note` with `action: "update"`, `note_id: 7`, new content,
    and `command_id: "c1"`. The route is authority-managed for the project so the
    vocabulary check at `:11584-11591` passes, and `command_id_from_facade_request`
    (`:15246-15280`) resolves `"c1"`.
@@ -119,7 +119,7 @@ first attempt produced `isError: true`.
    `NoteCasOutcome::Conflict`. The closure returns `Ok` with the conflict text
    and `isError: true`.
 3. `with_facade_command` inserts those bytes into the ledger under
-   `(identity_scope=session, tool="ctx_note", action="update", command_id="c1")`
+   `(identity_scope=session, tool="eidnara_note", action="update", command_id="c1")`
    and commits.
 4. The model reads "Error: Note #7 changed concurrently; retry with a fresh
    read." and does exactly that: re-reads, then retries. If its harness reuses
@@ -148,16 +148,16 @@ The window is the concurrent-update race that produces `NoteCasOutcome::Conflict
 `with_facade_command` serialises facade mutations with
 `self.facade_mutation_lock` (`memory-store/src/lib.rs:4977-4980`), so two facade
 mutations cannot race each other. The conflicting writer must therefore come from
-another path: the note evaluation protocol's completion writes, a dreamer run, or
+another path: the note evaluation protocol's completion writes, a memory_classifier run, or
 a `note.evaluation.complete` claim. That makes the race real but not
 facade-versus-facade, which matters for how a test constructs it.
 
 Dependencies for reachability:
 
-- Default-production. `ctx_note` is advertised by `manifest`
+- Default-production. `eidnara_note` is advertised by `manifest`
   (`lib.rs:15977-15991`) through `prompt_surface::module_tools`
   (`prompt_surface.rs:160-230`) with the default preset `Full`
-  (`prompt_surface.rs:112-122`). `ctx_note` does not consult `memory_enabled`, so
+  (`prompt_surface.rs:112-122`). `eidnara_note` does not consult `memory_enabled`, so
   the `config.rs:124` default is not a gate here.
 - A `command_id` must be resolvable. If none is,
   `log_missing_facade_command_id` (`:10339-10349`) prints once and the mutation
@@ -170,12 +170,12 @@ Dependencies for reachability:
 ## What a test must construct
 
 1. A bound, authority-managed facade route with a store and one existing note.
-2. Drive `ctx_note` `update` with a `command_id`, arranging a CAS conflict. The
+2. Drive `eidnara_note` `update` with a `command_id`, arranging a CAS conflict. The
    cheapest arrangement is to bump the note's version through a non-facade path
    between the handler's read and its CAS; the store has commit hooks for
    exactly this kind of detector test
    (`memory-store/src/lib.rs:5279-5281` documents one such one-shot callback for the
-   compartment path), so a note-path equivalent may need adding, which is a test
+   history_segment path), so a note-path equivalent may need adding, which is a test
    support change and out of scope for this pass.
 3. Assert the first response carries `isError: true`.
 4. Assert a ledger row now exists for that `command_id`, by calling
@@ -218,7 +218,7 @@ Dependencies for reachability:
   `PreparedOutcome::Error{code:"..."}` with the store error's Display, which is a
   different contract for the model and may break the plugin's decoders.
 - Missing evidence: whether any consumer distinguishes an MCP `isError` result
-  from a typed error on this path, and whether the plugin's `ctx_note` caller
+  from a typed error on this path, and whether the plugin's `eidnara_note` caller
   retries with a fresh `command_id` or the same one. The latter decides whether
   the memoization is observable in production at all.
 - Conclusion: needs human input. The narrow fix is to make the CAS-conflict arm

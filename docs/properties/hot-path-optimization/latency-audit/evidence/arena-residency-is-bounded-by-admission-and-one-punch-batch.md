@@ -49,7 +49,7 @@ bound before either moves.
   ([ring.rs:3086-3087][t-syscall] and siblings); the client crate has no caller and
   runs the same [`reserve_until`][native-reserve] path.
 - [§7.7][wire77] states no timed ring poll or prefault exists; [§7.5.1][wire751]
-  calls the Synapse cap an accounting boundary, not an RSS claim.
+  calls the LocalEmbeddings cap an accounting boundary, not an RSS claim.
 - Tests:
   [`process_limits_reject_counts_above_the_resident_byte_ceiling`][t-limits];
   [`unaligned_batch_boundaries_do_not_strand_pages`][t-batch] publishes

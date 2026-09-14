@@ -79,7 +79,7 @@ the [check inventory](existing-checks.md).
 | A3 | test-only | Pool pressure needs concurrent oversize parses; production occurrence is plausible but unverified. |
 | B1-B5 | default-production | Every pass with [`compaction_enabled`][cfg-compaction] (default true) projects, serves, and normalizes; the incremental arms need a cache hit, which the plugin's delta protocol produces on steady turns. |
 | C1, C2, C4, C5 | default-production | The [handler path][handler] runs for every transform request; the Emergency95 arm needs usage at the emergency threshold. |
-| C3 | explicit-config-only | The empty drain runs every pass, but outbox rows come from [`publish_historian_chunk`][publish], which needs a configured [`model_chain`][cfg-models]; `user_observation` rows also need [`user_memory_collection_enabled`][cfg-user-mem]. |
+| C3 | explicit-config-only | The empty drain runs every pass, but outbox rows come from [`publish_history_summarizer_chunk`][publish], which needs a configured [`model_chain`][cfg-models]; `user_observation` rows also need [`user_memory_collection_enabled`][cfg-user-mem]. |
 | C6 | explicit-config-only | The same gate as C3; the due row also needs a failed inline delivery at publish time or a process end between the enqueue commit and the inline drain, which the [`test-support` seam][fail-sc] constructs. |
 | P1-P4 | default-production | The plugin runs the verdict, mid-turn, paging, and logging steps on every production pass; `deps.client` is the SDK client ([hook.ts][hookclient]). |
 | P5 | test-only | Needs an injected SDK fault after a stored deny. |
@@ -87,8 +87,8 @@ the [check inventory](existing-checks.md).
 | T3-T4 | test-only | [`reserve_direct`][reserve-direct] is reached only through [`output_from_writer`][from-writer], whose sole non-crate caller is a [fixture arm][fixture-arm] no test sends. |
 | G1-G2 | default-production | Every daemon [`ingest_artifact`][route-ingest] reaches [`check_budget`][check-budget]; GC and purge decrements have no daemon caller. |
 | G3 | test-only | Four of five decrement paths run only in kernel tests and benches. |
-| W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the historian, and merges config on ordinary passes; SOFT pressure needs workload. |
-| W6 | explicit-config-only | The dreamer schedule [defaults to `None`][sched-default]; smart notes need a cron on the note. |
+| W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the history_summarizer, and merges config on ordinary passes; SOFT pressure needs workload. |
+| W6 | explicit-config-only | The memory_classifier schedule [defaults to `None`][sched-default]; conditional notes need a cron on the note. |
 | W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14634-14647`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
 | W1, W11 | test-only | Benches need `bench-internals` or manual `--ignored` runs; the deterministic abort seam is `#[cfg(test)]` [`after_transform_commit`][unit-after-hook]. |
 | W12 | default-production | Transform units use [the guarded host runner][unit-runner-live]. [`kernel_routes::blocking`][blocking] still runs without that guard; the panic itself is the injected fault. |
@@ -150,7 +150,7 @@ HEAD (`crates/daemon/src/dispatch.rs:132-148` measures, `:237-249` writes).
 | W2 | [stage-timing-fields-keep-their-boundaries][w2] (invalidated) | safety | always |
 | W3 | [token-cache-is-a-pure-declared-memo-behind-one-estimator-interface][w3] | safety | always |
 | W4 | [bounded-secret-scan-finds-every-whole-input-finding][w4] | safety | always |
-| W5 | [historian-firing-input-is-preserved-by-cheaper-construction][w5] | safety | always |
+| W5 | [history_summarizer-firing-input-is-preserved-by-cheaper-construction][w5] | safety | always |
 | W6 | [cron-next-occurrence-matches-the-minute-stepper][w6] | safety | always |
 | W7 | [effective-config-reads-observe-a-tier-change-by-the-next-pass][w7] | safety | always |
 | W8 | [committed-transform-bookkeeping-is-applied-or-recomputed][w8] | safety | always |
@@ -257,13 +257,13 @@ Impact: A refused body can leave route or staging state behind, or an
 admitted body can hold more resident bytes than it charged.
 Open questions:
 
-- Does the context module owe a `retry_after_ms` on `queue_full` as Synapse
+- Does the context module owe a `retry_after_ms` on `queue_full` as LocalEmbeddings
   does under [§7.5.1][wire751]? [`RequestOutcome::error`][outcome] sends
   none today. (needs human input)
 - The paged lane reaches the typed decode from [assembled pages][pageapply]
   with no footprint reservation for the assembled whole; is the page staging
   budget the intended cover? (needs human input)
-- [`SCRATCH_RESERVED_BYTES`][scratchconst] is documented as sized for Synapse
+- [`SCRATCH_RESERVED_BYTES`][scratchconst] is documented as sized for LocalEmbeddings
   budgets; the transform footprint shares the slice without appearing in
   that sizing. Is that intended? (needs human input)
 
@@ -290,7 +290,7 @@ decode.
 Check: `always` - Over a fixed corpus of body shapes assert three oracles
 against a frozen reference: a test-only copy of HEAD's routing read, probe,
 and `Value` decode kept under `crates/daemon/tests/` in the form of
-[`historian_truncate_differential.rs`][diff-ref], or a recorded corpus of
+[`history_summarizer_truncate_differential.rs`][diff-ref], or a recorded corpus of
 expected route, code, and decoded request per body. Routing: `route(body)`
 equals the
 [`Value` read][dispatch] (`method` as a string, else `kind` as a string, a
@@ -343,7 +343,7 @@ differently depending on which lane carried it.
 Open questions:
 
 - Is last-wins on duplicate top-level keys a contract or an accident of the
-  `Value` round trip? Synapse rejects duplicates ([§7.5.1][wire751]); the
+  `Value` round trip? LocalEmbeddings rejects duplicates ([§7.5.1][wire751]); the
   context module has no written rule. (needs human input)
 - Must malformed JSON keep reporting `unrecognized_request_shape`, or may it
   become `bad_request`? (needs human input)
@@ -400,7 +400,7 @@ Exercised: partial - The selection differential passes unchanged against its
 frozen reference. The [sharing check][selection-sharing] compares the selected
 inputs from all 48 frozen-corpus tool calls with the projected wire value and
 proves pointer identity through clones
-and historian input construction. The [sidecar check][sidecar-order-check]
+and history_summarizer input construction. The [sidecar check][sidecar-order-check]
 compares full and incremental order, metadata, and pins across three
 generations, including repeated IDs and sparse cached metadata. The
 [complex native replay][native-sharing] compares fresh, reattached, and shared
@@ -532,10 +532,10 @@ Reachability: default-production
 Status: active
 Exercised: yes - The [typed-flag reference comparison][synthetic-reference]
 checks served bytes, projection state and digests, native bytes, tag rows,
-historian boundary messages and chunk input ordinals. The
+history_summarizer boundary messages and chunk input ordinals. The
 [handler delta comparison][synthetic-delta-parity] checks full versus delta
 projection and native bytes; the [delta witness][synthetic-delta-witness]
-captures production historian prompts and native output on the second and
+captures production history_summarizer prompts and native output on the second and
 third turns, including replay carried in the third turn's cached prefix.
 The [lineage rebase comparison][synthetic-lineage-rebase] covers a normalized
 synthetic head on a non-subagent descent replay that rebases ordinals.
@@ -548,7 +548,7 @@ sets as at the discovery baseline: inside `apply_once` a message is synthetic if
 in the pass-local projection view, and request-dependent helpers consume
 that view); in
 [`cached_boundary_messages`][cached-boundary],
-[`assemble_historian_firing`][assemble],
+[`assemble_history_summarizer_firing`][assemble],
 [`store_projection_cache`][store-pc], and
 [`attach_native_messages_incremental`][native-attach] a message is synthetic
 iff `parsed.messages[i].ck.meta.synthetic` in that pass's ingress, including
@@ -559,17 +559,17 @@ bytes of a message whose flag was set by normalization equal the bytes of
 the same decoded message without the flag, because
 [`Serialize for WireMessage`][ser-msg] replays `original` and a `meta` edit
 does not clear it ([`:210-216`][meta-doc]). `always` because the sets decide
-which blocks count for coverage, historian ordinals, native reasoning
+which blocks count for coverage, history_summarizer ordinals, native reasoning
 clears, and the output; the check is on each observer, not on a defect.
 Fault/timing angle: A shared-reference design that marks `parsed` in place
-before `apply` widens the normalized view to the historian and native
+before `apply` widens the normalized view to the history_summarizer and native
 attach; a design that marks through `mark_modified` or rebuilds the message
 drops `original`, so `"synthetic":true` appears on the wire for the first
 time. Both are behavior changes relative to HEAD, not preservation.
 Required faults and enabling state: The B5 situation: a prior bust pass froze
 a todo pair ([`tail_reclaim`][tail-reclaim] is true for every shipping
 profile), then an array in which the harness replays the pair as ordinary
-messages without the `synthetic` marker, a historian firing on that pass,
+messages without the `synthetic` marker, a history_summarizer firing on that pass,
 and `serve_native` on.
 Confidence: high - [Evidence](evidence/synthetic-normalization-is-scoped-to-the-pass.md).
 The pass-local view, the handler consumers of the original request, and
@@ -579,14 +579,14 @@ Existing check: [Shared-input checks](existing-checks.md#shared-input-equivalenc
 include the typed-flag reference, the delta witness and the replayed pair's
 cache reuse. The transform catalog's [synthetic-strip record][tc-synthetic]
 states the inside invariant. Test adequacy remains unaudited.
-Impact: Historian ordinals, native reasoning clears, and wire bytes change
+Impact: HistorySummarizer ordinals, native reasoning clears, and wire bytes change
 when the clone is shared or the flag is written through.
 Open questions: None. The preservation contract retains both observer
-semantics: an unflagged suffix remains a zero-block historian message, while
+semantics: an unflagged suffix remains a zero-block history_summarizer message, while
 a reattached normalized prefix is filtered out. Passthrough fingerprints keep
 `eidnara_todo:` identities while retained ingress JSON stays unflagged. The
 third-turn native and prompt reference uses the same reattached observer
-input, not a full raw array whose historian ordinals differ. The discovery
+input, not a full raw array whose history_summarizer ordinals differ. The discovery
 questions and their evidence remain in the evidence file.
 
 ### tag-baseline-cache-entry-is-never-mutated-by-a-pass
@@ -656,7 +656,7 @@ Reachability: default-production
 Status: active
 Exercised: yes - Cold and warm memo walks match the frozen full-result digest.
 Independent kind-prefixed digest assertions, a poisoned projection token key,
-and content, caveman, context, namespace, reset, and eviction cases pass.
+and content, terse_text_compression, context, namespace, reset, and eviction cases pass.
 Least-recently-used eviction and poison recovery preserve cold-reference
 results. Sixteen distinct sessions hold their memos concurrently, over-budget
 walks keep a warm prefix, and production transforms reuse unchanged
@@ -665,7 +665,7 @@ Guarantee: The hygiene digest is a function of the part kind and derived
 content and is never the projection `content_hash`.
 Check: `always` - For every hygiene part, `content_hash ==
 hex(sha256(kind_name ++ "\0" ++ content))` where `content` is the derived
-part string ([caveman-substituted and reminder-stripped text][hyg-text],
+part string ([terse_text_compression-substituted and reminder-stripped text][hyg-text],
 [`to_string(input)`][hyg-input], or [`tool_output_content`][hyg-output]);
 excluded parts hash `"excluded\0" ++ block.bytes` on the pre-match branch
 (`tail_hygiene.rs:861-885`) and the kind-level branch (`:931-934`), and
@@ -690,8 +690,8 @@ a different cache, the boundary [`token_count`][token-count], which counts
 `block.bytes`.
 Required faults and enabling state: A tail with text, tool call, tool result
 in text and content variants, media, an excluded reduced block, and a
-caveman-substituted text block; the same input measured twice, then edited
-under the same block ID. Change caveman identity and payload, protection,
+terse_text_compression-substituted text block; the same input measured twice, then edited
+under the same block ID. Change terse_text_compression identity and payload, protection,
 coverage, reduction, role, and synthetic status independently. Interleave
 sessions, exceed the session limit, change the store namespace A/B/A, panic
 during a fill, reset, evict, and exceed byte limits with multiple blocks. Fill
@@ -749,7 +749,7 @@ reattaches, at least one non-synthetic message carries a
 [`synthetic_todo_`][todo-prefix] call or result id (the input condition under
 which [`normalize_synthetic_todo_ingress`][normalize] adds an override; the
 marker asserts the input, not the implementation's allocation), and
-[`prepare_historian_fire`][historian-fire] runs on that pass with
+[`prepare_history_summarizer_fire`][history_summarizer-fire] runs on that pass with
 `serve_native` on. The marker asserts these preconditions, not observer
 agreement.
 Fault/timing angle: A campaign that never combines prefix reattachment,
@@ -767,7 +767,7 @@ harness replays pairs on delta turns in production is inferred from the
 plugin's delta protocol, not observed.
 Existing check: [The delta witness][synthetic-delta-witness] asserts the input
 flags and frozen call ID, configured compaction and model chain, positive
-prefix reuse, and `historian.fired` before emitting the constant marker
+prefix reuse, and `history_summarizer.fired` before emitting the constant marker
 `replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn`. It compares captured
 producer prompts, third-turn boundary and chunk inputs, and native bytes;
 unaudited.
@@ -784,14 +784,14 @@ Status: active
 Exercised: partial - The no-fire CAS test and the emergency interleave test
 exercise the post-commit load. The
 [memory-store differential test](evidence/consolidated-cache-state-reads-match-per-consumer-loads.md#single-load-evidence)
-compares the `revert_epoch`, `historian.state`, and
+compares the `revert_epoch`, `history_summarizer.state`, and
 `publication_floor_ordinal` scalar reads and the `meta`-only load with
 `MemoryStore::load` over absent keys, JSON `null`, booleans, unknown variants,
-negative and textual epochs, a non-object `historian`, JSON5, malformed `meta`,
+negative and textual epochs, a non-object `history_summarizer`, JSON5, malformed `meta`,
 and malformed `core_state`; the daemon load-count test shows one pre-transform
 `meta` load, no pre-transform full load, and one post-commit full load per
 steady pass, split by the interleave hook, on handles the probe shows were
-never re-created; the durable-phase test exercises `historian_active` on every
+never re-created; the durable-phase test exercises `history_summarizer_active` on every
 `PassState`.
 Guarantee: Consolidating or narrowing `cache_state` loads never changes what
 any consumer observes: a post-commit consumer sees its own commit, and a
@@ -804,38 +804,38 @@ refuses does so only in a pass the transform's own snapshot then rejects before
 any commit.
 Check: `always` - Freshness: within one pass, every `cache_state` read that
 executes after `commit_transform`, [`descend_lineage`][descend],
-[`truncate_compartments_for_revert`][truncate], or an awaited historian
+[`truncate_history_segments_for_revert`][truncate], or an awaited history_summarizer
 firing observes a `row_version` at least as new as the one that work
 returned, any CAS write derived from that read ([`record_no_fire`][no-fire]
 under `loaded.row_version`) uses that value, and the two Emergency95
 `publication_floor_ordinal` reads ([`:8884-8888`][floor-a],
 [`:8943-8948`][floor-b]) stay distinct because their comparison is the rerun
 trigger. Decode: for every stored `meta` text, a scalar projection of
-`revert_epoch` and `historian.state` returns the same value as
+`revert_epoch` and `history_summarizer.state` returns the same value as
 `serde_json::from_str::<ModuleMeta>(meta)` when that succeeds, and when that
 field fails to deserialize the consumer takes the branch it took on a failed
 full load (`None` for the projection cache at
 [`lookup_full_projection_cache`][epoch-read] and
 [`expand_transform_tail_delta`][epoch-read-delta], `false` for
-[`historian_active`][active]), except for the recorded divergences: a
+[`history_summarizer_active`][active]), except for the recorded divergences: a
 corrupt `core_state` or a corrupt sibling field no longer takes that branch
 (the pass proceeds and the transform's own snapshot load refuses the row
-before any commit), a non-object `historian` reads as `Idle`, and an epoch
+before any commit), a non-object `history_summarizer` reads as `Idle`, and an epoch
 above `i64::MAX` fails the scalar read alone. `always` because the daemon
 consumes these reads on every pass, not only under a fault.
 Fault/timing angle: A consolidation reuses a snapshot taken before
 `commit_transform` for a consumer placed after it, or reuses the first
 `run_transform` snapshot for an Emergency95 rerun after an inline firing; a
 narrow read returns NULL where [`revert_epoch`][meta-epoch] and
-[`historian`][meta-historian] carry `#[serde(default)]` (`0`, `Idle`), or
-succeeds on an unknown [`HistorianPhase`][phase] string or a `null` epoch
+[`history_summarizer`][meta-history_summarizer] carry `#[serde(default)]` (`0`, `Idle`), or
+succeeds on an unknown [`HistorySummarizerPhase`][phase] string or a `null` epoch
 that serde rejects.
 Required faults and enabling state: A pass that commits, then reaches
-[`prepare_historian_fire`][prepare] with a new no-fire reason; an Emergency95
+[`prepare_history_summarizer_fire`][prepare] with a new no-fire reason; an Emergency95
 pass with a publication landing between the transform and the floor check
 (C5); a CAS conflict injected between snapshot and commit so the
 [retry loop][cas-retry] reloads; rows whose `meta` lacks `revert_epoch` or
-`historian`, carries an unknown `historian.state`, or holds `null` under
+`history_summarizer`, carries an unknown `history_summarizer.state`, or holds `null` under
 `revert_epoch`; rows whose `core_state` is not valid JSON.
 Confidence: high - [Evidence](evidence/consolidated-cache-state-reads-match-per-consumer-loads.md).
 [`MemoryStore::load`][load] (one deferred read of
@@ -846,10 +846,10 @@ Existing check: [State checks](existing-checks.md#cache-state-load-pass-trace-si
 cover the no-fire CAS, the emergency rerun, the CAS retry, and snapshot
 pinning; none found for narrow-read equivalence; all unaudited.
 Impact: A no-fire reason is never persisted, a rerun trigger disappears, a
-stale projection-cache entry is selected, or a historian veto is cleared.
+stale projection-cache entry is selected, or a history_summarizer veto is cleared.
 Open questions:
 
-- Which of the three pre-commit loads (epoch, `historian_active`, snapshot)
+- Which of the three pre-commit loads (epoch, `history_summarizer_active`, snapshot)
   may share one snapshot? Merging them removes a window in which the epoch is
   read before a concurrent recut; the specification should state whether
   closing that window is intended. (needs human input)
@@ -906,7 +906,7 @@ fresh session whose first pass commits; an injected failure in the
 `pass_trace` upsert during a committing pass, injected through
 [`fail_next_pass_trace_receive_for_test`][receive-seam], which fires inside
 the receive transaction at its UPSERT; the older `fail_next_*_for_test` seams
-cover the side channel, the authority route read, and dreamer tasks.
+cover the side channel, the authority route read, and memory_classifier tasks.
 Confidence: high - [Evidence](evidence/pass-trace-writes-count-every-pass-outside-the-cache-cas.md).
 [`trace_pass_received`][received] (its [doc][received-doc] says the write
 never contends with or extends the pass commit),
@@ -949,12 +949,12 @@ per-kind limit, or the backoff values.
 Guarantee: The outbox row is the only duplicate guard for events and user
 observations, and the drain's scheduling shape is unchanged by any
 transaction restructuring.
-Check: `always` - For every `historian_side_channel_outbox` row, the target
+Check: `always` - For every `history_summarizer_side_channel_outbox` row, the target
 table receives exactly one row across all drains, restarts, and overlapping
 drainers; the outbox state change that retires the row commits in the same
 transaction as the target insert; and a delivery whose outbox row is no
 longer pending when its transaction runs rolls back its target insert. A
-drain visits kinds in the order of [`HISTORIAN_SIDE_CHANNEL_KINDS`][kinds]
+drain visits kinds in the order of [`HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS`][kinds]
 (`event`, `primer`, `user_observation`); within a kind it delivers due rows
 ordered by `firing_seq, source_start, source_end, item_index` up to
 `min(per_kind_limit, 32)`; a row is due only when
@@ -963,7 +963,7 @@ ordered by `firing_seq, source_start, source_end, item_index` up to
 capped at 60000, and stores the error capped at 2000 characters; a failure in
 one kind does not stop other kinds; and the first bookkeeping error is
 returned after the loop completes. `always` because
-[`compartment_events`][events-insert] and
+[`history_segment_events`][events-insert] and
 [`user_memory_candidates`][obs-insert] are plain inserts with no dedupe
 (only [`primer_candidates`][primer-insert] upserts), and these rules define
 which rows a pass touches.
@@ -984,17 +984,17 @@ handle from the earlier read is held; multiple rows per kind across two
 firings; an injected failure on one kind; `now_ms` before and after the
 computed `next_attempt_at_ms`.
 Confidence: high - [Evidence](evidence/side-channel-drain-delivers-each-row-once-and-keeps-its-schedule.md).
-[`drain_historian_side_channels`][drain] and its [doc][drain-doc],
-[`load_due_historian_side_channels`][load-due] with the
-[order index][idx-order], [`deliver_historian_side_channel`][deliver],
-[`retire_historian_side_channel_tx`][retire] (a `DELETE` under
+[`drain_history_summarizer_side_channels`][drain] and its [doc][drain-doc],
+[`load_due_history_summarizer_side_channels`][load-due] with the
+[order index][idx-order], [`deliver_history_summarizer_side_channel`][deliver],
+[`retire_history_summarizer_side_channel_tx`][retire] (a `DELETE` under
 `delivered_at_ms IS NULL` and the row's payload that requires
-`changed == 1`), and [`record_historian_side_channel_failure`][failure] are
+`changed == 1`), and [`record_history_summarizer_side_channel_failure`][failure] are
 source-verified.
 Existing check: [State checks](existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
 cover restart redelivery, per-kind isolation, CAS-loser enqueue, and revert
 deletion; all unaudited.
-Impact: A compartment event or user observation is delivered twice or never,
+Impact: A history_segment event or user observation is delivered twice or never,
 or a pass drains rows it did not drain before.
 Open questions: None.
 
@@ -1064,7 +1064,7 @@ Exercised: yes - The
 records the transform's committed `row_version` and the publish's committed
 `row_version` from the store inside the hook and asserts the publish landed
 after the transform. In upstream `e451a2b4`, publication follows the Emergency95
-pre-hook floor read and precedes `prepare_historian_fire`'s load and the final
+pre-hook floor read and precedes `prepare_history_summarizer_fire`'s load and the final
 floor check. In relocation commit `d6060f79`, the hook instead precedes the
 first floor read; that test requires four scalar reads and a response containing
 the published fold. The final source restores `between_transform_and_prepare`
@@ -1079,18 +1079,18 @@ opened connection or the publisher's captured return value.
 Guarantee: A state-load campaign reaches the interleaving that distinguishes
 one-load-per-pass from per-consumer loads.
 Check: `sometimes` - For some pass, a foreign commit by another actor
-(historian publish, wrapup recut, or state sync) through a second store
+(history_summarizer publish, wrapup recut, or state sync) through a second store
 handle returns a `row_version` greater than the one the pass's transform
 committed, and that commit returns between two of the pass's post-commit
 `cache_state` reads (the [upstream hook](evidence/foreign-write-lands-between-pass-loads.md#marker-evidence)
-sits after the Emergency95 pre-floor read and before `prepare_historian_fire`'s
+sits after the Emergency95 pre-floor read and before `prepare_history_summarizer_fire`'s
 load and the final floor check); both versions and the ordering are recorded from
 the store and the actor, never from the pass's own read, which is what C1
 tests. `sometimes` rather than `reachable` because the [final floor check][unit-settle-live]
 executes on every non-subagent Emergency95 pass while the
 interleaving that makes C1 meaningful may never occur.
 Fault/timing angle: The window between `commit_transform` and
-[`prepare_historian_fire`][unit-prepare-live] or the floor check.
+[`prepare_history_summarizer_fire`][unit-prepare-live] or the floor check.
 Required faults and enabling state: A concurrent publish or recut committed
 through a second handle inside that window; the
 [`between_transform_and_prepare`][unit-between-hook] hook is the existing seam.
@@ -1110,9 +1110,9 @@ without weakening either oracle.
 Type: reachability
 Reachability: explicit-config-only
 Status: active
-Exercised: partial - [`status_diagnostics_surface_pending_historian_side_channel_failure`][t-status-sc]
+Exercised: partial - [`status_diagnostics_surface_pending_history_summarizer_side_channel_failure`][t-status-sc]
 constructs one pending `event` row and a pass whose drain delivers it;
-[`historian_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults-sc]
+[`history_summarizer_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults-sc]
 leaves one pending row per kind, one kind at a time, and drains it directly;
 the
 [crash test](evidence/side-channel-row-is-due-during-a-drain.md#marker-evidence)
@@ -1125,7 +1125,7 @@ of each kind, so C3's per-row clauses are evaluated on real rows rather than
 on an empty drain.
 Check: `sometimes` - Under three constant markers
 `side-channel-row-is-due-during-a-drain-event`, `-primer`, and
-`-user-observation`, for some call to [`drain_historian_side_channels`][drain]
+`-user-observation`, for some call to [`drain_history_summarizer_side_channels`][drain]
 from the handler's pass drain ([`:8674-8678`][pass-drain]), the outbox holds
 at entry, for that kind, at least one row with `delivered_at_ms IS NULL` and
 `next_attempt_at_ms <= now_ms` for the `now_ms` the call passes (the due
@@ -1137,16 +1137,16 @@ trivially satisfied.
 Fault/timing angle: Under default configuration no [`model_chain`][cfg-models]
 is set, so nothing publishes, the outbox is empty on every pass, and C3's
 per-row clauses are never evaluated. With publishing,
-[`publish_historian_chunk`][publish] drains inline right after its commit
+[`publish_history_summarizer_chunk`][publish] drains inline right after its commit
 ([`:11486-11494`][publish-drain]), so the pass drain finds a due row only when
 that inline delivery failed (the next attempt is
 `now + 1000 * 2^min(attempt, 6)` ms, [`:11744-11748`][backoff]) or when the
 process ended between the enqueue commit and the inline drain.
 Required faults and enabling state: A published firing with events, primers,
-and user observations (a direct `publish_historian_chunk` call in a unit
+and user observations (a direct `publish_history_summarizer_chunk` call in a unit
 test, or a configured `model_chain` with
 [`user_memory_collection_enabled`][cfg-user-mem]); a failed first delivery
-for each kind through [`fail_next_historian_side_channel_for_test`][fail-sc],
+for each kind through [`fail_next_history_summarizer_side_channel_for_test`][fail-sc],
 which is set-valued and takes one call per kind, and is available to daemon
 tests through the `test-support` dev-dependency
 ([`Cargo.toml:97-98`][daemon-cargo]), or a store reopen between publish and
@@ -1198,7 +1198,7 @@ followers share its deadline rather than restart it. Entry identity and an
 explicit invalidation flag reject superseded completions. Publication and
 caller return both check read-start expiry, including after event-loop stalls.
 Only a successful, still-valid result can publish. Every `session.updated`,
-`session.compacted`, and `/ctx-flush` expire all agent entries for that session
+`session.compacted`, and `/eidnara-flush` expire all agent entries for that session
 without erasing their successful verdicts; `session.deleted` removes them.
 There is no permission-change subscription. A silent edit can remain
 unobserved within the approved 30-second window.
@@ -1219,7 +1219,7 @@ absent.
 Open questions: None. User approval provenance for the changed failure default
 and accepted staleness window is appended to the evidence investigation log.
 
-[permission-cache-resolver]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L306-L362
+[permission-cache-resolver]: ../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L306-L362
 
 ### mid-turn-read-is-invariant-under-query-collapse-and-statement-caching
 
@@ -2041,7 +2041,7 @@ Open questions:
   within `radius` does not exist; it would be a new rule-set test, not a
   property of the evaluator.
 
-### historian-firing-input-is-preserved-by-cheaper-construction
+### history_summarizer-firing-input-is-preserved-by-cheaper-construction
 
 Type: safety
 Reachability: default-production
@@ -2052,11 +2052,11 @@ behavior. It also checks a frozen-size lookup hit through a borrowed block ID.
 The scripted producer pins captured prompts on two delta lanes.
 The fingerprint literal, three truncation differentials, golden, and marker
 test also pass. No test crosses a binary upgrade during an in-flight firing.
-Guarantee: The historian receives the same prompt bytes, and the durable
+Guarantee: The history_summarizer receives the same prompt bytes, and the durable
 chunk fingerprint still matches across restart.
-Check: `always` - [`truncate_historian_input_if_needed`][trunc] returns bytes
+Check: `always` - [`truncate_history_summarizer_input_if_needed`][trunc] returns bytes
 identical to the frozen reference in
-[`historian_truncate_differential.rs`][diff-ref] (same cut point, same
+[`history_summarizer_truncate_differential.rs`][diff-ref] (same cut point, same
 marker), and a snapshot item carrying only the UTF-8 byte length yields the same
 [`compute_chunk_fingerprint`][fp] string as one carrying the bytes. `always`
 because the fingerprint is computed on every firing and its string is durable
@@ -2067,16 +2067,16 @@ one and publication fails with `FingerprintMismatch`. The [snapshot][snap-build]
 stores `byte_len: block.bytes.len()` without retaining content. Its
 [`as_item`][as-item] view feeds the fingerprint, which writes the same UTF-8
 length into the literal `id:kind:len|...`, stored in
-[`HistorianDurableState.chunk_fingerprint`][fp-field] and compared by
+[`HistorySummarizerDurableState.chunk_fingerprint`][fp-field] and compared by
 [`verify_chunk_fingerprint`][fp-verify] and the [publish predicate][fp-predicate].
 Truncation binary-searches UTF-16 unit positions with an uncached
 `estimate_tokens` per probe; the differential's [header][diff-header] says the
 probe sequence must be preserved because token counts are not monotonic in
 prefix length.
-Required faults and enabling state: A restart with an in-flight historian
+Required faults and enabling state: A restart with an in-flight history_summarizer
 firing; a chunk whose text exceeds `token_budget`, which needs a large
 session.
-Confidence: high - [Evidence](evidence/historian-firing-input-is-preserved-by-cheaper-construction.md).
+Confidence: high - [Evidence](evidence/history_summarizer-firing-input-is-preserved-by-cheaper-construction.md).
 The snapshot, the fingerprint, its two comparisons, and the [truncation
 call][trunc-call] are source-verified. [Boundary construction][boundary-view]
 borrows block IDs and shares the projection's original `Arc<str>` allocation.
@@ -2087,7 +2087,7 @@ list the fingerprint test, the production-window, exact-budget, and
 small-window differentials, the golden, the marker test, the [construction
 corpus][construction-corpus], and the [producer capture][firing-capture]; all
 unaudited.
-Impact: Historian prompt bytes change, or an in-flight firing fails
+Impact: HistorySummarizer prompt bytes change, or an in-flight firing fails
 publication after a restart.
 Open questions: None. Exact bytes, including the truncation probe sequence,
 remain required; this construction change does not relax that contract.
@@ -2123,9 +2123,9 @@ Required faults and enabling state: A `Local` zone with DST; expressions such
 as `30 2 * * *` on spring-forward, `0 0 30 2 *`, `0 0 31 4,6,9,11 *`, and
 `0 0 29 2 *`; `after_ms` at the `i64` extremes.
 Confidence: high - [Evidence](evidence/cron-next-occurrence-matches-the-minute-stepper.md).
-The parser, the stepper, the cap, the smart-note ceiling
+The parser, the stepper, the cap, the conditional-note ceiling
 ([`:236-239`][note-cap]), and the config acceptance
-([`is_valid_smart_note_cron`][valid] at [config.rs][sched-accept]) are
+([`is_valid_conditional_note_cron`][valid] at [config.rs][sched-accept]) are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 list the Vixie test, the extreme-instant test, and the golden; all unaudited.
@@ -2153,9 +2153,9 @@ merge of the new contents; a cache is keyed by `(user_path, project_root)`
 and mtimes; [`merge_tiers_with_warnings`][merge] including
 [`ProjectRaiseOnly`][raise-only] is applied to the fresh contents unchanged;
 and bind-frozen `SessionBinding.config` stays frozen. `always` because
-[`prepare_historian_fire`][call-fire] calls it on every non-subagent pass
+[`prepare_history_summarizer_fire`][call-fire] calls it on every non-subagent pass
 whose state load succeeds, has no `pending_rewrite`, and has no live
-historian completion pending (`lib.rs:8462-8474`, `:5287-5325`), and
+history_summarizer completion pending (`lib.rs:8462-8474`, `:5287-5325`), and
 [`bind`][call-bind] calls it on every route bind; the check is on each call,
 not on each pass.
 Fault/timing angle: A tier edit between two passes; two routes on different
@@ -2185,7 +2185,7 @@ Open questions:
 - The doc at [config.rs:266-267][eff-warn-doc] says tier read failures are
   reported on every load so a long-running daemon keeps surfacing them; a
   merged cache silences the repeat. Keep that behavior? (needs human input)
-- Should the historian read the bind-frozen config, removing the per-pass
+- Should the history_summarizer read the bind-frozen config, removing the per-pass
   merge entirely? (needs human input)
 
 ### committed-transform-bookkeeping-is-applied-or-recomputed
@@ -2197,7 +2197,7 @@ Exercised: partial - [The aborted-waiter test][unit-abort-test] observes a real
 commit before lineage insertion, aborts the waiter while the unit remains held,
 then checks lineage, guidance-pin removal, reopened core state, and fresh
 guidance on the next HARD pass. [The Emergency95 cancellation test][unit-emergency-test]
-checks a committed first unit followed by cancellation during the historian
+checks a committed first unit followed by cancellation during the history_summarizer
 wait. The full derived-cache recovery matrix is not exercised.
 Guarantee: A committed transform's derived in-memory state is applied on the
 pass that committed it or provably recomputed on the next pass for that
@@ -2431,6 +2431,7 @@ Impact: A panic message or payload built from request bytes, or a backtrace
 naming them, reaches stderr unredacted; a relocated transform can change its
 terminal code if it bypasses the selected host seam.
 Open questions:
+
 - The transform choice is resolved: host-owned `run_blocking` enters the guard
   on the worker and maps failure to `internal_error`, without a new process-wide
   rule. Should kernel routes move to that seam, or retain their unjoined,
@@ -2446,13 +2447,13 @@ through a [`ScriptedHost`][sched-scripted] with a `*/15 * * * *` project and
 a [`ManualClock`][sched-clock]
 ([`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron] and its
 siblings); no campaign marker records that a tick evaluated a configured
-cron, and the smart-note consumer has the fixture-zone golden only.
+cron, and the conditional-note consumer has the fixture-zone golden only.
 Guarantee: A schedule-preservation campaign reaches a scheduler tick that
 evaluates a configured cron, so W6's differential runs on instants the
 scheduler consumes rather than on a scheduler that never sees a schedule.
 Check: `sometimes` - Under one constant marker
 `cron-schedule-is-evaluated-for-a-configured-project`, for some
-[`DreamerScheduler::tick`][sched-tick], `scheduled_projects()` returns at
+[`MemoryClassifierScheduler::tick`][sched-tick], `scheduled_projects()` returns at
 least one project with a non-empty `schedule`, and
 [`due_projects`][sched-due-projects] calls [`next_due`][sched-due] for it
 with a result other than `i64::MAX`. The marker records the project, the
@@ -2467,8 +2468,8 @@ authority is not `MODULE` ([`:14617-14622`][sched-authority]), so a default
 campaign hands the scheduler an empty list and `next_due` is never called;
 W6's clauses then hold on no instant.
 Required faults and enabling state: A user tier with
-`dreamer_review_user_memories_schedule` set to an expression
-[`is_valid_smart_note_cron`][valid] accepts, a bound route whose project is
+`memory_classifier_review_user_memories_schedule` set to an expression
+[`is_valid_conditional_note_cron`][valid] accepts, a bound route whose project is
 in `MODULE` memories authority, and a tick at a `now_ms` for which the
 expression has an occurrence within [`MAX_SEARCH_MS`][cap]; or, in a unit
 test, a `ScriptedHost` project built by the [`project`][sched-fixture]
@@ -2509,7 +2510,7 @@ Open questions: None.
   the occurrence witness for C3 and asserts only that due rows exist at a
   pass drain; C3 keeps every delivery clause.
 - P1 through P5 have no prior catalog; `docs/properties/` has no plugin part
-  at this HEAD (the README assigns `cli` and `historian-ts` to a later wave).
+  at this HEAD (the README assigns `cli` and `history_summarizer-ts` to a later wave).
   P3 shares the 512 KiB and 32 MiB constants with A1 and A2.
 - T1 refines, and does not replace, the shm-transport catalog's
   [reclamation-excludes-pages-with-live-wrapped-bytes][shm-punch] and
@@ -2627,7 +2628,7 @@ evaluation of this area and its disposition are recorded in
 [w2]: #stage-timing-fields-keep-their-boundaries
 [w3]: #token-cache-is-a-pure-declared-memo-behind-one-estimator-interface
 [w4]: #bounded-secret-scan-finds-every-whole-input-finding
-[w5]: #historian-firing-input-is-preserved-by-cheaper-construction
+[w5]: #history_summarizer-firing-input-is-preserved-by-cheaper-construction
 [w6]: #cron-next-occurrence-matches-the-minute-stepper
 [w7]: #effective-config-reads-observe-a-tier-change-by-the-next-pass
 [w8]: #committed-transform-bookkeeping-is-applied-or-recomputed
@@ -2699,8 +2700,8 @@ evaluation of this area and its disposition are recorded in
 [cfg-compaction]: ../../../../crates/daemon/src/config.rs#L121
 [expand]: ../../../../crates/daemon/src/lib.rs#L4456
 [store-pc]: ../../../../crates/daemon/src/lib.rs#L4594
-[historian-fire]: ../../../../crates/daemon/src/lib.rs#L5305
-[assemble]: ../../../../crates/daemon/src/historian_chunk.rs#L560
+[history_summarizer-fire]: ../../../../crates/daemon/src/lib.rs#L5305
+[assemble]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L560
 [ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13707
 [gate-native]: ../../../../crates/daemon/src/lib.rs#L13763-L13768
 [native-attach]: ../../../../crates/daemon/src/lib.rs#L13771
@@ -2806,7 +2807,7 @@ evaluation of this area and its disposition are recorded in
 [unique]: ../../../../crates/memory-store/src/lib.rs#L3608
 [recomp]: ../../../../crates/memory-store/src/lib.rs#L10781
 [meta-epoch]: ../../../../crates/memory-store/src/lib.rs#L1472-L1473
-[meta-historian]: ../../../../crates/memory-store/src/lib.rs#L1588-L1589
+[meta-history_summarizer]: ../../../../crates/memory-store/src/lib.rs#L1588-L1589
 [phase]: ../../../../crates/memory-store/src/lib.rs#L622-L631
 [drain]: ../../../../crates/memory-store/src/lib.rs#L11532
 [drain-doc]: ../../../../crates/memory-store/src/lib.rs#L11527-L11532
@@ -2932,16 +2933,10 @@ evaluation of this area and its disposition are recorded in
 [fx-2500]: ../../../../crates/daemon/src/transform.rs#L28085-L28090
 [h-pre]: ../../../../crates/daemon/src/lib.rs#L8204-L8221
 [respond]: ../../../../crates/daemon/src/lib.rs#L15097
-[tt]: ../../../../crates/daemon/src/transform.rs#L1026-L1207
-[rtcd]: ../../../../crates/daemon/src/transform.rs#L1209-L1220
-[fmt]: ../../../../crates/daemon/src/transform.rs#L1226-L1360
-[snap-add]: ../../../../crates/daemon/src/transform.rs#L2412
-[snap-once]: ../../../../crates/daemon/src/transform.rs#L2892
 [tc-doc]: ../../../../crates/daemon/src/token_cache.rs#L1-L7
 [tc-cap]: ../../../../crates/daemon/src/token_cache.rs#L16
 [tc-bound]: ../../../../crates/daemon/src/token_cache.rs#L24-L28
 [tc-static]: ../../../../crates/daemon/src/token_cache.rs#L34-L40
-[tc-local]: ../../../../crates/daemon/src/token_cache.rs#L57-L76
 [tc-concurrent]: ../../../../crates/daemon/src/token_cache.rs#L108-L109
 [tc-cwd]: ../../../../crates/daemon/src/token_cache.rs#L110
 [tc-shard]: ../../../../crates/daemon/src/token_cache.rs#L112-L113
@@ -2979,27 +2974,27 @@ evaluation of this area and its disposition are recorded in
 [edge-margin]: ../../../../crates/context-core/src/redaction.rs#L380-L385
 [ms-content]: ../../../../crates/memory-store/src/lib.rs#L2205
 [ms-digest]: ../../../../crates/memory-store/src/lib.rs#L2506-L2541
-[snap-build]: ../../../../crates/daemon/src/historian_chunk.rs#L418-L430
-[as-item]: ../../../../crates/daemon/src/historian_chunk.rs#L40
-[trunc-call]: ../../../../crates/daemon/src/historian_chunk.rs#L693
-[trunc]: ../../../../crates/daemon/src/historian_chunk.rs#L744
+[snap-build]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L418-L430
+[as-item]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L40
+[trunc-call]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L693
+[trunc]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L744
 [boundary-view]: ../../../../crates/daemon/src/lib.rs#L17556-L17606
 [construction-corpus]: ../../../../crates/daemon/src/lib.rs#L18499
 [firing-capture]: ../../../../crates/daemon/src/lib.rs#L25527
-[fp]: ../../../../crates/daemon/src/historian.rs#L152
+[fp]: ../../../../crates/daemon/src/history_summarizer.rs#L152
 [fp-field]: ../../../../crates/memory-store/src/lib.rs#L673
-[fp-verify]: ../../../../crates/daemon/src/historian.rs#L326
-[fp-predicate]: ../../../../crates/daemon/src/historian.rs#L407-L417
-[diff-header]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L1-L11
-[diff-ref]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
-[cap]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L31-L34
-[parse]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L125
-[vixie]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L152
-[stepper]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L166
-[valid]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L208
-[occurrence]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L216
-[note-cap]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L236-L239
-[sched-due]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L454
+[fp-verify]: ../../../../crates/daemon/src/history_summarizer.rs#L326
+[fp-predicate]: ../../../../crates/daemon/src/history_summarizer.rs#L407-L417
+[diff-header]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L1-L11
+[diff-ref]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L13-L58
+[cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
+[parse]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L125
+[vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L152
+[stepper]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L166
+[valid]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L208
+[occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L216
+[note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L236-L239
+[sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L454
 [sched-default]: ../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../crates/daemon/src/config.rs#L881-L895
 [eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4848
@@ -3022,25 +3017,11 @@ evaluation of this area and its disposition are recorded in
 [pb-tls]: ../../../../crates/host-runtime/src/panic_boundary.rs#L11-L13
 [pb-polling]: ../../../../crates/host-runtime/src/panic_boundary.rs#L30
 [pb-hook]: ../../../../crates/host-runtime/src/panic_boundary.rs#L36-L50
-[pb-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52-L55
-[pb-async]: ../../../../crates/host-runtime/src/panic_boundary.rs#L60-L72
 [blocking-doc]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L460-L461
 [blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
-[blk-commit-preview]: ../../../../crates/daemon/src/kernel_routes/commit.rs#L1013
-[blk-commit-run]: ../../../../crates/daemon/src/kernel_routes/commit.rs#L1038
-[blk-egress]: ../../../../crates/daemon/src/kernel_routes/egress.rs#L201
-[blk-eligibility]: ../../../../crates/daemon/src/kernel_routes/eligibility.rs#L346
-[blk-ingest-decode]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L722
-[blk-ingest-finish]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L797
-[blk-read-gate]: ../../../../crates/daemon/src/kernel_routes/read.rs#L291
-[blk-read-rows]: ../../../../crates/daemon/src/kernel_routes/read.rs#L311
-[spawn-health]: ../../../../crates/daemon/src/kernel_routes/health.rs#L224
 [spawn-kernel-open]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
 [spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L4097-L4105
-[tl-test]: ../../../../crates/daemon/src/transform.rs#L495-L498
-[t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
-[t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L643-L673
 
 [pass-drain]: ../../../../crates/daemon/src/lib.rs#L8733-L8737
 [due-predicate]: ../../../../crates/memory-store/src/lib.rs#L11631-L11635
@@ -3050,13 +3031,13 @@ evaluation of this area and its disposition are recorded in
 [t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38750
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20682
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L21058
-[sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L281
-[sched-due-projects]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L302
-[sched-idle]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L72
-[sched-scripted]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L536
-[sched-fixture]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L626
-[sched-clock]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L462
-[t-sched-cron]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L721
+[sched-tick]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L281
+[sched-due-projects]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L302
+[sched-idle]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L72
+[sched-scripted]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L536
+[sched-fixture]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L626
+[sched-clock]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L462
+[t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L721
 [sched-projects]: ../../../../crates/daemon/src/lib.rs#L14662
 [sched-authority]: ../../../../crates/daemon/src/lib.rs#L14681-L14686
 [sched-filter]: ../../../../crates/daemon/src/lib.rs#L14698-L14711

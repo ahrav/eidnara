@@ -249,7 +249,7 @@ pub struct ReceiveLease<'lease> {
     spans: [Option<LeaseSpan<'lease>>; 2],
     span_count: u8,
     body_len: usize,
-    wire_header: [u8; crate::descriptor::WIRE_V2_HEADER_BYTES],
+    wire_header: [u8; crate::descriptor::WIRE_V3_HEADER_BYTES],
     identity: ReleaseIdentity,
     sink: &'lease dyn ReleaseSink,
     released: bool,
@@ -263,7 +263,7 @@ impl<'lease> ReceiveLease<'lease> {
         spans: [Option<LeaseSpan<'lease>>; 2],
         span_count: u8,
         body_len: usize,
-        wire_header: [u8; crate::descriptor::WIRE_V2_HEADER_BYTES],
+        wire_header: [u8; crate::descriptor::WIRE_V3_HEADER_BYTES],
         identity: ReleaseIdentity,
         sink: &'lease dyn ReleaseSink,
     ) -> Result<Self, LeaseError> {
@@ -310,7 +310,7 @@ impl<'lease> ReceiveLease<'lease> {
     }
 
     /// Header the producer committed with the body.
-    pub const fn wire_header(&self) -> [u8; crate::descriptor::WIRE_V2_HEADER_BYTES] {
+    pub const fn wire_header(&self) -> [u8; crate::descriptor::WIRE_V3_HEADER_BYTES] {
         self.wire_header
     }
 
@@ -435,7 +435,7 @@ mod tests {
             [Some(span), None],
             1,
             bytes.len(),
-            [0; crate::descriptor::WIRE_V2_HEADER_BYTES],
+            [0; crate::descriptor::WIRE_V3_HEADER_BYTES],
             identity,
             log,
         )

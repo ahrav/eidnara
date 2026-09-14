@@ -29,7 +29,7 @@ function looksLikeContinuationMarker(value: unknown): boolean {
 }
 
 export interface ModuleNormalizationRecord {
-    kind: "tag_prefix" | "ctx_search_hint" | "summary_message";
+    kind: "tag_prefix" | "eidnara_search_hint" | "summary_message";
     message_id: string | null;
     part_index: number;
     field: string;
@@ -1137,7 +1137,7 @@ export type ModuleMethod =
     | "session.wrapup"
     | "todo_state.set"
     | "agent_drops.append"
-    | "ctx_note"
+    | "eidnara_note"
     | "note.evaluation.register"
     | "note.evaluation.heartbeat"
     | "note.evaluation.unregister"

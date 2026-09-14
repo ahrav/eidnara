@@ -5,12 +5,12 @@ import { parseIncidentCatalog } from "../contract";
 import { E2E_ROOT } from "../evidence";
 import * as regressions from "./source-linked-regressions";
 import {
-    type AgedCtxReduceObservation,
+    type AgedEidnaraReduceObservation,
     FIRST_RENDER_A1_CHECKS,
     FIRST_RENDER_A3_CHECKS,
     type FirstRenderDeferObservation,
     failedCheckIds,
-    hasCtxReducePair,
+    hasEidnaraReducePair,
     publishedHistoryCovers,
     THINKING_DROPPED_SHELL_CHECKS,
     THINKING_IMAGE_SURVIVAL_CHECKS,
@@ -18,7 +18,7 @@ import {
     type ThinkingDroppedShellObservation,
     type ThinkingImageSurvivalObservation,
     type ThinkingNudgeAnchorObservation,
-    verifyAgedCtxReduceSurvival,
+    verifyAgedEidnaraReduceSurvival,
     verifyFirstRenderPureDeferStability,
     verifyThinkingDroppedShell,
     verifyThinkingImageSurvival,
@@ -45,14 +45,14 @@ function a1Observation(
 }
 
 function a3Observation(
-    overrides: Partial<AgedCtxReduceObservation> = {},
-): AgedCtxReduceObservation {
+    overrides: Partial<AgedEidnaraReduceObservation> = {},
+): AgedEidnaraReduceObservation {
     return {
         mainRequestCount: 9,
         sawReduceOnWire: true,
         bustCount: 0,
         bustReport: "",
-        finalWireHasCtxReduce: true,
+        finalWireHasEidnaraReduce: true,
         uncachedTransitionCount: 0,
         transformRenderedRequestCount: 9,
         rustPassCount: 9,
@@ -150,7 +150,9 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
             ),
         ).toEqual(["check-a1-pure-defer"]);
         expect(
-            failedCheckIds(verifyAgedCtxReduceSurvival(a3Observation({ deferredPassCount: 8 }))),
+            failedCheckIds(
+                verifyAgedEidnaraReduceSurvival(a3Observation({ deferredPassCount: 8 })),
+            ),
         ).toEqual(["check-a3-pure-defer"]);
         // Internal-agent passes can pad the pass counts; a main request without the tag overlay still fails.
         expect(
@@ -177,17 +179,17 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
         ).toBe(false);
         expect(
             failedCheckIds(
-                verifyAgedCtxReduceSurvival(a3Observation({ uncachedTransitionCount: 1 })),
+                verifyAgedEidnaraReduceSurvival(a3Observation({ uncachedTransitionCount: 1 })),
             ),
         ).toEqual(["check-a3-cached-transitions"]);
         expect(
             failedCheckIds(
-                verifyAgedCtxReduceSurvival(a3Observation({ transformServedPassCount: 8 })),
+                verifyAgedEidnaraReduceSurvival(a3Observation({ transformServedPassCount: 8 })),
             ),
         ).toEqual(["check-a3-transform-served"]);
         expect(
             failedCheckIds(
-                verifyAgedCtxReduceSurvival(
+                verifyAgedEidnaraReduceSurvival(
                     a3Observation({
                         rustPassCount: 8,
                         transformServedPassCount: 8,
@@ -198,19 +200,21 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
         ).toEqual(["check-a3-transform-served"]);
     });
 
-    it("passes a surviving aged ctx_reduce arc and emits the catalog check ids", () => {
-        const result = verifyAgedCtxReduceSurvival(a3Observation());
+    it("passes a surviving aged eidnara_reduce arc and emits the catalog check ids", () => {
+        const result = verifyAgedEidnaraReduceSurvival(a3Observation());
         expect(result.verdict).toBe("pass");
         expect(result.checks.map((check) => check.id)).toEqual([...FIRST_RENDER_A3_CHECKS]);
     });
 
-    it("rejects a tool declaration after the emitted ctx_reduce pair vanished", () => {
-        const callId = "toolu_incident_a3_ctx_reduce";
+    it("rejects a tool declaration after the emitted eidnara_reduce pair vanished", () => {
+        const callId = "toolu_incident_a3_eidnara_reduce";
         const declarationOnly = {
-            tools: [{ name: "ctx_reduce" }],
+            tools: [{ name: "eidnara_reduce" }],
             messages: [{ role: "user", content: "continue" }],
         };
-        expect(hasCtxReducePair(declarationOnly, callId, "99999", "ctx_reduce")).toBe(false);
+        expect(hasEidnaraReducePair(declarationOnly, callId, "99999", "eidnara_reduce")).toBe(
+            false,
+        );
         const pairWithDrop = (drop: unknown) => ({
             ...declarationOnly,
             messages: [
@@ -220,7 +224,7 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
                         {
                             type: "tool_use",
                             id: callId,
-                            name: "ctx_reduce",
+                            name: "eidnara_reduce",
                             input: drop === undefined ? {} : { drop },
                         },
                     ],
@@ -231,34 +235,47 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
                 },
             ],
         });
-        expect(hasCtxReducePair(pairWithDrop("99999"), callId, "99999", "ctx_reduce")).toBe(true);
+        expect(hasEidnaraReducePair(pairWithDrop("99999"), callId, "99999", "eidnara_reduce")).toBe(
+            true,
+        );
         // A pair whose input was rewritten or stripped is not the retained fixture payload.
-        expect(hasCtxReducePair(pairWithDrop("1"), callId, "99999", "ctx_reduce")).toBe(false);
-        expect(hasCtxReducePair(pairWithDrop(undefined), callId, "99999", "ctx_reduce")).toBe(
+        expect(hasEidnaraReducePair(pairWithDrop("1"), callId, "99999", "eidnara_reduce")).toBe(
             false,
         );
+        expect(
+            hasEidnaraReducePair(pairWithDrop(undefined), callId, "99999", "eidnara_reduce"),
+        ).toBe(false);
         // A rewritten name that still contains the canonical name is not the emitted tool.
         expect(
-            hasCtxReducePair(pairWithDrop("99999"), callId, "99999", "ctx_reduce_corrupted"),
+            hasEidnaraReducePair(
+                pairWithDrop("99999"),
+                callId,
+                "99999",
+                "eidnara_reduce_corrupted",
+            ),
         ).toBe(false);
     });
 
-    it("rejects a vanished ctx_reduce call, a bust, and a never-on-wire call", () => {
+    it("rejects a vanished eidnara_reduce call, a bust, and a never-on-wire call", () => {
         expect(
             failedCheckIds(
-                verifyAgedCtxReduceSurvival(a3Observation({ finalWireHasCtxReduce: false })),
+                verifyAgedEidnaraReduceSurvival(
+                    a3Observation({ finalWireHasEidnaraReduce: false }),
+                ),
             ),
         ).toEqual(["check-a3-reduce-retained-final-wire"]);
         expect(
-            failedCheckIds(verifyAgedCtxReduceSurvival(a3Observation({ bustCount: 2 }))),
+            failedCheckIds(verifyAgedEidnaraReduceSurvival(a3Observation({ bustCount: 2 }))),
         ).toEqual(["check-a3-zero-prefix-busts"]);
         expect(
-            failedCheckIds(verifyAgedCtxReduceSurvival(a3Observation({ sawReduceOnWire: false }))),
+            failedCheckIds(
+                verifyAgedEidnaraReduceSurvival(a3Observation({ sawReduceOnWire: false })),
+            ),
         ).toEqual(["check-a3-reduce-on-wire"]);
-        // Eight prompts produce nine main requests because the ctx_reduce tool_use adds a continuation.
+        // Eight prompts produce nine main requests because the eidnara_reduce tool_use adds a continuation.
         expect(
             failedCheckIds(
-                verifyAgedCtxReduceSurvival(
+                verifyAgedEidnaraReduceSurvival(
                     a3Observation({ mainRequestCount: 8, transformRenderedRequestCount: 8 }),
                 ),
             ),

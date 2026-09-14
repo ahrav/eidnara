@@ -10,19 +10,19 @@ use std::ops::Range;
 
 use crate::arena::MAX_FRAME_BYTES;
 use crate::descriptor::{
-    DESCRIPTOR_SCHEMA_VERSION, DescriptorError, Incarnation, ReleaseIdentity, WIRE_V2_HEADER_BYTES,
+    DESCRIPTOR_SCHEMA_VERSION, DescriptorError, Incarnation, ReleaseIdentity, WIRE_V3_HEADER_BYTES,
     check_wire_header,
 };
 
 /// Bytes ahead of every sample body: schema (2), wire header (21), incarnation (16),
 /// lane (4), sequence (8), body length (8). All integers are little-endian.
-pub const SAMPLE_PREFIX_BYTES: usize = 2 + WIRE_V2_HEADER_BYTES + 16 + 4 + 8 + 8;
+pub const SAMPLE_PREFIX_BYTES: usize = 2 + WIRE_V3_HEADER_BYTES + 16 + 4 + 8 + 8;
 
 /// The fixed prefix of a sample as read from the peer, before validation.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SamplePrefix {
     schema: u16,
-    wire_header: [u8; WIRE_V2_HEADER_BYTES],
+    wire_header: [u8; WIRE_V3_HEADER_BYTES],
     identity: ReleaseIdentity,
     body_len: u64,
 }
@@ -36,9 +36,9 @@ impl SamplePrefix {
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or(DescriptorError::Truncated)?;
         let schema = u16::from_le_bytes([prefix[0], prefix[1]]);
-        let mut wire_header = [0u8; WIRE_V2_HEADER_BYTES];
-        wire_header.copy_from_slice(&prefix[2..2 + WIRE_V2_HEADER_BYTES]);
-        let identity_offset = 2 + WIRE_V2_HEADER_BYTES;
+        let mut wire_header = [0u8; WIRE_V3_HEADER_BYTES];
+        wire_header.copy_from_slice(&prefix[2..2 + WIRE_V3_HEADER_BYTES]);
+        let identity_offset = 2 + WIRE_V3_HEADER_BYTES;
         let mut incarnation = [0u8; 16];
         incarnation.copy_from_slice(&prefix[identity_offset..identity_offset + 16]);
         let lane_offset = identity_offset + 16;

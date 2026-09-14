@@ -41,5 +41,5 @@ pub mod profile;
 pub mod setup_auth;
 
 pub use arena::{MAX_FRAME_BYTES, MIN_ARENA_BYTES};
-pub use descriptor::{Incarnation, ReleaseIdentity, WIRE_V2_HEADER_BYTES};
+pub use descriptor::{Incarnation, ReleaseIdentity, WIRE_V3_HEADER_BYTES};
 pub use lease::{LeaseSpan, ReceiveLease};

@@ -74,7 +74,7 @@ export interface SpawnOptions {
     /** Reuse an isolated env so direct host starts before OpenCode and survives serve restarts. */
     existingEnv?: IsolatedEnv;
     /**
-     * User-tier host connection file. When set, the user config carries `subc.connection_file`
+     * User-tier host connection file. When set, the user config carries `host.connection_file`
      * and `transform_mode: "rust"`, and the project config selects `transform_mode: "rust"`.
      */
     userHostConnectionFile?: string;
@@ -203,16 +203,16 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
         $schema: "https://raw.githubusercontent.com/ahrav/eidnara/main/assets/eidnara.schema.json",
         execute_threshold_percentage: 40,
         history_budget_percentage: 0.15,
-        sidekick: { disable: true },
+        context_researcher: { disable: true },
         ...(eidnaraConfig ?? {}),
     };
     if (opts.userHostConnectionFile) {
         // The config loader activates rust only with user-tier consent: a user-tier
-        // `transform_mode: "rust"` or a user-tier `subc.connection_file`. Both are written so
+        // `transform_mode: "rust"` or a user-tier `host.connection_file`. Both are written so
         // the project selection below cannot be downgraded to ts by the consent check.
         Object.assign(eidnara, {
             transform_mode: "rust",
-            subc: { connection_file: opts.userHostConnectionFile },
+            host: { connection_file: opts.userHostConnectionFile },
         });
     }
 
@@ -459,8 +459,8 @@ function isInheritableEnvKey(key: string): boolean {
     // The harness clears `EIDNARA_MODULE_ID` and `EIDNARA_LAUNCH_NONCE` because an inherited supervisor identity makes the plugin send a nonce the hermetic host rejects.
     // The hermetic host rejects an inherited supervisor identity whose nonce does not match a supervised launch.
     if (key === "EIDNARA_MODULE_ID" || key === "EIDNARA_LAUNCH_NONCE") return false;
-    // `EIDNARA_BROCA_CHILD=1` makes the bundled plugin return before installing any hook, so an inherited value would run the suite without the Rust transform.
-    if (key === "EIDNARA_BROCA_CHILD") return false;
+    // `EIDNARA_MODEL_EXECUTION_CHILD=1` makes the bundled plugin return before installing any hook, so an inherited value would run the suite without the Rust transform.
+    if (key === "EIDNARA_MODEL_EXECUTION_CHILD") return false;
     // These point OpenCode at a database or configuration outside the isolated `env`; the child must read and mutate only the state this harness provisions.
     if (key === "OPENCODE_DB" || key === "OPENCODE_CONFIG" || key === "OPENCODE_CONFIG_CONTENT") {
         return false;

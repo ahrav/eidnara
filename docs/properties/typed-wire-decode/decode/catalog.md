@@ -69,7 +69,7 @@ adds precise acceptance and ownership witnesses to these canonical obligations:
 | [Independent payload pools](../../independent-payload-pools/catalog.md#private-decode-input-stability) | Worktree-only catalog; adjacent transport/private-input ownership, not evidence that its replacement exists. |
 | [Transform edit responses TE08](../../transform-edit-responses/catalog.md#cached-canonical-prefix-preserves-exact-ingress) | Worktree-only catalog; exact captured CK ingress, including unknown fields, conflicts with accepted R3. This spec's owner preserves R3 and records the integration owner's reconciliation before combining the work. |
 
-Identity hashes, historian migration, meter constants, resident budgets, and
+Identity hashes, history_summarizer migration, meter constants, resident budgets, and
 performance measurements belong to separate agents. They receive named
 handoffs rather than new records here. No tests, builds, or benchmarks run.
 
@@ -139,7 +139,7 @@ conversion supplies its field validation. No envelope-tree absence guard exists.
    That reconciliation remains open; the other catalog is not edited here.
 
 The host contract keeps routed bodies opaque (`docs/host-wire-protocol.md:337`).
-Its strict duplicate handling for channel 0 and Synapse is not a mandate to
+Its strict duplicate handling for channel 0 and LocalEmbeddings is not a mandate to
 reject duplicate CK fields. No transport fallback or protocol version change
 is proposed by this catalog.
 
@@ -195,6 +195,7 @@ prior shape.
 Impact: The retained-copy cost remains and a second serialization authority
 survives; R1/KTD1 are unmet.
 Open questions:
+
 - What final source-bound check accompanies the accounting agent's allocation
   witness without treating an allocation count as proof of representation?
 
@@ -234,6 +235,7 @@ entry outcomes; both unaudited, with nested CK witnesses missing.
 Impact: A previously valid request fails, an invalid request dispatches, or
 the same body receives a different typed result.
 Open questions:
+
 - Does dropping CK envelope re-reads change raw-value-token acceptance under
   discarded fields? The discriminating baseline/final run remains required;
   any change stops implementation for a report rather than an exception.
@@ -274,6 +276,7 @@ codec payload checks are in existing-checks.md.
 Impact: Tool arguments, opaque content, native metadata, or media references
 disappear, or R3 silently remains unimplemented.
 Open questions:
+
 - Does every kept-field witness distinguish explicit field null from a null
   nested inside a Value?
 - Which unlisted sender shapes rely on discarded typed-envelope extensions?
@@ -312,6 +315,7 @@ ignored and needs generated input.
 Impact: Valid pages fail digest validation, altered pages pass, or unrelated
 routes lose data or change dispatch.
 Open questions:
+
 - Which frozen raw-page vector proves unknown CK data is still hashed before
   R3 drops it?
 
@@ -350,6 +354,7 @@ lib.rs:22886-23004; all unaudited, with byte-buffer-drop witness missing.
 Impact: Buffer lifetime constrains request retention, prefix sharing is lost,
 or surviving cached input becomes unusable.
 Open questions:
+
 - Can the final test distinguish projection-prefix reuse from ready-snapshot
   fallback after both relevant cache entries are evicted?
 
@@ -387,6 +392,7 @@ expectations require explicit revision.
 Impact: A transformation is silently hidden, a cached prefix is changed
 through an alias, or equality depends on decode history rather than typed state.
 Open questions:
+
 - Does the mutation matrix cover every public shell field and block extras
   without relying on removed mark_modified calls?
 - Identity/equality handling of signed zero remains with the identity agent;
@@ -431,6 +437,7 @@ unaudited. None combines all new marker preconditions.
 Impact: Safety comparisons pass without reaching the representation change's
 principal fallback path.
 Open questions:
+
 - Will explicit gate/typed-attempt observations use the existing module-local
   seam or a narrowly extended direct-host fixture?
 - An unfired marker needs investigation of corpus construction versus changed

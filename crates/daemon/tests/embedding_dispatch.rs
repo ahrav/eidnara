@@ -1,4 +1,4 @@
-//! Durable embedding dispatch against a real kernel, a real projection, and an in-process Synapse component.
+//! Durable embedding dispatch against a real kernel, a real projection, and an in-process LocalEmbeddings component.
 //! Pending rows are the only queue: they reach the job table once, their results are polled rather than re-admitted, a host restart returns admitted work to pending with its attempts kept, every named disposition survives reopen without resuming on its own, and the attempt ledger moves with the state it accounts for.
 
 mod support;
@@ -17,10 +17,10 @@ use daemon::embedding_dispatch::{
 use daemon::embedding_publication::{EmbeddingPublisher, Publication};
 use daemon::search_projection::SearchProjection;
 use daemon::search_writer::QuarantineKind;
-use host_runtime::synapse::inference::InferenceError;
-use host_runtime::synapse::{
-    EmbeddingEngine, LaneInfo, LaneUnavailableState, PollOutcome, SubmitOutcome, SynapseComponent,
-    SynapseLimits,
+use host_runtime::local_embeddings::inference::InferenceError;
+use host_runtime::local_embeddings::{
+    EmbeddingEngine, LaneInfo, LaneUnavailableState, LocalEmbeddingsComponent,
+    LocalEmbeddingsLimits, PollOutcome, SubmitOutcome,
 };
 use kernel::{KernelStore, MAX_ELIGIBILITY_CANDIDATES, ProjectScope};
 use retrieval::batch::{VectorGeneration, register_generation};
@@ -70,14 +70,14 @@ fn a_gate_owner_unwinding_releases_the_inference_worker() {
 }
 
 fn wait_for_host_result(
-    synapse: &SynapseComponent,
+    local_embeddings: &LocalEmbeddingsComponent,
     host_job: &str,
     item: &str,
     text: &str,
 ) -> PollOutcome {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let result = synapse.poll_admitted(&lane(FINGERPRINT), host_job, item, text);
+        let result = local_embeddings.poll_admitted(&lane(FINGERPRINT), host_job, item, text);
         if !matches!(result, PollOutcome::Pending { .. }) {
             return result;
         }
@@ -176,13 +176,13 @@ fn insert_wrong_scope_jobs(data_home: &Path, occurrence_id: &str, count: usize) 
 fn pass(
     corpus: &Corpus,
     projection: &SearchProjection,
-    synapse: &SynapseComponent,
+    local_embeddings: &LocalEmbeddingsComponent,
     bounds: &DispatchBounds,
     now: i64,
 ) -> (Option<Blocked>, Vec<DispatchEvent>) {
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut events = Vec::new();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, projection, synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, projection, local_embeddings);
     let end = tokio::task::block_in_place(|| {
         dispatcher
             .run_pass(
@@ -287,9 +287,9 @@ async fn payload_corruption_quarantines_before_tokenization_or_inference() {
         .execute("UPDATE payloads SET bytes=?1", [b"jello".as_slice()])
         .unwrap();
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let result = dispatcher.run_pass(
         eligibility(&project),
         &bounds(),
@@ -303,7 +303,7 @@ async fn payload_corruption_quarantines_before_tokenization_or_inference() {
     assert_eq!(quarantine.kind, QuarantineKind::Integrity);
     assert_eq!(projection.quarantine(), Some(quarantine.clone()));
 
-    let mut fresh = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut fresh = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let again = fresh.run_pass(
         eligibility(&project),
         &bounds(),
@@ -329,9 +329,9 @@ async fn quarantine_entered_after_binding_stops_dispatch_before_submission_or_ch
     let occurrence = occurrence_of(&rows, &object);
     let before = ledger(dir.path(), occurrence);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let mut entered = None;
 
     let result = dispatcher.run_pass(
@@ -365,12 +365,12 @@ async fn publication_search_deadline_preserves_admission_without_recharging() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
     let bounds = bounds();
     // The budget's deadline is the publication guard's deadline, so a held write lock blocks within it.
     let short_guard = budget(Duration::from_millis(300));
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let mut events = Vec::new();
     let mut at_admission = None;
     let mut write_lock = None;
@@ -443,12 +443,12 @@ fn assert_lane_swap_blocked(after_admission: bool, replacement_max_tokens: u32) 
     let engine_a = TestEngine::new();
     let engine_b = TestEngine::new();
     let gate = GateGuard(engine_a.block_calls());
-    let synapse = component(&engine_a, SynapseLimits::default());
+    let local_embeddings = component(&engine_a, LocalEmbeddingsLimits::default());
     let before = ledger(dir.path(), occurrence);
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut events = Vec::new();
     let mut at_swap = None;
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let end = dispatcher
         .run_pass(
             eligibility(&project),
@@ -464,7 +464,7 @@ fn assert_lane_swap_blocked(after_admission: bool, replacement_max_tokens: u32) 
                     replacement.table_epoch = 2;
                     replacement.max_tokens = replacement_max_tokens;
                     at_swap = Some(ledger(dir.path(), occurrence));
-                    synapse
+                    local_embeddings
                         .replace_ready_with_engine_for_test(
                             replacement,
                             Arc::clone(&engine_b) as Arc<dyn EmbeddingEngine>,
@@ -546,10 +546,10 @@ async fn pending_rows_reach_guarded_completion_through_one_job_table() {
         .collect();
     let (projection, rows) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let tip = corpus.tip();
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
     assert_eq!(end, None);
     assert_eq!(events[0], DispatchEvent::Bound(BindingOutcome::Bound));
     let admitted = admitted(&events);
@@ -595,12 +595,12 @@ async fn pending_rows_reach_guarded_completion_through_one_job_table() {
             ledger
                 .host_job_id
                 .as_deref()
-                .is_some_and(|id| id.starts_with(synapse.host_incarnation())),
+                .is_some_and(|id| id.starts_with(local_embeddings.host_incarnation())),
             "{ledger:?}"
         );
         assert_eq!(
             ledger.host_incarnation.as_deref(),
-            Some(synapse.host_incarnation()),
+            Some(local_embeddings.host_incarnation()),
             "the row records the host that holds it"
         );
     }
@@ -609,7 +609,7 @@ async fn pending_rows_reach_guarded_completion_through_one_job_table() {
         .read(|conn| retrieval::read_identity(conn))
         .unwrap()
         .unwrap();
-    let bound = lane_binding(&lane(FINGERPRINT), synapse.host_incarnation());
+    let bound = lane_binding(&lane(FINGERPRINT), local_embeddings.host_incarnation());
     assert_eq!(
         (
             identity.embedding_model,
@@ -626,7 +626,7 @@ async fn pending_rows_reach_guarded_completion_through_one_job_table() {
     );
 
     // A second pass finds nothing eligible and touches neither the engine nor the ledgers.
-    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
     assert_eq!(end, None);
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
     assert_eq!(engine.calls(), 3);
@@ -643,13 +643,13 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
     let gate = GateGuard(engine.block_calls());
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let short = DispatchBounds {
         result_wait: Duration::from_millis(50),
         ..bounds()
     };
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &short, NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &short, NOW);
     assert_eq!(end, None);
     assert_eq!(admitted(&events).len(), 1);
     assert!(published(&events).is_empty());
@@ -661,14 +661,14 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
 
     // Duplicate passes poll the held job under its stored identity; they neither admit nor charge again.
     for _ in 0..2 {
-        let (_, events) = pass(&corpus, &projection, &synapse, &short, NOW);
+        let (_, events) = pass(&corpus, &projection, &local_embeddings, &short, NOW);
         assert!(admitted(&events).is_empty(), "{events:?}");
         assert_eq!(ledger(dir.path(), occurrence).attempts, 1);
     }
     assert_eq!(engine.calls(), 1);
 
     TestEngine::release(&gate.0);
-    let (_, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
     assert_eq!(
         published(&events),
         vec![(held.job_id.clone(), Publication::Embedded)]
@@ -698,7 +698,7 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
     let gate = GateGuard(engine.block_calls());
-    let first = component(&engine, SynapseLimits::default());
+    let first = component(&engine, LocalEmbeddingsLimits::default());
     let short = DispatchBounds {
         result_wait: Duration::from_millis(50),
         ..bounds()
@@ -728,10 +728,10 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
         },
     ];
     for wrong in wrong_lanes {
-        let wrong = SynapseComponent::ready_with_engine(
+        let wrong = LocalEmbeddingsComponent::ready_with_engine(
             wrong,
             Arc::clone(&engine) as Arc<dyn EmbeddingEngine>,
-            SynapseLimits::default(),
+            LocalEmbeddingsLimits::default(),
         )
         .unwrap();
         let (end, events) = pass(&corpus, &projection, &wrong, &short, NOW);
@@ -742,7 +742,7 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
     assert_eq!(held.host_incarnation.as_deref(), Some(first_host.as_str()));
 
     // The old host's result can never satisfy the new incarnation: its job identifier polls as restarted there.
-    let second = component(&engine, SynapseLimits::default());
+    let second = component(&engine, LocalEmbeddingsLimits::default());
     assert!(matches!(
         second.poll_admitted(
             &lane(FINGERPRINT),
@@ -815,9 +815,9 @@ async fn over_limit_input_stops_without_inference_and_keeps_lexical_state() {
         .unwrap();
     assert_eq!(raw_jobs, 0, "raw tool spans queue no dense work");
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
     assert_eq!(end, None);
     let over_ledger = ledger(dir.path(), occurrence_of(&rows, &over));
     assert_eq!(
@@ -854,7 +854,7 @@ async fn over_limit_input_stops_without_inference_and_keeps_lexical_state() {
         projection,
         &[occurrence_of(&rows, &over), occurrence_of(&rows, &fine)],
     );
-    let (_, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
     assert_eq!(engine.calls(), 1);
 }
@@ -866,7 +866,7 @@ type Scenario = (
     SearchProjection,
     String,
     Arc<TestEngine>,
-    SynapseComponent,
+    LocalEmbeddingsComponent,
     Vec<DispatchEvent>,
     Option<Blocked>,
 );
@@ -874,7 +874,7 @@ type Scenario = (
 /// One disposition scenario: a fresh corpus with one message, the engine prepared by `arrange`, one pass, then reopen and a second pass that must resume nothing on its own.
 fn scenario(
     text: &str,
-    limits: SynapseLimits,
+    limits: LocalEmbeddingsLimits,
     bounds: DispatchBounds,
     arrange: impl FnOnce(&Corpus, &SearchProjection, &Arc<TestEngine>, &str, &str),
 ) -> Scenario {
@@ -886,10 +886,17 @@ fn scenario(
     let occurrence = occurrence_of(&rows, &object).to_string();
     let engine = TestEngine::new();
     arrange(&corpus, &projection, &engine, &object, &occurrence);
-    let synapse = component(&engine, limits);
-    let (end, events) = pass(&corpus, &projection, &synapse, &bounds, NOW);
+    let local_embeddings = component(&engine, limits);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds, NOW);
     (
-        dir, corpus, projection, occurrence, engine, synapse, events, end,
+        dir,
+        corpus,
+        projection,
+        occurrence,
+        engine,
+        local_embeddings,
+        events,
+        end,
     )
 }
 
@@ -899,9 +906,9 @@ async fn transient_failure_retries_under_the_same_episode() {
     let standard = bounds();
 
     // Transient execution failure: pending again under the same episode, one attempt charged, eligible only after `retry_after`.
-    let (dir, corpus, projection, occurrence, _, synapse, events, end) = scenario(
+    let (dir, corpus, projection, occurrence, _, local_embeddings, events, end) = scenario(
         "retry me",
-        SynapseLimits::default(),
+        LocalEmbeddingsLimits::default(),
         standard,
         |_, _, engine, _, _| {
             engine.fail_next(InferenceError::Execution("transient".to_owned()));
@@ -920,9 +927,9 @@ async fn transient_failure_retries_under_the_same_episode() {
     assert_eq!(job.last_failure_kind.as_deref(), Some("execution_failure"));
     let (projection, ledgers) = reopen(dir.path(), projection, &[&occurrence]);
     let job = ledgers.into_iter().next().unwrap();
-    let (_, events) = pass(&corpus, &projection, &synapse, &standard, NOW + 9);
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &standard, NOW + 9);
     assert!(admitted(&events).is_empty(), "not yet eligible: {events:?}");
-    let (_, events) = pass(&corpus, &projection, &synapse, &standard, NOW + 10);
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &standard, NOW + 10);
     assert_eq!(admitted(&events), vec![(job.job_id.clone(), 2)]);
     assert_eq!(published(&events).len(), 1);
     let done = ledger(dir.path(), &occurrence);
@@ -930,7 +937,7 @@ async fn transient_failure_retries_under_the_same_episode() {
         (done.state.as_str(), done.attempts, done.episode),
         ("embedded", 2, job.episode)
     );
-    drop((synapse, projection, corpus, dir));
+    drop((local_embeddings, projection, corpus, dir));
 }
 
 /// AC5: terminal dispositions.
@@ -939,9 +946,9 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     let standard = bounds();
 
     // An artifact fault is the lane's disposition, not the input's: the lane goes down, the pass blocks, and the attempted row keeps its charge as admitted work for the next serving host to reconcile.
-    let (dir, corpus, projection, occurrence, engine, synapse, events, end) = scenario(
+    let (dir, corpus, projection, occurrence, engine, local_embeddings, events, end) = scenario(
         "artifact",
-        SynapseLimits::default(),
+        LocalEmbeddingsLimits::default(),
         standard,
         |_, _, engine, _, _| {
             engine.fail_next(InferenceError::Artifact("bad artifact".to_owned()));
@@ -956,10 +963,16 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         ("admitted", 1, true)
     );
     let (projection, _) = reopen(dir.path(), projection, &[&occurrence]);
-    let (end, events) = pass(&corpus, &projection, &synapse, &standard, NOW + DAY_MS / 2);
+    let (end, events) = pass(
+        &corpus,
+        &projection,
+        &local_embeddings,
+        &standard,
+        NOW + DAY_MS / 2,
+    );
     assert!(matches!(end, Some(Blocked::LaneUnavailable(_))), "{end:?}");
     assert!(events.is_empty());
-    let fresh = component(&engine, SynapseLimits::default());
+    let fresh = component(&engine, LocalEmbeddingsLimits::default());
     let (_, events) = pass(&corpus, &projection, &fresh, &standard, NOW + DAY_MS / 2);
     assert_eq!(
         events[0],
@@ -971,12 +984,12 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         vec![(job.job_id.clone(), Publication::Embedded)]
     );
     assert_eq!(engine.calls(), 2);
-    drop((synapse, fresh, projection, corpus, dir));
+    drop((local_embeddings, fresh, projection, corpus, dir));
 
     // A persistently malformed vector fails every lane it meets; each incarnation charges one attempt until the episode is exhausted, and nothing is ever Embedded.
-    let (dir, corpus, projection, occurrence, engine, synapse, events, end) = scenario(
+    let (dir, corpus, projection, occurrence, engine, local_embeddings, events, end) = scenario(
         "malformed",
-        SynapseLimits::default(),
+        LocalEmbeddingsLimits::default(),
         standard,
         |_, _, engine, _, _| {
             engine.return_malformed();
@@ -989,7 +1002,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     let job = ledger(dir.path(), &occurrence);
     assert_eq!(admitted(&events), vec![(job.job_id.clone(), 1)]);
     for attempt in 2..=3 {
-        let lane = component(&engine, SynapseLimits::default());
+        let lane = component(&engine, LocalEmbeddingsLimits::default());
         let (end, events) = pass(&corpus, &projection, &lane, &standard, NOW);
         assert_eq!(
             end,
@@ -997,7 +1010,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         );
         assert_eq!(admitted(&events), vec![(job.job_id.clone(), attempt)]);
     }
-    let lane = component(&engine, SynapseLimits::default());
+    let lane = component(&engine, LocalEmbeddingsLimits::default());
     let (end, events) = pass(&corpus, &projection, &lane, &standard, NOW);
     assert_eq!(end, None);
     assert_eq!(
@@ -1014,12 +1027,12 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         ("failed", 3, true)
     );
     assert_eq!(engine.calls(), 3);
-    drop((synapse, lane, projection, corpus, dir));
+    drop((local_embeddings, lane, projection, corpus, dir));
 
     // A job queued under a generation the lane does not serve is a model mismatch: obsolete, uncharged, never embedded.
-    let (dir, corpus, projection, occurrence, engine, synapse, events, end) = scenario(
+    let (dir, corpus, projection, occurrence, engine, local_embeddings, events, end) = scenario(
         "wrong generation",
-        SynapseLimits::default(),
+        LocalEmbeddingsLimits::default(),
         standard,
         |_, projection, _, _, occurrence| {
             let other = VectorGeneration {
@@ -1051,14 +1064,14 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     );
     assert_eq!(engine.calls(), 0);
     let (projection, _) = reopen(dir.path(), projection, &[&occurrence]);
-    let (_, events) = pass(&corpus, &projection, &synapse, &standard, NOW);
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &standard, NOW);
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
-    drop((synapse, projection, corpus, dir));
+    drop((local_embeddings, projection, corpus, dir));
 
     // A different durable vector under the same pair is an idempotency conflict.
-    let (dir, corpus, projection, occurrence, _, synapse, events, _) = scenario(
+    let (dir, corpus, projection, occurrence, _, local_embeddings, events, _) = scenario(
         "conflict",
-        SynapseLimits::default(),
+        LocalEmbeddingsLimits::default(),
         standard,
         |_, projection, _, _, occurrence| {
             let other = encode(&TestEngine::vector_for("something else"));
@@ -1080,14 +1093,14 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     );
     assert_eq!(job.state, "failed");
     let (projection, _) = reopen(dir.path(), projection, &[&occurrence]);
-    let (_, events) = pass(&corpus, &projection, &synapse, &standard, NOW);
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &standard, NOW);
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
-    drop((synapse, projection, corpus, dir));
+    drop((local_embeddings, projection, corpus, dir));
 
     // Retired input is obsolete, not embedded, and never resumes.
-    let (dir, corpus, projection, occurrence, engine, synapse, events, _) = scenario(
+    let (dir, corpus, projection, occurrence, engine, local_embeddings, events, _) = scenario(
         "retired",
-        SynapseLimits::default(),
+        LocalEmbeddingsLimits::default(),
         standard,
         |corpus, _, _, object, _| {
             corpus.retire(object);
@@ -1103,15 +1116,15 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         ("obsolete", true)
     );
     let (projection, _) = reopen(dir.path(), projection, &[&occurrence]);
-    let (_, events) = pass(&corpus, &projection, &synapse, &standard, NOW);
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &standard, NOW);
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
     assert_eq!(engine.calls(), 0);
-    drop((synapse, projection, corpus, dir));
+    drop((local_embeddings, projection, corpus, dir));
 
     // An expired episode deadline stops before any charge.
-    let (dir, corpus, projection, occurrence, engine, synapse, events, _) = scenario(
+    let (dir, corpus, projection, occurrence, engine, local_embeddings, events, _) = scenario(
         "late",
-        SynapseLimits::default(),
+        LocalEmbeddingsLimits::default(),
         DispatchBounds {
             grant: grant(3, NOW - 1),
             ..standard
@@ -1125,7 +1138,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     );
     assert_eq!((job.state.as_str(), job.attempts), ("failed", 0));
     assert_eq!(engine.calls(), 0);
-    drop((synapse, projection, corpus, dir));
+    drop((local_embeddings, projection, corpus, dir));
 }
 
 /// AC6: an allowance of one is exhausted by one failure; reopen and a later deadline resume nothing; an explicit authorization opens exactly one new episode, and replaying it grants nothing more. Reopen resets neither deadline nor allowance.
@@ -1135,9 +1148,9 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
         grant: grant(1, NOW + DAY_MS),
         ..bounds()
     };
-    let (dir, corpus, projection, occurrence, engine, synapse, events, _) = scenario(
+    let (dir, corpus, projection, occurrence, engine, local_embeddings, events, _) = scenario(
         "exhaust me",
-        SynapseLimits::default(),
+        LocalEmbeddingsLimits::default(),
         tight,
         |_, _, engine, _, _| {
             engine.fail_next(InferenceError::Execution("transient".to_owned()));
@@ -1162,7 +1175,13 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
         grant: grant(9, NOW + 2 * DAY_MS),
         ..tight
     };
-    let (_, events) = pass(&corpus, &projection, &synapse, &generous, NOW + DAY_MS);
+    let (_, events) = pass(
+        &corpus,
+        &projection,
+        &local_embeddings,
+        &generous,
+        NOW + DAY_MS,
+    );
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
     assert_eq!(
         ledger(dir.path(), &occurrence),
@@ -1225,7 +1244,7 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
         )
         .unwrap();
     let projection = SearchProjection::open(dir.path()).unwrap();
-    let (_, events) = pass(&corpus, &projection, &synapse, &generous, NOW);
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &generous, NOW);
     assert_eq!(
         stopped(&events),
         vec![(job.job_id.clone(), "deadline_expired".to_string())]
@@ -1237,7 +1256,7 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
         .unwrap();
     assert!(matches!(granted_again, Recovery::Granted { .. }));
 
-    let (_, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &tight, NOW);
     assert_eq!(admitted(&events), vec![(job.job_id.clone(), 1)]);
     assert_eq!(
         published(&events),
@@ -1265,11 +1284,11 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
     let gate = GateGuard(engine.block_calls());
-    let synapse = component(
+    let local_embeddings = component(
         &engine,
-        SynapseLimits {
+        LocalEmbeddingsLimits {
             max_queued_jobs: 1,
-            ..SynapseLimits::default()
+            ..LocalEmbeddingsLimits::default()
         },
     );
     let short = DispatchBounds {
@@ -1277,7 +1296,7 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
         ..bounds()
     };
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &short, NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &short, NOW);
     assert_eq!(end, None);
     assert_eq!(admitted(&events).len(), 1);
     assert_eq!(retried(&events).len(), 1);
@@ -1301,7 +1320,7 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
     assert_eq!(held.attempts, 1);
 
     // The same admission charged again, as after a lost COMMIT reply, is recognised by its host job and not re-charged.
-    let host = lane_binding(&lane(FINGERPRINT), synapse.host_incarnation());
+    let host = lane_binding(&lane(FINGERPRINT), local_embeddings.host_incarnation());
     let again = projection
         .write(|conn| {
             charge_admission(
@@ -1324,7 +1343,7 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
     assert_eq!(ledgered.attempts, 1);
 
     TestEngine::release(&gate.0);
-    let (_, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW + 10);
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW + 10);
     assert_eq!(published(&events).len(), 2, "{events:?}");
     assert_eq!(
         ledger(dir.path(), occurrence_of(&rows, &first)).state,
@@ -1347,9 +1366,9 @@ async fn a_lost_charge_reply_is_reconciled_from_the_row_not_recharged() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     dispatcher.inject_fault_for_test(DispatchFault::LoseChargeReply);
     let mut events = Vec::new();
     let bounds = bounds();
@@ -1401,9 +1420,9 @@ async fn charge_rollback_cannot_skip_a_failed_host_attempt() {
     let engine = TestEngine::new();
     let gate = GateGuard(engine.block_calls());
     engine.fail_next(InferenceError::Execution("controlled failure".to_owned()));
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     dispatcher.inject_fault_for_test(DispatchFault::RefuseChargeStatement);
     let mut tight = DispatchBounds {
         grant: grant(1, NOW + DAY_MS),
@@ -1425,16 +1444,17 @@ async fn charge_rollback_cannot_skip_a_failed_host_attempt() {
     let charged = ledger(dir.path(), occurrence);
     let item = retrieval::dispatch::first_episode_id(&charged.job_id);
     // The worker is parked, so identical submission can only return its existing identity.
-    let input = synapse
+    let input = local_embeddings
         .preflight_embedding_for_lane(&lane(FINGERPRINT), text)
         .unwrap();
-    let SubmitOutcome::Queued { job_id: h1 } = synapse.submit_admitted(&input, &item).unwrap()
+    let SubmitOutcome::Queued { job_id: h1 } =
+        local_embeddings.submit_admitted(&input, &item).unwrap()
     else {
         panic!("the parked host job must be retained");
     };
     drop(gate);
     assert!(matches!(
-        wait_for_host_result(&synapse, &h1, &item, text),
+        wait_for_host_result(&local_embeddings, &h1, &item, text),
         PollOutcome::Failed { .. }
     ));
     tight.result_wait = Duration::from_secs(5);
@@ -1487,12 +1507,12 @@ async fn terminal_search_deadline_preserves_the_candidate_for_retry() {
     let occurrence = occurrence_of(&rows, &object);
     corpus.retire(&object);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
     let limits = bounds();
     // The budget's deadline bounds the terminal obsoletion write, so a held write lock blocks within it.
     let short_guard = budget(Duration::from_millis(300));
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let mut write_lock = None;
     let mut events = Vec::new();
 
@@ -1548,9 +1568,9 @@ async fn unknown_terminal_commit_emits_no_attributed_stop() {
     let occurrence = occurrence_of(&rows, &object);
     corpus.retire(&object);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     dispatcher.inject_fault_for_test(DispatchFault::LoseObsoletionReply);
     let mut events = Vec::new();
 
@@ -1593,14 +1613,14 @@ async fn actionable_rows_are_repolled_before_later_pending_rows() {
     };
     let engine = TestEngine::new();
     let gate = GateGuard(engine.block_calls());
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut limits = DispatchBounds {
         result_wait: Duration::ZERO,
         ..bounds()
     };
     limits.max_jobs = NonZeroUsize::new(2).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let mut events = Vec::new();
 
     dispatcher
@@ -1658,12 +1678,12 @@ async fn eligibility_cursor_resets_when_project_changes() {
     insert_wrong_scope_jobs(dir.path(), occurrence_b, 2 * MAX_ELIGIBILITY_CANDIDATES);
     let target = ledger(dir.path(), occurrence_b);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project_a = ProjectScope::new(PROJECT).unwrap();
     let project_b = ProjectScope::new(PROJECT_B).unwrap();
     let mut limits = bounds();
     limits.max_jobs = NonZeroUsize::new(1).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
 
     assert_eq!(
         dispatcher
@@ -1751,9 +1771,9 @@ async fn an_unresolved_charge_retry_quarantines_without_resubmission() {
         )
         .unwrap();
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     dispatcher.inject_fault_for_test(DispatchFault::RefuseChargeStatement);
     for _ in 0..2 {
         let result = dispatcher.run_pass(
@@ -1788,9 +1808,9 @@ async fn a_refused_charge_statement_is_retried_not_quarantined() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     dispatcher.inject_fault_for_test(DispatchFault::RefuseChargeStatement);
     let bounds = bounds();
     let mut events = Vec::new();
@@ -1846,9 +1866,9 @@ async fn a_refused_binding_is_retryable_not_quarantined() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     dispatcher.inject_fault_for_test(DispatchFault::RefuseBinding);
     let bounds = bounds();
     let mut events = Vec::new();
@@ -1892,7 +1912,7 @@ fn an_authorized_episode_identity_fits_the_host_item_bound() {
         "{job_id}/auth/{}",
         "x".repeat(retrieval::dispatch::MAX_AUTHORIZATION_REF_BYTES)
     );
-    assert!(longest.len() <= host_runtime::synapse::jobs::MAX_ITEM_ID_BYTES);
+    assert!(longest.len() <= host_runtime::local_embeddings::jobs::MAX_ITEM_ID_BYTES);
 }
 
 /// The child bootstraps nothing: it reopens the stores the parent prepared, admits the one pending job to a host whose worker never finishes, prints its barrier once the admission is charged, and parks until the parent kills it.
@@ -1910,9 +1930,9 @@ fn crash_child_entrypoint_reexecuted_by_the_parent() {
         let projection = SearchProjection::open(&root).unwrap();
         let engine = TestEngine::new();
         let _gate = GateGuard(engine.block_calls());
-        let synapse = component(&engine, SynapseLimits::default());
+        let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
         let project = ProjectScope::new(PROJECT).unwrap();
-        let mut dispatcher = EmbeddingDispatcher::new(&kernel, &projection, &synapse);
+        let mut dispatcher = EmbeddingDispatcher::new(&kernel, &projection, &local_embeddings);
         let result = tokio::task::block_in_place(|| {
             dispatcher.run_pass(
                 eligibility(&project),
@@ -2004,8 +2024,8 @@ async fn crash_after_charge_reopens_state_and_accounting_together() {
     let corpus = Corpus::open(dir.path());
     let projection = SearchProjection::open(dir.path()).unwrap();
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
-    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
     assert_eq!(end, None);
     assert_eq!(
         events[0],
@@ -2027,7 +2047,7 @@ async fn crash_after_charge_reopens_state_and_accounting_together() {
     );
     assert_eq!(
         done.host_incarnation.as_deref(),
-        Some(synapse.host_incarnation())
+        Some(local_embeddings.host_incarnation())
     );
     assert_ne!(done.host_incarnation.as_deref(), Some(dead_host.as_str()));
 }
@@ -2043,7 +2063,7 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
     let gate = GateGuard(engine.block_calls());
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let tight = DispatchBounds {
         grant: grant(1, NOW + DAY_MS),
         ..DispatchBounds {
@@ -2052,14 +2072,14 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
         }
     };
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &tight, NOW);
     assert_eq!(end, None);
     let held = ledger(dir.path(), occurrence);
     assert_eq!(admitted(&events), vec![(held.job_id.clone(), 1)]);
     assert_eq!((held.state.as_str(), held.attempts), ("admitted", 1));
 
     // The result is still outstanding: the row is polled, not judged exhausted.
-    let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &tight, NOW);
     let still = ledger(dir.path(), occurrence);
     TestEngine::release(&gate.0);
     assert_eq!(end, None);
@@ -2072,7 +2092,7 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
 
     assert!(matches!(
         wait_for_host_result(
-            &synapse,
+            &local_embeddings,
             held.host_job_id.as_deref().unwrap(),
             held.episode.as_deref().unwrap(),
             "last attempt",
@@ -2082,7 +2102,7 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
     engine.fail_next_count(InferenceError::Execution(
         "completion count failed".to_owned(),
     ));
-    let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &tight, NOW);
     assert_eq!(end, None);
     assert_eq!(ledger(dir.path(), occurrence), held);
     assert!(stopped(&events).is_empty());
@@ -2091,7 +2111,7 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
     let (_, events) = pass(
         &corpus,
         &projection,
-        &synapse,
+        &local_embeddings,
         &DispatchBounds {
             grant: grant(1, NOW + DAY_MS),
             ..bounds()
@@ -2125,7 +2145,7 @@ async fn completion_count_lane_failures_preserve_the_final_attempt() {
         let occurrence = occurrence_of(&rows, &object);
         let engine = TestEngine::new();
         let gate = GateGuard(engine.block_calls());
-        let synapse = component(&engine, SynapseLimits::default());
+        let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
         let tight = DispatchBounds {
             grant: grant(1, NOW + DAY_MS),
             ..DispatchBounds {
@@ -2133,12 +2153,12 @@ async fn completion_count_lane_failures_preserve_the_final_attempt() {
                 ..bounds()
             }
         };
-        pass(&corpus, &projection, &synapse, &tight, NOW);
+        pass(&corpus, &projection, &local_embeddings, &tight, NOW);
         let held = ledger(dir.path(), occurrence);
         drop(gate);
         assert!(matches!(
             wait_for_host_result(
-                &synapse,
+                &local_embeddings,
                 held.host_job_id.as_deref().unwrap(),
                 held.episode.as_deref().unwrap(),
                 text,
@@ -2147,7 +2167,7 @@ async fn completion_count_lane_failures_preserve_the_final_attempt() {
         ));
         engine.fail_next_count(failure.clone());
 
-        let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+        let (end, events) = pass(&corpus, &projection, &local_embeddings, &tight, NOW);
 
         assert!(matches!(
             end,
@@ -2177,12 +2197,12 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
             let occurrence = occurrence_of(&rows, &object);
             let engine = TestEngine::new();
             let gate = GateGuard(engine.block_calls());
-            let synapse = component(
+            let local_embeddings = component(
                 &engine,
-                SynapseLimits {
+                LocalEmbeddingsLimits {
                     max_retained_jobs: 1,
                     max_queued_jobs: 1,
-                    ..SynapseLimits::default()
+                    ..LocalEmbeddingsLimits::default()
                 },
             );
             let tight = DispatchBounds {
@@ -2192,7 +2212,7 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
                     ..bounds()
                 }
             };
-            let (_, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+            let (_, events) = pass(&corpus, &projection, &local_embeddings, &tight, NOW);
             let held = ledger(dir.path(), occurrence);
             assert_eq!(admitted(&events), vec![(held.job_id.clone(), 1)]);
             assert_eq!(held.state, "admitted");
@@ -2201,27 +2221,34 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
 
             drop(gate);
             assert!(matches!(
-                wait_for_host_result(&synapse, &evicted_host_job, &item, text),
+                wait_for_host_result(&local_embeddings, &evicted_host_job, &item, text),
                 PollOutcome::Page(_)
             ));
             assert_eq!(engine.calls(), 1);
 
-            let sentinel = synapse
+            let sentinel = local_embeddings
                 .preflight_embedding_for_lane(&lane(FINGERPRINT), "eviction sentinel")
                 .unwrap();
             let SubmitOutcome::Queued {
                 job_id: sentinel_host,
-            } = synapse.submit_admitted(&sentinel, "sentinel").unwrap()
+            } = local_embeddings
+                .submit_admitted(&sentinel, "sentinel")
+                .unwrap()
             else {
                 panic!("sentinel must be admitted");
             };
             assert!(matches!(
-                wait_for_host_result(&synapse, &sentinel_host, "sentinel", "eviction sentinel"),
+                wait_for_host_result(
+                    &local_embeddings,
+                    &sentinel_host,
+                    "sentinel",
+                    "eviction sentinel"
+                ),
                 PollOutcome::Page(_)
             ));
             assert_eq!(engine.calls(), 2, "one original and one sentinel inference");
             assert!(matches!(
-                synapse.poll_admitted(&lane(FINGERPRINT), &evicted_host_job, &item, text),
+                local_embeddings.poll_admitted(&lane(FINGERPRINT), &evicted_host_job, &item, text),
                 PollOutcome::Restarted
             ));
 
@@ -2230,16 +2257,17 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
                 None
             } else {
                 let gate = GateGuard(engine.block_calls());
-                let input = synapse
+                let input = local_embeddings
                     .preflight_embedding_for_lane(&lane(FINGERPRINT), "queue holder")
                     .unwrap();
-                let SubmitOutcome::Queued { job_id } =
-                    synapse.submit_admitted(&input, "queue-holder").unwrap()
+                let SubmitOutcome::Queued { job_id } = local_embeddings
+                    .submit_admitted(&input, "queue-holder")
+                    .unwrap()
                 else {
                     panic!("queue holder must be admitted");
                 };
                 assert!(matches!(
-                    synapse.poll_admitted(
+                    local_embeddings.poll_admitted(
                         &lane(FINGERPRINT),
                         &job_id,
                         "queue-holder",
@@ -2249,12 +2277,12 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
                 ));
                 Some((gate, job_id))
             };
-            let (end, deferred_events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+            let (end, deferred_events) = pass(&corpus, &projection, &local_embeddings, &tight, NOW);
             let deferred = ledger(dir.path(), occurrence);
             if let Some((gate, host)) = blocker {
                 drop(gate);
                 assert!(matches!(
-                    wait_for_host_result(&synapse, &host, "queue-holder", "queue holder"),
+                    wait_for_host_result(&local_embeddings, &host, "queue-holder", "queue holder"),
                     PollOutcome::Page(_)
                 ));
             }
@@ -2276,7 +2304,7 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
             let (end, events) = pass(
                 &corpus,
                 &projection,
-                &synapse,
+                &local_embeddings,
                 &DispatchBounds {
                     grant: grant(allowance, NOW + DAY_MS),
                     ..bounds()
@@ -2344,14 +2372,14 @@ async fn project_selection_skips_wrong_scope_without_starving_eligible_work() {
         .unwrap();
     insert_wrong_scope_jobs(dir.path(), occurrence_b, 1_024);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
 
     let project_a = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let mut events = Vec::new();
     let end = dispatcher
         .run_pass(
@@ -2414,13 +2442,13 @@ async fn project_scan_cursor_advances_across_more_than_two_wrong_scope_pages() {
     let occurrence_b = occurrence_of(&rows, &object_b);
     insert_wrong_scope_jobs(dir.path(), occurrence_b, 2_048);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
     let project_a = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
 
     let first = dispatcher
         .run_pass(
@@ -2469,7 +2497,7 @@ async fn foreign_retries_do_not_restart_another_projects_scan() {
     drop(conn);
 
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
         retry_after: 1,
@@ -2477,8 +2505,8 @@ async fn foreign_retries_do_not_restart_another_projects_scan() {
     };
     let project_a = ProjectScope::new(PROJECT).unwrap();
     let project_b = ProjectScope::new(PROJECT_B).unwrap();
-    let mut dispatcher_a = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
-    let mut dispatcher_b = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher_a = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
+    let mut dispatcher_b = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     assert_eq!(
         dispatcher_a
             .run_pass(
@@ -2563,7 +2591,7 @@ async fn deferred_row_is_revisited_when_its_retry_becomes_due() {
 
     let engine = TestEngine::new();
     let gate = GateGuard(engine.block_calls());
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..DispatchBounds {
@@ -2572,7 +2600,7 @@ async fn deferred_row_is_revisited_when_its_retry_becomes_due() {
         }
     };
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
 
     dispatcher
         .run_pass(
@@ -2616,13 +2644,13 @@ async fn max_jobs_bounds_terminal_dispositions() {
         corpus.retire(object);
     }
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &one, NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &one, NOW);
 
     assert_eq!(end, None);
     let conn = inspect(dir.path());
@@ -2666,13 +2694,13 @@ async fn malformed_candidate_is_obsoleted_without_poisoning_valid_work() {
     .unwrap();
     drop(conn);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &one, NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &one, NOW);
 
     assert_eq!(end, None);
     assert_eq!(ledger(dir.path(), malformed_occurrence).state, "obsolete");
@@ -2685,7 +2713,7 @@ async fn malformed_candidate_is_obsoleted_without_poisoning_valid_work() {
     );
     assert_eq!(engine.calls(), 0);
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &one, NOW + 1);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &one, NOW + 1);
     assert_eq!(end, None);
     assert_eq!(ledger(dir.path(), valid_occurrence).state, "embedded");
     assert_eq!(published(&events).len(), 1, "{events:?}");
@@ -2721,9 +2749,9 @@ async fn selected_jobs_are_hydrated_only_when_they_are_driven() {
     drop(conn);
 
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let result = dispatcher.run_pass(
         eligibility(&project),
         &DispatchBounds {
@@ -2756,9 +2784,9 @@ async fn hidden_and_sensitive_inputs_are_obsoleted_without_inference() {
     let hidden_occurrence = occurrence_of(&rows, &hidden);
     let sensitive_occurrence = occurrence_of(&rows, &sensitive);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
 
     assert_eq!(end, None);
     assert_eq!(ledger(dir.path(), hidden_occurrence).state, "obsolete");
@@ -2786,9 +2814,9 @@ async fn project_selection_still_obsoletes_retracted_input_without_inference() {
     let occurrence = occurrence_of(&rows, &object);
     corpus.retire(&object);
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
 
     assert_eq!(end, None);
     assert_eq!(ledger(dir.path(), occurrence).state, "obsolete");
@@ -2823,13 +2851,13 @@ async fn eligible_rows_are_taken_oldest_first_not_by_identifier() {
         .unwrap();
     let projection = SearchProjection::open(dir.path()).unwrap();
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
 
     let one_at_a_time = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
-    let (end, events) = pass(&corpus, &projection, &synapse, &one_at_a_time, NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &one_at_a_time, NOW);
     assert_eq!(end, None);
     assert_eq!(
         published(&events),
@@ -2841,9 +2869,9 @@ async fn eligible_rows_are_taken_oldest_first_not_by_identifier() {
 /// Recovering under the reference `1` opens an episode distinct from the first, so inference runs instead of replaying the stopped episode's retained failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_authorization_reference_cannot_name_the_first_episode() {
-    let (dir, corpus, projection, occurrence, engine, synapse, events, end) = scenario(
+    let (dir, corpus, projection, occurrence, engine, local_embeddings, events, end) = scenario(
         "rejected by the model",
-        SynapseLimits::default(),
+        LocalEmbeddingsLimits::default(),
         bounds(),
         |_, _, engine, _, _| {
             engine.fail_next(InferenceError::Input("rejected".to_owned()));
@@ -2870,7 +2898,7 @@ async fn an_authorization_reference_cannot_name_the_first_episode() {
         "an authorized episode lives in its own namespace"
     );
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
     assert_eq!(end, None);
     assert_eq!(
         published(&events),
@@ -2902,9 +2930,10 @@ fn a_pass_on_a_runtime_worker_yields_the_worker_to_the_inference_it_awaits() {
             corpus.publish("m0", "embedded from a worker");
             let (projection, _) = corpus.bootstrap(&root);
             let engine = TestEngine::new();
-            let synapse = component(&engine, SynapseLimits::default());
+            let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
             let project = ProjectScope::new(PROJECT).unwrap();
-            let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+            let mut dispatcher =
+                EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
             let mut events = Vec::new();
             let end = dispatcher
                 .run_pass(

@@ -1,10 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import {
-    DEFAULT_HISTORIAN_TIMEOUT_MS,
     DEFAULT_HISTORY_BUDGET_PERCENTAGE,
+    DEFAULT_HISTORY_SUMMARIZER_TIMEOUT_MS,
     type EidnaraConfig,
     EidnaraConfigSchema,
-    REMOVED_CONFIG_KEYS,
 } from "./eidnara";
 
 describe("EidnaraConfigSchema", () => {
@@ -18,14 +17,13 @@ describe("EidnaraConfigSchema", () => {
                 fail_closed_blocking: true,
                 transform_mode: "ts",
                 storage: { enforce_private_permissions: true },
-                smart_notes: { retina_handoff: false },
                 cache_ttl: "5m",
                 prompt_surface: { default: "full" },
                 execute_threshold_percentage: 65,
                 protected_tags: 20,
                 clear_reasoning_age: 50,
                 history_budget_percentage: DEFAULT_HISTORY_BUDGET_PERCENTAGE,
-                historian_timeout_ms: DEFAULT_HISTORIAN_TIMEOUT_MS,
+                history_summarizer_timeout_ms: DEFAULT_HISTORY_SUMMARIZER_TIMEOUT_MS,
                 memory: {
                     enabled: true,
                     injection_budget_tokens: 4000,
@@ -37,10 +35,9 @@ describe("EidnaraConfigSchema", () => {
                     overlay: true,
                 },
             });
-            expect(result.historian).toBeUndefined();
-            expect(result.sidekick).toBeUndefined();
+            expect(result.history_summarizer).toBeUndefined();
+            expect(result.context_researcher).toBeUndefined();
             expect(result.pi).toBeUndefined();
-            expect(result.mural).toEqual({ enabled: false });
         });
     });
 
@@ -71,7 +68,6 @@ describe("EidnaraConfigSchema", () => {
                 enabled: true,
                 allow_home_project: false,
                 fail_closed_blocking: true,
-                mural: { enabled: false },
                 transform_mode: "ts",
                 toast_duration_ms: 5000,
                 cache_ttl: "10m",
@@ -80,7 +76,7 @@ describe("EidnaraConfigSchema", () => {
                 execute_threshold_percentage: 75,
                 clear_reasoning_age: 60,
                 history_budget_percentage: 0.2,
-                historian_timeout_ms: 360_000,
+                history_summarizer_timeout_ms: 360_000,
                 commit_cluster_trigger: {
                     enabled: true,
                     min_clusters: 3,
@@ -103,11 +99,10 @@ describe("EidnaraConfigSchema", () => {
                     overlay: false,
                 },
                 smart_drops: false,
-                smart_notes: { retina_handoff: false },
                 shadow_embedding: {
                     enabled: false,
                 },
-                caveman_text_compression: {
+                terse_text_compression: {
                     enabled: false,
                     min_chars: 500,
                 },
@@ -130,7 +125,7 @@ describe("EidnaraConfigSchema", () => {
                 pi: {
                     subagent_extensions: ["@example/provider", "./extensions/local.ts"],
                 },
-                sidekick: {
+                context_researcher: {
                     disable: false,
                     model: "qwen-test",
                     fallback_models: ["qwen-fallback"],
@@ -162,28 +157,28 @@ describe("EidnaraConfigSchema", () => {
             ).toBe(false);
         });
 
-        it("applies sidekick defaults when the object is present", () => {
+        it("applies context_researcher defaults when the object is present", () => {
             const result = EidnaraConfigSchema.parse({
-                sidekick: {
+                context_researcher: {
                     model: "github-copilot/gpt-5.4",
                 },
             });
 
-            expect(result.sidekick).toEqual({
+            expect(result.context_researcher).toEqual({
                 model: "github-copilot/gpt-5.4",
                 timeout_ms: 30000,
             });
         });
 
-        it("accepts disable on hidden agents and strips deprecated top-level enabled", () => {
+        it("accepts disable on hidden agents without deprecated enabled", () => {
             const result = EidnaraConfigSchema.parse({
-                historian: { disable: true },
-                sidekick: { disable: true, enabled: true },
+                history_summarizer: { disable: true },
+                context_researcher: { disable: true },
             });
 
-            expect(result.historian?.disable).toBe(true);
-            expect(result.sidekick?.disable).toBe(true);
-            expect("enabled" in (result.sidekick as Record<string, unknown>)).toBe(false);
+            expect(result.history_summarizer?.disable).toBe(true);
+            expect(result.context_researcher?.disable).toBe(true);
+            expect("enabled" in (result.context_researcher as Record<string, unknown>)).toBe(false);
         });
 
         it("parses ts and rust transform modes and rejects an unknown one", () => {
@@ -194,17 +189,16 @@ describe("EidnaraConfigSchema", () => {
             expect(() => EidnaraConfigSchema.parse({ transform_mode: "wasm" })).toThrow();
         });
 
-        it("parses a configuration that still carries a removed key without failing", () => {
-            const result = EidnaraConfigSchema.parse({
-                dreamer: { model: "x/y" },
-                embedding: { provider: "local" },
-                auto_update: false,
-            });
-
-            expect(REMOVED_CONFIG_KEYS).toEqual(["auto_update", "dreamer", "embedding"]);
-            expect("dreamer" in result).toBe(false);
-            expect("embedding" in result).toBe(false);
-            expect("auto_update" in result).toBe(false);
+        it("rejects removed configuration keys", () => {
+            for (const key of [
+                "memory_classifier",
+                "embedding",
+                "auto_update",
+                "mural",
+                "conditional_notes",
+            ]) {
+                expect(EidnaraConfigSchema.safeParse({ [key]: {} }).success).toBe(false);
+            }
         });
 
         it("fills the default for a per-model percentage map that omits it", () => {
@@ -257,7 +251,7 @@ describe("EidnaraConfigSchema", () => {
                     "openai/*": "light" as const,
                 },
                 guidance_override_path: "./guidance.md",
-                tool_descriptions: { ctx_search: "Search project context" },
+                tool_descriptions: { eidnara_search: "Search project context" },
             };
 
             expect(
@@ -312,7 +306,7 @@ describe("EidnaraConfigSchema", () => {
             ).toBe(false);
             expect(
                 EidnaraConfigSchema.safeParse({
-                    prompt_surface: { tool_descriptions: { ctx_search: "  " } },
+                    prompt_surface: { tool_descriptions: { eidnara_search: "  " } },
                 }).success,
             ).toBe(false);
             expect(
@@ -324,9 +318,8 @@ describe("EidnaraConfigSchema", () => {
 
         it("rejects whitespace-only trimmed path, model, and Pi extension fields but keeps trimming valid ones", () => {
             const blank = [
-                { mural: { model: "   " } },
                 { models: { window_overlay_path: "\t" } },
-                { subc: { connection_file: " " } },
+                { host: { connection_file: " " } },
                 { pi: { subagent_extensions: ["  "] } },
             ];
             for (const input of blank) {
@@ -336,7 +329,6 @@ describe("EidnaraConfigSchema", () => {
                 ]);
             }
 
-            expect(EidnaraConfigSchema.parse({ mural: { model: " m " } }).mural.model).toBe("m");
             expect(
                 EidnaraConfigSchema.parse({ models: { window_overlay_path: " ./o.json " } }).models
                     ?.window_overlay_path,
@@ -356,7 +348,7 @@ describe("EidnaraConfigSchema", () => {
                 { protected_tags: 0 },
                 { protected_tags: 101 },
                 { clear_reasoning_age: 9 },
-                { historian_timeout_ms: 59_999 },
+                { history_summarizer_timeout_ms: 59_999 },
             ];
             for (const input of outOfRange) {
                 expect([input, EidnaraConfigSchema.safeParse(input).success]).toEqual([

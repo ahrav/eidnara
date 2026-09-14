@@ -60,10 +60,10 @@ export function getEidnaraLogPath(harness: HarnessId = getHarness()): string {
 }
 
 /**
- * Each harness stores historian artifacts separately.
+ * Each harness stores history_summarizer artifacts separately.
  */
-export function getEidnaraHistorianDir(harness: HarnessId = getHarness()): string {
-    return path.join(getEidnaraTempDir(harness), "historian");
+export function getEidnaraHistorySummarizerDir(harness: HarnessId = getHarness()): string {
+    return path.join(getEidnaraTempDir(harness), "history_summarizer");
 }
 
 /**
@@ -140,14 +140,14 @@ export function ensureEidnaraArtifactGitignore(directory: string): void {
 
 /**
  *
- * Layout: `<project-directory>/.eidnara/context/historian/`
+ * Layout: `<project-directory>/.eidnara/context/history_summarizer/`
  *
  * Used for:
  *
  * Callers must create this directory before writing because a fresh project may not contain `.eidnara/`.
  */
-export function getProjectEidnaraHistorianDir(directory: string): string {
-    return path.join(getProjectEidnaraDir(directory), "historian");
+export function getProjectEidnaraHistorySummarizerDir(directory: string): string {
+    return path.join(getProjectEidnaraDir(directory), "history_summarizer");
 }
 
 /**

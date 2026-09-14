@@ -26,7 +26,7 @@ Sources consulted and why:
   to handlers. It remains normative over the plan for host wire behavior.
 - [Latency-audit catalog](../../hot-path-optimization/latency-audit/catalog.md):
   A1/A2/A3 own admission and entry equivalence; B1 owns shared-input artifacts;
-  B2/B5 own synthetic normalization; W5 owns historian construction. W1 is
+  B2/B5 own synthetic normalization; W5 owns history_summarizer construction. W1 is
   invalidated at HEAD and retained only for traceability; this catalog neither
   assigns it measurement ownership nor reactivates it. Their exercise status
   is historical evidence owned there.
@@ -128,6 +128,7 @@ Confidence: high - [evidence](evidence/plugin-block-canonical-identity-preserved
 Existing check: `crates/daemon/src/transform.rs:14467-14490` compares projection records to a golden; `served_json.rs:196-253` checks scalar/key order; both unaudited, with full inventory in [existing-checks.md](existing-checks.md).
 Impact: Established sessions reject identity drift or lose a reusable prefix despite unchanged plugin content.
 Open questions:
+
 - The current golden has no absent/true tool flags and no media. Which frozen emitter-derived entries fill every P partition? (partial: shape gaps identified)
 - The Appendix A.3 corpus is not supplied as a checked-in raw artifact; its 53-block observation is not universal evidence.
 
@@ -145,6 +146,7 @@ Confidence: high - [evidence](evidence/served-default-omissions-are-bounded.md).
 Existing check: `crates/daemon/src/transform.rs:13714-13793` pins served forms; `crates/daemon/src/injection.rs:794-831` checks same-input determinism and changed-input inequality, not literal or baseline-pinned todo bytes; all unaudited.
 Impact: A legitimate omission masks a signature, payload, failure-kind, or provider-field change.
 Open questions:
+
 - The parent specification must replace the 25-byte claim with 26 bytes per removed false tool member including its comma, or identify a different exact byte boundary. (needs human input)
 - Older frozen-byte promises include nonplugin fixtures and persisted synthetic messages. The parent specification must state the accepted upgrade exception explicitly. (needs human input)
 
@@ -162,6 +164,7 @@ Confidence: high - [evidence](evidence/block-byte-consumers-share-canonical-basi
 Existing check: `crates/daemon/src/codec/sidecar.rs:520-557` checks fingerprint matching; `transform.rs:13942-13991` checks source shape and receipt-helper use; unaudited. No `block_bases_agree.rs` exists at HEAD.
 Impact: Equal blocks are classified as changed or matched to incorrect native metadata.
 Open questions:
+
 - The proposed helper must define its serialization-error behavior while reusing the existing raw-byte hash seam; `stable_hash(Value::String(C))` is incorrect.
 - Reused receipts, especially signed-zero pairs, deliberately obey the next record rather than the fresh-receipt equation.
 - Old sidecar fingerprinting marks every block modified before serialization, so even normal plugin tool blocks with an absent false flag acquire an explicit false member in that old hash basis. The proposed omission changes their normalized sidecar fingerprints too. This conflicts with the plan's broad sidecar-preservation wording and needs an owner decision before implementation. (needs human input)
@@ -181,6 +184,7 @@ Confidence: high - [evidence](evidence/typed-equality-governs-receipt-reuse.md).
 Existing check: `crates/daemon/src/transform.rs:13797-13938` pins precedence, first match, and signed-zero fresh/reused differences; unaudited.
 Impact: Wrong projected receipts are attributed to served blocks or deterministic replay changes with allocation/provenance.
 Open questions:
+
 - Parent wording should say `IdentityFormatter` aligns equality digests, not served bytes: equal signed zeros can retain a selected projection receipt whose hash and length differ from fresh output. (needs human input)
 - No reverse law `D(a)==D(b) => E(a,b)` is promised; equality rechecks remain required.
 
@@ -190,14 +194,15 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: not yet - no old-release raw-row fixture was recovered with the replacement decoder.
-Guarantee: Valid stored old-release CK message arrays remain readable and unchanged plugin chunk items retain their production historian fingerprint.
+Guarantee: Valid stored old-release CK message arrays remain readable and unchanged plugin chunk items retain their production history_summarizer fingerprint.
 Check: `always-or-unreached` - When an old raw row is supplied, assert recovery returns the independently listed in-range IDs, ordinals, and known typed fields; assemble items from nonsynthetic, nonsystem blocks in the selected range and assert each `(id, kind, UTF-8 byte_len)` plus the exact joined `id:kind:len` string equals the old plugin baseline, because history is optional in production but mandatory in this campaign's companion witness.
 Fault/timing angle: Upgrade silently skips a no-longer-decodable row or changes a length used by a durable in-flight fingerprint.
 Required faults and enabling state: Baseline-produced serialized arrays, valid stored ordinal bounds, old false-default fields, a plugin tool pair, and a synthetic todo pair present beside real eligible blocks; test-only manually included synthetic items are labeled separately.
 Confidence: high - [evidence](evidence/historical-chunks-retain-readable-identity.md). Recovery's silent skip and production synthetic exclusion are source-verified; upgrade execution is missing.
-Existing check: `crates/daemon/src/historian.rs:3925-3950` pins fingerprint format; `historian_chunk.rs:1076-1103,1773-1858` pins assembly; `lib.rs:18182` compares boundary construction; all unaudited.
-Impact: Historical messages disappear from expansion or a valid pending historian firing fails its fingerprint check.
+Existing check: `crates/daemon/src/history_summarizer.rs:3925-3950` pins fingerprint format; `history_summarizer_chunk.rs:1076-1103,1773-1858` pins assembly; `lib.rs:18182` compares boundary construction; all unaudited.
+Impact: Historical messages disappear from expansion or a valid pending history_summarizer firing fails its fingerprint check.
 Open questions:
+
 - Which production path, if any, includes daemon-built synthetic todo blocks in chunk snapshot items? The inspected builder excludes them, so the plan's example is not production evidence. (needs human input)
 - An old in-flight binary-upgrade witness is missing. Existing W5 evidence explicitly does not cover that transition.
 
@@ -215,6 +220,7 @@ Confidence: high - [evidence](evidence/durable-identity-domains-survive-cache-re
 Existing check: `crates/daemon/src/transform.rs:13638,14672,14832,28295` covers diagnostic drift, enforcement, and cache equivalence; `lib.rs:25162` covers synthetic delta preparation; all unaudited.
 Impact: Existing sessions reject valid history, misattribute provider-cache divergence, or persist synthetic blocks as user ingress.
 Open questions:
+
 - Plan KTD2's cache-only rationale omits durable `ModuleMeta.served_output_fingerprint`, which includes synthetic output. What exact first post-upgrade diagnostic change is accepted? (needs human input)
 - Unknown/explicit-false legacy ingress can already have persisted identities; the plan accepts their new identity but supplies no migration behavior for a covered or frozen old row. (needs human input)
 
@@ -232,6 +238,7 @@ Confidence: high - [evidence](evidence/durable-hygiene-baseline-preserves-conten
 Existing check: `crates/daemon/src/tail_hygiene.rs:1217,1265,2027,2071,2290` covers digest domains, memo behavior, refresh, and parity; all unaudited, with no old/new persisted-baseline witness.
 Impact: Unchanged input becomes unevaluable and changes reminder-channel behavior despite unchanged U/T totals.
 Open questions:
+
 - Which outcome is required when daemon-built block ordering or false omission changes an excluded part hash in a persisted baseline? No semantic invalidation exception is granted by the plan. (needs human input)
 - Unknown-envelope legacy baselines can retain hashes of discarded fields. Their upgrade handling must be reconciled with frozen behavior before implementation. (needs human input)
 
@@ -249,6 +256,7 @@ Confidence: high - [evidence](evidence/durable-lineage-anchor-preserves-validati
 Existing check: `crates/daemon/src/transform.rs:28739,28914,29063,29121` and `crates/memory-store/src/lib.rs:26125` cover anchor/lineage behavior and persisted copy; all unaudited.
 Impact: Valid continued sessions defer and lose trimming after upgrade, or genuine anchor corruption escapes enforcement.
 Open questions:
+
 - An old anchor hash can include unknown envelope fields that R3 drops. The plan gives no migration or accepted enforcement change for that durable identifier. (needs human input)
 - Broad frozen guarantees and normalization must be reconciled by the owner; reviewer recommendations cannot authorize rewriting stored anchors. (needs human input)
 
@@ -266,6 +274,7 @@ Confidence: high - [evidence](evidence/block-byte-policy-outcomes-remain-stable.
 Existing check: `crates/daemon/src/lib.rs:18182`, `crates/daemon/src/boundary.rs:2073,2117,2670,2736`, and `crates/daemon/tests/selection_differential.rs:2399` are related unaudited checks, not a replacement-decode outcome corpus.
 Impact: A decode optimization changes what is folded, dropped, or protected on an otherwise unchanged plugin turn.
 Open questions:
+
 - Are daemon-only byte-basis changes observable at these policy consumers? Construct the real path and freeze its outcome; no permission to change token/fold/protection semantics follows from accepting a byte omission. (needs human input)
 - If a daemon-only delta changes a branch, the owner must resolve the conflict with frozen behavior before implementation rather than rebaseline the outcome. (needs human input)
 
@@ -283,6 +292,7 @@ Confidence: high - [evidence](evidence/sibling-mutation-preserves-untouched-byte
 Existing check: `crates/memory-store/src/lib.rs:16096-16112` and `crates/daemon/src/transform.rs:12733-12773` check sibling behavior under original replay; `wire.rs:1749` checks shared shells; all unaudited.
 Impact: An unrelated block edit changes cache identity, provider bytes, or a still-shared request.
 Open questions:
+
 - Replace the legacy unknown-envelope sentinel with a retained typed payload sentinel while separately asserting R3 drops unknown envelopes; the mutation oracle must not demand preservation of an explicitly removed field.
 
 ### identity-edge-states-are-exercised
@@ -299,6 +309,7 @@ Confidence: medium - [evidence](evidence/identity-edge-states-are-exercised.md).
 Existing check: None for this twelve-marker contract; existing checks and historical catalog evidence remain unaudited rather than satisfying it by association.
 Impact: Preservation assertions pass vacuously or cover only the current sixteen-block mixed-domain golden.
 Open questions:
+
 - The completed fresh evaluation identifies missing typed-only and durable domains; test strategy must implement and observe each separate marker before claiming exercise.
 
 ## Conflicts and verified corrections
@@ -307,7 +318,7 @@ Open questions:
    a comma: the exact compact block delta is **26 bytes** per false flag.
    A synthetic pair loses 52 block bytes from that omission alone. This is
    neither universal over all blocks nor the Appendix's 26-of-53 corpus count.
-2. Production historian snapshot assembly excludes synthetic blocks. A todo
+2. Production history_summarizer snapshot assembly excludes synthetic blocks. A todo
    pair beside real history changes zero production snapshot entries merely
    because its own flags are omitted. A manually fabricated snapshot item is
    a test-only counterfactual, not evidence of the production path.
@@ -364,7 +375,7 @@ bounded progress contract.
 | served-default-omissions-are-bounded | `/testing:test-strategy` | Specification author resolves the byte-delta and frozen-pair exception; independent byte-edit oracle owns expectations. |
 | block-byte-consumers-share-canonical-basis | `/testing:test-strategy` | Identity implementer owns the `served_json` block entry and raw-byte hashing; sidecar owner preserves one-namespace exclusion. |
 | typed-equality-governs-receipt-reuse | `/testing:test-strategy` | `/testing:invariant-test-review` audits signed-zero, candidate-order, and forced-fallback cases. |
-| historical-chunks-retain-readable-identity | `/testing:test-strategy` | Historian owner supplies baseline raw rows and selected snapshot inputs; `/testing:deterministic-simulation-testing` only if a restart-in-flight claim is added. |
+| historical-chunks-retain-readable-identity | `/testing:test-strategy` | HistorySummarizer owner supplies baseline raw rows and selected snapshot inputs; `/testing:deterministic-simulation-testing` only if a restart-in-flight claim is added. |
 | durable-identity-domains-survive-cache-reset | `/testing:test-strategy` | Specification author settles durable diagnostic drift and legacy ingress policy; `/low-level-systems:defensive-assertions-and-invariant-guards` audits enforcement. |
 | durable-hygiene-baseline-preserves-content-identity | `/testing:test-strategy` | Hygiene owner freezes persisted baseline/refresh outcomes; invariant-test and invariant-guard reviewers audit zero-token hash invalidation. |
 | durable-lineage-anchor-preserves-validation | `/testing:test-strategy` | Lineage owner supplies old anchors and fail-closed controls; specification owner resolves legacy unknown-field anchor hashes before implementation. |

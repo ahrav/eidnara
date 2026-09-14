@@ -84,8 +84,8 @@ the change: A2 ("the current reader"), W6 ("`next_occurrence` at HEAD"), W9
 ("the reference predicate at `:4298-4316`"), W4 ("the whole-input scan"),
 and P2 (a prose reference with no file). Once the optimization replaces the
 code, each oracle disappears. W5 shows the working pattern: a frozen copy in
-`crates/daemon/tests/historian_truncate_differential.rs:13-58`, with three
-proptests against it. The caveman and selection differentials in
+`crates/daemon/tests/history_summarizer_truncate_differential.rs:13-58`, with three
+proptests against it. The terse_text_compression and selection differentials in
 `crates/daemon/tests/` follow the same pattern. This is systematic enough to
 record as a bias as well as five refinements.
 
@@ -115,11 +115,11 @@ media hash the derived content string instead (`:542-543`, `:569-570`,
 `:584-585`, through `excluded_part` at `:280-289`). The evidence file has
 the correction; the catalog does not.
 
-One rationale over-claims: W7 says `prepare_historian_fire` "calls it every
+One rationale over-claims: W7 says `prepare_history_summarizer_fire` "calls it every
 pass". The call at `crates/daemon/src/lib.rs:5051` runs only after the state
 load succeeds (`:5013-5025`), when no `pending_rewrite` is set (`:5036`),
-and when no live historian completion is pending (`:5042`); the handler
-skips `prepare_historian_fire` entirely for subagent passes (`:8234`). The
+and when no live history_summarizer completion is pending (`:5042`); the handler
+skips `prepare_history_summarizer_fire` entirely for subagent passes (`:8234`). The
 check itself is a conditional on the call and stays `always`; the rationale
 needs the qualification.
 
@@ -178,7 +178,7 @@ Separately, C2 and the fault map (`fault-map.md:20`) treat "an injected
 failure in the `pass_trace` upsert" as available at the store. No such seam
 exists: the four `fail_next_*_for_test` seams
 (`crates/memory-store/src/lib.rs:5900`, `:5914`, `:5921`, `:5928`) cover the
-side channel, the authority route read, and two dreamer task steps.
+side channel, the authority route read, and two memory_classifier task steps.
 Refinement to both.
 
 (c) Direct frame for non-transform routes. T3's check is generic over
@@ -259,7 +259,7 @@ Anchor verification against HEAD. Every anchor below was read; none is off.
 | `crates/daemon/src/tail_hygiene.rs:542-543`, `:569-570`, `:584-585` | verified | empty or sentinel content excluded with derived content, not `block.bytes` |
 | `crates/daemon/src/tail_hygiene.rs:513-526`, `:601-604`, `:280-289` | verified | pre-match and kind-level exclusions hash `block.bytes`; `excluded_part` helper |
 | `crates/daemon/src/lib.rs:5051` | verified | `effective_config` after early returns at `:5013-5025`, `:5036`, `:5042` |
-| `crates/daemon/src/lib.rs:8234` | verified | `is_subagent` skips `prepare_historian_fire` |
+| `crates/daemon/src/lib.rs:8234` | verified | `is_subagent` skips `prepare_history_summarizer_fire` |
 | `crates/daemon/src/lib.rs:4556-4565` | verified | `#[cfg(test)] fixed_config` short-circuit at `:4557-4560` |
 | `crates/daemon/src/transform.rs:1254`, `:1331`, `:1162` | verified | key `post_attach_ms`, value `timings.post_attach`, field `post_attach` |
 | `packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts:1013-1042` | verified | 22 stage keys by field name; `post_attach` at `:1035` |
@@ -282,8 +282,8 @@ Anchor verification against HEAD. Every anchor below was read; none is off.
 | `crates/daemon/src/config.rs:266-288` | verified | doc on repeated warnings; clone at `:288` |
 | `crates/memory-store/src/lib.rs:6482-6496` | verified | `trace_pass_received` and its "never contends" doc |
 | `crates/memory-store/src/lib.rs:5900`, `:5914`, `:5921`, `:5928` | verified | the only `fail_next_*_for_test` seams; none for `pass_trace` |
-| `crates/daemon/src/smart_note_evaluation.rs:163-192` | verified | doc at `:163-165`, `fn next_occurrence` at `:166` |
-| `crates/daemon/src/historian_chunk.rs:692`, `:742-748` | verified | truncation call and function head |
+| `crates/daemon/src/conditional_note_evaluation.rs:163-192` | verified | doc at `:163-165`, `fn next_occurrence` at `:166` |
+| `crates/daemon/src/history_summarizer_chunk.rs:692`, `:742-748` | verified | truncation call and function head |
 | `crates/daemon/src/lib.rs:8131`, `:8194-8201`, `:8202`, `:8209-8214`, `:8224-8232` | verified | trace calls, commit call, roots insert, `#[cfg(test)]` hook |
 | `crates/daemon/src/lib.rs:8263`, `:8289`, `:8315`, `:8387-8394`, `:8398-8403` | verified | the three Emergency95 awaits; projection-cache store; guidance removal |
 | `crates/daemon/src/lib.rs:2906-2911` | verified | hook field is `#[cfg(test)]`, not `test-support` |
@@ -385,10 +385,10 @@ thread-local state would cover the class.
 | 1 | T4's fault angle describes the stream case; for a unary response the frame is queued from `settle` after the handler future completes (`dispatch.rs:956-997`, `:409-420`) | refinement | T4 | Rewrite Fault/timing angle and Required faults; see below |
 | 2 | W10's `-updates` marker cannot fire and W9's update-count boundary is not constructible; `memory_update_count` is the constant `0` (`m1_compose.rs:231`) with no other writer | refinement | W10, W9 | Rewrite Exercised and Required faults; add the writer question as needs human input |
 | 3 | B4's "excluded parts hash `block.bytes`" holds for pre-match and kind-level exclusions only; empty and sentinel branches hash derived content (`tail_hygiene.rs:542-543`, `:569-570`, `:584-585`) | refinement | B4 | Rewrite the excluded clause of Check |
-| 4 | W7's rationale says `prepare_historian_fire` calls `effective_config` every pass; the call at `lib.rs:5051` is skipped on subagent (`:8234`), load-failure (`:5013-5025`), pending-rewrite (`:5036`), and busy (`:5042`) passes | refinement | W7 | Rewrite the rationale sentence of Check |
+| 4 | W7's rationale says `prepare_history_summarizer_fire` calls `effective_config` every pass; the call at `lib.rs:5051` is skipped on subagent (`:8234`), load-failure (`:5013-5025`), pending-rewrite (`:5036`), and busy (`:5042`) passes | refinement | W7 | Rewrite the rationale sentence of Check |
 | 5 | W2's first clause is false as a literal name equality at HEAD: `post_attach_ms` (`transform.rs:1254`, `:1331`) versus field `post_attach` (`:1162`) | refinement | W2 | State the key-to-field map in Check |
 | 6 | W2's "bracket the same work" clause is a review criterion with no runtime oracle | refinement | W2 | Name the observation method in Check |
-| 7 | Five records compare against HEAD code with no frozen artifact: A2, W6, W9, W4, P2 | refinement | A2, W6, W9, W4, P2 | Name a frozen reference per record, on the `historian_truncate_differential.rs` pattern |
+| 7 | Five records compare against HEAD code with no frozen artifact: A2, W6, W9, W4, P2 | refinement | A2, W6, W9, W4, P2 | Name a frozen reference per record, on the `history_summarizer_truncate_differential.rs` pattern |
 | 8 | B5's precondition "produces a clone" is the candidate's mechanism; a shared-view design never fires it | refinement | B5 | Assert the input condition only |
 | 9 | C5's witness is the pass's own post-commit read, which is what C1 tests | refinement | C5 | Witness the foreign commit through a second handle and its ordering |
 | 10 | G3 does not name the usage source and uses one marker for five paths | refinement | G3 | Name the independent walk and five constant markers |
@@ -583,16 +583,16 @@ Current:
 
 ```
 and bind-frozen `SessionBinding.config` stays frozen. `always` because
-[`prepare_historian_fire`][call-fire] calls it every pass.
+[`prepare_history_summarizer_fire`][call-fire] calls it every pass.
 ```
 
 Replacement:
 
 ```
 and bind-frozen `SessionBinding.config` stays frozen. `always` because
-[`prepare_historian_fire`][call-fire] calls it on every non-subagent pass
+[`prepare_history_summarizer_fire`][call-fire] calls it on every non-subagent pass
 whose state load succeeds, has no `pending_rewrite`, and has no live
-historian completion pending (`lib.rs:8234`, `:5013-5051`), and
+history_summarizer completion pending (`lib.rs:8234`, `:5013-5051`), and
 [`bind`][call-bind] calls it on every route bind; the check is on each call,
 not on each pass.
 ```
@@ -654,7 +654,7 @@ Replacement:
 Check: `always` - Over a fixed corpus of body shapes assert three oracles
 against a frozen reference: a test-only copy of HEAD's routing read, probe,
 and `Value` decode kept under `crates/daemon/tests/` in the form of
-[`historian_truncate_differential.rs`][diff-ref], or a recorded corpus of
+[`history_summarizer_truncate_differential.rs`][diff-ref], or a recorded corpus of
 expected route, code, and decoded request per body. Routing: `route(body)`
 equals the
 ```
@@ -738,7 +738,7 @@ Current:
 ```
 Check: `sometimes` - For some pass, the `row_version` observed by its
 post-commit read differs from the `row_version` its transform committed,
-because another actor (historian publish, wrapup recut, or state sync)
+because another actor (history_summarizer publish, wrapup recut, or state sync)
 committed in between. `sometimes` rather than `reachable` because the rerun
 ```
 
@@ -746,7 +746,7 @@ Replacement:
 
 ```
 Check: `sometimes` - For some pass, a foreign commit by another actor
-(historian publish, wrapup recut, or state sync) through a second store
+(history_summarizer publish, wrapup recut, or state sync) through a second store
 handle returns a `row_version` greater than the one the pass's transform
 committed, and that commit returns before the pass's first post-commit
 `cache_state` read begins; both versions and the ordering are recorded from
@@ -815,7 +815,7 @@ reruns `apply_once` and commits once (one breadcrumb, not zero or two); a
 fresh session whose first pass commits; an injected failure in the
 `pass_trace` upsert during a committing pass (no store seam exists at HEAD;
 the four `fail_next_*_for_test` seams at `memory-store/src/lib.rs:5900-5928`
-cover the side channel, the authority route read, and dreamer tasks only).
+cover the side channel, the authority route read, and memory_classifier tasks only).
 ```
 
 ### fault-map.md, "Trace and drain faults" row (line 20)
@@ -829,7 +829,7 @@ Current:
 Replacement:
 
 ```
-| Trace and drain faults | An outbox delivery failure is injectable at the store (`fail_next_historian_side_channel_for_test`); two drainers exist in production (pass and publish task). | No seam injects a `pass_trace` upsert failure (the store's four `fail_next_*_for_test` seams at `memory-store/src/lib.rs:5900-5928` do not cover it); no fault point exists for a crash between the mark commit and the delete commit; SIGKILL at that point needs a child process. |
+| Trace and drain faults | An outbox delivery failure is injectable at the store (`fail_next_history_summarizer_side_channel_for_test`); two drainers exist in production (pass and publish task). | No seam injects a `pass_trace` upsert failure (the store's four `fail_next_*_for_test` seams at `memory-store/src/lib.rs:5900-5928` do not cover it); no fault point exists for a crash between the mark commit and the delete commit; SIGKILL at that point needs a child process. |
 ```
 
 ### Reachability text, `catalog.md:64-66`
@@ -943,7 +943,7 @@ area does not have: a diagnostics-preservation record.
 
 1. Reference is the HEAD code (finding 22). A2, W6, W9, W4, and P2 compare
    the candidate with the implementation the change replaces and name no
-   artifact that outlives it. W5 and the caveman and selection differentials
+   artifact that outlives it. W5 and the terse_text_compression and selection differentials
    in `crates/daemon/tests/` use frozen copies. Judgment required: for each
    of the five, a frozen reference function or a recorded corpus of expected
    outputs, and which team owns the frozen files so they are not "fixed"
@@ -1019,7 +1019,7 @@ None.
 | Gap | Closed by | Notes |
 | --- | --- | --- |
 | 1, finding 13 (panic redaction across the worker boundary), with finding 17 folded in | W12 `worker-thread-panics-stay-inside-the-redaction-boundary`, safety, `always`, default-production | Verified: the guard is the thread-local `CALLBACK_POLL_DEPTH` (`panic_boundary.rs:11-13`); the hook prints the redacted string only when the panicking thread's depth is non-zero and otherwise forwards the full panic to the previous hook (`:40-47`); `kernel_routes::blocking` (`mod.rs:462-468`) runs its closure on a `spawn_blocking` worker with no guard entry, so a panic there reaches the default hook. The terminal clause disagrees with HEAD for kernel routes: `blocking` maps the `JoinError` to a `store_unavailable` response by documented intent (`mod.rs:460-467`), while the host maps an in-handler panic to `internal_error` (`dispatch.rs:985-989`). Both sides are cited in the record and the choice is an open question (needs human input). The thread-local inventory (finding 17) is in the record's Fault/timing angle. |
-| 2, finding 12 (C3 and W6 vacuous under a default campaign) | C6 `side-channel-row-is-due-during-a-drain` and W13 `cron-schedule-is-evaluated-for-a-configured-project`, both reachability, `sometimes`, explicit-config-only | Witnesses were chosen over `always-or-unreached` because both enabling states are constructible from fixtures already in the tree: `fail_next_historian_side_channel_for_test` is set-valued (`memory-store/src/lib.rs:5905-5908`), the memory-store fixture publishes all three kinds (`:18712-18750`), and the daemon status test drives a pass drain against a pending row (`daemon/src/lib.rs:35555-35612`); the scheduler tests build a `MODULE`-authority project with a real cron on a real store and tick a `ManualClock` past its instant (`dreamer_scheduler.rs:586-600`, `:680-704`). Bias 4 is therefore answered in favour of the witnesses; a human may still prefer the exemption. |
+| 2, finding 12 (C3 and W6 vacuous under a default campaign) | C6 `side-channel-row-is-due-during-a-drain` and W13 `cron-schedule-is-evaluated-for-a-configured-project`, both reachability, `sometimes`, explicit-config-only | Witnesses were chosen over `always-or-unreached` because both enabling states are constructible from fixtures already in the tree: `fail_next_history_summarizer_side_channel_for_test` is set-valued (`memory-store/src/lib.rs:5905-5908`), the memory-store fixture publishes all three kinds (`:18712-18750`), and the daemon status test drives a pass drain against a pending row (`daemon/src/lib.rs:35555-35612`); the scheduler tests build a `MODULE`-authority project with a real cron on a real store and tick a `ManualClock` past its instant (`memory_classifier_scheduler.rs:586-600`, `:680-704`). Bias 4 is therefore answered in favour of the witnesses; a human may still prefer the exemption. |
 | 3, finding 16 (plugin cache versus a replaced database file) | P2 extended | Verified: the cache compares the path only (`read-session-db.ts:55`) and `openCodeDbExists` is re-checked per call (`:75`). P2's `Check:` and `Required faults and enabling state` now carry the file-identity clause; the evidence file has the construction and an investigation entry. Whether OpenCode replaces the file in place is not established by anything in this repository and is recorded as an open question (needs external input). Reachability stays unresolved. |
 
 ### Gaps remaining
@@ -1076,21 +1076,3 @@ None.
 `reachable`, or `unreachable`; no liveness record. The W12 evidence file
 exceeds the 60 to 120 line target (173 lines including 34 link definitions)
 to keep every verified anchor; the C6 and W13 files are within it.
-
-[call-bind]: ../../../../crates/daemon/src/lib.rs#L11856
-[call-fire]: ../../../../crates/daemon/src/lib.rs#L5108
-[cas-retry]: ../../../../crates/daemon/src/transform.rs#L1951-L1990
-[cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L779-L849
-[copies]: ../../../../crates/daemon/src/metered_decode.rs#L58
-[diff-ref]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
-[eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
-[fmt]: ../../../../crates/daemon/src/transform.rs#L1226-L1360
-[from-writer]: ../../../../crates/host-runtime/src/handler.rs#L465-L472
-[ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L73-L82
-[normalize]: ../../../../crates/daemon/src/transform.rs#L2094-L2111
-[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L4309-L4327
-[stepper]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L163-L192
-[todo-prefix]: ../../../../crates/daemon/src/injection.rs#L187-L189
-[ts-stages]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
-[tt]: ../../../../crates/daemon/src/transform.rs#L1026-L1207
-[walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1228-L1288

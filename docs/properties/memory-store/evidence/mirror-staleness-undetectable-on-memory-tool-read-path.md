@@ -34,7 +34,7 @@ freshness test.
 
 **There is no fenced path left, for contrast.**
 
-The transform and historian mirror reads that once bracketed
+The transform and history_summarizer mirror reads that once bracketed
 `list_claim_mirror` with a snapshot-vector comparison were deleted when both
 moved to canonical kernel rows (`crates/daemon/src/canonical_memory.rs`), and the
 commit-time comparison in `MemoryStore::commit_transform` that re-read the vector
@@ -72,7 +72,7 @@ wedges at a fixed, self-consistent, arbitrarily old state — and
 it.
 
 **Reachability.** `memory_tool.rs:57` is production: the `#[cfg(test)] mod tests` in
-that file begins at `:361-362`, well below. `transform.rs` and `historian_chunk.rs`
+that file begins at `:361-362`, well below. `transform.rs` and `history_summarizer_chunk.rs`
 paths are likewise production. So all four read shapes are default-production, and
 the unfenced one is not gated on configuration.
 
@@ -82,7 +82,7 @@ the unfenced one is not gated on configuration.
    after the double-apply in `mirror-receipt-replay-applies-effects-once`.
 2. The mirror stops advancing. Its state row, project rows, and claim rows remain
    internally consistent and pass every validation, so nothing looks broken.
-3. The transform and historian compose their memory surfaces from canonical
+3. The transform and history_summarizer compose their memory surfaces from canonical
    kernel rows (`crates/daemon/src/canonical_memory.rs`) and never consult the
    mirror, so they keep serving current memory.
 4. `list_committed_claims` continues to return the frozen claim set, indefinitely,
@@ -137,7 +137,7 @@ still reads it.
 
 - Sources examined: `memory_tool.rs:57-67` and the filtering that follows,
   `:361-362` (the test module boundary, confirming production reachability), and
-  the now-deleted transform and historian mirror reads, which received their
+  the now-deleted transform and history_summarizer mirror reads, which received their
   expected vector from a lane configuration the caller already held.
 - Findings: the signature cannot check. `list_committed_claims` takes claim IDs, a
   category, and a limit, and nothing that could serve as a freshness reference. So

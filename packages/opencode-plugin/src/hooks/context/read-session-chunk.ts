@@ -38,7 +38,7 @@ export { extractTexts, hasMeaningfulUserText } from "./read-session-formatting";
  * Block-tokenization memo.
  *
  * `readSessionChunk` re-tokenizes the TC-chunked eligible tail on every `message.updated` event.
- * `lastCompartmentEnd + 1` anchors the eligible window, which is built forward.
+ * `lastHistorySegmentEnd + 1` anchors the eligible window, which is built forward.
  * Blocks before the growing tail produce byte-identical `formatBlock` text.
  * Exact-text keys preserve the result of `estimateTokens`.
  * `blockTokenMemo` cannot replace the per-tag token store because the two stores count different content.
@@ -112,7 +112,7 @@ let activeAbsoluteCountCache: Map<string, number> | null = null;
  * A registered provider takes precedence over the OpenCode-DB default for its `sessionId`.
  * Sessions without a registered provider use the OpenCode-DB default.
  *
- * Provider registrations must last one historian or trigger evaluation.
+ * Provider registrations must last one history_summarizer or trigger evaluation.
  * Providers must be unregistered after the evaluation to prevent session state from leaking across plugin instances.
  * `withRawMessageProvider` enforces this scoped lifetime.
  * scope.
@@ -309,9 +309,9 @@ readRawSessionMessages.readPage = readRawSessionMessagePage;
 readRawSessionMessages.getCount = getRawSessionMessageOrdinalCount;
 
 /**
- * The boundary-resolution path primes the active raw-message cache with messages at or after the last compartment boundary; subsequent `readRawSessionMessages(sessionId)` calls reuse the cache.
+ * The boundary-resolution path primes the active raw-message cache with messages at or after the last history_segment boundary; subsequent `readRawSessionMessages(sessionId)` calls reuse the cache.
  *
- * Compartment-trigger boundary resolution is O(tail).
+ * HistorySegment-trigger boundary resolution is O(tail).
  * Boundary resolution never reads below `baseOrdinal + 1`.
  * Tail-cache reads scale with tail length rather than session length.
  *
@@ -322,18 +322,18 @@ readRawSessionMessages.getCount = getRawSessionMessageOrdinalCount;
  */
 export function primeTailRawMessageCache(args: {
     sessionId: string;
-    lastCompartmentEnd: number;
+    lastHistorySegmentEnd: number;
     anchorMessageId: string | null;
 }): boolean {
-    const { sessionId, lastCompartmentEnd, anchorMessageId } = args;
+    const { sessionId, lastHistorySegmentEnd, anchorMessageId } = args;
     if (!activeRawMessageCache) return false;
     if (activeRawMessageCache.has(sessionId)) return false;
     if (sessionProviders.has(sessionId)) return false;
     if (!refreshOpenCodeDbPresence()) return false;
-    if (lastCompartmentEnd < 1 || !anchorMessageId) return false;
+    if (lastHistorySegmentEnd < 1 || !anchorMessageId) return false;
 
     const result = withReadOnlySessionDb((db) =>
-        readRawSessionTailFromDb(db, sessionId, lastCompartmentEnd, anchorMessageId),
+        readRawSessionTailFromDb(db, sessionId, lastHistorySegmentEnd, anchorMessageId),
     );
     if (!result) return false; // anchor not found → caller uses full read
     activeRawMessageCache.set(sessionId, result.messages);
@@ -495,7 +495,7 @@ export function getRawSessionMessageCount(sessionId: string): number {
 
 /**
  * Tool tags use `messageId = callId`.
- * A `callId` reused outside the compartment can match a visible tool tag.
+ * A `callId` reused outside the history_segment can match a visible tool tag.
  * String-only matching can queue drops for live tags.
  *
  * `messageFileKeys` uses session-unique content IDs, while `toolObservations` uses `callId` and `tool_owner_message_id`.
@@ -656,7 +656,7 @@ export function readSessionChunk(
 
         const meta = { ordinal: msg.ordinal, messageId: msg.id };
 
-        // System rows are prompt text, not transcript; they never reach the historian.
+        // System rows are prompt text, not transcript; they never reach the history_summarizer.
         if (msg.role === "system") {
             pendingNoiseMeta.push(meta);
             continue;

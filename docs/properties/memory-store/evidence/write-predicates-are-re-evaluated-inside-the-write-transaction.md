@@ -21,11 +21,11 @@ totals are 73 `with_conn` and 40 fenced. Exactly three functions have two or mor
 2. `lib.rs:5069-5117` `repair_note_artifacts_v51` — three `with_conn` plus a
    fenced loop. A genuine split read-modify-write, analysed separately in
    [post-migration-open-repair-is-resumable-and-effect-idempotent](post-migration-open-repair-is-resumable-and-effect-idempotent.md).
-3. `lib.rs:9662-9719` `deliver_historian_side_channel` — three
+3. `lib.rs:9662-9719` `deliver_history_summarizer_side_channel` — three
    `with_conn_fenced`. **Mutually exclusive match arms**, one per side-channel
    kind: `:9684` for `"event"`, `:9697` for `"primer"`, `:9706` for
    `"user_observation"`. Exactly one executes per call, and each does its domain
-   insert and `mark_historian_side_channel_delivered_tx` in the *same*
+   insert and `mark_history_summarizer_side_channel_delivered_tx` in the *same*
    transaction (`:9685-9690`, `:9698-9699`, `:9707-9708`). This is a correct
    transactional-outbox commit, not a split.
 
@@ -34,10 +34,10 @@ The exemplary cases, where a predicate could have been read outside and was not:
 - `lib.rs:7145-7205` `commit_state_import`. Its fenced transaction opens at
   `:7152`. Inside it: the completed-import lookup at `:7153-7159`, the duplicate
   and not-empty decisions at `:7160-7165`, `session_has_durable_state(tx,
-  session_id)` at `:7170`, `validate_state_import_compartments` at `:7173`, the
-  N compartment inserts at `:7177-7179`, and the `state_imports` insert at
+  session_id)` at `:7170`, `validate_state_import_history_segments` at `:7173`, the
+  N history_segment inserts at `:7177-7179`, and the `state_imports` insert at
   `:7180-7190`. The comment at `:7167-7169` states the reasoning: "This is the
-  fresh-row form of the cache-state CAS. The predicate and all compartment writes
+  fresh-row form of the cache-state CAS. The predicate and all history_segment writes
   share one fenced transaction, so a racing bootstrap cannot slip state between
   the emptiness check and the imported rows."
 - `lib.rs:7114-7139` `preflight_state_import` reads the *same two* predicates in
@@ -151,14 +151,14 @@ compensation rather than assuming it.
   rejection returns in `commit_state_import` at `:7161-7165` and `:7170-7172`,
   both before the inserts at `:7177`; the conflict returns in `commit_transform`
   at `:7361`, `:7370`, `:7380`, all before the upsert at `:7390`;
-  `AbandonHistorianTxnOutcome` (`:3741`), `TruncateTxnOutcome` (`:3747`),
+  `AbandonHistorySummarizerTxnOutcome` (`:3741`), `TruncateTxnOutcome` (`:3747`),
   `LineageDescentTxnOutcome` (`:3754`), `ModuleStateSyncTxnOutcome` (`:4328`).
 - Findings: in every case I read, the rejecting return precedes all writes in that
   closure, which is the correct ordering. The pattern is consistent enough to
   look intentional.
 - Missing evidence: I did not read all 40 closures. The larger ones —
   `apply_state_sync` (`:7617-7934`), `descend_lineage` (`:8177-8854`),
-  `publish_historian_chunk` (`:9351-9550`) — each contain multiple outcome
+  `publish_history_summarizer_chunk` (`:9351-9550`) — each contain multiple outcome
   variants and were not audited statement by statement.
 - Conclusion: unresolved, needs a targeted audit of those three. This is the same
   open question recorded on
@@ -172,7 +172,7 @@ compensation rather than assuming it.
   (transaction at `:5664`), `:8855-8886` `load_m1_revision_snapshot`
   (transaction at `:8862`). Each issues several `query_row` calls against the
   same handle, for example `:8863-8872` reading `MAX(sequence)` from
-  `compartments` and then `MAX(status_version)` from `notes`.
+  `history_segments` and then `MAX(status_version)` from `notes`.
 - Findings: consistent. `unchecked_transaction` is DEFERRED, so in WAL mode the
   read snapshot is pinned from the first read and every subsequent read in that
   handle sees the same snapshot. None of the three commits, so each drops to

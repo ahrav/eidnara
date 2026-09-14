@@ -10,19 +10,19 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
         return { type: "message", id, message };
     }
 
-    it("skips current custom entries and historical ctx-status custom messages", () => {
+    it("skips current custom entries and historical eidnara-status custom messages", () => {
         const entries = [
             messageEntry("user-1", { role: "user", content: "before" }),
             {
                 type: "custom",
                 id: "status-current",
-                customType: "ctx-status",
+                customType: "eidnara-status",
                 data: { title: "Eidnara Embed", text: "Embedding history…" },
             },
             {
                 type: "custom_message",
                 id: "status-historical",
-                customType: "ctx-status",
+                customType: "eidnara-status",
                 content: "Historical status",
                 display: true,
             },

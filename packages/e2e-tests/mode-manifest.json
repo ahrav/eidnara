@@ -5,7 +5,7 @@
         {
             "path": "tests/cache-invariants.test.ts",
             "tier": "rust-only",
-            "rationale": "replay-class prefix stability: pure-defer growth (A1), defer passes after an execute pass (A2), and aged ctx_reduce survival (A3) through the incident-pool verifiers",
+            "rationale": "replay-class prefix stability: pure-defer growth (A1), defer passes after an execute pass (A2), and aged eidnara_reduce survival (A3) through the incident-pool verifiers",
             "contract_refs": [
                 "U5-PORT"
             ]
@@ -29,15 +29,15 @@
         {
             "path": "tests/pi-smoke.test.ts",
             "tier": "pi-smoke",
-            "rationale": "the Pi RPC process loads the built extension, completes one mock turn with ctx_search, ctx_memory, and ctx_note registered, and leaves no storage file in the isolated data directory",
+            "rationale": "the Pi RPC process loads the built extension, completes one mock turn with eidnara_search, eidnara_memory, and eidnara_note registered, and leaves no storage file in the isolated data directory",
             "contract_refs": [
                 "U5-PORT"
             ]
         },
         {
-            "path": "tests/rust-ctx-reduce-roundtrip.test.ts",
+            "path": "tests/rust-eidnara-reduce-roundtrip.test.ts",
             "tier": "rust-only",
-            "rationale": "an agent ctx_reduce drop enters the daemon queued-drop ledger and is consumed on the next producer-backed bust",
+            "rationale": "an agent eidnara_reduce drop enters the daemon queued-drop ledger and is consumed on the next producer-backed bust",
             "contract_refs": [
                 "U5-PORT"
             ]
@@ -83,9 +83,9 @@
             ]
         },
         {
-            "path": "tests/rust-historian-producer.test.ts",
+            "path": "tests/rust-history_summarizer-producer.test.ts",
             "tier": "rust-only",
-            "rationale": "historian producer reaches the controlled backend and records a typed backend failure without killing a provider process",
+            "rationale": "history_summarizer producer reaches the controlled backend and records a typed backend failure without killing a provider process",
             "contract_refs": [
                 "U5-PORT"
             ]

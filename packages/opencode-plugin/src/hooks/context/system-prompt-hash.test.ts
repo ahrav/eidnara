@@ -6,16 +6,16 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildHiddenAgentRegistrations } from "../../agents/hidden-agent-registrations";
-import { SIDEKICK_SYSTEM_PROMPT } from "../../features/context/sidekick/agent";
-import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "../../features/context/smart-notes/compiler-prompt";
+import { NOTE_CONDITION_COMPILER_SYSTEM_PROMPT } from "../../features/context/conditional-notes/compiler-prompt";
+import { CONTEXT_RESEARCHER_SYSTEM_PROMPT } from "../../features/context/context-researcher/agent";
 import { Database } from "../../shared/sqlite";
-import { clearCtxReduceAvailability } from "./ctx-reduce-availability";
+import { clearEidnaraReduceAvailability } from "./eidnara-reduce-availability";
 import { createSystemPromptHashHandler, isEidnaraInternalAgent } from "./system-prompt-hash";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
-/** An empty data home has no `opencode.db`, so the ctx_reduce verdict is frozen fail-open and the hash persists. */
+/** An empty data home has no `opencode.db`, so the eidnara_reduce verdict is frozen fail-open and the hash persists. */
 function useTempDataHome(prefix: string): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
     tempDirs.push(dir);
@@ -59,7 +59,7 @@ async function seedHash(
 }
 
 describe("system-prompt-hash drain semantics", () => {
-    it("drains pre-existing systemPromptRefresh flag set by /ctx-flush", async () => {
+    it("drains pre-existing systemPromptRefresh flag set by /eidnara-flush", async () => {
         useTempDataHome("sph-drain-existing-");
         const sessionId = "ses-existing-flag";
         const systemPromptRefreshSessions = new Set<string>([sessionId]);
@@ -111,7 +111,7 @@ describe("system-prompt-hash drain semantics", () => {
         const { handler } = buildHandler({ systemPromptRefreshSessions });
         await seedHash(handler, sessionId);
 
-        // A /ctx-flush flag and a prompt change land on the same pass.
+        // A /eidnara-flush flag and a prompt change land on the same pass.
         systemPromptRefreshSessions.add(sessionId);
         await handler({ sessionID: sessionId }, { system: ["Changed while flushing"] });
         expect(systemPromptRefreshSessions.has(sessionId)).toBe(true);
@@ -223,8 +223,8 @@ describe("system-prompt-hash fail-open (per-turn handler must never throw)", () 
     });
 });
 
-const HISTORIAN_HEAD =
-    "You are Historian — the hippocampus of a long-running coding agent. You and the primary agent are one mind.";
+const HISTORY_SUMMARIZER_HEAD =
+    "You are HistorySummarizer — the hippocampus of a long-running coding agent. You and the primary agent are one mind.";
 
 describe("system-prompt-hash skips OpenCode internal hidden agents", () => {
     const TITLE_PROMPT_HEAD =
@@ -256,7 +256,7 @@ describe("system-prompt-hash skips OpenCode internal hidden agents", () => {
         useTempDataHome("sph-skip-no-hash-update-");
         for (const [label, head] of [
             ["title", TITLE_PROMPT_HEAD],
-            ["historian", HISTORIAN_HEAD],
+            ["history_summarizer", HISTORY_SUMMARIZER_HEAD],
         ] as const) {
             const sessionId = `ses-no-hash-update-${label}`;
             const { handler, promptStateFor } = buildHandler();
@@ -299,9 +299,9 @@ describe("system-prompt-hash skips OpenCode internal hidden agents", () => {
 
 describe("system-prompt-hash skips Eidnara internal child agents", () => {
     for (const [label, head] of [
-        ["historian", HISTORIAN_HEAD],
-        ["sidekick", SIDEKICK_SYSTEM_PROMPT],
-        ["smart-note-compiler", SMART_NOTE_COMPILER_SYSTEM_PROMPT],
+        ["history_summarizer", HISTORY_SUMMARIZER_HEAD],
+        ["context-researcher", CONTEXT_RESEARCHER_SYSTEM_PROMPT],
+        ["note-condition-compiler", NOTE_CONDITION_COMPILER_SYSTEM_PROMPT],
     ] as const) {
         it(`skips tracking for the ${label} agent (prompt signature)`, async () => {
             useTempDataHome(`sph-skip-eidnara-${label}-`);
@@ -316,8 +316,8 @@ describe("system-prompt-hash skips Eidnara internal child agents", () => {
 
     it("detects every registered hidden-agent prompt", () => {
         const registrations = buildHiddenAgentRegistrations({
-            smartNoteCompilerPrompt: SMART_NOTE_COMPILER_SYSTEM_PROMPT,
-            sidekickPrompt: SIDEKICK_SYSTEM_PROMPT,
+            noteConditionCompilerPrompt: NOTE_CONDITION_COMPILER_SYSTEM_PROMPT,
+            context_researcherPrompt: CONTEXT_RESEARCHER_SYSTEM_PROMPT,
         });
 
         for (const registration of registrations) {
@@ -335,7 +335,7 @@ describe("system-prompt-hash skips Eidnara internal child agents", () => {
 
         const system = [
             "You are a helpful coding assistant.",
-            "Use ctx_search for the memory system before answering questions about prior work.",
+            "Use eidnara_search for the memory system before answering questions about prior work.",
         ];
         await handler({ sessionID: sessionId }, { system });
 
@@ -521,7 +521,7 @@ describe("system-prompt-hash sticky dates", () => {
     });
 });
 
-describe("provisional ctx_reduce availability (pre-first-user race)", () => {
+describe("provisional eidnara_reduce availability (pre-first-user race)", () => {
     function createOpenCodeDb(dataHome: string, firstUser?: { sessionId: string; tools: unknown }) {
         mkdirSync(join(dataHome, "opencode"), { recursive: true });
         const oc = new Database(join(dataHome, "opencode", "opencode.db"));
@@ -544,7 +544,7 @@ describe("provisional ctx_reduce availability (pre-first-user race)", () => {
         const dir = useTempDataHome("sph-provisional-subagent-");
         createOpenCodeDb(dir);
         const sessionId = "ses-provisional-subagent";
-        clearCtxReduceAvailability(sessionId);
+        clearEidnaraReduceAvailability(sessionId);
         const systemPromptRefreshSessions = new Set<string>([sessionId]);
         const { handler, promptStateFor } = buildHandler({
             isSubagentSession: () => true,
@@ -564,7 +564,7 @@ describe("provisional ctx_reduce availability (pre-first-user race)", () => {
     it("persists the hash from the frozen deny-verdict variant once the first user row exists", async () => {
         const dir = useTempDataHome("sph-frozen-deny-");
         const sessionId = "ses-frozen-deny";
-        clearCtxReduceAvailability(sessionId);
+        clearEidnaraReduceAvailability(sessionId);
         createOpenCodeDb(dir, { sessionId, tools: { "*": false, read: true } });
         const { handler, promptStateFor } = buildHandler();
 

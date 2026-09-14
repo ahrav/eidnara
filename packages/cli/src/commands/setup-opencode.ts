@@ -260,9 +260,9 @@ export function withoutDcpConflict(result: ConflictResult): ConflictResult {
 export function writeEidnaraConfig(
     configPath: string,
     options: {
-        historianModel: string | null;
-        sidekickEnabled: boolean;
-        sidekickModel: string | null;
+        history_summarizerModel: string | null;
+        context_researcherEnabled: boolean;
+        context_researcherModel: string | null;
         claudeMax: boolean;
     },
 ): void {
@@ -273,36 +273,40 @@ export function writeEidnaraConfig(
             "https://raw.githubusercontent.com/ahrav/eidnara/main/assets/eidnara.schema.json";
     }
 
-    if (options.historianModel) {
-        const historian = asPlainRecord(config.historian);
-        historian.model = options.historianModel;
-        delete historian.disable;
-        delete historian.enabled;
+    if (options.history_summarizerModel) {
+        const history_summarizer = asPlainRecord(config.history_summarizer);
+        history_summarizer.model = options.history_summarizerModel;
+        delete history_summarizer.disable;
+        delete history_summarizer.enabled;
         warnPrunedAgentFields(
             configPath,
-            "historian",
-            pruneInvalidAgentFields("historian", historian),
+            "history_summarizer",
+            pruneInvalidAgentFields("history_summarizer", history_summarizer),
         );
-        config.historian = historian;
+        config.history_summarizer = history_summarizer;
     }
 
-    const sidekick = asPlainRecord(config.sidekick);
-    delete sidekick.enabled;
-    if (options.sidekickEnabled) {
-        delete sidekick.disable;
-        if (options.sidekickModel) {
-            sidekick.model = options.sidekickModel;
+    const context_researcher = asPlainRecord(config.context_researcher);
+    delete context_researcher.enabled;
+    if (options.context_researcherEnabled) {
+        delete context_researcher.disable;
+        if (options.context_researcherModel) {
+            context_researcher.model = options.context_researcherModel;
         }
     } else {
-        sidekick.disable = true;
+        context_researcher.disable = true;
     }
-    warnPrunedAgentFields(configPath, "sidekick", pruneInvalidAgentFields("sidekick", sidekick));
-    config.sidekick = sidekick;
+    warnPrunedAgentFields(
+        configPath,
+        "context-researcher",
+        pruneInvalidAgentFields("context-researcher", context_researcher),
+    );
+    config.context_researcher = context_researcher;
 
     if (options.claudeMax) {
         config.cache_ttl = withClaudeMaxCacheTtl(config.cache_ttl, [
-            options.historianModel,
-            options.sidekickModel,
+            options.history_summarizerModel,
+            options.context_researcherModel,
         ]);
     }
 
@@ -310,7 +314,7 @@ export function writeEidnaraConfig(
 }
 
 /**
- * A parseable config can still hold a schema-invalid block such as `"historian": "old-model"`; config loading logs "invalid agent configuration, ignoring" for it, and the writer starts fresh the same way.
+ * A parseable config can still hold a schema-invalid block such as `"history_summarizer": "old-model"`; config loading logs "invalid agent configuration, ignoring" for it, and the writer starts fresh the same way.
  * A plain object is returned as is because comment-json keeps a block's comments as symbol-keyed metadata that a spread copy loses.
  */
 function asPlainRecord(value: unknown): Record<string, unknown> {
@@ -570,17 +574,21 @@ export async function runSetup(dryRun = false): Promise<number> {
         }
     }
 
-    const historianModel = await pickModel(promptIO, allModels, "historian");
-    log.success(`Historian: ${historianModel}`);
+    const history_summarizerModel = await pickModel(promptIO, allModels, "history_summarizer");
+    log.success(`HistorySummarizer: ${history_summarizerModel}`);
 
-    const sidekickEnabled = await confirm("Enable sidekick?", false);
-    let sidekickModel: string | null = null;
-    if (sidekickEnabled) {
-        sidekickModel = await pickModel(promptIO, allModels, "sidekick");
-        log.success(`Sidekick: ${sidekickModel}`);
+    const context_researcherEnabled = await confirm("Enable context_researcher?", false);
+    let context_researcherModel: string | null = null;
+    if (context_researcherEnabled) {
+        context_researcherModel = await pickModel(promptIO, allModels, "context-researcher");
+        log.success(`ContextResearcher: ${context_researcherModel}`);
     }
 
-    const hasAnthropic = hasAnthropicModel([...allModels, historianModel, sidekickModel]);
+    const hasAnthropic = hasAnthropicModel([
+        ...allModels,
+        history_summarizerModel,
+        context_researcherModel,
+    ]);
     let claudeMax = false;
     if (hasAnthropic) {
         log.message(
@@ -673,9 +681,9 @@ export async function runSetup(dryRun = false): Promise<number> {
             }
 
             writeEidnaraConfig(paths.eidnaraConfig, {
-                historianModel,
-                sidekickEnabled,
-                sidekickModel,
+                history_summarizerModel,
+                context_researcherEnabled,
+                context_researcherModel,
                 claudeMax,
             });
             log.success(`Config written to ${paths.eidnaraConfig}`);
@@ -733,10 +741,12 @@ export async function runSetup(dryRun = false): Promise<number> {
               : modes.enabled
                 ? "Compaction: native settings left unchanged (Eidnara compaction is off)"
                 : "Compaction: native settings left unchanged (Eidnara is disabled)",
-        historianModel ? `Historian: ${historianModel}` : "Historian: fallback chain",
-        sidekickEnabled
-            ? `Sidekick: enabled${sidekickModel ? ` (${sidekickModel})` : ""}`
-            : "Sidekick: disabled",
+        history_summarizerModel
+            ? `HistorySummarizer: ${history_summarizerModel}`
+            : "HistorySummarizer: fallback chain",
+        context_researcherEnabled
+            ? `ContextResearcher: enabled${context_researcherModel ? ` (${context_researcherModel})` : ""}`
+            : "ContextResearcher: disabled",
     ].join("\n");
 
     note(summary, dryRun ? "Configuration (dry run — not written)" : "Configuration");

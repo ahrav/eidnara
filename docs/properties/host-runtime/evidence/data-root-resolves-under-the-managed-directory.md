@@ -26,8 +26,8 @@ With no override, `data_dir_path` reads `XDG_DATA_HOME` and `HOME` with
 inside a `DataRootEnv` struct (`:147-150`) whose named fields prevent the
 two values being swapped. A grep for `var_os` and `env::var` across
 `crates/host-runtime/src` finds no other reader of these two variables; the
-Broca backends set `HOME` in child environments (`broca/opencode.rs:179`,
-`broca/pi.rs:322`) but do not read it.
+ModelExecution backends set `HOME` in child environments (`model_execution/opencode.rs:179`,
+`model_execution/pi.rs:322`) but do not read it.
 
 Resolver. `default_data_root` (`:155-167`) defines `absolute`, which
 converts a value to a `PathBuf` and keeps it only if `is_absolute()`
@@ -107,7 +107,7 @@ either behaviour.
   `set_var` in `crates/host-runtime`.
 - Findings: the test builds `DataRootEnv` values inline and never calls
   `std::env::set_var` or `var_os`. The only `set_var` calls in the crate
-  are in the Broca fixture child at `tests/broca_subprocess.rs:277-279`,
+  are in the ModelExecution fixture child at `tests/model_execution_subprocess.rs:277-279`,
   which runs in a separate process. `data_dir_path` is the only reader, and
   it is not under test here; it is exercised indirectly by every
   `InstanceGuard::acquire` call with `None`, which the unit tests avoid by

@@ -361,8 +361,8 @@
             "sessionID": "ses_0db6ed92bffeWh2Rj8dbsLZ6hy",
             "parentID": "msg_f249127e1001q49eS3UmpbY24P",
             "role": "assistant",
-            "mode": "historian",
-            "agent": "historian",
+            "mode": "history_summarizer",
+            "agent": "history_summarizer",
             "path": {
               "cwd": "/Users/ufukaltinok/Work/Projects/Eidnara/llm-runner",
               "root": "/Users/ufukaltinok/Work/Projects/Eidnara/llm-runner"

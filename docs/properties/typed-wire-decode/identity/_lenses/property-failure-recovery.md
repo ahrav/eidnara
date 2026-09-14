@@ -8,7 +8,7 @@ External leads: plan R6 and latency-audit W5.
 
 `crates/daemon/src/lib.rs:16443-16461` silently skips rows that no longer
 decode. Exact expected recovered IDs and ordinals are therefore necessary.
-`crates/daemon/src/historian.rs:152-157,326-334` uses a length-based durable
+`crates/daemon/src/history_summarizer.rs:152-157,326-334` uses a length-based durable
 fingerprint and rejects mismatches.
 
 ## Candidates
@@ -24,4 +24,4 @@ No crash-consistency claim follows from reopening a store. A termination test
 is required only if the later portfolio adds a crash-recovery claim.
 No old database or in-flight binary-upgrade campaign is supplied. Synthetic
 todo blocks are excluded from production snapshot items at
-`crates/daemon/src/historian_chunk.rs:418-430`.
+`crates/daemon/src/history_summarizer_chunk.rs:418-430`.

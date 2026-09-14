@@ -8,7 +8,7 @@ import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import {
     clearToolPermissionDenied,
     invalidateToolPermissionDenied,
-} from "./ctx-reduce-availability";
+} from "./eidnara-reduce-availability";
 import {
     type ContextUsage,
     getMessageRemovedInfo,

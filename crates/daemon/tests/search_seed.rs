@@ -27,7 +27,7 @@ use daemon::search_seed::{
     verify_closed,
 };
 use host_runtime::generation::{CurrentProfile, GenerationStore, SourceSpec, StageMeta};
-use host_runtime::synapse::SynapseLimits;
+use host_runtime::local_embeddings::LocalEmbeddingsLimits;
 use host_runtime::{InstanceError, LifecycleTransactionLock};
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, ProjectScope};
@@ -135,14 +135,14 @@ async fn embedded_fixture(root: &Path) -> Fixture {
     let embedded = support::embedding_fixtures::occurrence_of(&rows, &embedded_object).to_string();
     let projection = Arc::new(projection);
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
         Maintained {
             gate: open_gate(),
             kernel: Arc::clone(&corpus.kernel),
             projection: Arc::clone(&projection),
-            synapse,
+            local_embeddings,
             project: ProjectScope::new(PROJECT).unwrap(),
             destination: ArtifactDestination::Remote,
         },

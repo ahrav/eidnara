@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -11,12 +12,27 @@ import {
 import {
     assertMutationReplayResults,
     boundVerifierDigests,
+    E2E_ROOT,
     type EvidenceView,
     loadMutationEvidence,
     mutationRecordsBoundTo,
     REPO_ROOT,
 } from "../src/incident-pool/evidence";
-import { deriveTrustedAcceptedCommit, type GitRunner } from "./validate-incident-history";
+import {
+    canonicalJson,
+    compareWithAcceptedSnapshot,
+    type HistorySnapshot,
+} from "../src/incident-pool/history";
+import {
+    builtinIncidentCaseRegistry,
+    validateRegistryCatalogCorrespondence,
+} from "../src/incident-pool/registry";
+import {
+    deriveTrustedAcceptedCommit,
+    type GitRunner,
+    loadHistorySnapshot,
+    loadHistorySnapshotFromGit,
+} from "./validate-incident-history";
 
 function git(
     args: string[],
@@ -252,6 +268,167 @@ function cleanupTrustedWorktree(worktree: string, parent: string): Error | null 
     return null;
 }
 
+function runCatalogSuite(args: string[], cwd: string): ReturnType<GitRunner> {
+    const result = Bun.spawnSync({
+        cmd: [process.execPath, ...args],
+        cwd,
+        env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 120_000,
+        maxBuffer: 4 * 1024 * 1024,
+    });
+    return {
+        status: result.exitCode,
+        stdout: result.stdout.toString(),
+        stderr: result.stderr.toString(),
+    };
+}
+
+/** Catalog-only replay admission. Mutation bytes and per-record bindings retain their own gates. */
+export function replayCatalogVerifierChanges(
+    acceptedSnapshot: HistorySnapshot,
+    currentSnapshot: HistorySnapshot,
+    acceptedDigests: Record<string, string>,
+    currentDigests: Record<string, string>,
+    run: GitRunner = runCatalogSuite,
+): void {
+    const { changed, unbound } = digestDrift(acceptedDigests, currentDigests);
+    if (unbound.length > 0) {
+        throw new Error(
+            `catalog no longer binds accepted executable verifiers: ${unbound.join(", ")}`,
+        );
+    }
+    const { accepted, candidate } = compareWithAcceptedSnapshot(acceptedSnapshot, currentSnapshot);
+    const beforeBindings = catalogBindings(accepted.catalog);
+    const afterBindings = catalogBindings(candidate.catalog);
+    const vanished = digestDrift(beforeBindings, afterBindings).unbound;
+    if (vanished.length > 0) {
+        throw new Error(
+            `accepted executable variants no longer bind a verifier: ${vanished.join(", ")}`,
+        );
+    }
+    const changedPaths = new Set([
+        ...changed,
+        ...Object.keys(currentDigests).filter((path) => acceptedDigests[path] === undefined),
+    ]);
+    const currentVariants = new Map(
+        candidate.catalog.families.flatMap((family) =>
+            family.variants.map((variant) => [variant.id, variant] as const),
+        ),
+    );
+    const suites = new Set<string>();
+    const appended = candidate.events.slice(accepted.events.length);
+    for (const before of accepted.catalog.families.flatMap((family) => family.variants)) {
+        if (!EXECUTABLE_LANES.includes(before.lane)) continue;
+        const beforeBinding = before.verifier_binding;
+        const after = currentVariants.get(before.id);
+        const binding = after?.verifier_binding;
+        if (!beforeBinding || !after || !binding) {
+            throw new Error(`accepted executable variant ${before.id} no longer binds a verifier`);
+        }
+        if (before.normative_checks.some((check) => !after.normative_checks.includes(check))) {
+            throw new Error(`variant ${before.id} removed an accepted normative check`);
+        }
+        if (
+            beforeBinding.oracle_dependencies.some(
+                (path) => !binding.oracle_dependencies.includes(path),
+            )
+        ) {
+            throw new Error(`variant ${before.id} removed an accepted oracle binding`);
+        }
+        const paths = [beforeBindings[before.id], afterBindings[before.id]]
+            .flatMap((references) => references.split("\n"))
+            .map((reference) => `packages/e2e-tests/${reference.split("#")[0]}`);
+        if (
+            !paths.some((path) => changedPaths.has(path)) &&
+            canonicalJson(before) === canonicalJson(after)
+        )
+            continue;
+        const baseline = candidate.ledger.byIdentity.get(after.id)?.latestBaseline;
+        if (
+            !baseline ||
+            before.semantic_revision.id === after.semantic_revision.id ||
+            !appended.some(
+                (event) =>
+                    event.event_id === baseline.event_id &&
+                    event.kind === "baseline" &&
+                    event.semantic_fingerprint === after.semantic_revision.fingerprint,
+            )
+        ) {
+            throw new Error(
+                `variant ${before.id} requires an appended fingerprint-bound baseline and distinct semantic revision for replay`,
+            );
+        }
+        for (const reference of [
+            beforeBinding.driver,
+            beforeBinding.verifier,
+            binding.driver,
+            binding.verifier,
+        ]) {
+            const module = reference.split("#")[0];
+            const suite = module.replace(/\.ts$/, ".test.ts");
+            if (suite === module || !existsSync(resolve(E2E_ROOT, suite))) {
+                throw new Error(`variant ${before.id} missing required regression suite ${suite}`);
+            }
+            suites.add(suite);
+        }
+        for (const module of binding.oracle_dependencies) {
+            if (!changedPaths.has(`packages/e2e-tests/${module}`)) continue;
+            const suite = module.replace(/\.ts$/, ".test.ts");
+            if (suite !== module && existsSync(resolve(E2E_ROOT, suite))) suites.add(suite);
+        }
+    }
+    validateRegistryCatalogCorrespondence(builtinIncidentCaseRegistry(), candidate.catalog);
+    const suiteDigests = (): Record<string, string> =>
+        Object.fromEntries(
+            [...suites].sort().map((suite) => [
+                suite,
+                createHash("sha256")
+                    .update(readFileSync(resolve(E2E_ROOT, suite)))
+                    .digest("hex"),
+            ]),
+        );
+    const beforeSuites = suiteDigests();
+    for (const suite of [...suites].sort()) {
+        const result = run(["test", `./${suite}`, "--max-concurrency", "1"], E2E_ROOT);
+        // Bun's summary is required even on exit zero: missing/empty/skipped suites are not replay evidence.
+        const passes = result.stderr.match(/^\s*(\d+) pass\s*$/m);
+        const failures = result.stderr.match(/^\s*(\d+) fail\s*$/m);
+        if (
+            result.status !== 0 ||
+            !passes ||
+            Number(passes[1]) < 1 ||
+            !failures ||
+            Number(failures[1]) !== 0 ||
+            /^\s*[1-9]\d* (?:skip|todo)\s*$/m.test(result.stderr)
+        ) {
+            throw new Error(
+                `catalog regression replay failed or executed no successful tests: ${suite} (exit ${result.status})`,
+            );
+        }
+        // Only static paths, counts and digests leave the gate, never raw test diagnostics.
+        console.log(`catalog replay ${suite}: ${passes[1]} passed`);
+    }
+    if (suites.size > 0) {
+        const afterSnapshot = loadHistorySnapshot(
+            resolve(E2E_ROOT, "incidents"),
+            currentSnapshot.baseLabel,
+        );
+        if (
+            canonicalJson(afterSnapshot) !== canonicalJson(currentSnapshot) ||
+            canonicalJson(boundVerifierDigests(candidate.catalog)) !==
+                canonicalJson(currentDigests) ||
+            canonicalJson(suiteDigests()) !== canonicalJson(beforeSuites)
+        ) {
+            throw new Error("catalog replay inputs changed during replay");
+        }
+        for (const [path, digest] of Object.entries(currentDigests).sort()) {
+            console.log(`catalog replay digest ${path}: ${digest}`);
+        }
+    }
+}
+
 function replayMutationVerifier(path: string, evidence: EvidenceView): void {
     if (path !== "crates/daemon/src/differential_goldens.rs") {
         throw new Error(`bound verifier changed without a registered mutation runner: ${path}`);
@@ -291,15 +468,19 @@ export function validateIncidentVerifiers(baseCommit: string): number {
     const accepted = loadTrustedEvidence(baseCommit);
     const current = readVerifierState(REPO_ROOT, REPO_ROOT);
     assertMutationBindingsUnchanged(accepted.mutationBindings, current.mutationBindings);
-    assertCatalogBoundVerifierBytesUnchanged(
+    replayCatalogVerifierChanges(
+        loadHistorySnapshotFromGit(REPO_ROOT, baseCommit, git),
+        loadHistorySnapshot(resolve(E2E_ROOT, "incidents"), baseCommit),
         accepted.catalogBoundDigests,
         current.catalogBoundDigests,
     );
-    assertCatalogBindingsUnchanged(accepted.catalogBindings, current.catalogBindings);
     const evidence = loadMutationEvidence();
     assertBoundVerifierBytesUnchanged(accepted.mutationDigests, current.mutationDigests, (path) =>
         replayMutationVerifier(path, evidence),
     );
+    if (canonicalJson(readVerifierState(REPO_ROOT, REPO_ROOT)) !== canonicalJson(current)) {
+        throw new Error("bound verifier bytes or bindings changed during replay");
+    }
     return (
         Object.keys(accepted.mutationDigests).length +
         Object.keys(accepted.catalogBoundDigests).length

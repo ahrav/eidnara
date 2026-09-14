@@ -104,14 +104,14 @@
     }
   },
   {
-    "label": "supersession: ctx_reduce keep-3 exemplars",
+    "label": "supersession: eidnara_reduce keep-3 exemplars",
     "items": [
       {
         "id": "c1#0",
         "ordinal": 1,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -125,7 +125,7 @@
         "ordinal": 1,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -138,7 +138,7 @@
         "ordinal": 2,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -152,7 +152,7 @@
         "ordinal": 2,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -165,7 +165,7 @@
         "ordinal": 3,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -179,7 +179,7 @@
         "ordinal": 3,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -192,7 +192,7 @@
         "ordinal": 4,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -206,7 +206,7 @@
         "ordinal": 4,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -219,7 +219,7 @@
         "ordinal": 5,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -233,7 +233,7 @@
         "ordinal": 5,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -366,14 +366,14 @@
     }
   },
   {
-    "label": "supersession: ctx_note read+dismiss drop, write keep",
+    "label": "supersession: eidnara_note read+dismiss drop, write keep",
     "items": [
       {
         "id": "c1#0",
         "ordinal": 1,
         "kind": {
           "ToolCall": {
-            "name": "ctx_note",
+            "name": "eidnara_note",
             "input": {
               "action": "read"
             }
@@ -389,7 +389,7 @@
         "ordinal": 1,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_note"
+            "tool_name": "eidnara_note"
           }
         },
         "provider_executed": false,
@@ -402,7 +402,7 @@
         "ordinal": 2,
         "kind": {
           "ToolCall": {
-            "name": "ctx_note",
+            "name": "eidnara_note",
             "input": {
               "action": "dismiss"
             }
@@ -418,7 +418,7 @@
         "ordinal": 2,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_note"
+            "tool_name": "eidnara_note"
           }
         },
         "provider_executed": false,
@@ -431,7 +431,7 @@
         "ordinal": 3,
         "kind": {
           "ToolCall": {
-            "name": "ctx_note",
+            "name": "eidnara_note",
             "input": {
               "action": "write",
               "content": "x"
@@ -448,7 +448,7 @@
         "ordinal": 3,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_note"
+            "tool_name": "eidnara_note"
           }
         },
         "provider_executed": false,
@@ -830,14 +830,14 @@
     }
   },
   {
-    "label": "two_pass: ctx_reduce keep-3 exemplars",
+    "label": "two_pass: eidnara_reduce keep-3 exemplars",
     "items": [
       {
         "id": "c1#0",
         "ordinal": 1,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -851,7 +851,7 @@
         "ordinal": 1,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -864,7 +864,7 @@
         "ordinal": 2,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -878,7 +878,7 @@
         "ordinal": 2,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -891,7 +891,7 @@
         "ordinal": 3,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -905,7 +905,7 @@
         "ordinal": 3,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -918,7 +918,7 @@
         "ordinal": 4,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -932,7 +932,7 @@
         "ordinal": 4,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -945,7 +945,7 @@
         "ordinal": 5,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -959,7 +959,7 @@
         "ordinal": 5,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -1271,14 +1271,14 @@
     }
   },
   {
-    "label": "emergency: ctx_reduce keep-3 exemplars",
+    "label": "emergency: eidnara_reduce keep-3 exemplars",
     "items": [
       {
         "id": "c1#0",
         "ordinal": 1,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -1292,7 +1292,7 @@
         "ordinal": 1,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -1305,7 +1305,7 @@
         "ordinal": 2,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -1319,7 +1319,7 @@
         "ordinal": 2,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -1332,7 +1332,7 @@
         "ordinal": 3,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -1346,7 +1346,7 @@
         "ordinal": 3,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -1359,7 +1359,7 @@
         "ordinal": 4,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -1373,7 +1373,7 @@
         "ordinal": 4,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,
@@ -1386,7 +1386,7 @@
         "ordinal": 5,
         "kind": {
           "ToolCall": {
-            "name": "ctx_reduce",
+            "name": "eidnara_reduce",
             "input": {}
           }
         },
@@ -1400,7 +1400,7 @@
         "ordinal": 5,
         "kind": {
           "ToolResult": {
-            "tool_name": "ctx_reduce"
+            "tool_name": "eidnara_reduce"
           }
         },
         "provider_executed": false,

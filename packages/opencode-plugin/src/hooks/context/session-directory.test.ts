@@ -96,7 +96,11 @@ describe("resolveSessionDirectory", () => {
         const get = mock(async () => {
             if (fail) throw new Error("boom");
             return {
-                data: { directory: "/from/sdk", parentID: "ses-parent", title: "eidnara-sidekick" },
+                data: {
+                    directory: "/from/sdk",
+                    parentID: "ses-parent",
+                    title: "eidnara-context_researcher",
+                },
             };
         });
         const subagentSessions = new Set<string>();

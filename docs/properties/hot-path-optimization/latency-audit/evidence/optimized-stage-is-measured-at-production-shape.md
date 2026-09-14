@@ -34,12 +34,12 @@ must reach before any "faster" claim is checkable.
   store's 512 KiB durable-text bound, as the comment at
   [`:30-33`][hp-e2e-counts] and the note at [`:352-354`][hp-cliff] say.
 - The end-to-end arms ([`bench_e2e_first_hard`][hp-e2e], steady, output
-  cache, caveman) call [`transform_cached`][hp-e2e] on a request built by
+  cache, terse_text_compression) call [`transform_cached`][hp-e2e] on a request built by
   [`serde_json::from_value`][hp-req] against a [fresh tempfile store][hp-store]
   with a fixed [`ProducerContext`][hp-ctx]. The production handler wraps that
   call with the projection-cache lookup, side-channel drain, and receive
   trace at [`:8189-8206`][h-pre], the `run_transform` closure's
-  `project_memory`, `historian_active`, and guidance reads at
+  `project_memory`, `history_summarizer_active`, and guidance reads at
   [`:8203-8269`][h-run], and the response encoding in
   [`respond_transform`][respond]; none of that is in the bench.
 - The 1_400 and 1_000 points are pinned by

@@ -15,21 +15,21 @@ function snapshot(overrides: Partial<SidebarSnapshot> = {}): SidebarSnapshot {
         native_context_usage_percentage: 41,
         compaction_enabled: false,
         systemPromptTokens: 0,
-        compartmentCount: 12,
-        archivedCompartmentCount: 3,
+        history_segmentCount: 12,
+        archivedHistorySegmentCount: 3,
         memoryCount: 5,
         memoryState: "available",
         memoryBlockCount: 2,
         pendingOpsCount: 4,
-        historianRunning: true,
-        compartmentInProgress: true,
+        history_summarizerRunning: true,
+        history_segmentInProgress: true,
         sessionNoteCount: 2,
-        readySmartNoteCount: 1,
+        readyConditionalNoteCount: 1,
         cacheTtl: "5m",
         lastTransformError: null,
-        lastDreamerRunAt: null,
+        lastMemoryClassifierRunAt: null,
         projectIdentity: null,
-        compartmentTokens: 0,
+        history_segmentTokens: 0,
         factTokens: 0,
         memoryTokens: 0,
         docsTokens: 0,
@@ -94,21 +94,21 @@ test("names no owner when the host reports neither compaction.auto nor compactio
     );
 });
 
-test("keeps historical compartments as a static archived row", () => {
+test("keeps historical history_segments as a static archived row", () => {
     const initialRows = compactionOffSidebarRows(snapshot());
-    const activeCountChangedRows = compactionOffSidebarRows(snapshot({ compartmentCount: 99 }));
+    const activeCountChangedRows = compactionOffSidebarRows(snapshot({ history_segmentCount: 99 }));
 
     expect(initialRows).toEqual([
         { label: "Memories", value: "5" },
         { label: "Notes", value: "2" },
-        { label: "Archived compartments", value: "3" },
+        { label: "Archived history_segments", value: "3" },
     ]);
     expect(activeCountChangedRows).toEqual(initialRows);
 });
 
 test("hides the Notes and Archived rows when their counts are zero or absent", () => {
     const rows = compactionOffSidebarRows(
-        snapshot({ sessionNoteCount: 0, archivedCompartmentCount: undefined }),
+        snapshot({ sessionNoteCount: 0, archivedHistorySegmentCount: undefined }),
     );
 
     expect(rows).toEqual([{ label: "Memories", value: "5" }]);

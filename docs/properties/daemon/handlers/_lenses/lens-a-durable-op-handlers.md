@@ -37,7 +37,7 @@ at `:12250`. That function carries no `#[cfg]` attribute, unlike the
 arm cited below is present in that match in a default build with no feature flags
 and no configuration: `authority.prepare` (`:12255`), the eleven
 `authority.drain.*` arms (`:12257-12267`), `guidance.get` (`:12269`),
-`dreamer.run_task` (`:12271`), `state_sync` (`:12278`), `state_import` (`:12279`),
+`memory_classifier.run_task` (`:12271`), `state_sync` (`:12278`), `state_import` (`:12279`),
 `agent_drops.append` (`:12280`), `todo_state.set` (`:12305`), `session.recomp`
 (`:12307`), `session.delete` (`:12309`). No handler in this lens is behind
 `#[cfg(feature = ...)]`; the only feature-gated block in the file is
@@ -53,7 +53,7 @@ recognisable, or says what stands in for one.
 
 | Handler | Mutates | Txns | Identity | Returns |
 | --- | --- | --- | --- | --- |
-| `handle_state_import_value` (`:5591-5774`) | Compartment set for an empty session, via `commit_state_import` (`:5738-5743`) | 1 durable, after N in-memory staging calls | `import_id`, caller-supplied, capped 1..=128 bytes (`:5639`, const `:651`); preflighted (`:5678`) | `{ok, imported, duplicate}` (`:5749-5753`) or `{ok, staged}` (`:5732`) |
+| `handle_state_import_value` (`:5591-5774`) | HistorySegment set for an empty session, via `commit_state_import` (`:5738-5743`) | 1 durable, after N in-memory staging calls | `import_id`, caller-supplied, capped 1..=128 bytes (`:5639`, const `:651`); preflighted (`:5678`) | `{ok, imported, duplicate}` (`:5749-5753`) or `{ok, staged}` (`:5732`) |
 | `handle_agent_drops_value` (`:5776-5890`) | Pending agent-drop queue, via `append_pending_agent_drops_with_command` (`:5868-5874`) | 1 durable, preceded by one read (`:5833`) | `command_id` from `command_id_from_agent_drops_request` (`:5783`) | `{ok, queued, duplicate}` (`:5876`) or `{ok, queued, disposition?}` (`:5879-5883`) |
 | `handle_todo_state_set_value` (`:5935-5974`) | `last_todo_state*` meta, via `set_todo_state` (`:5965`) | 1 | None. Content-keyed by `owner_message_id` + `sha256(normalized)` (`:5960`) | `{ok: true}` only (`:5967`) |
 | `handle_session_flush_value` (`:5976-5993`) | `soft_refresh_pending`, via `arm_soft_refresh` (`:5986`) | 1 | None | `{ok, armed}` (`:5987`) |
@@ -63,10 +63,10 @@ recognisable, or says what stands in for one.
 | `handle_authority_seed_value` (`:7267-7318`) | Authority seed rows | 1 | `(context_store_uuid, project, domain)` plus per-row `source_row_id` (`:7281-7291`) | `{ok, ...}` |
 | `handle_authority_drain_value` (`:7320-7427`) | Authority drain state machine (`:7345`, `:7366`, `:7400`) | 1 per call | `(context_store_uuid, project, domain)` plus `generation` on every action except `begin` (`:7355`, `:7388`), plus `coordinator_token` (`:7358`, `:7392`) | `{ok, authority}` (`:7413`) |
 | `handle_guidance_value` (`:7607-7723`) | `meta.guidance_date`, via `guidance_date_for_session` (`:7674`) committing at `:7751` | 0 or 1. **Can be 0 while returning success** | None | `{ok, bytes, hash, content_hash, preset, ...}` (`:7704-7722`); no field reports whether the date was persisted |
-| `handle_transform_unpaged_value` (`:8007-8615`) | Project mural artifact (`:8210`), historian side channels (`:8252`), pass traces (`:8262`, `:8332`, `:8560`), then the fenced cache-state commit inside `apply_once` | **3 or more, in separate transactions** | None at the handler. The cache-state commit is fenced by `row_version`/`revert_epoch` inside `apply_once` | `TransformResponse` with `committed` (`:8522`) |
+| `handle_transform_unpaged_value` (`:8007-8615`) | Project mural artifact (`:8210`), history_summarizer side channels (`:8252`), pass traces (`:8262`, `:8332`, `:8560`), then the fenced cache-state commit inside `apply_once` | **3 or more, in separate transactions** | None at the handler. The cache-state commit is fenced by `row_version`/`revert_epoch` inside `apply_once` | `TransformResponse` with `committed` (`:8522`) |
 | `handle_state_sync_value` (`:8642-9125`) → `apply_state_sync_wire` (`:9127-9333`) | Full shadow state, via `apply_authority_state_sync` (`:9241-9285`), plus an in-memory capability flag (`:9288-9291`) | 1 durable, plus 1 in-memory effect | `shadow_generation` + `expected_shadow_seq` fence (`:9244-9245`); paged path adds `seed_id` + digest (`:8735-8748`) | `{ok, shadow_generation, shadow_seq, row_version, ...skipped/seeded counts}` (`:9292-9306`) |
 | `handle_transform_page_value` (`:9335-9578`) | Nothing durable itself; assembles pages then delegates to the unpaged path | 0 direct | `transform_page_id` + `transform_page_digest` (consts `:636-641`) | Page ack, or the delegated transform response |
-| `handle_dreamer_run_task` (`:9605-10040`) | Dream task ledger row (`:9989` failure path, `:10016` success path) | 1, after an external model call | `command_id`, 1..=256 bytes (`:9626-9631`), plus an `authority_generation` fence (`:9690-9698`); replay read at `:9819` before any producer run | Replayed ledger response (`:9820`, `:10029`) or an error (`:9995`, `:10035`) |
+| `handle_memory_classifier_run_task` (`:9605-10040`) | Dream task ledger row (`:9989` failure path, `:10016` success path) | 1, after an external model call | `command_id`, 1..=256 bytes (`:9626-9631`), plus an `authority_generation` fence (`:9690-9698`); replay read at `:9819` before any producer run | Replayed ledger response (`:9820`, `:10029`) or an error (`:9995`, `:10035`) |
 
 Read-only handlers in scope, listed for completeness and carrying no records
 here: `handle_authority_status_value` (`:7134-7167`), `handle_mirror_pull_value`
@@ -79,11 +79,11 @@ here: `handle_authority_status_value` (`:7134-7167`), `handle_mirror_pull_value`
 **O1. Validation precedes the first durable write in every handler in scope.**
 This is the one broadly good result. Each handler runs shape, cap, and binding
 checks before touching the store: `state_import` validates `v`, `session_id`,
-`import_id`, and the batch window at `:5628-5651` and the compartment set at
+`import_id`, and the batch window at `:5628-5651` and the history_segment set at
 `:5711-5714`, all before `commit_state_import` at `:5738`; `agent_drops` parses
 the range at `:5804` and rejects an empty resolved id set at `:5858-5866` before
 appending at `:5868`; `management_binding` (`:5892-5933`) gates `todo_state.set`,
-`session.flush`, `session.recomp`, `session.delete`, and `dreamer.run_task` on
+`session.flush`, `session.recomp`, `session.delete`, and `memory_classifier.run_task` on
 `v == 1`, a nonempty `session_id`, and a matching route binding before any of
 them reach a store call. `todo_state.set` additionally normalises through
 `injection::normalize_todo_state_json` and rejects a non-array at `:5957-5959`.
@@ -116,14 +116,14 @@ returns `Ok(())` without writing when `facade_binding(channel)` fails
 valid" (`:4407-4409`). The behaviour and the contract agree, so this is not a
 disagreement; it is a deliberate skip that a caller still cannot observe.
 
-**O5. The historian side-channel drain result is computed and thrown away.**
-`store.drain_historian_side_channels` at `:8252-8256` is bound to `let _`. The
-function returns `HistorianSideChannelDrainResult` and the store fills in
+**O5. The history_summarizer side-channel drain result is computed and thrown away.**
+`store.drain_history_summarizer_side_channels` at `:8252-8256` is bound to `let _`. The
+function returns `HistorySummarizerSideChannelDrainResult` and the store fills in
 `attempted`, `succeeded`, and `failed` per row
 (`crates/memory-store/src/lib.rs:9572-9581`). None of those three counters reaches
 the transform caller. An operator does have a channel: `status` surfaces
-`historian.side_channel_pending_count` and
-`historian.side_channel_last_failure`, asserted by the test at `:30037-30076`.
+`history_summarizer.side_channel_pending_count` and
+`history_summarizer.side_channel_last_failure`, asserted by the test at `:30037-30076`.
 So the operator side is covered and the caller side is not.
 
 **O6. Two handlers report duplicate delivery, one cannot.** `state_import`
@@ -161,10 +161,10 @@ when the digest matches and an error when it does not. That memo does not surviv
 a process restart, but `expected_shadow_seq` (`:9245`) does, so a post-restart
 repeat is rejected rather than double-applied. Worth naming as a positive.
 
-**10. `apply_state_sync_wire` pre-checks the historian phase and the store
-re-checks it.** The handler reads `loaded.meta.historian.state` at `:9195-9196`
+**10. `apply_state_sync_wire` pre-checks the history_summarizer phase and the store
+re-checks it.** The handler reads `loaded.meta.history_summarizer.state` at `:9195-9196`
 and rejects a non-idle phase at `:9204-9210`, and the store independently returns
-`ModuleStateSyncError::HistorianBusy` handled at `:9319-9321`. The window between
+`ModuleStateSyncError::HistorySummarizerBusy` handled at `:9319-9321`. The window between
 the two reads is closed by the store's own check. This matches Part 3's
 `write-predicates-are-re-evaluated-inside-the-write-transaction` and is the
 correct pattern; recording it as a positive so the portfolio is not all defects.
@@ -183,15 +183,15 @@ expiry.** `:7336-7340` defaults `lease` to `""` and `lease_expires_at` to `0`,
 then passes both to `authority_begin_drain` at `:7345`. Unlike `finish`, there is
 no second predicate that fails closed on the default.
 
-**O13. The dreamer's failure-path ledger write is unchecked; its success-path
+**O13. The memory_classifier's failure-path ledger write is unchecked; its success-path
 write is not, and the code names the exact hazard.** The handler reads its ledger
 at `:9819-9828` before constructing a producer at `:9848` or starting a run at
 `:9878`, and the comment above that read states the stake plainly: "replaying a
 command whose durable response exists would start a second billable run, so the
 read fails closed and the caller retries" (`:9816-9818`). The read is duly
-hardened, returning `dreamer_ledger_failed` on a read error (`:9822-9827`). The
+hardened, returning `memory_classifier_ledger_failed` on a read error (`:9822-9827`). The
 success-path write at `:10016-10038` is equally careful: it purges only after the
-row is durable (comment at `:10023-10027`), returns `dreamer_ledger_failed` when
+row is durable (comment at `:10023-10027`), returns `memory_classifier_ledger_failed` when
 the write fails, and deliberately leaves the child session alive so a retry can
 recover it (`:10031-10034`). The failure path at `:9989-9994` binds the same store
 call to `let _`. So the one write that a failed run depends on is the one whose
@@ -224,11 +224,12 @@ Exercised: partial — `session_recomp_resets_cache_boundary_and_replays_started
 Guarantee: A `session.recomp` request never leaves the session reset without a durable recomp command row recording that the reset happened.
 Check: `always` — after any `session.recomp` response, if `reset_session_for_recomp` committed for `(session_id)` then `load_recomp_command(session_id, command_id)` returns a row. `always` because the pairing must hold on every request that reaches the reset, not merely once per campaign.
 Fault/timing angle: The window is `:6077` (reset committed) to `:6114` (command row written). A store write failure, process kill, or disk-full inside that window leaves the session reset and unattributed. The recomp latch from `try_claim_recomp_session` (`:6030`) is released on the way out because `_guard` drops, so a retry is admitted.
-Required faults and enabling state: A session with `has_compartments` true or a nonempty `boundary_id` so `never_minted` is false at `:6058-6059`. Then a fault on the second `record_recomp_command` call at `:6114` only, not the first at `:6060`. A store-level fault injector or a `SIGKILL` between the two calls.
+Required faults and enabling state: A session with `has_history_segments` true or a nonempty `boundary_id` so `never_minted` is false at `:6058-6059`. Then a fault on the second `record_recomp_command` call at `:6114` only, not the first at `:6060`. A store-level fault injector or a `SIGKILL` between the two calls.
 Confidence: high — [evidence](evidence/h4c-recomp-reset-precedes-its-ledger-row.md). Read both call sites and the intervening in-memory cache clears at `:6095-6113`; confirmed the early-return `nothing_to_do` path at `:6060-6074` writes the row without a reset, so only the `:6077`-then-`:6114` order is exposed.
 Existing check: `:27313` `session_recomp_resets_cache_boundary_and_replays_started` asserts the reset and the `started` replay; it does not fault the ledger write.
 Impact: The session's cache and boundary are destroyed with no record that a recomp ran. A retry with the same `command_id` finds no row at `:6015`, takes the latch again, and re-resets. The reset is CAS-guarded on a freshly loaded `row_version` (`:6077`), so the second reset commits rather than conflicting, and the caller's `command_id` has provided no protection at all.
 Open questions:
+
 - Is a second `reset_session_for_recomp` against an already-reset session materially harmful, or is it idempotent in effect? Resolving this needs `memory-store`'s reset semantics, which are Part 3's territory.
 
 ### h4c-guidance-date-returns-success-without-persisting
@@ -245,6 +246,7 @@ Confidence: high — [evidence](evidence/h4c-guidance-date-returns-success-witho
 Existing check: `:22935` asserts hash advance on a busting commit; nothing asserts durability of `meta.guidance_date` under CAS pressure.
 Impact: The agent is served a date line the store does not know about. On the next `guidance.get` the loop re-enters, and because `self.guidance_dates` memoises per session (`:7739-7745`) the same line is re-served in-process, so the divergence is invisible until the process restarts and the memo is lost, at which point the served date can change mid-session. Part 3 found the identical shape one layer down; this is the second instance.
 Open questions:
+
 - Is a two-iteration retry budget deliberate, or was `0..2` intended as "retry until settled"? The comment block does not say. (needs human input)
 
 ### h4c-authority-prepare-route-bind-is-a-second-transaction
@@ -261,6 +263,7 @@ Confidence: high — [evidence](evidence/h4c-authority-prepare-route-bind-is-a-s
 Existing check: none.
 Impact: The authority for a project is durably `MODULE` while the caller believes the prepare failed. The generation has advanced, so a retry of `ack` with the caller's remembered generation fails at `:7217-7226` with a generation mismatch, and the caller has no route mapping. Recovery needs an out-of-band read of `authority.status`.
 Open questions:
+
 - Should the route mapping be written inside the same transaction as the transition, or is a missing mapping recoverable by any later bound call? Deciding this is a design question about who owns the mapping. (needs human input)
 
 ### h4c-transform-writes-two-side-effects-before-its-fenced-commit
@@ -270,13 +273,14 @@ Reachability: default-production
 Status: active
 Exercised: partial — `cc_inherits_oc_project_mural_on_a_natural_hard_without_defer_first_apply` (`:18591`) covers the mural inheritance path; it does not reject the pass afterwards. No test asserts what a rejected transform leaves behind.
 Guarantee: A transform pass that returns `transform_failed` leaves no durable side effect that a successful pass would have produced.
-Check: `always` — for every `handle_transform_unpaged_value` response that is `PreparedOutcome::Error { code: "transform_failed" }`, the project mural artifact and the historian side-channel delivery state are unchanged from immediately before the request. `always` because the failure contract applies per request.
-Fault/timing angle: Both side effects precede the pass engine. `upsert_project_mural_artifact` commits at `:8210-8215`, `drain_historian_side_channels` at `:8252-8256`, and `trace_pass_received` at `:8262`. The rejection path is `reject_transform` at `:8330-8337`, reached from `:8338-8340`. The cache-state commit is fenced inside `apply_once` and is the *last* write, so a CAS rejection also lands here.
-Required faults and enabling state: `serializer_profile == OpencodeAiSdk` and a request carrying a mural, so `host_mural_artifact` returns `Some` at `:8209`. Then any `TransformError` from `run_transform`, or a due historian side-channel row so the drain has work.
+Check: `always` — for every `handle_transform_unpaged_value` response that is `PreparedOutcome::Error { code: "transform_failed" }`, the project mural artifact and the history_summarizer side-channel delivery state are unchanged from immediately before the request. `always` because the failure contract applies per request.
+Fault/timing angle: Both side effects precede the pass engine. `upsert_project_mural_artifact` commits at `:8210-8215`, `drain_history_summarizer_side_channels` at `:8252-8256`, and `trace_pass_received` at `:8262`. The rejection path is `reject_transform` at `:8330-8337`, reached from `:8338-8340`. The cache-state commit is fenced inside `apply_once` and is the *last* write, so a CAS rejection also lands here.
+Required faults and enabling state: `serializer_profile == OpencodeAiSdk` and a request carrying a mural, so `host_mural_artifact` returns `Some` at `:8209`. Then any `TransformError` from `run_transform`, or a due history_summarizer side-channel row so the drain has work.
 Confidence: high — [evidence](evidence/h4c-transform-writes-two-side-effects-before-its-fenced-commit.md). Confirmed the ordering by reading `:8206-8262` and the rejection arm at `:8330-8340`. Note the comments at `:8249-8250` and `:8258-8261` deliberately place the drain and the trace outside the fence; the mural write at `:8210` carries no such statement.
 Existing check: `:18591` for the mural happy path only.
 Impact: The mural artifact is content-keyed by `content_hash` (`:8213`), so a repeat delivery overwrites with identical bytes and the double-apply is benign. The durable damage is narrower than it looks: an artifact from a *rejected* pass becomes the project's inherited mural for later Claude Code passes via `cc_mural_input` (`:8224`). A pass whose content the engine refused still supplies the mural other sessions inherit.
 Open questions:
+
 - Is publishing a mural from a pass that then fails intended? The comment at `:8226-8228` explains CC inheritance but not the failure interaction.
 
 ### h4c-side-channel-drain-result-is-discarded-by-the-caller
@@ -284,16 +288,17 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `status_diagnostics_surface_pending_historian_side_channel_failure` (`:30037`) proves the operator path works, asserting `side_channel_pending_count == 1` and a nonempty `side_channel_last_failure` at `:30073-30076`. Nothing covers the caller path, because there is nothing to cover.
-Guarantee: A historian side-channel delivery that the module attempts and fails is reportable, with the attempted and succeeded counts distinguished.
-Check: `always` — whenever `drain_historian_side_channels` reports `failed > 0` for a session, some surface reports a nonzero pending or failed count for that session. `always` because the reporting obligation attaches to every drain that fails, not to one per campaign.
+Exercised: partial — `status_diagnostics_surface_pending_history_summarizer_side_channel_failure` (`:30037`) proves the operator path works, asserting `side_channel_pending_count == 1` and a nonempty `side_channel_last_failure` at `:30073-30076`. Nothing covers the caller path, because there is nothing to cover.
+Guarantee: A history_summarizer side-channel delivery that the module attempts and fails is reportable, with the attempted and succeeded counts distinguished.
+Check: `always` — whenever `drain_history_summarizer_side_channels` reports `failed > 0` for a session, some surface reports a nonzero pending or failed count for that session. `always` because the reporting obligation attaches to every drain that fails, not to one per campaign.
 Fault/timing angle: No interleaving needed. `:8252` binds the result to `let _`, discarding `attempted`, `succeeded`, and `failed`, which the store computes per row at `crates/memory-store/src/lib.rs:9572-9581`. A drain that fails every row on every pass produces no per-pass signal.
-Required faults and enabling state: A due historian side-channel row plus a delivery failure. The store has a test seam for exactly this, `fail_next_historian_side_channel_for_test`, used at `:30041`.
+Required faults and enabling state: A due history_summarizer side-channel row plus a delivery failure. The store has a test seam for exactly this, `fail_next_history_summarizer_side_channel_for_test`, used at `:30041`.
 Confidence: high — [evidence](evidence/h4c-side-channel-drain-result-is-discarded-by-the-caller.md). Read the store function signature and its counter arithmetic; read the module call site and confirmed `let _`. Read the status test and confirmed the operator surface exists, which bounds this finding rather than inflating it.
 Existing check: `:30037` covers the operator surface via `status`. No check covers the discarded per-drain result.
 Impact: Bounded by the operator surface, so this is an observability gap rather than silent loss. What is lost is the per-pass rate: `attempted` versus `succeeded` on a given pass cannot be recovered from a pending count, so a drain that is failing on every pass and one that succeeded look identical from the transform path. METHOD.md's effect-accounting rule wants attempted and acknowledged tracked separately; the store does track them and the module drops both.
 Open questions:
-- Does `side_channel_pending_count` distinguish "never attempted" from "attempted and failed"? Answering needs the `status` assembly in `historian_status_summary` (`:15447-15736`), which is 4d's range.
+
+- Does `side_channel_pending_count` distinguish "never attempted" from "attempted and failed"? Answering needs the `status` assembly in `history_summarizer_status_summary` (`:15447-15736`), which is 4d's range.
 
 ### h4c-session-delete-has-no-caller-supplied-operation-identity
 
@@ -309,6 +314,7 @@ Confidence: high — [evidence](evidence/h4c-session-delete-has-no-caller-suppli
 Existing check: `:27420` for a single delete.
 Impact: `deleted_rows` at `:6154` is the row count, so a first delivery returns a positive number and a repeat returns zero, both as `ok: true`. A caller cannot distinguish "I deleted it" from "someone else did, or it was never there". Because the operation is destructive and terminal, the practical damage is low, but the retry contract is absent rather than satisfied.
 Open questions:
+
 - Is `deleted_rows == 0` on a repeat intended as the duplicate signal? Nothing documents it as one, and it collides with deleting an already-empty session.
 
 ### h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write
@@ -325,6 +331,7 @@ Confidence: high — [evidence](evidence/h4c-todo-state-set-cannot-distinguish-a
 Existing check: `:27182` asserts the current collapsed behaviour, so a fix would need that assertion updated. Recording that explicitly: the existing test locks in the shape this record questions.
 Impact: Lowest severity in this lens, and deliberately kept because the question asked is idempotency observability. The store's no-op is genuinely content-keyed, so no double-apply exists. What the caller loses is the `row_version` from `Updated`, which it could otherwise use as a local fence, and the ability to detect that its owner or hash did not match what it expected.
 Open questions:
+
 - Is the collapsed response a deliberate contract, given `:27182` asserts it byte for byte? If so it should be documented at the handler. (needs human input)
 
 ### h4c-state-import-commit-clears-staging-on-every-outcome
@@ -341,6 +348,7 @@ Confidence: high — [evidence](evidence/h4c-state-import-commit-clears-staging-
 Existing check: `:26941`, `:26967`, `:27013` as described.
 Impact: No double-apply: a resend after a commit that actually succeeded hits the preflight and returns `duplicate: true`. The cost is that a transient store error forces the caller to re-send an entire multi-batch import, and the error code gives it no way to know that. With batches capped at 1 MiB each (`:5597`) a large import is expensive to redo.
 Open questions:
+
 - Is `store_write_failed` classified as retryable by the TypeScript sender, and does it resend from batch zero? Answering needs the sender, which is outside this repository's Rust crates. Unresolved, needs the TS state-import client.
 
 ### h4c-state-sync-durable-write-and-capability-flag-are-not-replayed-together
@@ -357,6 +365,7 @@ Confidence: medium — [evidence](evidence/h4c-state-sync-durable-write-and-capa
 Existing check: none found.
 Impact: If it does not self-heal, conditioned notes are refused for the rest of the process lifetime even though the durable state says the evaluator is available. `refuse_conditioned_note_without_evaluator` (`:15246-15445` range) is the consumer, in 4d's scope.
 Open questions:
+
 - Does the sender re-send `note_evaluation_available` on every `state_sync`, making this self-healing within one pass? Unresolved, needs the TypeScript state-sync sender.
 
 ### h4c-authority-drain-finish-compares-two-caller-supplied-checksums
@@ -373,23 +382,25 @@ Confidence: medium — [evidence](evidence/h4c-authority-drain-finish-compares-t
 Existing check: none found.
 Impact: A finish request that asserts its own verification flips the authority without a real integrity comparison. `all_steps` still has to hold, so this is not a bare bypass.
 Open questions:
+
 - Who may send `authority.drain.finish`? The trust class decides whether this is a hole or a rough edge. (needs human input)
 - `authority.drain.begin` has the weaker version of the same shape: `lease` defaults to `""` and `lease_expires_at` to `0` at `:7336-7340`, with no second predicate failing closed. Whether an empty lease token is accepted by `authority_begin_drain` is unresolved and needs `memory-store`.
 
-### h4c-dreamer-failure-path-ledger-write-is-unchecked
+### h4c-memory_classifier-failure-path-ledger-write-is-unchecked
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — four `dreamer_run_task_*` tests (`:25872`, `:25899`, `:25931`, `:25977`) cover argument rejection and a successful classify. None faults `record_dream_task_command` on the failure path.
-Guarantee: A `dreamer.run_task` that fails after consuming a model call records that outcome durably, so a retry with the same `command_id` does not repeat the call.
-Check: `always` — after any `dreamer.run_task` response, `load`ing the dream task command for `(ledger_session, command_id)` returns a row. `always` because the ledger is the retry contract and applies to every terminal outcome, success or failure.
-Fault/timing angle: No interleaving needed. `:9989-9994` binds `record_dream_task_command` to `let _`, so a write failure there is invisible and the handler returns `dreamer_run_failed` at `:9995-9998` regardless. The success path at `:10016` does the opposite and returns the distinct code `dreamer_ledger_failed` at `:10035-10038` when its write fails.
+Exercised: partial — four `memory_classifier_run_task_*` tests (`:25872`, `:25899`, `:25931`, `:25977`) cover argument rejection and a successful classify. None faults `record_dream_task_command` on the failure path.
+Guarantee: A `memory_classifier.run_task` that fails after consuming a model call records that outcome durably, so a retry with the same `command_id` does not repeat the call.
+Check: `always` — after any `memory_classifier.run_task` response, `load`ing the dream task command for `(ledger_session, command_id)` returns a row. `always` because the ledger is the retry contract and applies to every terminal outcome, success or failure.
+Fault/timing angle: No interleaving needed. `:9989-9994` binds `record_dream_task_command` to `let _`, so a write failure there is invisible and the handler returns `memory_classifier_run_failed` at `:9995-9998` regardless. The success path at `:10016` does the opposite and returns the distinct code `memory_classifier_ledger_failed` at `:10035-10038` when its write fails.
 Required faults and enabling state: A classify run that exhausts its models so `output.is_none()` at `:9983`, plus a store fault on `record_dream_task_command`. The authority gate at `:9684-9698` must pass first.
-Confidence: high — [evidence](evidence/h4c-dreamer-failure-path-ledger-write-is-unchecked.md). Both call sites read and compared, and the replay contract fully traced: the handler reads the ledger at `:9819-9828` *before* constructing a producer at `:9848` or starting a run at `:9878`, and the store's write is `INSERT OR IGNORE` plus an unconditional read-back (`crates/memory-store/src/lib.rs:6947-6963`), so the row is write-once and replay-stable. The comment at `:9816-9818` names the exact hazard in the authors' own words: a missing row means "a second billable run", and the read is deliberately hardened to fail closed against it (`:9822-9827`). The unchecked write at `:9989` is therefore a hole in a protection the authors built on purpose.
-Existing check: none for the failure-path ledger write. The four `dreamer_run_task_*` tests cover argument rejection and a successful classify.
-Impact: A retry re-runs the producer, so the model is called twice for one logical command. This is the only handler in this lens whose repeat cost is an external paid side effect rather than a local write, which puts its severity above the row count involved. Secondary impact: the failure path returns `dreamer_run_failed` whether or not the ledger write landed, so a caller cannot distinguish "recorded as failed, do not retry" from "not recorded, a retry will re-run", while the success path does make that distinction with `dreamer_ledger_failed`.
+Confidence: high — [evidence](evidence/h4c-memory_classifier-failure-path-ledger-write-is-unchecked.md). Both call sites read and compared, and the replay contract fully traced: the handler reads the ledger at `:9819-9828` *before* constructing a producer at `:9848` or starting a run at `:9878`, and the store's write is `INSERT OR IGNORE` plus an unconditional read-back (`crates/memory-store/src/lib.rs:6947-6963`), so the row is write-once and replay-stable. The comment at `:9816-9818` names the exact hazard in the authors' own words: a missing row means "a second billable run", and the read is deliberately hardened to fail closed against it (`:9822-9827`). The unchecked write at `:9989` is therefore a hole in a protection the authors built on purpose.
+Existing check: none for the failure-path ledger write. The four `memory_classifier_run_task_*` tests cover argument rejection and a successful classify.
+Impact: A retry re-runs the producer, so the model is called twice for one logical command. This is the only handler in this lens whose repeat cost is an external paid side effect rather than a local write, which puts its severity above the row count involved. Secondary impact: the failure path returns `memory_classifier_run_failed` whether or not the ledger write landed, so a caller cannot distinguish "recorded as failed, do not retry" from "not recorded, a retry will re-run", while the success path does make that distinction with `memory_classifier_ledger_failed`.
 Open questions:
+
 - Is `let _` at `:9989` deliberate? Given `:9816-9818` names the second-billable-run hazard and `:9822-9827` hardens the read against it, an unchecked write on the other half of the same contract looks like an oversight. The alternative reading, that recording a failure is best-effort, is weakened by `:9984-9988` constructing a full replay-shaped response for storage. (needs human input)
 
 ### h4c-no-handler-in-scope-uses-the-claim-intent-ledger
@@ -404,8 +415,9 @@ Fault/timing angle: None.
 Required faults and enabling state: None.
 Confidence: high — [evidence](evidence/h4c-no-handler-in-scope-uses-the-claim-intent-ledger.md). Grepped the whole file for `claim_intent`, `operation_key`, and `producer_id`. The only matches below `16001` are the three dispatch arms at `:10048-10050` and the three handlers at `:10082-10182`, all above this lens's `10040` ceiling and inside 4d's range. Cross-checked Part 3's `intent-identity-is-producer-and-operation-key`, which establishes the ledger's key as `(producer, operation_key)` at `crates/memory-store/src/lib.rs:1230` and its digest guard at `:11049-11051`.
 Existing check: none.
-Impact: This is the answer to the lens's second task rather than a defect on its own. The ledger's protections, a two-part identity plus a `request_digest` conflict check, are not available to any handler here. Each handler reinvents a narrower version: `command_id` alone for recomp, agent drops, and dreamer; `import_id` alone for state import; a generation or sequence fence for authority and state sync; and nothing for session delete. None carries a request digest, so a repeat delivery of the same `command_id` with a *different* body is not detected as a conflict by any handler in scope. That is the concrete gap the ledger would close.
+Impact: This is the answer to the lens's second task rather than a defect on its own. The ledger's protections, a two-part identity plus a `request_digest` conflict check, are not available to any handler here. Each handler reinvents a narrower version: `command_id` alone for recomp, agent drops, and memory_classifier; `import_id` alone for state import; a generation or sequence fence for authority and state sync; and nothing for session delete. None carries a request digest, so a repeat delivery of the same `command_id` with a *different* body is not detected as a conflict by any handler in scope. That is the concrete gap the ledger would close.
 Open questions:
+
 - Should the durable request-path handlers adopt the ledger, or is per-handler identity deliberate because their bodies are host-generated rather than model-generated? (needs human input)
 
 ## Contract-vs-code leads
@@ -435,7 +447,7 @@ at `:8210` is also outside the fence and carries no such justification; the
 nearby comment at `:8226-8228` is about Claude Code inheritance, not about fence
 placement. Both sides cited.
 
-**L4. `record_no_fire`'s discard is documented; the dreamer's failure-path
+**L4. `record_no_fire`'s discard is documented; the memory_classifier's failure-path
 discard is not, and its own file argues against it.** `:5321-5322` states "A CAS
 conflict just drops the diagnostic; it must never fail a pass" for the `let _` at
 `:5335`. The `let _` at `:9989` has no equivalent statement. Worse for the code, the

@@ -26,10 +26,10 @@ export type {
     FailingReason,
     HarnessUnavailableReason,
     KernelReadinessState,
+    LocalEmbeddingsReadinessState,
     NonFailingReason,
     Remediation,
     StorageReadinessState,
-    SynapseReadinessState,
     TransportReadinessState,
 } from "./contract-vocabulary";
 export type DaemonReason = FailingReason | NonFailingReason;
@@ -54,7 +54,7 @@ const WARN_REMEDIATIONS = new Map<string, string>(
 const READINESS_STATES: Record<string, ReadonlySet<string>> = {
     transport: new Set(hostRelease.cli.readiness_states.transport),
     storage: new Set(hostRelease.cli.readiness_states.storage),
-    synapse: new Set(hostRelease.cli.readiness_states.synapse),
+    local_embeddings: new Set(hostRelease.cli.readiness_states.local_embeddings),
     kernel: new Set(hostRelease.cli.readiness_states.kernel),
 };
 
@@ -147,7 +147,7 @@ export interface ReadinessRecord {
 export interface DaemonReadiness {
     transport?: ReadinessRecord;
     storage?: ReadinessRecord;
-    synapse?: ReadinessRecord;
+    local_embeddings?: ReadinessRecord;
     kernel?: ReadinessRecord;
 }
 
@@ -169,8 +169,8 @@ export interface DaemonVersions {
     proof: "current" | null;
     daemon: string | null;
     context: string | null;
-    synapse: string | null;
-    broca: string | null;
+    local_embeddings: string | null;
+    model_execution: string | null;
 }
 
 /* */
@@ -272,7 +272,7 @@ function parseReadinessRecord(value: unknown, component: string): ReadinessRecor
     }
     // Component states admit explicit reason sets instead of a blanket failing/non-failing split.
     // `ready` accepts only non-failing reasons.
-    // `unsupported` may pair with `synapse_unsupported` without failing.
+    // `unsupported` may pair with `local_embeddings_unsupported` without failing.
     // `starting` accepts only failing reasons.
     // `non-ready` does not imply a failing reason because `unsupported` can be non-failing.
     const allowed = {
@@ -286,11 +286,11 @@ function parseReadinessRecord(value: unknown, component: string): ReadinessRecor
             starting: ["storage_starting", "starting"],
             unavailable: ["storage_unavailable"],
         },
-        synapse: {
+        local_embeddings: {
             ready: ["healthy"],
-            starting: ["synapse_starting", "starting"],
-            degraded: ["synapse_degraded"],
-            unsupported: ["synapse_unsupported"],
+            starting: ["local_embeddings_starting", "starting"],
+            degraded: ["local_embeddings_degraded"],
+            unsupported: ["local_embeddings_unsupported"],
         },
         kernel: {
             ready: ["healthy", "kernel_lagging", "kernel_capacity_warn", "no_required_consumer"],
@@ -436,7 +436,7 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
             if (
                 normalized !== "transport" &&
                 normalized !== "storage" &&
-                normalized !== "synapse" &&
+                normalized !== "local_embeddings" &&
                 normalized !== "kernel"
             ) {
                 fail("readiness carries an unknown component");
@@ -506,7 +506,7 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     const rawVersions = requireObject(record.versions, "versions");
     requireExactKeys(
         rawVersions,
-        ["release", "proof", "daemon", "context", "synapse", "broca"],
+        ["release", "proof", "daemon", "context", "local_embeddings", "model_execution"],
         "versions",
     );
     const proof = nullableString(rawVersions.proof, "versions.proof");
@@ -523,8 +523,8 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         proof,
         daemon: nullableDaemonVersion(rawVersions.daemon),
         context: nullableString(rawVersions.context, "versions.context"),
-        synapse: nullableString(rawVersions.synapse, "versions.synapse"),
-        broca: nullableString(rawVersions.broca, "versions.broca"),
+        local_embeddings: nullableString(rawVersions.local_embeddings, "versions.local_embeddings"),
+        model_execution: nullableString(rawVersions.model_execution, "versions.model_execution"),
     };
     return {
         schema: DAEMON_RESULT_SCHEMA,

@@ -220,7 +220,7 @@ the file at the same path.
   typechecks, lints, tests, builds, the comment gate and compiled-TUI
   cleanliness. That run predates bounded candidate pagination. Its counts are
   5,126 pass, 5 skip, 0 fail, with 19,743 Bun assertions: shm-native 21;
-  retina-local-fs 56; opencode 3,785; Pi 379; CLI 596 plus 3 skips; e2e 265
+  fs-observer 56; opencode 3,785; Pi 379; CLI 596 plus 3 skips; e2e 265
   plus 2 skips; root scripts 24. Lints report 73 warnings and one info, no
   errors. `bun run --cwd packages/opencode-plugin smoke` passes all nine
   checks (five WASM, four TUI). Logs are
@@ -331,7 +331,7 @@ the file at the same path.
 [graph-guard]: ../../../../../packages/opencode-plugin/src/testing/module-graph.test.ts#L46-L171
 [raw-reader]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-raw.ts#L138-L180
 [work-metrics]: ../../../../../packages/opencode-plugin/src/features/context/work-metrics.ts#L268-L312
-[availability-reader]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L149-L174
+[availability-reader]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L149-L174
 [marker-reader]: ../../../../../packages/opencode-plugin/src/plugin/conflict-warning-hook.ts#L207-L218
 [hook-test]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1612-L1666
 [hook-call]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1073

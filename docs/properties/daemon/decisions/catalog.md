@@ -11,7 +11,7 @@ Scope: sub-part 4f of `crates/daemon`, the decision layer every transform pass
 consults plus the two harness codecs that own the bytes entering and leaving the
 crate. `src/codec/` is 4,323 lines across four files, `src/selection.rs` is 3,365,
 `src/boundary.rs` 3,053, `src/scheduler.rs` 1,449, `src/config.rs` 1,229,
-`src/caveman.rs` 651, and `src/session_resolver.rs` 70. `src/wire.rs` (1,279)
+`src/terse_text_compression.rs` 651, and `src/session_resolver.rs` 70. `src/wire.rs` (1,279)
 is in scope where it bears on codec contracts, and `CONFIGURATION.md` (source-catalog path, not present at HEAD) (841) is
 read as the documented contract rather than as evidence of behaviour. The decision
 regions of
@@ -153,7 +153,7 @@ and consumed as Rust request fields, so "does nothing here" is false for them.
 another, and `transform.rs:682-684` and `:693-697` declare them as
 `#[serde(default = ...)]` fields on the request struct. Second, three keys were
 filed as "absent everywhere", which is true of `crates/daemon/src` and false of
-the workspace: `historian_timeout_ms` is read at `pi-plugin/src/index.ts:676` and
+the workspace: `history_summarizer_timeout_ms` is read at `pi-plugin/src/index.ts:676` and
 threaded through `:1297`, `:1313`, `:1332`; `history_budget_percentage` at
 `pi-plugin/src/index.ts:693` and `:1229`; `output_reserve` at
 `pi-plugin/src/config/index.ts:427` and `:600`. "Absent" was a statement about one
@@ -165,9 +165,9 @@ has to preserve:
 
 | Route | Count | Members | What a defect here means |
 | --- | --- | --- | --- |
-| **Parsed by the Rust config reader** | 24 | every row of the table below whose "Takes effect here?" is `Yes`, including the four undocumented-but-effective leaves and the deprecated `memory.budget_tokens` | `config.rs` is the authority. A bound or default that disagrees with `CONFIGURATION.md` (source-catalog path, not present at HEAD) is a real divergence in this crate, and 7 of these are divergent: `execute_threshold_percentage` scalar, `memory.injection_budget_tokens`, `memory.auto_search.min_prompt_chars`, `caveman_text_compression.min_chars`, the `review-user-memories` schedule, `historian.model` with `fallback_models`, and `cache_ttl` |
+| **Parsed by the Rust config reader** | 24 | every row of the table below whose "Takes effect here?" is `Yes`, including the four undocumented-but-effective leaves and the deprecated `memory.budget_tokens` | `config.rs` is the authority. A bound or default that disagrees with `CONFIGURATION.md` (source-catalog path, not present at HEAD) is a real divergence in this crate, and 7 of these are divergent: `execute_threshold_percentage` scalar, `memory.injection_budget_tokens`, `memory.auto_search.min_prompt_chars`, `terse_text_compression.min_chars`, the `review-user-memories` schedule, `history_summarizer.model` with `fallback_models`, and `cache_ttl` |
 | **Request-supplied** | 2 | `protected_tags`, `clear_reasoning_age` | Not inert. The value arrives per pass on the transform request (`transform.rs:682-697`) from the TypeScript sender (`rust-mode-transform.ts:1355`, `:1398`, `:2014`, `:2031`), and `config.rs` correctly does not parse it. **These are the keys the Rust-first migration must preserve**, because the sender is the thing being replaced. A hardwired Rust constant standing in for either — `DEFAULT_PROTECTED_TAGS` at `lib.rs:603` — is a fallback for a *missing request field*, not a config gap |
-| **TypeScript-only** | 6 | `execute_threshold_percentage` object form, `execute_threshold_tokens`, `commit_cluster_trigger.enabled`, `commit_cluster_trigger.min_clusters`, `historian_timeout_ms`, `history_budget_percentage`, `output_reserve` (7 leaf names, 6 documented keys, since the object form shares a key with the scalar) | The key is honoured, in TypeScript, by code the Rust reader never consults. Verified per key: the `commit_cluster_trigger` pair is parsed by `plugin/src/config/schema/eidnara.ts` and consumed by `pi-plugin/src/context-handler.ts`, while Rust hardwires `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` and `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:605`, `:607`) at `:4962-4963` and never reads either. **This is the class the Rust-first decision actually threatens**: a key that works today only because a TypeScript component is in the path |
+| **TypeScript-only** | 6 | `execute_threshold_percentage` object form, `execute_threshold_tokens`, `commit_cluster_trigger.enabled`, `commit_cluster_trigger.min_clusters`, `history_summarizer_timeout_ms`, `history_budget_percentage`, `output_reserve` (7 leaf names, 6 documented keys, since the object form shares a key with the scalar) | The key is honoured, in TypeScript, by code the Rust reader never consults. Verified per key: the `commit_cluster_trigger` pair is parsed by `plugin/src/config/schema/eidnara.ts` and consumed by `pi-plugin/src/context-handler.ts`, while Rust hardwires `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` and `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:605`, `:607`) at `:4962-4963` and never reads either. **This is the class the Rust-first decision actually threatens**: a key that works today only because a TypeScript component is in the path |
 | **Truly absent from both** | 0 | none | Checked per key. Every leaf in the documented table has a consumer somewhere in the workspace, in Rust, in TypeScript, or on the request. The pre-disposition "absent everywhere: 3" bucket is empty once the search leaves `crates/daemon/src` |
 
 So the corrected headline is: **7 divergences on the Rust-parsed route, 6
@@ -236,7 +236,7 @@ still arrive it is absorbed rather than propagated, because `f64::max` and
 reaches `:802`'s `tail_size_bar: trigger_budget * TAIL_SIZE_TRIGGER_MULTIPLIER`,
 which is a bare multiply with no `max` or `min` to absorb it, and the NaN lands in
 `TriggerProgress` — a struct whose own doc comment (`:322-324`) says it is
-"Surfaced through the transform response's historian diagnostics so a stalled rig
+"Surfaced through the transform response's history_summarizer diagnostics so a stalled rig
 drive is diagnosable per pass". It is carried out at `lib.rs:5023` and divided at
 `:5038`. So the defect class is present in shape, unreachable on the guarded
 derivations, and **reachable on the one unguarded passthrough**, which is a
@@ -277,7 +277,7 @@ purity claim, not a restatement of it.
 | `selection::resolve_tool_tier` (`:948-958`) | emergency drop tier of a tool | tool name | `{1,2,3}`, total via the `else` arm | Yes |
 | `selection::select_emergency` (`:995-1084`) | which arcs to evict under force pressure | active arcs, ctx, floor tokens | `HashSet<String>` of arc ids | Yes. Guards non-finite ceiling and usage at `:1001-1009` and refuses sub-`2000`-token reclaim at `:1018` |
 | `boundary::resolve_protected_tail_boundary` (`:410-416`) | where the compactable/protected split sits | messages, `BoundaryContext` | `BoundaryResolution` with ordinals and a reason string | Yes. `HashMap` at `:1001` is lookup-only, built from a `BTreeMap` at `:1027` |
-| `boundary::check_compartment_trigger*` (`:751-882`) | whether the historian fires, and why | messages, `TriggerContext`, token index, estimator | `TriggerDecision`, `reason` in a closed 4-variant enum | Yes given the caller-supplied estimator. `tokenizer` determinism is Part 3's |
+| `boundary::check_history_segment_trigger*` (`:751-882`) | whether the history_summarizer fires, and why | messages, `TriggerContext`, token index, estimator | `TriggerDecision`, `reason` in a closed 4-variant enum | Yes given the caller-supplied estimator. `tokenizer` determinism is Part 3's |
 | `boundary::derive_trigger_budget` (`:338-346`) + `derive_protected_tail_token_target` (`:362-401`) | the size-trigger budget and the protected-tail token target | `context_limit`, `execute_threshold_percentage`, usage, optional budget | budget always in `[5000, 50000]`; `n` always `>= 1` | Yes, and total **over the three fields it validates**: see `dec-a-boundary-budget-derivation-is-total-over-non-finite-input`. **Not total over `ctx.trigger_budget`**, which is read at `:377-379` with no `is_finite` gate: `n` stays finite because `f64::min` absorbs the NaN at `:383`, but the raw value is stored at `:399` and reaches `TriggerProgress.tail_size_bar` at `:802`. See `dec-a-caller-supplied-trigger-budget-is-the-one-unvalidated-float-and-reaches-a-diagnostic` |
 | `scheduler::decide` (`:706-800`) | the pass class, band, latch, and overflow verdict | `SchedulerInputs` (config, session, usage, `now_ms`, latch, error text) | `SchedulerOutcome`; `PassDecision` in a closed 4-variant enum | Yes. `now_ms` is a parameter, not a clock read. Regexes live behind `OnceLock` but are constant |
 | `scheduler::parse_cache_ttl` (`:385-419`) + `escalation_bands` (`:187-198`) | the idle TTL in ms, and the force/emergency bands | a TTL string; the effective threshold | `Result<u64, CacheTtlParseError>`; bands with force in `[85, 92]`, emergency fixed at `95` | Yes and total: `dec-a-cache-ttl-parse-is-total-over-arbitrary-strings`, `dec-a-escalation-bands-stay-ordered-for-every-threshold` |
@@ -285,7 +285,7 @@ purity claim, not a restatement of it.
 `config.rs` itself is not pure: `ConfigCache` reads the filesystem and caches on
 path and mtime, except that failures bypass the cache fast path
 (`config.rs:362-393`). Its two derived helpers are pure:
-`derive_historian_chunk_tokens` (`config.rs:39-46`) and
+`derive_history_summarizer_chunk_tokens` (`config.rs:39-46`) and
 `resolve_cache_ttl_with_provenance` (`config.rs:151-207`).
 
 `session_resolver.rs` holds no decision worth a record.
@@ -341,15 +341,15 @@ that source-catalog contract, not a census of all current user-facing docs.
 | `memory.auto_search.enabled` | `true` (`config.rs:58`) | `true` (`:682`) | none | Yes, both tiers (`config.rs:822-826`, `config.rs:717-733`) |
 | `memory.auto_search.score_threshold` | `0.6` (`config.rs:34`) | `0.6`, prose range `0.3-0.95` (`:683`, `:706`) | `clamp(0.3, 0.95)`, silent (`config.rs:827-831`) | Yes. Bound matches the prose; the clamp is invisible to the caller |
 | `memory.auto_search.min_prompt_chars` | `20` (`config.rs:35`) | `20`, **no range documented** (`:684`, `:707`) | `clamp(5, 500)` (`config.rs:832-836`); a `0` is silently discarded by `positive_usize_at` (`config.rs:955-961`) | Yes. **Divergent**: an undocumented bound and an undocumented discard |
-| `caveman_text_compression.enabled` | `false` (`config.rs:74`) | `false` (`:724`) | none | Yes, both tiers (`config.rs:837-841`, `config.rs:717-733`) |
-| `caveman_text_compression.min_chars` | `500` (`config.rs:37`, `config.rs:75`) | `500`, **no range documented** (`:725`) | `clamp(100, 10_000)` (`config.rs:842-846`); a `0` discarded (`config.rs:955-961`) | Yes. **Divergent**: undocumented bound |
+| `terse_text_compression.enabled` | `false` (`config.rs:74`) | `false` (`:724`) | none | Yes, both tiers (`config.rs:837-841`, `config.rs:717-733`) |
+| `terse_text_compression.min_chars` | `500` (`config.rs:37`, `config.rs:75`) | `500`, **no range documented** (`:725`) | `clamp(100, 10_000)` (`config.rs:842-846`); a `0` discarded (`config.rs:955-961`) | Yes. **Divergent**: undocumented bound |
 | `smart_drops` | `false` (`config.rs:128`) | `false` (`:752`) | none | Yes, both tiers (`config.rs:890-894`, `config.rs:717-733`) |
-| `dreamer.inject_docs` | `true` (`config.rs:125`) | `true` (`:501`) | none | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:895-899`); project warns (`config.rs:729-732`) |
+| `memory_classifier.inject_docs` | `true` (`config.rs:125`) | `true` (`:501`) | none | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:895-899`); project warns (`config.rs:729-732`) |
 | `temporal_awareness` | `true` (`config.rs:126`) | `true` (`:650`) | none | Yes, both tiers (`config.rs:900-904`, `config.rs:717-733`) |
-| `dreamer.tasks.review-user-memories.schedule`, legacy `user_memories.enabled` | privacy gate defaults `false` (`config.rs:121`) | task default schedule `0 3 * * *`, i.e. on (`:527`) | none; a non-empty trimmed string reads as consent (`config.rs:875-879`); the schedule is `UserOnly` (`config.rs:667-672`), the flag is `ProjectRaiseOnly` and a project may only close the gate (`config.rs:687-692`) | Yes as a presence test. **Divergent**: module default is closed, documented default is scheduled |
-| `historian.model`, `historian.fallback_models` | empty chain (`config.rs:114`) | documented with **no user-only marker** (`:448-449`) | `dedup_preserving_order` (`config.rs:750-753`, `config.rs:950-953`) | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:788-806`); project warns (`config.rs:729-732`) |
-| `historian.module_model`, `historian.module_fallback_models` | absent | **undocumented** | `dedup_preserving_order` (`config.rs:753`, `config.rs:950-953`) | Yes, user-only (`config.rs:659-672`); a non-empty module model selects the module chain instead of the plugin chain (`config.rs:774-806`) |
-| `historian.context_limit_tokens` | `128_000` (`config.rs:32`, `config.rs:122`) | **undocumented** | `> 0` via `positive_usize_at` (`config.rs:955-961`), applied at `config.rs:885-889` | Yes, user-only (`config.rs:668-672`); project warns (`config.rs:729-732`) |
+| `memory_classifier.tasks.review-user-memories.schedule`, legacy `user_memories.enabled` | privacy gate defaults `false` (`config.rs:121`) | task default schedule `0 3 * * *`, i.e. on (`:527`) | none; a non-empty trimmed string reads as consent (`config.rs:875-879`); the schedule is `UserOnly` (`config.rs:667-672`), the flag is `ProjectRaiseOnly` and a project may only close the gate (`config.rs:687-692`) | Yes as a presence test. **Divergent**: module default is closed, documented default is scheduled |
+| `history_summarizer.model`, `history_summarizer.fallback_models` | empty chain (`config.rs:114`) | documented with **no user-only marker** (`:448-449`) | `dedup_preserving_order` (`config.rs:750-753`, `config.rs:950-953`) | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:788-806`); project warns (`config.rs:729-732`) |
+| `history_summarizer.module_model`, `history_summarizer.module_fallback_models` | absent | **undocumented** | `dedup_preserving_order` (`config.rs:753`, `config.rs:950-953`) | Yes, user-only (`config.rs:659-672`); a non-empty module model selects the module chain instead of the plugin chain (`config.rs:774-806`) |
+| `history_summarizer.context_limit_tokens` | `128_000` (`config.rs:32`, `config.rs:122`) | **undocumented** | `> 0` via `positive_usize_at` (`config.rs:955-961`), applied at `config.rs:885-889` | Yes, user-only (`config.rs:668-672`); project warns (`config.rs:729-732`) |
 | `cache_ttl` (string or object) | `"5m"` (`config.rs:129`) | `"5m"` (`:163`), **no user-only marker** | parse is total; invalid falls back to `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:771-773`); `"never"` maps to `u64::MAX` (`scheduler.rs:365-368`) | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:924-945`); project warns (`config.rs:729-732`); the TypeScript strip removes it from project config (`project-security.ts:386-391`). `"0"` produces zero ms: hard expiry needs a positive prior timestamp and positive elapsed time (`scheduler.rs:400-407`), and later scheduler gates still apply (`scheduler.rs:689-732`) |
 | `prompt_surface.guidance_override_path` | `None` (`config.rs:127`) | documented, user-only (`:75`, `:80-88`) | must be a readable section with exactly one marker (documented at `CONFIGURATION.md:88`) | Yes, from the user tier after merging (`config.rs:278-279`, `config.rs:408-490`); project warns (`config.rs:729-732`) |
 | `prompt_surface.guidance_override_text` | `None` (`config.rs:127`) | **undocumented** | exactly one guidance marker (`config.rs:905-920`) | Yes, user-only (`config.rs:670-672`), but a configured path resets it to `None` first (`config.rs:424`); project warns (`config.rs:729-732`) |
@@ -357,7 +357,7 @@ that source-catalog contract, not a census of all current user-facing docs.
 | `commit_cluster_trigger.min_clusters` | not parsed | `3`, **minimum `1`** (`:232`, `:238`) | none from config | The daemon supplies constant `3` (`lib.rs:643`, `lib.rs:5004`). The boundary consumes it at `boundary.rs:814-819` |
 | `protected_tags` | not parsed by `config.rs` | `20`, range `1-100` (`:165`) | no config-reader bound; the request default is `20` (`transform.rs:797-799`) | It has a request field (`transform.rs:629-631`), so absence from config does not mean the value cannot arrive |
 | `clear_reasoning_age` | not parsed by `config.rs` | `50` (`:169`) | no config-reader bound | It has a request field (`transform.rs:640-644`) and a default helper (`transform.rs:765-767`); absence from config is not product-wide absence |
-| `historian_timeout_ms` | not parsed | `300_000` (`:170`) | none from this reader | Not in the consumed-key table (`config.rs:588-618`). The historical TypeScript-consumer lead is outside this reader audit |
+| `history_summarizer_timeout_ms` | not parsed | `300_000` (`:170`) | none from this reader | Not in the consumed-key table (`config.rs:588-618`). The historical TypeScript-consumer lead is outside this reader audit |
 | `history_budget_percentage` | not parsed | `0.15`, range `0.05-0.5` (`:171`) | none from this reader | Not in the consumed-key table (`config.rs:588-618`). No product-wide absence claim is made |
 | `output_reserve` | not parsed | automatic; `0` disables (`:164`, `:308-315`) | none from this reader | Not in the consumed-key table (`config.rs:588-618`). Its historical cross-component routing lead is not a config-reader implementation claim |
 
@@ -394,13 +394,13 @@ changing runtime policy.
 | [dec-a-commit-cluster-trigger-config-is-inert-in-this-crate](#dec-a-commit-cluster-trigger-config-is-inert-in-this-crate) | safety | high |
 | [dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list](#dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list) | safety | high |
 | [dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller](#dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller) | safety | high |
-| [dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian](#dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian) | safety | high |
+| [dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-history_summarizer](#dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-history_summarizer) | safety | high |
 | [dec-a-model-key-lookup-walk-has-two-implementations-that-disagree](#dec-a-model-key-lookup-walk-has-two-implementations-that-disagree) | safety | high |
 | [dec-a-model-chain-dedup-is-adjacent-only](#dec-a-model-chain-dedup-is-adjacent-only) | safety | high |
 | [dec-a-cache-ttl-parse-is-total-over-arbitrary-strings](#dec-a-cache-ttl-parse-is-total-over-arbitrary-strings) | safety | high |
 | [dec-a-boundary-budget-derivation-is-total-over-non-finite-input](#dec-a-boundary-budget-derivation-is-total-over-non-finite-input) | safety | high |
 | [dec-a-caller-supplied-trigger-budget-is-the-one-unvalidated-float-and-reaches-a-diagnostic](#dec-a-caller-supplied-trigger-budget-is-the-one-unvalidated-float-and-reaches-a-diagnostic) | safety | high |
-| [dec-a-derive-historian-chunk-tokens-is-total-at-both-integer-extremes](#dec-a-derive-historian-chunk-tokens-is-total-at-both-integer-extremes) | safety | high |
+| [dec-a-derive-history_summarizer-chunk-tokens-is-total-at-both-integer-extremes](#dec-a-derive-history_summarizer-chunk-tokens-is-total-at-both-integer-extremes) | safety | high |
 | [dec-a-escalation-bands-stay-ordered-for-every-threshold](#dec-a-escalation-bands-stay-ordered-for-every-threshold) | safety | high |
 | [dec-a-selection-decision-order-is-total-under-hashmap-iteration](#dec-a-selection-decision-order-is-total-under-hashmap-iteration) | safety | high |
 | [dec-a-region-hint-clamp-bypassed-by-sentinel-suffix](#dec-a-region-hint-clamp-bypassed-by-sentinel-suffix) | safety | high |
@@ -488,6 +488,7 @@ Impact: a user can select a threshold below the historical documented range
 without a range warning. Scheduler gates and workload still determine whether
 a particular pass executes.
 Open questions:
+
 - Is the historical lower bound of twenty the intended daemon contract, or is
   the implemented floor of one intended? (needs human input)
 
@@ -560,6 +561,7 @@ Impact: a supplied disabling flag or higher cluster count does not change the
 daemon's commit-cluster trigger. The historical configurability claim is not
 implemented by this reader.
 Open questions:
+
 - Is the source-catalog configurability obligation intended for the daemon
   reader? The original configuration document is absent here. (needs human input)
 
@@ -575,20 +577,20 @@ registration, not policy. No single independent per-key oracle covers this whole
 contract.
 Guarantee: A project may override only `memory.enabled`,
 `memory.auto_search.enabled`, `memory.auto_search.score_threshold`,
-`memory.auto_search.min_prompt_chars`, `caveman_text_compression.enabled`,
-`caveman_text_compression.min_chars`, `memory.auto_promote`, `smart_drops`, and
+`memory.auto_search.min_prompt_chars`, `terse_text_compression.enabled`,
+`terse_text_compression.min_chars`, `memory.auto_promote`, `smart_drops`, and
 `temporal_awareness`, raise `execute_threshold_percentage`, or close the
 `user_memories.enabled` gate; all other consumed keys are user-tier only.
 Check: `always` - compare user-only and user-plus-project resolutions against
 the fixed permissions above, not against `tier_class()` or `privileged()`.
 For valid project values, assert the nine allowed leaves take the parsed project
 value, the effective threshold never decreases, and a closed user-memory gate
-never opens. Assert that `historian.module_model`,
-`historian.module_fallback_models`, `historian.model`, `historian.fallback_models`,
+never opens. Assert that `history_summarizer.module_model`,
+`history_summarizer.module_fallback_models`, `history_summarizer.model`, `history_summarizer.fallback_models`,
 `compaction.enabled`,
 `memory.injection_budget_tokens`, `memory.budget_tokens`,
-`memory.user_profile_budget_tokens`, `historian.context_limit_tokens`,
-`dreamer.inject_docs`, `dreamer.tasks.review-user-memories.schedule`,
+`memory.user_profile_budget_tokens`, `history_summarizer.context_limit_tokens`,
+`memory_classifier.inject_docs`, `memory_classifier.tasks.review-user-memories.schedule`,
 `prompt_surface.guidance_override_text`, `prompt_surface.guidance_override_path`,
 and `cache_ttl` keep their user-only effects. Each supplied user-only key emits
 one ignored-key warning; a rejected weakening emits one warning, while an
@@ -628,7 +630,7 @@ Type: safety
 Reachability: explicit-config-only
 Status: active
 Exercised: partial - `config.rs:1407-1446` exercises ordinary auto-search and
-caveman overrides. `config.rs:1297-1302` checks the upper threshold clamp, but
+terse_text_compression overrides. `config.rs:1297-1302` checks the upper threshold clamp, but
 neither checks a clamp-reporting warning.
 Guarantee: When a configured value is altered by a clamp or discarded as out of
 domain, the resolution reports which key was altered.
@@ -640,9 +642,9 @@ Fault/timing angle: none.
 Required faults and enabling state: a user-only config with
 `memory.auto_search.score_threshold: 0.99`,
 `memory.auto_search.min_prompt_chars: 0`, or
-`caveman_text_compression.min_chars: 50`.
+`terse_text_compression.min_chars: 50`.
 Confidence: high - [evidence](evidence/dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller.md).
-The threshold clamp is at `config.rs:750-752`, auto-search and caveman clamps
+The threshold clamp is at `config.rs:750-752`, auto-search and terse_text_compression clamps
 at `config.rs:827-846`, and budget floors at `config.rs:847-869`.
 `positive_usize_at` rejects zero (`config.rs:955-961`). None reports a range
 warning. The warning-returning merge and file resolver are observable from tests
@@ -652,12 +654,13 @@ Impact: a user can receive a different effective value without an explanation.
 With only a user tier, `min_prompt_chars: 0` leaves the default `20`; an allowed
 project zero instead preserves the earlier user value.
 Open questions:
+
 - Is the stderr line from `emit_warnings` visible in any harness the module
   runs under? The module runs as a daemon component, so stderr may be
   discarded. Unresolved, needs a look at the host's process wiring, which is
   Part 2a scope.
 
-### dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian
+### dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-history_summarizer
 
 Type: safety
 Reachability: explicit-config-only
@@ -675,7 +678,7 @@ Fault/timing angle: failed reads bypass the mtime fast path
 edit, which is a separate condition and not evidence of silent parse failure.
 Required faults and enabling state: a user `eidnara.jsonc` with a syntax
 error that `strip_jsonc` does not repair, for example an unterminated string.
-Confidence: high - [evidence](evidence/dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian.md).
+Confidence: high - [evidence](evidence/dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-history_summarizer.md).
 `read_tier_cached` stores both the value and warning (`config.rs:362-393`);
 `effective_with_warnings` collects tier warnings (`config.rs:262-282`), and
 the public resolution path emits them (`config.rs:250-257`,
@@ -731,6 +734,7 @@ deserializes per-model thresholds (`scheduler.rs:923-932`,
 Impact: callers of the two map APIs can select different entries for the same
 qualified key. The daemon's scalar config route does not exercise that divergence.
 Open questions:
+
 - Should the two walks be one function? They already agree on the exact, bare,
   and dash-stripped steps, which is the duplication the repository's own
   duplication policy targets. (needs human input)
@@ -750,14 +754,14 @@ Reachability: explicit-config-only
 Status: invalidated
 Exercised: yes - `config.rs:2185-2194` supplies non-adjacent repeats and
 asserts first-occurrence order. Test adequacy remains `unaudited`.
-Guarantee: The resolved historian model chain contains no duplicate model id.
+Guarantee: The resolved history_summarizer model chain contains no duplicate model id.
 Check: `always` - after config resolution, `model_chain` has no repeated
 element. `always` because `dedup_preserving_order` runs on every merge at
 `config.rs:753`.
 Fault/timing angle: none.
 Required faults and enabling state: a user config with
-`historian.module_model: "a"` and
-`historian.module_fallback_models: ["b", "a"]`.
+`history_summarizer.module_model: "a"` and
+`history_summarizer.module_fallback_models: ["b", "a"]`.
 Confidence: high - [evidence](evidence/dec-a-model-chain-dedup-is-adjacent-only.md).
 The helper uses `HashSet` insertion with `retain` (`config.rs:950-953`), so
 `["a", "b", "a"]` becomes `["a", "b"]` without sorting.
@@ -788,7 +792,7 @@ value already carrying the sentinel suffix is passed through unclamped. The seco
 was carried inside the budget-derivation record as an open question and is now its
 own record: `BoundaryContext::trigger_budget` is the one float read without an
 `is_finite` gate, and a `Some(NaN)` reaches `TriggerProgress.tail_size_bar`
-(`boundary.rs:802`) and from there the transform response's historian diagnostics.
+(`boundary.rs:802`) and from there the transform response's history_summarizer diagnostics.
 Its evidence was already written — the budget record's own evidence file states
 that this test case fails today — so promoting it is applying a finding the part
 had rather than adding one. The group therefore reads: four guards, one determinism
@@ -829,6 +833,7 @@ Impact: an invalid user TTL silently uses the scheduler default
 hold; band selection and boundary deferral still govern the final pass
 (`scheduler.rs:689-732`). The parser's range guarantee remains intact.
 Open questions:
+
 - Is `cache_ttl: "0"` intended as "always expire" or should it be rejected?
   `CONFIGURATION.md:163` (source-catalog path, not present at HEAD) documents neither. (needs human input)
 
@@ -893,7 +898,7 @@ without validation, does not carry a non-finite value into a boundary
 computation or into a serialized diagnostic. **This guarantee does not hold
 today.**
 Check: `always(!X)` - for every `BoundaryContext`, if
-`derive_protected_tail_token_target` or `check_compartment_trigger_with_index` is
+`derive_protected_tail_token_target` or `check_history_segment_trigger_with_index` is
 called with `trigger_budget: Some(v)` where `!v.is_finite()`, then no field of the
 returned `ProtectedTailTokenTarget` or `TriggerProgress` is non-finite.
 `always(!X)` over a forbidden **state** with no dedicated detection point, per
@@ -923,17 +928,18 @@ propagating path is the trigger one: `:756-761` performs the same unguarded read
 with nothing to absorb it. So `TriggerProgress.tail_size_bar` is NaN.
 Existing check: none. Status `unaudited`.
 Impact: `TriggerProgress`'s own doc comment (`boundary.rs:322-324`) says it is
-"Surfaced through the transform response's historian diagnostics so a stalled rig
+"Surfaced through the transform response's history_summarizer diagnostics so a stalled rig
 drive is diagnosable per pass", and `tail_size_bar` is described at `:329-330` as
 "The tail_size fire bar". It is carried out at `lib.rs:5023` and divided by 1000
 and rounded at `:5038`. A NaN there is the diagnostic field going quietly wrong in
-the response an operator reads to explain why the historian did not fire, and
+the response an operator reads to explain why the history_summarizer did not fire, and
 `serde_json` renders a NaN as `null`, so the wire form is an absent number rather
 than a visible error. This is the defect the sibling record's "no totality defect
 was found" framing concealed, and it is the same class as Part 3's three.
 Open questions:
+
 - Should `derive_protected_tail_token_target` and
-  `check_compartment_trigger_with_index` validate `ctx.trigger_budget` the way
+  `check_history_segment_trigger_with_index` validate `ctx.trigger_budget` the way
   they validate `context_limit`, `execute_threshold_percentage`, and
   `usage_percentage`, or should the field's type make a non-finite value
   unrepresentable? The first is a two-line `is_finite` gate at each of the two
@@ -943,7 +949,7 @@ Open questions:
   someone — decides whether this is a latent defect or an active one. Unresolved;
   the field's purpose is not documented at its declaration (`:222-224`).
 
-### dec-a-derive-historian-chunk-tokens-is-total-at-both-integer-extremes
+### dec-a-derive-history_summarizer-chunk-tokens-is-total-at-both-integer-extremes
 
 Type: safety
 Reachability: default-production
@@ -951,24 +957,24 @@ Status: active
 Exercised: partial - `config.rs:1449-1455` covers `1`, `32_000`, `128_000`,
 `200_000`, and `400_000`, so both clamp arms are hit. Neither `0` nor
 `usize::MAX` is covered.
-Guarantee: `derive_historian_chunk_tokens` returns a value in
-`[MIN_HISTORIAN_CHUNK_TOKENS, MAX_HISTORIAN_CHUNK_TOKENS]` for every `usize`
+Guarantee: `derive_history_summarizer_chunk_tokens` returns a value in
+`[MIN_HISTORY_SUMMARIZER_CHUNK_TOKENS, MAX_HISTORY_SUMMARIZER_CHUNK_TOKENS]` for every `usize`
 input, without panicking.
 Check: `always` - for every input, the result is in `[8000, 50000]`. `always`
-because every historian firing derives the budget from the configured limit.
+because every history_summarizer firing derives the budget from the configured limit.
 Fault/timing angle: none.
-Required faults and enabling state: `historian.context_limit_tokens` set to `0`
+Required faults and enabling state: `history_summarizer.context_limit_tokens` set to `0`
 is impossible, because `positive_usize_at` (`config.rs:955-961`) discards it.
 Reaching the extremes needs a very large configured limit or a direct call.
-Confidence: high - [evidence](evidence/dec-a-derive-historian-chunk-tokens-is-total-at-both-integer-extremes.md).
+Confidence: high - [evidence](evidence/dec-a-derive-history_summarizer-chunk-tokens-is-total-at-both-integer-extremes.md).
 The final integer clamp (`config.rs:39-46`) enforces the ordered constants
 `8000` and `50000` (`config.rs:28-29`). The maximum input reaches the upper
 clamp after quartering; it does not need a saturating float-to-integer cast.
 The reattach builder and firing assemblers pass the effective context limit
 (`lib.rs:4708-4714`, `lib.rs:5114-5119`, `lib.rs:5270-5276`).
 Existing check: `config.rs:1449-1455`
-`historian_budget_derivation_clamps_at_both_bounds`. Status `unaudited`.
-Impact: a regression could produce an out-of-range historian chunk budget.
+`history_summarizer_budget_derivation_clamps_at_both_bounds`. Status `unaudited`.
+Impact: a regression could produce an out-of-range history_summarizer chunk budget.
 The final integer clamp bounds even an extremely large configured limit.
 Open questions: None.
 
@@ -1040,6 +1046,7 @@ Impact: the header stakes the cache invariant on this. If it fails, a defer
 pass replays different bytes than the freeze produced, which busts the provider
 prefix cache without any pass intending to.
 Open questions:
+
 - Can duplicate `SelItem` ids reach the selector? Ids are `mid#block_index`
   projections from `wire.rs`, which is the sibling lens's scope. Unresolved,
   needs the codec lens to confirm id uniqueness.
@@ -1077,6 +1084,7 @@ reduction reclaims nothing while the accounting believes it did. The content is
 harness-supplied, so a file whose text legitimately ends with that marker is
 enough; no adversary is required.
 Open questions:
+
 - Should the guard test for a well-formed hint rather than a bare suffix, for
   example a length check as well? Changing it would have to preserve
   idempotence, which the doc comment at `:557` claims. (needs human input)
@@ -1169,6 +1177,7 @@ authentic empty user turn. Part 1's equivalent record could say "the property
 holds at HEAD and is under-evidenced rather than violated"; this one cannot,
 because the property as stated is violated by design.
 Open questions:
+
 - Should a harness codec have a rejection or warning channel at all, or is
   total coercion the deliberate contract on the grounds that the harness is
   trusted? Nothing in either file states a position. (needs human input)
@@ -1219,6 +1228,7 @@ ordinal now names a different message. Because Pi has no `absolute_ordinal`
 input (record ten), there is no way for the harness to pin the numbering
 against this.
 Open questions:
+
 - Is the three-type opaque allow-list at `:681-686` a closed set by design, or
   a list that was meant to grow and did not? `codec/opencode.rs:194-204`
   suggests the crate's default answer is "preserve unknown shapes". (needs
@@ -1281,6 +1291,7 @@ any of the four ever carries content large enough to matter to the context
 budget, the module's measurement of the array is wrong by exactly that amount
 and no existing check would notice.
 Open questions:
+
 - Are all four types genuinely content-free for provider purposes? `patch` is
   the one that plausibly carries bytes. Unresolved, needs the OpenCode
   part-schema, which is not vendored (observation 20 records that the SDK
@@ -1338,6 +1349,7 @@ hardcoded `false` means the Pi leg has no provenance at all in either
 direction; combined with 4e's finding this leaves synthetic content
 indistinguishable from authentic content for that harness at every layer.
 Open questions:
+
 - Is all-parts-synthetic the intended rule, or should any synthetic part mark
   the message? The `!parts.is_empty()` guard suggests the author considered
   degenerate cases, which makes the mixed case look unconsidered rather than
@@ -1409,6 +1421,7 @@ rejection is correct and fail-closed; the defect is that it is detected two
 layers away from the layer that could have normalised it, and the error names a
 reserved character the harness never agreed to avoid.
 Open questions:
+
 - Should the decoders normalise or reject `#` in a mid, so the failure is
   attributable to one message rather than the whole array? `wire.rs:369-372`
   documents the fallback-to-full-projection policy for out-of-range metadata;
@@ -1478,6 +1491,7 @@ estimate is materially wrong is 4a's and 4b's call, since
 `ChunkBuilder::finish` is theirs; the decoder's contribution is that it
 faithfully passes through a space one consumer was not written for.
 Open questions:
+
 - Should `boundary.rs:687-691` take `ordered.len()` instead of `max()`, or does
   it genuinely want the highest ordinal for a different reason? Needs the
   `ChunkBuilder::finish` contract, which is 4a and 4b scope.
@@ -1548,6 +1562,7 @@ cannot handle: if the stamp were ever dropped from the pass-through path,
 duplicate-content blocks would align by the `:225-227` positional fallback
 instead, silently.
 Open questions:
+
 - Should the stamp carry a per-decode nonce so a stamp from a prior pass or a
   foreign caller is distinguishable? The comment at `:243-247` says the stamps
   "survive reductions, overlays, and deletion compaction", which is the
@@ -1619,6 +1634,7 @@ currently forbids either" (`part-1-shm-transport/catalog.md:1322-1324`): the
 reasoning that keeps the call safe lives only in the callers, and nothing in
 the tree records that the callee depends on it.
 Open questions:
+
 - Should the function clamp with `messages.len().min(replace_from)` and fall
   back to a full decode, matching the documented policy at `wire.rs:369-372`
   that "malformed or out-of-range local metadata falls back to a full
@@ -1677,6 +1693,7 @@ the chunk API, so `lib.rs:12949`'s direct call to
 `encode_opencode_chunks_with_transition_state` on the incremental native path
 has no uniqueness check in any build profile.
 Open questions:
+
 - Should the wire-level guard adopt the wire-level heal branch, or should the
   wire-level heal be removed in favour of failing loud in both? The two layers
   currently encode two different answers to the same question. (needs human
@@ -1749,6 +1766,7 @@ specific gap that matters is that the retained-raw path makes identity nearly
 automatic for unmutated input, so the test's pass carries much less information
 than its name implies.
 Open questions:
+
 - Should the exception set be declared in code rather than reconstructed in the
   test's own helpers (`codec/mod.rs:273-288`)? Today the encoder's compaction
   policy and the test's stripping helper are two independent statements of one
@@ -1796,6 +1814,7 @@ a behavioural difference to lose: `:199-211` produces
 produces `BlockKind::Reasoning` with a signature, and the two round-trip through
 different encoder arms (`:543-548` versus `:536-542`).
 Open questions:
+
 - Is `missing_capture_classes` intended as a temporary ledger with an owner and
   a date, or as a permanent waiver? Nothing in `codec/mod.rs` or either golden
   says. (needs human input)
@@ -1850,6 +1869,7 @@ expect, and because 4e's lens item 18 already notes the Pi encode path is
 off-route, which makes this the moment to write the contract down rather than
 after it is wired up.
 Open questions:
+
 - Should `encode_pi` adopt the `EncodedOpencodeChunk` shape so index mapping is
   explicit? Unresolved, needs a decision about whether the Pi leg is being
   wired up at all.
@@ -1878,7 +1898,7 @@ claim. Existing checks and their execution are recorded in
 - **The chain that spends the money.**
   [dec-a-model-key-lookup-walk-has-two-implementations-that-disagree](#dec-a-model-key-lookup-walk-has-two-implementations-that-disagree),
   [dec-a-model-chain-dedup-is-adjacent-only](#dec-a-model-chain-dedup-is-adjacent-only),
-  [dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian](#dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian).
+  [dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-history_summarizer](#dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-history_summarizer).
   These are distinct concerns, not three open model-chain defects. Full
   deduplication removes repeated models, and unusable files produce path-bearing
   warnings. Those two defect premises are invalidated, while their regression
@@ -1887,7 +1907,7 @@ claim. Existing checks and their execution are recorded in
 - **Guards that hold, recorded so a later change is visible.**
   [dec-a-cache-ttl-parse-is-total-over-arbitrary-strings](#dec-a-cache-ttl-parse-is-total-over-arbitrary-strings),
   [dec-a-boundary-budget-derivation-is-total-over-non-finite-input](#dec-a-boundary-budget-derivation-is-total-over-non-finite-input),
-  [dec-a-derive-historian-chunk-tokens-is-total-at-both-integer-extremes](#dec-a-derive-historian-chunk-tokens-is-total-at-both-integer-extremes),
+  [dec-a-derive-history_summarizer-chunk-tokens-is-total-at-both-integer-extremes](#dec-a-derive-history_summarizer-chunk-tokens-is-total-at-both-integer-extremes),
   [dec-a-escalation-bands-stay-ordered-for-every-threshold](#dec-a-escalation-bands-stay-ordered-for-every-threshold),
   [dec-a-selection-decision-order-is-total-under-hashmap-iteration](#dec-a-selection-decision-order-is-total-under-hashmap-iteration).
   The cheapest cluster in the part by a wide margin: five pure-function properties

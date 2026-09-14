@@ -11,7 +11,7 @@
  *
  * OpenCode flushes mutations immediately; Pi flushes them at `commit()`.
  *
- * Feature modules own compartment storage, ordinals, and raw-history reads.
+ * Feature modules own history_segment storage, ordinals, and raw-history reads.
  *   transcript only models the *current turn's* live message buffer.
  *
  */
@@ -96,7 +96,7 @@ export interface TranscriptPart {
     /**
      * `getToolInput` returns the invocation input object, or null for non-tool parts and parts without input.
      * Smart-drops supersession selection reads tool inputs without modifying wire data.
-     * Supersession selection reads `ctx_note.action` and edit `filePath` values.
+     * Supersession selection reads `eidnara_note.action` and edit `filePath` values.
      * `getToolInput` returns a live object reference; callers must not mutate it.
      */
     getToolInput?(): Record<string, unknown> | null;

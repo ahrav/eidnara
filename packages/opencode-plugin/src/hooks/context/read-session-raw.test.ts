@@ -240,7 +240,7 @@ describe("in-memory tail", () => {
         expect(
             buildInMemoryTailRawMessages({
                 messages,
-                lastCompartmentEnd: 2,
+                lastHistorySegmentEnd: 2,
                 anchorMessageId: "m-summary",
             }),
         ).toBeNull();
@@ -255,7 +255,7 @@ describe("in-memory tail", () => {
         ];
         const tail = buildInMemoryTailRawMessages({
             messages,
-            lastCompartmentEnd: 2,
+            lastHistorySegmentEnd: 2,
             anchorMessageId: "m-2",
         });
         expect(tail?.anchorFound).toBe(true);
@@ -265,10 +265,10 @@ describe("in-memory tail", () => {
         ]);
     });
 
-    it("starts after the compartment end when the anchor is absent", () => {
+    it("starts after the history_segment end when the anchor is absent", () => {
         const tail = buildInMemoryTailRawMessages({
             messages: [view("m-4"), view("m-5")],
-            lastCompartmentEnd: 3,
+            lastHistorySegmentEnd: 3,
             anchorMessageId: "missing",
         });
         expect(tail?.anchorFound).toBe(false);

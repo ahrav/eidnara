@@ -85,7 +85,7 @@ handler-dependent and cannot move into `config.rs`.
 A composite whose declarations sit exactly at each gate's boundary, then one
 step past it, asserting `Err(HostError::InitFailed(_))` for the failing side and
 a successful startup for the boundary side. `handler_contract.rs:302-320`
-already provides `broca_declaration` and `three_child_composite` for this.
+already provides `model_execution_declaration` and `three_child_composite` for this.
 
 The missing piece is the joint assertion. A `debug_assert` block immediately
 before `runtime.rs:882` stating all four preconditions would fire on a correct

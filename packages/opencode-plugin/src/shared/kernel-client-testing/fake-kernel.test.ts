@@ -25,7 +25,7 @@ function decisionSpec(objectId: string): Record<string, unknown> {
     return {
         object_id: objectId,
         domain_id: "memory",
-        source_id: "ctx_memory",
+        source_id: "eidnara_memory",
         source_revision: 2,
         decision_kind: "ARCHITECTURE",
         payload: { summary: "summary", rationale: "rationale" },
@@ -502,7 +502,7 @@ describe("FakeKernel envelope limits", () => {
         const refusedByClient = await client.commit({
             actor: "assistant",
             operationId: "op-1",
-            cause: "ctx_memory",
+            cause: "eidnara_memory",
             operations: [{ op: "insert_decision", spec: decisionSpec("mem_new") as never }],
             tokens,
         });

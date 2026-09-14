@@ -1276,7 +1276,10 @@ async fn current_keeps_dispatched_vectors_and_remaining_pending_across_restart()
     );
     let reader = selection.pin(&corpus.kernel, &gate, &grant).unwrap();
     let engine = fixtures::TestEngine::new();
-    let synapse = fixtures::component(&engine, host_runtime::synapse::SynapseLimits::default());
+    let local_embeddings = fixtures::component(
+        &engine,
+        host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
+    );
     let mut bounds = fixtures::bounds();
     bounds.max_jobs = NonZeroUsize::MIN;
     bounds.grant = fixtures::grant(3, now() + 20_000);
@@ -1284,7 +1287,7 @@ async fn current_keeps_dispatched_vectors_and_remaining_pending_across_restart()
     let mut dispatcher = daemon::embedding_dispatch::EmbeddingDispatcher::new(
         &corpus.kernel,
         reader.projection(),
-        &synapse,
+        &local_embeddings,
     );
     let end = dispatcher
         .run_pass(

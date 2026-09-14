@@ -19,8 +19,8 @@ were written outward from the checks that exist, so the properties they state
 are the ones the suite already names, and the suite's own blind spots became
 the catalog's.** 109 of the 237 checks map to no record
 (`existing-checks.md:460`), and the highest-impact unmapped cluster is six
-tests asserting that a Broca cancellation cannot be overwritten by a later
-completion, which is the single most consequential invariant in the Broca area
+tests asserting that a ModelExecution cancellation cannot be overwritten by a later
+completion, which is the single most consequential invariant in the ModelExecution area
 and is not a record.
 
 The second shape is narrower and mechanical. **Six of the sixteen records say
@@ -132,7 +132,7 @@ false (R3), which is the same "the fixture exists and cannot measure the
 thing" split the runtime-config evaluation had to draw for `F7`.
 
 **Coverage balance.** Areas are unevenly served by line count and much more
-unevenly by property kind. Broca gets 5 records for 4,960 lines and Synapse 4
+unevenly by property kind. ModelExecution gets 5 records for 4,960 lines and LocalEmbeddings 4
 for 4,968, which is defensible; `harness_closure.rs` gets 1 for 1,146, which
 is bias B2. The real imbalance is by kind. Every one of the 16 records states
 a validation, identity, placement, or bound property, and not one states a
@@ -160,7 +160,7 @@ factual and bias B1 for the part that is judgment.
 
 ## Refinements
 
-Ordered most systematic first. R2 and R3 interact: both rest on the same Broca
+Ordered most systematic first. R2 and R3 interact: both rest on the same ModelExecution
 entry-point census, and R3's correction is the reason R2's labels cannot be
 repaired by a note alone.
 
@@ -176,10 +176,10 @@ append `(needs human input)` to the record's list, and METHOD.md:55 permits
 | --- | --- | --- |
 | [host-proof-construction-matches-the-committed-vectors](../catalog.md#host-proof-construction-matches-the-committed-vectors) | [`:136`](../evidence/host-proof-construction-matches-the-committed-vectors.md) unresolved | `docs/host-wire-protocol.md` section 5.2's example proofs match neither the committed vectors nor a recomputation under the documented daemon version. A contract-versus-code disagreement, which METHOD.md:16-19 says to report with both sides cited |
 | [coordination-locks-live-beside-the-managed-subtree](../catalog.md#coordination-locks-live-beside-the-managed-subtree) | [`:148`](../evidence/coordination-locks-live-beside-the-managed-subtree.md) needs human input | the cutover probe must digest the current coordination directory separately from the predecessor's, and this tree does not record the predecessor name |
-| [broca-identical-resends-converge-on-one-run](../catalog.md#broca-identical-resends-converge-on-one-run) | [`:145`](../evidence/broca-identical-resends-converge-on-one-run.md) needs human input | the guarantee states no bound, and the code bounds convergence to the 15-minute terminal retention and the 256-session cap. Either the guarantee gains "within the retention window" or the design intends a dedup the process-local index cannot provide |
-| [broca-children-are-reaped-as-a-process-group](../catalog.md#broca-children-are-reaped-as-a-process-group) | [`:154`](../evidence/broca-children-are-reaped-as-a-process-group.md) unresolved | the shutdown test discards the unresolved count and tolerates four seconds of grandchild-probe lag, so it cannot refute a late kill |
-| [broca-child-environment-carries-only-the-provider-row](../catalog.md#broca-child-environment-carries-only-the-provider-row) | [`:145`](../evidence/broca-child-environment-carries-only-the-provider-row.md) needs human input | in this checkout the aggregate cap and the credential verifier are reached only from tests, and the wiring that decides the production path is out of tree |
-| [synapse-inference-runs-through-a-sealed-runtime-image](../catalog.md#synapse-inference-runs-through-a-sealed-runtime-image) | [`:131`](../evidence/synapse-inference-runs-through-a-sealed-runtime-image.md) unresolved | whether `ort` 2.0.0-rc.13's `init_from` can fall back to `ORT_DYLIB_PATH` or a default search path when the given path fails was not read |
+| [model_execution-identical-resends-converge-on-one-run](../catalog.md#model_execution-identical-resends-converge-on-one-run) | [`:145`](../evidence/model_execution-identical-resends-converge-on-one-run.md) needs human input | the guarantee states no bound, and the code bounds convergence to the 15-minute terminal retention and the 256-session cap. Either the guarantee gains "within the retention window" or the design intends a dedup the process-local index cannot provide |
+| [model_execution-children-are-reaped-as-a-process-group](../catalog.md#model_execution-children-are-reaped-as-a-process-group) | [`:154`](../evidence/model_execution-children-are-reaped-as-a-process-group.md) unresolved | the shutdown test discards the unresolved count and tolerates four seconds of grandchild-probe lag, so it cannot refute a late kill |
+| [model_execution-child-environment-carries-only-the-provider-row](../catalog.md#model_execution-child-environment-carries-only-the-provider-row) | [`:145`](../evidence/model_execution-child-environment-carries-only-the-provider-row.md) needs human input | in this checkout the aggregate cap and the credential verifier are reached only from tests, and the wiring that decides the production path is out of tree |
+| [local_embeddings-inference-runs-through-a-sealed-runtime-image](../catalog.md#local_embeddings-inference-runs-through-a-sealed-runtime-image) | [`:131`](../evidence/local_embeddings-inference-runs-through-a-sealed-runtime-image.md) unresolved | whether `ort` 2.0.0-rc.13's `init_from` can fall back to `ORT_DYLIB_PATH` or a default search path when the given path fails was not read |
 
 The proposed disposition is to lift each conclusion onto its record verbatim,
 not to resolve any of them. Three carry a further consequence handled below:
@@ -195,22 +195,22 @@ refutes.
 **[credential-fingerprint-derives-from-the-product-domain](../catalog.md#credential-fingerprint-derives-from-the-product-domain)
 says "every provider credential row is fingerprinted before a harness
 spawns".** The fingerprint check runs only under
-`if let Some(verifier) = &self.credential_verifier` (`broca/mod.rs:223-235`).
-`BrocaComponent::new` sets `credential_verifier: None` (`mod.rs:73-80`, the
+`if let Some(verifier) = &self.credential_verifier` (`model_execution/mod.rs:223-235`).
+`ModelExecutionComponent::new` sets `credential_verifier: None` (`mod.rs:73-80`, the
 field at `:80`). The verifier is installed only by `new_with_credentials`
 (`mod.rs:82`), whose sole caller in the workspace is
-`tests/broca_protocol.rs:443`. So a component built through the crate's default
+`tests/model_execution_protocol.rs:443`. So a component built through the crate's default
 constructor fingerprints nothing, and every other test and both examples use
 that constructor. The derivation function is still exercised, at
 `subprocess.rs:174` through `provider_row`, which production paths do call
 (`opencode.rs:116`, `pi.rs:215`); the *check* is what has no production
 producer here.
 
-**[broca-child-environment-carries-only-the-provider-row](../catalog.md#broca-child-environment-carries-only-the-provider-row)
+**[model_execution-child-environment-carries-only-the-provider-row](../catalog.md#model_execution-child-environment-carries-only-the-provider-row)
 says "every harness child receives the snapshot environment".** `EnvSnapshot`'s
 only public constructor is `capture_from` (`subprocess.rs:97`), and its callers
-are `tests/broca_subprocess.rs:2827`, `:2836`, `:2841`, `:2871`, `:2885`,
-`tests/broca_protocol.rs:436`, and the inline test at `subprocess.rs:1662`.
+are `tests/model_execution_subprocess.rs:2827`, `:2836`, `:2841`, `:2871`, `:2885`,
+`tests/model_execution_protocol.rs:436`, and the inline test at `subprocess.rs:1662`.
 Nothing in `src/` builds one. Every consumer takes it as an argument
 (`OpenCodeBackend::new` `opencode.rs:39`, `PiBackend::new` `pi.rs:60`,
 `new_with_credentials` `mod.rs:82`), and the first two have zero callers
@@ -233,11 +233,11 @@ this tree calls. What production does reach is the lock *file*:
 The honest split is that the placement half is production through file
 creation, and the `acquire_exclusive` oracle the `Check:` names is test-only.
 
-### R3. Two Broca records assert an `always` the code refutes on a slow child
+### R3. Two ModelExecution records assert an `always` the code refutes on a slow child
 
 Both omit the same disjunct, which makes this systematic rather than isolated.
 
-**[broca-children-are-reaped-as-a-process-group](../catalog.md#broca-children-are-reaped-as-a-process-group)**
+**[model_execution-children-are-reaped-as-a-process-group](../catalog.md#model_execution-children-are-reaped-as-a-process-group)**
 asserts "no process of a reaped group survives the terminal".
 `terminate_group` (`subprocess.rs:670`) has two exits that return an error
 precisely because that could not be established: `:692-695` when the leader is
@@ -247,16 +247,16 @@ confirmed stopped. The grace is `termination_grace`, 5 seconds by default
 `:684`, `:689`, `:691`), so the reaping ceiling is four graces and not one. An
 oracle written to the record's `Check:` fails on a correct build as soon as a
 child outlives the grace, which is what `hang_ignore_term` exists to produce
-(`tests/broca_subprocess.rs:2553`).
+(`tests/model_execution_subprocess.rs:2553`).
 
-**[broca-permits-and-charges-return-to-baseline](../catalog.md#broca-permits-and-charges-return-to-baseline)**
+**[model_execution-permits-and-charges-return-to-baseline](../catalog.md#model_execution-permits-and-charges-return-to-baseline)**
 asserts "after shutdown the state is empty". That clause is true and the code
 says why: local state is released even when teardown is unproven
 (`supervisor.rs:614`, implemented at `:635-639`). What the record omits is the
 return value. `Supervisor::shutdown` returns the count of runs whose teardown
 was never proven (`:611`, `:630-633`), and
 `shutdown_counts_runs_with_unproven_teardown` asserts it equals 1
-(`tests/broca_supervisor.rs:770`). The doc comments at `:615-618` are explicit
+(`tests/model_execution_supervisor.rs:770`). The doc comments at `:615-618` are explicit
 that a drained supervisor does not prove harness process trees stopped and
 that the component must not report a clean shutdown while provider work may
 still run. A baseline check that reads only the metrics passes in exactly the
@@ -293,12 +293,12 @@ this record rather than expanding it.
 
 ### R5. The one liveness record has no bound, and no code constant can supply one
 
-[synapse-degrades-to-disabled-and-keeps-the-context-routable](../catalog.md#synapse-degrades-to-disabled-and-keeps-the-context-routable)
+[local_embeddings-degrades-to-disabled-and-keeps-the-context-routable](../catalog.md#local_embeddings-degrades-to-disabled-and-keeps-the-context-routable)
 is `Type: liveness` with `Check: always` and no bound of any kind.
 METHOD.md:88-95 requires a bounded fault-free window stated in the units the
 code bounds and forbids an unbounded "eventually". The only bound in play is
-the harness timeout: `BUDGET` is 5 seconds at `tests/support/synapse.rs:22`,
-used at `tests/synapse_roundtrip.rs:112`. The fault map identifies this and
+the harness timeout: `BUDGET` is 5 seconds at `tests/support/local_embeddings.rs:22`,
+used at `tests/local_embeddings_roundtrip.rs:112`. The fault map identifies this and
 asks the question (`fault-map.md:342-345`); the record says
 `Open questions: None.`
 
@@ -307,15 +307,15 @@ The reason no code unit is available is already recorded in this part. Part
 (`../catalog.md:7808`), so a context request has no configured deadline to
 bound it. Two dispositions are defensible and neither invents a number. The
 record becomes `safety` over its two observable facts, that `activate` returns
-`Ok` with the lane disabled and that the Synapse bind is refused with
-`artifact_invalid` (`tests/synapse_roundtrip.rs:92-93`), with routability
+`Ok` with the lane disabled and that the LocalEmbeddings bind is refused with
+`artifact_invalid` (`tests/local_embeddings_roundtrip.rs:92-93`), with routability
 demoted to a `sometimes` witness; or the record stays `liveness` and carries
 the unresolved bound question. What it cannot do is stay `liveness` with
 `Open questions: None.`
 
 ### R6. The admission record's `Check:` drops expiry, and its expiry test runs at 2.5 times the bound
 
-[synapse-admission-boundaries-are-exact](../catalog.md#synapse-admission-boundaries-are-exact)'s
+[local_embeddings-admission-boundaries-are-exact](../catalog.md#local_embeddings-admission-boundaries-are-exact)'s
 `Guarantee:` ends "and reports expired jobs as `module_restarted`". Its
 `Check:` covers the count boundary, the byte boundary, live-work eviction, and
 charge return, and says nothing about expiry. So the record's one word,
@@ -324,10 +324,10 @@ charge return, and says nothing about expiry. So the record's one word,
 The code's condition is exact:
 `now.duration_since(at) >= self.limits.retention` (`jobs.rs:624`). The one
 host-level test drives it with 100 ms retention
-(`tests/synapse_jobs.rs:242`) and a 250 ms real sleep (`:266`), so it passes
+(`tests/local_embeddings_jobs.rs:242`) and a 250 ms real sleep (`:266`), so it passes
 on an implementation using `>` instead of `>=`, on `2 * retention`, and on any
-constant below 250 ms. `tests/synapse_jobs.rs` uses `start_paused` at zero
-sites, against 6 in `synapse_protocol.rs` and 5 in `broca_supervisor.rs`, so
+constant below 250 ms. `tests/local_embeddings_jobs.rs` uses `start_paused` at zero
+sites, against 6 in `local_embeddings_protocol.rs` and 5 in `model_execution_supervisor.rs`, so
 the deterministic-clock fixture the boundary needs exists in two sibling files
 and is unused here. The inline companion at `jobs.rs:880` uses
 `retention: Duration::ZERO`, which also misses the boundary from the other
@@ -384,9 +384,9 @@ Recorded, not mined. All three verified for this evaluation.
 
 | # | Gap | Evidence |
 | --- | --- | --- |
-| G1 | **Broca terminal exclusivity and unproven teardown have six dedicated tests, an explicit code contract, and no record.** `supervisor.rs:91` states first-terminal-append-wins so completion cannot overwrite cancellation; `finish` implements it with the `state.terminal_appended \|\| state.purged` early return at `:938-945`; `:113` states that cancel and delete report failure if descendants may still execute a billable request; `:966` sets `work_unresolved` on `FailedUnresolved`; `:557-566` turns it into the `teardown_unconfirmed` error. Six tests assert exactly this, all in `tests/broca_supervisor.rs`: `:544 cancel_covers_queued_and_running_runs_and_stays_idempotent`, `:604 completion_cannot_overwrite_a_committed_cancellation`, `:685 unproven_teardown_fails_cancel_and_delete`, `:730 cancellation_winning_the_terminal_still_reports_unproven_teardown`, `:770 shutdown_counts_runs_with_unproven_teardown`, `:799 terminal_cap_never_evicts_a_run_awaiting_teardown`. `existing-checks.md:452` lists them under "no record. Status, replay, cancel, delete, and teardown-proof contracts". The impact is the same one the dedup record exists for, two billed model calls and two divergent transcripts for one prompt, reached through a different window: a cancel racing a completion rather than a resend racing a send. Fixture cost is zero, because `gated_ignoring_cancel` (`tests/support/broca.rs:117`) and `ScriptedBackend::with_behavior` already build both shapes. This is also the missing half of refinement R3: the two records that assert an unconditional `always` would be repaired by the disjunct this record would state. |
-| G2 | **The Synapse activation-drop path has two tests, an explicit code comment, and no record.** `synapse/mod.rs:1023` says "Dropping the activation future does not stop the blocking task", immediately above the `spawn_blocking` at `:1024` that loads the bundle and the ONNX Runtime image. Two tests assert the consequences: `tests/synapse_bundle.rs:757 a_dropped_activate_keeps_shutdown_waiting_for_the_blocking_load` and `:818 an_abandoned_activation_holds_the_instance_lock_until_the_blocking_load_stops`. `existing-checks.md:453` lists both under "no record", correctly calling them activation-drop contracts. The second is the higher-impact one: the instance lock is the daemon's single-incarnation fence (`instance.rs:244`, `lifecycle.rs:182`), an abandoned activation holds it for the duration of a blocking model load, and `runtime.rs:562-580` retries `InstanceGuard::acquire` a bounded number of times before returning `AlreadyRunning`. So a dropped activation can make a successor host refuse to start, which is a startup-availability property with the widest blast radius in the Synapse area and is stated nowhere. Neither test needs an ONNX Runtime library, so both run in CI today. |
-| G3 | **The set has zero `reachability`-type records and zero non-`always` semantics, and at least four properties in scope fit the other four semantics exactly.** The fault map states the fact and treats it as a convenience (`fault-map.md:176-179`). The consequences it does not draw: (a) three `Exercised: partial` clauses are situation coverage by METHOD.md:74-75 and none is stated as `sometimes`, namely a resend after a terminal was retained then evicted, a backend that never exits, and a fault during inference itself. The fault map proposes markers for all three (`u3_broca_terminal_evicted_from_retained_set`, `u3_broca_group_signaled_sigkill_after_grace`, and the `F15` row), which is the right mechanism attached to no record. (b) One production `unreachable!` exists in scope, `synapse/mod.rs:327` `"ready lanes embed"`, which is METHOD.md's `unreachable` case by definition and has no record. It sits between two separate acquisitions of the same lock, `ready_lane()` at `:313-318` and `status()` at `:300-311`, so a `Starting` to `Ready` transition between them reaches it and panics. `embed_blocking` (`:322`) has only test callers here, all ORT-gated, so a record on it would be the set's first honest `test-only` label, which is what makes it worth writing. (c) The reaping record's first conjunct is a bounded liveness claim wearing a safety label: `terminate_group` bounds it at four times `termination_grace` (`subprocess.rs:679`, `:684`, `:689`, `:691`, the constant at `:232`), which is a bound in the units the code bounds and is exactly what METHOD.md:94-95 asks for. Fifteen safety records and one unbounded liveness record is not a distribution artifact of the subject matter; it is what writing records outward from an `always`-shaped assertion suite produces. |
+| G1 | **ModelExecution terminal exclusivity and unproven teardown have six dedicated tests, an explicit code contract, and no record.** `supervisor.rs:91` states first-terminal-append-wins so completion cannot overwrite cancellation; `finish` implements it with the `state.terminal_appended \|\| state.purged` early return at `:938-945`; `:113` states that cancel and delete report failure if descendants may still execute a billable request; `:966` sets `work_unresolved` on `FailedUnresolved`; `:557-566` turns it into the `teardown_unconfirmed` error. Six tests assert exactly this, all in `tests/model_execution_supervisor.rs`: `:544 cancel_covers_queued_and_running_runs_and_stays_idempotent`, `:604 completion_cannot_overwrite_a_committed_cancellation`, `:685 unproven_teardown_fails_cancel_and_delete`, `:730 cancellation_winning_the_terminal_still_reports_unproven_teardown`, `:770 shutdown_counts_runs_with_unproven_teardown`, `:799 terminal_cap_never_evicts_a_run_awaiting_teardown`. `existing-checks.md:452` lists them under "no record. Status, replay, cancel, delete, and teardown-proof contracts". The impact is the same one the dedup record exists for, two billed model calls and two divergent transcripts for one prompt, reached through a different window: a cancel racing a completion rather than a resend racing a send. Fixture cost is zero, because `gated_ignoring_cancel` (`tests/support/model_execution.rs:117`) and `ScriptedBackend::with_behavior` already build both shapes. This is also the missing half of refinement R3: the two records that assert an unconditional `always` would be repaired by the disjunct this record would state. |
+| G2 | **The LocalEmbeddings activation-drop path has two tests, an explicit code comment, and no record.** `local_embeddings/mod.rs:1023` says "Dropping the activation future does not stop the blocking task", immediately above the `spawn_blocking` at `:1024` that loads the bundle and the ONNX Runtime image. Two tests assert the consequences: `tests/local_embeddings_bundle.rs:757 a_dropped_activate_keeps_shutdown_waiting_for_the_blocking_load` and `:818 an_abandoned_activation_holds_the_instance_lock_until_the_blocking_load_stops`. `existing-checks.md:453` lists both under "no record", correctly calling them activation-drop contracts. The second is the higher-impact one: the instance lock is the daemon's single-incarnation fence (`instance.rs:244`, `lifecycle.rs:182`), an abandoned activation holds it for the duration of a blocking model load, and `runtime.rs:562-580` retries `InstanceGuard::acquire` a bounded number of times before returning `AlreadyRunning`. So a dropped activation can make a successor host refuse to start, which is a startup-availability property with the widest blast radius in the LocalEmbeddings area and is stated nowhere. Neither test needs an ONNX Runtime library, so both run in CI today. |
+| G3 | **The set has zero `reachability`-type records and zero non-`always` semantics, and at least four properties in scope fit the other four semantics exactly.** The fault map states the fact and treats it as a convenience (`fault-map.md:176-179`). The consequences it does not draw: (a) three `Exercised: partial` clauses are situation coverage by METHOD.md:74-75 and none is stated as `sometimes`, namely a resend after a terminal was retained then evicted, a backend that never exits, and a fault during inference itself. The fault map proposes markers for all three (`u3_model_execution_terminal_evicted_from_retained_set`, `u3_model_execution_group_signaled_sigkill_after_grace`, and the `F15` row), which is the right mechanism attached to no record. (b) One production `unreachable!` exists in scope, `local_embeddings/mod.rs:327` `"ready lanes embed"`, which is METHOD.md's `unreachable` case by definition and has no record. It sits between two separate acquisitions of the same lock, `ready_lane()` at `:313-318` and `status()` at `:300-311`, so a `Starting` to `Ready` transition between them reaches it and panics. `embed_blocking` (`:322`) has only test callers here, all ORT-gated, so a record on it would be the set's first honest `test-only` label, which is what makes it worth writing. (c) The reaping record's first conjunct is a bounded liveness claim wearing a safety label: `terminate_group` bounds it at four times `termination_grace` (`subprocess.rs:679`, `:684`, `:689`, `:691`, the constant at `:232`), which is a bound in the units the code bounds and is exactly what METHOD.md:94-95 asks for. Fifteen safety records and one unbounded liveness record is not a distribution artifact of the subject matter; it is what writing records outward from an `always`-shaped assertion suite produces. |
 
 ## Biases requiring human judgment
 
@@ -398,16 +398,16 @@ Recorded, not mined. All three verified for this evaluation.
    METHOD.md:20-23 requires the class verified per record at authoring time
    with its evidence, and names a blanket preamble claim as an error that has
    already cost one revision. The evidence available here is four callers, all
-   examples or a bench: `examples/synapse_host.rs:137`,
-   `examples/perf_host.rs:100`, `examples/synapse_perf.rs:385`,
+   examples or a bench: `examples/local_embeddings_host.rs:137`,
+   `examples/perf_host.rs:100`, `examples/local_embeddings_perf.rs:385`,
    `benches/ipc_budget.rs:111`. No `daemon` crate is a workspace member
    (`Cargo.toml:3-11`). The other 133 records in this part use 13 `test-only`
    and 8 `explicit-config-only` labels, so the vocabulary is in active use and
    this set declines all of it. The fault map says outright that the label
    "cannot be checked against a production caller in this checkout"
    (`fault-map.md:60-61`) and then relabels nothing. *Two sub-questions the
-   answer must also settle:* whether `SynapseComponent::new(None)`
-   (`synapse/mod.rs:219`, which `examples/synapse_host.rs:116-123` builds when
+   answer must also settle:* whether `LocalEmbeddingsComponent::new(None)`
+   (`local_embeddings/mod.rs:219`, which `examples/local_embeddings_host.rs:116-123` builds when
    the bundle argument is `-`) makes the sealed-image and validation records
    `explicit-config-only`; and what refinement R2's three cases become, since
    their entry points are test-only in a stronger sense than the rest, being
@@ -437,10 +437,10 @@ Recorded, not mined. All three verified for this evaluation.
    `Exercised: partial` or `Exercised: not yet`.** Raised by the inventory
    itself (`existing-checks.md:627-630`). Six tests return at
    `let Some(ort) = ort_library() else { return };` when
-   `EIDNARA_SYNAPSE_TEST_ORT_LIBRARY` is unset:
-   `tests/synapse_bundle.rs:573`, `:645`, `:687`, `:699`, `:709`, and
-   `tests/synapse_roundtrip.rs:121`, with the gate at
-   `tests/synapse_bundle.rs:29-42`. `ci.yml` sets no `EIDNARA` variable. *The
+   `EIDNARA_LOCAL_EMBEDDINGS_TEST_ORT_LIBRARY` is unset:
+   `tests/local_embeddings_bundle.rs:573`, `:645`, `:687`, `:699`, `:709`, and
+   `tests/local_embeddings_roundtrip.rs:121`, with the gate at
+   `tests/local_embeddings_bundle.rs:29-42`. `ci.yml` sets no `EIDNARA` variable. *The
    evaluator's view, offered and not imposed:* a clause with no execution in
    any automated run reads as `not yet`, and `partial` implies something was
    constructed. But the decision changes `Exercised:` fields across the whole
@@ -568,9 +568,9 @@ Recorded against the merged catalog (`../catalog.md`) at the commit that adds
 this section.
 
 What landed from this evaluation: R1, R2, R3, and R7 as the catalog's U3 preamble
-states; the Broca and Synapse records reclassified `test-only` (no in-tree
+states; the ModelExecution and LocalEmbeddings records reclassified `test-only` (no in-tree
 production caller; the daemon is U4); unresolved evidence conclusions lifted into
-open questions; both Broca checks bounded (retention and teardown now stated in
+open questions; both ModelExecution checks bounded (retention and teardown now stated in
 the units the code bounds). Later review rounds went further than the evaluation
 asked: the proof, fingerprint, and route-vector records are `partial` because
 their suites do not compare against an independent implementation or run

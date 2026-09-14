@@ -15,11 +15,11 @@ import {
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import * as logger from "../../shared/logger";
 import { TimeoutError } from "../../shared/with-timeout";
-import * as permissionAvailability from "./ctx-reduce-availability";
+import * as permissionAvailability from "./eidnara-reduce-availability";
 import {
     clearToolPermissionDenied,
     peekToolPermissionDeniedForTest,
-} from "./ctx-reduce-availability";
+} from "./eidnara-reduce-availability";
 import { createEidnaraHook, type EidnaraDeps } from "./hook";
 import {
     createKernelClient,
@@ -597,7 +597,7 @@ describe("eidnara hook", () => {
         });
     });
 
-    for (const boundary of ["session.updated", "session.compacted", "ctx-flush"] as const) {
+    for (const boundary of ["session.updated", "session.compacted", "eidnara-flush"] as const) {
         it(`refreshes all session agents after ${boundary} without changing other sessions`, async () => {
             useTempDataHome("hook-permission-invalidate-");
             const sessionId = `ses-permission-${boundary}`;
@@ -633,13 +633,13 @@ describe("eidnara hook", () => {
             await capture(otherSession, "build");
             await Bun.sleep(0);
             for (action of ["deny", "allow"]) {
-                if (boundary === "ctx-flush") {
+                if (boundary === "eidnara-flush") {
                     await expectSentinel(
                         hook["command.execute.before"](
-                            { command: "ctx-flush", sessionID: sessionId, arguments: "" },
+                            { command: "eidnara-flush", sessionID: sessionId, arguments: "" },
                             { parts: [{ type: "text", text: "" }] },
                         ),
-                        "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
+                        "__CONTEXT_MANAGEMENT_EIDNARA-FLUSH_HANDLED__",
                     );
                 } else {
                     await hook.event({
@@ -1046,7 +1046,11 @@ describe("eidnara hook", () => {
             session: { get: ReturnType<typeof mock> };
         };
         client.session.get = mock(async () => ({
-            data: { directory: "/other/repo", parentID: "ses-parent", title: "eidnara-sidekick" },
+            data: {
+                directory: "/other/repo",
+                parentID: "ses-parent",
+                title: "eidnara-context_researcher",
+            },
         }));
         const hook = requireHook(
             createEidnaraHook(
@@ -1128,7 +1132,7 @@ describe("eidnara hook", () => {
         ]);
     });
 
-    it("routes ctx_note through the pinned root and derives its memory project", async () => {
+    it("routes eidnara_note through the pinned root and derives its memory project", async () => {
         useTempDataHome("hook-note-");
         const fake = createFakeModuleClient(() => ({ result: { note_id: 7 } }));
         const liveSessionState = createLiveSessionState();
@@ -1162,9 +1166,9 @@ describe("eidnara hook", () => {
             {
                 sessionId: "ses-note",
                 projectRoot: "/pinned/repo",
-                method: "ctx_note",
+                method: "eidnara_note",
                 body: {
-                    name: "ctx_note",
+                    name: "eidnara_note",
                     arguments: {
                         command_id: "cmd-note",
                         action: "write",
@@ -1185,7 +1189,7 @@ describe("eidnara hook", () => {
         ]);
     });
 
-    it("omits compiled fields from ctx_note arguments without a compile status", async () => {
+    it("omits compiled fields from eidnara_note arguments without a compile status", async () => {
         useTempDataHome("hook-note-plain-");
         const fake = createFakeModuleClient();
         const hook = requireHook(
@@ -1266,7 +1270,7 @@ describe("eidnara hook", () => {
         }
         expect(
             fake.calls.filter(
-                (call) => call.method === "agent_drops.append" || call.method === "ctx_note",
+                (call) => call.method === "agent_drops.append" || call.method === "eidnara_note",
             ),
         ).toHaveLength(0);
         expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);
@@ -1410,7 +1414,7 @@ describe("eidnara hook", () => {
         );
         const liveSessionState = createLiveSessionState();
         const kernelConfig = {
-            subc: { connection_file: "/nonexistent/eidnara-hook-test/subc.json" },
+            host: { connection_file: "/nonexistent/eidnara-hook-test/host.json" },
         };
         const hook = requireHook(
             createEidnaraHook(
@@ -1585,7 +1589,7 @@ describe("eidnara hook", () => {
         expect(fake.closeSession).toHaveBeenCalledWith("ses-delete-ts-routed");
     });
 
-    it("forwards /ctx-flush to session.flush and throws the sentinel", async () => {
+    it("forwards /eidnara-flush to session.flush and throws the sentinel", async () => {
         useTempDataHome("hook-flush-");
         const fake = createFakeModuleClient(() => ({ result: { armed: false } }));
         const promptMock = mock((..._args: unknown[]) => undefined);
@@ -1602,10 +1606,10 @@ describe("eidnara hook", () => {
 
         await expectSentinel(
             hook["command.execute.before"](
-                { command: "ctx-flush", sessionID: "ses-flush", arguments: "" },
+                { command: "eidnara-flush", sessionID: "ses-flush", arguments: "" },
                 { parts: [{ type: "text", text: "" }] },
             ),
-            "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
+            "__CONTEXT_MANAGEMENT_EIDNARA-FLUSH_HANDLED__",
         );
 
         expect(fake.calls).toEqual([
@@ -1653,10 +1657,10 @@ describe("eidnara hook", () => {
 
         await expectSentinel(
             hook["command.execute.before"](
-                { command: "ctx-flush", sessionID: "ses-routed-cmd", arguments: "" },
+                { command: "eidnara-flush", sessionID: "ses-routed-cmd", arguments: "" },
                 { parts: [{ type: "text", text: "" }] },
             ),
-            "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
+            "__CONTEXT_MANAGEMENT_EIDNARA-FLUSH_HANDLED__",
         );
 
         expect(fake.calls.map((call) => [call.method, call.projectRoot])).toEqual([
@@ -1701,7 +1705,7 @@ describe("eidnara hook", () => {
         );
         const sessionId = "ses-command-deleted-race";
         const command = hook["command.execute.before"](
-            { command: "ctx-flush", sessionID: sessionId, arguments: "" },
+            { command: "eidnara-flush", sessionID: sessionId, arguments: "" },
             { parts: [{ type: "text", text: "" }] },
         );
         while (releaseDirectoryRead === undefined) await Bun.sleep(0);
@@ -1710,7 +1714,7 @@ describe("eidnara hook", () => {
             event: { type: "session.deleted", properties: { info: { id: sessionId } } },
         });
         releaseDirectoryRead();
-        await expectSentinel(command, "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__");
+        await expectSentinel(command, "__CONTEXT_MANAGEMENT_EIDNARA-FLUSH_HANDLED__");
 
         expect(fake.calls.filter((call) => call.method === "session.flush")).toHaveLength(0);
         expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);

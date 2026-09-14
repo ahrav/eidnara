@@ -75,9 +75,9 @@ Three conclusions siblings can rely on:
 `harness_closure.rs` deserves a note because it is 35 percent of this
 sub-part's lines. It is a self-contained content-addressed store with no
 `#[cfg(test)]` module of its own and no in-crate constructor. Its production
-consumers are `broca/pi.rs:49` and `broca/opencode.rs:40`, which hold an
+consumers are `model_execution/pi.rs:49` and `model_execution/opencode.rs:40`, which hold an
 `Arc<ValidatedHarnessClosure>` that someone else built. Its tests are
-`crates/host-runtime/tests/harness_closure.rs` and `tests/broca_subprocess.rs:853`,
+`crates/host-runtime/tests/harness_closure.rs` and `tests/model_execution_subprocess.rs:853`,
 plus one ignored qualification test driven by
 `scripts/run-host-closure-qualification.ts`. So its validation logic is
 well covered as a library and completely unexercised as part of host startup.
@@ -168,7 +168,7 @@ Ordered by leverage.
 `runtime.rs:1129-1133` selects `Duration::from_millis(50)` whenever
 `activation_in_progress(&report)` is true, otherwise `health_interval`. The
 predicate (`:1051-1074`) is satisfied when any component's metrics carry
-`storage_state == "starting"` or `synapse_state == "starting"`. Those strings
+`storage_state == "starting"` or `local_embeddings_state == "starting"`. Those strings
 come from the handler's own health report. So a handler that keeps reporting
 `starting` pins the host at a 20-probe-per-second cadence indefinitely, and the
 operator's `health_interval` - settable to anything up to 365 days
@@ -337,6 +337,7 @@ Confidence: high - [evidence](../../evidence/rt-a-no-configured-limit-is-silentl
 Existing check: seven unit tests in `config.rs`, per key, not exhaustive over fields. Status `unaudited`.
 Impact: an operator who sets a value and gets a different one silently loses the ability to reason about the host's capacity, which is the premise of `config.rs:87-88`.
 Open questions:
+
 - `file_mode::raw_mode` is `pub(crate)` and shared with `generation.rs`, which is Part 2a's file. Whether that caller upholds the "already within `0o7777`" precondition is unverified from here. (needs Part 2a)
 
 ### rt-a-the-default-configuration-arms-no-liveness-probe
@@ -353,6 +354,7 @@ Confidence: high - [evidence](../../evidence/rt-a-the-default-configuration-arms
 Existing check: `tests/lifecycle.rs:496`. Status `unaudited`.
 Impact: this is the reachability label for every liveness property in the catalog. Any record whose enabling state is a `LivenessPolicy` is reachable only from `tests/lifecycle.rs:402` or `tests/client.rs:64`, never from production.
 Open questions:
+
 - `config.rs:236-238` says `invalidate_on_missed` stays `false` until the source module-host work. `tests/client.rs:67` sets it `true`. So the only code path that ever invalidates on a missed Pong is a test. Whether that is intended coverage of a future default or an accidental divergence from the stated policy is a design question. (needs human input)
 
 ### rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval
@@ -364,11 +366,12 @@ Exercised: not yet - `tests/lifecycle.rs:165` sets `health_interval` to 50 ms, w
 Guarantee: The health probe cadence is either the configured `health_interval` or the fixed 50 ms activation cadence, and which one applies is a stated function of the component-reported activation state rather than an unbounded override of operator configuration.
 Check: `always` - at `runtime.rs:1129`, assert that the selected interval equals `health_interval` whenever `activation_in_progress` is false, and record the number of consecutive iterations that selected 50 ms so a campaign can bound it. `always` because the selection happens on every loop iteration.
 Fault/timing angle: the window is unbounded. The predicate at `:1051-1074` is driven entirely by handler-authored strings in the previous report's metrics, so nothing in the host limits how long the fixed cadence persists. A handler that never leaves `starting` holds it forever.
-Required faults and enabling state: a handler whose `health` report carries `metrics.components.<id>.metrics.storage_state == "starting"` or `synapse_state == "starting"`, plus a `health_interval` distinguishable from 50 ms. `tests/lifecycle.rs:165` must change its value to make the two branches separable.
+Required faults and enabling state: a handler whose `health` report carries `metrics.components.<id>.metrics.storage_state == "starting"` or `local_embeddings_state == "starting"`, plus a `health_interval` distinguishable from 50 ms. `tests/lifecycle.rs:165` must change its value to make the two branches separable.
 Confidence: high - [evidence](../../evidence/rt-a-a-fixed-probe-interval-preempts-the-configured-health-interval.md). Verified the branch, the predicate, the single `health_interval` consumer, and that `MAX_CONFIG_DURATION` admits 365 days.
 Existing check: none that separates the branches. Status `unaudited`.
 Impact: an operator who raises `health_interval` to reduce probe load gets no relief while any component reports `starting`, and 20 handler callbacks per second continue. This is Part 2a's hardcoded-60-second shape in the same direction.
 Open questions:
+
 - Should the fast cadence carry its own bound, or is an unbounded handler-controlled override intended? (needs human input)
 
 ### rt-a-the-serial-setup-budget-triples-the-configured-transport-deadline
@@ -400,6 +403,7 @@ Confidence: high - [evidence](../../evidence/rt-a-forced-shutdown-outlives-the-c
 Existing check: none bounding the total. Status `unaudited`.
 Impact: a supervisor that budgets `shutdown_deadline` for a stop, plus the documented client 5 s, kills the host during a cleanup phase the host considers in-budget, which is precisely the window `:1217-1222` says must not be interrupted.
 Open questions:
+
 - `saturating_mul(2)` can produce a duration the validator rejects as an input. Whether the derived budget should be clamped to `MAX_CONFIG_DURATION` is unresolved. It cannot overflow, so this is a coherence question rather than a defect.
 
 ### rt-a-an-unprobed-health-snapshot-is-distinguishable-from-a-degraded-one
@@ -446,6 +450,7 @@ Confidence: high - [evidence](../../evidence/rt-a-every-published-configuration-
 Existing check: none. Status `unaudited`.
 Impact: an embedder who populates `host_capabilities` believes it advertises capabilities and it does nothing. Its `Debug` appearance at `config.rs:262` makes it look load-bearing in diagnostics.
 Open questions:
+
 - Is `host_capabilities` a placeholder for the source module-host work work, in which case the record documents an accepted gap, or a wiring omission? `config.rs:246-247` says `HostInit` is "handed to the linked handler", so a handler outside this repository could read it. (needs human input)
 
 ### rt-a-configuration-is-frozen-for-the-incarnation
@@ -477,6 +482,7 @@ Confidence: medium - [evidence](../../evidence/rt-a-a-closure-store-open-failure
 Existing check: none on the failure path. Status `unaudited`.
 Impact: a permissions or symlink problem on the closure root presents as "no harness available" rather than "the closure store is insecure", so an operator investigates the wrong subsystem. This is Part 4f's silent-degradation shape.
 Open questions:
+
 - Does `harness_backend` (`serve.rs:344`) ultimately surface any distinguishable reason to an operator, or does the `None` terminate in a generic unavailability? Unresolved; needs the `daemon` binary pass, which is outside this footprint.
 
 ### rt-a-the-activation-fast-probe-interval-is-entered
@@ -484,7 +490,7 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet - no test constructs a component report carrying `storage_state` or `synapse_state` equal to `starting` and observes the branch
+Exercised: not yet - no test constructs a component report carrying `storage_state` or `local_embeddings_state` equal to `starting` and observes the branch
 Guarantee: The activation-in-progress fast probe cadence is entered at least once per campaign, so its handler-controlled predicate and its 50 ms interval are exercised rather than assumed.
 Check: `sometimes` - a marker at `runtime.rs:1130`, fired when the fixed interval is selected. `sometimes` and not `reachable` because this is situation coverage: a campaign can execute the health loop thousands of times, and even execute the `if` at `:1129`, while never producing the operational state the branch represents, which is a component that has published `starting` in its health metrics. Line coverage of the conditional does not witness that state.
 Fault/timing angle: the situation requires a real post-publication activation window. `spawn_activation_task` (`:932`) runs `handler.activate()` with deliberately no lifecycle deadline (`:981-983`), so the window's length is component-determined.
@@ -550,7 +556,7 @@ configuration contract it was not written to be. Recorded so a later pass does
 not read the absence as an oversight.
 
 **L5. `config.rs:236-238` states a policy that a test violates.** The comment
-says `invalidate_on_missed` "stays `false` until the raw Rust historian client
+says `invalidate_on_missed` "stays `false` until the raw Rust history_summarizer client
 can answer Ping (the source module-host work); enabling it before then would kill
 healthy long-running awaits". `tests/client.rs:67` sets it `true`. Part 2a
 already cites this comment in

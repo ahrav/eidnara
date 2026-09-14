@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use daemon::embedding_dispatch::DispatchBounds;
 use daemon::search_projection::SearchProjection;
-use host_runtime::synapse::inference::InferenceError;
-use host_runtime::synapse::{
-    EmbedTokens, EmbeddingEngine, LaneInfo, SynapseComponent, SynapseLimits,
+use host_runtime::local_embeddings::inference::InferenceError;
+use host_runtime::local_embeddings::{
+    EmbedTokens, EmbeddingEngine, LaneInfo, LocalEmbeddingsComponent, LocalEmbeddingsLimits,
 };
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::Occurrence;
@@ -180,8 +180,11 @@ pub fn lane(fingerprint: &str) -> LaneInfo {
     }
 }
 
-pub fn component(engine: &Arc<TestEngine>, limits: SynapseLimits) -> SynapseComponent {
-    SynapseComponent::ready_with_engine(
+pub fn component(
+    engine: &Arc<TestEngine>,
+    limits: LocalEmbeddingsLimits,
+) -> LocalEmbeddingsComponent {
+    LocalEmbeddingsComponent::ready_with_engine(
         lane(FINGERPRINT),
         Arc::clone(engine) as Arc<dyn EmbeddingEngine>,
         limits,

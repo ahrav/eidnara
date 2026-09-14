@@ -5,8 +5,8 @@ export function ballastProse(tokens: number): string {
     if (tokens <= 0) return "";
     const words = [
         "boundary",
-        "historian",
-        "compartment",
+        "history_summarizer",
+        "history_segment",
         "schedule",
         "pressure",
         "tokens",

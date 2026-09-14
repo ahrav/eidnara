@@ -31,7 +31,7 @@ coordinator and shares the abandonment question, but it stages no caller data.
 | --- | --- | --- | --- | --- |
 | `StateSyncSeedCoordinator` (`:939-1020`) | `Idle` -> `AwaitingSeed{generation, expected_seq}` (`:908`, armed at `:8869` or by an explicit reset) -> `Collecting(PendingStateSyncSeed)` accumulating `batches: Vec<ModuleStateSyncWire>` -> `Applying{seed_id, bytes}` (`:906-911`) | None until the terminal step. `Collecting` accumulates in process memory only. The single durable write is `apply_state_sync_wire` on the assembled seed at `:9086` | `Idle` after `release_phase`, plus an out-of-band `completed: Option<CompletedStateSyncSeed>` replay slot holding the full `PreparedOutput` (`:914-921`, set at `:9106-9116`) | The caller, one `state_sync` request per batch. `handle_state_sync_value` (`:8642-9125`) is the only advancer; nothing else drives it |
 | `TransformPageCoordinator` (`:1067-1320`) | `Idle` -> `Collecting(PendingTransformPage)` accumulating `pages: Vec<Value>` -> `Applying{transform_id, bytes}` (`:1035-1039`) | None until the terminal step. The durable write is the whole unpaged transform, `handle_transform_unpaged_value` at `:9528-9536`, which commits cache state behind its own CAS | `Idle` after `release_phase` at `:9554`, plus a `completed: Option<CompletedTransformPage>` replay slot holding the full `PreparedOutput` (`:1042-1047`, set at `:9558-9568`) | The caller, one paged `transform` request per page. `handle_transform_page_value` (`:9335-9578`) is the only advancer |
-| `StateImportCoordinator` (`:1340-1622`) | absent -> `Collecting(PendingStateImport)` accumulating `compartments: Vec<StoredCompartment>` -> `Applying{import_id, bytes}` (`:1334-1337`). There is no `Idle` variant; a map entry exists only while pending | None until the terminal step. `store.preflight_state_import` (`:5678`) reads durable dedup state on every batch. The single durable write is `store.commit_state_import` at `:5738-5743` | Entry removed, by `complete` (`:1415-1427`), `discard` (`:1388-1395`), or `evict_stale` (`:1397-1413`). No replay slot; replay protection is durable, via `StateImportPreflight::Duplicate` (`:5679`) | The caller, one `state_import` request per batch. `handle_state_import_value` (`:5591-5774`) is the only advancer |
+| `StateImportCoordinator` (`:1340-1622`) | absent -> `Collecting(PendingStateImport)` accumulating `history_segments: Vec<StoredHistorySegment>` -> `Applying{import_id, bytes}` (`:1334-1337`). There is no `Idle` variant; a map entry exists only while pending | None until the terminal step. `store.preflight_state_import` (`:5678`) reads durable dedup state on every batch. The single durable write is `store.commit_state_import` at `:5738-5743` | Entry removed, by `complete` (`:1415-1427`), `discard` (`:1388-1395`), or `evict_stale` (`:1397-1413`). No replay slot; replay protection is durable, via `StateImportPreflight::Duplicate` (`:5679`) | The caller, one `state_import` request per batch. `handle_state_import_value` (`:5591-5774`) is the only advancer |
 | `StoreOpenCoordinator` (`:286-322`) | Not a staging machine. Coordinates waiters on a single store open with a lease-wait window and jittered backoff | None of its own; `run_store_open` (`:3543-3655`) performs the open | Waiters released; `StoreOpenWaiterGuard`'s `Drop` (`:324-332`) releases on unwind | `begin_store_open` / `run_store_open`. Out of this lens's focus beyond the guard contrast noted below |
 
 Three structural facts fall straight out of the table and drive most of the
@@ -202,6 +202,7 @@ Impact: unbounded resident growth keyed by session id in a long-lived daemon.
 Each entry is small on its own, but it also permanently re-qualifies that
 session to bypass the pending-count gate (see the next record).
 Open questions:
+
 - Is retaining the entry deliberate, so that a returning session keeps its
   `completed` replay slot across a route rebind? If so the map needs its own
   bound; if not, `discard` should evict. (needs human input)
@@ -275,6 +276,7 @@ budget for the process lifetime. Enough of them and legitimate large transforms
 start failing with `buffer_overflow` (`lib.rs:9497-9500`) on a daemon that never
 restarts.
 Open questions:
+
 - Was the page coordinator intentionally left without a TTL on the theory that
   `route_gone` always arrives? Route teardown only releases on the last route
   for a session (`lib.rs:4256`), so a multi-route session does not get it.
@@ -344,6 +346,7 @@ the seed coordinator has no pending-count bound at all. Its only bound is the
 (`:962`), an `AwaitingSeed` phase is bounded by neither. The two sibling
 coordinators both cap pending count at 64.
 Open questions:
+
 - Is the missing `max_pending_seeds` cap an oversight, or is the seed path
   considered bounded because only a bound route can arm a collector? A bound
   route still supplies its own session id, so the map is bounded by sessions,
@@ -381,6 +384,7 @@ removal path, the retained set is bounded only by distinct session ids. A
 transform response is the largest single payload this handler produces, so this
 is the heaviest of the growth vectors in this lens.
 Open questions:
+
 - `CompletedStateSyncSeed` also retains `generation`, `expected_seq`, and
   `total` (`lib.rs:914-921`) which the equivalence test at `:8739-8741` does not
   use; they appear only in the mismatch error message (`:8747-8748`). The page
@@ -426,6 +430,7 @@ victim's in-progress import. Blast radius is limited by the reachability class:
 today only the preseed script sends this op. If `state_import` is ever promoted
 to a production path the record's severity rises with it.
 Open questions:
+
 - Is the pre-binding discard deliberate, on the theory that a malformed request
   invalidates any series in flight? If so it should key off the resolved
   binding, which is available two statements later. (needs human input)
@@ -456,8 +461,8 @@ in scope reads staged state from `memory-store`; and that the rejections are in
 place: pages require `page_index == 0` from `Idle` (`:1197-1199`), imports
 require `batch_seq == 0` from absent (`:1566-1571`), and seeds arm
 `AwaitingSeed` only for `batch_index == 0` (`:8869`).
-Existing check: none in scope. The historian's durable-phase recovery tests
-(`lib.rs:29822`, `:29827`, `:29832`) prove the *historian* reconstructs across a
+Existing check: none in scope. The history_summarizer's durable-phase recovery tests
+(`lib.rs:29822`, `:29827`, `:29832`) prove the *history_summarizer* reconstructs across a
 restart, which makes the contrast worth stating: the staging coordinators
 deliberately do not.
 Impact: this is the intended design as far as the code shows, and the rejections
@@ -505,6 +510,7 @@ final page applies a second cache-state transition against a generation the
 caller believes it already consumed. Confirming or refuting this needs the
 sibling lens's finding on the CAS predicate.
 Open questions:
+
 - Does the cache-state CAS in `handle_transform_unpaged_value` reject a second
   application at the same `shadow_generation`? If yes this record downgrades to
   a redundancy note; if no it is a double-apply. Requires the sibling lens's
@@ -549,6 +555,7 @@ Impact: a wedged session. Every later paged transform for it fails
 recovery is a route teardown or a process restart. The condition is visible in
 health past 120,000 ms (`:251`, `:387-397`) but nothing acts on it.
 Open questions:
+
 - Is the dispatch future ever dropped at that await, or does the host always
   poll a request to completion? `handle` (`:11963-11996`) awaits inline, so the
   answer depends on `host-runtime` cancellation behaviour, which is outside 4c.
@@ -620,7 +627,7 @@ Confidence: high — [evidence](../evidence/stagelc-a-restart-is-observed-with-s
 Verified the reset statements at `lib.rs:12095-12099` sit inside
 `async fn shutdown` (`:12048`), and that construction (`:3463-3467`) produces
 empty coordinators, so both sides of the boundary are observable.
-Existing check: none. The nearest analogue is the historian's seeded-phase
+Existing check: none. The nearest analogue is the history_summarizer's seeded-phase
 recovery family (`lib.rs:29793-29832`), which crosses a restart with durable
 phase state present; the staging coordinators have no equivalent test.
 Impact: without this marker,
@@ -661,7 +668,7 @@ the doc, per METHOD.md rule 3.
 5. **Guard idiom applied everywhere except the staging phases.** Doc: the
    `TransformDispatchTicket::Drop` comment at `lib.rs:503-504` states the rule,
    that a panic must not leave the lane's accounting wrong, and `SnapshotLease`
-   (`:1875-1881`), `WrapupSessionGuard` (`:3198-3220`), `DreamerRunGuard`
+   (`:1875-1881`), `WrapupSessionGuard` (`:3198-3220`), `MemoryClassifierRunGuard`
    (`:3063-3071`), and `StoreOpenWaiterGuard` (`:324-332`)
    all follow it. Code: the `Applying` phase is released by a plain statement at
    `:9554` with no guard, so it is the one piece of per-request accounting in
@@ -692,16 +699,16 @@ Design decisions, for a human.
 
 Facts still missing, not design decisions.
 
-6. Whether the cache-state CAS inside `handle_transform_unpaged_value`
+1. Whether the cache-state CAS inside `handle_transform_unpaged_value`
    (`lib.rs:8007-8615`) rejects a redriven final page at the same generation.
    Blocks the confidence upgrade on
    `stagelc-restart-drops-the-only-page-level-replay-guard`.
    (unresolved, needs the sibling 4c per-handler atomicity finding)
-7. Whether `host-runtime` can drop a dispatch future at an await, which decides
+2. Whether `host-runtime` can drop a dispatch future at an await, which decides
    whether the cancellation half of `stagelc-applying-phase-has-no-unwind-guard`
    is reachable or whether only the panic half is.
    (unresolved, needs an `host-runtime` dispatch-cancellation fact, Part 2a territory)
-8. Whether a paged transform is ever answered with `PreparedOutcome::Streamed`,
+3. Whether a paged transform is ever answered with `PreparedOutcome::Streamed`,
    which would leave the page path with no in-process replay guard even without
    a restart (`lib.rs:9537-9540`). (unresolved, needs the response-assembly
    finding from 4d)

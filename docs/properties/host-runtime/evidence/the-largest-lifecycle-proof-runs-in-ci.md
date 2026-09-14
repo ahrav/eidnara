@@ -5,18 +5,18 @@
 A coverage lens applied in reverse: instead of asking what the tests prove, ask
 where they run. Every claim in Parts A through G of this catalog leans on
 `tests/lifecycle.rs`, so the question is whether any workflow names it. Grepping
-`the source repository workflows directory ` for `host-runtime` answers it in one pass.
+`the source repository workflows directory` for `host-runtime` answers it in one pass.
 
 ## Evidence trail
 
-`the source repository workflows directory ` holds five files: `ci.yml` (826 lines),
-`claude-code-review.yml` (39), `historian-eval.yml` (150),
+`the source repository workflows directory` holds five files: `ci.yml` (826 lines),
+`claude-code-review.yml` (39), `history_summarizer-eval.yml` (150),
 `retrieval-benchmark.yml` (216), `shm-hardening-optin.yml` (81). A grep for
 `cargo (test|nextest|build|check)` across all five matches only `ci.yml` and
 `shm-hardening-optin.yml`; the other three contain no cargo invocation. No
 workflow runs `cargo clippy`, and no workflow runs a `--workspace` test.
 
-**Every `host-runtime` test invocation in `the source repository workflows directory `, exhaustively:**
+**Every `host-runtime` test invocation in `the source repository workflows directory`, exhaustively:**
 
 | Location | Job / step | Exact command |
 | --- | --- | --- |
@@ -46,14 +46,14 @@ dispatch.
 **All 26 `host-runtime` integration binaries.** `cargo metadata --no-deps` reports 26
 targets of kind `test` for the package, matching the 26 `.rs` files directly under
 `crates/host-runtime/tests/` (`fixtures/` and `support/` are directories, not targets;
-`broca_subprocess` is a target with `harness = false` per `Cargo.toml:37-39`).
+`model_execution_subprocess` is a target with `harness = false` per `Cargo.toml:37-39`).
 
 | # | Binary | CI |
 | --- | --- | --- |
 | 1 | `activation` | unnamed |
-| 2 | `broca_protocol` | unnamed |
-| 3 | `broca_subprocess` | unnamed |
-| 4 | `broca_supervisor` | unnamed |
+| 2 | `model_execution_protocol` | unnamed |
+| 3 | `model_execution_subprocess` | unnamed |
+| 4 | `model_execution_supervisor` | unnamed |
 | 5 | `client` | unnamed |
 | 6 | `composite_routing` | unnamed |
 | 7 | `dispatch` | unnamed |
@@ -71,10 +71,10 @@ targets of kind `test` for the package, matching the 26 `.rs` files directly und
 | 19 | `shm_failure_modes` | **named** - `ci.yml:123` |
 | 20 | `shm_soak` | **named** - `ci.yml:123`, `:178` |
 | 21 | `shm_transport` | **named** - `ci.yml:168` |
-| 22 | `synapse_bundle` | unnamed |
-| 23 | `synapse_jobs` | unnamed |
-| 24 | `synapse_protocol` | unnamed |
-| 25 | `synapse_roundtrip` | unnamed |
+| 22 | `local_embeddings_bundle` | unnamed |
+| 23 | `local_embeddings_jobs` | unnamed |
+| 24 | `local_embeddings_protocol` | unnamed |
+| 25 | `local_embeddings_roundtrip` | unnamed |
 | 26 | `transport_negotiation` | **named** - `ci.yml:168` |
 
 **Exactly 4 of 26 named; exactly 22 unnamed.** The catalog's counts are correct.
@@ -100,7 +100,7 @@ developer machine, on demand.
 **macOS.** The only `host-runtime` library invocation on macOS is `ci.yml:179-180`,
 which names a single filter, so no in-crate lifecycle, generation, connection,
 `frame_read`, or `panic_boundary` test runs there. Commit `ad52aa3b`,
-"fix(host-runtime): restore the macOS build and the synapse_perf example", records the
+"fix(host-runtime): restore the macOS build and the local_embeddings_perf example", records the
 consequence directly: `hostile_shapes_at_the_lock_names_fail_closed` planted its
 FIFO with `rustix::fs::mkfifoat`, which rustix gates away from Apple targets, so
 "the test compiled only on Linux even though it carries no cfg gate", and the

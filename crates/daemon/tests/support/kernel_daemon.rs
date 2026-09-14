@@ -185,7 +185,7 @@ fn commit_request(project: &Path, key: &str, digest_seed: &str, operations: Vec<
             "operation_key": key,
             "request_digest": digest(digest_seed),
             "actor": "assistant",
-            "cause": "ctx_memory",
+            "cause": "eidnara_memory",
         },
         "tokens": [],
         "operations": operations,

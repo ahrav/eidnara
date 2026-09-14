@@ -16,7 +16,7 @@ mod reference {
     //!
     //! Faithful port of the OpenCode selectors: control-plane supersession, edit
     //! supersession, duplicate-tool cleanup, emergency tiered drop, age-based two-pass,
-    //! and ctx_reduce agent-drop.
+    //! and eidnara_reduce agent-drop.
     //!
     //! Cache-critical invariants (enforced structurally here):
     //! - **frozen_keys HARD FILTER**: a CK item stays LIVE with original bytes after
@@ -60,12 +60,12 @@ mod reference {
 
     /// The newest `todowrite` record is the live plan, so retain one.
     const TODOWRITE_KEEP: usize = 1;
-    /// Recent `ctx_reduce` arcs retained as visible housekeeping exemplars.
-    const CTX_REDUCE_KEEP: usize = 3;
+    /// Recent `eidnara_reduce` arcs retained as visible housekeeping exemplars.
+    const EIDNARA_REDUCE_KEEP: usize = 3;
     /// Zero-value meta tools whose every occurrence is droppable.
     const ZERO_VALUE_META_TOOLS: &[&str] = &["bash_status", "bash_kill"];
-    /// `ctx_note` actions that carry no lasting value (droppable when positively read).
-    const CTX_NOTE_ZERO_VALUE_ACTIONS: &[&str] = &["read", "dismiss"];
+    /// `eidnara_note` actions that carry no lasting value (droppable when positively read).
+    const EIDNARA_NOTE_ZERO_VALUE_ACTIONS: &[&str] = &["read", "dismiss"];
     /// Mirrors the duplicate-safe tool list in the TypeScript twin:
     /// the TypeScript heuristic-cleanup hook this reference was ported from.
     const DEDUP_SAFE_TOOLS: &[&str] = &[
@@ -208,7 +208,7 @@ mod reference {
         /// drop (0 if never), and whether any emergency drop has happened.
         pub prior_input_sample: f64,
         pub has_prior_drop: bool,
-        /// Agent-marked drop ids (the ctx_reduce §N§ signal), a caller-owned side input.
+        /// Agent-marked drop ids (the eidnara_reduce §N§ signal), a caller-owned side input.
         /// Canonical flat ids of the marked blocks.
         pub agent_drop_ids: Vec<String>,
         /// Agent-drop command ownership, keyed by canonical block id. Missing entries are
@@ -239,7 +239,7 @@ mod reference {
     /// Which scheduler class this pass is — gates which selectors run.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum PassClass {
-        /// A normal execute+bust pass: control-plane / edit / two-pass / ctx_reduce run.
+        /// A normal execute+bust pass: control-plane / edit / two-pass / eidnara_reduce run.
         Execute,
         /// A derived force-band pass: the emergency tiered drop runs (in addition).
         EmergencyForce,
@@ -319,7 +319,7 @@ mod reference {
 
     /// Group the flat blocks into tool arcs (by `arc_id`), collecting the call/result
     /// bytes and adjacent reasoning. Non-tool, non-arc blocks are ignored here (they
-    /// are not reduction targets for the tool selectors; ctx_reduce targets ids directly).
+    /// are not reduction targets for the tool selectors; eidnara_reduce targets ids directly).
     fn group_arcs(items: &[SelItem], frozen: &HashSet<String>) -> Vec<ToolArc> {
         let mut arcs: HashMap<String, ToolArc> = HashMap::new();
         // Deterministic arc order = first-appearance order (by min ordinal), applied at
@@ -760,11 +760,11 @@ mod reference {
 
     // --- the five selectors: each returns the ARC-IDs (or block-ids) it targets ---
 
-    fn newest_ctx_reduce_arc_ids(arcs: &[&ToolArc]) -> HashSet<String> {
+    fn newest_eidnara_reduce_arc_ids(arcs: &[&ToolArc]) -> HashSet<String> {
         let mut newest_first: Vec<&ToolArc> = arcs
             .iter()
             .copied()
-            .filter(|arc| arc.name == "ctx_reduce")
+            .filter(|arc| arc.name == "eidnara_reduce")
             .collect();
         newest_first.sort_by(|left, right| {
             right
@@ -774,14 +774,14 @@ mod reference {
         });
         newest_first
             .into_iter()
-            .take(CTX_REDUCE_KEEP)
+            .take(EIDNARA_REDUCE_KEEP)
             .map(|arc| arc.arc_id.clone())
             .collect()
     }
 
     /// 1.1 Control-plane supersession + 1.2 edit supersession (the smart_drops selectors).
-    /// Newest-arc-first, per tool name: todowrite keep-1, ctx_reduce keep-K, zero-value
-    /// meta drop-all, ctx_note drop-on-zero-value-action; edit/write older-per-file →
+    /// Newest-arc-first, per tool name: todowrite keep-1, eidnara_reduce keep-K, zero-value
+    /// meta drop-all, eidnara_note drop-on-zero-value-action; edit/write older-per-file →
     /// edit_marker. Returns per-arc intents so the caller expands + shapes them. Active
     /// (non-reduced, client-executed) arcs only.
     fn select_supersession(arcs: &[&ToolArc]) -> HashMap<String, ArcIntent> {
@@ -795,7 +795,7 @@ mod reference {
         });
 
         let mut todowrite_seen = 0usize;
-        let protected_ctx_reduce_arcs = newest_ctx_reduce_arc_ids(arcs);
+        let protected_eidnara_reduce_arcs = newest_eidnara_reduce_arc_ids(arcs);
         let mut seen_file: HashSet<String> = HashSet::new();
 
         for arc in newest_first {
@@ -817,13 +817,13 @@ mod reference {
             let is_drop_target = if name == "todowrite" {
                 todowrite_seen += 1;
                 todowrite_seen > TODOWRITE_KEEP
-            } else if name == "ctx_reduce" {
-                !protected_ctx_reduce_arcs.contains(&arc.arc_id)
+            } else if name == "eidnara_reduce" {
+                !protected_eidnara_reduce_arcs.contains(&arc.arc_id)
             } else if ZERO_VALUE_META_TOOLS.contains(&name) {
                 true
-            } else if name == "ctx_note" {
+            } else if name == "eidnara_note" {
                 read_input_str(&arc.input, &["action"])
-                    .map(|a| CTX_NOTE_ZERO_VALUE_ACTIONS.contains(&a.as_str()))
+                    .map(|a| EIDNARA_NOTE_ZERO_VALUE_ACTIONS.contains(&a.as_str()))
                     .unwrap_or(false)
             } else {
                 false
@@ -899,7 +899,7 @@ mod reference {
         if !two_pass_batch_can_apply(ctx) || ctx.last_execute_ordinal == 0 {
             return HashSet::new();
         }
-        let protected_ctx_reduce_arcs = newest_ctx_reduce_arc_ids(arcs);
+        let protected_eidnara_reduce_arcs = newest_eidnara_reduce_arc_ids(arcs);
         let newest_todowrite = arcs
             .iter()
             .filter(|arc| arc.name == "todowrite")
@@ -916,12 +916,12 @@ mod reference {
                     .is_none_or(|tokens| tokens >= AGE_RECLAIM_MIN_TOKENS)
             })
             .filter(|arc| Some(arc.arc_id.as_str()) != newest_todowrite)
-            .filter(|arc| !protected_ctx_reduce_arcs.contains(&arc.arc_id))
+            .filter(|arc| !protected_eidnara_reduce_arcs.contains(&arc.arc_id))
             .map(|arc| arc.arc_id.clone())
             .collect()
     }
 
-    /// 1.5 ctx_reduce agent-drop: the caller-supplied marked ids (a control-plane side
+    /// 1.5 eidnara_reduce agent-drop: the caller-supplied marked ids (a control-plane side
     /// input). These are already flat block ids; emitted directly as drops (arc-atomic
     /// isn't needed — the agent marks specific blocks). Frozen/absent filtered by caller.
     fn select_agent_drops(
@@ -1062,10 +1062,10 @@ mod reference {
             }
         }
 
-        // Protect ctx_reduce exemplars without changing the target math. The fixed floor
+        // Protect eidnara_reduce exemplars without changing the target math. The fixed floor
         // above already derives from every active floor tag, so removing candidates changes
         // neither the floor nor target (panel-verified emergency interaction).
-        let protected_ctx_reduce_arcs = newest_ctx_reduce_arc_ids(arcs);
+        let protected_eidnara_reduce_arcs = newest_eidnara_reduce_arc_ids(arcs);
 
         // Build candidates per tier (protected tail + reserve excluded).
         let mut by_tier: HashMap<u8, Vec<&&ToolArc>> = HashMap::new();
@@ -1073,7 +1073,7 @@ mod reference {
             if arc.ordinal > ctx.protected_cutoff_ordinal && ctx.protected_cutoff_ordinal > 0 {
                 continue; // global protected tail
             }
-            if protected_ctx_reduce_arcs.contains(&arc.arc_id) {
+            if protected_eidnara_reduce_arcs.contains(&arc.arc_id) {
                 continue;
             }
             let tier = resolve_tool_tier(&arc.name);
@@ -1153,7 +1153,7 @@ mod reference {
                 // Media/Opaque are pass-through carriers; Reasoning is signed
                 // provider-verified content whose rewrite can never re-encode.
                 // None of the three may ever become a reduction target, including
-                // via agent-directed ctx_reduce ids.
+                // via agent-directed eidnara_reduce ids.
                 !matches!(
                     item.kind,
                     SelKind::Media
@@ -1248,7 +1248,7 @@ mod reference {
                 // Order = dedup (drop) → two-pass (drop) → control-plane (drop) → edit (edit_marker).
                 // drop wins: a later edit_marker never overrides an assigned drop. The transform maps
                 // ordinary scheduler Execute here only when classification identifies an independent
-                // bust opportunity; an active background historian defers ordinary executes first.
+                // bust opportunity; an active background history_summarizer defers ordinary executes first.
                 for arc_id in &dedup_arc_ids {
                     arc_shapes.insert(arc_id.clone(), ArcShape::DedupFullDrop);
                 }
@@ -1360,7 +1360,7 @@ mod reference {
             expand_arc(arc, resolved, frozen_keys, &mut out);
         }
 
-        // ctx_reduce agent drops stay block-granular, but pass-through carriers are absent
+        // eidnara_reduce agent drops stay block-granular, but pass-through carriers are absent
         // from live_ids so Media and Opaque can never become reduction targets.
         select_agent_drops(ctx, &live_ids, frozen_keys, &mut out);
 
@@ -1563,8 +1563,8 @@ const TOOLS: [&str; TOOL_COUNT as usize] = [
     "edit",
     "write",
     "todowrite",
-    "ctx_reduce",
-    "ctx_note",
+    "eidnara_reduce",
+    "eidnara_note",
     "bash",
     "glob",
     // `ZERO_VALUE_META_TOOLS` members.
@@ -1634,7 +1634,7 @@ fn input_value(variant: u8) -> serde_json::Value {
         2 => serde_json::json!({"path": "src/a.rs", "limit": 5}),
         3 => serde_json::json!({"action": "list"}),
         4 => serde_json::json!({"description": "do things"}),
-        // `CTX_NOTE_ZERO_VALUE_ACTIONS` members.
+        // `EIDNARA_NOTE_ZERO_VALUE_ACTIONS` members.
         5 => serde_json::json!({"action": "read"}),
         6 => serde_json::json!({"action": "dismiss"}),
         7 => large_input(),
@@ -2096,7 +2096,7 @@ fn dedup_specs() -> impl Strategy<Value = Vec<ItemSpec>> {
         })
 }
 
-fn ctx_reduce_supersession_specs() -> impl Strategy<Value = Vec<ItemSpec>> {
+fn eidnara_reduce_supersession_specs() -> impl Strategy<Value = Vec<ItemSpec>> {
     (4u8..8, 0u8..10).prop_map(|(arc_count, input)| {
         let mut specs = Vec::with_capacity(usize::from(arc_count) * 2);
         for arc in 0..arc_count {
@@ -2503,8 +2503,8 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(192))]
     #[test]
-    fn optimized_matches_frozen_reference_across_ctx_reduce_keep_boundary(
-        specs in ctx_reduce_supersession_specs(),
+    fn optimized_matches_frozen_reference_across_eidnara_reduce_keep_boundary(
+        specs in eidnara_reduce_supersession_specs(),
         bits in pressured_ctx_bits(),
     ) {
         let (optimized, expected, specs, bits) = outcome_pair!(specs, bits);

@@ -257,8 +257,8 @@ function localResult(
             proof: null,
             daemon: null,
             context: null,
-            synapse: null,
-            broca: null,
+            local_embeddings: null,
+            model_execution: null,
         },
     };
 }
@@ -328,7 +328,7 @@ function envelopeIdentity(envelope: NativeStartupEnvelope | undefined): string {
 
 export interface DemandStartRequest {
     origin: ConnectionOrigin;
-    capability: "context" | "synapse";
+    capability: "context" | "local_embeddings";
     signal?: AbortSignal;
     deadlineMs?: number;
     startupEnvelope?: NativeStartupEnvelope;
@@ -948,7 +948,7 @@ export class HostLifecyclePolicy {
                 id:
                     | "readiness.transport"
                     | "readiness.storage"
-                    | "readiness.synapse"
+                    | "readiness.local_embeddings"
                     | "readiness.kernel",
                 record: NonNullable<DaemonReadiness[keyof DaemonReadiness]>,
             ): void => {
@@ -975,8 +975,8 @@ export class HostLifecyclePolicy {
             if (observed.readiness.storage) {
                 addCheck("readiness.storage", observed.readiness.storage);
             }
-            if (observed.readiness.synapse) {
-                addCheck("readiness.synapse", observed.readiness.synapse);
+            if (observed.readiness.local_embeddings) {
+                addCheck("readiness.local_embeddings", observed.readiness.local_embeddings);
             }
             if (observed.readiness.kernel) {
                 addCheck("readiness.kernel", observed.readiness.kernel);
@@ -1059,8 +1059,8 @@ export class HostLifecyclePolicy {
                     proof,
                     daemon: snapshot.authenticatedPeer.daemonVer,
                     context: moduleVersion("context"),
-                    synapse: moduleVersion("synapse"),
-                    broca: moduleVersion("broca"),
+                    local_embeddings: moduleVersion("local_embeddings"),
+                    model_execution: moduleVersion("model_execution"),
                 },
             },
         };

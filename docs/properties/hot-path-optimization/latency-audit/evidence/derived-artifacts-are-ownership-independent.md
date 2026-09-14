@@ -129,7 +129,7 @@ accounting](shared-selection-and-pressure-accounting.md).
 
 Both production selection constructors borrow the projected wire input.
 The pointer-identity test fails on the clone-based baseline and passes on
-the borrowed representation, including a selection clone and historian input.
+the borrowed representation, including a selection clone and history_summarizer input.
 The unchanged selection reference passes all 18 differential tests. The
 `tool_input` versus `wire.kind()` question from the discovery snapshot is
 resolved by removal: `FlatBlock` no longer carries a separate input copy, so
@@ -294,7 +294,7 @@ accounting evidence, not a latency comparison.
 Passing focused commands use `cargo test -p daemon --lib --all-features --locked`
 with filters `wire::tests` (14), `prefix` (21), `differential` (8), `native` (35),
 `tail_delta` (7), `synthetic` (24), `lineage` (16), `snapshot` (16), `retained` (8),
-`historian_chunk` (20), `tail_hygiene` (9), `golden` (32), `projection` (17),
+`history_summarizer_chunk` (20), `tail_hygiene` (9), `golden` (32), `projection` (17),
 `expand` (5), and `rejects` (37). All groups pass after the shared-block change.
 Filters overlap. Both differential
 checks are enabled by the compiled test setting throughout this campaign.

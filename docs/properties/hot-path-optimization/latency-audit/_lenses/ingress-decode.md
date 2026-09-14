@@ -24,7 +24,7 @@ channel][fixture]), and `queue_full` for a transient scratch shortfall
 ([`resident_capacity_error`][queuefull]). The [wire contract][wire63] names
 `invalid_params` for the 1 MiB facade and 32 MiB transform limits; the
 resident-slice semantics it spells out ([§7.5.1][wire751], [§8.3][wire83]) are
-Synapse and host statements, not a context-module contract. Only bodies over
+LocalEmbeddings and host statements, not a context-module contract. Only bodies over
 1 MiB run the [`RequestMethodProbe`][probe], whose [`ProbeString`][probestr]
 skips structured or long discriminators and whose [class set][class] is
 `transform`, `state_sync`, and `kernel.artifact.ingest.page`.
@@ -77,24 +77,25 @@ body whose footprint exceeds `resident_capacity()` (about 176 MiB at the fixed
 concurrent parses so `try_charge` fails transiently.
 Reachability: test-only - the production plugin caps unpaged bodies at
 512 KiB, whose footprint is about 1.6 MiB against a 176 MiB pool. A transient
-`queue_full` under concurrent Synapse and context load is plausible but not
+`queue_full` under concurrent LocalEmbeddings and context load is plausible but not
 verified here.
 Existing check: none found at the handler level. Pure-function tests cover the
 cap and the bound ([byte cap test][t-cap], [footprint tests][t-fp]);
 [production settlement test][t-prep] shows error outcomes settle without an output
 reservation.
 Open questions:
+
 - Is a transient `queue_full` from the shared scratch pool expected in default
   production, and does the context module owe a `retry_after_ms` on it the way
-  Synapse does? Today [`RequestOutcome::error`][outcome] sends none. (needs
+  LocalEmbeddings does? Today [`RequestOutcome::error`][outcome] sends none. (needs
   human input)
 
 ### parse-charge-bounds-decoded-residency
 
 Type: safety
 Check: `always` - for every admitted request, assert
-`charge >= nodes * size_of::<Value>() * VALUE_NODE_SLACK * RETAINED_NODE_COPIES
-+ string_bytes * RETAINED_STRING_COPIES + VALUE_ENVELOPE_BYTES` where `nodes` and
+`charge >= nodes *size_of::<Value>()* VALUE_NODE_SLACK * RETAINED_NODE_COPIES
+- string_bytes * RETAINED_STRING_COPIES + VALUE_ENVELOPE_BYTES` where `nodes` and
 `string_bytes` come from the scan, and independently assert that the typed
 decode retains at most `RETAINED_STRING_COPIES` owned copies of each string
 block (the `WireMessage` original, the `WireBlock` original, and the
@@ -109,12 +110,13 @@ reverse; [`try_reserve_resident`][reserve] documents that reserving after
 allocation lets the allocation escape the envelope.
 Required faults and enabling state: A body with a large text block (the
 existing [copy test][t-fp] uses 1 MiB) decoded through the full typed path,
-with a copy count taken from the resulting `TransformRequest`.
+with a copy count taken from the resulting`TransformRequest`.
 Reachability: default-production - every unpaged transform takes this path.
 Existing check: [footprint tests][t-fp] assert the arithmetic of the bound and
 the three-copy multiplier; none found that counts copies retained by the typed
 decode, and none found that compares the charge with a measured decode.
 Open questions:
+
 - [E2][e2] owns the lifetime of the charge; this record owns its magnitude.
   Should the two be one record in synthesis? (needs human input)
 - The paged lane reaches the typed decode from staged pages with no
@@ -183,8 +185,9 @@ decodes one full envelope; [transform_meta_bound.rs][t-meta] decodes a
 `kind`-only body; none found for duplicate keys, `null` handling, or malformed
 JSON on either lane.
 Open questions:
+
 - Is last-wins on duplicate top-level keys a contract or an accident of the
-  `Value` round trip? Synapse rejects duplicates ([§7.5.1][wire751]); the
+  `Value` round trip? LocalEmbeddings rejects duplicates ([§7.5.1][wire751]); the
   context module has no written rule. (needs human input)
 - Must malformed JSON keep reporting `unrecognized_request_shape` with
   `non-object JSON (null)`, or may it become `bad_request`? (needs human input)
@@ -224,6 +227,7 @@ unparseable refusal, structured and long `method`, and a body above the
 transform ceiling; none found for exactly 32 MiB, for duplicate discriminator
 keys, or for probe memory.
 Open questions:
+
 - A body over 1 MiB with duplicate `method` keys is refused by the probe but
   would be admitted under 1 MiB (last-wins). Is the asymmetry acceptable as
   conservative refusal? (needs human input)
@@ -241,7 +245,7 @@ change admission ordering for every peer.
 Guarantee: The handler's parse reservation never waits and never draws on the
 pool that admits other connections' frames.
 Fault/timing angle: The scratch pool is one host-wide [`ByteBudget`][pools]
-shared by the context, Synapse, and Broca components; concurrent large parses
+shared by the context, LocalEmbeddings, and ModelExecution components; concurrent large parses
 race for it, and a reservation that awaited would hold the pending and task
 permits while parked.
 Required faults and enabling state: Two or more concurrent bodies whose
@@ -255,7 +259,8 @@ transient `None`, all-or-none acquisition, and the `u32` conversion refusal;
 that exercises the handler's `queue_full` or footprint `invalid_params`
 branch.
 Open questions:
-- [`SCRATCH_RESERVED_BYTES`][scratchconst] is documented as sized for Synapse
+
+- [`SCRATCH_RESERVED_BYTES`][scratchconst] is documented as sized for LocalEmbeddings
   budgets; the context transform footprint (up to about 96 MiB of string
   copies for a 32 MiB body) shares the slice without appearing in the sizing
   or in `validate_serving_limits`. Is that intended? (needs human input)
@@ -302,10 +307,10 @@ bodies opaque and states only the `invalid_params` cap codes
 - The audit names a `request_too_large` code; the handler helper
   [`request_too_large_error`][toolarge] emits `invalid_params`, which matches
   the contract.
-- [§7.5.1][wire751] says every Synapse `queue_full` carries a retry hint and
+- [§7.5.1][wire751] says every LocalEmbeddings `queue_full` carries a retry hint and
   that a permanently unservable parse is `schema_violation`; the context
   module emits `queue_full` without a hint and `invalid_params` for the
-  permanent case. The contract scopes those rules to Synapse.
+  permanent case. The contract scopes those rules to LocalEmbeddings.
 
 ## Anchors
 

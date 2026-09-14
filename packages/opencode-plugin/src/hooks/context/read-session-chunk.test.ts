@@ -490,7 +490,7 @@ describe("readSessionChunk", () => {
         withRawMessageProvider("ses-pi-shape", piShaped, () => {
             const chunk = readSessionChunk("ses-pi-shape", 100_000, 1);
             expect(chunk.completedToolArcs).toEqual([{ start: 1, end: 2 }]);
-            // A narrative-free exchange still reaches the historian as tool summaries, so `endIndex` advances.
+            // A narrative-free exchange still reaches the history_summarizer as tool summaries, so `endIndex` advances.
             expect(chunk.text).toContain("TC: read");
             expect(chunk.endIndex).toBe(2);
             expect(chunk.toolOnlyRanges).toEqual([{ start: 1, end: 2 }]);
@@ -881,7 +881,7 @@ describe("readSessionChunk", () => {
                 expect(
                     primeTailRawMessageCache({
                         sessionId: "ses-omitted-slot",
-                        lastCompartmentEnd: 1,
+                        lastHistorySegmentEnd: 1,
                         anchorMessageId: "m-1",
                     }),
                 ).toBe(true);

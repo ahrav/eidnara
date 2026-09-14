@@ -25,8 +25,8 @@ pub struct Tool {
 }
 
 use super::{
-    ctx_expand_description, ctx_expand_schema, ctx_memory_description, ctx_memory_schema,
-    ctx_note_description, ctx_note_schema, ctx_search_description, ctx_search_schema,
+    eidnara_memory_description, eidnara_memory_schema, eidnara_note_description,
+    eidnara_note_schema, eidnara_search_description, eidnara_search_schema,
 };
 
 /// Diagnostic emitted when light assets are unavailable and full assets are used.
@@ -44,37 +44,32 @@ const GUIDANCE_LIGHT_PRIMARY: Option<&str> = Some(GUIDANCE_LIGHT_PRIMARY_TEXT);
 const GUIDANCE_LIGHT_NO_REDUCE: Option<&str> = Some(GUIDANCE_LIGHT_NO_REDUCE_TEXT);
 const TOOL_LIGHT_DESCRIPTIONS: Option<&[(&str, &str)]> = Some(&[
     (
-        "ctx_reduce",
+        "eidnara_reduce",
         "Queue a tagged reduction request for asynchronous delivery.",
     ),
     (
-        "ctx_memory",
+        "eidnara_memory",
         "Maintain standalone durable project facts: write new knowledge, update changed facts, archive obsolete facts, and merge duplicates.",
     ),
     (
-        "ctx_search",
+        "eidnara_search",
         "Before answering from memory, keyword-search saved memories, notes, and compacted summaries; this Claude Code leg is literal, not semantic.",
     ),
     (
-        "ctx_expand",
-        "Recover the persisted historian U:/A:/TC: transcript for a compacted conversation range.",
-    ),
-    (
-        "ctx_note",
+        "eidnara_note",
         "Save or inspect future session follow-ups; surface_condition is recorded but not evaluated on this Claude Code leg.",
     ),
 ]);
 
-const CTX_REDUCE_DESCRIPTION: &str =
+const EIDNARA_REDUCE_DESCRIPTION: &str =
     "Acknowledge a tagged reduction request for asynchronous delivery";
 
 /// Tool IDs whose descriptions may be selected or overridden.
-pub const PROMPT_SURFACE_TOOL_IDS: [&str; 5] = [
-    "ctx_reduce",
-    "ctx_memory",
-    "ctx_search",
-    "ctx_expand",
-    "ctx_note",
+pub const PROMPT_SURFACE_TOOL_IDS: [&str; 4] = [
+    "eidnara_reduce",
+    "eidnara_memory",
+    "eidnara_search",
+    "eidnara_note",
 ];
 
 /// Authored prompt and description set selected for a session.
@@ -229,7 +224,7 @@ pub fn is_known_tool_id(tool_id: &str) -> bool {
 
 pub fn warn_ignored_unknown_tool_description(tool_id: &str) {
     eprintln!(
-        "daemon: config warning: prompt_surface.tool_descriptions.{tool_id} is not a known ctx_* tool ID; the override was ignored."
+        "daemon: config warning: prompt_surface.tool_descriptions.{tool_id} is not a known eidnara_* tool ID; the override was ignored."
     );
 }
 
@@ -266,10 +261,10 @@ pub fn module_tools(selection: &PromptSurfaceSelection) -> Vec<Tool> {
             schema: json!({ "type": "object" }),
         },
         Tool {
-            name: "ctx_reduce".to_string(),
+            name: "eidnara_reduce".to_string(),
             description: Some(description(
-                "ctx_reduce",
-                CTX_REDUCE_DESCRIPTION.to_string(),
+                "eidnara_reduce",
+                EIDNARA_REDUCE_DESCRIPTION.to_string(),
             )),
             execution_mode: ExecutionMode::Pure,
             // `PromptSurfaceSelection` may replace only top-level tool descriptions.
@@ -283,28 +278,22 @@ pub fn module_tools(selection: &PromptSurfaceSelection) -> Vec<Tool> {
             }),
         },
         Tool {
-            name: "ctx_memory".to_string(),
-            description: Some(description("ctx_memory", ctx_memory_description())),
+            name: "eidnara_memory".to_string(),
+            description: Some(description("eidnara_memory", eidnara_memory_description())),
             execution_mode: ExecutionMode::Mutating,
-            schema: ctx_memory_schema(),
+            schema: eidnara_memory_schema(),
         },
         Tool {
-            name: "ctx_expand".to_string(),
-            description: Some(description("ctx_expand", ctx_expand_description())),
+            name: "eidnara_search".to_string(),
+            description: Some(description("eidnara_search", eidnara_search_description())),
             execution_mode: ExecutionMode::Pure,
-            schema: ctx_expand_schema(),
+            schema: eidnara_search_schema(),
         },
         Tool {
-            name: "ctx_search".to_string(),
-            description: Some(description("ctx_search", ctx_search_description())),
-            execution_mode: ExecutionMode::Pure,
-            schema: ctx_search_schema(),
-        },
-        Tool {
-            name: "ctx_note".to_string(),
-            description: Some(description("ctx_note", ctx_note_description())),
+            name: "eidnara_note".to_string(),
+            description: Some(description("eidnara_note", eidnara_note_description())),
             execution_mode: ExecutionMode::Mutating,
-            schema: ctx_note_schema(),
+            schema: eidnara_note_schema(),
         },
     ]
 }
@@ -490,10 +479,10 @@ mod tests {
 
     #[test]
     fn shared_guidance_names_one_memory_identity_form() {
-        let memory_schema = ctx_memory_schema();
+        let memory_schema = eidnara_memory_schema();
         let memory_properties = memory_schema["properties"]
             .as_object()
-            .expect("ctx_memory schema has properties");
+            .expect("eidnara_memory schema has properties");
         assert!(memory_properties.contains_key("objectId"));
         assert!(memory_properties.contains_key("objectIds"));
         assert!(!memory_schema.to_string().contains("Claim"));
@@ -517,8 +506,7 @@ mod tests {
                     || guidance.contains("when its contract includes project memories")
             );
             assert!(guidance.contains("notes or"));
-            assert!(guidance.contains("When `ctx_expand` is registered"));
-            assert!(guidance.contains("`## start-end · date · title`"));
+            assert!(!guidance.contains("ctx_expand"));
             assert!(guidance.contains("`<session-history>`"));
         }
     }
@@ -532,7 +520,7 @@ mod tests {
         let mut selected = full.clone();
         selected.preset = PromptSurfacePreset::Light;
         selected.tool_descriptions.insert(
-            "ctx_search".to_string(),
+            "eidnara_search".to_string(),
             "Replacement search prose.".to_string(),
         );
         let legacy = session_tools(&full);
@@ -544,7 +532,7 @@ mod tests {
             assert_eq!(actual.execution_mode, expected.execution_mode);
         }
         assert_eq!(
-            tools[3].description.as_deref(),
+            tools[2].description.as_deref(),
             Some("Replacement search prose.")
         );
         assert!(!manifest_content_epoch(&selected).is_empty());

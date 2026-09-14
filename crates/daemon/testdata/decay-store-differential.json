@@ -2,43 +2,43 @@
   "cases": [
     {
       "budget": 10500,
-      "tsCost": 10469,
+      "tsCost": 10470,
       "tsTierCounts": [
         15,
         30,
-        16,
-        43,
-        284
+        13,
+        25,
+        305
       ],
-      "bodySha256": "edf74abef03ae58a8c2b1e79ab27d0a78407154ebe9d72f9724ed7d110fc1a7e"
+      "bodySha256": "fc3bdbefd85c0b62fe3de2dbe51c88f62fe26bdf13fbbf576e9a0fca80ca1ede"
     },
     {
       "budget": 19500,
-      "tsCost": 19489,
+      "tsCost": 19500,
       "tsTierCounts": [
         28,
         33,
-        71,
-        91,
-        165
+        68,
+        53,
+        206
       ],
-      "bodySha256": "204d90e9026cf8913ced3f78c976aad0e81ac0eebe2d9a92c2cba7e999a6ccc7"
+      "bodySha256": "f700b41e94dbcf45b77361421911ecd46ccae4e4dbca6a6afb6ad3c39392b9ed"
     },
     {
       "budget": 42000,
-      "tsCost": 38843,
+      "tsCost": 41964,
       "tsTierCounts": [
         47,
         138,
-        79,
-        110,
-        14
+        67,
+        105,
+        31
       ],
-      "bodySha256": "de8ce557c0dc3770c1c683979913c5f41db9a825f198a44ac40b6397e3cb8a99"
+      "bodySha256": "ffba6c320d4bdb977038cc012d4910a373d3de883d336c329f6064f45ea8909d"
     },
     {
       "budget": 60000,
-      "tsCost": 41144,
+      "tsCost": 45870,
       "tsTierCounts": [
         50,
         162,
@@ -46,7 +46,7 @@
         98,
         11
       ],
-      "bodySha256": "0d8808ef40e8664b45a3d56c5fc0d925d27834355694b227c96098b3f8af16f0"
+      "bodySha256": "0165e4c63b81439d9d413f3b609a92d243bff02fd719bc26b07206433540bf5d"
     }
   ]
 }

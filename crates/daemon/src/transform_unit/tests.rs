@@ -776,7 +776,7 @@ async fn emergency_cancellation_between_units_preserves_commit_and_releases_scra
         handler_with_store(Arc::clone(&producer), default_test_config());
     let messages = big_messages();
     let first = watchdog(call_transform(&handler, messages.clone())).await;
-    assert_eq!(first["historian"]["fired"], true);
+    assert_eq!(first["history_summarizer"]["fired"], true);
     wait_for_count(&producer.starts, 1).await;
     wait_for_count(&producer.await_outputs, 1).await;
     let seed_version = store.load("ses").unwrap().row_version.unwrap();
@@ -798,7 +798,7 @@ async fn emergency_cancellation_between_units_preserves_commit_and_releases_scra
     poll_fn(|cx| {
         assert!(
             emergency.as_mut().poll(cx).is_pending(),
-            "the completed first unit must wait for the live historian"
+            "the completed first unit must wait for the live history_summarizer"
         );
         Poll::Ready(())
     })
@@ -812,7 +812,7 @@ async fn emergency_cancellation_between_units_preserves_commit_and_releases_scra
     assert!(committed.row_version.unwrap() > seed_version);
     assert!(
         handler
-            .live_historian_sessions
+            .live_history_summarizer_sessions
             .lock()
             .unwrap()
             .contains_key("ses")
@@ -920,7 +920,10 @@ async fn synthetic_unit_failures_map_to_internal_error_and_release_resources() {
                         .publication_floor_ordinal
                         .is_some_and(|floor| floor > 0)
                 );
-                assert_eq!(persisted.meta.historian.state, HistorianPhase::Idle);
+                assert_eq!(
+                    persisted.meta.history_summarizer.state,
+                    HistorySummarizerPhase::Idle
+                );
                 assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
                 assert_eq!(producer.await_outputs.load(Ordering::SeqCst), 1);
             }

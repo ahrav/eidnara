@@ -1,10 +1,10 @@
-//! Runs one bounded identity sweep over the search projection: selects finished, unreferenced embedding identities, asks the in-process Synapse host whether it still holds any of them, and reclaims the rest inside one fenced write transaction that rechecks eligibility row by row.
+//! Runs one bounded identity sweep over the search projection: selects finished, unreferenced embedding identities, asks the in-process LocalEmbeddings host whether it still holds any of them, and reclaims the rest inside one fenced write transaction that rechecks eligibility row by row.
 //!
 //! A live native lease, component-table entry, or served result page prevents row reclamation. A holder check taken before the write transaction cannot go stale in the deleting direction: only pending rows are admitted, so an `obsolete` row never gains a holder again, and the dispatcher obtains the page it holds across publication before the row finishes, so a finished row's protecting page exists at check time. A job issued by another incarnation has no holder left. Lost COMMIT replies reconcile from stored rows, and repeated deletion is idempotent. Integrity or storage failures quarantine the projection and preserve cleanup obligations.
 
 use std::num::NonZeroUsize;
 
-use host_runtime::synapse::SynapseComponent;
+use host_runtime::local_embeddings::LocalEmbeddingsComponent;
 use kernel::applicability::EvalBudget;
 use retrieval::identity_sweep::{Candidate, candidates, presence, reclaim};
 use tokio_util::sync::CancellationToken;
@@ -40,26 +40,29 @@ pub enum SweepError {
 /// Sweeps one projection against one in-process host. `run_sweep` blocks on the projection and belongs on a blocking thread.
 pub struct IdentitySweeper<'a> {
     projection: &'a SearchProjection,
-    synapse: &'a SynapseComponent,
+    local_embeddings: &'a LocalEmbeddingsComponent,
     cursor: Option<String>,
     invalidated: Option<CancellationToken>,
     lose_reclaim_reply: bool,
 }
 
 impl<'a> IdentitySweeper<'a> {
-    pub fn new(projection: &'a SearchProjection, synapse: &'a SynapseComponent) -> Self {
-        Self::resuming(projection, synapse, None)
+    pub fn new(
+        projection: &'a SearchProjection,
+        local_embeddings: &'a LocalEmbeddingsComponent,
+    ) -> Self {
+        Self::resuming(projection, local_embeddings, None)
     }
 
     /// A sweeper whose first selection starts after `cursor`, the job identifier a previous sweeper's [`Self::cursor`] handed back; `None` starts at the first identity.
     pub fn resuming(
         projection: &'a SearchProjection,
-        synapse: &'a SynapseComponent,
+        local_embeddings: &'a LocalEmbeddingsComponent,
         cursor: Option<String>,
     ) -> Self {
         Self {
             projection,
-            synapse,
+            local_embeddings,
             cursor,
             invalidated: None,
             lose_reclaim_reply: false,
@@ -190,9 +193,9 @@ impl<'a> IdentitySweeper<'a> {
             return false;
         };
         if candidate.state == "obsolete" {
-            self.synapse.holds_job(job_id)
+            self.local_embeddings.holds_job(job_id)
         } else {
-            self.synapse.holds_result_page(job_id)
+            self.local_embeddings.holds_result_page(job_id)
         }
     }
 

@@ -27,12 +27,12 @@ The absence of a retry policy:
   for `busy`, `Busy`, `retry`, `Retry`, `SQLITE_BUSY`, and `DatabaseBusy` returns:
   an index name in the migration SQL (`:790`
   `idx_note_deliveries_retry`); `NoteEvalAcquireOutcome::Busy` (`:2999`);
-  `MemoryStoreError::HistorianBusy` and `ModuleStateSyncError::HistorianBusy`
+  `MemoryStoreError::HistorySummarizerBusy` and `ModuleStateSyncError::HistorySummarizerBusy`
   (`:3355`, `:3626`, `:4332`, `:7663`, `:7925`); prose in doc comments (`:1796`,
   `:2411`, `:5168`, `:6148`, `:6190`, `:6726`, `:6862`, `:6913`, `:6937`,
   `:6977`); and the two CAS retry-limit messages (`:6755`, `:6776`).
 - Every `Busy` in that list is a domain-level lease-contention outcome, not
-  SQLite busy. `HistorianBusy` carries a `HistorianPhase` (`:3355`), and
+  SQLite busy. `HistorySummarizerBusy` carries a `HistorySummarizerPhase` (`:3355`), and
   `NoteEvalAcquireOutcome::Busy` is a note-evaluation claim conflict. None
   originates from `SQLITE_BUSY`.
 - So no code retries a SQLite busy failure.
@@ -54,7 +54,7 @@ Why writer-writer conflict rarely reaches SQLite:
 What does reach SQLite, proven by test:
 
 - `crates/memory-store/src/lib.rs:16697-16713`. Inside an
-  `abandon_historian_hook` that fires while a fenced transaction is open, the
+  `abandon_history_summarizer_hook` that fires while a fenced transaction is open, the
   test opens a second raw `rusqlite::Connection` on the same path (`:16702`),
   sets `busy_timeout(Duration::ZERO)` (`:16703`), issues an `UPDATE
   cache_state`, and asserts the error is
@@ -134,8 +134,8 @@ To exercise the property, invert the roles:
 
 For the mid-transaction variant, the holder must arrive *after* the store's
 `BEGIN` rather than before, which requires a hook inside the closure. The
-existing `set_before_max_compartment_end_read_hook` (`lib.rs:5283`) and
-`set_abandon_historian_hook` (`:5294`) are the hooks of this shape; neither fires
+existing `set_before_max_history_segment_end_read_hook` (`lib.rs:5283`) and
+`set_abandon_history_summarizer_hook` (`:5294`) are the hooks of this shape; neither fires
 inside `commit_transform`.
 
 A cheaper coverage check that asserts preconditions rather than the violation:

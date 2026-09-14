@@ -11,11 +11,11 @@ persistence path exists at the pinned revision.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/synapse/jobs.rs:91-106` defines Ready as vectors,
+- `crates/host-runtime/src/local_embeddings/jobs.rs:91-106` defines Ready as vectors,
   page boundaries, and a ResultLease. It contains no persistent store handle.
 - `jobs.rs:502-557` converts vectors to Arc-backed memory and sets Ready.
 - `jobs.rs:623-655` serves pages from that resident allocation.
-- `crates/host-runtime/src/synapse/mod.rs:873-899` validates native output and
+- `crates/host-runtime/src/local_embeddings/mod.rs:873-899` validates native output and
   publishes it to JobTable. It does not commit a product vector.
 - `mod.rs:1148-1155` clears local jobs after shutdown drains tracked work.
 - P1 lines 108-110 separate Pending, Embedded, and Published in the intended
@@ -78,7 +78,7 @@ crash harness or an assumption that kernel CAS checks cover this path.
 
 ### Q: What storage protocol makes completion durable?
 
-- Sources examined: P1 U2/U3, Synapse, and the kernel CAS process-crash pattern.
+- Sources examined: P1 U2/U3, LocalEmbeddings, and the kernel CAS process-crash pattern.
 - Findings: Pending belongs in search.sqlite, but vector storage/completion
   operations and their durability mode do not exist in the current tree.
   Existing child termination and reopen mechanics are reusable, not absent.

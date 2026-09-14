@@ -49,7 +49,7 @@ its position and magnitude.
 - [`RequestOutcome::error`][outcome] sets `retry_after_ms: None`. The wire
   contract at [§6.3][wire63] names `invalid_params` for the 1 MiB and 32 MiB
   limits; [§7.5.1][wire751] scopes the `queue_full` retry hint and the
-  `schema_violation` code to Synapse. The string `request_too_large` appears
+  `schema_violation` code to LocalEmbeddings. The string `request_too_large` appears
   only in the [direct-host fixture control channel][fixture].
 - The plugin [pages bodies over 512 KiB][paging], so the over-cap arms need
   constructed input; the plugin sends both [`method` and `kind`][plugin].
@@ -101,7 +101,7 @@ because the decoded type exposes no copy count.
 - Sources examined: [`RequestOutcome::error`][outcome], [§7.5.1][wire751],
   [§6.3][wire63], [`resident_capacity_error`][queuefull].
 - Findings: The helper carries no hint and the outcome constructor fixes
-  `retry_after_ms: None`. The contract's hint rule is written for Synapse
+  `retry_after_ms: None`. The contract's hint rule is written for LocalEmbeddings
   `embed.query`; routed transform bodies are opaque to the contract.
 - Missing evidence: A written rule for the context module.
 - Conclusion: needs human input.
@@ -116,11 +116,11 @@ because the decoded type exposes no copy count.
 - Missing evidence: A statement of which budget covers the assembled tree.
 - Conclusion: needs human input.
 
-### Q: Is sharing the Synapse-sized scratch slice intended?
+### Q: Is sharing the LocalEmbeddings-sized scratch slice intended?
 
 - Sources examined: [`SCRATCH_RESERVED_BYTES`][scratchconst] and its doc,
   the [pool split][pools].
-- Findings: The doc lists Synapse terms only; the transform footprint is not
+- Findings: The doc lists LocalEmbeddings terms only; the transform footprint is not
   in the sizing or in `validate_serving_limits`.
 - Missing evidence: A sizing statement that names the transform footprint.
 - Conclusion: needs human input.
@@ -310,7 +310,7 @@ lane test holds over the nine raw-value corpus bodies.
 ### Focused execution, 2026-09-12
 
 `cargo test -p daemon --locked` passed 1024 tests including the eleven above,
-the two `dreamer_run_task_bounds_*` tests failing under full-suite load on the
+the two `memory_classifier_run_task_bounds_*` tests failing under full-suite load on the
 base branch as well and passing in isolation;
 `cargo test -p daemon --locked --features direct-host-fixture --test direct_host`
 passed 7 including the ring test;

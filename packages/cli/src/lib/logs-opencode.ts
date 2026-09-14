@@ -6,7 +6,7 @@ import {
     renderDiagnosticsMarkdown,
 } from "./diagnostics-opencode";
 import { writeNewFile } from "./fs-utils";
-import { scopeDumpBucketsToSession } from "./historian-dumps";
+import { scopeDumpBucketsToSession } from "./history_summarizer-dumps";
 import { capBodyToGithubLimit, codeFenceFor, extractRecentErrors } from "./issue-body";
 import { filterLogRecords } from "./log-records";
 import { readLogTailLines } from "./log-tail";
@@ -49,27 +49,27 @@ export interface BundledIssueReport {
 
 /**
  */
-const HISTORIAN_LOG_PATTERNS = [
-    /historian failure:/,
-    /historian failure recorded:/,
-    /historian prompt failed:/,
-    /## Historian alert/,
-    /historian alert suppressed/,
+const HISTORY_SUMMARIZER_LOG_PATTERNS = [
+    /history_summarizer failure:/,
+    /history_summarizer failure recorded:/,
+    /history_summarizer prompt failed:/,
+    /## HistorySummarizer alert/,
+    /history_summarizer alert suppressed/,
     /EMERGENCY: aborting session/,
-    /historian: prompt attempt \d+ failed:/,
+    /history_summarizer: prompt attempt \d+ failed:/,
 ];
 
-function isHistorianLogLine(line: string): boolean {
-    return HISTORIAN_LOG_PATTERNS.some((rx) => rx.test(line));
+function isHistorySummarizerLogLine(line: string): boolean {
+    return HISTORY_SUMMARIZER_LOG_PATTERNS.some((rx) => rx.test(line));
 }
 
 /**
  */
-function extractHistorianFailureLines(sanitized: string, limit = 30): string[] {
+function extractHistorySummarizerFailureLines(sanitized: string, limit = 30): string[] {
     const matches: string[] = [];
     const lines = sanitized.split(/\r?\n/);
     for (let i = lines.length - 1; i >= 0 && matches.length < limit; i -= 1) {
-        if (isHistorianLogLine(lines[i])) {
+        if (isHistorySummarizerLogLine(lines[i])) {
             matches.push(lines[i]);
         }
     }
@@ -102,9 +102,12 @@ function scopeReportToSession(
     return {
         ...report,
         recentSessions: report.recentSessions.filter((session) => session.sessionId === sessionId),
-        historianDumps: {
-            ...report.historianDumps,
-            byProject: scopeDumpBucketsToSession(report.historianDumps.byProject, sessionId),
+        history_summarizerDumps: {
+            ...report.history_summarizerDumps,
+            byProject: scopeDumpBucketsToSession(
+                report.history_summarizerDumps.byProject,
+                sessionId,
+            ),
         },
     };
 }
@@ -132,9 +135,12 @@ export async function bundleIssueReport(
     const logLines = filterLogLinesBySession(allLogLines, sessionFilter);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
-    // The 4,000-line window includes historian failures outside the 400-line log tail.
-    const historianScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
-    const historianFailureLines = extractHistorianFailureLines(historianScanWindow, 30);
+    // The 4,000-line window includes history_summarizer failures outside the 400-line log tail.
+    const history_summarizerScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
+    const history_summarizerFailureLines = extractHistorySummarizerFailureLines(
+        history_summarizerScanWindow,
+        30,
+    );
 
     // The 4,000-line window includes errors outside the 400-line log tail.
     const errorScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
@@ -144,9 +150,9 @@ export async function bundleIssueReport(
     const sanitizedProjectConfigPath = sanitizeDiagnosticText(report.projectConfig.path);
     const sanitizedDescription = sanitizeDiagnosticText(description);
     const sanitizedTitle = sanitizeDiagnosticText(title).trim();
-    const historianBlock = historianFailureLines.join("\n");
+    const history_summarizerBlock = history_summarizerFailureLines.join("\n");
     const errorBlock = recentErrorLines.join("\n");
-    const fence = codeFenceFor(historianBlock, errorBlock, recentLog);
+    const fence = codeFenceFor(history_summarizerBlock, errorBlock, recentLog);
 
     const rawBodyMarkdown = [
         ...(sanitizedTitle ? ["## Title", sanitizedTitle, ""] : []),
@@ -167,10 +173,10 @@ export async function bundleIssueReport(
         "## Diagnostics",
         renderDiagnosticsMarkdown(scopedReport),
         "",
-        "## Historian failure signals (log, sanitized)",
-        historianFailureLines.length === 0
-            ? "_No historian failure log lines found in recent history._"
-            : [fence, historianBlock, fence].join("\n"),
+        "## HistorySummarizer failure signals (log, sanitized)",
+        history_summarizerFailureLines.length === 0
+            ? "_No history_summarizer failure log lines found in recent history._"
+            : [fence, history_summarizerBlock, fence].join("\n"),
         "",
         "## Recent errors (last 20, sanitized)",
         recentErrorLines.length === 0

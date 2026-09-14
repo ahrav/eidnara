@@ -1,5 +1,5 @@
 /**
- * OpenCode and Pi share the host-owned `/ctx-memory-mark` command. It names a
+ * OpenCode and Pi share the host-owned `/eidnara-memory-mark` command. It names a
  * kernel `EventKind`, never a target disposition: the kernel's fixed table
  * decides the resulting state. The daemon previews the event first; the
  * harness asks for confirmation only when a serving surface would display a
@@ -22,7 +22,7 @@ import {
     unavailable,
 } from "./kernel-client";
 
-export const MEMORY_MARK_COMMAND = "ctx-memory-mark";
+export const MEMORY_MARK_COMMAND = "eidnara-memory-mark";
 
 export const MEMORY_MARK_DESCRIPTION =
     "Mark a project memory stale, disputed, rejected, contradicted, or quarantined";

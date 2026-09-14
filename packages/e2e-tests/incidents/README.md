@@ -68,12 +68,21 @@ Changing an executable verifier requires serial replay of every mutation record
 bound to that verifier. Each crafted invalid state must still produce the
 reviewed red result before merge. Keep observed-red and reverted-green evidence.
 
-The contributor gate derives each bound verifier's bytes from the trusted event
-base and rejects any drift. A binding's `oracle_dependencies` name the other
-package modules whose bytes decide the verdict, such as the cache-bust oracle,
-and the gate freezes them with the bound module. The gate does not claim replay
-occurred and has no replay-evidence ingestion path. Land verifier changes only
-after adding reviewed replay support to that gate.
+The contributor gate derives bound verifier bytes from the trusted event base.
+Mutation-byte and per-record binding guards remain separate from catalog replay.
+A catalog binding's `oracle_dependencies` name other package modules whose bytes
+decide the verdict, such as the cache-bust oracle.
+
+Catalog drift requires valid append-only history and an appended,
+fingerprint-bound baseline with a distinct semantic revision for every affected
+variant. Accepted executable variants, verifier paths, oracle dependencies, and
+normative checks cannot disappear. The gate checks fingerprints against registered
+fixtures, then serially runs each affected driver/verifier module's required
+`.test.ts` counterpart and each changed oracle dependency's counterpart when
+present. Failed, empty, or skipped suites fail closed. Source, binding, history,
+and suite digests must remain unchanged during replay. Only static replay counts
+and digests reach CI logs. A baseline edit alone is not replay evidence; native
+green wrappers still independently block runtime regressions.
 
 ## Publication and privacy
 
@@ -81,7 +90,7 @@ Use synthetic fixtures only. Published reports allow only schema IDs, family and
 variant IDs, semantic and implementation digests, baseline IDs, static check and
 reason codes, harness, counts, and result classifications.
 
-Never publish prompts, session or memory bodies, historian dumps, credentials,
+Never publish prompts, session or memory bodies, history_summarizer dumps, credentials,
 ambient paths, raw stdout or stderr, exception text, or untrusted process output.
 Raw diagnostics stay capped in owner-only case workspaces and are deleted during
 teardown.

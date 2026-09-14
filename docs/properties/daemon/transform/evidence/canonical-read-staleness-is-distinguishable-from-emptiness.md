@@ -64,18 +64,18 @@ Verified at HEAD.
   memory is disabled so the kernel store is not consulted, before the
   `run_transform` closure; every attempt of that pass clones the same value
   into its `ProducerContext`, so the m1 revision signal, m0, and additive m0
-  compose from one snapshot. A historian firing the pass triggers receives the
-  same pinned value through `HistorianPrepareContext` (`lib.rs:5104`). The
+  compose from one snapshot. A history_summarizer firing the pass triggers receives the
+  same pinned value through `HistorySummarizerPrepareContext` (`lib.rs:5104`). The
   wrapup route takes its own read through the same helper (`lib.rs:5244`).
-- `crates/daemon/src/historian_chunk.rs:681-687`: the assembler gates the read
+- `crates/daemon/src/history_summarizer_chunk.rs:681-687`: the assembler gates the read
   on `memory_enabled` once, renders the block from that gated read's `rows()`,
   and (`:734`) records the same gated read's `composition()` on
-  `AssembledHistorianFiring.project_memory`, so a withheld read renders no
+  `AssembledHistorySummarizerFiring.project_memory`, so a withheld read renders no
   block and carries `Withheld { state }`, a served read with zero rows renders
   no block and carries `Canonical { .. }`, and a gated-off read carries `None`.
-  `prepare_historian_fire` copies that record into the fired
-  `HistorianDiagnostics.project_memory` (`lib.rs:5148`), which the transform
-  response returns under `historian`; every not-fired diagnostics literal
+  `prepare_history_summarizer_fire` copies that record into the fired
+  `HistorySummarizerDiagnostics.project_memory` (`lib.rs:5148`), which the transform
+  response returns under `history_summarizer`; every not-fired diagnostics literal
   leaves it `None`. Summarization continues through a kernel outage while the
   diagnostics keep the reason.
 
@@ -125,17 +125,17 @@ reader itself, with a registered consumer trailing the published outbox by the
 position threshold, and then shows the block return once the consumer
 acknowledges.
 
-For the historian, the same three steps run over `HistorianAssemblerConfig`
-and the fired `HistorianDiagnostics`:
+For the history_summarizer, the same three steps run over `HistorySummarizerAssemblerConfig`
+and the fired `HistorySummarizerDiagnostics`:
 `a_withheld_memory_read_renders_no_block_and_records_its_verdict`
-(`historian_chunk.rs:1369`) assembles withheld, empty, served, and gated-off
+(`history_summarizer_chunk.rs:1369`) assembles withheld, empty, served, and gated-off
 reads at the assembler seam;
-`a_withheld_historian_memory_read_is_recorded_and_differs_from_an_empty_block`
-(`lib.rs:28544`) fires the historian through the handler with the kernel store
+`a_withheld_history_summarizer_memory_read_is_recorded_and_differs_from_an_empty_block`
+(`lib.rs:28544`) fires the history_summarizer through the handler with the kernel store
 still opening (`Withheld { state: "unavailable:store_starting" }`) and again
 with an open, empty store (`Canonical { .. }`), and asserts the two records
 differ while neither captured prompt carries the block; and
-`historian_prompt_composes_project_memory_from_canonical_rows`
+`history_summarizer_prompt_composes_project_memory_from_canonical_rows`
 (`lib.rs:28420`) commits verified, quarantined, retired, superseded, and
 other-project decisions to a real kernel store and checks the captured prompt
 carries only the verified row, with the diagnostics pinning `known_as_of` to

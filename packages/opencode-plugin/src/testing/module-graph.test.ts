@@ -35,7 +35,7 @@ const ROOTS = [ENTRY, TUI_ENTRY, ...TESTS];
 
 /** Not-ported subsystems; a path under any of them reachable from a bundle root is residue. The bundler names inputs relative to `SRC`, so a subsystem directly under `src` has no leading slash and the prefix must also accept the start of the path; the file alternative accepts both extensions `sourceFiles` scans. */
 const NOT_PORTED =
-    /(^|\/)(memory|dreamer|storage[^/]*|search[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory)(\/|\.tsx?$)/;
+    /(^|\/)(memory|memory_classifier|storage[^/]*|search[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory)(\/|\.tsx?$)/;
 
 /**
  * Modules no bundle root reaches through a runtime import. Type-only modules
@@ -46,7 +46,7 @@ const NOT_PORTED =
 const AWAITING_CONSUMER = new Map<string, string>([
     ["config/load-outcome.ts", "type-only"],
     ["features/builtin-commands/types.ts", "type-only"],
-    ["features/context/sidekick/index.ts", "barrel; the entry imports ./agent directly"],
+    ["features/context/context-researcher/index.ts", "barrel; the entry imports ./agent directly"],
     [
         "hooks/context/__tests__/session-db-cache-contract.ts",
         "test infrastructure: built and run as child process, never imported",
@@ -57,7 +57,7 @@ const AWAITING_CONSUMER = new Map<string, string>([
     ["shared/opencode-config-dir-types.ts", "type-only"],
     ["shared/format-bytes.ts", "no consumer; the TUI formats bytes with its own local helper"],
     ["shared/kernel-client-testing/state-table.ts", "tool tests (U3)"],
-    ["shared/subagent-runner.ts", "sidekick (U3)"],
+    ["shared/subagent-runner.ts", "context_researcher (U3)"],
     ["shared/transcript.ts", "hooks (U4)"],
     [
         "testing/module-graph-report.ts",
@@ -101,7 +101,7 @@ function moduleGraphReport(): Record<string, ReportedGraph> {
 describe("module graph over the landed tree", () => {
     test("the residue pattern matches a not-ported subsystem at the source root and nested under it", () => {
         expect(NOT_PORTED.test("memory/foo.ts")).toBe(true);
-        expect(NOT_PORTED.test("dreamer.ts")).toBe(true);
+        expect(NOT_PORTED.test("memory_classifier.ts")).toBe(true);
         expect(NOT_PORTED.test("memory.tsx")).toBe(true);
         expect(NOT_PORTED.test("features/memory/foo.ts")).toBe(true);
         expect(NOT_PORTED.test("shared/user-memory.ts")).toBe(true);
@@ -126,14 +126,14 @@ describe("module graph over the landed tree", () => {
         expect(orphans).toEqual([...AWAITING_CONSUMER.keys()].sort());
     }, 120_000);
 
-    test("retained modules carry no claim.* or dreamer.* operation literal", () => {
+    test("retained modules carry no claim.* or memory_classifier.* operation literal", () => {
         expect(OPERATION_LITERAL.test('"claim.intent.stage"')).toBe(true);
-        expect(OPERATION_LITERAL.test("'dreamer.run_task'")).toBe(true);
-        expect(OPERATION_LITERAL.test("`dreamer.run_task`")).toBe(true);
+        expect(OPERATION_LITERAL.test("'memory_classifier.run_task'")).toBe(true);
+        expect(OPERATION_LITERAL.test("`memory_classifier.run_task`")).toBe(true);
         expect(OPERATION_LITERAL.test('"claim.intent-stage"')).toBe(true);
-        expect(OPERATION_LITERAL.test("`dreamer.${task}`")).toBe(true);
+        expect(OPERATION_LITERAL.test("`memory_classifier.${task}`")).toBe(true);
         expect(OPERATION_LITERAL.test('"CLAIM.INTENT.STAGE"')).toBe(true);
-        expect(OPERATION_LITERAL.test('"dreamer_inference"')).toBe(false);
+        expect(OPERATION_LITERAL.test('"memory_classifier_inference"')).toBe(false);
         expect(OPERATION_LITERAL.test("claim.claim_id")).toBe(false);
         expect(operationLiteralHits(MODULES)).toEqual([]);
     });

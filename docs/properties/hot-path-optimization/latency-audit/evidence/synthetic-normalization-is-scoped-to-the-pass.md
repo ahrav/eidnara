@@ -11,7 +11,7 @@ pass-local view.
 The audit proposes replacing the whole-request clone in
 `normalize_synthetic_todo_ingress` with a shared view or an in-place flag. At
 HEAD the flag is set on a clone that only `apply_once` reads; the handler keeps
-passing the un-normalized `parsed` to the historian, the projection-cache
+passing the un-normalized `parsed` to the history_summarizer, the projection-cache
 charge, and the native attach. A design that marks the shared request changes
 which messages those observers treat as synthetic, and a design that rebuilds
 the message drops `original`, so the flag reaches the wire for the first time.
@@ -33,10 +33,10 @@ inside-the-pass invariant; nothing states the outside one.
   `FlatBlock.synthetic` and the projection's `message_meta` holds the
   normalized `HarnessMeta` ([`:514`][meta-clone]).
 - The handler binds `parsed` before the transform ([`:8115`][arc-parsed]) and
-  hands that un-normalized value to [`prepare_historian_fire`][historian-fire]
+  hands that un-normalized value to [`prepare_history_summarizer_fire`][history_summarizer-fire]
   at [`:8245-8247`][prepare-call], which calls
   [`boundary_messages`][boundary-call] and
-  [`assemble_historian_firing`][assemble] with `parsed`. In
+  [`assemble_history_summarizer_firing`][assemble] with `parsed`. In
   [`cached_boundary_messages`][cached-boundary] the message filter is
   `!message.ck.meta.synthetic` ([`:16586-16588`][msg-filter]) and the block
   filter is `!block.synthetic` ([`:16597`][boundary-filter]).
@@ -60,9 +60,9 @@ inside-the-pass invariant; nothing states the outside one.
 
 ## Failure scenario
 
-A shared-reference design flags `parsed` before `apply`. The historian's
+A shared-reference design flags `parsed` before `apply`. The history_summarizer's
 message filter then drops the replayed pair on a full-array turn where HEAD
-keeps it as a `BoundaryMsg` with zero blocks, so historian ordinals change. The
+keeps it as a `BoundaryMsg` with zero blocks, so history_summarizer ordinals change. The
 native attach's newest-assistant choice changes. A design that flags through
 `mark_modified` or rebuilds the message emits `"synthetic":true` on the wire
 where HEAD emits the harness bytes. Both are behavior changes relative to HEAD.
@@ -78,8 +78,8 @@ reach.
 ## What a test must construct
 
 A prior bust pass that froze a todo pair; an array that replays the pair as
-ordinary messages; a historian firing on that pass; `serve_native` on. Capture
-the `BoundaryMsg` list and `input_ordinals` the historian sees, the projection
+ordinary messages; a history_summarizer firing on that pass; `serve_native` on. Capture
+the `BoundaryMsg` list and `input_ordinals` the history_summarizer sees, the projection
 cache's charged messages, the newest-assistant mid, and the served bytes of
 the normalized message, and compare each against the HEAD reference on both a
 full-array turn and a delta turn. The
@@ -89,7 +89,7 @@ replayed pair ([`warm_cache_...`][t-collapsed]); none compares the two lanes.
 
 ## Investigation log
 
-### Q: Should the historian see the replayed pair as zero blocks or not at all?
+### Q: Should the history_summarizer see the replayed pair as zero blocks or not at all?
 
 - Sources examined: [`cached_boundary_messages`][cached-boundary] filters at
   [`:16586-16588`][msg-filter] and [`:16597`][boundary-filter]; the
@@ -98,7 +98,7 @@ replayed pair ([`warm_cache_...`][t-collapsed]); none compares the two lanes.
   block fails the block filter, so a zero-block `BoundaryMsg` exists. Delta
   lane: the rebuilt shell carries `synthetic: true` and the message filter
   drops it. Both are HEAD behavior.
-- Missing evidence: A statement of the intended historian view.
+- Missing evidence: A statement of the intended history_summarizer view.
 - Conclusion: needs human input.
 
 ### Q: Is the fingerprint-versus-bytes pairing in passthrough intended?
@@ -124,7 +124,7 @@ replayed pair ([`warm_cache_...`][t-collapsed]); none compares the two lanes.
 [reattach-meta]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/wire.rs#L181
 [arc-parsed]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8115
 [prepare-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8245-L8247
-[historian-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4994
+[history_summarizer-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4994
 [boundary-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5074
 [assemble]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5234-L5238
 [store-pc]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4302-L4345
@@ -157,7 +157,7 @@ still clones the request.
 Request-dependent transform helpers read the view. Passthrough rendering
 changes the output clone's typed flag without clearing retained ingress JSON.
 The handler still passes the original request to boundary construction,
-historian assembly, projection-cache accounting and native attachment. These
+history_summarizer assembly, projection-cache accounting and native attachment. These
 handler call sites have no production changes.
 
 The [reference comparison][reference-test] uses decoded unflagged messages and
@@ -165,7 +165,7 @@ a clone with only the pair's typed flags set. Fresh, pending-rewrite and
 lineage-passthrough cases compare canonical served bytes, complete projection
 state (including digests), native attachment bytes and tag rows. Passthrough
 also pins both `eidnara_todo:` fingerprint IDs and the unflagged ingress bytes.
-The original request remains unchanged. The historian lane retains two empty
+The original request remains unchanged. The history_summarizer lane retains two empty
 boundary messages; its chunk input retains ordinals `[90, 91, 92]`, and chunk
 text, snapshot and metadata agree across the two transform inputs.
 
@@ -218,9 +218,9 @@ the override set after the pass, not the derived projection's flags.
 
 The handler's original request means its current, expanded ingress. An
 unflagged replay in a full array or delta suffix is an empty boundary message
-and contributes an input ordinal to historian chunk construction. When the
+and contributes an input ordinal to history_summarizer chunk construction. When the
 same replay enters a cached prefix, reattachment restores its normalized flag
-and both historian filters omit it. The
+and both history_summarizer filters omit it. The
 [three-turn handler witness][delta-witness-test] checks this distinction;
 it does not require full raw ingress and reattached ingress to be identical.
 It compares actual producer prompts and native bytes against a full request

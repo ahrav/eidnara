@@ -231,11 +231,11 @@
         },
         {
           "type": "custom_message",
-          "customType": "ctx-status",
+          "customType": "eidnara-status",
           "content": "[redacted:content][redacted:content][redacted:content][redacted:content][redacted:content][redacted:content][redacted:content][redac",
           "display": true,
           "details": {
-            "title": "/ctx-flush",
+            "title": "/eidnara-flush",
             "text": "[redacted:text][redacted:text][redacted:text][redacted:text][redacted:text][redacted:text][redacted:text][redacted:text][redacted:te",
             "level": "success",
             "details": {

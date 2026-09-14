@@ -62,7 +62,15 @@ every exit path.
 
 ## Update Existing Items
 
-Create-only; updates unsupported.
+Title and body updates require approval of an exact preview: issue numbers and
+URLs, current title/body hashes, replacement titles, full body diffs, preserved
+state, labels, relationships and work-item markers, and execution order.
+Approval covers only that unchanged set. Apply serially and read each issue back
+to verify approved content and preserved metadata. Stop on the first failure,
+concurrent edit, or unknown outcome. Reconcile by exact issue number and readback;
+never retry blindly. Re-preview and obtain approval for the remaining set before
+resuming. Keep temporary manifests and journals outside the worktree and remove
+them after reconciliation. Do not edit comments.
 
 ## Parent Relationship
 

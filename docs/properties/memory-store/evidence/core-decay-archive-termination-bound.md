@@ -24,7 +24,7 @@ as a future extension point. That combination invited checking what happens when
   including `+inf`. So `should_archive` returns `false` unconditionally.
 - `crates/context-core/src/decay.rs:115-123` — `rendered_tier` then skips the
   archive return at `:121` and evaluates `tier(..).min(4)`, so every
-  compartment, however old, renders at tier 4 or lower. No compartment ever
+  history_segment, however old, renders at tier 4 or lower. No history_segment ever
   reaches tier 5.
 
 Measured in a scratch crate outside the repository using the extracted kernel:
@@ -65,18 +65,18 @@ the label changes.
 
 Anchors become a real storage primitive, as `crates/context-core/src/decay.rs:94`
 anticipates. Anchor overlap is computed as a ratio, something of the shape
-`overlapping_anchors as f64 / total_anchors as f64`. For a compartment with no
+`overlapping_anchors as f64 / total_anchors as f64`. For a history_segment with no
 anchors at all, that is `0.0 / 0.0`, which is NaN. The NaN reaches
 `should_archive`, the clamp passes it through, and every comparison fails.
 
 The observable result is unbounded retention: session history never archives.
-The rendered prompt grows with every compartment, and the only remaining
+The rendered prompt grows with every history_segment, and the only remaining
 backstop is the byte-level budget guard at
 `crates/daemon/src/decay_render.rs:331-347`, which demotes oldest-first while
 the rendered body exceeds the budget. That guard has a bounded iteration count
-(`guard = compartments.len() * 5` at `:329`) and stops when nothing can be
+(`guard = history_segments.len() * 5` at `:329`) and stops when nothing can be
 demoted further, so it limits the damage but does not restore archival: it
-pushes compartments to tier 5 in the local `tiers` vector without ever agreeing
+pushes history_segments to tier 5 in the local `tiers` vector without ever agreeing
 with `should_archive`, so the renderer and any archival bookkeeping diverge.
 
 The failure is silent. There is no error, no panic, and no log line. The tier
@@ -150,7 +150,7 @@ there is nothing to poll.
 - Findings: yes. For the documented domain (`importance` 1..100,
   `budget_pressure` at or above `P_FLOOR`, `anchor_overlap` 0.0..=1.0), the
   half-life is finite and bounded above by `H50 * 2^((100-50)/25) / P_FLOOR`,
-  which is `24 * 4 / 0.1 = 960` compartments, so `z` exceeds
+  which is `24 * 4 / 0.1 = 960` history_segments, so `z` exceeds
   `Z4 + G * 1.0 = 4.587` by index `960 * 4.587 + 1`, roughly 4,404. That is far
   below `u32::MAX`, so termination holds with an enormous margin.
 - Missing evidence: none.

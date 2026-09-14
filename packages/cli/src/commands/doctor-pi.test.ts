@@ -381,10 +381,10 @@ describe("Pi doctor", () => {
             },
             recentSessions: [],
             sessionDiscovery: "ok",
-            historianDumps: {
+            history_summarizerDumps: {
                 byProject: [],
                 legacyDumps: {
-                    dir: join(tmpdir(), "pi", "context", "historian"),
+                    dir: join(tmpdir(), "pi", "context", "history_summarizer"),
                     count: 0,
                     recent: [],
                 },
@@ -484,7 +484,7 @@ describe("Pi doctor", () => {
                 },
             ],
             sessionDiscovery: "ok",
-            historianDumps: {
+            history_summarizerDumps: {
                 byProject: [],
                 legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
             },
@@ -563,7 +563,7 @@ describe("Pi doctor", () => {
             logFile: { path: logPath, exists: true, sizeKb: 1 },
             recentSessions: [],
             sessionDiscovery,
-            historianDumps: {
+            history_summarizerDumps: {
                 byProject: [],
                 legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
             },
@@ -649,7 +649,7 @@ describe("Pi doctor", () => {
                 },
             ],
             sessionDiscovery: "ok",
-            historianDumps: {
+            history_summarizerDumps: {
                 byProject: [],
                 legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
             },
@@ -740,7 +740,7 @@ describe("Pi doctor", () => {
                 },
             ],
             sessionDiscovery: "ok",
-            historianDumps: {
+            history_summarizerDumps: {
                 byProject: [],
                 legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
             },
@@ -839,7 +839,7 @@ describe("Pi doctor", () => {
                 { sessionId: "two", directory: cwd, lastActiveAt: "2026-04-28T11:00:00.000Z" },
             ],
             sessionDiscovery: "ok",
-            historianDumps: {
+            history_summarizerDumps: {
                 byProject: [],
                 legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
             },
@@ -915,7 +915,7 @@ describe("Pi doctor", () => {
             logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
             recentSessions: [],
             sessionDiscovery: "ok",
-            historianDumps: {
+            history_summarizerDumps: {
                 byProject: [],
                 legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
             },

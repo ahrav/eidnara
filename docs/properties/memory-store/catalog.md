@@ -128,13 +128,13 @@ correction were applied to `fault-map.md` and change no record here.
   `tests/claim_intent_ledger.rs`. The authority machine keeps its prepare,
   finish, abort, and drain transitions unchanged apart from the control-row
   write each one made for the memories domain; the notes-domain fence and the
-  `dreamer.run_task` memories gate are untouched. Every Group D record and
+  `memory_classifier.run_task` memories gate are untouched. Every Group D record and
   `core-intent-ack-transition-legality-gap` carry `Status: invalidated`; there
   is no successor, because canonical memory writes go through the kernel's
   own `(producer, operation_key, request_digest)` receipts, which the kernel
   crate's tests hold (`crates/kernel/tests/kernel_envelope.rs`).
 - `crates/context-core/src/claim_operation.rs` is gone. The canonical-JSON
-  encoder, `ContractError::NotCanonical`, `is_lower_hex`, and the Dreamer
+  encoder, `ContractError::NotCanonical`, `is_lower_hex`, and the MemoryClassifier
   request digest moved unchanged to `crates/context-core/src/canonical_json.rs`,
   with the canonicalization and rejection cases of the golden fixture as
   `testdata/canonical-json-contract-v1.json`; the intent wire types, the
@@ -142,7 +142,7 @@ correction were applied to `fault-map.md` and change no record here.
   mutation tokens, the heads digests, and the snapshot vector were deleted
   with no consumer left. In Group F, `core-canonical-encoding-crossruntime-parity`
   stays active over the moved module, restated as the Rust encoder's byte
-  stability and the Dreamer request digest because no TypeScript encoder under
+  stability and the MemoryClassifier request digest because no TypeScript encoder under
   the fixture exists in this repository;
   `core-result-decode-acceptance-boundary`,
   `core-applicability-heads-order-independence`, and
@@ -164,7 +164,7 @@ correction were applied to `fault-map.md` and change no record here.
 ## What this part is about
 
 This is the durability floor of the system. Everything Parts 4a through 4f decide
-becomes real by passing through `commit_transform`, `publish_historian_chunk`,
+becomes real by passing through `commit_transform`, `publish_history_summarizer_chunk`,
 `apply_claim_mirror_receipt`, or `stage_claim_intent`, and each of those is one
 fenced SQLite transaction in this crate. The part also covers `context-core`, which
 holds no state at all: it is the encoding, identity, and decay vocabulary both
@@ -187,7 +187,7 @@ transactions.
 **Predicates and their writes almost never split.** A scan of every production
 `fn` for two or more connection acquisitions returns exactly three:
 `open` (`lib.rs:4816`), `repair_note_artifacts_v51` (`:5069`), and
-`deliver_historian_side_channel` (`:9662`), and the third is three mutually
+`deliver_history_summarizer_side_channel` (`:9662`), and the third is three mutually
 exclusive match arms, each doing its domain insert and its delivery mark in one
 transaction, which is a correct transactional-outbox shape. `commit_transform` is
 the exemplary case: it opens the fenced transaction at `:7352`, reads the current
@@ -264,7 +264,7 @@ cannot answer it. This is a **risk-selected slice, not representative coverage**
 Groups A and B cover the open path and the three transaction primitives, Groups C
 and D the claim mirror and the intent ledger, and Groups E through G a few
 thousand lines of pure functions in `context-core` and `tokenizer`. Large regions
-of production `lib.rs` have no record at all: the historian publish and outbox
+of production `lib.rs` have no record at all: the history_summarizer publish and outbox
 machinery (`:9194-9798`, which Part 4a covers from the module side), the
 note-evaluation claim lifecycle (`crates/memory-store/src/lib.rs:15119-15430`,
 whose lease protocol is `crates/memory-store/src/task_lease.rs:477-1012`), the
@@ -303,7 +303,7 @@ bill for the crate.
 | [intent-identity-is-producer-and-operation-key](#intent-identity-is-producer-and-operation-key) | safety | high |
 | [intent-terminal-state-is-entered-at-most-once](#intent-terminal-state-is-entered-at-most-once) | safety | high |
 | [intent-staged-replay-produces-one-context-effect](#intent-staged-replay-produces-one-context-effect) | safety | medium |
-| [core-decay-newest-compartment-tier-floor](#core-decay-newest-compartment-tier-floor) | safety | high |
+| [core-decay-newest-history_segment-tier-floor](#core-decay-newest-history_segment-tier-floor) | safety | high |
 | [core-decay-tier-ladder-monotone-and-archive-agreement](#core-decay-tier-ladder-monotone-and-archive-agreement) | safety | high |
 | [core-decay-budget-pressure-range-totality](#core-decay-budget-pressure-range-totality) | safety | high |
 | [core-decay-archive-termination-bound](#core-decay-archive-termination-bound) | safety | high |
@@ -337,7 +337,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `lib.rs:16927`
-`historian_side_channel_outbox_recovers_after_restart` and `lib.rs:14717`
+`history_summarizer_side_channel_outbox_recovers_after_restart` and `lib.rs:14717`
 `first_application_marker_is_atomic_and_survives_reopen` reopen the store
 in-process after a clean drop. Neither kills a process mid-commit.
 Guarantee: When `with_conn_fenced` returns `Ok`, the committed rows are present
@@ -367,6 +367,7 @@ Impact: an acknowledged commit that vanishes makes the `row_version` CAS unsound
 across restart, because the caller's cached expectation no longer matches durable
 state.
 Open questions:
+
 - The `commit_state_import` write family this record also cites was deleted in the port to this repository; the remaining write families are unchanged.
 
 - Does the `libsqlite3-sys 0.30.1` bundled build override
@@ -551,8 +552,8 @@ Fault/timing angle: the interesting closures are the multi-statement ones, where
 the window between the first and last statement is real: `commit_transform` writes
 cache state then up to eight overlay tables (`lib.rs:7390-7586`); `delete_session`
 deletes from every discovered table in a loop (`lib.rs:5448-5472`);
-`commit_state_import` inserts N compartments then the import record
-(`lib.rs:7177-7190`); `append_compartments_tx` (`lib.rs:12609`). An injected error
+`commit_state_import` inserts N history_segments then the import record
+(`lib.rs:7177-7190`); `append_history_segments_tx` (`lib.rs:12609`). An injected error
 must land *between* statements, not before the first.
 Required faults and enabling state: an error injected at statement k of an
 n-statement closure, for k strictly between 1 and n. A late SQL error suffices and
@@ -561,8 +562,8 @@ needs no new infrastructure: in-crate tests already reach
 `foreign_keys = ON` (`storage:291`), and the bootstrap carries `CHECK`,
 `NOT NULL`, and `UNIQUE` constraints. One caveat: `commit_state_import` validates
 *before* its insert loop (`lib.rs:7172-7174`), so in that closure the error must
-come from a constraint rather than from `validate_state_import_compartments`. The
-existing `historian_side_channel_fail_once` hook (`lib.rs:9667-9678`) fires before
+come from a constraint rather than from `validate_state_import_history_segments`. The
+existing `history_summarizer_side_channel_fail_once` hook (`lib.rs:9667-9678`) fires before
 any write and is therefore not this shape.
 Confidence: medium - [evidence](evidence/failed-fenced-transaction-leaves-no-partial-state.md).
 High on the mechanism, medium on coverage.
@@ -574,6 +575,7 @@ Impact: a partially applied `commit_transform` would leave overlay tables ahead 
 the cache row's `row_version`, so the next CAS would accept a state the overlays
 already contradict.
 Open questions:
+
 - The `commit_state_import` write family this record also cites was deleted in the port to this repository; the remaining write families are unchanged.
 
 ### busy-timeout-expiry-aborts-cleanly-without-partial-effect
@@ -641,7 +643,7 @@ short-circuits to `Noop` when the owner and hash already match (6737-6741), and
 `arm_soft_refresh` short-circuits when the flag is already set (6764-6766).
 Required faults and enabling state: 8 or more successful competing commits landing
 between one caller's load and commit. A test needs a hook in the load-to-commit
-window; `set_before_max_compartment_end_read_hook` (`lib.rs:5283`) is the existing
+window; `set_before_max_history_segment_end_read_hook` (`lib.rs:5283`) is the existing
 hook of this shape but on a different path.
 Confidence: high - [evidence](evidence/bounded-cas-retry-never-duplicates-an-effect.md). Verified both
 loops are `for _ in 0..8` (6735, 6762), both short-circuit before writing, both
@@ -709,6 +711,7 @@ invariant so a future split is caught. The residual risk is the open-path pair a
 and the migration would be migrated after passing a check that no longer describes
 it.
 Open questions:
+
 - The `commit_state_import` write family this record also cites was deleted in the port to this repository; the remaining write families are unchanged.
 
 ### migration-and-its-version-record-commit-together
@@ -1095,7 +1098,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: invalidated
-Invalidated: by commit `3b817ad8`, which moved the transform onto canonical kernel rows (`crates/daemon/src/canonical_memory.rs`) and deleted `claim_snapshot_for_context`, the double-read vector fence, the commit-time vector check in `commit_transform`, and the historian's full-state fence with `historian_claim_block`. Before the mirror's deletion, `snapshot_vector_from_connection` had one caller, `replace_claim_mirror_snapshot` (`claim_mirror.rs:980`), a seed-path replay check; both are now gone with the module, so no read of claim rows compares a vector and the subject of this record is unreachable. The replacement property is `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon transform catalog. The record body and its evidence file keep the deleted code as quoted from the host repository at `eb6da6109`; those `file:line` references resolve there only.
+Invalidated: by commit `3b817ad8`, which moved the transform onto canonical kernel rows (`crates/daemon/src/canonical_memory.rs`) and deleted `claim_snapshot_for_context`, the double-read vector fence, the commit-time vector check in `commit_transform`, and the history_summarizer's full-state fence with `history_summarizer_claim_block`. Before the mirror's deletion, `snapshot_vector_from_connection` had one caller, `replace_claim_mirror_snapshot` (`claim_mirror.rs:980`), a seed-path replay check; both are now gone with the module, so no read of claim rows compares a vector and the subject of this record is unreachable. The replacement property is `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon transform catalog. The record body and its evidence file keep the deleted code as quoted from the host repository at `eb6da6109`; those `file:line` references resolve there only.
 Exercised: not yet - nothing constructs a mirror mutation that changes
 `acked_effect_id` without changing a generation, which is the only case that would
 distinguish the two fence strengths.
@@ -1109,7 +1112,7 @@ because it must hold for every mutation for the fence to be sound; there is no
 optional path.
 Fault/timing angle: The window is `transform.rs:1978` to `:2004`, three separate
 store calls with no shared transaction. A receipt applied concurrently in that window
-must be caught by the `:2008` comparison. `historian_chunk.rs:605` compares the whole
+must be caught by the `:2008` comparison. `history_summarizer_chunk.rs:605` compares the whole
 `ClaimMirrorState` and so does not depend on this property; `transform.rs` does.
 Required faults and enabling state: A seeded mirror and a concurrent
 `apply_claim_mirror_receipt` landing between the two `claim_mirror_state()` calls.
@@ -1123,13 +1126,13 @@ intended to be permanent.
 Existing check: none. `transform.rs:1978-2011` is the mechanism, not a check of it.
 Impact: If a future mutation advanced a checkpoint without a generation bump,
 `transform.rs` would serve claim memory assembled from a mirror that changed
-mid-read, and the mismatch would be invisible. `historian_chunk.rs` would still catch
+mid-read, and the mismatch would be invisible. `history_summarizer_chunk.rs` would still catch
 it, so the two paths would disagree.
 Open questions:
 
-- Why do `transform.rs:2008` and `historian_chunk.rs:605` compare different things?
+- Why do `transform.rs:2008` and `history_summarizer_chunk.rs:605` compare different things?
   If the full-state comparison is correct, transform's is weaker than intended; if
-  the vector comparison is correct, historian's is needlessly strict and will bail
+  the vector comparison is correct, history_summarizer's is needlessly strict and will bail
   out more often. (needs human input)
 
 ### mirror-reset-cycle-requires-a-rebuild-grant
@@ -1366,7 +1369,7 @@ delivering receipts, for example because a receipt was refused with
 Confidence: high - [evidence](evidence/mirror-staleness-undetectable-on-memory-tool-read-path.md).
 Enumerated the production read sites: `memory_tool.rs:57-67` (`list_committed_claims`,
 no comparison) is the only production caller of `list_claim_mirror`. The transform
-and historian read sites were deleted when both moved to canonical kernel rows
+and history_summarizer read sites were deleted when both moved to canonical kernel rows
 (`crates/daemon/src/canonical_memory.rs`), and the commit-time vector comparison in
 `commit_transform` went with them. `snapshot_vector_from_connection`
 (`claim_mirror.rs:806-840`) survives at one call site, `claim_mirror.rs:980` inside
@@ -1376,7 +1379,7 @@ Verified `updated_at_ms` is written but never selected.
 Existing check: none. No production read of the mirror is fenced.
 Impact: `list_committed_claims` can surface committed claim memory from a wedged
 mirror indefinitely, with no error and no signal to the caller, while the transform
-and historian, which compose from canonical kernel rows, are unaffected by mirror
+and history_summarizer, which compose from canonical kernel rows, are unaffected by mirror
 staleness. The system degrades inconsistently: one surface still trusts the mirror.
 Open questions:
 
@@ -1628,7 +1631,7 @@ Open questions:
 ## Group E: core decay and totality
 
 Four records on `crates/context-core/src/decay.rs`, a 302-line pure-function module whose
-whole contract is a total function from `(compartment_index, importance,
+whole contract is a total function from `(history_segment_index, importance,
 budget_pressure, anchor_overlap)` to a render tier. The decay curve is
 default-production: the only in-tree caller is
 `crates/daemon/src/decay_render.rs:19`, which calls `compute_budget_pressure` at
@@ -1640,7 +1643,7 @@ measured empirically by extracting the kernel into a scratch program, and two of
 record contradictions of the module's own documented invariants that are already
 waiting for a test.
 
-### core-decay-newest-compartment-tier-floor
+### core-decay-newest-history_segment-tier-floor
 
 Type: safety
 Reachability: default-production
@@ -1648,7 +1651,7 @@ Status: active
 Exercised: partial - `decay.rs:154-162` asserts `tier(1, imp, p) == 1` for `imp` in
 `{1, 50, 100}` and `p` in `{0.1, 1.0, 5.0}` only, so the non-finite pressure case is
 unexercised.
-Guarantee: the newest compartment always renders at tier 1, for every importance and
+Guarantee: the newest history_segment always renders at tier 1, for every importance and
 every pressure value the public API accepts.
 Check: `always` - for all `importance: i32` and all `budget_pressure: f64` including
 non-finite values, `tier(1, importance, budget_pressure) == 1` and
@@ -1660,13 +1663,13 @@ Required faults and enabling state: `budget_pressure = f64::INFINITY`, which
 `compute_budget_pressure` (`decay.rs:130-145`) returns when `history_budget` is
 positive but subnormal (measured at `5e-324`). No fault injection needed; the input
 alone is the enabling state.
-Confidence: high - [evidence](evidence/core-decay-newest-compartment-tier-floor.md).
+Confidence: high - [evidence](evidence/core-decay-newest-history_segment-tier-floor.md).
 I extracted the exact kernel from `decay.rs:56-124` into a scratch program and measured
 `tier(1, 50, f64::INFINITY) == 5`, `should_archive == false`, `rendered_tier == 4`,
 with `z = 0.0/0.0 = NaN`.
-Existing check: `crates/context-core/src/decay.rs:154` `newest_compartment_is_tier_1`
+Existing check: `crates/context-core/src/decay.rs:154` `newest_history_segment_is_tier_1`
 covers three finite pressures. Status `unaudited`.
-Impact: the newest, most relevant compartment renders as an anchor-level P4 summary
+Impact: the newest, most relevant history_segment renders as an anchor-level P4 summary
 instead of the verbose P1 form, silently dropping the most recent session content from
 the prompt. Because `rendered_tier` returns 4 while `tier` returns 5, the two functions
 also disagree, so any caller that reads `tier` directly to decide archival diverges from
@@ -1706,10 +1709,10 @@ confirmed the disagreement window empirically: at `importance = 50`, `pressure =
 `decay.rs:94` and `:107-108`.
 Existing check: `crates/context-core/src/decay.rs:165`, `:176`, `:186`, `:201`. Status
 `unaudited`.
-Impact: a monotonicity break means a compartment gets *more* verbose as it ages or
+Impact: a monotonicity break means a history_segment gets *more* verbose as it ages or
 *less* protected as its importance rises, which is a direct contradiction of the
 council-validated model at `decay.rs:12-13`. An agreement break means the renderer and
-any archival consumer disagree about whether a compartment is retired.
+any archival consumer disagree about whether a history_segment is retired.
 Open questions:
 
 - Is `tier() == 5` a legitimate public answer, or should the archive-candidate boundary
@@ -1725,7 +1728,7 @@ Exercised: partial - `decay.rs:208-221` asserts only that a tighter budget raise
 pressure and that the loose case is at least `P_FLOOR`.
 Guarantee: `compute_budget_pressure` is total, never returns NaN, and always returns a
 value at or above `P_FLOOR`.
-Check: `always` - for every compartment slice and every `history_budget: f64` including
+Check: `always` - for every history_segment slice and every `history_budget: f64` including
 0, negative, subnormal, `f64::MAX`, `+inf`, and NaN:
 `!result.is_nan() && result >= P_FLOOR`. Additionally record whether
 `result.is_finite()`; if the contract intends finiteness, assert it too. `always`
@@ -1742,7 +1745,7 @@ finiteness clause does not hold. `TIER_COST` indexing at `decay.rs:141` is guard
 Existing check: `crates/context-core/src/decay.rs:208` `pressure_self_tunes_toward_budget`.
 Status `unaudited`.
 Impact: an `+inf` pressure propagates into `z_value` and produces the
-`core-decay-newest-compartment-tier-floor` failure. A NaN pressure would be worse,
+`core-decay-newest-history_segment-tier-floor` failure. A NaN pressure would be worse,
 collapsing every comparison, but the `f64::max` at `decay.rs:144` already prevents it.
 Open questions:
 
@@ -1757,7 +1760,7 @@ Reachability: test-only
 Status: active
 Exercised: partial - `decay.rs:194-198` asserts termination at one point,
 `should_archive(100_000, 100, 1.0, 0.0)`, with `anchor_overlap` fixed at 0.
-Guarantee: every compartment eventually archives; no input produces an immortal row.
+Guarantee: every history_segment eventually archives; no input produces an immortal row.
 Check: `always` - for every `importance` and every finite `pressure >= P_FLOOR` and
 every `anchor_overlap` the API accepts, there exists a finite `index` at which
 `should_archive` is true; equivalently, assert
@@ -1792,7 +1795,7 @@ Open questions:
 
 At HEAD `claim_operation.rs` is gone (see Provenance): the encoder record below
 is live over `canonical_json.rs` and states the Rust encoder's byte stability
-and the Dreamer request digest, because no TypeScript encoder exists in this
+and the MemoryClassifier request digest, because no TypeScript encoder exists in this
 repository; the intent-ack and three encoding-law records are invalidated, and
 the pass-classifier record is unchanged.
 
@@ -1817,11 +1820,11 @@ astral key-order case that discriminates code-point from UTF-16 ordering; `:235`
 `non_canonical_numbers_are_rejected` pins 5 rejections (`1.5`, `2^53 - 1 + 2`,
 `2^53`, `-2^53`, `2^64 - 1`); `:250` `integer_above_i64_max_is_not_canonical`
 covers the u64 path; `:201`
-`dreamer_request_digest_is_sha256_over_protocol_and_canonical_bytes` recomputes
+`memory_classifier_request_digest_is_sha256_over_protocol_and_canonical_bytes` recomputes
 the digest formula over the 5 cases, pins `1e3`, `1.0`, `-0.0`, and `-0` to
 their integer forms, and asserts key-order independence and array-order
 sensitivity on one object; `:164` `digest_protocols_are_the_recorded_literals`
-pins the protocol strings. `crates/memory-store/tests/dreamer_ledger.rs:455`
+pins the protocol strings. `crates/memory-store/tests/memory_classifier_ledger.rs:455`
 repeats the key-order and protocol checks through the store's wrapper. No
 generator drives the discriminating regions, and no cross-runtime comparison
 runs: the TypeScript encoder this record was raised against is not in this
@@ -1829,16 +1832,16 @@ repository.
 Guarantee: the canonical encoder is a deterministic function of the JSON value:
 equal values encode to byte-identical output regardless of object key insertion
 order, integral floats encode as the integer they equal, every number outside
-the safe-integer vocabulary is rejected, and the Dreamer request digest is the
+the safe-integer vocabulary is rejected, and the MemoryClassifier request digest is the
 documented formula over those bytes, so one digest identifies exactly one
 semantic request.
 Check: `always` - for every `serde_json::Value` `v`: `canonical_json_encode(v)`
 succeeds if and only if every number in `v` is finite, integral, and within
 `±(2^53 - 1)`; when it succeeds, the output equals
 `canonical_json_encode(permute_keys(v))` byte for byte, equals the pinned bytes
-for every fixture case, and `compute_dreamer_request_digest(v)` equals the
-lowercase-hex SHA-256 over `"eidnara-dreamer-request-v1\n"` followed by those
-bytes. `always` because every Dreamer command digests through this path before
+for every fixture case, and `compute_memory_classifier_request_digest(v)` equals the
+lowercase-hex SHA-256 over `"eidnara-memory_classifier-request-v1\n"` followed by those
+bytes. `always` because every MemoryClassifier command digests through this path before
 its receipt is written.
 Fault/timing angle: none. This is a pure-function law, not a race.
 Required faults and enabling state: a generator that emits values spanning the
@@ -1868,13 +1871,13 @@ digest-formula check until an encoder under the same fixture exists here.
 Existing check: `crates/context-core/src/canonical_json.rs:164`, `:185`, `:201`,
 `:235`, and `:250`, fixture-driven from
 `crates/context-core/testdata/canonical-json-contract-v1.json`, and
-`crates/memory-store/tests/dreamer_ledger.rs:455`. The source tree's checks were
+`crates/memory-store/tests/memory_classifier_ledger.rs:455`. The source tree's checks were
 `claim_operation.rs:718` `canonical_bytes_and_request_digests_match_fixture` and
 `:737` `non_canonical_numbers_are_rejected`. Status `unaudited`.
-Impact: a nondeterministic or drifting encoding gives one Dreamer command two
-digests, so `begin_dreamer_receipt`
-(`crates/memory-store/src/dreamer_ledger.rs:318`) reports `DigestConflict` on a
-legitimate retry and `run_dreamer_task` returns `dreamer_request_conflict`
+Impact: a nondeterministic or drifting encoding gives one MemoryClassifier command two
+digests, so `begin_memory_classifier_receipt`
+(`crates/memory-store/src/memory_classifier_ledger.rs:318`) reports `DigestConflict` on a
+legitimate retry and `run_memory_classifier_task` returns `memory_classifier_request_conflict`
 (`crates/daemon/src/lib.rs:9646`) instead of replaying the recorded outcome; a
 collision gives two different requests one receipt, so a retry replays the wrong
 result. The durable-write redaction scan at `crates/memory-store/src/lib.rs:3206`
@@ -2277,7 +2280,7 @@ executing check.
   subprocess harness. Hypothesis: the late-error record *dominates* nothing but is the
   cheapest of the three by a wide margin and should be built first, because the
   multi-statement closures it targets (`commit_transform`, `delete_session`,
-  `commit_state_import`, `append_compartments_tx`) are the same closures the other two
+  `commit_state_import`, `append_history_segments_tx`) are the same closures the other two
   records care about.
 - **The declaration that is missing under all of it.**
   [synchronous-level-is-explicitly-declared-not-inherited](#synchronous-level-is-explicitly-declared-not-inherited),
@@ -2354,11 +2357,11 @@ executing check.
   [mirror-generation-advances-exactly-one-per-touched-project](#mirror-generation-advances-exactly-one-per-touched-project).
   At the time of this synthesis there were four production read paths of the same
   tables, at three different strengths: the fenced `commit_transform` re-read
-  converted a vector mismatch to `CasConflict`, the transform and historian were
+  converted a vector mismatch to `CasConflict`, the transform and history_summarizer were
   optimistic double-reads against a caller-supplied expected value that compared
   *different things*, a canonical vector versus the whole `ClaimMirrorState`, and
   `memory_tool.rs:57-67` compared nothing. The first three were deleted when the
-  transform and historian moved to canonical kernel rows, so on the current tree the
+  transform and history_summarizer moved to canonical kernel rows, so on the current tree the
   memory tool is the only production reader and the read-fence record is invalidated.
   The generation record was load-bearing under the weaker of the two double-reads:
   transform's vector comparison was a sufficient change-detector only because every
@@ -2387,14 +2390,14 @@ executing check.
   separate because they are checks on different crates and the `context-core` half is what a
   future second consumer of the vocabulary would rely on.
 - **Pure functions with measured contradictions already waiting.**
-  [core-decay-newest-compartment-tier-floor](#core-decay-newest-compartment-tier-floor),
+  [core-decay-newest-history_segment-tier-floor](#core-decay-newest-history_segment-tier-floor),
   [core-decay-budget-pressure-range-totality](#core-decay-budget-pressure-range-totality),
   [core-decay-archive-termination-bound](#core-decay-archive-termination-bound),
   [core-decay-tier-ladder-monotone-and-archive-agreement](#core-decay-tier-ladder-monotone-and-archive-agreement).
   One chain, not four independent records. A positive subnormal `history_budget` makes
   `compute_budget_pressure` return `+inf`, which makes `z` become `NaN`, which makes
   `tier(1, ..)` return 5 instead of 1 while `rendered_tier` returns 4, so the newest
-  compartment renders as an anchor summary *and* the two functions disagree. Separately,
+  history_segment renders as an anchor summary *and* the two functions disagree. Separately,
   a NaN `anchor_overlap` propagates through `f64::clamp` and makes `should_archive` false
   for every index, contradicting the "finite demotion even at importance 100" invariant
   the module states at `decay.rs:12-13`. Both were measured, not argued. Hypothesis: the

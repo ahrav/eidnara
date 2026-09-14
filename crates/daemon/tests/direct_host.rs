@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use host_runtime::TargetKind;
-use memory_store::{MemoryStore, StoredCompartment};
+use memory_store::{MemoryStore, StoredHistorySegment};
 use serde_json::{Value, json};
 use support::applied::applied_messages;
 use support::direct_host::{
@@ -57,10 +57,10 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
 
     let info = host_runtime::read_connection_file(fixture.connection_file())
         .expect("strict connection publication");
-    assert_eq!(info.wire_version, 2);
+    assert_eq!(info.wire_version, 3);
     assert_eq!(
         fixture.readiness()["catalog"],
-        json!(["context", "synapse", "broca"])
+        json!(["context", "local_embeddings", "model_execution"])
     );
 
     let client = fixture.client().await;
@@ -68,20 +68,20 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
     let primary = fixture
         .open_route(&client, "context", TargetKind::ToolProvider, session)
         .await;
-    let synapse = fixture
+    let local_embeddings = fixture
         .open_route(
             &client,
-            "synapse",
+            "local_embeddings",
             TargetKind::ManagementSurface,
-            "synapse-route",
+            "local_embeddings-route",
         )
         .await;
-    let broca = fixture
+    let model_execution = fixture
         .open_route(
             &client,
-            "broca",
+            "model_execution",
             TargetKind::ManagementSurface,
-            "broca-route",
+            "model_execution-route",
         )
         .await;
     wait_for_store(&client, primary, session).await;
@@ -121,10 +121,13 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
         .await
         .expect("primary route closes");
     client
-        .close_route(synapse)
+        .close_route(local_embeddings)
         .await
-        .expect("synapse route closes");
-    client.close_route(broca).await.expect("broca route closes");
+        .expect("local_embeddings route closes");
+    client
+        .close_route(model_execution)
+        .await
+        .expect("model_execution route closes");
     client.close().await.expect("managed client closes");
     fixture.shutdown();
 }
@@ -134,27 +137,27 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     let root = tempfile::tempdir().expect("persistent fixture root");
     fs::create_dir_all(root.path().join("project")).expect("project root");
     // The fixture opens its store through the production launcher's descriptor.
-    let seed_compartment = |summary: &str| {
+    let seed_history_segment = |summary: &str| {
         let descriptor = daemon::managed_store_descriptor(root.path()).expect("UTF-8 root");
         let store = MemoryStore::open(&descriptor).expect("seed store opens");
         store
-            .replace_compartments(
+            .replace_history_segments(
                 "restart-transform",
-                &[StoredCompartment {
+                &[StoredHistorySegment {
                     sequence: 1,
                     start_message: 1,
                     end_message: 10,
                     end_message_id: "m10#0".to_owned(),
-                    title: "Seeded compartment".to_owned(),
+                    title: "Seeded history_segment".to_owned(),
                     content: summary.to_owned(),
                     p1: Some(summary.to_owned()),
                     importance: 50,
                     ..Default::default()
                 }],
             )
-            .expect("compartment seed commits");
+            .expect("history_segment seed commits");
     };
-    seed_compartment("RESTART-SUMMARY");
+    seed_history_segment("RESTART-SUMMARY");
 
     let request = json!({
         "kind": "transform",
@@ -210,8 +213,8 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     client.close().await.expect("first client closes");
     first.shutdown();
 
-    // A recomputed m0 would render the mutated compartment; only the frozen m0 persisted by the first pass still carries the original summary.
-    seed_compartment("MUTATED-SUMMARY");
+    // A recomputed m0 would render the mutated history_segment; only the frozen m0 persisted by the first pass still carries the original summary.
+    seed_history_segment("MUTATED-SUMMARY");
 
     let second = FixtureProcess::start_at(root.path().to_path_buf());
     let client = second.client().await;
@@ -295,7 +298,7 @@ async fn malformed_unknown_duplicate_and_overcap_controls_do_not_mutate_backend(
     let route = fixture
         .open_route(
             &client,
-            "broca",
+            "model_execution",
             TargetKind::ManagementSurface,
             "malformed-control",
         )
@@ -337,7 +340,12 @@ async fn control_shutdown_cleans_state_and_redacts_all_fixture_surfaces() {
     let publication = fs::read_to_string(fixture.connection_file()).expect("publication readable");
     let client = fixture.client().await;
     let route = fixture
-        .open_route(&client, "broca", TargetKind::ManagementSurface, "redaction")
+        .open_route(
+            &client,
+            "model_execution",
+            TargetKind::ManagementSurface,
+            "redaction",
+        )
         .await;
     assert_eq!(fixture.control(1, "block-next-call")["ok"], true);
     let sent = request_json(&client, route, send_body(REDACTION_SENTINEL)).await;
@@ -382,7 +390,7 @@ async fn sigterm_releases_blocked_backend_and_cleans_runtime_state() {
     let route = fixture
         .open_route(
             &client,
-            "broca",
+            "model_execution",
             TargetKind::ManagementSurface,
             "sigterm-blocked",
         )

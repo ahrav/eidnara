@@ -12,6 +12,12 @@ Every line reference below was produced by a brace-balanced scan of the file at
 `HEAD` and the region endpoints were then read back individually. Where a
 reference is approximate it says so.
 
+Staleness note: the line ranges and symbol inventory still describe `dde0c051`.
+Only terminology was renamed afterward; the ranges were not re-measured, and
+symbols retired since then (the `ctx_expand` facade and schema) still appear
+where that commit had them. Re-measure against the current `lib.rs` before
+citing any range below as a HEAD reference.
+
 ## Size accounting, corrected
 
 The 102,515-line figure in the task is right, and it hides the single most
@@ -65,19 +71,19 @@ boundary, coverage, or tail computation (primary), and the `eidnara_*` id namesp
 reserved so a synthetic block can never masquerade as the real boundary
 (backstop).
 
-The **historian** is the writer subsystem that produces the compressed history in
-the first place. `src/historian.rs:1-7` describes a durable firing state machine
+The **history_summarizer** is the writer subsystem that produces the compressed history in
+the first place. `src/history_summarizer.rs:1-7` describes a durable firing state machine
 `idle -> firing -> awaiting_producer -> validating -> publishing`, a pinned
 ordinal-range chunk snapshot with fail-loud fingerprint verification, and a
 CAS-gated publish transaction whose writes surface only through the `m1`
 watermark on the next materializing pass, so a publish never mutates cached
-render state directly. `historian_chunk.rs` builds the pinned chunk,
-`historian_prompt.rs` assembles the per-run prompt, `historian_producer.rs` is
-the Broca session client that calls out to a language model through
-`host_runtime::Client`, and `historian_validate.rs` parses the model's compartment XML
-and validates it against the raw chunk and the already-persisted compartment
+render state directly. `history_summarizer_chunk.rs` builds the pinned chunk,
+`history_summarizer_prompt.rs` assembles the per-run prompt, `history_summarizer_producer.rs` is
+the ModelExecution session client that calls out to a language model through
+`host_runtime::Client`, and `history_summarizer_validate.rs` parses the model's history_segment XML
+and validates it against the raw chunk and the already-persisted history_segment
 ranges "before any side effect can publish it"
-(`src/historian_validate.rs:1-10`).
+(`src/history_summarizer_validate.rs:1-10`).
 
 **Selection** is tail-reduction selection: which live tail items to reduce, and
 the `ReductionDecision`s that the freeze/replay mechanics then act on
@@ -86,7 +92,7 @@ the flat block-granular typed tail, and determinism is stated as the cache
 invariant, because the same inputs must yield byte-identical freeze and replay.
 
 **Boundary** decides two things purely from the in-memory tail: where the
-compactable/protected split sits, and whether a historian run should fire
+compactable/protected split sits, and whether a history_summarizer run should fire
 (`src/boundary.rs:1-9`). The header claims no I/O, no wall clock, no store
 access, and no ambient cache state.
 
@@ -95,18 +101,18 @@ Channel-1 and Channel-2 nudges (`src/tail_hygiene.rs:1`). It measures the
 rendered tail so the nudge machinery can tell the agent how many tokens are
 reclaimable.
 
-**Smart note evaluation** is a Rust port of a TypeScript reducer for the
-smart-notes lifecycle, plus a vendored five-field cron evaluator
-(`src/smart_note_evaluation.rs:1-11`). Both implementations replay the frozen
-fixture `testdata/smart-note-evaluation-golden.json` so lifecycle behavior cannot
+**Conditional Note evaluation** is a Rust port of a TypeScript reducer for the
+conditional-notes lifecycle, plus a vendored five-field cron evaluator
+(`src/conditional_note_evaluation.rs:1-11`). Both implementations replay the frozen
+fixture `testdata/conditional-note-evaluation-golden.json` so lifecycle behavior cannot
 drift between languages. The header claims pure functions throughout.
 
 ### Who owns persistent state and who is pure
 
 State-owning, in rough order of how much durable damage each can do:
 
-- **Historian publish** (`historian.rs`, `historian_validate.rs`,
-  `historian_chunk.rs`) writes compartments, chunk ranges, and durable phase
+- **HistorySummarizer publish** (`history_summarizer.rs`, `history_summarizer_validate.rs`,
+  `history_summarizer_chunk.rs`) writes history_segments, chunk ranges, and durable phase
   state through `memory-store`. This is where raw conversation content is replaced by
   model-generated summary text.
 - **`Handler`** (`lib.rs:3398-11917`) owns every store write on the request
@@ -121,8 +127,8 @@ State-owning, in rough order of how much durable damage each can do:
   frontier cache. These are not durable, but a stale hit produces wrong bytes.
 
 Documented as pure computation: `selection.rs`, `boundary.rs`,
-`compartment_coverage.rs`, `scheduler.rs`, `historian_validate.rs`,
-`historian_prompt.rs`, `injection.rs`, `smart_note_evaluation.rs`,
+`history_segment_coverage.rs`, `scheduler.rs`, `history_summarizer_validate.rs`,
+`history_summarizer_prompt.rs`, `injection.rs`, `conditional_note_evaluation.rs`,
 `decay_render.rs`, `m0_compose.rs` (pure given the store read),
 `project_docs.rs`. Purity here is a claim in a doc comment, so it is exactly the
 kind of statement a lens pass should try to refute rather than assume.
@@ -142,13 +148,13 @@ except the small `#[cfg(test)]` islands noted inline.
 | `248-351` | 104 | Store-open coordination: constants, `StoreOpenPolicy`, `StoreOpenCoordinator` (`:286-322`), `StoreOpenWaiterGuard` + `Drop` (`:324-332`), `jittered_store_open_delay`, `store_open_error_is_live_lease` |
 | `353-508` | 156 | Dispatch health and the transform wedge detector: `DispatchHealth` (`:361-446`), `static DISPATCH_HEALTH` (`:448`), `TransformDispatchTicket` (`:456-495`) and its `Drop` (`:497-508`) |
 | `510-594` | 85 | Render/format epoch constants and the `const fn` epoch predicates: `profile_render_epoch` (`:550`), `cc_u1_active` (`:562`), `tagging_surface_active` (`:568`), `tagger_feature_epoch` (`:580`), `state_sync_epoch_compatible` (`:592`) |
-| `596-669` | 74 | Default and budget constants: protected tags, commit clusters, historian chunk tokens, state-sync seed caps, transform-page caps, snapshot and projection cache budgets, snapshot lease caps, wrapup margin. `#[cfg(test)]` consts at `:598`, `:610` |
-| `671-827` | 157 | State-sync wire types: `ModuleStateSyncWire` (`:681-751`) and the seven seed wire structs (`:754-803`), plus `state_sync_seq_mismatch_error`, `historian_compartment_sync_busy_error` |
-| `829-890` | 62 | `TransformLane`, `StateImportWire`, `StateImportCompartmentWire` + impl |
+| `596-669` | 74 | Default and budget constants: protected tags, commit clusters, history_summarizer chunk tokens, state-sync seed caps, transform-page caps, snapshot and projection cache budgets, snapshot lease caps, wrapup margin. `#[cfg(test)]` consts at `:598`, `:610` |
+| `671-827` | 157 | State-sync wire types: `ModuleStateSyncWire` (`:681-751`) and the seven seed wire structs (`:754-803`), plus `state_sync_seq_mismatch_error`, `history_summarizer_history_segment_sync_busy_error` |
+| `829-890` | 62 | `TransformLane`, `StateImportWire`, `StateImportHistorySegmentWire` + impl |
 | `892-1020` | 129 | State-sync seed staging: `PendingStateSyncSeed`, `StateSyncSeedPhase`, `CompletedStateSyncSeed`, `StateSyncSeedSession`, `StateSyncSeedCoordinator` (`:957-1020`) |
 | `1022-1320` | 299 | Transform-page staging: `PendingTransformPage`, `TransformPagePhase`, `CompletedTransformPage`, `TransformPageSession`, `TransformPageCoordinator` (`:1107-1320`) with `TransformPageStageAction` / `StageError` |
 | `1322-1622` | 301 | State-import staging: `PendingStateImport`, `StateImportPhase`, `StateImportCoordinator` (`:1380-1622`) with its stage outcome and error enums |
-| `1624-1705` | 82 | Compartment and workspace wire structs, `FacadeScope`, `From<ModuleCompartmentWire> for StoredCompartment` (`:1683-1705`) |
+| `1624-1705` | 82 | HistorySegment and workspace wire structs, `FacadeScope`, `From<ModuleHistorySegmentWire> for StoredHistorySegment` (`:1683-1705`) |
 | `1707-1846` | 140 | `impl TransformRequest` (the `lib.rs`-side construction helpers, distinct from the type in `transform.rs`) |
 | `1848-1904` | 57 | `TransformSnapshot`, `SnapshotLeaseBudget`, `SnapshotLease` + `Drop` (`:1875-1881`), `TransformSnapshotLookup`, `TransformSnapshotCache` struct |
 | `1906-2079` | 174 | `impl TransformSnapshotCache`: snapshot lease acquisition, budget accounting, eviction |
@@ -157,8 +163,8 @@ except the small `#[cfg(test)]` islands noted inline.
 | `2718-2869` | 152 | Projection cache: context, `ProjectionCacheSnapshot` (`:2737-2765`), session, `impl ProjectionCache` (`:2792-2869`) |
 | `2873-2960` | 88 | `pub struct Handler`, the handler's whole field set |
 | `2962-3020` | 59 | Note-evaluator registry types: `NoteEvaluatorRegistration`, `NoteEvaluatorSlotCycles`, `new_note_evaluator_slot_cycles` |
-| `3023-3104` | 82 | `pub trait HistorianProducerFactory` (`:3023-3030`), `RealHistorianProducerFactory` + impl (`:3038-3054`), `MissingProducerFactory`, `DreamerRunGuard`, `DreamCommandGuard`, `StringSetGuard`, each with `Drop` |
-| `3106-3396` | 291 | Historian and wrapup orchestration types: `LiveHistorianCompletionWait` alias (`:3106`), `LiveHistorianSession`, `SessionSetGuard` + `Drop`, `PreparedHistorianFiring`, `HistorianPrepareContext`, `HistorianTriggerTimings`, `HistorianTriggerTimer` + `Drop`, `WrapupPrepareContext`, `LiveWrapupSession`, `WrapupSessionGuard` + `Drop` (`:3198-3220`), `PreparedWrapupAction`, `TerminalWrapupResponse`, `WrapupFiringError`, `RetryableWrapupReason`, `WrapupSnapshotPublicationFence` impl (`:3296-3322`), `ReattachSnapshotPublicationFence` impl (`:3332-3359`), `HistorianFiringTask`, `SchedulerObservation`, `impl HistorianProducerFactory for MissingProducerFactory` (`:3382-3396`) |
+| `3023-3104` | 82 | `pub trait HistorySummarizerProducerFactory` (`:3023-3030`), `RealHistorySummarizerProducerFactory` + impl (`:3038-3054`), `MissingProducerFactory`, `MemoryClassifierRunGuard`, `DreamCommandGuard`, `StringSetGuard`, each with `Drop` |
+| `3106-3396` | 291 | HistorySummarizer and wrapup orchestration types: `LiveHistorySummarizerCompletionWait` alias (`:3106`), `LiveHistorySummarizerSession`, `SessionSetGuard` + `Drop`, `PreparedHistorySummarizerFiring`, `HistorySummarizerPrepareContext`, `HistorySummarizerTriggerTimings`, `HistorySummarizerTriggerTimer` + `Drop`, `WrapupPrepareContext`, `LiveWrapupSession`, `WrapupSessionGuard` + `Drop` (`:3198-3220`), `PreparedWrapupAction`, `TerminalWrapupResponse`, `WrapupFiringError`, `RetryableWrapupReason`, `WrapupSnapshotPublicationFence` impl (`:3296-3322`), `ReattachSnapshotPublicationFence` impl (`:3332-3359`), `HistorySummarizerFiringTask`, `SchedulerObservation`, `impl HistorySummarizerProducerFactory for MissingProducerFactory` (`:3382-3396`) |
 | **`3398-11917`** | **8,520** | **`impl Handler`, 131 methods.** Sub-map below |
 | `11919-11932` | 14 | `impl Drop for Handler`, `impl Default for Handler` (`:11928`) |
 | `11934-12115` | 182 | `impl CompositeComponent for Handler` |
@@ -175,14 +181,14 @@ except the small `#[cfg(test)]` islands noted inline.
 | `13475-13514` | 40 | `primary_language_directive` |
 | `13516-13789` | 274 | Content digests and page reassembly: `state_sync_seed_content_digest`, `canonical_object_fields`, `transform_page_content_digest`, `transform_continuation_chunk`, `assemble_transform_page_field` (`:13587-13659`), `assemble_transform_pages` (`:13661-13699`), `assemble_state_sync_seed` (`:13701-13784`), `sha256_hex` |
 | `13791-13880` | 90 | MCP result helpers and the canned error surface: `mcp_text_result`, `tool_error_result`, `session_unresolved_error`, `authority_draining_error`, `store_error_is_authority_draining`, `authority_request_key`, `invalid_params_error`, `store_unavailable_error`, `claim_mirror_error` (`:13844-13857`), note-evaluation errors |
-| `13885-14277` | 393 | Note-evaluation wire parsing and outcome application: field extractors, `smart_note_selection_snapshot`, `note_evaluation_acquire_response` (`:13990-14047`), `parse_note_evaluation_wire_outcome` (`:14051-14110`), `parse_note_evaluation_wire_artifact` (`:14112-14172`), `smart_note_check_digest`, `apply_note_evaluation_outcome` (`:14193-14277`) |
+| `13885-14277` | 393 | Note-evaluation wire parsing and outcome application: field extractors, `conditional_note_selection_snapshot`, `note_evaluation_acquire_response` (`:13990-14047`), `parse_note_evaluation_wire_outcome` (`:14051-14110`), `parse_note_evaluation_wire_artifact` (`:14112-14172`), `conditional_note_check_digest`, `apply_note_evaluation_outcome` (`:14193-14277`) |
 | `14279-14391` | 113 | Request byte caps: `RequestMethodProbe` + impl (`:14297-14305`), `value_footprint_bound` (`:14329-14357`), `request_too_large_error`, `resident_capacity_error`, `enforce_request_byte_cap` (`:14375-14391`). `#[cfg(test)]` const at `:14393` |
 | `14393-14517` | 125 | Test-only caps then argument extraction: `validate_string_cap`, `facade_arguments`, `string_arg`, `non_empty_string_arg`, `i64_arg`, `note_condition_compile_args`, `usize_arg`, expand-output truncation helpers |
 | `14519-15055` | 537 | Facade expand rendering: message expand, cached expand, `render_range_expand` (`:14625-14674`), durable range expand (`:14679-14778`), `slice_expand_transcript`, verbose range expand (`:14811-14963`), `render_verbose_transcript_range_expand` (`:14968-15034`), ordinal-span parsing |
 | `15057-15242` | 186 | `render_notes` (`:15057-15163`), `parse_tag_range_string` (`:15165-15210`), `parse_tag_integer`, `command_id_from_agent_drops_request` |
 | `15246-15445` | 200 | Facade response and canonicalization: `command_id_from_facade_request`, `facade_text_response`, `facade_command_outcome`, `refuse_conditioned_note_without_evaluator`, `canonical_value` (`:15341-15372`), `canonical_number`, text formatting and sanitizing helpers |
-| `15447-15736` | 290 | Status and boundary summary: `storage_versions_block`, `historian_status_summary`, wrapup/boundary message helpers, `cached_boundary_messages` (`:15515-15577`), `sel_kind_for_flat`, `usage_numbers` (`:15596-15623`), `projected_post_drop_percentage` (`:15629-15690`), `project_slug`, `record_historian_connect_failure` (`:15700-15736`) |
-| `15738-15991` | 254 | Descriptors, tool descriptions, JSON schemas, and the manifest: `resolve_descriptor` (`:15740`), `dev_descriptor`, `dev_descriptor_at` (`:15763`), four `ctx_*` descriptions, `ctx_memory_schema` (`:15790-15924`), `ctx_search_schema`, `ctx_expand_schema`, `ctx_note_schema`, `manifest` (`:15977-15991`) |
+| `15447-15736` | 290 | Status and boundary summary: `storage_versions_block`, `history_summarizer_status_summary`, wrapup/boundary message helpers, `cached_boundary_messages` (`:15515-15577`), `sel_kind_for_flat`, `usage_numbers` (`:15596-15623`), `projected_post_drop_percentage` (`:15629-15690`), `project_slug`, `record_history_summarizer_connect_failure` (`:15700-15736`) |
+| `15738-15991` | 254 | Descriptors, tool descriptions, JSON schemas, and the manifest: `resolve_descriptor` (`:15740`), `dev_descriptor`, `dev_descriptor_at` (`:15763`), four `ctx_*` descriptions, `eidnara_memory_schema` (`:15790-15924`), `eidnara_search_schema`, `ctx_expand_schema`, `eidnara_note_schema`, `manifest` (`:15977-15991`) |
 | `15993-15999` | 7 | `#[cfg(test)] fn test_route` |
 | **`16001-30279`** | **14,279** | **`#[cfg(test)] mod tests`.** Flat, no inner modules. 248 test functions: 75 `#[test]`, 173 `#[tokio::test]` |
 | **`30281-30517`** | **237** | **`#[cfg(test)] mod release_contract_tests`.** 8 `#[test]` |
@@ -203,15 +209,15 @@ inferred from names.
 | `4032-4230` | 199 | Projection cache and tail delta: `expand_transform_tail_delta` (`:4032-4128`), `lookup_projection_cache`, `lookup_full_projection_cache`, `cached_expand_messages`, `store_projection_cache` (`:4178-4221`), `transform_page_in_progress` |
 | `4233-4298` | 66 | `unbind_route`. Route teardown and the state it must release |
 | `4305-4425` | 121 | Binding resolution: `resolve_binding`, `state_sync_binding`, `facade_binding`, `module_knows_transform_session` (`:4357-4405`), `bind_authority_route` |
-| `4427-4532` | 106 | Config, activity, and guidance clock: `effective_config`, `historian_active`, `wrapup_active`, `observed_last_response_at_ms`, `record_response_observation`, `guidance_now_ms`, guidance date helpers, `set_guidance_now_ms_for_test` |
+| `4427-4532` | 106 | Config, activity, and guidance clock: `effective_config`, `history_summarizer_active`, `wrapup_active`, `observed_last_response_at_ms`, `record_response_observation`, `guidance_now_ms`, guidance date helpers, `set_guidance_now_ms_for_test` |
 | `4536-4541` | 6 | `#[cfg(test)] inject_reductions_for_test` |
-| `4543-4612` | 70 | Session claims: `live_historian_completion_wait`, `try_claim_live_historian_session` (`:4556-4581`), `try_claim_recomp_session`, `try_claim_wrapup_session` |
+| `4543-4612` | 70 | Session claims: `live_history_summarizer_completion_wait`, `try_claim_live_history_summarizer_session` (`:4556-4581`), `try_claim_recomp_session`, `try_claim_wrapup_session` |
 | `4614-4806` | 193 | `maybe_spawn_reattach` |
-| `4808-5184` | **377** | `prepare_historian_fire`. The historian trigger decision |
+| `4808-5184` | **377** | `prepare_history_summarizer_fire`. The history_summarizer trigger decision |
 | `5186-5303` | 118 | `prepare_wrapup_fire` |
-| `5305-5336` | 32 | `refresh_historian_diagnostics`, `record_no_fire` |
-| `5338-5443` | 106 | Historian firing execution: `execute_historian_firing_task` (`:5338-5394`), `run_historian_firing_inline`, `await_live_historian_completion` |
-| `5445-5589` | 145 | Wrapup budget and firing: `wrapup_operation_budget`, `unknown_module_retry_delay`, `remaining_wrapup_budget`, `run_wrapup_firing` (`:5477-5557`), `await_wrapup_historian_completion`, `spawn_historian_firing` |
+| `5305-5336` | 32 | `refresh_history_summarizer_diagnostics`, `record_no_fire` |
+| `5338-5443` | 106 | HistorySummarizer firing execution: `execute_history_summarizer_firing_task` (`:5338-5394`), `run_history_summarizer_firing_inline`, `await_live_history_summarizer_completion` |
+| `5445-5589` | 145 | Wrapup budget and firing: `wrapup_operation_budget`, `unknown_module_retry_delay`, `remaining_wrapup_budget`, `run_wrapup_firing` (`:5477-5557`), `await_wrapup_history_summarizer_completion`, `spawn_history_summarizer_firing` |
 | `5591-5774` | 184 | `handle_state_import_value` |
 | `5776-5890` | 115 | `handle_agent_drops_value` |
 | `5892-5993` | 102 | `management_binding`, `handle_todo_state_set_value`, `handle_session_flush_value` |
@@ -229,14 +235,14 @@ inferred from names.
 | `8617-8640` | 24 | `state_sync_seed_now`, `handle_transform_for_test` |
 | `8642-9333` | 692 | State sync: `handle_state_sync_value` (`:8642-9125`), `apply_state_sync_wire` (`:9127-9333`) |
 | `9335-9578` | 244 | `handle_transform_page_value` |
-| `9580-10040` | 461 | Dreamer: `register_dreamer_run`, `unregister_dreamer_run`, `dreamer_run_registered`, `handle_dreamer_run_task` (`:9605-10040`) |
+| `9580-10040` | 461 | MemoryClassifier: `register_memory_classifier_run`, `unregister_memory_classifier_run`, `memory_classifier_run_registered`, `handle_memory_classifier_run_task` (`:9605-10040`) |
 | `10042-10060` | 19 | `handle_facade_value`. Facade dispatch entry |
 | `10068-10182` | 115 | Claim intent: `claim_route_root`, `handle_claim_intent_stage`, `handle_claim_intent_inspect`, `handle_claim_intent_ack` |
 | `10184-10337` | 154 | Claim effects and mirror: `handle_claim_effects_apply` (`:10184-10255`), `handle_claim_mirror_replace` (`:10257-10297`), `handle_claim_mirror_apply` (`:10299-10337`) |
 | `10339-10480` | 142 | Facade scope: `log_missing_facade_command_id`, `bind_facade_route_for_write`, `resolve_facade_scope` (`:10387-10480`) |
-| `10482-10878` | 397 | The four `ctx_*` facades: `handle_ctx_reduce_facade` (`:10482-10588`), `handle_ctx_memory_facade` (`:10590-10697`), `handle_ctx_search_facade` (`:10699-10759`), `handle_ctx_expand_facade` (`:10761-10878`) |
+| `10482-10878` | 397 | The four `ctx_*` facades: `handle_eidnara_reduce_facade` (`:10482-10588`), `handle_eidnara_memory_facade` (`:10590-10697`), `handle_eidnara_search_facade` (`:10699-10759`), `handle_ctx_expand_facade` (`:10761-10878`) |
 | `10880-11481` | 602 | Note-evaluation protocol: `register` (`:10880-10980`), `heartbeat` (`:10982-11052`), `unregister`, `next` (`:11097-11276`), `renew`, `complete` (`:11334-11407`), `abandon`, `note_evaluation_claim_scope` |
-| `11483-11916` | 434 | `handle_note_delivery_value` (`:11483-11545`), `handle_ctx_note_facade` (`:11547-11916`) |
+| `11483-11916` | 434 | `handle_note_delivery_value` (`:11483-11545`), `handle_eidnara_note_facade` (`:11547-11916`) |
 
 ## transform.rs region map (line ranges)
 
@@ -254,7 +260,7 @@ inferred from names.
 | `898-1097` | 200 | `struct TransformRequestWire` (`:898-1007`), the custom `impl<'de> Deserialize for TransformRequest` (`:1009-1077`), `legacy_item_to_message`. This is the untrusted-input decode seam |
 | `1101-1138` | 38 | Response enums and directive types: `TransformStatus`, `ServedFrom`, `SurfaceState`, `Channel2NudgeDirective`, `Channel2Directive`, `HostDirectives` |
 | `1145-1443` | 299 | Timing: `TransformTimings` (`:1145-1312`), `format_pass_timing_line` (`:1317-1443`) |
-| `1448-1671` | 224 | Response types: `NativeMessagesDelta`, `TransformResponse` (`:1455-1535`) + impl (`:1537-1617`), `HistorianDiagnostics`, `HistorianTriggerProgress`, `ProjectionCacheInput`, `TransformWithProjection` |
+| `1448-1671` | 224 | Response types: `NativeMessagesDelta`, `TransformResponse` (`:1455-1535`) + impl (`:1537-1617`), `HistorySummarizerDiagnostics`, `HistorySummarizerTriggerProgress`, `ProjectionCacheInput`, `TransformWithProjection` |
 | `1674-1794` | 121 | Tag and overlay internals: `TaggableKind`, `Channel1Level` + impl, `TagOverlayState`, `ActiveTagForNudge`, `Channel1Decision`, `PendingOverlayDecisions`, `OverlayComputation`, `Channel1NudgeInputs` |
 | `1800-1920` | 121 | `TransformError` (`:1800-1840`), `Display`, `Error`, impl, and four `From` conversions |
 | `1922-2080` | 159 | Claim-mirror read seam: `claim_state_vector`, `claim_mirror_read_outcome`, `claim_snapshot_for_context` (`:1964-2012`), `revision_signal_for_context`, `compose_m0_for_context`, `compose_m1_for_context` |
@@ -269,11 +275,11 @@ inferred from names.
 | `5859-5941` | 83 | Ingress meta and effective limits: `apply_ingress_meta`, `effective_usage`, `effective_context_limit_tokens`, `effective_hard_context_limit_tokens` |
 | `5943-6124` | 182 | Render identity and epochs: mural identity fold, `render_identity_base`, `m0_mural_input`, `m0_content_epoch_for_pass` (`:5999-6044`), `render_config_change`, `prompt_surface_selection`, `render_epoch_suffix`, `scheduler_config`, `producer_gate`, `selection_pass_class` |
 | `6126-6243` | 118 | Meta/state conversion and shape checks: deferred-execute and latch conversion, `apply_scheduler_meta`, `tail_state_from_live`, `is_legacy_baseline`, `cached_m1_missing`, `valid_m0m1_shape` |
-| `6245-6435` | 191 | Caveman units: depth, payload, unit construction, level, target depth, `new_caveman_units` (`:6303-6381`), `prune_covered_caveman_units`, `surviving_caveman_units` |
-| `6441-6673` | 233 | Coverage and boundary divergence: `frozen_units_matched_to_tail`, `is_tail`, `is_uncovered_leading_system`, `BoundaryDivergenceRecut`, `protected_tail_floor_ordinal`, `boundary_divergence_reset_allowed`, `detect_boundary_divergence_candidate` (`:6557-6600`), coverage ordinal/bounds from compartments, `covered_system_messages_for_coverage`, `coverage_advance_covers_new_system` |
+| `6245-6435` | 191 | TerseTextCompression units: depth, payload, unit construction, level, target depth, `new_terse_text_compression_units` (`:6303-6381`), `prune_covered_terse_text_compression_units`, `surviving_terse_text_compression_units` |
+| `6441-6673` | 233 | Coverage and boundary divergence: `frozen_units_matched_to_tail`, `is_tail`, `is_uncovered_leading_system`, `BoundaryDivergenceRecut`, `protected_tail_floor_ordinal`, `boundary_divergence_reset_allowed`, `detect_boundary_divergence_candidate` (`:6557-6600`), coverage ordinal/bounds from history_segments, `covered_system_messages_for_coverage`, `coverage_advance_covers_new_system` |
 | `6675-6968` | 294 | Reduction units: frozen red payload/targets, drop-seed logging, `first_applied_pending_command_ids`, `consumed_pending_drop_ids` (`:6735-6779`), `red_unit`, `validate_reduction_monotonicity`, `reductions_pending`, `new_reduction_units` (`:6848-6882`), `effective_reductions` (`:6887-6919`), prune and survive |
 | `6973-7029` | 57 | Synthesized region rendering: `synthetic_m0_message`, `render_mural_block`, `render_m1_placeholder`, `render_m1_body`, `synth_region` |
-| `7031-7165` | 135 | Tail projection and coverage predicates: `sel_item_from_flat`, `tail_sel_items`, `tail_end_mid`, `tail_contains_mid`, `coverage_advanced`, `coverage_shrank`, `stored_compartment_covers_ordinal`, `first_uncovered_live_block`, `validate_live_boundary_ordinal`, `boundary_available` |
+| `7031-7165` | 135 | Tail projection and coverage predicates: `sel_item_from_flat`, `tail_sel_items`, `tail_end_mid`, `tail_contains_mid`, `coverage_advanced`, `coverage_shrank`, `stored_history_segment_covers_ordinal`, `first_uncovered_live_block`, `validate_live_boundary_ordinal`, `boundary_available` |
 | `7167-7323` | 157 | `resolve_boundary_state` (`:7167-7269`), `trim_mismatch`, `surviving_revert_prefix_seq`, `has_durable_lineage`, `absent_shape_fingerprint`, `pending_rewrite_detail` |
 | `7325-7509` | 185 | Pending passthrough and synthetic todo: `PendingPassthroughArgs`, `pending_passthrough_messages`, `pending_passthrough_result` (`:7376-7425`), `anchor_folded_by_coverage`, `advance_synthetic_todo`, `reanchor_kept_synthetic_todo_if_folded_or_shrunk` |
 | `7511-7634` | 124 | Tag baseline cache: entry + impl, cache + impl (`:7554-7595`), accessor, metrics, retained bytes, entry builder |
@@ -309,30 +315,30 @@ inferred from names.
 `src/` non-monolith modules, largest first. Line count is the whole file; the
 inline-test share is in parentheses where it is material.
 
-- `historian.rs` 4,682 (2,862 test) — the durable historian firing state machine, pinned chunk snapshot with fingerprint verification, and the CAS-gated publish transaction.
+- `history_summarizer.rs` 4,682 (2,862 test) — the durable history_summarizer firing state machine, pinned chunk snapshot with fingerprint verification, and the CAS-gated publish transaction.
 - `selection.rs` 3,365 (1,954 test) — pure deterministic tail-reduction selection producing `ReductionDecision`s; determinism is the stated cache invariant.
-- `boundary.rs` 3,053 (1,080 test) — protected-tail split and historian trigger decision, claimed pure over caller-provided bytes with no clock or store.
-- `historian_producer.rs` 2,306 (821 test) — Broca session client that runs the historian model call through `host_runtime::Client`; interprets only Broca request and response semantics.
+- `boundary.rs` 3,053 (1,080 test) — protected-tail split and history_summarizer trigger decision, claimed pure over caller-provided bytes with no clock or store.
+- `history_summarizer_producer.rs` 2,306 (821 test) — ModelExecution session client that runs the history_summarizer model call through `host_runtime::Client`; interprets only ModelExecution request and response semantics.
 - `codec/opencode.rs` 2,186 (865 test) — OpenCode harness decode and encode with sidecar block-identity stamping.
-- `historian_chunk.rs` 2,051 (881 test) — builds the pinned ordinal-range chunk that the historian summarizes, including the snapshot-vector compare at `:563-608`.
+- `history_summarizer_chunk.rs` 2,051 (881 test) — builds the pinned ordinal-range chunk that the history_summarizer summarizes, including the snapshot-vector compare at `:563-608`.
 - `bin/eidnara-host.rs` 2,048 (301 test) — see the overlaps section; this is the production lifecycle CLI, already covered by Part 2a.
-- `historian_validate.rs` 1,869 (565 test) — parses and validates the model's compartment XML against chunk and stored ranges before any write is possible; declared fail-closed.
-- `smart_note_evaluation.rs` 1,851 (901 test) — smart-note evaluation transition contract plus a vendored five-field cron evaluator, replaying a frozen cross-language fixture.
+- `history_summarizer_validate.rs` 1,869 (565 test) — parses and validates the model's history_segment XML against chunk and stored ranges before any write is possible; declared fail-closed.
+- `conditional_note_evaluation.rs` 1,851 (901 test) — conditional-note evaluation transition contract plus a vendored five-field cron evaluator, replaying a frozen cross-language fixture.
 - `codec/pi.rs` 1,499 (422 test) — Pi harness decode and encode, same sidecar contract as OpenCode.
 - `scheduler.rs` 1,449 (532 test) — pass-class producer (execute/defer/force/block), idle-TTL fire, mid-turn deferred-execute transition, emergency-drain latch, provider context-overflow detection.
 - `wire.rs` 1,279 (541 test) — wire ingress and egress wire types and the `mid#block_index` block-granular projection; retains original message objects for verbatim replay.
 - `tail_hygiene.rs` 1,278 (555 test) — the shared rendered-tail hygiene metric feeding Channel-1 and Channel-2.
 - `config.rs` 1,229 (514 test) — JSONC config reader with per-leaf trust policy: model choice is user-tier only, project config may only raise the execute threshold.
 - `injection.rs` 911 (455 test) — synthetic todowrite injection: canonical todo normalization, the deterministic `synthetic_todo_<hash>` call id, byte-exact injected pair, bust-only freeze.
-- `decay_render.rs` 849 (484 test) — deterministic decay renderer turning a compartment set into the markdown history bytes for m0 and m1; **partly cataloged by Part 3**.
-- `caveman.rs` 651 (40 test) — the caveman paraphrase levels used by depth-tiered tail compression.
+- `decay_render.rs` 849 (484 test) — deterministic decay renderer turning a history_segment set into the markdown history bytes for m0 and m1; **partly cataloged by Part 3**.
+- `terse_text_compression.rs` 651 (40 test) — the terse_text_compression paraphrase levels used by depth-tiered tail compression.
 - `bin/eidnara_host/serve.rs` 637 (0 test) — the `serve` daemon-mode entry, including the SIGTERM handler.
-- `historian_prompt.rs` 552 (220 test) — pure assembly of the historian per-run user prompt from already-loaded rows.
+- `history_summarizer_prompt.rs` 552 (220 test) — pure assembly of the history_summarizer per-run user prompt from already-loaded rows.
 - `memory_render.rs` 538 (162 test) — memory and mirrored-claim rendering into m0 sub-blocks.
 - `dispatch.rs` 511 (0 test) — `PreparedOutcome` / `PreparedOutput` / `PreparedSegment` and `MAX_WIRE_BODY_BYTES`: the measured, reserve-then-write response encoder.
 - `classify.rs` 490 (217 test) — module-local classification helpers.
-- `memory_tool.rs` 447 (87 test) — memory search used by the `ctx_memory` facade and the user-hint lexical search; **its staleness read path is cataloged by Part 3**.
-- `compartment_coverage.rs` 413 (198 test) — validates strictly ordered stored compartment ranges and partitions them for the m0/m1 split.
+- `memory_tool.rs` 447 (87 test) — memory search used by the `eidnara_memory` facade and the user-hint lexical search; **its staleness read path is cataloged by Part 3**.
+- `history_segment_coverage.rs` 413 (198 test) — validates strictly ordered stored history_segment ranges and partitions them for the m0/m1 split.
 - `m0_compose.rs` 403 (0 test) — the store-to-m0 byte producer for the HARD branch; byte producer only, does not classify HARD versus SOFT.
 - `prompt_surface.rs` 385 (62 test) — guidance and prompt-surface text constants and selection.
 - `codec/sidecar.rs` 339 (0 test) — shared block-meta matching, fingerprinting, and identity stamping used by both codecs.
@@ -391,7 +397,7 @@ it is excluded from Part 4 discovery.
 | `tests/direct_host.rs` | 6 |
 | `tests/host_adapter.rs` | 4 |
 | `tests/release_contract_conformance.rs` | 3 |
-| `tests/broca_roundtrip.rs` | 2 |
+| `tests/model_execution_roundtrip.rs` | 2 |
 | `tests/boundary_counter_durability.rs` | 1 |
 
 Both giant inline test modules are **flat**: neither
@@ -401,7 +407,7 @@ has to grep test-function names. As a locating aid, a keyword histogram over the
 280 transform test names gives cache-state and pass 124, output and render 83,
 tags and nudges 56, selection and reduction 47, identity and lineage 38, codec
 and wire 25, config and scheduler 20; over the `lib.rs` test names it gives
-facade/note/claim 51, historian and wrapup 49, cache-state and pass 35, codec
+facade/note/claim 51, history_summarizer and wrapup 49, cache-state and pass 35, codec
 and native 34, selection and reduction 30, state sync/import/page 18. Buckets
 overlap and about 12 percent of names match no bucket, so treat this as a
 starting point, not an inventory.
@@ -425,7 +431,7 @@ The consequence is stark. `scripts/test-rust.sh` runs `cargo nextest run
 `check:all`, but no workflow calls either. So:
 
 - **All 528 inline tests in `lib.rs` and `transform.rs` run only on a developer's machine.** So do the ~364 inline tests in the other modules.
-- **Six of the seven integration binaries never run in CI**: `prepared_output`, `direct_host`, `host_adapter`, `release_contract_conformance`, `broca_roundtrip`, `boundary_counter_durability`. Only `lifecycle_cli` runs.
+- **Six of the seven integration binaries never run in CI**: `prepared_output`, `direct_host`, `host_adapter`, `release_contract_conformance`, `model_execution_roundtrip`, `boundary_counter_durability`. Only `lifecycle_cli` runs.
 - `release_contract_conformance.rs` is the cross-artifact drift gate whose own header argues the drift "must fail the build, not the deployment". It does not run in CI. The separate `release-qualification-gate` job (`ci.yml:338-405`) runs the TypeScript-side drift checks, not this Rust conformance suite.
 
 Note a correction to an existing catalog entry: Part 2a's
@@ -444,10 +450,10 @@ the output path: `transform.rs:11172-11225 assert_no_orphaned_tool_arcs` and
 
 Fixture corpus: 29 files under `testdata/`, including `boundary-golden.json`,
 `wire-golden.json`, `differential-golden.json`, four
-`fm-boundary-divergence*` files, `historian-chunk-golden.json`,
-`historian-prompt-golden.json`, `historian-system-prompt.txt`,
+`fm-boundary-divergence*` files, `history_summarizer-chunk-golden.json`,
+`history_summarizer-prompt-golden.json`, `history_summarizer-system-prompt.txt`,
 `ingress-projection-golden.json`, `injection-golden.json`,
-`smart-note-evaluation-golden.json`, `nudge-hygiene-golden.json`,
+`conditional-note-evaluation-golden.json`, `nudge-hygiene-golden.json`,
 `render-golden.json`, plus two TypeScript generators
 (`gen-decay-store-differential.ts`, `gen-m0-decay-pressure-retry.ts`) and a
 `codec/` subdirectory. Golden files that only an uninvoked test reads are not
@@ -461,23 +467,23 @@ a risk multiplier, and it multiplies almost everything here, because only
 
 | Area | Persistent state | Can lose or corrupt user data | Documented contract | Trust boundary | Concurrency and ordering | Tests, and do they run |
 | --- | --- | --- | --- | --- | --- | --- |
-| **Historian write, validate, publish** | Yes: compartments, chunk ranges, durable phase, publish CAS | **Irreversibly.** Raw conversation is replaced by model-generated summary text; once folded behind coverage, the original is no longer served | Strong, and strong claims: five-phase machine, fail-loud fingerprint verification, "fail-closed" validation, publish surfaces only through the m1 watermark | **Yes, the worst one.** Producer output is language-model text arriving over Broca and parsed as XML into durable rows | Yes: single live-session claim, publication fence, CAS-gated publish, chunk pinning versus concurrent coverage advance | ~108 inline across four modules, plus 12 in `lib.rs` tests; `broca_roundtrip` (2). **None run in CI** |
+| **HistorySummarizer write, validate, publish** | Yes: history_segments, chunk ranges, durable phase, publish CAS | **Irreversibly.** Raw conversation is replaced by model-generated summary text; once folded behind coverage, the original is no longer served | Strong, and strong claims: five-phase machine, fail-loud fingerprint verification, "fail-closed" validation, publish surfaces only through the m1 watermark | **Yes, the worst one.** Producer output is language-model text arriving over ModelExecution and parsed as XML into durable rows | Yes: single live-session claim, publication fence, CAS-gated publish, chunk pinning versus concurrent coverage advance | ~108 inline across four modules, plus 12 in `lib.rs` tests; `model_execution_roundtrip` (2). **None run in CI** |
 | **Transform pass engine** | Yes: cache state, module meta, tag rows, all committed behind one CAS | Yes: wrong bytes in the served context, wrong messages dropped, duplicate `tool_use` ids, a wedged cache state that poisons every later pass | Strong, and it states two named poison-resistance invariants and a render-once cache discipline | Yes: harness-supplied wire arrays decoded through a hand-written `Deserialize`, plus the reserved `eidnara_*` namespace defence | Yes: bust versus defer render-once, epoch fold ordering before activation, boundary divergence reset, snapshot lease budget | 280 inline in `transform.rs` plus a share of `lib.rs`'s. **None run in CI** |
 | **Handler op handlers and staging** | Yes: state sync, state import, agent drops, todo state, recomp, delete, wrapup, note-evaluation claims | Yes: state import overwrites session state; session delete and recomp destroy it; a bad seq or digest accepted admits foreign data | Partial. Individual methods carry good comments; there is no single contract document | Yes: raw JSON from the host, with byte caps (`enforce_request_byte_cap`, `value_footprint_bound`) and per-field id and staged-byte caps | Heavy: async tasks under a `TaskTracker`, `CancellationToken`, atomics, store-open lease waiting with jittered backoff, route unbind teardown, three staging coordinators with phase enums, dispatch wedge detector | 248 inline in `lib.rs`; `prepared_output` (10), `direct_host` (6), `host_adapter` (4), `boundary_counter_durability` (1). **None run in CI** |
-| **Facade surface and note evaluation** | Yes: notes, claim mirror, note-evaluation claims and leases | Yes: `ctx_note` and the claim mirror write durable user content; a mis-scoped facade writes to the wrong project | Partial; `smart_note_evaluation.rs` has a strong cross-language fixture claim | Yes: MCP tool arguments from a model, string caps, JSON schemas, and credential minting for evaluators | Yes: claim acquire/heartbeat/renew/complete/abandon with slot cycles and expiry purge | Inline plus the `lib.rs` module. **None run in CI**. Claim-mirror parts overlap Part 3 |
+| **Facade surface and note evaluation** | Yes: notes, claim mirror, note-evaluation claims and leases | Yes: `eidnara_note` and the claim mirror write durable user content; a mis-scoped facade writes to the wrong project | Partial; `conditional_note_evaluation.rs` has a strong cross-language fixture claim | Yes: MCP tool arguments from a model, string caps, JSON schemas, and credential minting for evaluators | Yes: claim acquire/heartbeat/renew/complete/abandon with slot cycles and expiry purge | Inline plus the `lib.rs` module. **None run in CI**. Claim-mirror parts overlap Part 3 |
 | **Rendered output, tags, nudges** | Tag rows and nudge arming watermarks in module meta; three in-process caches | Yes but narrower: a wrong overlay or a stale tag-baseline hit changes replayed bytes and busts the prefix cache | Moderate; `tail_hygiene.rs` has a one-line header, and the nudge formulas have a calibration doc under `docs/` | Yes: `strip_leading_tag_imitations` and the tag-suffix well-formedness check exist specifically to stop harness content imitating module tags | Yes: tag mint frontier monotonicity, generation-gated baseline cache refill, Channel-2 rearm after fold or collapse | 56 tag/nudge and 83 output/render inline, plus `nudge_formula_tests`. **None run in CI** |
-| **Pure decision units, codecs, config** | No durable writes of their own; `config.rs` reads user and project files | Indirectly: a wrong selection decision or a wrong decode drops content downstream | **Strongest in the crate.** `selection.rs`, `boundary.rs`, `scheduler.rs`, `compartment_coverage.rs`, `injection.rs` all declare purity and determinism explicitly | Yes: `config.rs` enforces per-leaf trust policy (project config may only raise the execute threshold, model choice is user-tier only); the codecs parse untrusted harness session JSON | Determinism obligations rather than concurrency; `codec/sidecar.rs` owns block-identity stamping with zero tests | Well covered inline, plus goldens. **None run in CI** |
+| **Pure decision units, codecs, config** | No durable writes of their own; `config.rs` reads user and project files | Indirectly: a wrong selection decision or a wrong decode drops content downstream | **Strongest in the crate.** `selection.rs`, `boundary.rs`, `scheduler.rs`, `history_segment_coverage.rs`, `injection.rs` all declare purity and determinism explicitly | Yes: `config.rs` enforces per-leaf trust policy (project config may only raise the execute threshold, model choice is user-tier only); the codecs parse untrusted harness session JSON | Determinism obligations rather than concurrency; `codec/sidecar.rs` owns block-identity stamping with zero tests | Well covered inline, plus goldens. **None run in CI** |
 
-Ranking, highest first: historian write path; transform pass engine; Handler op
+Ranking, highest first: history_summarizer write path; transform pass engine; Handler op
 handlers; facade surface and note evaluation; rendered output and tags; pure
 decision units and codecs.
 
-The historian ranks first on the one criterion that separates recoverable from
+The history_summarizer ranks first on the one criterion that separates recoverable from
 unrecoverable. Every other area produces wrong bytes for one pass or wrong state
-that a later correct pass can overwrite. The historian publish is the only path
+that a later correct pass can overwrite. The history_summarizer publish is the only path
 that permanently substitutes unverified model-generated text for the user's real
 conversation, and the only thing standing between the two is
-`historian_validate.rs`, whose 19 tests never execute in CI.
+`history_summarizer_validate.rs`, whose 19 tests never execute in CI.
 
 ## Proposed sub-partition
 
@@ -495,17 +501,17 @@ as Part 2a), `test_support.rs` and `differential_goldens.rs` (402), `tests/`
 (2,379), `examples/` (714), and seven blank separator lines. That sums to
 102,515.
 
-### 4a Historian write, validate, and publish — risk 1
+### 4a HistorySummarizer write, validate, and publish — risk 1
 
 Files, 8 units, 13,500 lines:
 
-- `src/historian.rs` (4,682)
-- `src/historian_producer.rs` (2,306)
-- `src/historian_chunk.rs` (2,051)
-- `src/historian_validate.rs` (1,869)
-- `src/historian_prompt.rs` (552)
-- `src/lib.rs:3106-3396` (291) — historian and wrapup orchestration types, both publication fences, `HistorianFiringTask`
-- `src/lib.rs:4543-5589` (1,047) — session claims, `maybe_spawn_reattach`, `prepare_historian_fire`, `prepare_wrapup_fire`, firing execution, wrapup budget and `run_wrapup_firing`
+- `src/history_summarizer.rs` (4,682)
+- `src/history_summarizer_producer.rs` (2,306)
+- `src/history_summarizer_chunk.rs` (2,051)
+- `src/history_summarizer_validate.rs` (1,869)
+- `src/history_summarizer_prompt.rs` (552)
+- `src/lib.rs:3106-3396` (291) — history_summarizer and wrapup orchestration types, both publication fences, `HistorySummarizerFiringTask`
+- `src/lib.rs:4543-5589` (1,047) — session claims, `maybe_spawn_reattach`, `prepare_history_summarizer_fire`, `prepare_wrapup_fire`, firing execution, wrapup budget and `run_wrapup_firing`
 - `src/lib.rs:6431-7132` (702) — wrapup response shaping and `handle_session_wrapup_value`
 
 Rationale: the only path in the crate that irreversibly replaces real user
@@ -514,17 +520,17 @@ that CI never runs.
 
 Attention focuses:
 
-1. **Publish admission.** Does every route into `memory-store`'s publish go through `validate_historian_output` first, and is the CAS predicate sufficient to reject a chunk pinned against coverage that has since moved? Trace fingerprint verification and `BOUNDARY_HEALING_SLACK` (`historian_validate.rs:20`) as an admission widener.
-2. **Untrusted producer output.** Treat the Broca response as adversarial: malformed XML, ranges outside the chunk, overlapping or non-monotone ranges, endpoints naming message ids that are not in the pinned snapshot, and duplicate or absent compartments.
-3. **Firing exclusion and phase durability.** One live historian session per session id across `prepare_historian_fire`, `run_wrapup_firing`, `maybe_spawn_reattach`, and the dreamer path; what a crash between phases leaves behind; whether both publication fences actually block a stale publish.
+1. **Publish admission.** Does every route into `memory-store`'s publish go through `validate_history_summarizer_output` first, and is the CAS predicate sufficient to reject a chunk pinned against coverage that has since moved? Trace fingerprint verification and `BOUNDARY_HEALING_SLACK` (`history_summarizer_validate.rs:20`) as an admission widener.
+2. **Untrusted producer output.** Treat the ModelExecution response as adversarial: malformed XML, ranges outside the chunk, overlapping or non-monotone ranges, endpoints naming message ids that are not in the pinned snapshot, and duplicate or absent history_segments.
+3. **Firing exclusion and phase durability.** One live history_summarizer session per session id across `prepare_history_summarizer_fire`, `run_wrapup_firing`, `maybe_spawn_reattach`, and the memory_classifier path; what a crash between phases leaves behind; whether both publication fences actually block a stale publish.
 
 ### 4b Transform pass engine and cache-state transition — risk 1
 
 Files, 8 units, 10,124 lines:
 
-- `src/transform.rs:1-7510` (7,510) — contract types, the untrusted `Deserialize`, entry points, `apply_additive_only`, `apply_once`, block identity, coverage and boundary resolution, caveman and reduction units, pending passthrough, synthetic todo
+- `src/transform.rs:1-7510` (7,510) — contract types, the untrusted `Deserialize`, entry points, `apply_additive_only`, `apply_once`, block identity, coverage and boundary resolution, terse_text_compression and reduction units, pending passthrough, synthetic todo
 - `src/injection.rs` (911)
-- `src/compartment_coverage.rs` (413)
+- `src/history_segment_coverage.rs` (413)
 - `src/m0_compose.rs` (403)
 - `src/healing.rs` (267)
 - `src/m1_compose.rs` (230)
@@ -549,7 +555,7 @@ Files, 5 ranges in `src/lib.rs`, 7,857 lines, essentially all production:
 - `src/lib.rs:3398-4542` (1,145) — construction, store open, producer-factory seams, `bind_route`, note-evaluator registry methods, discard paths, projection cache, `unbind_route`, binding resolution, guidance clock
 - `src/lib.rs:5591-6429` (839) — state import, agent drops, todo state, flush, recomp, delete, session status
 - `src/lib.rs:7134-8005` (872) — authority lifecycle, mirror pull, prompt surface, guidance, memory metrics, status, transform dispatch entry
-- `src/lib.rs:8007-10040` (2,034) — `handle_transform_unpaged_value`, `handle_state_sync_value`, `apply_state_sync_wire`, `handle_transform_page_value`, dreamer run task
+- `src/lib.rs:8007-10040` (2,034) — `handle_transform_unpaged_value`, `handle_state_sync_value`, `apply_state_sync_wire`, `handle_transform_page_value`, memory_classifier run task
 
 Rationale: every store write on the request path, all three multi-request staging
 protocols, and all of the crate's real concurrency, with zero CI coverage and no
@@ -566,8 +572,8 @@ Attention focuses:
 Files, 6 units, 9,000 lines:
 
 - `src/lib.rs:11919-16001` (4,083) — trait impls, `settle_prepared*`, native attachment plumbing and the incremental delta path, the `drive-fault` block, `respond_transform`, page and seed reassembly, canned errors, note-evaluation wire parsing, request byte caps, facade expand and note rendering, canonicalization, status summaries, schemas, manifest
-- `src/lib.rs:10042-11917` (1,876) — facade dispatch, claim intent and effects and mirror, the four `ctx_*` facades, the note-evaluation protocol, `handle_ctx_note_facade`
-- `src/smart_note_evaluation.rs` (1,851)
+- `src/lib.rs:10042-11917` (1,876) — facade dispatch, claim intent and effects and mirror, the four `ctx_*` facades, the note-evaluation protocol, `handle_eidnara_note_facade`
+- `src/conditional_note_evaluation.rs` (1,851)
 - `src/dispatch.rs` (511)
 - `src/memory_tool.rs` (447)
 - `src/project_docs.rs` (232)
@@ -589,7 +595,7 @@ Files, 7 units, 9,304 lines:
 - `src/transform.rs:7511-12623` (5,113) — tag baseline and mint frontier caches, overlay application, tag-imitation defence, user-hint lexical search, Channel-1 and Channel-2 decisions, strips, renderer transition, output identity and the two integrity guards, `build_output_with_tags_inner`, serializer residuals, native reasoning clearing
 - `src/tail_hygiene.rs` (1,278)
 - `src/decay_render.rs` (849) — **partly cataloged by Part 3, see overlaps**
-- `src/caveman.rs` (651)
+- `src/terse_text_compression.rs` (651)
 - `src/memory_render.rs` (538)
 - `src/classify.rs` (490)
 - `src/prompt_surface.rs` (385)
@@ -666,7 +672,7 @@ lists Part 3 as "Not started" and Part 4 as "Not started"; both are stale.
 - `src/decay_render.rs`. Part 3's four `core-decay-*` records cite `:19`, `:278-282`, `:291-296`, `:306-314`, `:330-348` for the tier ladder, the hardcoded `0.0` budget pressure, the archive termination bound, and the oldest-first demotion. Part 4e should treat decay tier selection as settled and look only at how the rendered bytes are spliced into m0 and m1.
 - The claim-mirror facade handlers in `lib.rs`. Part 3's five `mirror-*` records cite `:10040-10060` (facade dispatch), `:10052-10053`, `:10299-10336` (`handle_claim_mirror_apply`), and `:13844-13860` (`claim_mirror_error`) for generation advance, receipt replay and conflict, the accepting gate, and the rebuild grant. Part 4d owns the rest of the facade surface but must not re-derive mirror receipt semantics.
 - `src/memory_tool.rs:19` and `:57-67`. Part 3's `mirror-staleness-undetectable-on-memory-tool-read-path` establishes that the read path takes no expected vector. Part 4d cites it rather than restating it.
-- `src/transform.rs:1964-2012` (`claim_snapshot_for_context`, cited as `:1978-2011` and `:2008`) and `src/historian_chunk.rs:563-608` (cited as `:605`). Part 3's `mirror-read-fence-relies-on-generation-advance` already compares these two snapshot-vector checks. Part 4a and 4b cite it.
+- `src/transform.rs:1964-2012` (`claim_snapshot_for_context`, cited as `:1978-2011` and `:2008`) and `src/history_summarizer_chunk.rs:563-608` (cited as `:605`). Part 3's `mirror-read-fence-relies-on-generation-advance` already compares these two snapshot-vector checks. Part 4a and 4b cite it.
 - `src/tail_hygiene.rs:6` and `:85`. Part 3's `tokenizer-cross-process-determinism` and `core-pass-classifier-destructive-clear-guard` cite the `tokenizer` call and the `CoreState` import. Tokenizer determinism belongs to Part 3.
 - `src/classify.rs:176`. Part 3's `core-pass-classifier-destructive-clear-guard` explicitly notes that `daemon`'s `classify.rs` is a different module from `context-core`'s pass classifier, with its own concerns. Part 4e owns `classify.rs`; Part 3 owns the `context-core` classifier.
 
@@ -677,7 +683,7 @@ cross-reference, not coverage.
 
 ## Open questions
 
-- Is the absence of `cargo test -p daemon` from CI deliberate or an oversight? Part 2a asked the same question about `host-runtime`'s 22 unnamed binaries and left it needing human input. For `daemon` the shape is more extreme: 926 of 938 tests never run in CI, including the entire historian validation suite and the `release_contract_conformance` drift gate whose own header argues it must fail the build. `scripts/test-rust.sh` exists and would cover it. (needs human input)
+- Is the absence of `cargo test -p daemon` from CI deliberate or an oversight? Part 2a asked the same question about `host-runtime`'s 22 unnamed binaries and left it needing human input. For `daemon` the shape is more extreme: 926 of 938 tests never run in CI, including the entire history_summarizer validation suite and the `release_contract_conformance` drift gate whose own header argues it must fail the build. `scripts/test-rust.sh` exists and would cover it. (needs human input)
 - Should Part 4 catalog properties whose only existing check lives in a test binary that CI never runs, as `Exercised: partial`, or as `Exercised: not yet`? `METHOD.md` defines `partial` as "what is covered", which a never-executed test arguably is not. This affects a large fraction of Part 4 records, so it needs a ruling before the lens passes start. (needs human input)
 - What is Part 3's final scope? Its `catalog.md` does not exist yet, so the overlap list above is derived from its evidence files and lens files. If Part 3's scope statement claims `decay_render.rs` or the claim-mirror handlers wholly rather than as boundary context, 4d and 4e shrink. Unresolved, needs Part 3's synthesis step.
 - Are the four in-process caches in `lib.rs` and the three in `transform.rs` in scope for durability properties, or only for correctness-of-served-bytes? They hold no durable state but their budgets, leases, and eviction accounting have the shape of resource properties. Unresolved, needs a scoping decision at 4c authoring time.
@@ -692,9 +698,9 @@ cross-reference, not coverage.
   records, and a light-validation manifest. Of the ten files in `docs/plans/`,
   five mention `daemon` and all five do so tangentially: the shared-memory
   release gate, the beads restructure, the Tauri dashboard removal, and two
-  Synapse plans. So there is no transform or historian specification. The
+  LocalEmbeddings plans. So there is no transform or history_summarizer specification. The
   authoritative contract statements are the module doc comments, which makes
   every one of them a claim with no independent source to check it against. Part
   4's external references should list `docs/specs/context-window-geometry.md` for
   4b and the whole of `docs/specs/prompt-surface/` for 4e, and should record that
-  the historian has no specification outside `historian*.rs`.
+  the history_summarizer has no specification outside `history_summarizer*.rs`.

@@ -139,8 +139,8 @@ The losing-attempt test needs a hook in the load-to-commit window:
    `MemoryStoreError::CasConflict`, not `MemoryStoreError::Serde`.
 
 The hook does not exist. The two existing hooks of this shape are
-`set_before_max_compartment_end_read_hook` (`lib.rs:5283`) and
-`set_abandon_historian_hook` (`:5294`), both `#[cfg(any(test,
+`set_before_max_history_segment_end_read_hook` (`lib.rs:5283`) and
+`set_abandon_history_summarizer_hook` (`:5294`), both `#[cfg(any(test,
 feature = "test-support"))]`, and neither fires in the `set_todo_state` path.
 Adding one is a source change, which this lens does not make.
 
@@ -159,10 +159,10 @@ unrelated commit.
 ### Q: Why is the retry bound 8, and why is there no backoff?
 
 - Sources examined: `lib.rs:6735`, `:6762`; the doc comments at `:6725-6726` and
-  `:6759`; the contrasting backoff logic that does exist for the historian side
+  `:6759`; the contrasting backoff logic that does exist for the history_summarizer side
   channel at `:9726-9730`, which computes
   `1_000 * (1 << attempt_count.min(6))` capped at
-  `HISTORIAN_SIDE_CHANNEL_MAX_BACKOFF_MS = 60_000` (`:3714`).
+  `HISTORY_SUMMARIZER_SIDE_CHANNEL_MAX_BACKOFF_MS = 60_000` (`:3714`).
 - Findings: the codebase clearly knows how to write bounded exponential backoff
   and chose not to here. No comment explains 8. Given the mutex and lease
   analysis above, contention on this path should be near-zero in a

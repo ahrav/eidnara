@@ -2,11 +2,11 @@
 
 #![allow(dead_code)]
 
-pub mod broca;
 pub mod echo_host;
+pub mod local_embeddings;
+pub mod model_execution;
 pub mod process_resources;
 pub mod raw_client;
-pub mod synapse;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -391,7 +391,7 @@ impl HostHandler for TestHandler {
             provides: vec![serde_json::json!({
                 "role": "tool_provider",
                 "tools": [{
-                    "name": "ctx_reduce",
+                    "name": "eidnara_reduce",
                     "execution_mode": "pure",
                     "schema": {"type": "object"}
                 }],
@@ -974,8 +974,8 @@ impl SecondaryComponent for StubComponent {
 pub fn stub_trio() -> (StubComponent, StubComponent, StubComponent) {
     (
         StubComponent::new("context", "tool_provider"),
-        StubComponent::new("synapse", "management_surface"),
-        StubComponent::new("broca", "management_surface"),
+        StubComponent::new("local_embeddings", "management_surface"),
+        StubComponent::new("model_execution", "management_surface"),
     )
 }
 
@@ -1001,7 +1001,7 @@ impl CompositeTestHost {
             daemon_ver: "eidnara-host/test".to_owned(),
             limits: HostLimits {
                 max_resident_bytes: host_runtime::config::MIN_RESIDENT_BYTES * 2
-                    + host_runtime::broca::config::DECLARED_RETAINED_RESIDENT_BYTES,
+                    + host_runtime::model_execution::config::DECLARED_RETAINED_RESIDENT_BYTES,
                 ..Default::default()
             },
             ..Default::default()

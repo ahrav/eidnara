@@ -5,7 +5,7 @@ Lens: the OpenCode TypeScript plugin's work between receiving OpenCode's
 the host transport. Source read at HEAD `913234433ae36a80a6e22c6aac14c7f9aab74386`
 on 2026-09-10 with Bun 1.3.14 and Node v24.18.0. `docs/properties/` has no
 TypeScript or plugin catalog part at this HEAD: the README assigns `cli` and
-`historian-ts` to wave U7 and no such directory exists, and the
+`history_summarizer-ts` to wave U7 and no such directory exists, and the
 `hot-path-optimization/catalog.md` records are Rust-daemon only. Nothing here
 duplicates an existing record.
 
@@ -96,6 +96,7 @@ cache and assert the fail-open outcome (`todo_tool_present: true`, capture
 forwarded). Neither constructs a cached deny first. None found for the
 deny-then-failure case.
 Open questions:
+
 - When no verdict is cached and the read fails, the pass sends
   `todo_tool_present: true` ([:85-96][combinedseed] `?? false`). Is fail-open
   the intended default, given the comment at [:1056-1057][failclosed] says
@@ -128,11 +129,12 @@ Reachability: default-production - agent switching is an ordinary OpenCode
 action (`chat.message` records `input.agent` per message at
 [hook-handlers.ts:133-135][agentset]); permission overlay edits mid-session
 are not verified as reachable here.
-Existing check: [ctx-reduce-availability.test.ts:318][t318] shows the agent
+Existing check: [eidnara-reduce-availability.test.ts:318][t318] shows the agent
 input changes the live answer (`plan` deny vs `undefined` allow) but tests
 the evaluator, not a cache. None found for cache staleness across an agent
 switch.
 Open questions:
+
 - What staleness is acceptable for the permission verdict, in passes or in
   time, and which events must invalidate it? (needs human input)
 - Does the OpenCode SDK emit a permission-change event the plugin could
@@ -184,6 +186,7 @@ forty example states against `isMidTurnFromOpenCodeDb`; [:920-951][tismidturn]
 covers idle, missing DB, and unreadable DB. None found for the cross-session
 `message_id` scoping or for a differential oracle.
 Open questions:
+
 - OpenCode's real `message` and `part` indexes are not in this repository;
   every fixture declares only `id TEXT PRIMARY KEY`. Whether a collapsed
   query's plan depends on an index that exists in OpenCode's schema is
@@ -284,6 +287,7 @@ Whether a real body can cross the boundary is unresolved.
 Existing check: [module-wire.test.ts:1391][t1391] pins the pageable field
 list against the Rust literal. None found for the byte-measure boundary.
 Open questions:
+
 - Can any body pass the plugin's `JSON.stringify` measure at 512 KiB and
   fail the host's `serde_json` measure? Unresolved, needs a boundary
   construction with `f64` fields.
@@ -323,6 +327,7 @@ bound), [:381][t381] (private modes and planted symlink),
 secret-bearing text is redacted before write; no such redaction exists on
 this path.
 Open questions:
+
 - Provider error bodies and model output reach the log unredacted; the CLI
   redacts on export. Is that the intended boundary, or must the plugin
   redact before write? (needs human input)
@@ -356,8 +361,8 @@ Open questions: None.
 | [rust-mode-transform.test.ts:440][t440] | agent `deny` rule through the SDK yields `todo_tool_present: false`; `app.agents` called once | unaudited |
 | [rust-mode-transform.test.ts:466][t466] | hung `app.agents()` with an empty cache yields `todo_tool_present: true` after about 2 s | unaudited |
 | [hook-handlers.test.ts:119][t119] | hung permission read in the capture hook forwards the snapshot after about 2 s | unaudited |
-| [ctx-reduce-availability.test.ts:238-343][tperm] | `permissionDisabled` last-match semantics, session overlay after agent rules, wildcard escaping, agent input changes the answer | unaudited |
-| [ctx-reduce-availability.test.ts:26-122][tavaildb] | DB-derived frozen verdicts: fail-open freeze, tie by id, malformed JSON row | unaudited |
+| [eidnara-reduce-availability.test.ts:238-343][tperm] | `permissionDisabled` last-match semantics, session overlay after agent rules, wildcard escaping, agent input changes the answer | unaudited |
+| [eidnara-reduce-availability.test.ts:26-122][tavaildb] | DB-derived frozen verdicts: fail-open freeze, tie by id, malformed JSON row | unaudited |
 | [read-session-db.test.ts:97-742][tmidturn] | example states for `isMidTurnFromOpenCodeDb` (streaming, `tool-calls`, compaction summary, same-millisecond, malformed rows and parts, marker-only parts) | unaudited |
 | [read-session-db.test.ts:920-951][tismidturn] | `isMidTurn`: idle DB, missing DB, unreadable DB returns mid-turn | unaudited |
 | [read-session-db.test.ts:953-1021][tdbpath] | `OPENCODE_DB` override selects the database; empty override ignored | unaudited |
@@ -395,7 +400,7 @@ Suspiciously quiet: `transform-stage-logger.ts` has no test file;
 
 ## Contract-versus-code disagreements
 
-1. Live read frequency. [ctx-reduce-availability.ts:15-17][doc17] says
+1. Live read frequency. [eidnara-reduce-availability.ts:15-17][doc17] says
    "Todowrite checks live permissions only at cache-busting boundaries" and
    [:57-58][doc57] says defer passes "reuse the cached permission verdict
    without a live permission read". The code at [:85-96][combinedseed]
@@ -445,14 +450,14 @@ call site. `messageCacheSignature` is defined at 363-368; 1152, 1264, and
 [body]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L739-L819
 [prefix]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L349-L361
 [signature]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L363-L368
-[cached]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L319-L324
-[clearperm]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L326-L334
-[permdenied]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L277-L308
-[permdisabled]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L203-L213
-[permmap]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L57-L59
-[permkey]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L71-L73
-[doc17]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L15-L17
-[doc57]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L57-L58
+[cached]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L319-L324
+[clearperm]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L326-L334
+[permdenied]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L277-L308
+[permdisabled]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L203-L213
+[permmap]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L57-L59
+[permkey]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L71-L73
+[doc17]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L15-L17
+[doc57]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L57-L58
 [capture]: ../../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L270-L292
 [agentset]: ../../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L133-L135
 [hookclient]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L138-L139
@@ -494,9 +499,9 @@ call site. `messageCacheSignature` is defined at 363-368; 1152, 1264, and
 [t244]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L244
 [tinplace]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1441
 [t119]: ../../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.test.ts#L119
-[t318]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L318
-[tperm]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L238
-[tavaildb]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L26
+[t318]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.test.ts#L318
+[tperm]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.test.ts#L238
+[tavaildb]: ../../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.test.ts#L26
 [tmidturn]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L97
 [tismidturn]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L920
 [tdbpath]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L953

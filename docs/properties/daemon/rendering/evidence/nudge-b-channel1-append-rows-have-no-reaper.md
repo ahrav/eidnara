@@ -176,12 +176,12 @@ the test fixture uses `"word ".repeat(40_000)` per result (`:23556`).
 - Missing evidence: the projection cache's mid-stability contract.
 - Conclusion: unresolved, needs 4b.
 
-### Q: Should the reaper key on the overlay frontier, on tag retirement, or on compartment coverage?
+### Q: Should the reaper key on the overlay frontier, on tag retirement, or on history_segment coverage?
 
 - Sources examined: `overlay_watermark` (`memory-store/src/lib.rs:6506-6521`),
   `is_tail` (`transform.rs:6471-6473`), the `tags` retirement logic in
   `newest_active_tag_block_ids` (`:8082-8125`).
-- Findings: compartment coverage is the natural key, because
+- Findings: history_segment coverage is the natural key, because
   `is_tail` already uses it and a block below coverage can never be selected for a
   new append. A reaper deleting rows whose block ordinal is at or below
   `meta.coverage_ordinal` would be sound and would bound the table to the live

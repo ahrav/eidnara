@@ -10,15 +10,15 @@ Reachability is test-only because no production RP2.1 pending driver exists.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/synapse/mod.rs:206-225` owns one JobTable, CPU
+- `crates/host-runtime/src/local_embeddings/mod.rs:206-225` owns one JobTable, CPU
   semaphore, query admission set, tracker, and closing token per component.
-- `crates/host-runtime/src/synapse/jobs.rs:162-196` stores jobs in memory.
+- `crates/host-runtime/src/local_embeddings/jobs.rs:162-196` stores jobs in memory.
 - `jobs.rs:387-428` compares retained keys and payload digests under one lock;
   equal nonretryable retained work returns Existing.
 - `jobs.rs:430-453` checks queue and result capacity before insertion.
 - `jobs.rs:455-488` replaces a retryable failure only after admission succeeds.
 - `mod.rs:795-838` spawns a worker only for Admitted, not Existing.
-- `crates/host-runtime/src/synapse/protocol.rs:923-947` derives the canonical
+- `crates/host-runtime/src/local_embeddings/protocol.rs:923-947` derives the canonical
   batch key from ordered hashes, IDs, model, epoch, and fingerprint.
 - `crates/retrieval/src/dispatch.rs:174-181` derives the host item identity from
   the current episode or the first episode that admission opens.
@@ -29,7 +29,7 @@ Reachability is test-only because no production RP2.1 pending driver exists.
   `crates/daemon/src/embedding_dispatch.rs:576-664` computes one item identity,
   passes it to host submission and `charge_admission`, and defers
   `EpisodeChanged` without a disposition.
-- The [existing admission record](../../../host-runtime/catalog.md#synapse-admission-boundaries-are-exact)
+- The [existing admission record](../../../host-runtime/catalog.md#local_embeddings-admission-boundaries-are-exact)
   remains canonical for process-local capacities and retention.
 
 ## Failure scenario

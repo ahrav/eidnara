@@ -10,14 +10,14 @@ Reachability is test-only because no production RP2.1 identity GC path exists.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/synapse/jobs.rs:62-88` keeps result bytes charged
+- `crates/host-runtime/src/local_embeddings/jobs.rs:62-88` keeps result bytes charged
   while either the table or a served page holds a ResultLease.
 - `jobs.rs:91-106` stores that lease only on the process-local Ready state.
 - `jobs.rs:156-158` ranks retention using last poll time or completion time.
 - `jobs.rs:748-886` sweeps and removes local jobs, not durable model identities.
 - `jobs.rs:1382` defines the page-leased-result retention test. Its oracle is
   in-memory resource custody, not whether current product vectors may be deleted.
-- `crates/daemon/src/dreamer_scheduler.rs:334-371` schedules only the existing
+- `crates/daemon/src/memory_classifier_scheduler.rs:334-371` schedules only the existing
   review-user-memories task; no embedding GC sweep is registered there.
 - P1 line 109 makes identity mismatch Obsolete. P1 KTD4 and P2 lines 37-38
   prevent payload deduplication from collapsing distinct occurrences.

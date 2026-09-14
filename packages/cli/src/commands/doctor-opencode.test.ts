@@ -256,8 +256,9 @@ describe("doctor OpenCode conflict repair", () => {
     it.if(process.platform !== "win32")(
         "fails on a FIFO opencode.jsonc instead of blocking on it",
         async () => {
+            const mkfifo = execFileSync("which", ["mkfifo"], { encoding: "utf8" }).trim();
             const { configDir, opencodeConfigPath } = installIsolatedHome();
-            execFileSync("mkfifo", [opencodeConfigPath]);
+            execFileSync(mkfifo, [opencodeConfigPath]);
             writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
             const { errors, restore } = captureDoctorLog();
 
@@ -410,7 +411,7 @@ describe("doctor OpenCode read-only checks", () => {
         const cwd = makeTempDir("eidnara-doctor-project-");
         mkdirSync(join(cwd, ".eidnara"), { recursive: true });
         const projectConfigPath = join(cwd, ".eidnara", fileName);
-        writeFileSync(projectConfigPath, '{ "historian": { \n');
+        writeFileSync(projectConfigPath, '{ "history_summarizer": { \n');
         const { errors, successes, restore } = captureDoctorLog();
 
         try {
@@ -428,13 +429,15 @@ describe("doctor OpenCode read-only checks", () => {
         }
     });
 
-    it("prints loader warnings for a project config that names a removed key", async () => {
+    it("reports a startup error for a project config that names a removed key", async () => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();
         writeJsonc(opencodeConfigPath, REGISTERED_PLUGIN);
         writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
         const cwd = makeTempDir("eidnara-doctor-project-");
         mkdirSync(join(cwd, ".eidnara"), { recursive: true });
-        writeJsonc(join(cwd, ".eidnara", "eidnara.jsonc"), { dreamer: { enabled: true } });
+        writeJsonc(join(cwd, ".eidnara", "eidnara.jsonc"), {
+            memory_classifier: { enabled: true },
+        });
         const warnings: string[] = [];
         const warnSpy = spyOn(log, "warn").mockImplementation((message: string) => {
             warnings.push(message);
@@ -444,14 +447,8 @@ describe("doctor OpenCode read-only checks", () => {
         try {
             const code = await runDoctor({ cwd });
 
-            expect(code).toBe(0);
-            expect(errors).toEqual([]);
-            expect(
-                warnings.some(
-                    (message) =>
-                        message.startsWith("[project config]") && message.includes('"dreamer"'),
-                ),
-            ).toBe(true);
+            expect(code).toBe(1);
+            expect(errors.join("\n")).toContain("Unknown Eidnara configuration key");
         } finally {
             warnSpy.mockRestore();
             restore();

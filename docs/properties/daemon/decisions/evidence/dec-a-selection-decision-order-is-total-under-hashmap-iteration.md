@@ -107,7 +107,7 @@ key:
 | --- | --- | --- |
 | `:372-379` `group_arcs` output sort | arc identity fields | yes |
 | `:447-452` adjacency message sort | `left.mid.cmp(right.mid)` | yes, message ids |
-| `:741-747` `newest_ctx_reduce_arc_ids` | arc id | yes |
+| `:741-747` `newest_eidnara_reduce_arc_ids` | arc id | yes |
 | `:763-770` `select_supersession` | arc id | yes |
 | `:853-861` `select_tool_dedup` | `left.arc_id.cmp(&right.arc_id)` | yes |
 | `:1033-1037` tier recency reserve | `b.arc_id.cmp(&a.arc_id)` | yes |

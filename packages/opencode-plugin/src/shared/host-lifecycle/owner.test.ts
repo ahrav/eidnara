@@ -68,7 +68,7 @@ function fixture(): Fixture {
             target: "linux-x64-gnu",
         },
         platform_floor: { glibc: "2.34" },
-        synapse: "qualified",
+        local_embeddings: "qualified",
         launcher: "payload/bin/eidnara-host",
         files: [
             {
@@ -234,8 +234,8 @@ describe("managed lifecycle owner", () => {
 
     test("the manifest key set is exactly the daemon's trusted-mode field set", () => {
         const f = fixture();
-        const { synapse: _dropped, ...withoutSynapse } = f.manifest;
-        writeManifest(f, withoutSynapse);
+        const { local_embeddings: _dropped, ...withoutLocalEmbeddings } = f.manifest;
+        writeManifest(f, withoutLocalEmbeddings);
         expect(() => prepare(f, true)).toThrow(/keys do not match/);
 
         writeManifest(f, { ...f.manifest, extra: true });
@@ -327,7 +327,10 @@ describe("managed lifecycle owner", () => {
         // The bytes are ASCII, so the strict UTF-8 decoder passes them; `JSON.parse` yields an ill-formed string where serde_json fails.
         writeFileSync(
             f.manifestPath,
-            f.manifestText.replace('"synapse": "qualified"', '"synapse": "\\ud800"'),
+            f.manifestText.replace(
+                '"local_embeddings": "qualified"',
+                '"local_embeddings": "\\ud800"',
+            ),
         );
         expect(() => prepare(f, true)).toThrow(/lone surrogate/);
 
@@ -340,7 +343,10 @@ describe("managed lifecycle owner", () => {
         // A paired escape decodes to one astral code point and is well formed.
         writeFileSync(
             f.manifestPath,
-            f.manifestText.replace('"synapse": "qualified"', '"synapse": "\\ud83d\\ude00"'),
+            f.manifestText.replace(
+                '"local_embeddings": "qualified"',
+                '"local_embeddings": "\\ud83d\\ude00"',
+            ),
         );
         expect(prepare(f, true)?.kind).toBe("retained-fd");
     });

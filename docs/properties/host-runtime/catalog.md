@@ -31,11 +31,11 @@ portfolio evaluation under its own directory; every per-record evidence file liv
   with no composition-dependent or configuration-dependent state". In this tree `run` itself is
   reached only from `crates/host-runtime/examples/` and a bench; the daemon that will call it in
   production is scheduled for U4 (`../README.md`). Records whose reachability depends on a
-  composed component (Broca, Synapse, the reserved route class), on the host's own `Client`, or
+  composed component (ModelExecution, LocalEmbeddings, the reserved route class), on the host's own `Client`, or
   on the daemon's probe and CLI paths are `test-only` here and say which caller reclassifies
   them. Whether the `run`-default records should also move until the daemon lands is bias B1 in
   [discovered-at-u3/portfolio-evaluation.md](discovered-at-u3/portfolio-evaluation.md).
-- Discovery at U3 for code the source catalogs did not cover (`broca/`, `synapse/`, `harness_closure.rs`, `wire.rs`)
+- Discovery at U3 for code the source catalogs did not cover (`model_execution/`, `local_embeddings/`, `harness_closure.rs`, `wire.rs`)
   is in the trailing "Discovered at U3" section; those records carry the status observed at discovery.
 
 ## Part 2a catalog: host lifecycle, generations, connections
@@ -47,8 +47,8 @@ Scope: `crates/host-runtime/src/lifecycle.rs`, `generation.rs`, `connection.rs`,
 `instance.rs`, `wire.rs`, `auth.rs`, `control.rs`.
 
 Provenance: source catalogs in the host repo at `39e823037`; see [../README.md](../README.md). System
-`the `host` source checkout at `d90e7811`, 2026-08-29. The five
-scope files are byte-identical from `753b1c38` through `d90e7811`.
+`the`host` source checkout at `d90e7811`, 2026-08-29. The five
+scope files are byte-identical from`753b1c38` through `d90e7811`.
 
 Not re-mined here: `shm_provider.rs` and `provider_recovery.rs` custody and
 recovery, already cataloged as Part 1 boundary context.
@@ -237,6 +237,7 @@ Confidence: high - [evidence](evidence/at-most-one-registered-generation-per-con
 Existing check: none at HEAD. The source catalog's `shutdown_during_candidate_setup_reaps_both_channels` was removed with the candidate-handoff path (`ed487e11`); `tests/lifecycle.rs` shutdown cases execute `run_connection` under drain incidentally and assert nothing about registration.
 Impact: shutdown, route ownership, and Goodbye delivery all enumerate the registry assuming one live owner per socket; a generation registered after the drain snapshot is never told to stop.
 Open questions:
+
 - Should a generation discarded by the `:256-258` early return receive a connection Goodbye? Today it is cancelled and its writer discarded without one. (needs human input)
 
 ### close-disposition-is-a-total-function-of-the-read-exit-cause
@@ -274,6 +275,7 @@ Existing check: partial, per above. Status unaudited.
 Impact: this is the silent-close rule the wire protocol requires. Each of the five
 iterations shipped a wrong disposition.
 Open questions:
+
 - Should the disposition be encoded so a new cause cannot compile without a
   declared disposition? That is a design change, not a test. (needs human input)
 
@@ -381,6 +383,7 @@ Confidence: medium - [evidence](evidence/disconnect-releases-every-resource-keye
 Existing check: `tests/lifecycle.rs` covers shutdown before a connection registers; nothing lands shutdown in the post-setup, pre-registration window. The source catalog's `tests/transport_negotiation.rs` reference was removed with that file.
 Impact: a connection retired during shutdown that leaks a permit or charge until the host exits.
 Open questions:
+
 - Which of the setup-phase permits and charges does the `:256-258` early return release directly, and which only through task exit? (needs human input)
 
 ---
@@ -453,6 +456,7 @@ seeded, so `crates/host-runtime/src/connection.rs:381` now seeds the watermark t
 unconditionally, correlations 1 and 2 are not spent, and the guarantee is vacuous
 rather than violated.
 Open questions:
+
 - `crates/host-runtime/src/connection.rs:379-380` still tells a reader that "A
   promoted candidate starts at 2 so application correlations begin at 3
   (§7.7.4)" immediately above the unconditional `= 0` seed, and two further
@@ -536,6 +540,7 @@ Impact: defeats the pre-answer defence the probe design exists to provide. A pee
 that never reads its socket can keep a generation alive by answering pings it
 never received, which is precisely what read-liveness is supposed to detect.
 Open questions:
+
 - Is the absence of the guard on this side an oversight, or is the design comment
   intended to cover it? The comment argues a peer that received bytes but answered
   without reading is indistinguishable from a real answer; that does not cover
@@ -602,6 +607,7 @@ Existing check: none.
 Impact: harmless as written, which is exactly why it should be pinned: the
 shutdown sequence's completeness argument rests on the enumeration being total.
 Open questions:
+
 - Should the watchdog be tracked? That makes its lifetime a stated part of the
   generation's at the cost of one abort handle.
 
@@ -637,6 +643,7 @@ Existing check: none for the forced path.
 Impact: the instance lock is held until the tracker wait completes, so a surviving
 writer blocks a successor incarnation.
 Open questions:
+
 - Is the omission deliberate, so the writer survives the sweep long enough to
   flush terminals and Goodbye? If so the compensating chain belongs in a comment.
 
@@ -672,6 +679,7 @@ but by abort, and no signal distinguishes drained from aborted mid-rendezvous.
 Existing check: none.
 Impact: the graceful-close guarantee degrades to task abort, two timeouts deep.
 Open questions:
+
 - Should the rendezvous carry its own timeout, or is "escaped only by the forced
   sweep" the intended contract? If the latter, the connection task's choice of
   spawn helper is a correctness requirement rather than a style choice.
@@ -914,6 +922,7 @@ spelled out in comments.
 Existing check: the strongest existing check in this scope. Status unaudited.
 Impact: a lost wakeup is a permanently stuck requester holding a pending permit.
 Open questions:
+
 - The source comment at `lifecycle.rs:1769` and the `enable()` calls at `:1750` and `:1776` attribute the guarantee to enabling rather than to creation order; the calls are harmless but the stated rationale disagrees with the Tokio contract. Contract-versus-code note, not resolved here. (needs human input)
 
 ---
@@ -980,6 +989,7 @@ Confidence: high - [evidence](evidence/stopping-precedes-unpublication-on-every-
 Existing check: two tests cover the success path. Nothing covers the failed write.
 Impact: an orderly stop reported to the operator as a fault.
 Open questions:
+
 - Is a failed demotion meant to abort or delay publication removal? The contract
   says MUST demote first without saying what a failed demotion means. (needs human
   input)
@@ -1028,6 +1038,7 @@ permits.
 Impact: the freshness window is an undocumented hard cap on startup and shutdown
 duration, and it is the one value in the pair that cannot be tuned.
 Open questions:
+
 - Should the window scale with the configured budgets, or should the budgets be
   clamped to it? Either couples them; the protocol specifies neither. (needs human
   input)
@@ -1095,6 +1106,7 @@ Status unaudited.
 Impact: a squatter is classified as a live incumbent, which suppresses a
 successor.
 Open questions:
+
 - Are pre-coordination releases trusted by definition? If so, state it; if not,
   the rule needs an unforgeable witness. (needs human input)
 
@@ -1129,6 +1141,7 @@ crate proves the reasons are computed while nothing proves they are conveyed.
 Impact: twelve of thirteen diagnosable causes are indistinguishable to an
 operator, and remediation advice is uniform where the causes are not.
 Open questions:
+
 - Is only the forwarded reason a contract, with the other twelve as pure
   diagnostics? If so they are diagnostics nobody can see. (needs human input)
 
@@ -1168,6 +1181,7 @@ post-hoc tampering, and the quarantine abort. Status unaudited.
 Impact: the profile is the selector that decides which payload the daemon
 executes.
 Open questions:
+
 - Should the exchange-then-revalidate window be crash-tested? Whether any reader
   can observe the intermediate was not established.
 
@@ -1203,6 +1217,7 @@ Existing check: partial; the fixed instances have regression tests. Nothing
 prevents a third instance.
 Impact: two separate shipped defects from one class, and the class was never swept.
 Open questions:
+
 - How many more instances exist? A sweep of every pathname-based call in the store
   would settle it.
 
@@ -1270,6 +1285,7 @@ Existing check: none.
 Impact: the two forward-compatibility thresholds that must agree do not, and the
 code says they do.
 Open questions:
+
 - Should the two caps be unified, or should the guarantee be invalidated and each threshold documented on its own? Until decided, the check fails. (needs human input)
 
 ### every-declared-cli-reason-id-has-a-producer
@@ -1307,6 +1323,7 @@ native error classification uses the declared vocabulary.
 Impact: an operator-facing diagnosis exists but the native layer cannot emit it, so
 the same root cause produces different advice depending on which layer noticed.
 Open questions:
+
 - For the 13 declared ids with no Rust producer, is the intent that the
   TypeScript policy layer owns them entirely? A partial survey found producers for
   some; no count is asserted. (needs human input)
@@ -1504,6 +1521,7 @@ transport is not yet chosen, which is the one thing section 7.7 exists to
 forbid. A routed dispatch there would run handler code the client can then be
 told to reach over a different transport.
 Open questions:
+
 - Should a premature oversize control declaration receive the section 7.1
   authoritative terminal before retiring, or does the setup gate correctly
   outrank it? The code chooses the gate (`:430` refuses before any emission),
@@ -1596,6 +1614,7 @@ Impact: divergence makes the negotiation-first gate non-uniform for exactly one
 frame class, which is the shape the `Pong` hole already has. This record is the
 structural reason that hole is easy to create.
 Open questions:
+
 - Is the inline copy at `:642-645` deliberate, for example to keep
   `handle_control` independent of a `connection.rs`-private helper, or is it
   incidental duplication? (needs human input)
@@ -1656,6 +1675,7 @@ reading the document forbids a frame the host itself solicits. A test author
 picking either side without a decision would encode a guess as a regression
 test.
 Open questions:
+
 - Should the document drop `Pong` from the retirement list at `:562`, or should
   liveness probing be deferred until a selection commits? (needs human input)
 - If probing is deferred, does the setup deadline
@@ -1718,6 +1738,7 @@ permanently suppresses the client's re-upgrade probe, so a transport that would
 recover in seconds stays unused for the life of the connection. The panic
 mapping has the same effect for a provider whose preflight is merely buggy.
 Open questions:
+
 - Should a panicking preflight be observably different from permanent absence,
   for example through a host-side event, given that the wire reason must stay
   reasonless per the KTD6 comment at `:906`? (needs human input)
@@ -1830,6 +1851,7 @@ Impact: silent stream desynchronization with an `Ok` return. `k` body bytes are
 parsed as the next header, so a peer's body content chooses the host's next
 header, and the frame handed up contains `k` bytes that are not its body.
 Open questions:
+
 - Should `read_body` take `&mut Vec<u8>` at all? The client wrapper already
   owns its allocation (`client.rs:2003`), so only the host's forwarding wrapper
   needs the out-parameter. Either clearing `buf` on entry, asserting
@@ -1883,6 +1905,7 @@ cannot discriminate either. Status unaudited.
 Impact: a hot spin for the whole frame deadline on every orderly mid-frame
 close, plus a close reason that blames a slow peer for a clean disconnect.
 Open questions:
+
 - `read_body`'s EOF detection depends on `bytes`' `BufMut for Vec<u8>` growing
   on demand. Should that dependency be pinned by a comment or an assertion at
   `frame_read.rs:89`? A buffer type with fixed remaining capacity would
@@ -1932,6 +1955,7 @@ Impact: a resumed read parses body bytes as a header. Every downstream identity
 decision - correlation, channel, epoch, frame type - is then made from
 attacker-chosen bytes on a stream the host believes is aligned.
 Open questions:
+
 - The obligation is not written down. `frame_read.rs:5-8` assigns short-read
   *policy* to the callers but never states that no resume is permitted. Should
   the module doc state it, given that the type system cannot? (needs human
@@ -1990,6 +2014,7 @@ resident-byte budget. Those bytes are also unobserved: `drain` never touches
 the `CopyCounter`, whose only producers are `frame_channel.rs:376` and
 `shm_provider.rs:611`, so no counter in the crate sees them.
 Open questions:
+
 - Is the unbudgeted cost acceptable, or should the drain hold a nominal charge
   or a dedicated permit? The zero-budget property is deliberate and correct as
   a *resident-memory* property (never buffer the body); the open question is
@@ -2044,6 +2069,7 @@ code consumes, and even if the branch fired, `read_active_frame` returns
 discards the realignment. If the branch ever does fire it signals a real
 regression in the reader-exclusive reservation, and nothing would report it.
 Open questions:
+
 - Should the branch keep its drain, or return the error directly? The drain's
   only stated purpose is a realignment the sole caller discards. Removing it
   would delete the client's only `frame_read::drain` call site and make the
@@ -2107,29 +2133,30 @@ same inputs as round 1; (b) with `invalidate_on_missed: true`, answer nothing,
 advance to `write_completion + pong_deadline`, and assert `gen.token` is
 cancelled; and assert it is *not* cancelled at `write_completion +
 pong_deadline
-- 1ns`. `always` because the two directions are the dual outcomes of one
+
+- 1ns`.`always` because the two directions are the dual outcomes of one
   predicate, `expired` at `connection.rs:755-760`, and both must hold at
   every evaluation of the loop.
 Fault/timing angle: the bound is stated in the units the code bounds, so this
 is a finite check rather than an unbounded "eventually". The wake is the
-minimum of the next tick and the earliest `probe.sent + pong_deadline`
-(`connection.rs:741-749`); expiry is `>= pong_deadline` from `probe.sent`
-(`:755-760`); the tick re-arms at `now + ping_interval` (`:779`).
+minimum of the next tick and the earliest`probe.sent + pong_deadline`
+(`connection.rs:741-749`); expiry is`>= pong_deadline` from `probe.sent`
+(`:755-760`); the tick re-arms at`now + ping_interval`(`:779`).
 `config.rs:370-382` rejects a zero value for either, so both bounds are
 strictly positive in any accepted configuration. The subtle part is which
 instant `probe.sent` holds: the insert at `:783-792` records the enqueue
-instant with `written_at: None`, and the write-completion hook at `:810-820`
-overwrites it with `completed_at`. Probes with `written_at: None` are excluded
+instant with `written_at: None`, and the write-completion hook at`:810-820`
+overwrites it with `completed_at`. Probes with`written_at: None`are excluded
 from both the deadline wake (`:745`) and the expiry scan (`:758`), so
 queueing delay neither expires a probe nor arms one. Both halves need paused
 time; wall-clock sleeps cannot distinguish the boundary from scheduler noise.
-Required faults and enabling state: a configured `LivenessPolicy`, which no
+Required faults and enabling state: a configured`LivenessPolicy`, which no
 shipped configuration supplies. For (a) a cooperative peer, which the in-crate
-duplex harness at `connection.rs:1480` (source-catalog line, not present at HEAD; the duplex harness lives in the crate's test module) onward already provides. For (b) a peer
+duplex harness at`connection.rs:1480` (source-catalog line, not present at HEAD; the duplex harness lives in the crate's test module) onward already provides. For (b) a peer
 that reads but never sends a Pong, plus `invalidate_on_missed: true`. Paused
 tokio time for both. No adversary and no concurrency campaign.
 Confidence: high - [evidence](evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md).
-Every bound was read at HEAD and the two `sent` anchors were traced through
+Every bound was read at HEAD and the two`sent` anchors were traced through
 both writers of the field.
 Existing check: partial. `tests/client.rs:97-145` covers direction (a) with an
 indirect oracle, and is the only place in the crate where a full client answers
@@ -2222,6 +2249,7 @@ generations to egress backpressure. The failure looks like a transport reset to
 both sides, and per `authentication-and-capacity-rejections-are-observable`
 there is no channel to report it.
 Open questions:
+
 - Is retiring on Ping admission timeout intended? The admission timeout is a
   general frame-channel policy and the Ping is an ordinary caller of it, so
   this reads as an unnoticed interaction rather than a decision. If it is
@@ -2339,6 +2367,7 @@ every retained generation carrying the moved field, refusing payloads that are
 byte-for-byte intact. That is the forward-compatibility break the `Option` on
 `source_payload_manifest_sha256` was introduced to prevent.
 Open questions:
+
 - Should the canonical encoding be decoupled from declaration order, for
   example by an explicit field-order list or a canonical-JSON serializer, so
   the contract is stated once rather than implied by the struct? The current
@@ -2406,6 +2435,7 @@ behaves differently on APFS than `RENAME_EXCHANGE` on ext4, the failure mode is
 deleting a retained generation, on a platform whose lifecycle code the suite
 never runs.
 Open questions:
+
 - Is macOS a supported deployment target for the lifecycle store, or only a
   development platform? The cfg arm still carries the macOS path in source,
   but after PR #131 (merge `5d638e3e8`) no CI job builds or runs it. That
@@ -2474,6 +2504,7 @@ enforced by the kernel on Linux and by a prose argument on macOS. A defect here
 destroys a retained generation, which is the outcome the protection check
 exists to prevent.
 Open questions:
+
 - Does anything outside the trust model have write access to the generations
   directory in a real deployment? The lock argument is sound if and only if the
   answer is no, and the store's validation path assumes the answer is yes.
@@ -2482,6 +2513,7 @@ Open questions:
   it needs a real no-replace primitive; if it is not, the fallback is dead code
   on every supported platform and the stub at `:1200-1205` is the honest shape.
   (needs human input)
+
 ---
 
 ## Deferred candidates
@@ -2505,7 +2537,6 @@ follow-up pass, with their lens evidence retained:
 - Platform and drift records: the directory-enumeration backend divergence, the
   relative data-root CWD anchor, the two-fence coupling at creation, the
   probe's undocumented blocking budget, the exported-type stability question.
-
 
 ## Sub-part 2b catalog: the ring datapath in the host
 
@@ -2537,8 +2568,8 @@ commits carry it, all dated 2026-08-30 and all verified by
 | `ed487e11` | `refactor(host): make ring transport mandatory` |
 
 Provenance: source catalogs in the host repo at `39e823037`; see [../README.md](../README.md). System
-`the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`
+`the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`,`HEAD` = `e447c927`
 ("refactor(shm): trim final review leftovers"). Both lens agents read and
 verified their line references at that commit, and this synthesis re-verified
 every citation it repeats. Scope and CI findings come from
@@ -2899,6 +2930,7 @@ control page, which the transport's `try_receive` would surface as descriptor
 validation failure and quarantine at best, and as torn payload delivery at
 worst.
 Open questions:
+
 - Should `PreparedRing` carry a negative marker, or a compile-fail doctest like
   the two on `frame_channel::ReceiveLease` (`frame_channel.rs:296-308`), so the
   confinement is enforced rather than reviewed?
@@ -2970,6 +3002,7 @@ of those callers, and they still discard it. So Part 1's
 producer side, and no re-anchoring of the verdict is needed - only of the line
 numbers, from `shm_provider.rs:365` to `ring_transport.rs:615`/`:628`.
 Open questions:
+
 - Is the producer-side `ReleaseIdentity` return value intended to stay unused?
   If so, `#[must_use]` on `commit` is currently misleading, and the simpler
   contract would be for `commit` to return `()` and for identities to exist
@@ -3047,6 +3080,7 @@ slot, and the failure presents much later as `RingUnavailable` on an unrelated
 connect with `state: "healthy"` in diagnostics (see
 `ring-a-host-doctor-emits-one-of-five-declared-terminal-classes`).
 Open questions:
+
 - `AdmissionController::release` swallows a `checked_sub` underflow
   (`profile.rs:516-519`). Is a double release meant to be silent, or should it
   be a detectable accounting fault?
@@ -3114,6 +3148,7 @@ this record and
 can both be right, because one requires the charge to come back on every exit
 and the other asks whether a condemned ring is an exception.
 Open questions:
+
 - Is the missing quarantine caller a deferred feature or a decision that the host never quarantines? The transport document says the former; the record's second clause fails until one of them is implemented or the document changes. (needs human input)
 - Was host-side quarantine accounting deliberately dropped with
   `provider_recovery.rs`, or lost? Part 1's
@@ -3179,6 +3214,7 @@ queued frames (`connection.rs:315-318`), which is the correct handling for a
 peer-caused close but means a host-caused close also produces no terminal, so
 every pending correlation becomes `outcome_unknown` with no recorded reason.
 Open questions:
+
 - Should `publish_one` carry a cause enum rather than `()`? The information
   exists at each of the four failure sites and is discarded at `:588-590`.
 - Is the asymmetry between `:535-537` (`Corrupt`) and `:479-484` (`CleanEof`)
@@ -3238,6 +3274,7 @@ deadline, so the connection degrades over `frame_deadline` per frame rather than
 retiring, and diagnostics records nothing at all: no `peer_death`, no
 `exhaustion`, and `state: "healthy"`.
 Open questions:
+
 - Should `:591`'s `COMPLETE` store move after the hooks, or should the hooks
   move inside the inner `catch_unwind`? The two answers differ on whether a
   hook panic should retire the connection.
@@ -3297,6 +3334,7 @@ all refuses every connection while reporting `state: "healthy"` with all five
 counters at zero, and the client sees only `setup_failed`. That is a silent
 total outage of the only datapath.
 Open questions:
+
 - Should `RingUnavailable` carry a closed cause class matching the doctor's
   five terminal classes (`docs/shm-transport.md:53-59`)?
 - On the `prepare` timeout path, should the connection task cancel the ring it
@@ -3367,6 +3405,7 @@ Impact: the exact metric a release gate would read as proof that charges came
 back can be incremented before they did. The gate would pass on a host that is
 in fact still holding the charge.
 Open questions:
+
 - Should `record_reclamation` move onto the endpoint thread, immediately after
   `admission.release()`, so the counter is release-witnessed by construction?
 
@@ -3470,6 +3509,7 @@ classifier only ever sees a terminal condition when its *own* call fails. A host
 that is unhealthy but still answering produces no terminal class from either
 side.
 Open questions:
+
 - The five-class taxonomy is the client's, and the doc attributes it to
   `eidnara daemon doctor`. Should the host's `diagnostics()` also derive a
   class from its own counters, so an unhealthy-but-answering host is
@@ -3566,6 +3606,7 @@ the ring was quarantined rather than merely overloaded, and that matters because
 `ReadExit::Peer`, so the gap is latent and becomes live only if that taxonomy is
 split.
 Open questions:
+
 - Should the `Overloaded` and `Cancelled` paths release explicitly and upgrade a
   release failure to `Corrupt`? Investigation found this buys nothing until
   `connection.rs:401-404` stops collapsing the two causes into one `ReadExit`,
@@ -3694,6 +3735,7 @@ the window in which a retiring connection still holds its full admission
 charge, which is exactly the pressure that turns an ordinary retirement into
 `RingUnavailable` for the next connect.
 Open questions:
+
 - Does `read_loop` stop draining the inbound channel promptly on
   `read_cancel`, closing the channel and bounding this window? That is in
   Part 2a's `connection.rs` scope and I did not resolve it. Until it is resolved,
@@ -3789,6 +3831,7 @@ observing the `Corrupt`-versus-`CleanEof` asymmetry in
 `ring-a-publish-failure-is-reported-as-a-clean-peer-close`, so leaving it
 unreached leaves both unfalsifiable.
 Open questions:
+
 - Should `receive_one` distinguish "ring empty" from "leases saturated"? Both
   arrive as `Ok(None)` from `try_receive` (`ring.rs:1063-1068`, `:1073-1074`)
   and both collapse to `Ok(false)` at `:500-501`. Investigation found this is
@@ -3859,6 +3902,7 @@ promise is satisfied vacuously, since there is no separate body to truncate,
 but the engine still carries the machinery that would have honoured it. The
 risk is not a current defect; it is that the dead arm looks like coverage.
 Open questions:
+
 - Should `RejectedDrainFailed` and `Io` be removed, or retained for a future
   transport? Removing them would make Part 2a's drain records genuinely closed
   rather than superseded.
@@ -3904,6 +3948,7 @@ descriptor and header before exposing a scoped lease", which is true of the
 transport but not of the host boundary: the host exposes a lease over its own
 copy.
 Open questions:
+
 - Is the segmented path intended to return, or should
   `InboundFrame::segmented`, `ReceiveBody::Segmented`, and
   `frame_channel::LeaseTracker` be deleted together? `LeaseTracker`
@@ -4178,6 +4223,7 @@ variable-length slice - a coalescing reader, a batched shared-memory descriptor,
 a future version with a shorter header - the constant indexes become the only
 thing between a peer and a panic in the read loop.
 Open questions:
+
 - Should `header_len_for_version` be required to return at least the largest
   constant index used by the parse body, so a future version cannot silently
   make the parse out of bounds? (needs human input)
@@ -4236,6 +4282,7 @@ independently written codec can interoperate. A drifted offset that still
 satisfies the eleven gates produces a frame both sides accept and interpret
 differently.
 Open questions:
+
 - Should `encode` and `decode_header` be generated from one offset table so a
   transposition is impossible by construction? (needs human input)
 
@@ -4390,6 +4437,7 @@ The document shrank from 1,031 lines to 936 and that sentence was rewritten;
 both its clean-close and its retirement clauses now sit in `:296`. `:293` is
 blank at `HEAD`.
 Open questions:
+
 - Should the encoders validate, or should the illegal region be made
   unconstructible by removing the public field from `Flags` and by giving
   pure-header types a body-free encoder? (needs human input)
@@ -4397,7 +4445,6 @@ Open questions:
   encoder that takes `&[u8]` rather than an owned body, and its existence means
   the contract-test suite exercises an encoder the production path never uses.
   (needs human input)
-
 
 ## Part 2c catalog: the authenticated setup socket and peer identity
 
@@ -4419,8 +4466,8 @@ listener and the handshake bound live there), `ring_transport.rs:636-656` and
 
 Provenance: source catalogs in the host repo at `39e823037`; see [../README.md](../README.md). Method contract in
 [../METHOD.md](../METHOD.md). Code read from
-`the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`
+`the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`,`HEAD` = `e447c927`
 ("refactor(shm): trim final review leftovers"). Both lens agents read and verified
 their line references at that commit, and this synthesis re-opened every reference
 it restates in its own prose.
@@ -4750,7 +4797,6 @@ Part 1 established the whole object is mapped `PROT_READ|PROT_WRITE` with no
 arbitrary write access to host transport state, not merely disclosure.
 Open questions: None.
 
-
 ### setup-a-mapping-authority-derives-only-from-the-key-never-from-the-token
 
 Type: safety
@@ -4801,11 +4847,11 @@ example - would be relying on a check that runs after the asset is gone, and the
 message order makes that mistake easy to make and hard to see. That is what this
 record protects against, and it is the whole of its claim.
 Open questions:
+
 - Was descriptor-before-validation chosen so the host need not hold the ring
   while waiting on a peer round trip, or is it incidental? Reordering to
   `Activate`-then-grant would make the token a real gate, at the cost of one
   extra round trip inside the setup deadline. (needs human input)
-
 
 ### setup-a-an-activation-token-is-scoped-to-the-connection-that-minted-it
 
@@ -4841,10 +4887,10 @@ comparison were always-true, activation would stop distinguishing the peer that
 received a grant from any other authenticated peer, and the doc's "one-use
 activation token" (`host-wire-protocol.md:561`) would be vacuous.
 Open questions:
+
 - The token is compared but never *consumed* into any store. "One-use" holds only
   because each connection mints its own. Is that the intended reading of
   `host-wire-protocol.md:561`? (needs human input)
-
 
 ## Group S2: credential freshness and the two directions of proof refusal
 
@@ -4895,10 +4941,10 @@ Impact: if the nonce ever became derived, fixed, or counter-based, one observed
 transcript would become a permanent credential for that incarnation, and it would
 still satisfy the existing test if the counter merely incremented.
 Open questions:
+
 - `client_nonce` is unchecked. Should the host reject an all-zero or repeated
   client nonce, or is server-nonce freshness genuinely sufficient? The doc claims
   sufficiency at `host-wire-protocol.md:177`. (needs human input)
-
 
 ### setup-a-credentials-do-not-survive-a-host-incarnation
 
@@ -4933,10 +4979,10 @@ Impact: without per-incarnation rotation, an old snapshot would be a permanent
 bearer credential, and `daemon_ver` fencing (`auth.rs:346-348`) would be the only
 thing distinguishing incarnations.
 Open questions:
+
 - Where are the two bootstrap tests named at `auth.rs:390-392`? Not found in
   `crates/host-runtime/tests/` in this pass. Locating them changes this record's
   `Existing check` line. (unresolved, needs a repository-wide test search)
-
 
 ### setup-a-a-rogue-listener-at-the-published-path-obtains-no-client-proof
 
@@ -4973,11 +5019,11 @@ Impact: this is the only thing standing between a same-uid squatter and a peer's
 connecting. A leaked `ClientAuth` is not directly a credential, since it is
 nonce-bound, but it is an oracle on the key.
 Open questions:
+
 - Should the peer stat the socket for owner and mode before connecting, as the
   connection-file reader already does for the file (`connection_file.rs:267-287`)?
   It would be defence in depth over a check the mutual proof already carries.
   (needs human input)
-
 
 ## Group S3: the socket as a filesystem object
 
@@ -5032,10 +5078,10 @@ worth holding because the socket's own mode is the layer a reader would believe,
 and a future change that moves the socket out of the `0700` directory would
 inherit an unprotected window.
 Open questions:
+
 - Would binding through a temporary name and `renameat` into place, or setting
   the umask around the bind, be preferred to relying on the parent directory?
   (needs human input)
-
 
 ### setup-a-a-hostile-occupant-of-the-socket-path-fails-closed
 
@@ -5074,10 +5120,10 @@ the host adopt and then unlink an attacker-planted object, or bind over a live
 socket. The conjunction is exactly the shape that passes for the wrong reason
 when one clause is dropped.
 Open questions:
+
 - The stale-socket branch removes and rebinds. Is there a case where the occupant
   is a *live* socket of a still-running incarnation that lost its lock, and
   should the instance lock be consulted before the unlink? (needs human input)
-
 
 ## Group S4: bounded unauthenticated work, abandoned setups, and the sentinel
 
@@ -5150,11 +5196,11 @@ Impact: without the bound an unauthenticated peer drives unbounded task and
 descriptor growth. `host-wire-protocol.md:161` states the requirement as a
 MUST, and the code satisfies it; the residual is the class-crossing window.
 Open questions:
+
 - Should the 2-second post-auth setup window have its own bound rather than
   sharing `max_connections`? Sixty-four concurrent stalled setups each hold a
   prepared ring, which is 128 MiB of arena per connection by
   `host-shm-transport.md:77`. (needs human input)
-
 
 ### setup-a-an-abandoned-setup-strands-no-ring-charge
 
@@ -5217,7 +5263,6 @@ stranded today, it is that the only thing returning it on that exit is a
 channel-closure side effect three files away, which a refactor that gave the
 endpoint thread another sender clone would silently remove.
 Open questions: None.
-
 
 ### setup-a-a-stalled-setup-is-torn-down-within-the-transport-setup-deadline
 
@@ -5310,10 +5355,10 @@ concurrent stalled setups each hold a prepared ring. Whether that is 2 seconds o
 exposure or unbounded exposure is exactly this record, and nothing else in the
 catalog states it.
 Open questions:
+
 - Should the post-grant exchange have a tighter deadline than the pre-grant one?
   Both halves currently share `transport_setup_deadline`, but only the post-grant
   half holds a prepared ring. (needs human input)
-
 
 ### setup-a-the-peer-lifetime-sentinel-allocates-under-a-cap
 
@@ -5351,10 +5396,10 @@ Impact: the cap is the only thing between a post-commit peer and a 4 GiB
 allocation, on a read that has no deadline at all, so it is what keeps an idle
 authenticated connection cheap.
 Open questions:
+
 - Should `read_message_unbounded` be renamed to say what it actually is,
   time-unbounded and length-capped? The current name invites the exact wrong
   conclusion, and the re-scope document drew it. (needs human input)
-
 
 ### setup-a-the-peer-lifetime-sentinel-exits-on-cancellation-without-further-peer-input
 
@@ -5418,7 +5463,6 @@ the host's own schedule. Without it, teardown of a connection whose peer has gon
 quiet mid-message depends on the peer, which is the one party a teardown path must
 not depend on.
 Open questions: None.
-
 
 ### setup-a-concurrent-setup-saturation-is-reached
 
@@ -5529,11 +5573,11 @@ alias and replay-claim checks into the native boundary, so the native side is no
 the stronger one. The weaker boundary is the managed Rust client. Part 1's record
 should be re-read with that in mind rather than assumed still-oriented.
 Open questions:
+
 - Can an aliased grant pair actually arise? The only producer is
   `ring_transport.rs:324-327`, which encodes two distinct rings, so today this is
   latent. It becomes live under a rogue or impersonating host, which is the
   threat model this lens is written against.
-
 
 ### setup-a-only-an-authenticated-grant-enters-the-native-channel-registry
 
@@ -5604,13 +5648,13 @@ authenticated to hold this ring" is unsound for in-process callers. That is the
 consequence worth protecting against regression, and it is why this record stays
 in the catalog after the narrowing.
 Open questions:
+
 - Is `attach` intended as production surface, test surface, or a
   worker-thread re-attach path? `create_test_pair` at `lib.rs:631` suggests the
   test reading. If it is test surface, the check strengthens to a build-time
   assertion that the shipped addon does not export it, which is Part 1's
   neighbouring record; if it is production surface, the narrowed guarantee above
   is the strongest form available. (needs human input)
-
 
 ## Relationship map
 
@@ -5765,7 +5809,6 @@ executes anywhere, so nothing here has been measured.
   conclude that no bound existed. The bound is cancellation, and cancellation is
   observable.
 
-
 ## Sub-part 2d catalog: the host's own client as a protocol peer
 
 Scope: the client the host crate ships and that production binaries use to speak
@@ -5802,8 +5845,8 @@ subjects were re-verified with `git log -1` at authoring time:
 negotiation request that owned correlation 1 is gone.
 
 Provenance: source catalogs in the host repo at `39e823037`; see [../README.md](../README.md). System
-`the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`
+`the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`,`HEAD` = `e447c927`
 ("refactor(shm): trim final review leftovers"), confirmed with
 `git branch --show-current` and `git log -1`. Both lens agents read and verified
 their line references at that commit. Scope and CI findings come from
@@ -6063,7 +6106,7 @@ them `default-production` on four facts, and the first two still hold here:
    (`:378`), then `RingClientEndpoint::attach_with_descriptors` (`:1855`,
    defined `ring_transport.rs:636`). None is `cfg`-gated.
 3. The production callers the source catalog cited, `crates/daemon/src/bin/eidnara-host.rs`
-   and `ManagedConnector::connect` in `crates/daemon/src/historian_producer.rs`, are
+   and `ManagedConnector::connect` in `crates/daemon/src/history_summarizer_producer.rs`, are
    not in this tree: `crates/daemon` is scheduled for U4 (`docs/properties/README.md:52`),
    and a workspace-wide search finds `Client::connect` only in `crates/host-runtime/tests/`
    and benches. Public visibility without a shipped caller is `test-only` under
@@ -6132,7 +6175,7 @@ mean the client retains no diagnosis of its own death.
 ### client-a-a-retired-generation-forgets-why-it-retired
 
 Type: safety
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test asserts what a caller arriving after retirement can
 learn about the cause
@@ -6163,6 +6206,7 @@ fault after the fact. Combined with Part 2b's finding that the host reports
 itself healthy on ring unavailability, neither side of the connection retains the
 diagnosis.
 Open questions:
+
 - Should `Inner` carry a `retire_cause: OnceLock<&'static str>` so late callers
   get the real code? This changes the public `CallError` code set, so it is a
   compatibility decision. (needs human input)
@@ -6170,7 +6214,7 @@ Open questions:
 ### client-a-a-clean-host-close-and-a-transport-failure-share-one-code
 
 Type: safety
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test drives the bridge thread's four distinct break paths
 and compares the resulting caller-visible code
@@ -6203,6 +6247,7 @@ that wants to back off on transport faults but reconnect promptly on a host
 reload has no signal to branch on, and Part 2b established the host's own
 diagnostics are equally silent, so the fault is invisible from both ends.
 Open questions:
+
 - Does a healthy host emit a channel-0 Goodbye before its ring closes?
   `docs/host-wire-protocol.md` step 4 of graceful shutdown says the host sends
   best-effort connection Goodbye after the drain, which would give
@@ -6229,7 +6274,7 @@ unconditionally, which is not the same as delivered.
 ### client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye
 
 Type: safety
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test observes the setup socket after a forced ring failure
 Guarantee: The client's setup-socket departure signal does not distinguish a
@@ -6279,6 +6324,7 @@ a fleet of well-behaved clients. Whether both conditions hold on a ring fault is
 a 2b question about which side observes the collapse first, and it is the
 difference between a metric that is wrong and a metric that is merely unproven.
 Open questions:
+
 - Should the bridge thread suppress the goodbye on its failure `break`s so the
   host classifies correctly? That makes a transport fault look like an abrupt
   EOF, which is the honest signal. (needs human input)
@@ -6291,7 +6337,7 @@ Open questions:
 ### client-a-a-close-completes-before-its-setup-goodbye-is-written
 
 Type: reachability
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - nothing constructs the ordering, but the thread's *exit* is
 observed in CI by `tests/shm_soak.rs:54-110`, whose `await_envelope` predicate
@@ -6351,6 +6397,7 @@ and the protocol requires that teardown be joined (`:691`). The consequence is a
 contract gap and an unbounded-in-principle residency of one thread past a
 successful `close`, not a peer-death miscount.
 Open questions:
+
 - Should `Inner` hold the bridge thread's `JoinHandle` so `close` can join it
   under the same 5-second budget? That budget is already shared with route
   teardown. (needs human input)
@@ -6377,7 +6424,7 @@ that a regression has something to violate.
 ### client-a-every-in-flight-request-is-settled-with-a-classified-send-outcome
 
 Type: safety
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - `dropped_unary_future_cleans_pending_and_possibly_sent_request`
 (`client.rs:3090`) and
@@ -6415,7 +6462,7 @@ Open questions: None.
 ### client-a-no-request-frame-carries-a-non-increasing-correlation
 
 Type: safety
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - `max_correlation_is_used_once_then_exhausted`
 (`client.rs:2328`) and
@@ -6467,7 +6514,7 @@ anything name the probe as the thing that failed.
 ### client-a-a-failed-pong-enqueue-retires-the-generation-as-a-local-fault
 
 Type: safety
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - `a_ping_at_any_valid_priority_is_answered_with_an_exact_flag_echo`
 (`client.rs:2754`) covers the success path, and
@@ -6514,6 +6561,7 @@ records that a host liveness probe went unanswered. Part 2a's
 `a-timely-pong-sustains-the-generation-within-a-bounded-round` is the host-side
 property, and the two ends disagree about what happened.
 Open questions:
+
 - Is escalating one unanswerable probe to a full-generation retirement the
   intended policy? The comment at `:1336-1339` argues the reserved-pool choice so
   that ordinary request traffic cannot cause it, which makes exhaustion a real
@@ -6524,7 +6572,7 @@ Open questions:
 ### client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget
 
 Type: liveness
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test stalls inbound delivery and measures Pong egress
 Guarantee: Once inbound delivery backpressures, an enqueued Pong waits on the
@@ -6552,6 +6600,7 @@ Impact: Whether the host retires the generation first depends on its probe
 interval against 30 seconds. If the probe is shorter, an inbound stall presents
 to the operator as a liveness failure rather than as backpressure.
 Open questions:
+
 - What is the host's probe interval and deadline? Part 2a owns the liveness
   probe; the comparison against `CLIENT_FRAME_TIMEOUT` needs that number.
   (unresolved, needs the 2a figure)
@@ -6572,7 +6621,7 @@ and one about what an entry means.
 ### client-a-live-route-handles-are-bounded-only-by-the-host
 
 Type: safety
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test opens routes to exhaustion
 Guarantee: The client imposes no limit on concurrently live route handles, so the
@@ -6596,6 +6645,7 @@ shape this catalog has found in every part. Here the damage is transitive: each
 entry corresponds to a host channel and route permit, so a looping caller
 exhausts host resources rather than its own.
 Open questions:
+
 - Does the host cap concurrent routes per generation, and does it answer
   `target_unavailable` on exhaustion as `docs/host-wire-protocol.md:658`
   implies? If so the transitive bound is real, though undeclared on this side.
@@ -6604,7 +6654,7 @@ Open questions:
 ### client-a-a-duplicate-host-bind-collapses-two-routes-into-one-handle
 
 Type: safety
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - `a_duplicate_bind_terminal_never_closes_an_owned_route`
 (`client.rs:3587`) covers the unmatched-terminal case, not two successful opens
@@ -6633,6 +6683,7 @@ B's requests with `route_gone`. Part 2c established that epochs are host-minted
 and that the activation token cannot gate mapping, so the client has no
 independent basis to reject a repeated handle.
 Open questions:
+
 - Should `open_route` retire on a duplicate handle, the way it already retires on
   an unparseable one (`:486`)? Both are host protocol violations the client
   cannot name a remedy for. (needs human input)
@@ -6657,7 +6708,7 @@ host-side fact remains open.
 ### client-a-host-shutdown-success-rests-only-on-a-json-echo
 
 Type: safety
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test supplies a well-formed echo from a host that did not
 stop
@@ -6688,6 +6739,7 @@ acknowledgement gates a lifecycle owner's belief that a daemon stopped, which is
 the precondition for starting a replacement. A stale echo could produce two live
 daemons.
 Open questions:
+
 - Does the host emit the `host.shutdown` response strictly after its stop is
   committed, as `:575` claims? That is a 2a or 2e claim about the host's control
   handler and is not verifiable from `client.rs`. (unresolved, needs the
@@ -6700,7 +6752,7 @@ Open questions:
 ### client-a-route-open-retries-treat-four-host-terminals-as-proof-of-no-bind
 
 Type: safety
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: not yet - no test counts host-side binds across a retried `open_route`
 Guarantee: `open_route` retries after four specific host terminal codes on the
@@ -6731,7 +6783,7 @@ installs the bind and emits the `route.open` success response (`:1178-1193`).
 any bind exists or after it is cleaned: `unknown_module` and `target_unavailable`
 are pre-bind classification (`control.rs:15-16`, with capacity exhaustion
 documented "without any handler bind" at `routing.rs:112`), and
-`module_reloading` is a handler bind rejection (`synapse/mod.rs:960-963`) that
+`module_reloading` is a handler bind rejection (`local_embeddings/mod.rs:960-963`) that
 takes the `Reject` arm. `module_timeout`, the code the original record's recipe
 was built on, appears nowhere in the tree outside this client's own allowlist
 (`client.rs:518`), verified by grep.
@@ -6766,6 +6818,7 @@ this side is the dead allowlist entry: `module_timeout` can only ever be produce
 by a peer that is not this host, so the client retries on a code its own host
 never sends.
 Open questions:
+
 - Should the client's retry allowlist be derived from, or checked against, the
   host's emitted code set? They are independent literals today, and one of the
   four has no producer. (needs human input)
@@ -6790,7 +6843,7 @@ directions, and because this synthesis's correction above bears on both.
 ### client-a-a-host-originated-cancel-retires-the-generation
 
 Type: safety
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - `inbound_validation_enforces_the_direct_profile_table`
 (`client.rs:2658`) exercises `validate_inbound` broadly but does not assert the
@@ -6821,6 +6874,7 @@ Impact: If a host ever emits `Cancel`, every route on the generation dies. If a
 host never does, the strictness is free and the finding is a documentation defect
 rather than a code defect. Which of those holds is the open question.
 Open questions:
+
 - Is host-originated `Cancel` legal in this profile?
   `docs/host-wire-protocol.md:269` enumerates role-invalid frames and omits
   `Cancel`, while `:280` gives `Cancel` a no-op disposition without naming a
@@ -6847,7 +6901,7 @@ Open questions:
 ### client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production
 
 Type: reachability
-Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and historian consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
+Reachability: test-only - `Client::connect` (`crates/host-runtime/src/client.rs:306`) has no caller outside `crates/host-runtime` tests and benches in this tree; the daemon and history_summarizer consumers the source catalog cited are scheduled for U4 (`docs/properties/README.md:52`). The path carries no `cfg` gate and is reached by every test client, so reclassify to `default-production` in the wave that lands a production caller.
 Status: active
 Exercised: partial - reached only by the test module's 15 direct `dispatch` calls (the source catalog said 16; grepping the test module finds 15)
 Guarantee: `dispatch`'s catch-all retirement arm is unreachable from the
@@ -6889,6 +6943,7 @@ zero CI-executed source-resident checks, its six CI-executed `tests/client.rs`
 tests touch none of these records directly, and the thread-count assertions in
 `tests/shm_soak.rs` and `tests/shm_failure_modes.rs` reach only the *termination*
 half of the close-ordering record, never its ordering.
+
 - **One erased cause, read from four sides.**
   [client-a-a-retired-generation-forgets-why-it-retired](#client-a-a-retired-generation-forgets-why-it-retired),
   [client-a-a-clean-host-close-and-a-transport-failure-share-one-code](#client-a-a-clean-host-close-and-a-transport-failure-share-one-code),
@@ -6959,7 +7014,6 @@ half of the close-ordering record, never its ordering.
   contract question that no refactor answers, and the document is ambiguous
   (`docs/host-wire-protocol.md:269` versus `:280`).
 
-
 ## Sub-part 2e catalog: admission, dispatch, and the response obligation
 
 Scope: what admits a request, what guarantees it gets a response, and what
@@ -7002,8 +7056,8 @@ the normative document, and it is the sharpest disagreement in the sub-part:
 see the fifth lead below.
 
 Provenance: source catalogs in the host repo at `39e823037`; see [../README.md](../README.md). System
-`the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`, confirmed with
+`the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`,`HEAD` = `e447c927`, confirmed with
 `git log -1`. Both lens agents read and verified their line references at that
 commit. Scope and CI findings come from
 `part-2-rescope/scope-map-and-risk-ranking.md` (a source-tree artifact that was not migrated into this repository).
@@ -7183,9 +7237,9 @@ construction at `runtime.rs:905-912` and defaults at `config.rs:131-132`:
 | Bound | Value | Scope | Acquisition |
 | --- | --- | --- | --- |
 | `task_permits` | `max_handler_tasks` (default 256) minus reservations | host-global, general class | `try_acquire_owned` on the read loop |
-| `reserved_task_permits` | 96 (Broca) | host-global, reserved class | same |
+| `reserved_task_permits` | 96 (ModelExecution) | host-global, reserved class | same |
 | `pending_permits` | `max_pending_requests` (default 1024) minus reservations | host-global, general class | same |
-| `reserved_pending_permits` | 96 (Broca) | host-global, reserved class | same |
+| `reserved_pending_permits` | 96 (ModelExecution) | host-global, reserved class | same |
 
 The acquisition discipline is the part that is unambiguously right and tested:
 `try_acquire_owned` never waits, so the request is rejected pre-dispatch with
@@ -7251,7 +7305,7 @@ source-resident checks.** The 37 in-crate tests are `control.rs` 23,
 none. The 84 integration tests are spread over six binaries whose subject is
 this sub-part - `tests/dispatch.rs` (20), `tests/composite_routing.rs` (16),
 `tests/protocol_vectors.rs` (15), `tests/handler_contract.rs` (12),
-`tests/routing.rs` (12), `tests/broca_protocol.rs` (9). The source repository's CI
+`tests/routing.rs` (12), `tests/model_execution_protocol.rs` (9). The source repository's CI
 named none of them; in this tree all six run under `ci.yml:118` and `:126`. The
 source finding, 121 claim-bearing tests and zero executed by CI, is provenance here.
 
@@ -7363,7 +7417,7 @@ per METHOD rule 4.
 2. **`RouteClass::Reserved` is declared only by a composed component.** The
    comment at `runtime.rs:118-119` says the reserved pools are zero-permit when no
    module declares a reservation. In this tree the only declarer is
-   `BrocaComponent::resources` (`broca/mod.rs:151`), and every `BrocaComponent`
+   `ModelExecutionComponent::resources` (`model_execution/mod.rs:151`), and every `ModelExecutionComponent`
    constructor is called only from `crates/host-runtime/tests/`. `RouteClass` is
    read back by dispatch to pick a permit pair (`dispatch.rs:821`), so
    reserved-class dispatch is live code, but the state that saturates it is
@@ -7621,6 +7675,7 @@ three exits there is no frame at all, so that remedy never triggers and the
 client burns its full 30-second route deadline. Repeated bind panics therefore
 cost one route deadline each.
 Open questions:
+
 - Is the `CloseWins` silent exit reachable on a generation that stays live
   afterwards, or does every producer of that decision also retire the
   generation? `settle_route` is called from host shutdown, so the host is at
@@ -7682,6 +7737,7 @@ unbounded growth. The consequence is a stale `PendingEntry` holding a
 generation, which makes `handle_cancel` for that key a live no-op against an
 already-dead task.
 Open questions:
+
 - Does the forced path always drop the `GenerationCore` immediately afterwards?
   `close_generation` removes the connection at `dispatch.rs:1409-1413` (source-catalog line, not present at HEAD), but
   `force_close_all_routes` does not call it. (unresolved, needs sub-part 2f)
@@ -7750,6 +7806,7 @@ answered. Protocol §10.1 makes an unobserved terminal `outcome_unknown` on the
 client side; the host has no matching classification, so the two ends cannot be
 reconciled after a close.
 Open questions:
+
 - Should routed terminals carry a `written` hook for metering, given the hook
   is a boxed closure per frame? (needs human input)
 
@@ -7793,6 +7850,7 @@ nothing was answered. Combined with Part 2d's finding that a clean host close
 and a transport failure share one code, the client cannot attribute the loss,
 and any effect the handler already applied is invisible to it.
 Open questions:
+
 - Does any production handler use `output_from_writer` with a computed
   `exact_len` that could disagree with its serializer? That is `daemon`'s
   side of the boundary. (unresolved, needs an `daemon` audit)
@@ -7850,6 +7908,7 @@ at publication with `ProducerError::Underfill` rather than at this gate, which i
 territory. The gap here is specifically the owned path, where declared and written
 are the same field and zero is legal.
 Open questions:
+
 - Is a zero-length `Response` a defect or a supported outcome?
   `handler.rs:220-235` does not state the intent, and
   `OutputBuffer::is_empty()` (`:368-370`) exists as public API, which weakly
@@ -7877,7 +7936,7 @@ must construct.
 ### req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs
 
 Type: safety
-Reachability: default-production for the general-class pair, which every routed request through `host_runtime::run` takes; the reserved-class pair is declared only by `BrocaComponent::resources` (`broca/mod.rs:151`), whose constructors have only test callers in this tree, so the reserved half of the bound is exercised only in tests until a production composition declares a reservation.
+Reachability: default-production for the general-class pair, which every routed request through `host_runtime::run` takes; the reserved-class pair is declared only by `ModelExecutionComponent::resources` (`model_execution/mod.rs:151`), whose constructors have only test callers in this tree, so the reserved half of the bound is exercised only in tests until a production composition declares a reservation.
 Status: active
 Exercised: partial - `tests/dispatch.rs:976` and `:1074` prove the two classes
 cannot consume each other; `tests/handler_contract.rs:323` and `:636` prove the
@@ -7887,7 +7946,7 @@ Guarantee: Concurrent handler callbacks are bounded by the class-scoped
 `task_permits` pool, concurrent unsettled requests by the class-scoped
 `pending_permits` pool, both acquired non-blockingly on the read loop before any
 task is spawned, and each class is unreachable from the other.
-Check: `always` - assert that live handler callbacks never exceed the class's task-permit count, that unsettled requests never exceed its pending-permit count, that both acquisitions are `try_acquire_owned` on the reader so exhaustion rejects instead of queueing, and that each route class acquires only from its matching permit pair (`dispatch.rs:821`): with the general pools saturated a reserved-class request is admitted and with the reserved pools saturated a general-class request is admitted, and neither class ever holds a permit from the other pair (`saturated_broca_reserve_cannot_consume_a_general_slot` and `saturated_general_capacity_cannot_consume_the_broca_reserve` in `tests/dispatch.rs` are the existing forms). `always` because all four bounds must hold at every instant.
+Check: `always` - assert that live handler callbacks never exceed the class's task-permit count, that unsettled requests never exceed its pending-permit count, that both acquisitions are `try_acquire_owned` on the reader so exhaustion rejects instead of queueing, and that each route class acquires only from its matching permit pair (`dispatch.rs:821`): with the general pools saturated a reserved-class request is admitted and with the reserved pools saturated a general-class request is admitted, and neither class ever holds a permit from the other pair (`saturated_model_execution_reserve_cannot_consume_a_general_slot` and `saturated_general_capacity_cannot_consume_the_model_execution_reserve` in `tests/dispatch.rs` are the existing forms). `always` because all four bounds must hold at every instant.
 Fault/timing angle: The task permit is released when the handler returns
 (`dispatch.rs:990`, inside the inner task) while the pending permit is held
 across the egress wait (`:933`, in the outer task). Under a slow peer the two
@@ -7898,10 +7957,10 @@ Required faults and enabling state: A client pipelining more requests than
 and the pending count exceeds the task count.
 Confidence: high - [evidence](evidence/req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs.md).
 Verified pool construction at `runtime.rs:905-912`, class selection at
-`dispatch.rs:873-879` from `route_tracker`'s stored class, and Broca's live
+`dispatch.rs:873-879` from `route_tracker`'s stored class, and ModelExecution's live
 96/96 reserved declaration.
-Existing check: `tests/dispatch.rs:976` `saturated_broca_reserve_cannot_consume_a_general_slot`,
-`:1074` `saturated_general_capacity_cannot_consume_the_broca_reserve`,
+Existing check: `tests/dispatch.rs:976` `saturated_model_execution_reserve_cannot_consume_a_general_slot`,
+`:1074` `saturated_general_capacity_cannot_consume_the_model_execution_reserve`,
 `tests/handler_contract.rs:323` `reservations_must_leave_one_general_slot_in_each_pool`,
 `:636` `zero_reservation_handlers_keep_single_pool_admission`. Status unaudited.
 All run in CI through `cargo test --workspace --all-targets` (`ci.yml:118`, `:126`).
@@ -7909,6 +7968,7 @@ Impact: All four pools are host-global, so one connection can hold every general
 permit. Per-connection fairness is not provided at this layer; if it is
 required, it is required somewhere else and nothing here supplies it.
 Open questions:
+
 - Is per-connection handler-capacity fairness owned anywhere? `connection_permits`
   bounds connection count but not per-connection dispatch share. (unresolved,
   needs sub-part 2f's `runtime.rs` and `config.rs` pass)
@@ -7963,6 +8023,7 @@ Impact: Handler-task capacity is reclaimed only by handler cooperation, client
 timeout can hold all 256 general task permits, at which point every other
 route's traffic gets `server_busy` while the host reports itself healthy.
 Open questions:
+
 - Should the host own a request deadline at all, given protocol §11's rule that
   each operation owns exactly one absolute deadline and it assigns the request
   deadline to the client? Adding one would create the multiplied timer §11
@@ -7971,7 +8032,7 @@ Open questions:
 ### req-a-both-admission-classes-and-the-rejection-bound-saturate
 
 Type: reachability
-Reachability: test-only - the reserved class exists only when a composed component declares it, and the only declarer in this tree is `BrocaComponent::resources` (`crates/host-runtime/src/broca/mod.rs:151`), whose constructors are called only from `crates/host-runtime/tests/`. Reserved-pending and reserved-task saturation are therefore reachable only in tests here; reclassify when a production composition declares a reservation.
+Reachability: test-only - the reserved class exists only when a composed component declares it, and the only declarer in this tree is `ModelExecutionComponent::resources` (`crates/host-runtime/src/model_execution/mod.rs:151`), whose constructors are called only from `crates/host-runtime/tests/`. Reserved-pending and reserved-task saturation are therefore reachable only in tests here; reclassify when a production composition declares a reservation.
 Status: active
 Exercised: partial - `tests/dispatch.rs:295`, `:976`, and `:1074` saturate
 pending capacity in both classes. Task-permit saturation and `busy_rejects`
@@ -8002,7 +8063,7 @@ classes. Status unaudited; runs in CI through `cargo test --workspace --all-targ
 Impact: The reserved class exists specifically to survive general-load
 saturation. If reserved *task* exhaustion is never constructed, the carve-out's
 second half is unverified, and `runtime.rs:118-119`'s claim that the reserved
-pools may be "unreachable" would go unchallenged even though Broca makes them
+pools may be "unreachable" would go unchallenged even though ModelExecution makes them
 live.
 Open questions: None.
 
@@ -8065,6 +8126,7 @@ the clients it is trying to shed, while backing off their routed traffic. The
 divergence is not merely unchecked, it is **pinned by a CI-executed test**, so it
 is current intended behaviour unless someone changes both the code and that test.
 Open questions:
+
 - Which code does the protocol intend for a `route.open` during shutdown? §12
   step 1 names `server_busy` for routed requests and is silent on `route.open`;
   §8.3 reserves `target_unavailable` for route admission failures such as
@@ -8107,6 +8169,7 @@ requests, so malformed control traffic degrades application throughput on every
 connection, while a capacity-rejection flood is contained per generation. The
 two attack surfaces have different blast radii for the same client behaviour.
 Open questions:
+
 - Protocol §8.3 says a control request is "one consumer request against the
   global unsettled bound", which the semantic path honours. Is charging
   malformed traffic to the *global* pool rather than a per-generation one the
@@ -8281,7 +8344,7 @@ record. Its `Existing check:` cited
 `tests/composite_routing.rs:1028-1060` for the optional-child health panic on the
 tertiary child. The file is 1,049 lines, so `:1060` overruns the end of the file
 by eleven lines; the test is
-`a_panicking_synapse_health_reports_failing_without_unwinding`, whose
+`a_panicking_local_embeddings_health_reports_failing_without_unwinding`, whose
 `#[tokio::test]` is at `:1028`, whose `fn` is at `:1029`, and which ends at
 `:1049`, the last line of the file. The corrected span is `:1028-1049`. This is
 the one drift the earlier triage did not predict: it recorded that both records'
@@ -8355,7 +8418,7 @@ Existing check: `tests/composite_routing.rs:485-531` pins exactly one
 to stale child ownership. Both run in CI in this tree (`ci.yml:118`, `:126`); the
 unnamed-binary status in [existing-checks.md](request-path/existing-checks.md) is the
 source repository's. Status unaudited. Both spans
-re-verified at carry time: `rejected_broca_bind_gets_exactly_one_broca_route_gone`
+re-verified at carry time: `rejected_model_execution_bind_gets_exactly_one_model_execution_route_gone`
 has its attribute at `:485` and its `fn` at `:486`, and
 `a_closed_route_handle_cannot_dispatch_to_stale_child_ownership` has its attribute
 at `:532` and its `fn` at `:533`.
@@ -8363,6 +8426,7 @@ Impact: a bind path that never yields `route_gone` leaks one map entry per
 connection for the host's lifetime, and the leaked entry keeps routing a reused
 handle to a stale child.
 Open questions:
+
 - Does the host guarantee `route_gone` after a panicking `bind`, or only after
   `Reject` and close? The comment claims all three; the runtime side is outside
   this lens. **Resolved at carry time, and the answer is yes.** The runtime side
@@ -8436,7 +8500,7 @@ run in CI in this tree (`ci.yml:118`, `:126`); the unnamed-binary status in
 [existing-checks.md](request-path/existing-checks.md) is the source repository's. Status unaudited. **One citation
 repaired at carry time:** the last of the health-panic spans is `:1028-1049`, not
 `:1028-1060`. The file is 1,049 lines, so the lens's end bound overran it by
-eleven; the test is `a_panicking_synapse_health_reports_failing_without_unwinding`
+eleven; the test is `a_panicking_local_embeddings_health_reports_failing_without_unwinding`
 (attribute `:1028`, `fn` `:1029`) and it ends on the file's final line. The other
 four spans verified exactly.
 Impact: adding a `catch_child_panic` to a callback the runtime treats as fatal
@@ -8444,7 +8508,6 @@ would silently convert a host-fatal invariant break into a degraded mode;
 removing one from `shutdown` would release the instance fence with a child's
 work still live.
 Open questions: None.
-
 
 ## Sub-part 2f catalog: runtime assembly and the configuration contract
 
@@ -8516,8 +8579,8 @@ conditionality map below leaned on it.
    comments. This one is a genuine forward reference and stands.
 
 Provenance: source catalogs in the host repo at `39e823037`; see [../README.md](../README.md). System
-`the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`, confirmed with
+`the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`,`HEAD` = `e447c927`, confirmed with
 `git log -1`. Both lens agents read and verified their line references at that
 commit. Scope and CI findings come from
 `part-2-rescope/scope-map-and-risk-ranking.md` (a source-tree artifact that was not migrated into this repository).
@@ -8576,6 +8639,7 @@ three sub-parts.
 Reproduced in full, because sibling sub-parts depend on it for their reachability
 labels. **This map was rebuilt after an independent evaluation refuted two of its
 rows, and the headline it previously carried - "only three things are conditional"
+
 - was one of the casualties.** The corrected answer is that four things are
 conditional on a config key, a `#[doc(hidden)]` entry point, or a cancelled
 token, **and one whole tail of the sequence is conditional on something none of
@@ -8772,7 +8836,7 @@ let interval = if activation_in_progress {
 
 The predicate `activation_in_progress` (`:1051-1071`) walks the report's own
 metrics and returns true when any component's `metrics.storage_state` or
-`metrics.synapse_state` equals the string `"starting"`. That report is handler
+`metrics.local_embeddings_state` equals the string `"starting"`. That report is handler
 output: `HostHandler::health` returns a `HealthReport` (`handler.rs:591` (source-catalog line, not present at HEAD)) whose
 `metrics` field is `Option<serde_json::Value>` (`:194`), entirely
 handler-authored. So a handler that keeps reporting `starting` moves the host
@@ -8884,7 +8948,7 @@ independently and agree. Every key name in `HostLimits`, `HostTiming`,
 `LivenessPolicy`, `HostInit`, and `HostConfig` was grepped across `docs/`, and
 **no file names any of them except `max_resident_bytes`**
 (`docs/host-wire-protocol.md:423`, and there only to say the cap covers
-Synapse parse scratch as a named logical payload). Every other hit is inside
+LocalEmbeddings parse scratch as a named logical payload). Every other hit is inside
 `docs/properties/`, which is this catalog's own working material and is not a
 contract. `the historical host performance baseline document:36-38` restates a handful of default
 values as a description of one perf run and `:48` explicitly tells a reader to
@@ -9020,7 +9084,7 @@ doctests.** The 11 are 10 in `config.rs` (`:467`, `:472`, `:502`, `:520`,
 `:550`, `:564`, `:576`, `:603`, `:636`, `:646`) and 1 in `runtime.rs` (`:1326`,
 `stalled_generations_share_one_shutdown_goodbye_deadline`).
 `harness_closure.rs`, `lib.rs`, and `file_mode.rs` have none. Four integration
-binaries carry this sub-part's claims - `tests/synapse_bundle.rs` (24 tests),
+binaries carry this sub-part's claims - `tests/local_embeddings_bundle.rs` (24 tests),
 `tests/harness_closure.rs` (15), `tests/ipc_budget_topology.rs` (9),
 `tests/activation.rs` (4). The source repository's CI named none of them; in this tree all four run under `ci.yml:118` and `:126`.
 
@@ -9128,13 +9192,13 @@ question".
 
 One asymmetry to state explicitly, because it is the opposite of what the
 `runtime.rs:118-119` comment implies. The reserved admission pools are
-**`default-production` reachable**, not dormant: `broca/mod.rs:164-177` returns a
+**`default-production` reachable**, not dormant: `model_execution/mod.rs:164-177` returns a
 `ResourceDeclaration` with `route_class: RouteClass::Reserved` and 96/96 counts
-(`broca/config.rs:185`, `:188`), the comment at `broca/mod.rs:169-170` makes it
+(`model_execution/config.rs:185`, `:188`), the comment at `model_execution/mod.rs:169-170` makes it
 deliberate and unconditional, `composite.rs:10-13` fixes the direct profile's
-tertiary as `broca/management_surface`; the daemon that would compose it (`serve.rs:575` in the source repository) is not in this tree, so in this checkout the reserved Broca class is `test-only`, as the Broca records below classify it. So the
+tertiary as `model_execution/management_surface`; the daemon that would compose it (`serve.rs:575` in the source repository) is not in this tree, so in this checkout the reserved ModelExecution class is `test-only`, as the ModelExecution records below classify it. So the
 comment's second clause is false and its first clause is true only of a
-composition that excludes Broca. Sub-part 2e reached the same verdict
+composition that excludes ModelExecution. Sub-part 2e reached the same verdict
 independently. The record this bears on,
 [rt-a-reserved-pools-are-zero-permit-and-unentered-without-a-declaration](#rt-a-reserved-pools-are-zero-permit-and-unentered-without-a-declaration),
 is worded conditionally ("When no linked module declares a reserved
@@ -9288,6 +9352,7 @@ Impact: an operator who sets a value and gets a different one silently loses the
 ability to reason about the host's capacity, which is the premise of
 `config.rs:87-88`.
 Open questions:
+
 - `file_mode::raw_mode` is `pub(crate)` and shared with `generation.rs`, which is
   Part 2a's file. Whether that caller upholds the "already within `0o7777`"
   precondition is unverified from here. (needs Part 2a)
@@ -9334,6 +9399,7 @@ candidate bounds a campaign could assert instead are stated here so the decision
 is a choice between named options rather than an open-ended design question, and
 neither can be adopted without the open question below being answered, because
 both invent a limit the code does not contain:
+
 - **A count bound**, `consecutive_fast_probes <= K`, which needs a `K`. Nothing
   in `HostTiming` supplies one and no constant in `runtime.rs` is a candidate.
 - **A duration bound**, `time_in_fast_cadence <= lifecycle_callback_deadline` or
@@ -9350,7 +9416,7 @@ limits how long the fixed cadence persists. A handler that never leaves
 `starting` holds it forever.
 Required faults and enabling state: a handler whose `health` report carries
 `metrics.components.<id>.metrics.storage_state == "starting"` or
-`synapse_state == "starting"`, plus a `health_interval` distinguishable from
+`local_embeddings_state == "starting"`, plus a `health_interval` distinguishable from
 50 ms. `tests/lifecycle.rs:165` must change its value to make the two branches
 separable. Conjunct 1 needs only the second half, since it asserts the `else`
 branch; conjunct 2 needs both.
@@ -9372,6 +9438,7 @@ direction.
 > finding is unaffected; only the span moved.
 
 Open questions:
+
 - Should the fast cadence carry its own bound, and if so which of the two forms
   above? Until this is answered the record has one assertable conjunct and one
   measured one, which is why its `Exercised:` line cannot reach `yes` by fixture
@@ -9430,6 +9497,7 @@ return, assert elapsed time is at most:
 writing `L` for `lifecycle_callback_deadline` and `R = 2 * L` for one
 `force_close_all_routes` call (the tracker wait at `dispatch.rs:1299` plus
 `run_route_gone` at `:1162-1166`, each under `L`, and no `timeout` wraps the call):
+
 - `shutdown_deadline + L` on the graceful exit at `runtime.rs:1069` when the drain
   finished inside `deadline`, and `shutdown_deadline + R + L` when it did not but
   the tracker wait at `:1048` still succeeded, since the first
@@ -9553,6 +9621,7 @@ Impact: this is the reachability label for every liveness property in the
 catalog. Any record whose enabling state is a `LivenessPolicy` is reachable only
 from `tests/lifecycle.rs:402` or `tests/client.rs:64`, never from production.
 Open questions:
+
 - `config.rs:236-238` says `invalidate_on_missed` stays `false` until
   the source module-host work. `tests/client.rs:67` sets it `true`. So the only code
   path that ever invalidates on a missed Pong is a test. Whether that is intended
@@ -9595,7 +9664,7 @@ Type: reachability
 Reachability: default-production - the health task is spawned by `run` for every incarnation and selects its interval at `runtime.rs:972-976` on each iteration from the handler's report (`activation_in_progress`, `:900`); no option disables the loop.
 Status: active
 Exercised: not yet - no test constructs a component report carrying
-`storage_state` or `synapse_state` equal to `starting` and observes the branch
+`storage_state` or `local_embeddings_state` equal to `starting` and observes the branch
 Guarantee: The activation-in-progress fast probe cadence is entered at least once
 per campaign, so its handler-controlled predicate and its 50 ms interval are
 exercised rather than assumed.
@@ -9666,6 +9735,7 @@ whether it does anything is the handler's contract, not the host's. Its `Debug`
 appearance at `config.rs:262` makes it look load-bearing in host diagnostics
 even though the host itself never reads it.
 Open questions:
+
 - Does any handler outside this repository read `host_capabilities`, so that the
   forwarding contract is exercised end to end? `config.rs:246-247` says `HostInit`
   is "handed to the linked handler"; no in-tree handler reads the field. (needs
@@ -9758,12 +9828,12 @@ Open questions: None.
 > written, but the comment at `runtime.rs:117-119` that it verifies against is
 > **false in the composed production host**. The comment says the reserved pools
 > are "Zero-permit when no module declared a reservation, and then unreachable
-> because every route is general-class". `broca/mod.rs:164-177` declares
-> `route_class: RouteClass::Reserved` with 96/96 counts (`broca/config.rs:185`,
+> because every route is general-class". `model_execution/mod.rs:164-177` declares
+> `route_class: RouteClass::Reserved` with 96/96 counts (`model_execution/config.rs:185`,
 > `:188`), `composite.rs:10-13` fixes the direct profile's tertiary as
-> `broca/management_surface`, and `serve.rs:575` composes it. So the second
+> `model_execution/management_surface`, and `serve.rs:575` composes it. So the second
 > clause is false and the first is true only of a composition that excludes
-> Broca. Sub-part 2e's lens B reached the same verdict independently and both
+> ModelExecution. Sub-part 2e's lens B reached the same verdict independently and both
 > lenses report it as the fourth misleading comment in this crate; neither
 > verified the three prior instances, so **the ordinal is inherited and
 > unconfirmed** while the contradiction itself is verified.
@@ -9786,7 +9856,7 @@ footprint.
 Type: safety
 Reachability: test-only - `HarnessClosureStore::open` is called only from tests in
 this tree (`crates/host-runtime/tests/harness_closure.rs` and
-`tests/broca_subprocess.rs:845`, which opens a store to materialise a fixture
+`tests/model_execution_subprocess.rs:845`, which opens a store to materialise a fixture
 closure), and `manifest_digest` is reached through the store and directly from
 `tests/harness_closure.rs:410-413`; the daemon that opens the store in production
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
@@ -9829,6 +9899,7 @@ Impact: a permissions or symlink problem on the closure root presents as "no
 harness available" rather than "the closure store is insecure", so an operator
 investigates the wrong subsystem. This is Part 4f's silent-degradation shape.
 Open questions:
+
 - Does `harness_backend` (`serve.rs:344`) ultimately surface any distinguishable
   reason to an operator, or does the `None` terminate in a generic
   unavailability? Unresolved; needs the `daemon` binary pass, which is outside
@@ -9957,20 +10028,20 @@ rather than the configuration contract.
   [rt-a-reserved-pools-are-zero-permit-and-unentered-without-a-declaration](#rt-a-reserved-pools-are-zero-permit-and-unentered-without-a-declaration).
   Standing alone because its relationship is across parts rather than within
   this one. Its guarantee is conditional on no module declaring a reservation;
-  Broca declares one, so 2e's
+  ModelExecution declares one, so 2e's
   [req-a-both-admission-classes-and-the-rejection-bound-saturate](#req-a-both-admission-classes-and-the-rejection-bound-saturate)
   owns the live half, namely that reserved *task* exhaustion is constructed by no
   test. Hypothesis: 2e's five-state saturation campaign *dominates this record's
   entry half*, because a campaign that saturates the reserved task pool has
   necessarily observed that only `Reserved`-class routes acquire from it. It does
   not dominate the zero-permit half, which is about a composition that excludes
-  Broca and which no in-tree production configuration produces.
+  ModelExecution and which no in-tree production configuration produces.
 
 ## Discovered at U3
 
 Records added when the crate entered this tree. The first seven cover renamed identities (proof vectors, data root,
-coordination locks, route-open body, closure digest, credential fingerprint, bundle fingerprint); the Broca and
-Synapse records cover code the source catalogs did not reach and enter at the status observed at discovery, with
+coordination locks, route-open body, closure digest, credential fingerprint, bundle fingerprint); the ModelExecution and
+LocalEmbeddings records cover code the source catalogs did not reach and enter at the status observed at discovery, with
 their existing checks named and unaudited. This set has its own per-part artifacts under
 [`discovered-at-u3/`](discovered-at-u3/): the check inventory
 [existing-checks.md](discovered-at-u3/existing-checks.md), the fault map
@@ -9988,17 +10059,17 @@ applied below and whose remaining findings are queued there.
 | [canonical-route-open-declares-its-exact-body-length](#canonical-route-open-declares-its-exact-body-length) | safety | high |
 | [harness-closure-manifest-digest-is-canonical](#harness-closure-manifest-digest-is-canonical) | safety | high |
 | [credential-fingerprint-derives-from-the-product-domain](#credential-fingerprint-derives-from-the-product-domain) | safety | high |
-| [synapse-bundle-fingerprint-covers-every-artifact](#synapse-bundle-fingerprint-covers-every-artifact) | safety | high |
-| [broca-identical-resends-converge-on-one-run](#broca-identical-resends-converge-on-one-run) | safety | medium |
-| [broca-permits-and-charges-return-to-baseline](#broca-permits-and-charges-return-to-baseline) | safety | medium |
-| [broca-children-are-reaped-as-a-process-group](#broca-children-are-reaped-as-a-process-group) | safety | medium |
-| [broca-child-environment-carries-only-the-provider-row](#broca-child-environment-carries-only-the-provider-row) | safety | medium |
-| [broca-protocol-shapes-are-closed](#broca-protocol-shapes-are-closed) | safety | medium |
-| [synapse-admission-boundaries-are-exact](#synapse-admission-boundaries-are-exact) | safety | medium |
-| [synapse-degrades-to-disabled-and-keeps-the-context-routable](#synapse-degrades-to-disabled-and-keeps-the-context-routable) | liveness | medium |
-| [synapse-requests-are-validated-before-any-inference](#synapse-requests-are-validated-before-any-inference) | safety | medium |
-| [synapse-inference-runs-through-a-sealed-runtime-image](#synapse-inference-runs-through-a-sealed-runtime-image) | safety | medium |
-| [synapse-local-memory-reservation-is-honest](#synapse-local-memory-reservation-is-honest) | safety | high |
+| [local_embeddings-bundle-fingerprint-covers-every-artifact](#local_embeddings-bundle-fingerprint-covers-every-artifact) | safety | high |
+| [model_execution-identical-resends-converge-on-one-run](#model_execution-identical-resends-converge-on-one-run) | safety | medium |
+| [model_execution-permits-and-charges-return-to-baseline](#model_execution-permits-and-charges-return-to-baseline) | safety | medium |
+| [model_execution-children-are-reaped-as-a-process-group](#model_execution-children-are-reaped-as-a-process-group) | safety | medium |
+| [model_execution-child-environment-carries-only-the-provider-row](#model_execution-child-environment-carries-only-the-provider-row) | safety | medium |
+| [model_execution-protocol-shapes-are-closed](#model_execution-protocol-shapes-are-closed) | safety | medium |
+| [local_embeddings-admission-boundaries-are-exact](#local_embeddings-admission-boundaries-are-exact) | safety | medium |
+| [local_embeddings-degrades-to-disabled-and-keeps-the-context-routable](#local_embeddings-degrades-to-disabled-and-keeps-the-context-routable) | liveness | medium |
+| [local_embeddings-requests-are-validated-before-any-inference](#local_embeddings-requests-are-validated-before-any-inference) | safety | medium |
+| [local_embeddings-inference-runs-through-a-sealed-runtime-image](#local_embeddings-inference-runs-through-a-sealed-runtime-image) | safety | medium |
+| [local_embeddings-local-memory-reservation-is-honest](#local_embeddings-local-memory-reservation-is-honest) | safety | high |
 
 ### host-proof-construction-matches-the-committed-vectors
 
@@ -10006,7 +10077,7 @@ Type: safety
 Reachability: default-production - every client and server handshake computes this proof.
 Status: active
 Exercised: yes - the crate-internal vector test and the independent `raw_client` oracle each pin their own side to the same committed literal, and `production_proof_matches_the_oracle_across_perturbed_tuples` calls `compute_proof` and `raw_client::proof` on the same tuple for both domains over the committed inputs, each input perturbed alone, daemon versions of several lengths, and short and long keys, asserting equality and distinctness.
-Guarantee: The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server-v1` and `eidnara-client-v1`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.
+Guarantee: The host's `compute_proof` is the shared `shm_transport::setup_auth` transcript with domains `eidnara-server-v3` and `eidnara-client-v3`, and its output over the committed inputs equals the vectors an implementation outside the crate produces.
 Check: `always` - `compute_proof(...) == raw_client::proof(...)` for the committed inputs and for every generated or single-field-perturbed input tuple, where `raw_client::proof` is the test-local HMAC implementation of the documented transcript; the equality over arbitrary inputs, not the change under perturbation, is the oracle; the campaign does not assert global injectivity, since HMAC-SHA256 over a larger input space must collide somewhere and a found collision would say nothing about transcript conformance. `always` because the transcript is a pure function evaluated on every handshake.
 Fault/timing angle: Only an external oracle detects a transcript change both sides apply.
 Required faults and enabling state: The committed inputs and the test-local HMAC oracle.
@@ -10044,6 +10115,7 @@ Confidence: high - [evidence](evidence/coordination-locks-live-beside-the-manage
 Existing check: `independent_openers_see_one_stable_coordination_identity` (`crates/host-runtime/src/lifecycle.rs`), plus the replaced-subtree tests in the same module; audited at U3.
 Impact: Two live hosts, each believing it holds the fence.
 Open questions:
+
 - How does the cutover isolation probe treat `.eidnara-coordination`, which sits beside rather than inside the managed subtree it digests? See the evidence file. (needs human input)
 
 ### canonical-route-open-declares-its-exact-body-length
@@ -10066,7 +10138,7 @@ Open questions: None.
 Type: safety
 Reachability: test-only - `HarnessClosureStore::open` is called only from tests in
 this tree (`crates/host-runtime/tests/harness_closure.rs` and
-`tests/broca_subprocess.rs:845`, which opens a store to materialise a fixture
+`tests/model_execution_subprocess.rs:845`, which opens a store to materialise a fixture
 closure), and `manifest_digest` is reached through the store and directly from
 `tests/harness_closure.rs:410-413`; the daemon that opens the store in production
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
@@ -10085,199 +10157,203 @@ Open questions: None.
 ### credential-fingerprint-derives-from-the-product-domain
 
 Type: safety
-Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `BrocaComponent::new_with_credentials` (`crates/host-runtime/src/broca/mod.rs:82`) installs one; its single caller is `tests/broca_protocol.rs:443`. `BrocaComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.
+Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `ModelExecutionComponent::new_with_credentials` (`crates/host-runtime/src/model_execution/mod.rs:82`) installs one; its single caller is `tests/model_execution_protocol.rs:443`. `ModelExecutionComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.
 Status: active
 Exercised: yes - the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes including a multibyte value and two non-UTF-8 byte values agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows; field-boundary pairs, including an empty name and an empty harness, are encoded apart by the pure encoder.
-Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-broca-credential-v1"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
-Check: `always` - for the documented row, `credential_fingerprint(key, harness, provider) == committed literal`; for every generated `(key, harness, provider name, value)` row in a campaign that `provider_row` admits (a supported harness and provider under the closed `canonical_provider` mapping and a nonempty value; an empty value returns `CredentialMissing` at `subprocess.rs:151-174` before any fingerprint exists), `credential_fingerprint` equals an independent implementation of the documented derivation (`HMAC(derive(key, "eidnara-broca-credential-v1"), canonical_row)` with length-prefixed fields), including admissible rows that differ only by moving one byte across a field boundary, which must yield distinct fingerprints; boundary cases that leave a field empty or name an unsupported harness or provider are asserted against a pure canonical encoder of the documented row, not against `credential_fingerprint`, which rejects them before canonicalization; and the per-value size cap rejects before fingerprinting. `always` because the derivation is a pure function evaluated on every row.
+Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-model-execution-credential-v3"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
+Check: `always` - for the documented row, `credential_fingerprint(key, harness, provider) == committed literal`; for every generated `(key, harness, provider name, value)` row in a campaign that `provider_row` admits (a supported harness and provider under the closed `canonical_provider` mapping and a nonempty value; an empty value returns `CredentialMissing` at `subprocess.rs:151-174` before any fingerprint exists), `credential_fingerprint` equals an independent implementation of the documented derivation (`HMAC(derive(key, "eidnara-model-execution-credential-v3"), canonical_row)` with length-prefixed fields), including admissible rows that differ only by moving one byte across a field boundary, which must yield distinct fingerprints; boundary cases that leave a field empty or name an unsupported harness or provider are asserted against a pure canonical encoder of the documented row, not against `credential_fingerprint`, which rejects them before canonicalization; and the per-value size cap rejects before fingerprinting. `always` because the derivation is a pure function evaluated on every row.
 Fault/timing angle: A fingerprint that leaked the raw credential or that matched across products would let a captured fingerprint be replayed.
 Required faults and enabling state: The documented inputs and an oracle outside the crate.
 Confidence: high - [evidence](evidence/credential-fingerprint-derives-from-the-product-domain.md). The domain separator is a renamed identity; the vector was regenerated once from a Python implementation of the documented derivation, which also reproduced the predecessor value from the predecessor domain.
-Existing check: `credential_fingerprint_matches_the_committed_vector` and `credential_fingerprint_matches_the_documented_derivation_across_rows` (`crates/host-runtime/src/broca/subprocess.rs`, added at U3) and `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`, a `harness = false` binary whose checks are plain functions the binary's own runner names); audited at U3.
+Existing check: `credential_fingerprint_matches_the_committed_vector` and `credential_fingerprint_matches_the_documented_derivation_across_rows` (`crates/host-runtime/src/model_execution/subprocess.rs`, added at U3) and `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/model_execution_subprocess.rs`, a `harness = false` binary whose checks are plain functions the binary's own runner names); audited at U3.
 Impact: A credential row passes a fingerprint check it should fail, or fails one it should pass.
 Open questions: `CREDENTIAL_ROW_CAP_BYTES` is defined in `subprocess.rs` but nothing enforces it; only the 16 KiB per-value cap is checked.
 
-### synapse-bundle-fingerprint-covers-every-artifact
+### local_embeddings-bundle-fingerprint-covers-every-artifact
 
 Type: safety
-Reachability: test-only - every bundle load through a composed `SynapseComponent` recomputes and compares the fingerprint (`load_bundle` is called only from `crates/host-runtime/src/synapse/mod.rs:1025`), but the component is not on `host_runtime::run`'s default path; an embedder composes it, and in this tree the only compositions are tests and `examples/synapse_host.rs:123`. The daemon that will compose it is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every bundle load through a composed `LocalEmbeddingsComponent` recomputes and compares the fingerprint (`load_bundle` is called only from `crates/host-runtime/src/local_embeddings/mod.rs:1025`), but the component is not on `host_runtime::run`'s default path; an embedder composes it, and in this tree the only compositions are tests and `examples/local_embeddings_host.rs:123`. The daemon that will compose it is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: yes - the committed tiny fixture's fingerprint is recomputed from its manifest and pinned as a literal; each artifact hash, each external-initializer name, each embedding-space scalar, and the numeric output index value is changed alone and shown to move the fingerprint; single-bit artifact changes are caught by each artifact's own digest at load.
-Guarantee: The bundle fingerprint is SHA-256 over a newline-joined `key=value` pre-image beginning with `eidnara-synapse-fingerprint-v1` and covering the model file, every external initializer, the four tokenizer artifacts, pooling, quantization, output selector, max tokens, dims, table epoch, and corpus digest; a bundle whose manifest fingerprint disagrees does not load.
-Check: `always` - `canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; a bundle whose manifest fingerprint disagrees does not load; and for every field the guarantee names (the model hash, each external-initializer hash and each external-initializer name, since the pre-image binds `name.len():name:sha256` per initializer at `crates/host-runtime/src/synapse/bundle.rs:585-594`, plus the name-to-hash pairing, so swapping two names while keeping every hash also changes the fingerprint; each of the four tokenizer artifact hashes, pooling, quantization, output selection, dimension, and the embedding-space scalars), perturbing that field alone in the manifest changes `canonical_fingerprint`, so no verified input is absent from the pre-image. `always` because the pre-image is a pure function of the manifest.
+Guarantee: The bundle fingerprint is SHA-256 over a newline-joined `key=value` pre-image beginning with `eidnara-local-embeddings-fingerprint-v1` and covering the model file, every external initializer, the four tokenizer artifacts, pooling, quantization, output selector, max tokens, dims, table epoch, and corpus digest; a bundle whose manifest fingerprint disagrees does not load.
+Check: `always` - `canonical_fingerprint(manifest) == manifest.fingerprint` for the committed fixture; a bundle whose manifest fingerprint disagrees does not load; and for every field the guarantee names (the model hash, each external-initializer hash and each external-initializer name, since the pre-image binds `name.len():name:sha256` per initializer at `crates/host-runtime/src/local_embeddings/bundle.rs:585-594`, plus the name-to-hash pairing, so swapping two names while keeping every hash also changes the fingerprint; each of the four tokenizer artifact hashes, pooling, quantization, output selection, dimension, and the embedding-space scalars), perturbing that field alone in the manifest changes `canonical_fingerprint`, so no verified input is absent from the pre-image. `always` because the pre-image is a pure function of the manifest.
 Fault/timing angle: A fingerprint that omitted an artifact would let a swapped artifact change embedding bytes under an unchanged identity.
 Required faults and enabling state: The committed fixture and its generator's independent fingerprint function.
-Confidence: high - [evidence](evidence/synapse-bundle-fingerprint-covers-every-artifact.md). The pre-image's first line is a renamed identity; the fixture manifest's fingerprint was regenerated once with the generator's Python `canonical_fingerprint`, which also reproduced the predecessor value from the predecessor line.
-Existing check: `the_committed_fixture_carries_its_canonical_fingerprint`, `a_bundle_manifest_outside_the_committed_digest_does_not_load`, `one_bit_changes_to_each_artifact_disable_the_lane` (`crates/host-runtime/tests/synapse_bundle.rs`), and `every_artifact_hash_and_embedding_scalar_participates_in_the_fingerprint` (`crates/host-runtime/src/synapse/bundle.rs`); audited at U3.
+Confidence: high - [evidence](evidence/local_embeddings-bundle-fingerprint-covers-every-artifact.md). The pre-image's first line is a renamed identity; the fixture manifest's fingerprint was regenerated once with the generator's Python `canonical_fingerprint`, which also reproduced the predecessor value from the predecessor line.
+Existing check: `the_committed_fixture_carries_its_canonical_fingerprint`, `a_bundle_manifest_outside_the_committed_digest_does_not_load`, `one_bit_changes_to_each_artifact_disable_the_lane` (`crates/host-runtime/tests/local_embeddings_bundle.rs`), and `every_artifact_hash_and_embedding_scalar_participates_in_the_fingerprint` (`crates/host-runtime/src/local_embeddings/bundle.rs`); audited at U3.
 Impact: A different model produces embeddings under the identity of the certified one.
 Open questions: None.
 
-### broca-identical-resends-converge-on-one-run
+### model_execution-identical-resends-converge-on-one-run
 
 Type: safety
-Reachability: test-only - every Broca send through a composed `BrocaComponent` is deduplicated by the supervisor. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every ModelExecution send through a composed `ModelExecutionComponent` is deduplicated by the supervisor. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `ModelExecutionComponent` is constructed only in tests; the two LocalEmbeddings examples (`local_embeddings_host.rs:124`, `local_embeddings_perf.rs:370`) pass a `PlaceholderModelExecution` to `StaticComposite::new` and never reach the ModelExecution send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - identical resends and racing identical sends are covered; a resend after the run's terminal was retained then evicted is not.
-Guarantee: While a session entry is retained, byte-identical resends of `session.send` converge on one backend run and a differing body for the same key is rejected as a conflict. Retention ends when `TERMINAL_RETENTION` (15 minutes, `crates/host-runtime/src/broca/config.rs:126`) expires or `enforce_terminal_cap` evicts the entry beyond `MAX_TERMINAL_SESSIONS` (256, `:122`); a resend after that legitimately starts a new run.
+Guarantee: While a session entry is retained, byte-identical resends of `session.send` converge on one backend run and a differing body for the same key is rejected as a conflict. Retention ends when `TERMINAL_RETENTION` (15 minutes, `crates/host-runtime/src/model_execution/config.rs:126`) expires or `enforce_terminal_cap` evicts the entry beyond `MAX_TERMINAL_SESSIONS` (256, `:122`); a resend after that legitimately starts a new run.
 Check: `always` - within the retention of a session entry, `runs_started <= 1` per identical send key and a differing body returns the conflict terminal; the campaign reads `terminal_retention` and the cap from the supervisor limits and stops counting a key only once `sweep_for` or `enforce_terminal_cap` (`supervisor.rs:1085`, `:1005`) has removed it or `session.delete` has replaced the live run with a retained `SessionEntry::Tombstone` (`:509-527`); the conflict assertion is scoped to live entries, and a send against a tombstone must return `session_deleted` (`:356-372`) rather than the conflict terminal until the tombstone expires or is evicted; and a session entry is present until `terminal_retention` has elapsed since its terminal or the cap has been exceeded, so a removal before either condition holds fails the check rather than ending the count.
 Fault/timing angle: Two harness clients retry the same prompt concurrently.
 Required faults and enabling state: Concurrent identical sends; a differing resend under the same key.
-Confidence: medium - [evidence](evidence/broca-identical-resends-converge-on-one-run.md). `identical_resend_dedups_and_any_byte_difference_conflicts`, `racing_identical_sends_converge_on_one_run_and_one_backend_start` (`crates/host-runtime/tests/broca_supervisor.rs`).
+Confidence: medium - [evidence](evidence/model_execution-identical-resends-converge-on-one-run.md). `identical_resend_dedups_and_any_byte_difference_conflicts`, `racing_identical_sends_converge_on_one_run_and_one_backend_start` (`crates/host-runtime/tests/model_execution_supervisor.rs`).
 Existing check: The two tests named above; unaudited.
 Impact: Two model calls billed and two divergent transcripts for one prompt.
 Open questions: None.
 
-### broca-permits-and-charges-return-to-baseline
+### model_execution-permits-and-charges-return-to-baseline
 
 Type: safety
-Reachability: test-only - every run path of a composed `BrocaComponent` releases what it took. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every run path of a composed `ModelExecutionComponent` releases what it took. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `ModelExecutionComponent` is constructed only in tests; the two LocalEmbeddings examples (`local_embeddings_host.rs:124`, `local_embeddings_perf.rs:370`) pass a `PlaceholderModelExecution` to `StaticComposite::new` and never reach the ModelExecution send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - success, failure, cancel, transport detach, and shutdown paths are covered in-process; a backend that never exits is covered only through the escalation timers.
 Guarantee: Every run path returns its pending permits, task permits, and byte charges to the supervisor baseline, and host shutdown drains the supervisor to zero state; when an uncooperative backend outlives the termination grace, shutdown reports the unresolved count to the caller instead of claiming zero state.
-Check: `always` - at terminal commitment the run slot is released; once `work_done` is set or the run task has quiesced, the supervisor's pending permits and task permits equal their starting values and the run's excess bytes are released, because the run task retains `_backend_permit` until backend teardown finishes (`crates/host-runtime/src/broca/supervisor.rs:748-782`), `finish` (`:938`) releases the excess only when `work_done` is already true (`:989-995`), and `DoneGuard` releases it at task exit otherwise (`:792-809`), so a committed `Cancelled` terminal may legitimately coexist with a held backend permit until then; while the retained session's base charge and replay frames are still held for `terminal_retention`; the full byte-budget baseline is required only once `remove_session` (`:1059`) has removed that entry by expiry, cap eviction, deletion, or shutdown; after shutdown, either the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/broca/supervisor.rs:611`, `:630-633`) is zero, or the count is nonzero and exactly equals the number of runs whose final `work_unresolved` verdict is set (`supervisor.rs:629-634` counts unproven teardowns, not processes live at inspection time, and a process may exit after `terminate_group` fails to confirm it), with no permit, charge, or run state retained; a zero count with retained state, or a nonzero count that is not surfaced to the caller, fails the check.
+Check: `always` - at terminal commitment the run slot is released; once `work_done` is set or the run task has quiesced, the supervisor's pending permits and task permits equal their starting values and the run's excess bytes are released, because the run task retains `_backend_permit` until backend teardown finishes (`crates/host-runtime/src/model_execution/supervisor.rs:748-782`), `finish` (`:938`) releases the excess only when `work_done` is already true (`:989-995`), and `DoneGuard` releases it at task exit otherwise (`:792-809`), so a committed `Cancelled` terminal may legitimately coexist with a held backend permit until then; while the retained session's base charge and replay frames are still held for `terminal_retention`; the full byte-budget baseline is required only once `remove_session` (`:1059`) has removed that entry by expiry, cap eviction, deletion, or shutdown; after shutdown, either the state is empty and the unresolved count `shutdown` returns (`crates/host-runtime/src/model_execution/supervisor.rs:611`, `:630-633`) is zero, or the count is nonzero and exactly equals the number of runs whose final `work_unresolved` verdict is set (`supervisor.rs:629-634` counts unproven teardowns, not processes live at inspection time, and a process may exit after `terminate_group` fails to confirm it), with no permit, charge, or run state retained; a zero count with retained state, or a nonzero count that is not surfaced to the caller, fails the check.
 Fault/timing angle: A leaked permit shrinks the admission pool until the host restarts.
 Required faults and enabling state: Each terminal path: success, error, cancel, detach, shutdown.
-Confidence: medium - [evidence](evidence/broca-permits-and-charges-return-to-baseline.md). `every_path_returns_permits_and_charges_to_baseline`, `host_shutdown_drains_the_supervisor_to_zero_state`, `transport_detach_paths_leave_the_run_untouched` (`crates/host-runtime/tests/broca_supervisor.rs`).
+Confidence: medium - [evidence](evidence/model_execution-permits-and-charges-return-to-baseline.md). `every_path_returns_permits_and_charges_to_baseline`, `host_shutdown_drains_the_supervisor_to_zero_state`, `transport_detach_paths_leave_the_run_untouched` (`crates/host-runtime/tests/model_execution_supervisor.rs`).
 Existing check: The tests named above; unaudited.
-Impact: Slow admission collapse of the Broca lane.
+Impact: Slow admission collapse of the ModelExecution lane.
 Open questions: None.
 
-### broca-children-are-reaped-as-a-process-group
+### model_execution-children-are-reaped-as-a-process-group
 
 Type: safety
-Reachability: test-only - every harness child a composed `BrocaComponent` spawns runs in its own process group under `PR_SET_PDEATHSIG`. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every harness child a composed `ModelExecutionComponent` spawns runs in its own process group under `PR_SET_PDEATHSIG`. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `ModelExecutionComponent` is constructed only in tests; the two LocalEmbeddings examples (`local_embeddings_host.rs:124`, `local_embeddings_perf.rs:370`) pass a `PlaceholderModelExecution` to `StaticComposite::new` and never reach the ModelExecution send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - SIGTERM-then-SIGKILL reaping on cancel, delete, and shutdown is covered with real processes; the orphan sweep is covered for dead owners.
 Guarantee: On cancellation, deletion, or shutdown, every harness child's process group is terminated within four applications of `termination_grace`, or `terminate_group` reports the group unresolved and the operation that triggered the teardown surfaces `teardown_unconfirmed` (cancel and delete return it; shutdown reports the unresolved count); the orphan sweep never signals a group whose owner is alive.
-Check: `always` - measured from the cancellation, deletion, or shutdown instant, `terminate_group` (`crates/host-runtime/src/broca/subprocess.rs:670`) completes within four applications of `termination_grace` (the TERM wait, the KILL wait, the member sweep, and the bounded leader reap at `:679-693`), and the backend task finishes within that bound plus the fixed one-second stdin-task wait at `:554-564`; at completion either no process of the reaped group survives, or `terminate_group` has reported the group unresolved and the classification is surfaced on the operation result, `teardown_unconfirmed` from cancel or delete (`supervisor.rs:560`, after the `Cancelled` terminal has already been committed at `:456-465` and `:486-496` and cannot be replaced, `:767-781`) or the unresolved count from `shutdown`; the terminal itself is not required to carry the classification. The sweep never signals a group whose owner is alive. A teardown that exceeds the bound, or that never surfaces the result, fails the check rather than deferring it.
+Check: `always` - measured from the cancellation, deletion, or shutdown instant, `terminate_group` (`crates/host-runtime/src/model_execution/subprocess.rs:670`) completes within four applications of `termination_grace` (the TERM wait, the KILL wait, the member sweep, and the bounded leader reap at `:679-693`), and the backend task finishes within that bound plus the fixed one-second stdin-task wait at `:554-564`; at completion either no process of the reaped group survives, or `terminate_group` has reported the group unresolved and the classification is surfaced on the operation result, `teardown_unconfirmed` from cancel or delete (`supervisor.rs:560`, after the `Cancelled` terminal has already been committed at `:456-465` and `:486-496` and cannot be replaced, `:767-781`) or the unresolved count from `shutdown`; the terminal itself is not required to carry the classification. The sweep never signals a group whose owner is alive. A teardown that exceeds the bound, or that never surfaces the result, fails the check rather than deferring it.
 Fault/timing angle: A grandchild that survives its parent keeps a credential in its environment.
 Required faults and enabling state: A child that ignores SIGTERM; a forked grandchild; a dead owner with a live group.
-Confidence: medium - [evidence](evidence/broca-children-are-reaped-as-a-process-group.md). `cancel_reaps_group_with_sigterm_first`, `sigkill_escalation_when_term_ignored`, `supervisor_shutdown_reaps_group`, `group_registry_sweep_kills_only_dead_owner_groups` (`crates/host-runtime/tests/broca_subprocess.rs`, `harness = false` runner).
+Confidence: medium - [evidence](evidence/model_execution-children-are-reaped-as-a-process-group.md). `cancel_reaps_group_with_sigterm_first`, `sigkill_escalation_when_term_ignored`, `supervisor_shutdown_reaps_group`, `group_registry_sweep_kills_only_dead_owner_groups` (`crates/host-runtime/tests/model_execution_subprocess.rs`, `harness = false` runner).
 Existing check: The checks named above; unaudited.
 Impact: Orphaned model processes holding credentials.
 Open questions:
-- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/broca_subprocess.rs:2659`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
 
-### broca-child-environment-carries-only-the-provider-row
+- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/model_execution_subprocess.rs:2659`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
+
+### model_execution-child-environment-carries-only-the-provider-row
 
 Type: safety
-Reachability: test-only - `EnvSnapshot::capture_from` (`crates/host-runtime/src/broca/subprocess.rs:97`) and `BrocaComponent::new_with_credentials` (`broca/mod.rs:82`) have no caller outside tests in this tree, and `OpenCodeBackend::new` and `PiBackend::new` have none at all; the spawn path is exercised by fixtures only. Reclassify when the daemon (U4) wires a real backend.
+Reachability: test-only - `EnvSnapshot::capture_from` (`crates/host-runtime/src/model_execution/subprocess.rs:97`) and `ModelExecutionComponent::new_with_credentials` (`model_execution/mod.rs:82`) have no caller outside tests in this tree, and `OpenCodeBackend::new` and `PiBackend::new` have none at all; the spawn path is exercised by fixtures only. Reclassify when the daemon (U4) wires a real backend.
 Status: active
 Exercised: partial - launch-identity stripping, per-entry overhead, ambient-credential exclusion, and the size caps are covered; the OpenCode and Pi argv contracts are covered by fixture executables.
-Guarantee: A snapshot admitted through `EnvSnapshot::capture_from` (`crates/host-runtime/src/broca/subprocess.rs:97`) has the launch identity stripped and is charged per entry and in aggregate, and the harness child spawned from it receives only the selected provider credential row plus adapter-owned variables.
-Check: `always` - for a snapshot built by `capture_from`, the spawned environment contains no `EIDNARA_MODULE_ID` or `EIDNARA_LAUNCH_NONCE`, exactly the selected provider variable with its value under the 16 KiB per-value credential cap, and each adapter-owned variable within its own adapter bound (`OPENCODE_CONFIG_CONTENT` up to `MAX_OPENCODE_CONFIG_BYTES`, 96 KiB at `crates/host-runtime/src/broca/config.rs:19`, added at `opencode.rs:122-170`), so the credential cap is not applied to adapter-owned entries; and the aggregate and per-entry charges are applied; the property is scoped to `capture_from` because the public `from_vars` (`:122`) bypasses that accounting.
+Guarantee: A snapshot admitted through `EnvSnapshot::capture_from` (`crates/host-runtime/src/model_execution/subprocess.rs:97`) has the launch identity stripped and is charged per entry and in aggregate, and the harness child spawned from it receives only the selected provider credential row plus adapter-owned variables.
+Check: `always` - for a snapshot built by `capture_from`, the spawned environment contains no `EIDNARA_MODULE_ID` or `EIDNARA_LAUNCH_NONCE`, exactly the selected provider variable with its value under the 16 KiB per-value credential cap, and each adapter-owned variable within its own adapter bound (`OPENCODE_CONFIG_CONTENT` up to `MAX_OPENCODE_CONFIG_BYTES`, 96 KiB at `crates/host-runtime/src/model_execution/config.rs:19`, added at `opencode.rs:122-170`), so the credential cap is not applied to adapter-owned entries; and the aggregate and per-entry charges are applied; the property is scoped to `capture_from` because the public `from_vars` (`:122`) bypasses that accounting.
 Fault/timing angle: A leaked launch identity lets the child impersonate the module; a leaked ambient credential reaches a harness the user did not choose.
 Required faults and enabling state: An environment with several provider credentials and the launch identity set.
-Confidence: medium - [evidence](evidence/broca-child-environment-carries-only-the-provider-row.md). `env_snapshot_strips_launch_identity`, `env_snapshot_admission_charges_per_entry_overhead`, `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/broca_subprocess.rs`), `credential_snapshot_must_match_before_backend_spawn` (`crates/host-runtime/tests/broca_protocol.rs`).
+Confidence: medium - [evidence](evidence/model_execution-child-environment-carries-only-the-provider-row.md). `env_snapshot_strips_launch_identity`, `env_snapshot_admission_charges_per_entry_overhead`, `provider_rows_exclude_ambient_credentials_and_enforce_caps` (`crates/host-runtime/tests/model_execution_subprocess.rs`), `credential_snapshot_must_match_before_backend_spawn` (`crates/host-runtime/tests/model_execution_protocol.rs`).
 Existing check: The checks named above; unaudited.
 Impact: Credential exfiltration through a harness child.
 Open questions:
+
 - `EnvSnapshot::from_vars` (`subprocess.rs:122`) is public and skips the aggregate-byte and per-entry-overhead accounting that `capture_from` applies before calling it (`:98`); an embedder that passes a `from_vars` snapshot to `new_with_credentials` retains an unbounded ambient snapshot. The selected provider value is still capped at spawn. Gap: either make `from_vars` private or account in it. (needs human input)
 - `CREDENTIAL_ROW_CAP_BYTES` (`subprocess.rs:51`) has no reader: should it be enforced on the selected row or removed? (needs human input)
 
-### broca-protocol-shapes-are-closed
+### model_execution-protocol-shapes-are-closed
 
 Type: safety
-Reachability: test-only - every request a composed `BrocaComponent` receives is decoded against the closed shape set. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `BrocaComponent` is constructed only in tests; the two Synapse examples (`synapse_host.rs:124`, `synapse_perf.rs:370`) pass a `PlaceholderBroca` to `StaticComposite::new` and never reach the Broca send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every request a composed `ModelExecutionComponent` receives is decoded against the closed shape set. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `ModelExecutionComponent` is constructed only in tests; the two LocalEmbeddings examples (`local_embeddings_host.rs:124`, `local_embeddings_perf.rs:370`) pass a `PlaceholderModelExecution` to `StaticComposite::new` and never reach the ModelExecution send, supervisor, subprocess, or protocol paths. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - each valid operation decodes its exact schema, every enumerated malformed shape is rejected, and the 512 KiB boundary is exact; two cases remain open (evidence, "What a test must construct"): the array-params case uses an empty array and cannot detect a decoder that accepts a correctly sized positional sequence, and the host-level rejection test does not observe release of its resident scratch charge, so the exact-schema and no-state halves are not fully exercised.
-Guarantee: The Broca application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, and oversize bodies are `schema_violation` terminals, an unsupported harness name is rejected at bind as `invalid_identity`, and malformed requests create no run state.
-Check: `always` - every malformed shape is rejected with `schema_violation`, a 512 KiB body is admitted and one byte more is rejected, a bind naming a harness outside the supported set is rejected with exactly `invalid_identity` (`bind_requires_absolute_root_nonempty_session_and_supported_harness`, `crates/host-runtime/tests/broca_protocol.rs:372`, asserts the code at `:397`), and a rejected request or bind leaves no run state; every clause is an invariant over every request, so one `always` covers the conjunction.
+Guarantee: The ModelExecution application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, and oversize bodies are `schema_violation` terminals, an unsupported harness name is rejected at bind as `invalid_identity`, and malformed requests create no run state.
+Check: `always` - every malformed shape is rejected with `schema_violation`, a 512 KiB body is admitted and one byte more is rejected, a bind naming a harness outside the supported set is rejected with exactly `invalid_identity` (`bind_requires_absolute_root_nonempty_session_and_supported_harness`, `crates/host-runtime/tests/model_execution_protocol.rs:372`, asserts the code at `:397`), and a rejected request or bind leaves no run state; every clause is an invariant over every request, so one `always` covers the conjunction.
 Fault/timing angle: A permissive decoder lets a harness smuggle fields the host does not validate.
 Required faults and enabling state: Malformed and boundary-sized bodies.
-Confidence: medium - [evidence](evidence/broca-protocol-shapes-are-closed.md). `each_valid_operation_decodes_its_exact_schema`, `every_malformed_shape_is_rejected_with_schema_violation`, `the_512kib_boundary_admits_exactly_and_rejects_one_byte_over`, `malformed_requests_over_the_host_create_no_run_state`, `harness_vocabulary_is_closed` (`crates/host-runtime/tests/broca_protocol.rs`).
+Confidence: medium - [evidence](evidence/model_execution-protocol-shapes-are-closed.md). `each_valid_operation_decodes_its_exact_schema`, `every_malformed_shape_is_rejected_with_schema_violation`, `the_512kib_boundary_admits_exactly_and_rejects_one_byte_over`, `malformed_requests_over_the_host_create_no_run_state`, `harness_vocabulary_is_closed` (`crates/host-runtime/tests/model_execution_protocol.rs`).
 Existing check: The tests named above; unaudited.
 Impact: Unvalidated input reaches the harness spawn path.
 Open questions: None.
 
-### broca-payload-hook-owns-the-generation-controls
+### model_execution-payload-hook-owns-the-generation-controls
 
 Type: safety
-Reachability: test-only - every Pi run loads the compiled-in hook as the last `--extension` after `--no-extensions` disables discovery, so the hook is the final `before_provider_request` handler on every provider request; but `PiBackend::new` and `run_pi` have no caller outside `crates/host-runtime/tests/broca_subprocess.rs` in this tree, so no production request reaches the hook until the daemon (U4) wires a real backend. Reclassify with the other Broca records then.
+Reachability: test-only - every Pi run loads the compiled-in hook as the last `--extension` after `--no-extensions` disables discovery, so the hook is the final `before_provider_request` handler on every provider request; but `PiBackend::new` and `run_pi` have no caller outside `crates/host-runtime/tests/model_execution_subprocess.rs` in this tree, so no production request reaches the hook until the daemon (U4) wires a real backend. Reclassify with the other ModelExecution records then.
 Status: active
 Exercised: partial - a driver that registers a tampering handler ahead of the hook covers the OpenAI-style, Gemini-style, and mixed-spelling payloads plus one unrecognized shape; nothing runs the hook inside a real Pi process or covers a missing or non-numeric environment value.
 Guarantee: The provider payload Pi sends carries exactly the output-token bound and temperature the `session.send` request admitted: every recognized output-token spelling present on the payload and `generationConfig.maxOutputTokens` are rewritten to the request's `max_output_tokens`, `temperature` follows it, every unrelated field survives, and a payload with no recognized output-token field or a non-object payload fails the request rather than running uncapped.
 Check: `always` - for every payload the hook returns, each recognized output-token field equals the admitted bound and `temperature` equals the admitted temperature, fields the hook does not own are byte-identical to the input, and a payload with no recognized field throws; the rewrite is an invariant over every provider request, so one `always` covers the conjunction.
 Fault/timing angle: An earlier trusted extension leaves a larger limit in a second spelling, or a provider adds a wire family the hook does not recognize; either lets a provider default exceed the caller's budget.
 Required faults and enabling state: A payload touched by an earlier handler; a payload carrying two output-token spellings; a payload with no recognized spelling.
-Confidence: medium - [evidence](evidence/broca-payload-hook-owns-the-generation-controls.md). `pi_broca_hook_owns_generation_controls` (`crates/host-runtime/tests/broca_subprocess.rs`, `harness = false` runner) materializes the hook bytes from `PI_BROCA_EXTENSION_BYTES` and drives them under Node or Bun.
+Confidence: medium - [evidence](evidence/model_execution-payload-hook-owns-the-generation-controls.md). `pi_model_execution_hook_owns_generation_controls` (`crates/host-runtime/tests/model_execution_subprocess.rs`, `harness = false` runner) materializes the hook bytes from `PI_MODEL_EXECUTION_EXTENSION_BYTES` and drives them under Node or Bun.
 Existing check: The check named above; unaudited.
 Impact: A provider request runs with a token budget or temperature the caller did not admit.
 Open questions: None.
 
-### synapse-admission-boundaries-are-exact
+### local_embeddings-admission-boundaries-are-exact
 
 Type: safety
-Reachability: test-only - every batch and query a composed `SynapseComponent` receives is admitted through these bounds. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `SynapseComponent` is constructed by tests and by the two examples (`SynapseComponent::new` at `examples/synapse_host.rs:123`, composed at `:124`; `SynapseComponent::ready_with_engine` at `examples/synapse_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every batch and query a composed `LocalEmbeddingsComponent` receives is admitted through these bounds. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `LocalEmbeddingsComponent` is constructed by tests and by the two examples (`LocalEmbeddingsComponent::new` at `examples/local_embeddings_host.rs:123`, composed at `:124`; `LocalEmbeddingsComponent::ready_with_engine` at `examples/local_embeddings_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
-Exercised: partial - count and byte boundaries and eviction order are covered with a deterministic engine; expiry is covered only as eventual expiry, since `expired_jobs_return_module_restarted` (`tests/synapse_jobs.rs:238-272`) configures 100 ms retention and sleeps 250 ms before polling, so the exact `>= retention` boundary the Check states is unexercised and an implementation using `>` or a larger threshold below 250 ms would pass; the bounded-waiter test that opens 33 ring clients is ignored because the host admits at most 8 rings per process.
+Exercised: partial - count and byte boundaries and eviction order are covered with a deterministic engine; expiry is covered only as eventual expiry, since `expired_jobs_return_module_restarted` (`tests/local_embeddings_jobs.rs:238-272`) configures 100 ms retention and sleeps 250 ms before polling, so the exact `>= retention` boundary the Check states is unexercised and an implementation using `>` or a larger threshold below 250 ms would pass; the bounded-waiter test that opens 33 ring clients is ignored because the host admits at most 8 rings per process.
 Guarantee: Job admission is exact at the count and queued-byte boundaries, never evicts live work, evicts completed jobs oldest first under count pressure, and reports expired jobs as `module_restarted`.
 Check: `always` - the boundary-plus-one request is rejected and the boundary request admitted; no live job is evicted; under count pressure the completed job evicted is the one with the oldest `completed_at`; an expired job is reported as `module_restarted` (`jobs.rs:624`, exact `>=` on retention); and, at completion, the excess over the retained key-and-metadata bytes is released (`publish_ready` splits it off at `jobs.rs:453-455`) while the retained remainder is held by the completed job for polling and returns only when the job is removed, evicted, expired, or cleared (`jobs.rs:96-100`). Every clause is an invariant over every admission, eviction, expiry, and completion, so one `always` covers the conjunction.
 Fault/timing angle: Off-by-one at the boundary or eviction of live work loses a caller's result.
 Required faults and enabling state: Boundary-sized admission; completion under count pressure; expiry.
-Confidence: medium - [evidence](evidence/synapse-admission-boundaries-are-exact.md). `admission_count_boundary_is_exact_and_never_evicts_live_work`, `queued_byte_boundary_is_exact_and_releases_on_completion`, `completed_jobs_evict_oldest_first_under_count_pressure`, `expired_jobs_return_module_restarted` (`crates/host-runtime/tests/synapse_jobs.rs`).
+Confidence: medium - [evidence](evidence/local_embeddings-admission-boundaries-are-exact.md). `admission_count_boundary_is_exact_and_never_evicts_live_work`, `queued_byte_boundary_is_exact_and_releases_on_completion`, `completed_jobs_evict_oldest_first_under_count_pressure`, `expired_jobs_return_module_restarted` (`crates/host-runtime/tests/local_embeddings_jobs.rs`).
 Existing check: The tests named above; unaudited.
 Impact: A lost or silently duplicated embedding job.
 Open questions:
-- Whether `boundary_waiters_with_maximal_texts_are_all_admitted` (`crates/host-runtime/tests/synapse_protocol.rs:415`, a query-waiter admission test, not a job-table test) should be rewritten for the eight-ring admission cap or dropped; it is `#[ignore]` with that reason (`:412-414`). (needs human input)
 
-### synapse-degrades-to-disabled-and-keeps-the-context-routable
+- Whether `boundary_waiters_with_maximal_texts_are_all_admitted` (`crates/host-runtime/tests/local_embeddings_protocol.rs:415`, a query-waiter admission test, not a job-table test) should be rewritten for the eight-ring admission cap or dropped; it is `#[ignore]` with that reason (`:412-414`). (needs human input)
+
+### local_embeddings-degrades-to-disabled-and-keeps-the-context-routable
 
 Type: liveness
-Reachability: test-only - every artifact fault in a composed `SynapseComponent` takes this path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `SynapseComponent` is constructed by tests and by the two examples (`SynapseComponent::new` at `examples/synapse_host.rs:123`, composed at `:124`; `SynapseComponent::ready_with_engine` at `examples/synapse_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every artifact fault in a composed `LocalEmbeddingsComponent` takes this path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `LocalEmbeddingsComponent` is constructed by tests and by the two examples (`LocalEmbeddingsComponent::new` at `examples/local_embeddings_host.rs:123`, composed at `:124`; `LocalEmbeddingsComponent::ready_with_engine` at `examples/local_embeddings_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - missing, corrupt, extra, wrong-identity, and wrong-pooling artifacts disable the lane while the context module stays routable; a fault during inference itself is covered only by the deterministic engine.
-Guarantee: An unconfigured or faulted Synapse bundle disables the Synapse lane and is never host-fatal; the context module keeps serving requests, and a bind to the disabled lane is refused with `artifact_invalid`.
-Check: `always` - for the unconfigured component (`SynapseComponent::new(None)`, as built at `crates/host-runtime/tests/synapse_bundle.rs:227`) and for every artifact fault, `activate` returns `Ok` with the lane disabled, a bind to the disabled lane is refused with exactly `artifact_invalid` (`crates/host-runtime/tests/synapse_bundle.rs:241`, `tests/synapse_roundtrip.rs:93`), and a context request issued afterwards completes within the campaign's request deadline; the existing test bounds it with the 5 s harness `BUDGET` (`crates/host-runtime/tests/support/synapse.rs:22`, `:265`), and the host itself imposes no dispatch deadline (see [req-a-a-handler-outliving-every-host-deadline-is-reached](#req-a-a-handler-outliving-every-host-deadline-is-reached)), so the bound must come from the campaign. The second clause is asserted inside the same faulted scenario (`corrupt_bundle_degrades_synapse_and_keeps_context_routable`), so it is part of the invariant rather than a separate coverage obligation.
-Fault/timing angle: A host-fatal Synapse fault would take the product down for an optional lane.
+Guarantee: An unconfigured or faulted LocalEmbeddings bundle disables the LocalEmbeddings lane and is never host-fatal; the context module keeps serving requests, and a bind to the disabled lane is refused with `artifact_invalid`.
+Check: `always` - for the unconfigured component (`LocalEmbeddingsComponent::new(None)`, as built at `crates/host-runtime/tests/local_embeddings_bundle.rs:227`) and for every artifact fault, `activate` returns `Ok` with the lane disabled, a bind to the disabled lane is refused with exactly `artifact_invalid` (`crates/host-runtime/tests/local_embeddings_bundle.rs:241`, `tests/local_embeddings_roundtrip.rs:93`), and a context request issued afterwards completes within the campaign's request deadline; the existing test bounds it with the 5 s harness `BUDGET` (`crates/host-runtime/tests/support/local_embeddings.rs:22`, `:265`), and the host itself imposes no dispatch deadline (see [req-a-a-handler-outliving-every-host-deadline-is-reached](#req-a-a-handler-outliving-every-host-deadline-is-reached)), so the bound must come from the campaign. The second clause is asserted inside the same faulted scenario (`corrupt_bundle_degrades_local_embeddings_and_keeps_context_routable`), so it is part of the invariant rather than a separate coverage obligation.
+Fault/timing angle: A host-fatal LocalEmbeddings fault would take the product down for an optional lane.
 Required faults and enabling state: Each artifact fault class; an unconfigured component.
-Confidence: medium - [evidence](evidence/synapse-degrades-to-disabled-and-keeps-the-context-routable.md). `unconfigured_component_is_disabled_not_fatal`, `one_bit_changes_to_each_artifact_disable_the_lane`, `missing_artifact_disables_the_lane`, `wrong_ort_identity_disables_the_lane`, `corrupt_bundle_degrades_synapse_and_keeps_context_routable` (`crates/host-runtime/tests/synapse_bundle.rs`, `crates/host-runtime/tests/synapse_roundtrip.rs`).
+Confidence: medium - [evidence](evidence/local_embeddings-degrades-to-disabled-and-keeps-the-context-routable.md). `unconfigured_component_is_disabled_not_fatal`, `one_bit_changes_to_each_artifact_disable_the_lane`, `missing_artifact_disables_the_lane`, `wrong_ort_identity_disables_the_lane`, `corrupt_bundle_degrades_local_embeddings_and_keeps_context_routable` (`crates/host-runtime/tests/local_embeddings_bundle.rs`, `crates/host-runtime/tests/local_embeddings_roundtrip.rs`).
 Existing check: The tests named above; unaudited.
 Impact: The whole host fails because an embedding model is missing.
 Open questions: None.
 
-### synapse-requests-are-validated-before-any-inference
+### local_embeddings-requests-are-validated-before-any-inference
 
 Type: safety
-Reachability: test-only - every Synapse request to a composed `SynapseComponent` is decoded and bounded before it reaches the engine. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `SynapseComponent` is constructed by tests and by the two examples (`SynapseComponent::new` at `examples/synapse_host.rs:123`, composed at `:124`; `SynapseComponent::ready_with_engine` at `examples/synapse_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every LocalEmbeddings request to a composed `LocalEmbeddingsComponent` is decoded and bounded before it reaches the engine. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `LocalEmbeddingsComponent` is constructed by tests and by the two examples (`LocalEmbeddingsComponent::new` at `examples/local_embeddings_host.rs:123`, composed at `:124`; `LocalEmbeddingsComponent::ready_with_engine` at `examples/local_embeddings_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - constraint violations, unknown fields, excessive depth, oversize bodies, and replay reuse are covered with a deterministic engine that counts calls.
 Guarantee: A request that violates a constraint, carries an unknown field, exceeds the depth or size bound, names a different model, fingerprint, or epoch, or names a foreign job is rejected before the engine runs (as `schema_violation`, `substitution_rejected`, or `module_restarted` by class), and equal replays of a queued, running, ready, or permanently failed job reuse that job and one inference, while an equal replay after a retained retryable failure admits a new job.
-Check: `always` - `engine.calls` is unchanged by a rejected request; the rejection code matches the violation class exactly: `schema_violation` for a constraint violation, an unknown field, or an exceeded depth or size bound, `substitution_rejected` for a different model, fingerprint, or epoch, and `module_restarted` for a foreign or unknown job (`unknown_and_foreign_jobs_are_module_restarted`, `crates/host-runtime/tests/synapse_protocol.rs:1218`); and equal replays of a queued, running, ready, or permanently failed job produce exactly one inference, while an equal replay after a retained retryable failure such as `internal_error` removes the failed job and admits a new one (`JobTable::admit_charged`, `crates/host-runtime/src/synapse/jobs.rs:324-368`, pinned by `an_identical_retry_replaces_a_failed_job`), so a second inference on that path is the supported outcome and not a violation. Every clause is an invariant over every request, so one `always` covers the conjunction.
+Check: `always` - `engine.calls` is unchanged by a rejected request; the rejection code matches the violation class exactly: `schema_violation` for a constraint violation, an unknown field, or an exceeded depth or size bound, `substitution_rejected` for a different model, fingerprint, or epoch, and `module_restarted` for a foreign or unknown job (`unknown_and_foreign_jobs_are_module_restarted`, `crates/host-runtime/tests/local_embeddings_protocol.rs:1218`); and equal replays of a queued, running, ready, or permanently failed job produce exactly one inference, while an equal replay after a retained retryable failure such as `internal_error` removes the failed job and admits a new one (`JobTable::admit_charged`, `crates/host-runtime/src/local_embeddings/jobs.rs:324-368`, pinned by `an_identical_retry_replaces_a_failed_job`), so a second inference on that path is the supported outcome and not a violation. Every clause is an invariant over every request, so one `always` covers the conjunction.
 Fault/timing angle: Validation after inference would spend model time on hostile input.
 Required faults and enabling state: Each violation class; replayed requests.
-Confidence: medium - [evidence](evidence/synapse-requests-are-validated-before-any-inference.md). `embed_query_rejects_every_constraint_violation`, `embed_batch_validation_creates_no_job_and_no_inference`, `an_unknown_top_level_field_is_rejected_without_reading_its_value`, `a_routed_depth_nine_request_is_a_schema_violation`, `equal_replays_reuse_one_job_and_one_inference` (`crates/host-runtime/tests/synapse_protocol.rs`).
+Confidence: medium - [evidence](evidence/local_embeddings-requests-are-validated-before-any-inference.md). `embed_query_rejects_every_constraint_violation`, `embed_batch_validation_creates_no_job_and_no_inference`, `an_unknown_top_level_field_is_rejected_without_reading_its_value`, `a_routed_depth_nine_request_is_a_schema_violation`, `equal_replays_reuse_one_job_and_one_inference` (`crates/host-runtime/tests/local_embeddings_protocol.rs`).
 Existing check: The tests named above; unaudited.
 Impact: Model time spent on requests that were never valid.
 Open questions: None.
 
-### synapse-inference-runs-through-a-sealed-runtime-image
+### local_embeddings-inference-runs-through-a-sealed-runtime-image
 
 Type: safety
-Reachability: test-only - every inference in a composed `SynapseComponent` loads ONNX Runtime through the sealed memfd path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `SynapseComponent` is constructed by tests and by the two examples (`SynapseComponent::new` at `examples/synapse_host.rs:123`, composed at `:124`; `SynapseComponent::ready_with_engine` at `examples/synapse_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
+Reachability: test-only - every inference in a composed `LocalEmbeddingsComponent` loads ONNX Runtime through the sealed memfd path. The component is not on `host_runtime::run`'s default path; an embedder composes it into the handler, and in this tree `LocalEmbeddingsComponent` is constructed by tests and by the two examples (`LocalEmbeddingsComponent::new` at `examples/local_embeddings_host.rs:123`, composed at `:124`; `LocalEmbeddingsComponent::ready_with_engine` at `examples/local_embeddings_perf.rs:1796`, composed at `:370`), neither of which is `host_runtime::run`'s default handler. The daemon that will compose it in production is scheduled for U4 (`docs/properties/README.md:52`); reclassify then.
 Status: active
 Exercised: partial - `source_replacement_cannot_change_verified_loader_bytes` asserts the seals, rejected writes, replacement resistance, and the digest on the memfd path; the full load into ONNX Runtime is exercised only where the runtime library is present.
 Guarantee: The ONNX Runtime library is loaded from a sealed memfd named `host-onnxruntime` whose bytes were certified with the bundle, so a library swapped on disk after certification cannot reach inference.
-Check: `always` - the loaded image's digest equals the certified digest, and the memfd carries the shrink, grow, write, and seal seals (`F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL`, as applied at `crates/host-runtime/src/synapse/inference.rs:152-159`), so the image can neither be modified, grown, truncated, nor unsealed after certification; and the ONNX Runtime object actually mapped into the process is that memfd, asserted by matching the `host-onnxruntime` memfd entry in `/proc/self/maps` against the loaded library's mapping, so a loader that seals one image and initialises from a filesystem path fails the check; all three are invariants over every load, so one `always` covers the conjunction.
+Check: `always` - the loaded image's digest equals the certified digest, and the memfd carries the shrink, grow, write, and seal seals (`F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL`, as applied at `crates/host-runtime/src/local_embeddings/inference.rs:152-159`), so the image can neither be modified, grown, truncated, nor unsealed after certification; and the ONNX Runtime object actually mapped into the process is that memfd, asserted by matching the `host-onnxruntime` memfd entry in `/proc/self/maps` against the loaded library's mapping, so a loader that seals one image and initialises from a filesystem path fails the check; all three are invariants over every load, so one `always` covers the conjunction.
 Fault/timing angle: A library swapped between certification and load changes every embedding.
 Required faults and enabling state: A modified library on disk after certification; a memfd without seals.
-Confidence: medium - [evidence](evidence/synapse-inference-runs-through-a-sealed-runtime-image.md). `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`) observes the seals and the digest.
-Existing check: `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/synapse/inference.rs`); unaudited.
+Confidence: medium - [evidence](evidence/local_embeddings-inference-runs-through-a-sealed-runtime-image.md). `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/local_embeddings/inference.rs`) observes the seals and the digest.
+Existing check: `source_replacement_cannot_change_verified_loader_bytes` (`crates/host-runtime/src/local_embeddings/inference.rs`); unaudited.
 Impact: Embeddings from an uncertified runtime under a certified identity.
 Open questions:
+
 - Whether `ort::init_from` loads from the given `/proc/self/fd/<n>` path and nothing else is unverified from this tree; it needs the `ort` source or a `/proc/self/maps` assertion. (needs human input)
 
-### synapse-local-memory-reservation-is-honest
+### local_embeddings-local-memory-reservation-is-honest
 
 Type: safety
-Reachability: explicit-config-only - a configured Synapse component declares and
+Reachability: explicit-config-only - a configured LocalEmbeddings component declares and
 allocates these pools before initialization; an unsupported component with no
 configured or ready lane declares no retained memory.
 Status: active
 Exercised: yes - unit tests construct valid default-shaped limits, arithmetic
 overflow, an unrepresentable result cap, exact local admission, completion, and
 release.
-Guarantee: Synapse's local input budget covers the maximum queued input charge
+Guarantee: LocalEmbeddings's local input budget covers the maximum queued input charge
 plus the maximum retained job-metadata charge, and its host declaration also
 covers retained results; invalid arithmetic never becomes a zero declaration.
 Check: `always` - for valid limits, `local_inputs.capacity()` equals
@@ -10295,16 +10371,16 @@ Required faults and enabling state: A completed retained job, queued input at it
 cap, maximal integer limits, and a configured component inspected before
 initialization.
 Confidence: high -
-[evidence](evidence/synapse-local-memory-reservation-is-honest.md). The queue and
+[evidence](evidence/local_embeddings-local-memory-reservation-is-honest.md). The queue and
 retained formulas, constructor fallback, declaration, and boundary tests were
 verified together.
 Existing check: `local_job_inputs_are_declared_as_retained_resident_memory`,
 `overflowing_unvalidated_limits_fail_initialization_without_panicking`,
 `maximal_retained_result_limit_declares_failure_without_panicking`, and
 `local_input_budget_refuses_before_copy_and_recovers_after_release` in
-`crates/host-runtime/src/synapse/mod.rs`; `exact_input_shape_refuses_an_unaccounted_item_identity`
-in `crates/host-runtime/src/synapse/jobs.rs`.
-Impact: Host admission can reserve less memory than Synapse retains, or a valid
+`crates/host-runtime/src/local_embeddings/mod.rs`; `exact_input_shape_refuses_an_unaccounted_item_identity`
+in `crates/host-runtime/src/local_embeddings/jobs.rs`.
+Impact: Host admission can reserve less memory than LocalEmbeddings retains, or a valid
 local job can fail because completed metadata consumed an unmodeled part of the
 same pool.
 Open questions: None.

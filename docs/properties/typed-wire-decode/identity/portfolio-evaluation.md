@@ -60,7 +60,7 @@ not dispositioned as permission to weaken constraints.
   not 25. A synthetic pair loses 52 block bytes from that omission alone.
   The Appendix's 26-of-53 count is corpus-specific. Parent wording remains an
   owner correction outside this directory.
-- Production historian snapshots exclude synthetic blocks. The claimed todo
+- Production history_summarizer snapshots exclude synthetic blocks. The claimed todo
   snapshot delta needs another demonstrated path or a test-only classification.
 - Durable served receipts include synthetic output. The first post-upgrade
   diagnostic result remains an owner question, not an empty-cache assumption.

@@ -108,8 +108,8 @@ function redactResult(
             proof: redact(result.versions.proof) as DaemonResultV1["versions"]["proof"],
             daemon: redact(result.versions.daemon),
             context: redact(result.versions.context),
-            synapse: redact(result.versions.synapse),
-            broca: redact(result.versions.broca),
+            local_embeddings: redact(result.versions.local_embeddings),
+            model_execution: redact(result.versions.model_execution),
         },
     };
 }
@@ -125,7 +125,7 @@ export function renderDaemonHuman(result: DaemonResultV1): string {
         );
     }
     if (result.readiness !== null) {
-        for (const component of ["transport", "storage", "synapse"] as const) {
+        for (const component of ["transport", "storage", "local_embeddings"] as const) {
             const readiness = result.readiness[component];
             if (readiness !== undefined) {
                 lines.push(`Readiness ${component}: ${readiness.state} (${readiness.reason})`);

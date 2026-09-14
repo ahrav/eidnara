@@ -14,8 +14,8 @@ Scope: `crates/host-runtime/src/setup_socket.rs` (826), `auth.rs` (1,112),
 `packages/shm-native/src/setup.rs` (433) as the peer half. 3,832 in-crate
 lines, 4,265 with the peer half; `wc -l` at `HEAD`.
 
-Provenance. Code read from `the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`. Every line
+Provenance. Code read from `the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`,`HEAD` = `e447c927`. Every line
 reference below was printed from that tree before being written.
 
 **The headline of this lens is a claim with no implementing code, and it is a
@@ -561,7 +561,7 @@ Verified: `packages/plugin/src/shared/host-client/auth.test.ts` does not
 exist. `auth.ts` does not exist. `git show --stat ed487e11` shows both deleted in
 the commit that made the ring mandatory, at 365 and 314 lines. A repository-wide
 search for `auth.test.ts` returns nothing outside `node_modules`. A search for
-`eidnara-server-v1` in TypeScript returns two hits, neither a handshake
+`eidnara-server-v3` in TypeScript returns two hits, neither a handshake
 implementation: `packages/plugin/scripts/host-client-boundary.test.ts:221`
 uses the string as a *forbidden-name fixture*, and
 `packages/plugin/dist/shared/host-client/auth.d.ts:24-25` is an untracked
@@ -713,7 +713,7 @@ Two support helpers are documented as deliberate fault seams: the
 length-prefix-only writer at `:773-775` (stalls the peer mid-message to exercise
 the within-stage deadline) and the handshake driver at `:883-884`.
 
-**Doctests: none found.** Zero `/// ```` or `//! ```` fences across the four
+**Doctests: none found.** Zero `/// ```` or`//! ```` fences across the four
 `host-runtime` scope files, so `cargo test -p host-runtime --doc` (`ci.yml:190`) covers
 nothing here. This is the difference from sibling 2b, whose two `compile_fail`
 doctests are its only CI-executed source-resident checks.

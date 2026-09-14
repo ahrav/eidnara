@@ -16,7 +16,7 @@ does not exist.
 `crates/memory-store/src/lib.rs:2458-2461`:
 
 ```
-    /// Set by ctx_reduce after the agent has acted on a reminder. The next transform
+    /// Set by eidnara_reduce after the agent has acted on a reminder. The next transform
     /// suppresses new Channel-1 appends while still replaying every stored append row.
     #[serde(default)]
     pub channel1_reduce_suppressed: bool,
@@ -103,7 +103,7 @@ they are not the same design.
 ## Failure scenario
 
 The agent reads a `<system-reminder>` telling it that ~40k tokens of tool output
-are unreduced, and calls `ctx_reduce` on the named tags. Reclaimable mass drops.
+are unreduced, and calls `eidnara_reduce` on the named tags. Reclaimable mass drops.
 `reset_cycle` fires, the memo zeroes, and the level resets to none. As soon as
 enough new tool output accumulates to clear `CHANNEL1_FLOOR_TOKENS` (25_000,
 `tail_hygiene.rs:16`) and `CHANNEL1_GENTLE_FRACTION` (0.20,
@@ -117,11 +117,11 @@ as a non-compliant one, and possibly more often, because the non-compliant agent
 
 ## Timing windows and dependencies
 
-If the flag were ever set, the window would be from the `ctx_reduce` commit to the
+If the flag were ever set, the window would be from the `eidnara_reduce` commit to the
 next `tagging_active` transform pass, and the clear at `:9157` would consume it on
 that pass. Since nothing sets it, there is no window.
 
-Dependencies: the `ctx_reduce` facade handler, which is 4d scope, and
+Dependencies: the `eidnara_reduce` facade handler, which is 4d scope, and
 `ModuleMeta` serialization, which honours a stored `true` because of
 `#[serde(default)]` (`memory-store/src/lib.rs:2460`).
 
@@ -129,8 +129,8 @@ Dependencies: the `ctx_reduce` facade handler, which is 4d scope, and
 
 The property is `always`, so the test needs the antecedent.
 
-1. Drive a `ctx_reduce` call that freezes at least one reduction. The facade
-   handler is `handle_ctx_reduce_facade` in `lib.rs`, which is 4d scope, so this
+1. Drive a `eidnara_reduce` call that freezes at least one reduction. The facade
+   handler is `handle_eidnara_reduce_facade` in `lib.rs`, which is 4d scope, so this
    test crosses a sub-part boundary.
 2. Drive the next `tagging_active` transform pass for the same session.
 3. Assert `decide_channel1` took the suppressed arm. Since `decide_channel1` is
@@ -142,7 +142,7 @@ The property is `always`, so the test needs the antecedent.
 
 That assertion fails today. The cheaper intermediate test, which is worth having
 regardless, is the one the existing suite almost does: assert that
-`meta.channel1_reduce_suppressed` is `true` after a reducing `ctx_reduce` commit.
+`meta.channel1_reduce_suppressed` is `true` after a reducing `eidnara_reduce` commit.
 That is a single field read and it isolates the missing writer from everything
 downstream.
 
@@ -163,7 +163,7 @@ of whether suppression can happen.
 - Findings: the field is `#[serde(default)]`, so a `true` written by any past
   writer would still round-trip through the store and be honoured. That is
   consistent with either history. The doc comment's specificity ("Set by
-  ctx_reduce after the agent has acted on a reminder") reads like a description of
+  eidnara_reduce after the agent has acted on a reminder") reads like a description of
   code that existed rather than a design note for code that did not.
 - Missing evidence: repository history, which would settle it.
 - Conclusion: needs human input.

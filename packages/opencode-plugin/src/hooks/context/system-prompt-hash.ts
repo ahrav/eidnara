@@ -4,7 +4,7 @@ import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import { type PromptSurfaceConfig, resolvePromptSurface } from "../../shared/prompt-surface";
 import { promptSurfaceHashMaterial } from "../../shared/prompt-surface-runtime";
-import { resolveCtxReduceAvailability } from "./ctx-reduce-availability";
+import { resolveEidnaraReduceAvailability } from "./eidnara-reduce-availability";
 import {
     EIDNARA_INTERNAL_AGENT_SIGNATURES,
     INTERNAL_OPENCODE_AGENT_SIGNATURES,
@@ -13,7 +13,7 @@ import { estimateTokens } from "./read-session-formatting";
 
 /** The plugin's per-session view of the host system prompt, refreshed on every tracked pass. */
 export interface SystemPromptState {
-    /** Hexadecimal MD5 of the frozen prompt content and the prompt-surface preset; empty until the ctx_reduce verdict is frozen and the model is known. */
+    /** Hexadecimal MD5 of the frozen prompt content and the prompt-surface preset; empty until the eidnara_reduce verdict is frozen and the model is known. */
     systemPromptHash: string;
     systemPromptTokens: number;
     isSubagent: boolean;
@@ -26,7 +26,7 @@ interface SessionTracking {
     prompt?: SystemPromptState;
 }
 
-/** One entry per tracked session; the LRU bound matches the ctx_reduce verdict caches. */
+/** One entry per tracked session; the LRU bound matches the eidnara_reduce verdict caches. */
 const SYSTEM_PROMPT_STATE_CAPACITY = 1000;
 
 /**
@@ -134,7 +134,7 @@ export function createSystemPromptHashHandler(deps: {
             return;
         }
 
-        const availability = resolveCtxReduceAvailability(sessionId);
+        const availability = resolveEidnaraReduceAvailability(sessionId);
         const inputModel = input.model;
         const liveModel =
             inputModel?.providerID && inputModel.modelID
@@ -206,7 +206,7 @@ export function createSystemPromptHashHandler(deps: {
 
         const systemContent = output.system.join("\n");
 
-        // The hash waits for a frozen ctx_reduce verdict and a known model; the classification does not, so a subagent's first turn is not reported as primary.
+        // The hash waits for a frozen eidnara_reduce verdict and a known model; the classification does not, so a subagent's first turn is not reported as primary.
         const hashReady = availability.frozen && modelKey !== undefined;
         const currentHash = hashReady
             ? createHash("md5")

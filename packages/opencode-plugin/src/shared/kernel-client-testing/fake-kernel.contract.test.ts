@@ -41,7 +41,7 @@ function decisionSpec(index: number) {
 }
 /** The route test's `wire_intent(key, ..)`: the key is the operation identity, the cause is audit text. */
 function intent(operationId: string) {
-    return { actor: "assistant", operationId, cause: "ctx_memory" };
+    return { actor: "assistant", operationId, cause: "eidnara_memory" };
 }
 
 /** Keeps the raw reply of every call so a test can compare it with the recorded daemon bytes. */
@@ -466,7 +466,7 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
                     operation_key: "foreign",
                     request_digest: "foreign",
                     actor: "assistant",
-                    cause: "ctx_memory",
+                    cause: "eidnara_memory",
                 },
                 tokens: [],
                 operations: [{ op: "insert_decision", spec: decisionSpec(1) }],

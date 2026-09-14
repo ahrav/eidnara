@@ -21,7 +21,7 @@ The sticky flag, in order of appearance:
 - `transform.rs:3232` — `*boundary_divergence_detected = false;` on entry
 - `transform.rs:3953` — `*boundary_divergence_detected = boundary_divergence_recut.is_some();`
 - `transform.rs:2285-2289` — on a `CasConflict`, with the comment at
-  `:2286-2288`: "A historian publish can win after detection but before the
+  `:2286-2288`: "A history_summarizer publish can win after detection but before the
   transform commit. Preserve the recut intent across the mandatory reload so the
   new m1 watermark cannot turn the already-proven inconsistency back into an
   ordinary defer." Then `boundary_divergence_retry |= boundary_divergence_detected;`
@@ -34,11 +34,11 @@ What the flag changes on the retry:
   skipped, so `post_end_revision_inputs_moved` (`:3903`) cannot clear
   `divergence_candidate`.
 - `transform.rs:3924-3939` — the pending-count arithmetic. On a retry, the
-  `boundary_divergence_retry || compartment_revision_matches` branch at `:3929`
+  `boundary_divergence_retry || history_segment_revision_matches` branch at `:3929`
   sets the count to `0` rather than incrementing.
 - `transform.rs:3941-3946` — `let boundary_divergence_recut =
   divergence_candidate.filter(|_| boundary_divergence_retry ||
-  compartment_revision_matches || (!active_legitimate_publication_window &&
+  history_segment_revision_matches || (!active_legitimate_publication_window &&
   boundary_divergence_pending_count >= BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT));`
   The first disjunct is the sticky flag, so a retry admits the recut
   unconditionally.
@@ -56,7 +56,7 @@ The suppression budget the flag bypasses:
 - `transform.rs:85` — `const BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT: u8 = 3;`
   with the doc at `:83-84`
 - `transform.rs:3924` — `let active_legitimate_publication_window =
-  ctx.historian_active || ctx.wrapup_active;` with the comment at `:3919-3923`
+  ctx.history_summarizer_active || ctx.wrapup_active;` with the comment at `:3919-3923`
   stating that a damaged row seen during wrapup waits for the latch guard to end,
   "bounded by the 3,800-second wrapup request budget documented on the context"
 
@@ -66,9 +66,9 @@ The detection itself is `detect_boundary_divergence_candidate`
 ## Failure scenario
 
 Without the sticky flag: attempt 1 detects a divergence, decides to recut, and
-renders. A historian publish commits in the meantime, so the terminal CAS at
-`:5565` conflicts. Attempt 2 reloads and now sees a fresh `m1_compartment_seq`
-that matches the new `max_compartment_seq`, so `compartment_revision_matches` at
+renders. A history_summarizer publish commits in the meantime, so the terminal CAS at
+`:5565` conflicts. Attempt 2 reloads and now sees a fresh `m1_history_segment_seq`
+that matches the new `max_history_segment_seq`, so `history_segment_revision_matches` at
 `:3913-3918` is true. That alone would still admit the recut through the second
 disjunct at `:3943`. The narrower loss is the revalidation at `:3890-3907`: with
 `boundary_divergence_retry` false, attempt 2 re-reads the revision signal and
@@ -88,25 +88,25 @@ delayed.
 ## Timing windows and dependencies
 
 Window: from `detect_boundary_divergence_candidate` at `:3877` to the terminal
-commit at `:5565`. A compartment publish committing in that window is what
+commit at `:5565`. A history_segment publish committing in that window is what
 produces the conflict, and the conflict is the trigger for the retry.
 
 Dependency: the conflict must actually be a `CasConflict`. A publish that changes
-compartments without touching `cache_state` would not conflict on
+history_segments without touching `cache_state` would not conflict on
 `row_version`; it conflicts because the recut pass is a bust, so it passes
-`compartment_max_seq` (`:5574`) and the store's compartment predicate at
+`history_segment_max_seq` (`:5574`) and the store's history_segment predicate at
 `memory-store/src/lib.rs:7378-7387` catches it. So the sticky flag and the
-bust-only compartment fence are coupled: the fence is what turns the interleaved
+bust-only history_segment fence are coupled: the fence is what turns the interleaved
 publish into a retry, and the flag is what makes the retry repair rather than
 defer.
 
 ## What a test must construct
 
 An existing test already does this, which is why the confidence is high:
-`boundary_divergence_recut_retries_after_interleaved_historian_publish`
+`boundary_divergence_recut_retries_after_interleaved_history_summarizer_publish`
 (`transform.rs:20433`). It seeds an astro-shaped divergence
-(`seed_astro_divergence`), builds a `HistorianSelectedMessageIdentity` and a
-`CompartmentSetGeneration`, then uses a `Cell` to publish once during the pass.
+(`seed_astro_divergence`), builds a `HistorySummarizerSelectedMessageIdentity` and a
+`HistorySegmentSetGeneration`, then uses a `Cell` to publish once during the pass.
 
 What is not covered and would complete the property:
 
@@ -115,7 +115,7 @@ What is not covered and would complete the property:
    to the coverage numbers alone.
 2. Assert that `meta.boundary_divergence_pending_count` after the firing is `0`
    and not `1`, which pins the budget-preservation half at `:3947-3949`.
-3. A negative control: the same interleave with `ctx.historian_active` true, so
+3. A negative control: the same interleave with `ctx.history_summarizer_active` true, so
    `active_legitimate_publication_window` holds. The recut filter's third disjunct
    is then disabled and `:3948` does not reset the count. Asserting that the
    retry disjunct still admits the recut separates the two admission routes.
@@ -132,8 +132,8 @@ retried zero times against the same final state. That is the real claim behind
 
 - Sources examined: `transform.rs:3919-3924`; searched `transform.rs` for
   `3800`, `3_800`, and `wrapup` budget constants; `ProducerContext` fields at
-  `:548-608` for `wrapup_active` and `historian_active`.
-- Findings: `ctx.wrapup_active` and `ctx.historian_active` are plain booleans on
+  `:548-608` for `wrapup_active` and `history_summarizer_active`.
+- Findings: `ctx.wrapup_active` and `ctx.history_summarizer_active` are plain booleans on
   the producer context. No budget constant appears in `transform.rs`. The comment
   attributes the bound to "the wrapup request budget documented on the context",
   which points at the handler side (`wrapup_operation_budget` and

@@ -50,7 +50,7 @@ describe("shared regex instances are stateless across calls", () => {
     });
 });
 
-describe("createCommitHashExtractPattern (historian extraction)", () => {
+describe("createCommitHashExtractPattern (history_summarizer extraction)", () => {
     it("captures backtick-wrapped and bare hashes, deduped via matchAll", () => {
         const text = "Committed `abc1234` and def5678, also abc1234 again";
         const found = [...text.matchAll(createCommitHashExtractPattern())].map((m) =>

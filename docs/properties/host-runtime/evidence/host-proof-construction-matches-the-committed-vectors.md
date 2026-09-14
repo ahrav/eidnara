@@ -22,7 +22,7 @@ to `shm_transport::setup_auth::compute_proof`
 (`crates/shm-transport/src/setup_auth.rs:40-59`), whose `transcript_mac`
 (`:89-107`) is `HMAC-SHA256(key, domain || client_nonce || server_nonce ||
 u32be(len(daemon_ver)) || daemon_ver || daemon_id)`. The domains are
-`eidnara-server-v1` and `eidnara-client-v1` (`:28`, `:30`), re-exported into
+`eidnara-server-v3` and `eidnara-client-v3` (`:28`, `:30`), re-exported into
 `auth.rs:13` as `SERVER_PROOF_DOMAIN` and `CLIENT_AUTH_DOMAIN`. The server
 side computes the server proof at `auth.rs:216-223` and the expected client
 auth at `:239-246`, comparing in constant time at `:247`. The client side

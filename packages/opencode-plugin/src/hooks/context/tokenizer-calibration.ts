@@ -3,7 +3,7 @@
  * ai-tokenizer encodings drift from API token counts by model-specific amounts.
  * Calibration ratios are empirically measured and model-specific.
  * `scripts/calibrate-tokenizer/` measures ratios against provider-reported `usage.input_tokens`.
- * The calibration sweep uses a production system prompt, 39 MCP-style tools, and a minimal conversation.
+ * The calibration sweep uses a production system prompt, 38 MCP-style tools, and a minimal conversation.
  * The calibration sweep compares local counts with each provider's `usage.input_tokens`.
  *
  * `system_ratio = api_tokens / local_raw_tokens` for plain-text system prompts
@@ -121,7 +121,7 @@ export function resolveModelCalibration(
  * Unknown-drift buckets ensure all categories sum exactly to `inputTokens`.
  *
  * `System` and `Tool Defs` use their local counts multiplied by the measured model-specific ratio.
- * `Compartments`, `Facts`, and `Memories` retain their unadjusted local counts.
+ * `HistorySegments`, `Facts`, and `Memories` retain their unadjusted local counts.
  *
  * The function returns all-zero buckets when `inputTokens <= 0`.
  * When `residualLocalSum <= 0`, `conversation` receives the full residual.
@@ -131,7 +131,7 @@ export function resolveModelCalibration(
 export interface CalibratedBuckets {
     systemTokens: number;
     toolDefinitionTokens: number;
-    compartmentTokens: number;
+    history_segmentTokens: number;
     factTokens: number;
     memoryTokens: number;
     docsTokens: number;
@@ -147,7 +147,7 @@ export interface CalibrationInput {
     /* */
     toolDefsLocal: number;
     /* */
-    compartmentsLocal: number;
+    history_segmentsLocal: number;
     factsLocal: number;
     memoriesLocal: number;
     /* */
@@ -164,7 +164,7 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
     const empty: CalibratedBuckets = {
         systemTokens: 0,
         toolDefinitionTokens: 0,
-        compartmentTokens: 0,
+        history_segmentTokens: 0,
         factTokens: 0,
         memoryTokens: 0,
         docsTokens: 0,
@@ -177,19 +177,25 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
     let calibratedSystem = Math.round(input.systemLocal * input.calibration.systemRatio);
     let calibratedToolDefs = Math.round(input.toolDefsLocal * input.calibration.toolsRatio);
 
-    let compartments = Math.max(0, input.compartmentsLocal);
+    let history_segments = Math.max(0, input.history_segmentsLocal);
     let facts = Math.max(0, input.factsLocal);
     let memories = Math.max(0, input.memoriesLocal);
     let docs = Math.max(0, input.docsLocal);
     let profile = Math.max(0, input.profileLocal);
 
     const nonResidualTotal =
-        calibratedSystem + calibratedToolDefs + compartments + facts + memories + docs + profile;
+        calibratedSystem +
+        calibratedToolDefs +
+        history_segments +
+        facts +
+        memories +
+        docs +
+        profile;
     if (nonResidualTotal > input.inputTokens) {
         const ratio = input.inputTokens / nonResidualTotal;
         calibratedSystem = Math.round(calibratedSystem * ratio);
         calibratedToolDefs = Math.round(calibratedToolDefs * ratio);
-        compartments = Math.round(compartments * ratio);
+        history_segments = Math.round(history_segments * ratio);
         facts = Math.round(facts * ratio);
         memories = Math.round(memories * ratio);
         docs = Math.round(docs * ratio);
@@ -201,7 +207,7 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
         input.inputTokens -
             calibratedSystem -
             calibratedToolDefs -
-            compartments -
+            history_segments -
             facts -
             memories -
             docs -
@@ -225,7 +231,7 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
     const provisionalSum =
         calibratedSystem +
         calibratedToolDefs +
-        compartments +
+        history_segments +
         facts +
         memories +
         docs +
@@ -252,7 +258,7 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
         type BucketName =
             | "system"
             | "toolDefs"
-            | "compartments"
+            | "history_segments"
             | "facts"
             | "memories"
             | "docs"
@@ -260,7 +266,7 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
         const get = (name: BucketName): number => {
             if (name === "system") return calibratedSystem;
             if (name === "toolDefs") return calibratedToolDefs;
-            if (name === "compartments") return compartments;
+            if (name === "history_segments") return history_segments;
             if (name === "facts") return facts;
             if (name === "docs") return docs;
             if (name === "profile") return profile;
@@ -269,7 +275,7 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
         const subtract = (name: BucketName, amount: number): void => {
             if (name === "system") calibratedSystem -= amount;
             else if (name === "toolDefs") calibratedToolDefs -= amount;
-            else if (name === "compartments") compartments -= amount;
+            else if (name === "history_segments") history_segments -= amount;
             else if (name === "facts") facts -= amount;
             else if (name === "docs") docs -= amount;
             else if (name === "profile") profile -= amount;
@@ -278,7 +284,7 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
         const buckets: BucketName[] = [
             "system",
             "toolDefs",
-            "compartments",
+            "history_segments",
             "facts",
             "memories",
             "docs",
@@ -298,7 +304,7 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
     return {
         systemTokens: calibratedSystem,
         toolDefinitionTokens: calibratedToolDefs,
-        compartmentTokens: compartments,
+        history_segmentTokens: history_segments,
         factTokens: facts,
         memoryTokens: memories,
         docsTokens: docs,

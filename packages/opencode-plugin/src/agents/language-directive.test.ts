@@ -19,7 +19,7 @@ const EXHAUSTIVE_STRUCTURAL_TOKENS = [
     "model_behavior",
     "tool_protocol",
     "host_integration",
-    "historian_pipeline",
+    "history_summarizer_pipeline",
     "edit_pipeline",
     "environment",
     "undocumented_internal",

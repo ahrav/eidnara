@@ -20,29 +20,29 @@ reconcile is already pending:
   validate_live_boundary_ordinal(..)?; if minted.is_empty() ||
   !boundary_available(..) {`
 - `transform.rs:4642` — `if loaded.core.reconcile_pending {`
-- `transform.rs:4643` — `let compartments = store.load_compartments(&req.session_id)?;`
+- `transform.rs:4643` — `let history_segments = store.load_history_segments(&req.session_id)?;`
 - `transform.rs:4644-4645` — `let keep_through_seq =
-  surviving_revert_prefix_seq(&compartments, &live);`
+  surviving_revert_prefix_seq(&history_segments, &live);`
 - `transform.rs:4646-4650` — `let outcome =
-  store.truncate_compartments_for_revert(&req.session_id, keep_through_seq,
+  store.truncate_history_segments_for_revert(&req.session_id, keep_through_seq,
   commit_expected)?;`
 - `transform.rs:4651` — `commit_expected = Some(outcome.row_version);`
 - `transform.rs:4652` — `meta.revert_epoch = outcome.revert_epoch;`
 - `transform.rs:4653` — `meta.last_recut = outcome.last_recut;`
 
-`truncate_compartments_for_revert` (`memory-store/src/lib.rs:9015`) is its own
+`truncate_history_segments_for_revert` (`memory-store/src/lib.rs:9015`) is its own
 fenced transaction. It CAS-checks `expected_row_version` (`:9035-9042`), reads
 and mutates `meta` (`:9043-9048`, `:9130-9131`), deletes from five tables
 (`:9106-9138`), and bumps `row_version` (`:9139-9144`). Its doc comment
-(`:9012-9014`) is accurate: "Delete every compartment after `keep_through_seq`
+(`:9012-9014`) is accurate: "Delete every history_segment after `keep_through_seq`
 and bump the session revert epoch under the same row-version CAS."
 
 What runs after that commit and before the terminal commit:
 
 - `transform.rs:4654-4664` — `revision_signal_for_context`, a store read that
   returns `Result` and so can `?` out
-- `transform.rs:4666` — `store.load_compartments`, another `?`
-- `transform.rs:4668` — `coverage_bounds_from_compartments(..)?`
+- `transform.rs:4666` — `store.load_history_segments`, another `?`
+- `transform.rs:4668` — `coverage_bounds_from_history_segments(..)?`
 - `transform.rs:4676-4697` — `compose_m0_for_context(..)?`
 - `transform.rs:4699-4710` — a `CoverageGap` return: "coverage gap after
   re-cut: live item {} (ordinal {}) is below coverage end {:?} but uncovered"
@@ -63,14 +63,14 @@ are individually true and the conjunction is misleading.
 
 A user reverts a conversation past a folded boundary. The next pass finds
 `reconcile_pending` true and a minted anchor that no live block carries, enters
-the truncate arm, and deletes the compartments the revert orphaned. The
+the truncate arm, and deletes the history_segments the revert orphaned. The
 re-composed m0 then still leaves a live block below the new coverage end, so
 `:4704` returns `CoverageGap`. The transform fails. Durably:
-`compartments`, `chunk_transcripts`, `compartment_events`,
+`history_segments`, `chunk_transcripts`, `history_segment_events`,
 `primer_candidates`, `user_memory_candidates` and
-`historian_side_channel_outbox` have lost rows; `meta.revert_epoch` and
+`history_summarizer_side_channel_outbox` have lost rows; `meta.revert_epoch` and
 `meta.last_recut` have advanced; `core.boundary_id` and `meta.coverage_ordinal`
-still name the coverage that the deleted compartments provided.
+still name the coverage that the deleted history_segments provided.
 
 The same split state results from a process kill anywhere in that window,
 which is the more likely trigger in production because the window contains the
@@ -91,7 +91,7 @@ proceed with a no-op truncate. This is the reasoning; no test constructs it.
 
 ## What a test must construct
 
-1. Seed a session with several compartments and a folded m0 so
+1. Seed a session with several history_segments and a folded m0 so
    `meta.initialized` is true and `meta.coverage_ordinal` is set.
 2. Force `core.reconcile_pending = true`, which a defer with the boundary absent
    produces naturally (cache-core `:197`).
@@ -100,10 +100,10 @@ proceed with a no-op truncate. This is the reasoning; no test constructs it.
    entered.
 4. Arrange the post-truncate composition to leave an uncovered live block below
    the new coverage end, so `:4704` fires. A live block whose ordinal is below
-   the surviving compartment's `end_message` but which no surviving compartment
+   the surviving history_segment's `end_message` but which no surviving history_segment
    covers does it.
 5. Assert the returned error is `CoverageGap`.
-6. Assert the compartment count is unchanged and `meta.revert_epoch` is
+6. Assert the history_segment count is unchanged and `meta.revert_epoch` is
    unchanged. Both assertions fail today.
 
 As a coverage check instead of a violation check, assert the three independent
@@ -125,7 +125,7 @@ truncate observed to return `dropped_count > 0`, and the pass observed to reach
   re-enters `:4642` depends on the classifier, which is the sibling lens's
   territory.
 - Missing evidence: the classifier's behaviour on a session whose
-  `coverage_ordinal` names a deleted compartment.
+  `coverage_ordinal` names a deleted history_segment.
 - Conclusion: unresolved, needs the pass-selection lens's result plus a
   constructed test. The reasoning supports recovery; it is not proof.
 
@@ -135,9 +135,9 @@ truncate observed to return `dropped_count > 0`, and the pass observed to reach
   `transform.rs:4651`, `:4654-4697`.
 - Findings: the pass consumes the truncate's output before it can render:
   `commit_expected` (`:4651`), `meta.revert_epoch` (`:4652`), and the re-read
-  compartments at `:4666` all feed `compose_m0_for_context` at `:4676`. So the
+  history_segments at `:4666` all feed `compose_m0_for_context` at `:4676`. So the
   truncate cannot simply be deferred to the commit without restructuring the
-  composition to take the intended post-truncate compartment set as a value
+  composition to take the intended post-truncate history_segment set as a value
   instead of re-reading it.
 - Missing evidence: none needed for this observation.
 - Conclusion: resolved with answer — not a small change. Recording the property

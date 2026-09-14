@@ -39,27 +39,27 @@ afterEach(() => {
 describe("setup-opencode config safety", () => {
     it("leaves malformed existing config unchanged", () => {
         const path = join(tempDir(), "eidnara.jsonc");
-        const malformed = `{\n  "historian": {\n`;
+        const malformed = `{\n  "history_summarizer": {\n`;
         writeFileSync(path, malformed);
 
         expect(() =>
             writeEidnaraConfig(path, {
-                historianModel: "anthropic/claude-sonnet-4-6",
-                sidekickEnabled: false,
-                sidekickModel: null,
+                history_summarizerModel: "anthropic/claude-sonnet-4-6",
+                context_researcherEnabled: false,
+                context_researcherModel: null,
                 claudeMax: false,
             }),
         ).toThrow(`Refusing to overwrite unparseable config ${path}`);
         expect(readFileSync(path, "utf-8")).toBe(malformed);
     });
 
-    it("writes the schema URL, historian model, and sidekick block into a new config", () => {
+    it("writes the schema URL, history_summarizer model, and context_researcher block into a new config", () => {
         const path = join(tempDir(), "eidnara.jsonc");
 
         writeEidnaraConfig(path, {
-            historianModel: "anthropic/claude-haiku-4-5",
-            sidekickEnabled: true,
-            sidekickModel: "openai/gpt-5-mini",
+            history_summarizerModel: "anthropic/claude-haiku-4-5",
+            context_researcherEnabled: true,
+            context_researcherModel: "openai/gpt-5-mini",
             claudeMax: false,
         });
 
@@ -67,29 +67,29 @@ describe("setup-opencode config safety", () => {
         expect(written.$schema).toBe(
             "https://raw.githubusercontent.com/ahrav/eidnara/main/assets/eidnara.schema.json",
         );
-        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5" });
-        expect(written.sidekick).toEqual({ model: "openai/gpt-5-mini" });
+        expect(written.history_summarizer).toEqual({ model: "anthropic/claude-haiku-4-5" });
+        expect(written.context_researcher).toEqual({ model: "openai/gpt-5-mini" });
 
         writeEidnaraConfig(path, {
-            historianModel: "anthropic/claude-haiku-4-5",
-            sidekickEnabled: true,
-            sidekickModel: "openai/gpt-5-nano",
+            history_summarizerModel: "anthropic/claude-haiku-4-5",
+            context_researcherEnabled: true,
+            context_researcherModel: "openai/gpt-5-nano",
             claudeMax: false,
         });
 
         const rewritten = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
         expect(rewritten.$schema).toBe(written.$schema);
-        expect(rewritten.sidekick).toEqual({ model: "openai/gpt-5-nano" });
+        expect(rewritten.context_researcher).toEqual({ model: "openai/gpt-5-nano" });
     });
 
     it("lifts a scalar cache_ttl into the record default when Claude Max is selected", () => {
         const path = join(tempDir(), "eidnara.jsonc");
-        writeFileSync(path, `{"cache_ttl":"10m","historian":{"model":"openai/gpt-5"}}`);
+        writeFileSync(path, `{"cache_ttl":"10m","history_summarizer":{"model":"openai/gpt-5"}}`);
 
         writeEidnaraConfig(path, {
-            historianModel: "anthropic/claude-haiku-4-5",
-            sidekickEnabled: false,
-            sidekickModel: null,
+            history_summarizerModel: "anthropic/claude-haiku-4-5",
+            context_researcherEnabled: false,
+            context_researcherModel: null,
             claudeMax: true,
         });
 
@@ -106,76 +106,79 @@ describe("setup-opencode config safety", () => {
         const path = join(tempDir(), "eidnara.jsonc");
         writeFileSync(
             path,
-            `{\n  // top keep\n  "historian": {\n    // inner keep\n    "model": "old"\n  },\n  "sidekick": {\n    // sidekick keep\n    "disable": true\n  }\n}\n`,
+            `{\n  // top keep\n  "history_summarizer": {\n    // inner keep\n    "model": "old"\n  },\n  "context_researcher": {\n    // context_researcher keep\n    "disable": true\n  }\n}\n`,
         );
 
         writeEidnaraConfig(path, {
-            historianModel: "anthropic/claude-haiku-4-5",
-            sidekickEnabled: false,
-            sidekickModel: null,
+            history_summarizerModel: "anthropic/claude-haiku-4-5",
+            context_researcherEnabled: false,
+            context_researcherModel: null,
             claudeMax: false,
         });
 
         const text = readFileSync(path, "utf-8");
         expect(text).toContain("top keep");
         expect(text).toContain("inner keep");
-        expect(text).toContain("sidekick keep");
+        expect(text).toContain("context_researcher keep");
         const written = parseJsonc(text) as Record<string, unknown>;
-        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5" });
+        expect(written.history_summarizer).toEqual({ model: "anthropic/claude-haiku-4-5" });
     });
 
-    it("clears a historian opt-out when a historian model is chosen", () => {
+    it("clears a history_summarizer opt-out when a history_summarizer model is chosen", () => {
         const path = join(tempDir(), "eidnara.jsonc");
         writeFileSync(
             path,
-            `{"historian":{"disable":true,"enabled":false,"model":"old"},"sidekick":{"disable":true}}`,
+            `{"history_summarizer":{"disable":true,"enabled":false,"model":"old"},"context_researcher":{"disable":true}}`,
         );
 
         writeEidnaraConfig(path, {
-            historianModel: "anthropic/claude-haiku-4-5",
-            sidekickEnabled: false,
-            sidekickModel: null,
+            history_summarizerModel: "anthropic/claude-haiku-4-5",
+            context_researcherEnabled: false,
+            context_researcherModel: null,
             claudeMax: false,
         });
 
         const written = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
-        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5" });
-        expect(written.sidekick).toEqual({ disable: true });
+        expect(written.history_summarizer).toEqual({ model: "anthropic/claude-haiku-4-5" });
+        expect(written.context_researcher).toEqual({ disable: true });
     });
 
     it("drops schema-invalid agent fields so the runtime keeps the block", () => {
         const path = join(tempDir(), "eidnara.jsonc");
         writeFileSync(
             path,
-            `{"historian":{"temperature":"hot","top_p":0.5},"sidekick":{"color":"red","prompt":"keep"}}`,
+            `{"history_summarizer":{"temperature":"hot","top_p":0.5},"context_researcher":{"color":"red","prompt":"keep"}}`,
         );
 
         writeEidnaraConfig(path, {
-            historianModel: "anthropic/claude-haiku-4-5",
-            sidekickEnabled: true,
-            sidekickModel: "openai/gpt-5-mini",
+            history_summarizerModel: "anthropic/claude-haiku-4-5",
+            context_researcherEnabled: true,
+            context_researcherModel: "openai/gpt-5-mini",
             claudeMax: false,
         });
 
         const written = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
-        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5", top_p: 0.5 });
-        expect(written.sidekick).toEqual({ model: "openai/gpt-5-mini", prompt: "keep" });
+        expect(written.history_summarizer).toEqual({
+            model: "anthropic/claude-haiku-4-5",
+            top_p: 0.5,
+        });
+        expect(written.context_researcher).toEqual({ model: "openai/gpt-5-mini", prompt: "keep" });
     });
 
     it("replaces schema-invalid agent blocks instead of throwing on them", () => {
         const path = join(tempDir(), "eidnara.jsonc");
-        writeFileSync(path, `{"historian":"old-model","sidekick":["stale"]}`);
+        writeFileSync(path, `{"history_summarizer":"old-model","context_researcher":["stale"]}`);
 
         writeEidnaraConfig(path, {
-            historianModel: "anthropic/claude-haiku-4-5",
-            sidekickEnabled: true,
-            sidekickModel: "openai/gpt-5-mini",
+            history_summarizerModel: "anthropic/claude-haiku-4-5",
+            context_researcherEnabled: true,
+            context_researcherModel: "openai/gpt-5-mini",
             claudeMax: false,
         });
 
         const written = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
-        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5" });
-        expect(written.sidekick).toEqual({ model: "openai/gpt-5-mini" });
+        expect(written.history_summarizer).toEqual({ model: "anthropic/claude-haiku-4-5" });
+        expect(written.context_researcher).toEqual({ model: "openai/gpt-5-mini" });
     });
 
     it("normalizes every cache_ttl shape before adding the Claude Max overrides", () => {
@@ -207,9 +210,9 @@ describe("setup-opencode config safety", () => {
         );
 
         writeEidnaraConfig(path, {
-            historianModel: null,
-            sidekickEnabled: false,
-            sidekickModel: null,
+            history_summarizerModel: null,
+            context_researcherEnabled: false,
+            context_researcherModel: null,
             claudeMax: true,
         });
 

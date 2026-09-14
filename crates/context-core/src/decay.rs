@@ -1,12 +1,12 @@
 //! Age-based paraphrase tiering.
 //!
-//! A compartment's tier follows its exponential decay position `z`, the age
+//! A history_segment's tier follows its exponential decay position `z`, the age
 //! measured in half-lives, where the half-life grows with importance and
 //! shrinks with budget pressure. Tier boundaries are fixed so the same
-//! compartment renders identically for a given index, importance, and
+//! history_segment renders identically for a given index, importance, and
 //! pressure.
 
-/// Half-life in compartment positions for importance 50 at budget pressure 1.
+/// Half-life in history_segment positions for importance 50 at budget pressure 1.
 pub const H50: f64 = 24.0;
 /// Importance-point interval that doubles the half-life.
 ///
@@ -39,7 +39,7 @@ pub enum Tier {
 }
 
 impl Tier {
-    /// Estimated token cost of one compartment rendered at this tier.
+    /// Estimated token cost of one history_segment rendered at this tier.
     pub const fn cost(self) -> u32 {
         match self {
             Tier::P1 => 322,
@@ -52,8 +52,8 @@ impl Tier {
 }
 
 #[inline]
-fn z_value(compartment_index: u32, importance: i32, budget_pressure: f64) -> f64 {
-    let a = (compartment_index.max(1) - 1) as f64;
+fn z_value(history_segment_index: u32, importance: i32, budget_pressure: f64) -> f64 {
+    let a = (history_segment_index.max(1) - 1) as f64;
     let imp = importance.clamp(1, 100) as f64;
     // `f64::clamp` preserves NaN, so `p` maps NaN to `P_FLOOR`.
     // An infinite pressure gives `h == 0.0`, and `0.0 / 0.0` matches no tier boundary.
@@ -100,16 +100,16 @@ fn archives_at(z: f64, anchor_overlap: f64) -> bool {
     z >= Z4 + G * o
 }
 
-/// Maps compartment age onto fixed exponential-decay boundaries.
+/// Maps history_segment age onto fixed exponential-decay boundaries.
 ///
-/// `compartment_index` is one-based from newest and clamps upward to 1.
+/// `history_segment_index` is one-based from newest and clamps upward to 1.
 /// `importance` clamps to 1 through 100. `budget_pressure` has a floor of
 /// [`P_FLOOR`] and a ceiling of `f64::MAX`; NaN reads as [`P_FLOOR`].
 ///
 /// Boundaries are lower-inclusive for the older tier: a value
 /// exactly equal to [`Z1`], [`Z2`], [`Z3`], or [`Z4`] enters the next tier.
-pub fn tier(compartment_index: u32, importance: i32, budget_pressure: f64) -> Tier {
-    tier_for_z(z_value(compartment_index, importance, budget_pressure))
+pub fn tier(history_segment_index: u32, importance: i32, budget_pressure: f64) -> Tier {
+    tier_for_z(z_value(history_segment_index, importance, budget_pressure))
 }
 
 /// Tests decay position against an anchor-adjusted archive boundary.
@@ -118,28 +118,28 @@ pub fn tier(compartment_index: u32, importance: i32, budget_pressure: f64) -> Ti
 /// 1 and raises the archive threshold by up to [`G`] half-lives. With
 /// `anchor_overlap = 0.0`, archiving requires `z >= Z4`.
 pub fn should_archive(
-    compartment_index: u32,
+    history_segment_index: u32,
     importance: i32,
     budget_pressure: f64,
     anchor_overlap: f64,
 ) -> bool {
     archives_at(
-        z_value(compartment_index, importance, budget_pressure),
+        z_value(history_segment_index, importance, budget_pressure),
         anchor_overlap,
     )
 }
 
 /// Applies archival protection before selecting a renderable tier.
 ///
-/// P5 denotes archival, not a verbosity tier. A compartment naturally in P5
+/// P5 denotes archival, not a verbosity tier. A history_segment naturally in P5
 /// remains P4 while anchor overlap protects it from archival.
 pub fn rendered_tier(
-    compartment_index: u32,
+    history_segment_index: u32,
     importance: i32,
     budget_pressure: f64,
     anchor_overlap: f64,
 ) -> Tier {
-    let z = z_value(compartment_index, importance, budget_pressure);
+    let z = z_value(history_segment_index, importance, budget_pressure);
     if archives_at(z, anchor_overlap) {
         return Tier::P5;
     }
@@ -151,11 +151,11 @@ pub fn rendered_tier(
 
 /// Derives pressure from natural tier costs and a history budget.
 ///
-/// `importances` is ordered newest first; position `i` is compartment index
+/// `importances` is ordered newest first; position `i` is history_segment index
 /// `i + 1`. `history_budget` and tier costs use estimated tokens. A
 /// non-positive budget returns 1. Otherwise, `H ∝ 1/p` makes per-tier
-/// compartment counts scale as `1/p`, so `C(p) ≈ C(1)/p`; `p = C(1)/B`
-/// targets budget `B` before applying [`P_FLOOR`]. Archived P5 compartments
+/// history_segment counts scale as `1/p`, so `C(p) ≈ C(1)/p`; `p = C(1)/B`
+/// targets budget `B` before applying [`P_FLOOR`]. Archived P5 history_segments
 /// contribute no natural cost.
 pub fn compute_budget_pressure(importances: &[i32], history_budget: f64) -> f64 {
     if history_budget <= 0.0 {
@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn non_finite_pressure_keeps_the_newest_compartment_in_tier_1() {
+    fn non_finite_pressure_keeps_the_newest_history_segment_in_tier_1() {
         assert_eq!(tier(1, 50, f64::INFINITY), Tier::P1);
         assert_eq!(tier(1, 50, f64::MAX), Tier::P1);
         assert_eq!(tier(2, 50, f64::INFINITY), Tier::P5);

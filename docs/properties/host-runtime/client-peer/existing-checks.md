@@ -5,14 +5,14 @@ Every claim-bearing check for the host's own client acting as a protocol peer:
 it, the binaries that use it as a fixture, and the CI steps that reach any of
 them.
 
-Provenance: system `the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`. Every count in this
+Provenance: system `the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`,`HEAD` = `e447c927`. Every count in this
 file was re-derived at that commit rather than copied from the lens material: the
-in-crate total by grepping `#[test]` and `tokio::test` from `:2266` onward, the
+in-crate total by grepping`#[test]` and `tokio::test` from `:2266` onward, the
 40 cluster sites by printing each one and confirming it is a test `fn` line, the
 integration tests by printing every `async fn` in `crates/host-runtime/tests/client.rs`,
-the 24 integration binaries by listing `crates/host-runtime/tests/*.rs`, and the
-fixture users by grepping each for `Client::connect`.
+the 24 integration binaries by listing`crates/host-runtime/tests/*.rs`, and the
+fixture users by grepping each for`Client::connect`.
 
 **Every status below is `unaudited`.** An existing check never removes a property
 from the catalog. Test adequacy belongs to `/testing:invariant-test-review`;
@@ -171,7 +171,7 @@ subject, and three of the seven are CI-named.** Counted by grepping each of the
 > the answer is that `--test client` is the load-bearing invocation.
 
 The shared harness also constructs the client: `tests/support/mod.rs` at 3 sites
-and `tests/support/synapse.rs` at 1. So **8 of the 24 integration binaries touch
+and `tests/support/local_embeddings.rs` at 1. So **8 of the 24 integration binaries touch
 `client.rs` at all**, and 4 of those 8 are CI-named.
 
 > **Two fixture binaries carry a claim-bearing assertion about this sub-part, and
@@ -352,7 +352,7 @@ state with "bounded backoff, reread file" (`:764`), and `client.rs` has no
 reconnect path - but no reconnect path was deleted either. A `git diff` of
 `ed487e11` shows no removed reconnect function, so this is a contract gap rather
 than a deleted-mechanism finding. Recovery lives in
-`crates/daemon/src/historian_producer.rs:699`, outside this sub-part.
+`crates/daemon/src/history_summarizer_producer.rs:699`, outside this sub-part.
 
 ### Claims stated somewhere and checked mechanically nowhere
 

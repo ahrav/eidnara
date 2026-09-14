@@ -59,7 +59,7 @@ inputs. Any design that promotes the cache to a source inherits both facts.
   forwarding. The test asserts one forwarded snapshot, not a
   `todo_tool_present` value.
 - The agent-deny test at [:440][t440] and the evaluator test at
-  [ctx-reduce-availability.test.ts:318][t318] show the agent input changes the
+  [eidnara-reduce-availability.test.ts:318][t318] show the agent input changes the
   answer.
 
 ## Failure scenario
@@ -96,7 +96,7 @@ cached-deny-then-failure sequence.
 ### Q: Is fail-open on an empty cache and a failed read the intended default?
 
 - Sources examined: [`?? false`][combinedseed]; the doc comments at
-  [ctx-reduce-availability.ts:15-17][doc17] and [:57-58][doc57]; the comment
+  [eidnara-reduce-availability.ts:15-17][doc17] and [:57-58][doc57]; the comment
   at [rust-mode-transform.ts:1056-1057][failclosed]; [t466] and [t119].
 - Findings: The code defaults to "not denied". The comment at 1057 says
   synthesis fails closed when evidence is missing; the availability doc says
@@ -128,14 +128,14 @@ cached-deny-then-failure sequence.
 [combinedcatch]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L97-L104
 [activeagent]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L68-L75
 [failclosed]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1056-L1057
-[todowrap]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L310-L316
-[permdenied]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L277-L308
-[permdisabled]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L203-L213
-[permkey]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L71-L73
-[permmap]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L57-L59
-[clearperm]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L326-L334
-[doc17]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L15-L17
-[doc57]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L57-L58
+[todowrap]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L310-L316
+[permdenied]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L277-L308
+[permdisabled]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L203-L213
+[permkey]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L71-L73
+[permmap]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L57-L59
+[clearperm]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L326-L334
+[doc17]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L15-L17
+[doc57]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L57-L58
 [capture]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L270-L292
 [agentset]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L133-L135
 [hookclient]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook.ts#L44-L45
@@ -147,7 +147,7 @@ cached-deny-then-failure sequence.
 [t466]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L466
 [t440]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L440
 [t119]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook-handlers.test.ts#L119
-[t318]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L318
+[t318]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.test.ts#L318
 
 ## Historical first implementation investigation
 
@@ -169,10 +169,10 @@ reviewed implementation. The single-flight design and retention ledger follow.
   without a live read. The user accepts silent permission edits remaining
   unobserved within that window because there is no permission-change
   subscription. Freshness invalidates on `session.updated`, native
-  `session.compacted`, and `/ctx-flush`; deletion clears entries. Invalidation
+  `session.compacted`, and `/eidnara-flush`; deletion clears entries. Invalidation
   must retain the last deny to preserve the P5 witness.
 - Findings: The resolver owns the timeout and fail-closed outcome for both
-  transform and capture. The frozen tools-map cache and `ctx_reduce` paths
+  transform and capture. The frozen tools-map cache and `eidnara_reduce` paths
   remain separate. The `todo_tool_present` wire name and all schemas remain
   unchanged.
 - Findings: Keys encode session separately from the JSON tuple
@@ -227,7 +227,7 @@ reviewed implementation. The single-flight design and retention ledger follow.
   Result before production edits: 2 passed, 2 failed. A shared-hit test saw
   three SDK reads instead of one; missing-client capture forwarded a snapshot.
 - Focused command:
-  `bun run --cwd packages/opencode-plugin test src/hooks/context/ctx-reduce-availability.test.ts src/hooks/context/hook.test.ts src/hooks/context/hook-handlers.test.ts src/hooks/context/rust-mode-transform.test.ts src/hooks/context/event-handler.test.ts src/shared/bounded-session-map.test.ts`.
+  `bun run --cwd packages/opencode-plugin test src/hooks/context/eidnara-reduce-availability.test.ts src/hooks/context/hook.test.ts src/hooks/context/hook-handlers.test.ts src/hooks/context/rust-mode-transform.test.ts src/hooks/context/event-handler.test.ts src/shared/bounded-session-map.test.ts`.
   First integration run: 157 passed, 4 failed. Two fixtures still assumed the
   old fail-open default; two assertions counted detached capture sends before
   their promise continuations drained. Explicit successful SDK fixtures and
@@ -258,7 +258,7 @@ reviewed implementation. The single-flight design and retention ledger follow.
   [transform/capture overlap][singleflight-hook], and
   [shared resolver][singleflight-resolver].
 - Proof-first result: The command
-  `bun run --cwd packages/opencode-plugin test src/hooks/context/ctx-reduce-availability.test.ts src/hooks/context/hook.test.ts --test-name-pattern 'overlapping same-key|overlapping transform and capture'`
+  `bun run --cwd packages/opencode-plugin test src/hooks/context/eidnara-reduce-availability.test.ts src/hooks/context/hook.test.ts --test-name-pattern 'overlapping same-key|overlapping transform and capture'`
   runs three tests before the single-flight fix: 0 passed, 3 failed, 7
   assertions. The resolver returns `[true, false]` rather than `[false, false]`.
   Both hook variants send `todo_tool_present: false` instead of true.
@@ -352,13 +352,13 @@ reviewed implementation. The single-flight design and retention ledger follow.
 - Conclusion: all required local runtime and package gates pass; the two
   preexisting test-type diagnostics remain explicit.
 
-[singleflight-overlap]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L368-L391
+[singleflight-overlap]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.test.ts#L368-L391
 [singleflight-hook]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/hook.test.ts#L408-L465
-[singleflight-resolver]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L295-L351
-[singleflight-reader]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L353-L383
-[singleflight-cap]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L59-L68
-[singleflight-keys]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L80-L91
-[singleflight-lifetime]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L347-L604
+[singleflight-resolver]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L295-L351
+[singleflight-reader]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L353-L383
+[singleflight-cap]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L59-L68
+[singleflight-keys]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts#L80-L91
+[singleflight-lifetime]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.test.ts#L347-L604
 
 ### Q: How does an empty host agent reach the permission cache?
 

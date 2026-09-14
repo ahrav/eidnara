@@ -20,7 +20,7 @@ disagree about retirement for a nonempty region of the input space.
 Monotonicity, traced through the arithmetic:
 
 - `crates/context-core/src/decay.rs:65` — `a` is non-decreasing in
-  `compartment_index`.
+  `history_segment_index`.
 - `crates/context-core/src/decay.rs:68` — `f = 2^((imp - 50) / D)` is increasing in
   `imp`, so `h` at `:69` is increasing in `imp`, so `z = a / h` at `:70` is
   non-increasing in `imp`.
@@ -32,7 +32,7 @@ Monotonicity, traced through the arithmetic:
 
 So all three monotonicity clauses follow from a monotone `z` composed with a
 monotone step function, *provided* `z` is not NaN. The NaN case is the subject
-of a separate record, `core-decay-newest-compartment-tier-floor`.
+of a separate record, `core-decay-newest-history_segment-tier-floor`.
 
 Existing coverage, precisely:
 
@@ -62,7 +62,7 @@ idx=120 tier=5  archive=true   rendered=5
 Indices 64 through 119 are the window where `tier` says 5 and
 `should_archive` says false. This is the documented anchor protection:
 `crates/context-core/src/decay.rs:94` says "Anchor overlap extends P4 protection by
-up to `G` half-lives", and `:107-108` says non-archived compartments "render at
+up to `G` half-lives", and `:107-108` says non-archived history_segments "render at
 most P4". So the disagreement is intended, and the correct property is not
 "`tier == 5` implies archived" but "`rendered_tier == 5` if and only if
 `should_archive`".
@@ -73,8 +73,8 @@ Two distinct failures.
 
 A monotonicity break: a boundary constant is edited so the ladder is no longer
 sorted, or the exponent sign at `crates/context-core/src/decay.rs:68` is flipped
-during a refactor. The visible effect is a compartment that becomes *more*
-verbose as the session grows, or a high-importance compartment demoting faster
+during a refactor. The visible effect is a history_segment that becomes *more*
+verbose as the session grows, or a high-importance history_segment demoting faster
 than a low-importance one. Because the three existing tests pin only single
 slices, an edit that preserves those slices while breaking the surface passes.
 Concretely, swapping `Z2` and `Z3` would keep `tier` non-decreasing in age
@@ -84,9 +84,9 @@ non-decrease, not the specific tier values.
 
 An agreement break: a change to `rendered_tier` that returns `tier()`
 unclamped, or an `anchor_overlap` handling change, makes the renderer emit
-tier 5 for a compartment `should_archive` reports as live, or tier 4 for one it
+tier 5 for a history_segment `should_archive` reports as live, or tier 4 for one it
 reports as archived. Any archival bookkeeping keyed on `should_archive` then
-disagrees with the bytes actually rendered, so a compartment is either retired
+disagrees with the bytes actually rendered, so a history_segment is either retired
 while still appearing in the prompt or dropped from the prompt while still
 tracked as live.
 
@@ -97,7 +97,7 @@ and no interleaving to construct.
 
 Dependency: the monotonicity clauses hold only where `z` is not NaN, so this
 record's sweep must exclude `pressure = +inf` at `index <= 1`, or must be run
-after `core-decay-newest-compartment-tier-floor` is resolved. Sweeping finite
+after `core-decay-newest-history_segment-tier-floor` is resolved. Sweeping finite
 pressures only keeps the two records independent.
 
 ## What a test must construct

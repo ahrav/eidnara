@@ -33,9 +33,9 @@ the read-only source system is clean apart from untracked directories. Every
 `client.rs` reference below was read back individually at that commit. References
 outside `client.rs` verified for this disposition: `wire.rs:540-602` and `:45-89`
 and `:336-346`; `connection.rs:70-103` and `:185-210`; `dispatch.rs:1160-1239`;
-`routing.rs:112` and `:191-205`; `setup_socket.rs:81-85`; `synapse/mod.rs:960-963`;
+`routing.rs:112` and `:191-205`; `setup_socket.rs:81-85`; `local_embeddings/mod.rs:960-963`;
 `control.rs:15-16`; `tests/shm_soak.rs:1-120`; `tests/shm_failure_modes.rs:185-244`;
-`the source repository `ci.yml` workflow:105-200`; `docs/host-wire-protocol.md:689-693`. One
+`the source repository`ci.yml`workflow:105-200`; `docs/host-wire-protocol.md:689-693`. One
 grep is load-bearing for D5 and is recorded as a fact rather than an impression:
 `rg 'module_timeout' crates/` returns exactly one hit, `client.rs:518`.
 
@@ -312,9 +312,10 @@ And the codes reachable at all are emitted either pre-bind or post-cleanup:
 `unknown_module` and `target_unavailable` are pre-bind classification
 (`control.rs:15-16`, with capacity exhaustion documented as happening "without any
 handler bind" at `routing.rs:112`), and `module_reloading` is a handler bind
-rejection (`synapse/mod.rs:960-963`) that takes the `Reject` arm.
+rejection (`local_embeddings/mod.rs:960-963`) that takes the `Reject` arm.
 
 **The finding that survives is sharper than the one it replaces.** `module_timeout`
+
 - the code the whole original recipe was built on - has **no producer anywhere in
 the tree**. `rg 'module_timeout' crates/` returns one hit, and it is the client's
 own allowlist at `client.rs:518`. So the client retries on a code its own host

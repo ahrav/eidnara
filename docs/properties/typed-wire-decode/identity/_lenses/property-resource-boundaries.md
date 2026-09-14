@@ -7,7 +7,7 @@ External leads: plan R8-R11, latency-audit A1/A3, and invalidated W1.
 ## Finding
 
 The identity basis includes serialized lengths (`crates/daemon/src/transform.rs:198-200`)
-and historian lengths (`crates/daemon/src/historian_chunk.rs:426-430`).
+and history_summarizer lengths (`crates/daemon/src/history_summarizer_chunk.rs:426-430`).
 Lengths must be exact UTF-8 byte counts, independently of admission charges.
 
 ## Candidate

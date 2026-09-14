@@ -97,16 +97,16 @@ and here with current evidence:
 - Claude tokenizer production use exists: `crates/daemon/Cargo.toml:32` and
   `crates/daemon/src/token_cache.rs:127-141`. Its vocabulary remains distinct
   from the embedding model tokenizer.
-- Production Synapse composition exists at
+- Production LocalEmbeddings composition exists at
   `crates/daemon/src/bin/eidnara_host/serve.rs:1097-1127`. Certified artifacts
   or disabled/unsupported fallback are selected at `:1027-1065`. Composition
   is default-production; certified inference/live jobs are explicit-config-only.
 - Eviction ranks eligible completed jobs by last poll time falling back to
-  completion, then by completion: `crates/host-runtime/src/synapse/jobs.rs:156-158`,
+  completion, then by completion: `crates/host-runtime/src/local_embeddings/jobs.rs:156-158`,
   `:773-797`, `:840-851`. Oldest-completion behavior for unpolled jobs is not
   the full eviction contract.
 - The certified-runtime check is explicitly ignored at
-  `crates/host-runtime/tests/synapse_bundle.rs:579-581`. Its source presence
+  `crates/host-runtime/tests/local_embeddings_bundle.rs:579-581`. Its source presence
   supplies no execution or acceptance witness.
 
 These corrections do not rewrite older catalogs, import their exercise claims,

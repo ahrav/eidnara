@@ -58,7 +58,7 @@ are covered by concurrency and recovery. No distributed claim is introduced.
 
 N1.3 hooks stay disabled before gates pass. Daemon route rejection is live at
 `lib.rs:11805-11826,12558-12650`; the scheduler names only the existing
-review-user-memories task (`dreamer_scheduler.rs:25-36`). The new gate contract
+review-user-memories task (`memory_classifier_scheduler.rs:25-36`). The new gate contract
 must cover startup and configuration changes, not just public route names.
 Schema/model/policy mismatch rebuild is handed to the export/rebuild owner.
 
@@ -80,7 +80,7 @@ exclusion rather than re-specifying embedding admission.
 ## Overlap decisions before additions
 
 The existing catalogs were inspected before new records were written. Exact
-codec preservation, raw historian publication, canonical withheld-read
+codec preservation, raw history_summarizer publication, canonical withheld-read
 reporting and scheduler lease/receipt guarantees stay in their existing
 records. The [overlap register](../existing-checks.md#overlap-register) links
 them and records citation drift. Invalidated mirror records are historical

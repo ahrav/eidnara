@@ -55,7 +55,7 @@ fn first_hard_pass_meta_respects_the_store_durable_text_bound() {
             model_key: None,
             observed_last_response_at_ms: None,
             guidance_date: Some("Today's date: Thu Jan 01 2026".to_string()),
-            historian_active: false,
+            history_summarizer_active: false,
             wrapup_active: false,
         };
         let before = store.load(session).expect("load before");

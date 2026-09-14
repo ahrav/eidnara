@@ -34,7 +34,7 @@ invocations, and only a `CasConflict` continues. Every other error, including
 Within one `apply_once`, the other explicit bound on repeated work is
 `BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT` (`transform.rs:85`, value 3) with the
 doc at `:83-84`: "Limit consecutive passes that may ignore a coverage gap when
-the applied compartment watermark is missing or stale; after this limit, the gap
+the applied history_segment watermark is missing or stale; after this limit, the gap
 is repaired instead of suppressed." It is applied at `:3931-3937` via
 `.min(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT)` and consulted at `:3944-3945`.
 That bound is in passes, not in one firing, so it does not bound this firing's
@@ -112,7 +112,7 @@ The retry bound is unconditional.
 The unbounded loop's reachability depends on whether two writers can touch one
 session's tags while a third pass reads them. That is the same open concurrency
 question that
-[defer-commit-carries-no-compartment-fence](defer-commit-carries-no-compartment-fence.md)
+[defer-commit-carries-no-history_segment-fence](defer-commit-carries-no-history_segment-fence.md)
 depends on, and it belongs to sub-part 4c.
 
 ## What a test must construct

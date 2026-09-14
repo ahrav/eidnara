@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use shm_transport::backend::ring::{ProducerError, Ring, wire_v2_header};
+use shm_transport::backend::ring::{ProducerError, Ring, wire_v3_header};
 use shm_transport::descriptor::HardwareProfileId;
 use shm_transport::evidence::OperationCounters;
 use shm_transport::profile::{TargetProfile, ring_profile as library_ring_profile};
@@ -638,7 +638,7 @@ fn run_ring(
     // The doorbells are socketpairs: the consumer must own the peer ends, so it attaches its
     // own handle from the attachment instead of sharing the producer's `Ring`.
     let attachment = ring.attachment().map_err(|_| "ring attachment")?;
-    let header = wire_v2_header(payload_len).map_err(|_| "header")?;
+    let header = wire_v3_header(payload_len).map_err(|_| "header")?;
     let body = vec![BODY_BYTE; payload_len];
     let page = SharedPage::map()?;
     let report = page.place(PeerReport::new());
@@ -699,7 +699,7 @@ fn run_ring(
 fn produce(
     ring: &Ring,
     body: &[u8],
-    header: [u8; shm_transport::WIRE_V2_HEADER_BYTES],
+    header: [u8; shm_transport::WIRE_V3_HEADER_BYTES],
     iterations: u64,
     copied_producer: bool,
 ) -> Result<u64, &'static str> {

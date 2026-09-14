@@ -1,5 +1,10 @@
 # h4c-transform-writes-two-side-effects-before-its-fenced-commit
 
+Current disposition: [catalog record](../catalog.md#h4c-transform-writes-two-side-effects-before-its-fenced-commit)
+is invalidated. The mural artifact helpers and store operation are absent from
+the current source. The quotations and line references below remain historical
+evidence, not evidence of the current implementation. No tests were rerun.
+
 ## Discovery trigger
 
 The transform pass is described throughout the crate as ending in a single
@@ -36,16 +41,16 @@ Note the scope: `&project_path` at `:8211`, resolved at `:8184-8194` from the
 route's authority project. This is a *project*-scoped write, wider than the session
 the pass belongs to.
 
-**Write two: the historian side-channel drain.**
+**Write two: the history_summarizer side-channel drain.**
 
 ```
 8249        // A previous publish may have committed while one independent side channel failed.
 8250        // Retry on normal traffic rather than creating another background timer.
 8251        let side_channel_drain_started_at = Instant::now();
-8252        let _ = store.drain_historian_side_channels(
+8252        let _ = store.drain_history_summarizer_side_channels(
 8253            &parsed.session_id,
 8254            pass_now,
-8255            HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND,
+8255            HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND,
 8256        );
 ```
 
@@ -149,7 +154,7 @@ request must carry a mural.
   request. Both hold on a correct implementation and together they mark the window
   as entered.
 - The side-channel half of the property needs a due side-channel row so the drain
-  has work; `fail_next_historian_side_channel_for_test`, used at `:30041`, is the
+  has work; `fail_next_history_summarizer_side_channel_for_test`, used at `:30041`, is the
   seam.
 
 ## Investigation log

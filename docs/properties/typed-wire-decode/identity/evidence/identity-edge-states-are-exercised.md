@@ -22,7 +22,7 @@ by the user after its four completed portfolio lenses.
    and parsing seams, but no aggregate exclusion marker is present.
 5. `crates/daemon/src/lib.rs:16443-16461` requires supplied stored rows to
    reach meaningful history recovery. An empty store is not an upgrade probe.
-6. `crates/daemon/src/historian_chunk.rs:418-430` requires synthetic and real
+6. `crates/daemon/src/history_summarizer_chunk.rs:418-430` requires synthetic and real
    inputs to witness exclusion without demanding a forbidden synthetic item.
 7. `crates/daemon/src/wire.rs:1749-1784` demonstrates a shared-shell test seam.
    No claim is made that this existing test satisfies the proposed marker.

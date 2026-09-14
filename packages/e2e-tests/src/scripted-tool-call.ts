@@ -10,7 +10,7 @@ export const DEFAULT_SCRIPTED_TOOL_USAGE: MockUsage = {
 };
 
 export interface ScriptedToolCallOptions {
-    /** `tool` must exactly match the published tool name, such as "ctx_memory". */
+    /** `tool` must exactly match the published tool name, such as "eidnara_memory". */
     tool: string;
     input: Record<string, unknown>;
     prompt: string;

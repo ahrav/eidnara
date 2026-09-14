@@ -100,13 +100,13 @@ that commit. Verified for this disposition: `boundary.rs:322-346`, `:348-402`,
 `:750-805`; `config.rs:250-279`, `:425-435`, `:620-636`; `scheduler.rs:105-120`,
 `:448-462`, `:840-870`; `lib.rs:600-610`, `:4950-4968`, `:16500-16501`,
 `:16573-16574`, `:16767-16768`; `codec/opencode.rs:240-270`, `:460-470`;
-`caveman.rs:610-651`; `transform.rs:676-700`;
+`terse_text_compression.rs:610-651`; `transform.rs:676-700`;
 `packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1355` (source-catalog path, not present at HEAD), `:1398`,
 `:2014`, `:2031`; `CONFIGURATION.md:160-172` (source-catalog path, not present at HEAD), `:230-240`. Four greps are
 load-bearing and are recorded as facts rather than impressions:
 `grep -rn 'ByModel' --include='*.rs'` over the whole tree returns exactly two hits,
 both in `scheduler.rs` (`:115`, `:456`); `grep -rn 'commit_cluster\|min_clusters'
-crates/daemon/src/` returns no request field; `historian_timeout_ms`,
+crates/daemon/src/` returns no request field; `history_summarizer_timeout_ms`,
 `history_budget_percentage`, and `output_reserve` each return TypeScript consumers
 under `packages/`; and `tail_size_bar` returns `lib.rs:4982` and `:5002` as its
 consumers.
@@ -318,13 +318,13 @@ propagates.** In `derive_protected_tail_token_target` the NaN is absorbed:
 `:383`'s `(trigger_budget + reserve).min((usable * 0.5).floor())` returns the
 non-NaN operand, so `headroom`, `ceiling_n`, and `n` all stay finite and the
 function's own postcondition survives — but `:399` stores the raw NaN into the
-returned struct's `trigger_budget` field. In `check_compartment_trigger_with_index`
+returned struct's `trigger_budget` field. In `check_history_segment_trigger_with_index`
 the NaN escapes: `:756-761` performs the same unguarded read, `:780-781`'s
 `MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE.max(...)` absorbs it for `scan_budget`, and then
 `:802`'s `tail_size_bar: trigger_budget * TAIL_SIZE_TRIGGER_MULTIPLIER` is a bare
 multiply with nothing to absorb it. `TriggerProgress.tail_size_bar` is NaN.
 `TriggerProgress`'s own doc comment at `:322-324` says it is "Surfaced through the
-transform response's historian diagnostics so a stalled rig drive is diagnosable
+transform response's history_summarizer diagnostics so a stalled rig drive is diagnosable
 per pass"; it is carried out at `lib.rs:4982` and divided and rounded at `:5002`.
 `serde_json` renders a NaN as `null`, so the wire form is an absent number rather
 than a visible error.
@@ -382,7 +382,7 @@ pointer" while its verdict column said **No**.
 
 **Error 2: three keys called absent everywhere have workspace consumers.** The
 "absent everywhere" bucket was defined as zero occurrences in
-`crates/daemon/src`, and then named as absence. `historian_timeout_ms` is read at
+`crates/daemon/src`, and then named as absence. `history_summarizer_timeout_ms` is read at
 `pi-plugin/src/index.ts:676` and threaded through `:1297`, `:1313`, `:1332`;
 `history_budget_percentage` at `:693` and `:1229`; `output_reserve` through
 `setOutputReserveConfig` at `pi-plugin/src/config/index.ts:427` and `:600`. Checked
@@ -463,7 +463,7 @@ ownership. The full entries are in
 
 | # | Gap | Owner | Evidence |
 | --- | --- | --- | --- |
-| G-a | **The caveman path-independence claim never became a record.** `CONFIGURATION.md:740` (source-catalog path, not present at HEAD) claims that when a tag shifts deeper, caveman compresses the *original* text at the new depth rather than the already-cavemaned intermediate, so "repeated tier shifts converge to exactly the same output as direct compression at the final depth". Registered in full at `_lenses/lens-c1-claims-and-config.md:360-378`, mechanism identified, and then no record. | **4f**, because the claim is about what `caveman::compress` returns for a given depth and `caveman.rs` is in 4f's brief-named file set. | The mechanism is real and lives outside 4f: `transform.rs:6339` reads `row.source_bytes` and `:6358` calls `caveman::compress(&source, level)` on the pristine text, with `:6352-6354` refusing a non-increasing depth. The property is asserted nowhere. `caveman.rs`'s only test, `differential_golden_matches_typescript_oracle` (`:626`, extent `:626-650`), replays 42 cases from `caveman-golden.json` against `Lite`, `Full`, and `Ultra` **independently** — verified by reading the body — and never composes two compressions. The claim is load-bearing precisely because `compress` is not idempotent by construction: `apply_ultra_connectives` (`:472`) and `apply_ultra_abbreviations` (`:501`) rewrite words into symbols a second pass would read as different input. So a record needs one oracle over pairs of depths, and the interesting inequality is `compress(compress(t, Lite), Ultra) != compress(t, Ultra)` with the guarantee that the production path never takes the left-hand form. `safety`, direct call, no fault. |
+| G-a | **The terse_text_compression path-independence claim never became a record.** `CONFIGURATION.md:740` (source-catalog path, not present at HEAD) claims that when a tag shifts deeper, terse_text_compression compresses the *original* text at the new depth rather than the already-terse_text_compressioned intermediate, so "repeated tier shifts converge to exactly the same output as direct compression at the final depth". Registered in full at `_lenses/lens-c1-claims-and-config.md:360-378`, mechanism identified, and then no record. | **4f**, because the claim is about what `terse_text_compression::compress` returns for a given depth and `terse_text_compression.rs` is in 4f's brief-named file set. | The mechanism is real and lives outside 4f: `transform.rs:6339` reads `row.source_bytes` and `:6358` calls `terse_text_compression::compress(&source, level)` on the pristine text, with `:6352-6354` refusing a non-increasing depth. The property is asserted nowhere. `terse_text_compression.rs`'s only test, `differential_golden_matches_typescript_oracle` (`:626`, extent `:626-650`), replays 42 cases from `terse_text_compression-golden.json` against `Lite`, `Full`, and `Ultra` **independently** — verified by reading the body — and never composes two compressions. The claim is load-bearing precisely because `compress` is not idempotent by construction: `apply_ultra_connectives` (`:472`) and `apply_ultra_abbreviations` (`:501`) rewrite words into symbols a second pass would read as different input. So a record needs one oracle over pairs of depths, and the interesting inequality is `compress(compress(t, Lite), Ultra) != compress(t, Ultra)` with the guarantee that the production path never takes the left-hand form. `safety`, direct call, no fault. |
 | G-b | **The `smart_drops` byte-equality claim never became a record, and it is the strongest testable statement in the whole configuration document.** `CONFIGURATION.md:763` (source-catalog path, not present at HEAD) claims that with the flag off "the messages sent to the model are byte-identical to the age-based-only behavior — the entire feature is inert". Registered at `_lenses/lens-c1-claims-and-config.md:379-384` with `NOT FOUND` as its implementing check. | **4f**, because the claim is about what a flag resolved by `config.rs` does to output and `config.rs` is 4f's. | A single flag flip gives a free differential oracle over the emitted message array, with no fixture beyond two resolutions of one config: the flag defaults `false` (`config.rs:135`) and is settable from either tier (`:467-469`, `:541-543`). Nothing takes it. Note the interaction with `dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list`, which covers *who may set* the flag against `CONFIGURATION.md:767` (source-catalog path, not present at HEAD)'s statement that it is intentionally off while cache stability is validated; this gap covers *what the flag does* when unset. The two are complementary and neither subsumes the other. |
 
 ## Biases requiring human judgment
@@ -562,7 +562,7 @@ until then the new record's `Confidence:` line names the shared file explicitly 
 the sharing is visible rather than inferred. Separately, four evidence files now
 understate their records, because G1 and G4 moved material into `catalog.md` that
 `evidence/dec-a-commit-cluster-trigger-config-is-inert-in-this-crate.md`,
-`evidence/dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian.md`,
+`evidence/dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-history_summarizer.md`,
 `evidence/codec-b-harness-decoders-accept-every-input-with-no-rejection-channel.md`,
 and
 `evidence/dec-a-model-key-lookup-walk-has-two-implementations-that-disagree.md`
@@ -648,7 +648,7 @@ Four other triggers, each firing independently:
   `lib.rs:4957` passes `None` today and the only `Some` sites are two test literals,
   which is what makes the new record `test-only`. A production `Some` moves it to
   `default-production` and converts a latent defect into an active one, in a
-  diagnostic field an operator reads to explain why the historian did not fire.
+  diagnostic field an operator reads to explain why the history_summarizer did not fire.
 - **Any Rust-first migration step that removes a TypeScript component from the
   request path.** The route matrix's 2 request-supplied keys and 6 TypeScript-only
   keys are the exposure, and the matrix exists to be re-derived at that moment

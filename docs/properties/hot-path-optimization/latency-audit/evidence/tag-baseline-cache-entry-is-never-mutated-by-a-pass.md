@@ -138,12 +138,12 @@ Execution provenance: 2026-09-11, working tree based on `9d04c24b`.
   `mint_scope_matches_overlay_scope_and_captures_exact_source`, `pending`,
   `tail_hygiene`, and `differential_goldens` pass with
   `cargo test -p daemon --lib --locked`. The three integration targets
-  `caveman_differential`, `selection_differential`, and
-  `historian_truncate_differential` pass (24 tests).
+  `terse_text_compression_differential`, `selection_differential`, and
+  `history_summarizer_truncate_differential` pass (24 tests).
 - `cargo clippy -p daemon --all-targets --all-features --locked -- -D warnings`
   and scoped `rustfmt --edition 2024 --check` pass. A full daemon library run
   reports 1093 passed, two failed, and four ignored. Both failures are
-  `dreamer_run_task_bounds_*` deadline tests in unchanged `lib.rs`; both pass
+  `memory_classifier_run_task_bounds_*` deadline tests in unchanged `lib.rs`; both pass
   when rerun together with `--test-threads=1`. The broad run is not a green gate.
 - `differential_goldens.rs` is byte-identical to `9d04c24b`, Git blob
   `7a32a3236bd3102dc764cd36616edfd7920c736c`. No measurements, schema changes,
@@ -196,8 +196,8 @@ Execution provenance: 2026-09-11, working tree based on `9d04c24b`.
   `transform_projection_tag_numbers_include_same_pass_mints`,
   `mint_scope_matches_overlay_scope_and_captures_exact_source`, `pending`,
   and `differential_goldens`: 58 passed, zero failed, one ignored. The
-  `caveman_differential`, `selection_differential`, and
-  `historian_truncate_differential` integration targets pass with
+  `terse_text_compression_differential`, `selection_differential`, and
+  `history_summarizer_truncate_differential` integration targets pass with
   `--all-features --locked`: 24 passed. All-features daemon Clippy with
   `--all-targets --locked -- -D warnings` and scoped Rustfmt checks pass.
   These results do not replace the controller's final affected gate.
@@ -220,8 +220,8 @@ Execution provenance: 2026-09-12, working tree merging `0cf2fb3a` into
   transform_projection_tag_numbers_include_same_pass_mints
   mint_scope_matches_overlay_scope_and_captures_exact_source pending`
   passes 56 tests, with zero failures and one ignored manual timing test.
-- `cargo test -p daemon --all-features --locked --test caveman_differential
-  --test selection_differential --test historian_truncate_differential`
+- `cargo test -p daemon --all-features --locked --test terse_text_compression_differential
+  --test selection_differential --test history_summarizer_truncate_differential`
   passes 24 tests with zero failures.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
   passes. `rustfmt --edition 2024 --check` on `tail_hygiene.rs` and
