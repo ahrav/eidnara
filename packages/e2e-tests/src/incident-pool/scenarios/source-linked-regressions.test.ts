@@ -406,7 +406,7 @@ describe("registry binding surface", () => {
         );
         const expectedChecks: Record<string, readonly string[]> = {
             "var-parity-a1-pure-defer-stability": FIRST_RENDER_A1_CHECKS,
-            "var-parity-a3-eidnara-reduce-survival": FIRST_RENDER_A3_CHECKS,
+            "var-parity-a3-ctx-reduce-survival": FIRST_RENDER_A3_CHECKS,
         };
         let matched = 0;
         for (const family of catalog.families) {

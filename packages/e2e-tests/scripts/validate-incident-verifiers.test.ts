@@ -2,8 +2,15 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseIncidentCatalog } from "../src/incident-pool/contract";
-import { boundVerifierFiles, E2E_ROOT, loadMutationEvidence } from "../src/incident-pool/evidence";
+import {
+    boundVerifierDigests,
+    boundVerifierFiles,
+    E2E_ROOT,
+    loadMutationEvidence,
+} from "../src/incident-pool/evidence";
+import { compareWithAcceptedSnapshot, validateIncidentHistory } from "../src/incident-pool/history";
 import { builtinIncidentCaseRegistry } from "../src/incident-pool/registry";
+import { loadHistorySnapshot } from "./validate-incident-history";
 import {
     assertBoundVerifierBytesUnchanged,
     assertCatalogBindingsUnchanged,
@@ -11,6 +18,7 @@ import {
     assertMutationBindingsUnchanged,
     catalogBindings,
     mutationBindings,
+    replayCatalogVerifierChanges,
 } from "./validate-incident-verifiers";
 
 function committedCatalog() {
@@ -77,7 +85,7 @@ describe("per-variant binding gate", () => {
         const bindings = catalogBindings(committedCatalog());
         expect(Object.keys(bindings).sort()).toEqual([
             "var-parity-a1-pure-defer-stability",
-            "var-parity-a3-eidnara-reduce-survival",
+            "var-parity-a3-ctx-reduce-survival",
         ]);
         for (const binding of Object.values(bindings)) {
             expect(binding).toContain(`${module}#drive`);
@@ -160,5 +168,217 @@ describe("per-record mutation binding gate", () => {
             assertMutationBindingsUnchanged(accepted, { ...accepted, "ev-new": "x" }),
         ).not.toThrow();
         expect(() => assertMutationBindingsUnchanged({}, { "ev-new": "x" })).not.toThrow();
+    });
+});
+
+// Use the committed append-only ledger rather than a second catalog or fixture mapping.
+function replayFixture() {
+    const current = loadHistorySnapshot(resolve(E2E_ROOT, "incidents"), "accepted");
+    const accepted = structuredClone(current);
+    const catalog = committedCatalog();
+    const events = validateIncidentHistory(current).events;
+    const previous = events.slice(0, -2);
+    accepted.adjudicationLines = current.adjudicationLines.slice(0, -2);
+    for (const variant of catalog.families.flatMap((family) => family.variants)) {
+        variant.semantic_revision = {
+            id: `${variant.semantic_revision.id}-accepted`,
+            fingerprint: previous
+                .filter((event) => event.identity === variant.id && event.kind === "baseline")
+                .at(-1)!.semantic_fingerprint!,
+        };
+    }
+    accepted.catalogText = JSON.stringify(catalog);
+    const currentDigests = boundVerifierDigests(committedCatalog());
+    const acceptedDigests = { ...currentDigests };
+    acceptedDigests["packages/e2e-tests/src/incident-pool/scenarios/source-linked-regressions.ts"] =
+        "0".repeat(64);
+    acceptedDigests["packages/e2e-tests/src/cache-analysis.ts"] = "0".repeat(64);
+    return { accepted, current, acceptedDigests, currentDigests };
+}
+
+const replayPass = () => ({ status: 0, stdout: "", stderr: " 13 pass\n 0 fail\n" });
+
+describe("catalog revision replay admission", () => {
+    it("accepts complete preserved history only after serial replay of driver and changed oracle suites", () => {
+        const { accepted, current, acceptedDigests, currentDigests } = replayFixture();
+        expect(
+            compareWithAcceptedSnapshot(accepted, current).candidate.events.length,
+        ).toBeGreaterThan(15);
+        const calls: string[][] = [];
+        replayCatalogVerifierChanges(
+            accepted,
+            current,
+            acceptedDigests,
+            currentDigests,
+            (args, cwd) => {
+                expect(cwd).toBe(E2E_ROOT);
+                calls.push(args);
+                return replayPass();
+            },
+        );
+        expect(calls).toEqual([
+            ["test", "./src/cache-analysis.test.ts", "--max-concurrency", "1"],
+            [
+                "test",
+                "./src/incident-pool/scenarios/source-linked-regressions.test.ts",
+                "--max-concurrency",
+                "1",
+            ],
+        ]);
+    });
+
+    it("rejects byte drift with no appended baseline, even when the fingerprint did not change", () => {
+        const { current, acceptedDigests, currentDigests } = replayFixture();
+        expect(() =>
+            replayCatalogVerifierChanges(
+                current,
+                current,
+                acceptedDigests,
+                currentDigests,
+                replayPass,
+            ),
+        ).toThrow(/requires an appended fingerprint-bound baseline/);
+    });
+
+    it("rejects a baseline missing for one affected variant, a reused revision, or an invented fingerprint", () => {
+        for (const failure of ["missing", "reused", "fingerprint"]) {
+            const { accepted, current, acceptedDigests, currentDigests } = replayFixture();
+            const before = parseIncidentCatalog(JSON.parse(accepted.catalogText));
+            const after = parseIncidentCatalog(JSON.parse(current.catalogText));
+            const a1 = after.families[0]!.variants[0]!;
+            if (failure === "missing") {
+                current.adjudicationLines.splice(-2, 1);
+                before.families[0]!.variants[0] = structuredClone(a1);
+                accepted.catalogText = JSON.stringify(before);
+            } else if (failure === "reused") {
+                a1.semantic_revision.id = before.families[0]!.variants[0]!.semantic_revision.id;
+            } else {
+                a1.semantic_revision.fingerprint = "f".repeat(64);
+                const event = JSON.parse(current.adjudicationLines.at(-2)!);
+                event.semantic_fingerprint = a1.semantic_revision.fingerprint;
+                current.adjudicationLines[current.adjudicationLines.length - 2] =
+                    JSON.stringify(event);
+            }
+            current.catalogText = JSON.stringify(after);
+            expect(() =>
+                replayCatalogVerifierChanges(
+                    accepted,
+                    current,
+                    acceptedDigests,
+                    currentDigests,
+                    replayPass,
+                ),
+            ).toThrow(
+                /requires an appended fingerprint-bound baseline|reusing semantic revision|does not match the registered case/,
+            );
+        }
+    });
+
+    it("rejects removed checks, variants, oracle bindings, and accepted verifier paths", () => {
+        for (const failure of ["check", "variant", "binding", "path"]) {
+            const { accepted, current, acceptedDigests, currentDigests } = replayFixture();
+            const catalog = parseIncidentCatalog(JSON.parse(current.catalogText));
+            const variant = catalog.families[0]!.variants[0]!;
+            if (failure === "check") variant.normative_checks.pop();
+            if (failure === "variant") catalog.families[0]!.variants.pop();
+            if (failure === "binding") variant.verifier_binding!.oracle_dependencies.pop();
+            if (failure === "path")
+                delete currentDigests["packages/e2e-tests/src/cache-analysis.ts"];
+            current.catalogText = JSON.stringify(catalog);
+            expect(() =>
+                replayCatalogVerifierChanges(
+                    accepted,
+                    current,
+                    acceptedDigests,
+                    currentDigests,
+                    replayPass,
+                ),
+            ).toThrow(/removed an accepted|unknown identity|no longer binds accepted/);
+        }
+    });
+
+    it("rejects missing required driver suites and historical prefix edits before replay", () => {
+        for (const failure of ["suite", "prefix"]) {
+            const { accepted, current, acceptedDigests, currentDigests } = replayFixture();
+            if (failure === "suite") {
+                const catalog = parseIncidentCatalog(JSON.parse(current.catalogText));
+                catalog.families[0]!.variants[0]!.verifier_binding!.driver =
+                    "src/incident-pool/scenarios/missing.ts#drive";
+                current.catalogText = JSON.stringify(catalog);
+            } else {
+                current.adjudicationLines[0] += " ";
+            }
+            expect(() =>
+                replayCatalogVerifierChanges(
+                    accepted,
+                    current,
+                    acceptedDigests,
+                    currentDigests,
+                    replayPass,
+                ),
+            ).toThrow(/missing required regression suite|ledger prefix changed/);
+        }
+    });
+
+    it("fails closed on replay failure, no tests, skipped tests, or command failure despite an approved baseline", () => {
+        for (const result of [
+            { status: 1, stdout: "", stderr: " 1 pass\n 1 fail\n" },
+            { status: 0, stdout: "", stderr: " 0 pass\n 0 fail\n" },
+            { status: 0, stdout: "", stderr: " 1 pass\n 1 skip\n 0 fail\n" },
+            { status: 0, stdout: "", stderr: "" },
+        ]) {
+            const { accepted, current, acceptedDigests, currentDigests } = replayFixture();
+            expect(() =>
+                replayCatalogVerifierChanges(
+                    accepted,
+                    current,
+                    acceptedDigests,
+                    currentDigests,
+                    () => result,
+                ),
+            ).toThrow(/replay failed or executed no successful tests/);
+        }
+        const { accepted, current, acceptedDigests, currentDigests } = replayFixture();
+        let calls = 0;
+        expect(() =>
+            replayCatalogVerifierChanges(accepted, current, acceptedDigests, currentDigests, () => {
+                calls++;
+                return calls === 1
+                    ? replayPass()
+                    : { status: 1, stdout: "", stderr: " 0 pass\n 1 fail\n" };
+            }),
+        ).toThrow(/replay failed/);
+        expect(calls).toBe(2);
+        expect(() =>
+            replayCatalogVerifierChanges(accepted, current, acceptedDigests, currentDigests, () => {
+                throw new Error("spawn failed");
+            }),
+        ).toThrow("spawn failed");
+    });
+
+    it("rejects digests or bindings changed during replay", () => {
+        for (const failure of ["digest", "binding"]) {
+            const { accepted, current, acceptedDigests, currentDigests } = replayFixture();
+            expect(() =>
+                replayCatalogVerifierChanges(
+                    accepted,
+                    current,
+                    acceptedDigests,
+                    currentDigests,
+                    () => {
+                        if (failure === "digest")
+                            currentDigests["packages/e2e-tests/src/cache-analysis.ts"] = "f".repeat(
+                                64,
+                            );
+                        else {
+                            const catalog = parseIncidentCatalog(JSON.parse(current.catalogText));
+                            catalog.families[0]!.variants[0]!.verifier_binding!.driver += "Changed";
+                            current.catalogText = JSON.stringify(catalog);
+                        }
+                        return replayPass();
+                    },
+                ),
+            ).toThrow(/inputs changed during replay/);
+        }
     });
 });

@@ -15,7 +15,10 @@ import {
 const result = probeCapabilities();
 assert.ok(result.napiVersion === null || result.napiVersion >= 1);
 // A claimed source-build target must load its addon. Node can load the addon and report `detachment_unavailable`, so this assertion cannot require `available`; `addon_unavailable` is the only reason returned before the addon loads.
-if (process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1" && !result.available) {
+if (
+    process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1" &&
+    !result.available
+) {
     assert.notEqual(
         result.reason,
         "addon_unavailable",

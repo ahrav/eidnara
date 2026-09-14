@@ -53,7 +53,9 @@ describe("native mechanism gate", () => {
             }
             return;
         }
-        expect(constants.descriptorSchemaVersion).toBe(DESCRIPTOR_SCHEMA_VERSION);
+        expect(constants.descriptorSchemaVersion).toBe(
+            DESCRIPTOR_SCHEMA_VERSION,
+        );
         expect(constants.qualifiedTestProfile).toBe(QUALIFIED_TEST_PROFILE);
     });
 
@@ -101,7 +103,11 @@ interface RawAttachAddon {
     ): void;
     poll(
         channel: number,
-        deliver: (token: number, header: Uint8Array, segments: Uint8Array[]) => void,
+        deliver: (
+            token: number,
+            header: Uint8Array,
+            segments: Uint8Array[],
+        ) => void,
     ): boolean;
     watch(channel: number, callback: () => void): void;
     readinessHandled(): boolean;
@@ -123,7 +129,9 @@ function loadRawAddon(): RawAttachAddon | null {
     return createRequire(import.meta.url)(path) as RawAttachAddon;
 }
 
-function supportsMechanismTests(addon: RawAttachAddon | null): addon is RawAttachAddon {
+function supportsMechanismTests(
+    addon: RawAttachAddon | null,
+): addon is RawAttachAddon {
     return addon !== null && process.platform === "linux";
 }
 
@@ -216,7 +224,9 @@ describe("readiness dispatch", () => {
             await new Promise((resolve) => setTimeout(resolve, 100));
             expect(dispatches).toBe(settled);
             expect(receiveErrors).toBeGreaterThan(0);
-            expect(() => pair.second.drainOne(() => {})).toThrow(/receive failed/);
+            expect(() => pair.second.drainOne(() => {})).toThrow(
+                /receive failed/,
+            );
         } finally {
             pair.second.close();
         }
@@ -234,10 +244,12 @@ describe("readiness dispatch", () => {
             throw new Error("first handler failed");
         });
         second.first.startReadiness(() => {
-            while (second.first.drainOne((lease) => {
-                delivered = true;
-                lease.release();
-            })) {}
+            while (
+                second.first.drainOne((lease) => {
+                    delivered = true;
+                    lease.release();
+                })
+            ) {}
         });
         try {
             const header = new Uint8Array(21);
@@ -263,8 +275,16 @@ describe("readiness dispatch", () => {
     });
 
     test("out-of-range u32 arguments are rejected before reaching the addon", () => {
-        for (const value of [-1, 0.5, 2 ** 32, Number.NaN, Number.POSITIVE_INFINITY]) {
-            expect(() => assertUint32Argument("timeoutMs", value)).toThrow(RangeError);
+        for (const value of [
+            -1,
+            0.5,
+            2 ** 32,
+            Number.NaN,
+            Number.POSITIVE_INFINITY,
+        ]) {
+            expect(() => assertUint32Argument("timeoutMs", value)).toThrow(
+                RangeError,
+            );
         }
         for (const value of [0, 1, 0xffff_ffff]) {
             expect(assertUint32Argument("timeoutMs", value)).toBe(value);
@@ -628,7 +648,9 @@ describe("raw N-API descriptor boundary", () => {
         // registered callback, so a later channel's publish must still reach it.
         later = addon.createTestPair();
         const laterPair = later;
-        const delivered = new Promise<void>((resolve) => (laterDelivered = resolve));
+        const delivered = new Promise<void>(
+            (resolve) => (laterDelivered = resolve),
+        );
         addon.watch(laterPair.second, () => {});
         let laterTimeout: ReturnType<typeof setTimeout>;
         try {
@@ -637,7 +659,12 @@ describe("raw N-API descriptor boundary", () => {
                 delivered,
                 new Promise<never>((_, reject) => {
                     laterTimeout = setTimeout(
-                        () => reject(new Error("reactor stayed parked after the closed pair")),
+                        () =>
+                            reject(
+                                new Error(
+                                    "reactor stayed parked after the closed pair",
+                                ),
+                            ),
                         5_000,
                     );
                 }),
@@ -664,10 +691,17 @@ describe("raw N-API descriptor boundary", () => {
         view.setUint32(9, 1, true);
         const publish = (pair: { first: number }, value: number): void => {
             view.setBigUint64(13, BigInt(value), true);
-            addon.produce(pair.first, header, 1, 0, (segments) => {
-                segments[0]![0] = value;
-                return 1;
-            }, () => {});
+            addon.produce(
+                pair.first,
+                header,
+                1,
+                0,
+                (segments) => {
+                    segments[0]![0] = value;
+                    return 1;
+                },
+                () => {},
+            );
         };
 
         const released = addon.createTestPair();
@@ -677,7 +711,11 @@ describe("raw N-API descriptor boundary", () => {
             for (let value = 1; value <= depth * 3; value += 1) {
                 publish(released, value);
                 let token = -1;
-                expect(addon.poll(released.second, (t) => { token = t; })).toBe(true);
+                expect(
+                    addon.poll(released.second, (t) => {
+                        token = t;
+                    }),
+                ).toBe(true);
                 addon.release(released.second, token);
             }
             expect(addon.poll(released.second, () => {})).toBe(false);
@@ -686,7 +724,11 @@ describe("raw N-API descriptor boundary", () => {
             const tokens: number[] = [];
             for (let value = 1; value <= depth; value += 1) {
                 publish(held, value);
-                expect(addon.poll(held.second, (t) => { tokens.push(t); })).toBe(true);
+                expect(
+                    addon.poll(held.second, (t) => {
+                        tokens.push(t);
+                    }),
+                ).toBe(true);
             }
             // `isRingFullError` matches by exact message, so the addon's text must equal the export.
             let full: unknown;
@@ -699,8 +741,14 @@ describe("raw N-API descriptor boundary", () => {
             expect(isRingFullError(full)).toBe(true);
             addon.release(held.second, tokens.shift()!);
             publish(held, depth + 1);
-            expect(addon.poll(held.second, (t) => { tokens.push(t); })).toBe(true);
-            expect(() => addon.release(held.second, 999)).toThrow(/already released/);
+            expect(
+                addon.poll(held.second, (t) => {
+                    tokens.push(t);
+                }),
+            ).toBe(true);
+            expect(() => addon.release(held.second, 999)).toThrow(
+                /already released/,
+            );
             for (const token of tokens) addon.release(held.second, token);
         } finally {
             addon.close(released.first);
@@ -726,10 +774,19 @@ describe("raw N-API descriptor boundary", () => {
         try {
             let published = 0;
             expect(() =>
-                addon.produce(pair.first, header, 2, 0, (segments) => {
-                    segments[0]![0] = 1;
-                    return 1;
-                }, () => { published += 1; }),
+                addon.produce(
+                    pair.first,
+                    header,
+                    2,
+                    0,
+                    (segments) => {
+                        segments[0]![0] = 1;
+                        return 1;
+                    },
+                    () => {
+                        published += 1;
+                    },
+                ),
             ).toThrow(/wire header does not describe the committed body/);
             // Application bookkeeping must not advance for a frame that never published.
             expect(published).toBe(0);
@@ -769,7 +826,13 @@ describe("raw N-API descriptor boundary", () => {
             expect(token).toBeGreaterThan(0);
             // A header of the wrong length is rejected before the token is consumed.
             expect(() =>
-                raw.commitReservation(pair.first, token, new Uint8Array(3), 1, () => {}),
+                raw.commitReservation(
+                    pair.first,
+                    token,
+                    new Uint8Array(3),
+                    1,
+                    () => {},
+                ),
             ).toThrow(/wire header has invalid length/);
             const header = new Uint8Array(21);
             const view = new DataView(header.buffer);

@@ -19,7 +19,7 @@
                     "id": "claim-parity-a3",
                     "content_digest": "45037eb2d3ad517eca6cf1e7615bccf9dc746b4cf1e51b6bc5ad4bdb6f0cd1db",
                     "disposition": "executable_fixed_regression",
-                    "rationale": "real parity defect (aged eidnara_reduce prefix survival), fixed by the same first-render tag activation; same root cause as parity A1",
+                    "rationale": "real parity defect (aged ctx_reduce prefix survival), fixed by the same first-render tag activation; same root cause as parity A1",
                     "family_links": [
                         "fam-first-render-tag-stability"
                     ]

@@ -1080,7 +1080,7 @@ export function sourceLinkedRegressionIncidentCases(): RegisteredIncidentCase[] 
             prerequisite: rustPrerequisite,
         },
         {
-            variantId: "var-parity-a3-eidnara-reduce-survival",
+            variantId: "var-parity-a3-ctx-reduce-survival",
             implementationFiles: RUST_CACHE_IMPLEMENTATION_FILES,
             fixtures: { ...FIRST_RENDER_A3_FIXTURE },
             driver: adaptBoundSymbol(

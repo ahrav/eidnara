@@ -115,7 +115,9 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | [Early discard][upload-discard] | Discard releases the declared total even before a page arrives. | unaudited |
 
 The #437 blocking-work tests cover the host seam with a test handler. The
+
 # 438 checks below add the production transform path. Pending-table size or
+
 health counters alone are not physical completion witnesses. A transform may
 have durable effects despite an unknown transport outcome, so terminal counts
 are not durable-effect counts.
