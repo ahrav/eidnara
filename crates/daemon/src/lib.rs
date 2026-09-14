@@ -60,6 +60,7 @@ pub mod wire;
 pub mod transform;
 
 pub mod production_inputs;
+pub mod projection_admission;
 pub mod projection_gates;
 pub mod projection_lifecycle;
 pub mod release_contract;
@@ -112,7 +113,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use storage::StoreError;
-use storage::{Isolation, StorageBackend, StorageDescriptor, sqlite_store_path};
+use storage::{
+    Isolation, StorageBackend, StorageDescriptor, sqlite_store_data_home, sqlite_store_path,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment, RecipeSegment};
@@ -3000,6 +3003,8 @@ pub struct HandlerCore {
     publication_fence_write_hook: ConnectFailureCommitHook,
     /// A full route handle maps to its session binding and route root; epoch-scoped lookups and removals prevent channel reuse from accessing another incarnation's state.
     bindings: Arc<Mutex<RouteBindings>>,
+    /// Set once the SQLite store's data home is known; a deployment without a SQLite store has no projection to admit.
+    projection_admission: Arc<OnceLock<projection_admission::ProjectionAdmission>>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
     /// Evaluator registrations exist only in memory and are keyed by notes-authority project.
@@ -3848,6 +3853,7 @@ impl Handler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
+            projection_admission: Arc::new(OnceLock::new()),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -3931,6 +3937,7 @@ impl HandlerCore {
         let store_slot = Arc::clone(&self.store);
         let bindings = Arc::clone(&self.bindings);
         let memory_classifier = Arc::clone(&self.memory_classifier);
+        let projection_admission = Arc::clone(&self.projection_admission);
         if admission
             .spawn(async move {
                 let _guard = StoreOpenWaiterGuard {
@@ -3972,7 +3979,11 @@ impl HandlerCore {
                         if kernel.state() == kernel_routes::KernelState::Ready
                             && kernel.background_sampler_enabled()
                         {
-                            task_admission.spawn(kernel.run_sampler(cancel));
+                            task_admission.spawn(kernel.run_sampler(cancel.clone()));
+                        }
+                        // `kernel.open` returns on cancellation too; an owner bound then would read records during shutdown for a gate nothing can consult.
+                        if !cancel.is_cancelled() {
+                            Self::open_projection_admission(&projection_admission, path);
                         }
                     }
                     (true, StorageBackend::Postgres { .. }) => {
@@ -4105,6 +4116,32 @@ impl HandlerCore {
         }
     }
 
+    /// Binds the admission owner to the store's data home. Nothing is selected at startup, so the gate stays closed; a refused record is reported now rather than at the first hook, while an absent one is the ordinary state of a host without approvals.
+    fn open_projection_admission(
+        slot: &OnceLock<projection_admission::ProjectionAdmission>,
+        sqlite_path: &str,
+    ) {
+        let Some(home) = sqlite_store_data_home(sqlite_path) else {
+            eprintln!(
+                "daemon: search admission stays closed: the store path is not under a data home"
+            );
+            return;
+        };
+        let home = Path::new(home);
+        slot.get_or_init(|| projection_admission::ProjectionAdmission::for_home(home));
+        if let Err(refusal) = projection_admission::AdmissionInputs::read(home)
+            && !matches!(refusal, projection_admission::InputRefusal::Missing(_))
+        {
+            eprintln!("daemon: search admission record refused: {refusal}");
+        }
+    }
+
+    /// The admission owner, once the SQLite store's data home is known.
+    #[cfg(feature = "test-support")]
+    pub fn projection_admission(&self) -> Option<&projection_admission::ProjectionAdmission> {
+        self.projection_admission.get()
+    }
+
     async fn open_store_once(
         descriptor: &StorageDescriptor,
     ) -> Result<MemoryStore, MemoryStoreError> {
@@ -4191,6 +4228,7 @@ impl Handler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
+            projection_admission: Arc::new(OnceLock::new()),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -12511,7 +12549,14 @@ impl CompositeComponent for Handler {
             self.cancel.cancel();
             self.tasks.close();
         }
+        // Closing before the join cancels every grant so a slice holding one can exit; closing again after it catches an owner the store-open task bound while the join was in progress, which the first pass could not see.
+        if let Some(admission) = self.projection_admission.get() {
+            admission.close();
+        }
         self.tasks.wait().await;
+        if let Some(admission) = self.projection_admission.get() {
+            admission.close();
+        }
 
         self.bindings.lock().expect("bindings mutex").clear();
         self.transform_route_channels
@@ -19101,6 +19146,38 @@ mod tests {
 
         assert!(observed.load(Ordering::SeqCst));
         assert!(handler.tasks.is_empty());
+    }
+
+    /// The tracked task binds `projection_admission` after cancellation, so the owner exists only once shutdown is already joining its tasks.
+    #[tokio::test]
+    async fn shutdown_closes_an_admission_owner_bound_during_the_join() {
+        use projection_admission::{Closed, ProjectionAdmission, Refresh};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_owned();
+        let handler = Handler::new();
+        let slot = Arc::clone(&handler.projection_admission);
+        let cancel = handler.cancel.clone();
+        handler
+            .spawn_tracked_task(async move {
+                cancel.cancelled().await;
+                slot.get_or_init(|| ProjectionAdmission::for_home(&home));
+            })
+            .expect("late binder admitted");
+
+        <Handler as CompositeComponent>::shutdown(&handler)
+            .await
+            .unwrap();
+
+        let admission = handler
+            .projection_admission
+            .get()
+            .expect("the owner was bound during the join");
+        assert_eq!(
+            admission.refresh(None),
+            Refresh::Closed(Closed::ShutDown),
+            "no refresh reopens a gate after shutdown"
+        );
     }
 
     fn handler_with_blocking_lifecycle(

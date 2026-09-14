@@ -16,7 +16,8 @@
 //! epoch-checked writes.
 
 pub use storage_types::{
-    Isolation, StorageBackend, StorageDescriptor, postgres_database_name, sqlite_store_path,
+    Isolation, StorageBackend, StorageDescriptor, postgres_database_name, sqlite_store_data_home,
+    sqlite_store_path,
 };
 
 use lease::LeaseError;
