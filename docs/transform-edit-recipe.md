@@ -78,6 +78,11 @@ fail:
   `serde_json` rule. This limit is checked before allocation and separately
   from the wire frame limit.
 
+The prepared producer checks inserted values against a 123-container limit,
+leaving four containers for the recipe envelope. An insert that would exceed
+the full 127-container bound is refused with `encode_failed` before a successful
+response is emitted. This check does not re-enable raw CK input keeps.
+
 Reconstruction produces a new array of shared references and literal values,
 each entry's canonical length for use as a later `previous` source, and the
 array's measured canonical length. It never edits a source or splices the host

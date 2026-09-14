@@ -41,8 +41,9 @@ warnings` and `cargo +1.98 fmt --all -- --check` pass.
 
 The candidate builder is `applyTransformRecipe`
 (`rust-mode-transform.ts:657`): it parses and validates the whole recipe,
-reserves one slot per output entry (value plus retained length), applies
-against the captured input and the retained previous output, and only then
+reserves value and retained-length slots per output entry plus one temporary
+length slot per inserted entry, applies against the captured input and retained
+previous output, and only then
 hands the array to the existing boundary, ownership, source, and container
 checks. Witnesses: `rust-mode-transform.test.ts:2301` "publishes at the exact
 candidate charge and leaves the host array intact" and "declines one byte

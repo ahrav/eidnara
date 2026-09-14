@@ -2,7 +2,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
-import { cargoTestEvidence } from "./mutation-evidence-output";
+import { cargoTestCompleted, cargoTestEvidence } from "./mutation-evidence-output";
 import { reportMutationInventorySync, syncMutationInventory } from "./mutation-inventory";
 
 type CommandResult = {
@@ -63,10 +63,12 @@ function mutatedGolden(
     return { before, after, mutated: `${JSON.stringify(golden, null, 2)}\n` };
 }
 
-const drill = Bun.argv[2];
+const [drill, mode, ...extra] = Bun.argv.slice(2);
 const target = drill ? families[drill] : undefined;
-if (!drill || !target) {
-    console.error(`usage: bun scripts/run-goldens-mutation.ts ${Object.keys(families).join("|")}`);
+if (!drill || !target || (mode !== undefined && mode !== "--check") || extra.length > 0) {
+    console.error(
+        `usage: bun scripts/run-goldens-mutation.ts ${Object.keys(families).join("|")} [--check]`,
+    );
     process.exit(2);
 }
 
@@ -97,8 +99,19 @@ if (
         `${name}: mutated run went red without the goldens assertion "${expectedFailure}" failing`,
     );
 }
-if (revertedRerun.exit_status !== 0) {
+if (
+    revertedRerun.exit_status !== 0 ||
+    !cargoTestCompleted(
+        revertedRerun.output,
+        "differential_goldens::dg_goldens_match_ts_wire_surface_and_gate_labels",
+    )
+) {
     throw new Error(`${name}: reverted goldens test did not pass`);
+}
+
+if (mode === "--check") {
+    console.log(`verified ${name}: assertion failed under mutation and passed after restore`);
+    process.exit(0);
 }
 
 const record = {
