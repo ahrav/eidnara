@@ -1819,7 +1819,7 @@ mod sqlite_backend {
             })?;
             let directory = parent.join(format!(
                 ".inspect-{}-{}-{}",
-                file_name.to_string_lossy(),
+                inspection_scratch_tag(file_name),
                 std::process::id(),
                 unique_nanos()
             ));
@@ -1973,7 +1973,9 @@ mod sqlite_backend {
                 Err(e) => return Err(StoreError::Io(e)),
             }
         }
-        remove_stale_inspection_copies(parent, &db_file_name)?;
+        if let Some(file_name) = path.file_name() {
+            remove_stale_inspection_copies(parent, file_name)?;
+        }
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(StoreError::DurabilityUnknown)
@@ -1983,15 +1985,23 @@ mod sqlite_backend {
     /// A directory that cannot be listed is left to the directory sync that follows, whose open needs
     /// the same permission and whose failure reports the removed family's durability as unknown.
     /// A scratch directory removed before its inspection completes is already gone.
-    fn remove_stale_inspection_copies(parent: &Path, db_file_name: &str) -> Result<(), StoreError> {
+    fn remove_stale_inspection_copies(
+        parent: &Path,
+        db_file_name: &std::ffi::OsStr,
+    ) -> Result<(), StoreError> {
         let entries = match std::fs::read_dir(parent) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
             Err(error) => return Err(StoreError::Io(error)),
         };
+        let tag = inspection_scratch_tag(db_file_name);
         for entry in entries {
             let entry = entry.map_err(StoreError::Io)?;
-            if !is_inspection_scratch_name(&entry.file_name().to_string_lossy(), db_file_name) {
+            if !entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| is_inspection_scratch_name(name, &tag))
+            {
                 continue;
             }
             let scratch = entry.path();
@@ -2009,18 +2019,29 @@ mod sqlite_backend {
         Ok(())
     }
 
-    /// Accepts `.inspect-<database>-` followed by nonempty decimal pid and nanosecond components.
-    fn is_inspection_scratch_name(name: &str, db_file_name: &str) -> bool {
+    /// A bounded stand-in for the database name inside a scratch directory name, so a long
+    /// database name never pushes the component past the filesystem limit.
+    pub fn inspection_scratch_tag(db_file_name: &std::ffi::OsStr) -> String {
+        let digest = Sha256::digest(db_file_name.as_encoded_bytes());
+        format!("{digest:x}")[..16].to_owned()
+    }
+
+    /// Accepts `.inspect-<tag>-` followed by nonempty decimal pid and nanosecond components.
+    fn is_inspection_scratch_name(name: &str, tag: &str) -> bool {
         let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
         name.strip_prefix(".inspect-")
-            .and_then(|rest| rest.strip_prefix(db_file_name))
+            .and_then(|rest| rest.strip_prefix(tag))
             .and_then(|rest| rest.strip_prefix('-'))
             .and_then(|rest| rest.split_once('-'))
             .is_some_and(|(pid, nanos)| digits(pid) && digits(nanos))
     }
 
     /// An empty directory contains no entry that disproves it is this database's scratch.
-    fn holds_only_copies_of(scratch: &Path, db_file_name: &str) -> std::io::Result<bool> {
+    /// Names are compared as raw bytes; a lossy decode would let a foreign name collide.
+    fn holds_only_copies_of(
+        scratch: &Path,
+        db_file_name: &std::ffi::OsStr,
+    ) -> std::io::Result<bool> {
         if !std::fs::symlink_metadata(scratch)?.is_dir() {
             return Ok(false);
         }
@@ -2028,9 +2049,13 @@ mod sqlite_backend {
             let entry = entry?;
             let is_member = entry
                 .file_name()
-                .to_string_lossy()
-                .strip_prefix(db_file_name)
-                .is_some_and(|suffix| SQLITE_FAMILY_SUFFIXES.contains(&suffix));
+                .as_encoded_bytes()
+                .strip_prefix(db_file_name.as_encoded_bytes())
+                .is_some_and(|suffix| {
+                    SQLITE_FAMILY_SUFFIXES
+                        .iter()
+                        .any(|known| known.as_bytes() == suffix)
+                });
             if !is_member || !entry.file_type()?.is_file() {
                 return Ok(false);
             }
@@ -2923,8 +2948,8 @@ pub use sqlite_backend::library_memory_used;
 pub use sqlite_backend::{
     APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
     SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject, SqliteStore, USER_VERSION,
-    delete_sqlite_family, immutable_uri, open_sqlite, schema_inventory, verify_baseline,
-    verify_sqlite_family_removed,
+    delete_sqlite_family, immutable_uri, inspection_scratch_tag, open_sqlite, schema_inventory,
+    verify_baseline, verify_sqlite_family_removed,
 };
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -3033,12 +3058,15 @@ mod tests {
         let path = Path::new(path);
         drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
         let name = path.file_name().expect("database file name");
-        let stale = root.join(format!(".inspect-{}-1-1", name.to_string_lossy()));
+        let stale = root.join(format!(".inspect-{}-1-1", inspection_scratch_tag(name)));
         std::fs::create_dir(&stale).expect("plant a stale inspection directory");
         std::fs::copy(path, stale.join(name)).expect("copy the database into it");
         std::fs::write(stale.join(format!("{}-wal", name.to_string_lossy())), b"w")
             .expect("plant a copied journal");
-        let foreign = root.join(".inspect-other.db-2-2");
+        let foreign = root.join(format!(
+            ".inspect-{}-2-2",
+            inspection_scratch_tag(std::ffi::OsStr::new("other.db"))
+        ));
         std::fs::create_dir(&foreign).expect("plant another database's inspection directory");
         std::fs::write(foreign.join("other.db"), b"other").expect("plant the other copy");
 
@@ -3072,10 +3100,13 @@ mod tests {
         drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
         let name = path.file_name().expect("database file name");
         // `interrupted` is a copy that died before its first file: the generated name, nothing inside.
-        let interrupted = root.join(format!(".inspect-{}-3-3", name.to_string_lossy()));
+        let interrupted = root.join(format!(".inspect-{}-3-3", inspection_scratch_tag(name)));
         std::fs::create_dir(&interrupted).expect("plant an interrupted inspection directory");
         // `sibling` is another database's empty interrupted inspection directory.
-        let sibling = root.join(".inspect-other.db-5-5");
+        let sibling = root.join(format!(
+            ".inspect-{}-5-5",
+            inspection_scratch_tag(std::ffi::OsStr::new("other.db"))
+        ));
         std::fs::create_dir(&sibling).expect("plant a sibling's interrupted inspection directory");
         // `backup` is not a generated name, though it holds a same-named database.
         let backup = root.join(".inspect-backup");
@@ -3083,7 +3114,7 @@ mod tests {
         std::fs::copy(path, backup.join(name)).expect("copy the database into it");
         std::fs::write(backup.join("notes.txt"), b"keep").expect("plant unrelated contents");
         // `stray` has a generated name but contains an extra member.
-        let stray = root.join(format!(".inspect-{}-4-4", name.to_string_lossy()));
+        let stray = root.join(format!(".inspect-{}-4-4", inspection_scratch_tag(name)));
         std::fs::create_dir(&stray).expect("plant a directory with a stray member");
         std::fs::copy(path, stray.join(name)).expect("copy the database into it");
         std::fs::write(stray.join("stray"), b"s").expect("plant the stray member");
@@ -4320,6 +4351,57 @@ mod tests {
         );
         drop(conn);
         std::fs::remove_dir(&shm).expect("remove planted directory");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scratch_members_are_matched_by_raw_bytes_not_lossy_text() {
+        use std::os::unix::ffi::OsStrExt;
+        let (root, mut d) = tmp();
+        let database = root.join("store\u{fffd}.db");
+        d.backend = StorageBackend::Sqlite {
+            path: database.to_string_lossy().into_owned(),
+        };
+        drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
+        let name = database.file_name().expect("database file name");
+        // `foreign` carries this database's tag but holds a member whose raw bytes only decode to the same text.
+        let foreign = root.join(format!(".inspect-{}-1-1", inspection_scratch_tag(name)));
+        std::fs::create_dir(&foreign).expect("plant a directory with a look-alike member");
+        let look_alike = foreign.join(std::ffi::OsStr::from_bytes(b"store\xff.db"));
+        std::fs::write(&look_alike, b"not a copy").expect("plant the look-alike member");
+
+        delete_sqlite_family(&d).expect("delete the released family");
+        assert!(
+            look_alike.exists(),
+            "a raw-byte mismatch is not this database's copy"
+        );
+        std::fs::remove_dir_all(&foreign).expect("clear the retained directory");
+        verify_sqlite_family_removed(&d).expect("only the lease sidecar remains");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_long_database_name_still_reopens_through_its_inspection_copy() {
+        let (root, mut d) = tmp();
+        let long = root.join(format!("{}.db", "a".repeat(230)));
+        d.backend = StorageBackend::Sqlite {
+            path: long.to_string_lossy().into_owned(),
+        };
+        drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
+        // An empty hot journal sends the reopen through `InspectionCopy::of`.
+        std::fs::write(format!("{}-journal", long.display()), b"").expect("plant a journal");
+        drop(open_sqlite(&d, KV_BASELINE).expect("reopen through the inspection copy"));
+        assert!(
+            std::fs::read_dir(&root)
+                .expect("list the family directory")
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".inspect-")),
+            "the inspection copy is removed on drop"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
