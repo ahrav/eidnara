@@ -48,6 +48,14 @@ impl Transition {
             Self::AuthorizedRecovery => ProjectionHook::EmbeddingBackfill,
         }
     }
+
+    /// The manifest limit that bounds the transition's whole episode.
+    pub(crate) fn duration_limit(self) -> &'static str {
+        match self {
+            Self::Rebuilding => "B_recovery_ms",
+            Self::AuthorizedRecovery => "B_authorized_recovery_ms",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

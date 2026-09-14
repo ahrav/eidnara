@@ -44,6 +44,7 @@ pub(crate) mod prompt_surface;
 mod retained_size;
 pub mod scheduler;
 pub mod search_catchup;
+pub mod search_lifecycle_owner;
 pub mod search_projection;
 pub mod search_replacement;
 pub mod search_seed;
@@ -3003,8 +3004,10 @@ pub struct HandlerCore {
     publication_fence_write_hook: ConnectFailureCommitHook,
     /// A full route handle maps to its session binding and route root; epoch-scoped lookups and removals prevent channel reuse from accessing another incarnation's state.
     bindings: Arc<Mutex<RouteBindings>>,
-    /// Set once the SQLite store's data home is known; a deployment without a SQLite store has no projection to admit.
-    projection_admission: Arc<OnceLock<projection_admission::ProjectionAdmission>>,
+    /// Set once the SQLite store's data home is known and a local-embeddings lane is attached; a deployment without either has no projection to own.
+    search_lifecycle: Arc<OnceLock<Arc<search_lifecycle_owner::SearchLifecycleOwner>>>,
+    /// The lane the projection's identity and embedding work come from; attached by the daemon binary before activation.
+    local_embeddings: Mutex<Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
     /// Evaluator registrations exist only in memory and are keyed by notes-authority project.
@@ -3785,6 +3788,18 @@ impl Handler {
         self
     }
 
+    /// Attaches the lane whose model and tokenizer name the search projection's identity and run its embedding work. Without one the daemon owns no projection.
+    pub fn with_local_embeddings(
+        self,
+        local_embeddings: host_runtime::local_embeddings::LocalEmbeddingsComponent,
+    ) -> Self {
+        *self
+            .local_embeddings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(local_embeddings);
+        self
+    }
+
     pub fn new_with_connection_file(connection_file: Option<PathBuf>) -> Self {
         let cancel = CancellationToken::new();
         let producer_factory: Arc<dyn HistorySummarizerProducerFactory> = match connection_file {
@@ -3853,7 +3868,8 @@ impl Handler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
-            projection_admission: Arc::new(OnceLock::new()),
+            search_lifecycle: Arc::new(OnceLock::new()),
+            local_embeddings: Mutex::new(None),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -3937,7 +3953,12 @@ impl HandlerCore {
         let store_slot = Arc::clone(&self.store);
         let bindings = Arc::clone(&self.bindings);
         let memory_classifier = Arc::clone(&self.memory_classifier);
-        let projection_admission = Arc::clone(&self.projection_admission);
+        let search_lifecycle = Arc::clone(&self.search_lifecycle);
+        let local_embeddings = self
+            .local_embeddings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         if admission
             .spawn(async move {
                 let _guard = StoreOpenWaiterGuard {
@@ -3976,12 +3997,20 @@ impl HandlerCore {
                         kernel
                             .open(kernel_routes::kernel_root_for(path), policy, cancel.clone())
                             .await;
+                        if let Some(owner) = Self::open_search_lifecycle(
+                            &search_lifecycle,
+                            &kernel,
+                            local_embeddings,
+                            path,
+                        ) {
+                            task_admission
+                                .spawn(search_lifecycle_owner::run_slices(owner, cancel.clone()));
+                        }
                         if kernel.state() == kernel_routes::KernelState::Ready
                             && kernel.background_sampler_enabled()
                         {
                             task_admission.spawn(kernel.run_sampler(cancel));
                         }
-                        Self::open_projection_admission(&projection_admission, path);
                     }
                     (true, StorageBackend::Postgres { .. }) => {
                         kernel.mark_unavailable(kernel_routes::UnavailableKind::Unsupported)
@@ -4113,30 +4142,51 @@ impl HandlerCore {
         }
     }
 
-    /// Binds the admission owner to the store's data home. Nothing is selected at startup, so the gate stays closed; a refused record is reported now rather than at the first hook, while an absent one is the ordinary state of a host without approvals.
-    fn open_projection_admission(
-        slot: &OnceLock<projection_admission::ProjectionAdmission>,
+    /// Binds the lifecycle owner to the store's data home once the kernel is ready and a lane is attached, and returns it only on the first binding so exactly one slice loop runs. Nothing is selected at startup, so admission stays closed until the first slice; a refused admission record is reported now rather than at that slice, while an absent one is the ordinary state of a host without approvals.
+    fn open_search_lifecycle(
+        slot: &OnceLock<Arc<search_lifecycle_owner::SearchLifecycleOwner>>,
+        kernel: &kernel_routes::KernelOpenCoordinator,
+        local_embeddings: Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>,
         sqlite_path: &str,
-    ) {
+    ) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
         let Some(home) = sqlite_store_data_home(sqlite_path) else {
-            eprintln!(
-                "daemon: search admission stays closed: the store path is not under a data home"
-            );
-            return;
+            eprintln!("daemon: search stays unavailable: the store path is not under a data home");
+            return None;
         };
+        let (Ok(kernel), Some(local_embeddings)) = (kernel.kernel_store(), local_embeddings) else {
+            return None;
+        };
+        if slot.get().is_some() {
+            return None;
+        }
         let home = Path::new(home);
-        slot.get_or_init(|| projection_admission::ProjectionAdmission::for_home(home));
         if let Err(refusal) = projection_admission::AdmissionInputs::read(home)
             && !matches!(refusal, projection_admission::InputRefusal::Missing(_))
         {
             eprintln!("daemon: search admission record refused: {refusal}");
         }
+        let mut bound = false;
+        let owner = slot.get_or_init(|| {
+            bound = true;
+            Arc::new(search_lifecycle_owner::SearchLifecycleOwner::for_home(
+                home,
+                kernel,
+                local_embeddings,
+            ))
+        });
+        bound.then(|| Arc::clone(owner))
     }
 
-    /// The admission owner, once the SQLite store's data home is known.
+    /// The lifecycle owner, once the kernel is ready under a SQLite store with a lane attached.
+    #[cfg(feature = "test-support")]
+    pub fn search_lifecycle(&self) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
+        self.search_lifecycle.get().cloned()
+    }
+
+    /// The admission owner, once the lifecycle owner exists.
     #[cfg(feature = "test-support")]
     pub fn projection_admission(&self) -> Option<&projection_admission::ProjectionAdmission> {
-        self.projection_admission.get()
+        self.search_lifecycle.get().map(|owner| owner.admission())
     }
 
     async fn open_store_once(
@@ -4225,7 +4275,8 @@ impl Handler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
-            projection_admission: Arc::new(OnceLock::new()),
+            search_lifecycle: Arc::new(OnceLock::new()),
+            local_embeddings: Mutex::new(None),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -12546,8 +12597,8 @@ impl CompositeComponent for Handler {
             self.cancel.cancel();
             self.tasks.close();
         }
-        if let Some(admission) = self.projection_admission.get() {
-            admission.close();
+        if let Some(owner) = self.search_lifecycle.get() {
+            owner.shutdown();
         }
         self.tasks.wait().await;
 
@@ -13389,7 +13440,7 @@ fn json_type_name(value: &Value) -> &'static str {
 /// Use the wall clock only to set the expiry cutoff during the first HARD materialization.
 /// Storing the first HARD cutoff keeps later materializations byte-stable.
 /// Later passes use the stored cutoff so expiry cannot change rendered bytes between passes.
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)

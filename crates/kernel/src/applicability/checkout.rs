@@ -172,6 +172,14 @@ impl EvalBudget {
         self.deadline
     }
 
+    /// The same cancellation with the earlier of this deadline and `deadline`. Crossing either deadline raises the shared interrupt, so the bounded budget cannot outlive the one it came from.
+    pub fn bounded_by(&self, deadline: Instant) -> Self {
+        Self {
+            deadline: Some(self.deadline.map_or(deadline, |own| own.min(deadline))),
+            interrupt: Arc::clone(&self.interrupt),
+        }
+    }
+
     /// Cancellation is irreversible: no method clears `interrupt`.
     pub fn cancel(&self) {
         self.interrupt.store(true, Ordering::Relaxed);
@@ -1544,6 +1552,26 @@ fn repository_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_by_keeps_the_earlier_deadline_and_shares_the_interrupt() {
+        let now = Instant::now();
+        let earlier = now + std::time::Duration::from_secs(10);
+        let later = now + std::time::Duration::from_secs(20);
+        let unbounded = EvalBudget::unbounded();
+        assert_eq!(unbounded.bounded_by(earlier).deadline(), Some(earlier));
+        let own_earlier = EvalBudget::new(Some(earlier), Arc::new(AtomicBool::new(false)));
+        assert_eq!(own_earlier.bounded_by(later).deadline(), Some(earlier));
+        let own_later = EvalBudget::new(Some(later), Arc::new(AtomicBool::new(false)));
+        let bounded = own_later.bounded_by(earlier);
+        assert_eq!(bounded.deadline(), Some(earlier));
+        assert!(!bounded.is_exhausted());
+        own_later.cancel();
+        assert!(
+            bounded.is_exhausted(),
+            "cancellation reaches the bounded budget"
+        );
+    }
 
     /// The descriptor, not the pathname, decides what a hash reads. Every
     /// case here is what a racing swap would substitute after a stat.

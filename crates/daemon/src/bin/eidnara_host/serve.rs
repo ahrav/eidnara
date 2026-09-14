@@ -1123,7 +1123,8 @@ pub fn run() -> Result<(), &'static str> {
     });
     let composite = StaticComposite::new(
         daemon::Handler::new_with_connection_file(Some(publication))
-            .with_connection_key_hook(commit_selection),
+            .with_connection_key_hook(commit_selection)
+            .with_local_embeddings(local_embeddings.clone()),
         local_embeddings,
         model_execution,
     )

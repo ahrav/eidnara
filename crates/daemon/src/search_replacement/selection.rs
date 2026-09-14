@@ -164,6 +164,15 @@ impl SearchSelection {
         }
     }
 
+    pub fn identity(&self) -> &ProjectionIdentity {
+        &self.identity
+    }
+
+    /// Whether a family is selected in this process; a selected family may still refuse a pin.
+    pub fn has_selected(&self) -> bool {
+        self.selected.load().is_some()
+    }
+
     pub fn pin(
         &self,
         kernel: &KernelStore,

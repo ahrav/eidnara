@@ -68,6 +68,10 @@ pub struct AdmissionInputs {
 }
 
 impl AdmissionInputs {
+    pub fn manifest(&self) -> &RuntimeManifest {
+        &self.manifest
+    }
+
     /// Reads both records under `<home>/search-admission/`.
     ///
     /// # Errors

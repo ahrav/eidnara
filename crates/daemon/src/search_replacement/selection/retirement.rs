@@ -3,7 +3,7 @@ use kernel::{CommitIntent, CommitReadRequest, CommitReadTarget, ConsumerObligati
 use retrieval::retirement::{RetirementReceipt, record_receipt, verify_receipt};
 
 /// Each disposition row stores the receipt id and the `removed` literal beyond its censused fields.
-const DISPOSITION_ROW_BYTES: u64 =
+pub(crate) const DISPOSITION_ROW_BYTES: u64 =
     (host_runtime::lifecycle::PAYLOAD_MANIFEST_DIGEST_LEN + "removed".len()) as u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
