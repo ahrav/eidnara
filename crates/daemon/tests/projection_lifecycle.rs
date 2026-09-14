@@ -487,7 +487,7 @@ fn reserved(intent: &LifecycleIntent) -> usize {
         "recorded_at": i64::MAX,
         "episodes": {"allowance": u32::MAX, "consumed": u32::MAX, "deadline": i64::MAX},
         "through": i64::MAX,
-        "deregistered": true,
+        "deregistered": false,
     }))
     .unwrap()
     .len()
@@ -1270,7 +1270,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         "deadline": i64::MAX,
     });
     stored["through"] = json!(i64::MAX);
-    stored["deregistered"] = json!(true);
+    stored["deregistered"] = json!(false);
     assert!(serde_json::to_vec(&stored).unwrap().len() <= 64 * 1024);
 
     // A well-formed record the daemon did not write: a symlink to one.

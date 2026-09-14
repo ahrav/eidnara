@@ -1336,6 +1336,22 @@ async fn a_restore_before_the_completion_write_refuses_to_persist_deregistration
         .unwrap();
     let checkpoint = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
     assert!(checkpoint.is_some());
+    let record = root.path().join("search-lifecycle/intent.json");
+    let restored = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let restore_once = Arc::clone(&restored);
+    let kernel = Arc::clone(&corpus.kernel);
+    let backup_path = saved.destination_path.clone();
+    selection = selection.with_disable_write_barrier_for_test(move |event| {
+        if event == daemon::projection_lifecycle::WriteBarrier::AfterRename
+            && !restore_once.load(std::sync::atomic::Ordering::SeqCst)
+            && serde_json::from_slice::<serde_json::Value>(&std::fs::read(&record).unwrap())
+                .unwrap()["deregistered"]
+                == true
+        {
+            kernel.restore(&backup_path).unwrap();
+            restore_once.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
     selection.begin_disable(&gate, &mut |_| {}).unwrap();
     let result = selection
         .reconcile_disabled(
@@ -1343,11 +1359,7 @@ async fn a_restore_before_the_completion_write_refuses_to_persist_deregistration
             &gate,
             &spec(root.path()),
             &budget(Duration::from_secs(20)),
-            &mut |event| {
-                if event == DisableEvent::Deregistered {
-                    corpus.kernel.restore(&saved.destination_path).unwrap();
-                }
-            },
+            &mut |_| {},
         )
         .await;
     assert!(
@@ -1359,7 +1371,8 @@ async fn a_restore_before_the_completion_write_refuses_to_persist_deregistration
         ),
         "{result:?}"
     );
-    assert!(!disabled(root.path()).deregistered);
+    assert!(restored.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(disabled(root.path()).deregistered);
     assert_eq!(
         corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
         checkpoint
@@ -1674,6 +1687,64 @@ async fn maintenance_refuses_a_gate_bound_to_another_identity() {
             Err(BuildError::Denied(
                 daemon::projection_gates::Denial::EvidenceIdentity
             ))
+        ),
+        "{result:?}"
+    );
+    assert!(selection.maintenance_supervisor_for_test().is_none());
+}
+
+/// Maintenance cannot derive slice deadlines beyond the manifest's approved supervisor bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maintenance_refuses_a_slice_longer_than_the_manifest_limit() {
+    use daemon::embedding_supervisor::{Maintained, SliceBounds};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let mut evaluator = cleanup_evaluator(root.path());
+    evaluator
+        .manifest
+        .limits
+        .insert("supervisor_slice_ms".to_owned(), 1);
+    gate.install(evaluator);
+    let engine = fixtures::TestEngine::new();
+    let synapse = Arc::new(fixtures::component(
+        &engine,
+        host_runtime::synapse::SynapseLimits::default(),
+    ));
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    let result = selection.start_maintenance(
+        Maintained {
+            gate: Arc::clone(&gate),
+            kernel: Arc::clone(&corpus.kernel),
+            projection: Arc::clone(reader.projection()),
+            synapse,
+            project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+            destination: kernel::ArtifactDestination::Remote,
+        },
+        SliceBounds {
+            dispatch: fixtures::bounds(),
+            sweep_candidates: NonZeroUsize::new(16).unwrap(),
+            slice: Duration::from_millis(200),
+            idle: Duration::from_millis(20),
+        },
+        Arc::new(|| fixtures::NOW),
+        events,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Denied(
+                daemon::projection_gates::Denial::LimitExceeded {
+                    ref limit,
+                    observed: 200,
+                    max: 1,
+                }
+            )) if limit == "supervisor_slice_ms"
         ),
         "{result:?}"
     );

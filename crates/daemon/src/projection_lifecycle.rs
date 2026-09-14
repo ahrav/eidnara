@@ -976,7 +976,7 @@ fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
             deadline: i64::MAX,
         }),
         through: Some(i64::MAX),
-        deregistered: true,
+        deregistered: false,
     };
     let bytes =
         serde_json::to_vec(&disabled).map_err(|_| IntentRefusal::Io("encode".to_owned()))?;

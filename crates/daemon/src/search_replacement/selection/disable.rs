@@ -67,6 +67,19 @@ impl SearchSelection {
         let grant = maintained
             .gate
             .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Startup)?;
+        let slice_ms = u64::try_from(bounds.slice.as_millis())
+            .ok()
+            .and_then(|whole| {
+                whole.checked_add(u64::from(
+                    !bounds.slice.subsec_nanos().is_multiple_of(1_000_000),
+                ))
+            })
+            .ok_or(BuildError::Invalid("maintenance slice"))?;
+        maintained.gate.check_limits(
+            &grant,
+            &InvalidationIdentity::from(&self.identity),
+            &[("supervisor_slice_ms", slice_ms)],
+        )?;
         let supervisor = EmbeddingSupervisor::new(maintained, bounds, now, events);
         let task = supervisor.spawn_pinned(SearchReader { family, grant });
         self.maintenance = Some(Maintenance { supervisor, task });
@@ -114,6 +127,11 @@ impl SearchSelection {
         observer: &mut dyn FnMut(DisableEvent),
     ) -> Result<DisabledIntent, BuildError> {
         let lifecycle = ProjectionLifecycle::open(&self.data_home)?;
+        #[cfg(feature = "test-support")]
+        let lifecycle = match self.disable_barrier.clone() {
+            Some(barrier) => lifecycle.with_write_barrier_for_test(move |event| barrier(event)),
+            None => lifecycle,
+        };
         let mut disabled = match lifecycle.read() {
             ControlState::Disabled(intent) => intent,
             _ => return Err(IntentRefusal::Disabled.into()),
@@ -353,6 +371,11 @@ impl SearchSelection {
         let mut next = disabled.clone();
         next.deregistered = true;
         lifecycle.update_disabled(&disabled, &next)?;
+        if registered_again(&next)? {
+            return Err(BuildError::Invalid(
+                "deregistered consumer is registered again",
+            ));
+        }
         Ok(next)
     }
 
