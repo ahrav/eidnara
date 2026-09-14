@@ -7,6 +7,7 @@ import {
     MAX_RECONSTRUCTED_BYTES,
     MAX_REVISION_BYTES,
     parseRecipe,
+    type RecipeOperation,
     type RecipeRejectionCode,
     type RecipeSourceBase,
 } from "./edit-recipe";
@@ -79,6 +80,9 @@ describe("edit recipe fixtures", () => {
             if (testCase.expect.ok) {
                 if (!result.ok) throw new Error(`${testCase.name}: ${result.rejection.detail}`);
                 expect(result.values).toEqual(testCase.expect.output as unknown[]);
+                expect(result.lengths).toEqual(
+                    result.values.map((value) => canonicalJsonLength(value)),
+                );
                 expect(result.bytes).toBe(testCase.expect.canonical_bytes as number);
                 expect(result.bytes).toBe(canonicalJsonLength(result.values));
                 expect(result.lengths).toEqual(result.values.map(canonicalJsonLength));
@@ -128,6 +132,7 @@ describe("edit recipe fixtures", () => {
         expect(result.values[0]).toBe(previousValues[0]);
         expect(result.values[1]).toBe(previousValues[1]);
         expect(result.values[2]).toBe(inputValues[3]);
+        expect(result.lengths).toEqual(result.values.map((value) => canonicalJsonLength(value)));
         expect(JSON.stringify(inputValues)).toBe(inputJson);
         expect(JSON.stringify(previousValues)).toBe(previousJson);
     });
@@ -272,6 +277,347 @@ describe("edit recipe bounds", () => {
         expect(
             parseRecipe({ base_revision: "☃".repeat(42), output_revision: "o", operations: [] }).ok,
         ).toBe(true);
+    });
+
+    it("requires own data properties without invoking accessors", () => {
+        const inherited = Object.assign(Object.create({ base_revision: "b" }) as object, {
+            output_revision: "o",
+            operations: [],
+        });
+        expect(parseRecipe(inherited)).toMatchObject({
+            ok: false,
+            rejection: { code: "malformed" },
+        });
+
+        let accessed = false;
+        const operation = {};
+        Object.defineProperty(operation, "op", {
+            enumerable: true,
+            get() {
+                accessed = true;
+                throw new Error("accessor invoked");
+            },
+        });
+        let parsed: ReturnType<typeof parseRecipe> | undefined;
+        expect(() => {
+            parsed = parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [operation],
+            });
+        }).not.toThrow();
+        expect(accessed).toBe(false);
+        expect(parsed).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+
+        const operations = [null];
+        Object.defineProperty(operations, 0, {
+            enumerable: true,
+            get() {
+                accessed = true;
+                throw new Error("indexed accessor invoked");
+            },
+        });
+        parsed = undefined;
+        expect(() => {
+            parsed = parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations,
+            });
+        }).not.toThrow();
+        expect(accessed).toBe(false);
+        expect(parsed).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+    });
+
+    it("stops container traversal before reading later children", () => {
+        let laterRead = false;
+        const values = new Proxy<unknown[]>([1n, null], {
+            get(target, property, receiver) {
+                if (property === "1") {
+                    laterRead = true;
+                    throw new Error("later child read");
+                }
+                return Reflect.get(target, property, receiver);
+            },
+            getOwnPropertyDescriptor(target, property) {
+                if (property === "1") {
+                    laterRead = true;
+                    throw new Error("later child inspected");
+                }
+                return Reflect.getOwnPropertyDescriptor(target, property);
+            },
+        });
+        expect(() =>
+            parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{ op: "insert", values }],
+            }),
+        ).not.toThrow();
+        expect(laterRead).toBe(false);
+
+        expect(() => canonicalJsonLength(values)).toThrow();
+        expect(laterRead).toBe(false);
+    });
+
+    it("rejects recipes outside serde_json's value domain", () => {
+        const loneSurrogate = String.fromCharCode(0xd800);
+        expect(
+            parseRecipe({
+                base_revision: "b",
+                output_revision: loneSurrogate.repeat(42),
+                operations: [],
+            }),
+        ).toMatchObject({ ok: false, rejection: { code: "invalid_revision" } });
+        expect(
+            parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{ op: "insert", values: [Number.POSITIVE_INFINITY] }],
+            }),
+        ).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+        expect(
+            parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{ op: "insert", values: [loneSurrogate] }],
+            }),
+        ).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+    });
+
+    it("rejects nested literals beyond serde_json's recursion limit without throwing", () => {
+        let nested: unknown = null;
+        for (let depth = 0; depth < 123; depth += 1) nested = [nested];
+        const accepted = parseRecipe({
+            base_revision: "b",
+            output_revision: "o",
+            operations: [{ op: "insert", values: [nested] }],
+        });
+        expect(accepted.ok).toBe(true);
+        if (accepted.ok) expect(applyRecipe(accepted.recipe, base("b", [])).ok).toBe(true);
+        nested = [nested];
+        expect(
+            parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{ op: "insert", values: [nested] }],
+            }),
+        ).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+    });
+
+    it("does not use inherited array methods while parsing", () => {
+        let methodRead = false;
+        const operations = new Proxy([{ op: "insert", values: [null] }], {
+            get(target, property, receiver) {
+                if (property === "entries" || property === "some") {
+                    methodRead = true;
+                    throw new Error(`inherited ${String(property)} read`);
+                }
+                return Reflect.get(target, property, receiver);
+            },
+        });
+        expect(() =>
+            parseRecipe({ base_revision: "b", output_revision: "o", operations }),
+        ).not.toThrow();
+        expect(methodRead).toBe(false);
+    });
+
+    it("does not use inherited array methods to check operation fields", () => {
+        const find = Object.getOwnPropertyDescriptor(Array.prototype, "find");
+        const includes = Object.getOwnPropertyDescriptor(Array.prototype, "includes");
+        let parsed: ReturnType<typeof parseRecipe> | undefined;
+        try {
+            Object.defineProperty(Array.prototype, "find", {
+                configurable: true,
+                value() {
+                    throw new Error("inherited find called");
+                },
+            });
+            Object.defineProperty(Array.prototype, "includes", {
+                configurable: true,
+                value() {
+                    throw new Error("inherited includes called");
+                },
+            });
+            parsed = parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{ op: "insert", values: [null] }],
+            });
+        } finally {
+            if (find) Object.defineProperty(Array.prototype, "find", find);
+            if (includes) Object.defineProperty(Array.prototype, "includes", includes);
+        }
+        expect(parsed?.ok).toBe(true);
+    });
+
+    it("does not accept a rejection through an inherited operation discriminant", () => {
+        const op = Object.getOwnPropertyDescriptor(Object.prototype, "op");
+        let parsed: ReturnType<typeof parseRecipe> | undefined;
+        try {
+            Object.defineProperty(Object.prototype, "op", {
+                configurable: true,
+                value: "insert",
+            });
+            parsed = parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{}],
+            });
+        } finally {
+            if (op) Object.defineProperty(Object.prototype, "op", op);
+            else Reflect.deleteProperty(Object.prototype, "op");
+        }
+        expect(parsed).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+    });
+
+    it("uses own tags for internal traversal frames", () => {
+        const children = Object.getOwnPropertyDescriptor(Object.prototype, "children");
+        const code = Object.getOwnPropertyDescriptor(Object.prototype, "code");
+        try {
+            Object.defineProperty(Object.prototype, "children", {
+                configurable: true,
+                value: {
+                    next: () => {
+                        throw new Error("inherited children used");
+                    },
+                },
+            });
+            Object.defineProperty(Object.prototype, "code", {
+                configurable: true,
+                value: "malformed",
+            });
+            expect(
+                parseRecipe({
+                    base_revision: "b",
+                    output_revision: "o",
+                    operations: [{ op: "insert", values: [null] }],
+                }).ok,
+            ).toBe(true);
+            expect(canonicalJsonLength([null])).toBe(6);
+        } finally {
+            if (children) Object.defineProperty(Object.prototype, "children", children);
+            else Reflect.deleteProperty(Object.prototype, "children");
+            if (code) Object.defineProperty(Object.prototype, "code", code);
+            else Reflect.deleteProperty(Object.prototype, "code");
+        }
+    });
+
+    it("rejects non-enumerable known fields skipped by validation", () => {
+        const cyclic: unknown[] = [];
+        cyclic[0] = cyclic;
+        const operation = { op: "insert" };
+        Object.defineProperty(operation, "values", {
+            enumerable: false,
+            value: [cyclic],
+        });
+        expect(
+            parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [operation],
+            }),
+        ).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+    });
+
+    it("does not retain metadata per rejected operation", () => {
+        const operations: RecipeOperation[] = Array.from({ length: 100_000 }, () => ({
+            op: "insert",
+            values: [null],
+        }));
+        let heapAtFinalOperation = 0;
+        operations.push(
+            new Proxy({ op: "keep", source: "input", start: 1, count: 1 } as RecipeOperation, {
+                get(target, property, receiver) {
+                    if (property === "op") heapAtFinalOperation = process.memoryUsage().heapUsed;
+                    return Reflect.get(target, property, receiver);
+                },
+            }),
+        );
+        Bun.gc(true);
+        const heapBefore = process.memoryUsage().heapUsed;
+        const result = applyRecipe(
+            { baseRevision: "b", outputRevision: "o", operations },
+            base("b", []),
+        );
+        expect(result).toMatchObject({ ok: false, rejection: { code: "out_of_bounds" } });
+        expect(heapAtFinalOperation - heapBefore).toBeLessThan(8 * 1024 * 1024);
+    });
+
+    it("stops at the size cap before inspecting later literals", () => {
+        const result = applyRecipe(
+            {
+                baseRevision: "b",
+                outputRevision: "o",
+                operations: [
+                    { op: "keep", source: "input", start: 0, count: 1 },
+                    { op: "insert", values: [null, 1n] },
+                ],
+            },
+            { revision: "b", values: [null], lengths: [MAX_RECONSTRUCTED_BYTES - 2] },
+        );
+        expect(result).toMatchObject({ ok: false, rejection: { code: "output_too_large" } });
+    });
+
+    it("does not retain parsed operations before rejecting unused previous revision", () => {
+        const operations = Array.from({ length: 1_000 }, () => ({
+            op: "insert",
+            values: [null],
+        }));
+        const original = Object.getOwnPropertyDescriptor(Array.prototype, "999");
+        let copied = false;
+        let result: ReturnType<typeof parseRecipe> | undefined;
+        try {
+            Object.defineProperty(Array.prototype, "999", {
+                configurable: true,
+                set(value: unknown) {
+                    copied = true;
+                    Object.defineProperty(this, "999", {
+                        value,
+                        writable: true,
+                        enumerable: true,
+                        configurable: true,
+                    });
+                },
+            });
+            result = parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                previous_output_revision: "unused",
+                operations,
+            });
+        } finally {
+            if (original) Object.defineProperty(Array.prototype, "999", original);
+            else Reflect.deleteProperty(Array.prototype, "999");
+        }
+        expect(result).toMatchObject({
+            ok: false,
+            rejection: { code: "unused_previous_revision" },
+        });
+        expect(copied).toBe(false);
+    });
+
+    it("rejects oversized kept ranges before slicing sources", () => {
+        const values = new Proxy([1, 2], {
+            get(target, property, receiver) {
+                if (property === "slice") throw new Error("values sliced before validation");
+                return Reflect.get(target, property, receiver);
+            },
+        });
+        const lengths = new Proxy([MAX_RECONSTRUCTED_BYTES, 1], {
+            get(target, property, receiver) {
+                if (property === "slice") throw new Error("lengths sliced before validation");
+                return Reflect.get(target, property, receiver);
+            },
+        });
+        let result: ReturnType<typeof applyRecipe> | undefined;
+        expect(() => {
+            result = applyRecipe(recipe, { revision: "b", values, lengths });
+        }).not.toThrow();
+        expect(result).toMatchObject({
+            ok: false,
+            rejection: { code: "output_too_large" },
+        });
     });
 
     it("rejects a mismatched length table without reading values", () => {

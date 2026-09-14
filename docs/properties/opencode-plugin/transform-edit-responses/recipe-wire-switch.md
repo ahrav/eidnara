@@ -67,9 +67,11 @@ alone cannot validate objects retained from an earlier host array.
 
 The synchronous publication block stores the applied output. Invalidation,
 clear, budget eviction, and session-count eviction drop it. The daemon offers
-its retained output only when the request names that revision. In `lib.rs`,
-`CkEntry::same_message` compares served canonical bytes without falling back to
-typed equality; ingress matches also include unknown serialized fields.
+its retained output only when the request names that revision. The CK branch of
+`respond_transform` compares served canonical bytes. It offers no CK input
+candidates: typed decoding discards unknown envelope fields and normalizes
+defaults, so typed equality cannot prove equality with raw client input. Native
+input keeps remain enabled because native values retain their JSON representation.
 
 Witnesses in `rust-mode-transform.test.ts`:
 - "rejects mutated retained output before request"
@@ -81,8 +83,11 @@ The mutation tests send serialized fake requests and fresh second-pass input
 objects. They verify retained-object mutation cannot change the published
 array and distinguish successful input-only recovery from rejected delivery.
 Daemon witnesses in `lib.rs` cover missing and matching advertised revisions,
-changed unknown fields between passes, and ingress candidates with different
-unknown fields.
+normalized previous output across unknown-field and typed-payload edits
+(`wire_recipe_keeps_only_normalized_previous_output`), and normalized passthrough
+against raw client bases (`wire_passthrough_recipe_matches_typed_output_not_raw_input`).
+`recipe_matching_compares_served_payload_fields` checks that unknown envelope
+fields disappear while provider-extra changes remain significant.
 
 ### TE22 `delivery-disposition-follows-publication`
 
@@ -133,7 +138,7 @@ separate owners.
 
 - `lib.rs:23157` `transform_response_seam_turns_missing_recipe_into_a_typed_refusal`.
 - `lib.rs:22659` `cached_transform_response_writer_is_byte_identical_to_value_round_trip`
-  (a one-message passthrough is one `keep` from `input`).
+  (a one-message CK passthrough inserts its typed served value).
 - `edit_recipe.rs:1192` `revision_allocator_names_each_pass_once_and_refuses_exhaustion`.
 - `lib.rs:26412` `native_attachment_reuses_transform_tag_baseline_and_preserves_bytes`
   replays the served array against the native attachment.

@@ -151,10 +151,32 @@ CREATE TABLE embedding_recovery_authorizations(
 -- files can be reclaimed once and the reclamation can be audited.
 CREATE TABLE retirement_receipts(
     receipt_id TEXT PRIMARY KEY,
-    generation_id TEXT NOT NULL REFERENCES vector_generations(generation_id) ON DELETE RESTRICT,
+    generation_id TEXT NOT NULL,
     reason TEXT NOT NULL,
     operator_id TEXT,
     retired_at INTEGER NOT NULL,
-    recorded_at INTEGER NOT NULL
+    recorded_at INTEGER NOT NULL,
+    old_consumer_id TEXT,
+    old_family TEXT,
+    selected_family TEXT,
+    kernel_incarnation_id TEXT,
+    through_commit_seq INTEGER CHECK(through_commit_seq>=0),
+    obligation_count INTEGER CHECK(obligation_count>=0),
+    CHECK((old_consumer_id IS NULL AND old_family IS NULL AND selected_family IS NULL
+        AND kernel_incarnation_id IS NULL AND through_commit_seq IS NULL AND obligation_count IS NULL)
+      OR (old_consumer_id IS NOT NULL AND old_family IS NOT NULL AND selected_family IS NOT NULL
+        AND kernel_incarnation_id IS NOT NULL AND through_commit_seq IS NOT NULL AND obligation_count IS NOT NULL))
 ) STRICT;
 CREATE INDEX idx_retirement_receipts_generation ON retirement_receipts(generation_id,receipt_id);
+
+-- Each row records completed removal, not an intention to remove derived bytes.
+CREATE TABLE retirement_dispositions(
+    receipt_id TEXT NOT NULL REFERENCES retirement_receipts(receipt_id) ON DELETE RESTRICT,
+    kind TEXT NOT NULL CHECK(kind IN ('source','barrier')),
+    identity TEXT NOT NULL,
+    artifact_digest TEXT NOT NULL,
+    commit_seq INTEGER NOT NULL CHECK(commit_seq>=0),
+    invalidated_commit_seq INTEGER,
+    disposition TEXT NOT NULL CHECK(disposition='removed'),
+    PRIMARY KEY(receipt_id,kind,identity)
+) STRICT;

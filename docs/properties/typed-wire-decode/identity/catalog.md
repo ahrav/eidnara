@@ -119,7 +119,7 @@ reachability record is a reporting rollup, not a combined runtime assertion.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - the replacement and a complete frozen plugin-shape corpus are missing.
+Exercised: yes - `wire_golden_projects_to_flat_blocks` passes on the owned typed model with zero byte/hash drift against the emitter-faithful golden frozen at `85accd89`; the golden was not regenerated.
 Guarantee: Every accepted plugin-domain block preserves its canonical bytes and ingress identity through typed decode.
 Check: `always` - For each P block, assert `C(b) == R(b) == baseline_bytes(b)`, `flat.bytes == C(b)`, and `flat.content_hash == H(baseline_bytes(b))`; unchanged message IDs and block order must yield the same ingress identity vector, because projection computes identity on every accepted block.
 Fault/timing angle: Switching serialization before the canonical producer changes ordering or emits a previously absent default.
@@ -136,7 +136,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - no old/new served-byte comparison or persisted synthetic-pair replay ran.
+Exercised: partial - `served_canonical_shell_bytes_and_segments_are_frozen` (transform.rs) pins served bytes for decoded, flagged, and edited shells: unknown envelope keys are gone, false `synthetic` is omitted, true is kept; `typed_only_blocks_canonicalize_by_field_selection_and_sorted_order` pins explicit-false `provider_executed` decoding to the omitted default. No persisted synthetic-pair replay ran.
 Guarantee: Plugin-shaped messages and daemon-built typed messages change served bytes only by the plan's permitted default-field omissions.
 Check: `always` - Compare new served bytes to an independent sorted baseline JSON edit that removes only false `meta.synthetic`, `meta.summary`, and `meta.errored`, plus false tool-kind `provider_executed` in daemon-built typed blocks; preserve `meta` itself and every other field/value, because the exception is a bounded byte contract, not arbitrary semantic equality.
 Fault/timing angle: A default skip predicate removes true values, changes null/empty handling, or hides unrelated output drift during golden regeneration.
@@ -153,7 +153,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - the common producer and cross-consumer check are absent at HEAD.
+Exercised: yes - `tests/block_bases_agree.rs` and `fresh_block_byte_consumers_call_the_canonical_producer` pass after replay removal; `decoded_block_fingerprint` no longer clears an envelope before hashing.
 Guarantee: Projection, fresh served fingerprints, and decoded sidecar fingerprints use one canonical typed block-byte basis with only the sidecar's codec namespace excluded.
 Check: `always` - Assert `flat.bytes == C(b) == R(b)`, `flat.content_hash == H(C(b))`, fresh nonreused served receipt equals `(hex(H(C(b))), C(b).len())`, and sidecar fingerprint equals `hex(H(C(S(b))))`; the sidecar equals the other hash only when S does not change b, because namespace exclusion is intentional.
 Fault/timing angle: One consumer keeps declaration-order serialization, hashes a JSON string containing C, or strips all provider extras instead of one namespace.
@@ -172,7 +172,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - receipt tests still distinguish retained originals and no typed-only replacement campaign ran.
+Exercised: yes - `receipt_reuse_is_separate_from_fresh_hashing` now asserts that candidates differing only in discarded envelope fields are equal typed values with equal `block_identity_digest`s, that the first equal candidate is selected, and that signed-zero reuse preserves served bytes; the digest covers `(kind, provider_extras)` only.
 Guarantee: Receipt reuse follows typed equality, positional precedence, and first-candidate selection without changing canonical served bytes.
 Check: `always` - Assert `E(a,b) => D(a)==D(b)` for the equality digest D; select the first projected candidate at the served index, otherwise the first candidate indexed by D, recheck E, reuse exactly that candidate's hash/length when equal, and otherwise use the fresh C receipt; assert served message bytes equal serialization without receipt reuse, because receipts are metadata and must not rewrite the payload.
 Fault/timing angle: Removing `original` broadens equality; a positional mismatch must not fall through to another index, and a hash match must not bypass equality.
@@ -274,7 +274,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - legacy sibling tests preserve unknown originals rather than testing the new typed contract.
+Exercised: yes - `a_block_edit_leaves_its_sibling_unchanged_and_envelope_unknowns_are_discarded` (memory-store) and `overlay_canonicalizes_only_the_mutated_block` (transform.rs) test the typed contract: an edit re-encodes one block, the untouched sibling is equal by value and keeps its payload, and unknown envelope keys are discarded on both.
 Guarantee: Editing one typed block leaves all unedited sibling bytes and the shared source message unchanged.
 Check: `always` - Snapshot C for every block after accepted ingress normalization, edit one selected block in an owned clone, assert every other sibling's C and hash are unchanged, the edited block equals its explicit expected bytes, and the aliased original retains all pre-edit bytes; for P siblings also compare against frozen baseline bytes, because the isolation promise applies to each mutation.
 Fault/timing angle: Dropping message-level originals or rebuilding a clone accidentally changes sibling defaults, provider extras, signatures, or shared data.

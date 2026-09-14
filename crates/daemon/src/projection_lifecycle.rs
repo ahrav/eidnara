@@ -5,6 +5,11 @@ use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-support")]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::sync::{Mutex, MutexGuard};
 
 use host_runtime::LifecycleTransactionLock;
@@ -22,7 +27,9 @@ pub const CONTROL_RECORD: &str = "intent.json";
 const TEMP_PREFIX: &str = "intent.";
 const TEMP_SUFFIX: &str = ".tmp";
 /// Schema 2 adds `staged_seed_digest`; a record of another schema is unavailable rather than read with defaults.
-const SCHEMA: u32 = 2;
+const ACTIVE_SCHEMA: u32 = 2;
+const DISABLED_SCHEMA: u32 = 3;
+const CURRENT_SCHEMA: u32 = 4;
 /// A record larger than this is not decoded; it is reported unavailable.
 pub const MAX_RECORD_BYTES: u64 = 64 * 1024;
 
@@ -45,6 +52,7 @@ impl Transition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Cause {
+    Corruption,
     SchemaMismatch,
     TokenizerMismatch,
     EmbeddingModelMismatch,
@@ -135,9 +143,56 @@ pub struct LifecycleIntent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement_capture: Option<Box<ReplacementCapture>>,
     pub recorded_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_disabled: Option<Box<DisabledIntent>>,
 }
 
 impl LifecycleIntent {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != ACTIVE_SCHEMA {
+            return Err(format!("schema {}", self.schema));
+        }
+        check_invariants(
+            &self.consumer.consumer_id,
+            self.transition,
+            self.authorization_ref.as_deref(),
+            self.cause,
+        )
+        .map_err(|refusal| refusal.to_string())?;
+        // `record` admits only a positive allowance and a deadline at or after `recorded_at`,
+        // and `consume_episode` never passes the allowance, so other accounting is corruption.
+        if self.episodes.allowance == 0
+            || self.episodes.consumed > self.episodes.allowance
+            || self.episodes.deadline < self.recorded_at
+        {
+            return Err("impossible episode accounting".to_owned());
+        }
+        if !self
+            .replacement_capture
+            .as_deref()
+            .is_none_or(ReplacementCapture::stage_is_bound)
+        {
+            return Err("certificate names another capture".to_owned());
+        }
+        if let Some(prior) = self.prior_disabled.as_deref() {
+            prior.validate()?;
+            // `authorize_recovery` retains a second level only as a deregistration proof.
+            if let Some(inner) = prior
+                .handoff
+                .as_deref()
+                .and_then(|handoff| handoff.prior_disabled.as_deref())
+                && (!inner.deregistered
+                    || inner
+                        .handoff
+                        .as_deref()
+                        .is_some_and(|handoff| handoff.prior_disabled.is_some()))
+            {
+                return Err("nested prior handoff".to_owned());
+            }
+        }
+        Ok(())
+    }
+
     /// Whether `request` is a replay of this record: the same intent in every field the caller supplies.
     fn is_replay_of(&self, request: &LifecycleRequest) -> bool {
         self.transition == request.transition
@@ -185,12 +240,63 @@ fn check_invariants(
 pub enum ControlState {
     Absent,
     Intent(LifecycleIntent),
+    /// Current stores completion history; it does not prove live inventory or query authorization.
+    Current(LifecycleIntent),
+    Disabled(DisabledIntent),
     /// The record exists but cannot be trusted: not a regular owner-only file, over the size cap, malformed, or of another schema. Nothing is decided from it.
     Unavailable(String),
 }
 
+/// A durable admission stop. The construction handoff is evidence, not permission to recover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisabledIntent {
+    schema: u32,
+    pub handoff: Option<Box<LifecycleIntent>>,
+    pub recorded_at: i64,
+    pub episodes: Option<EpisodeAccounting>,
+    pub through: Option<i64>,
+    pub deregistered: bool,
+}
+
+impl DisabledIntent {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != DISABLED_SCHEMA
+            || self.recorded_at < 0
+            || self.through.is_some_and(|n| n < 0)
+            || (self.deregistered && self.through.is_none())
+            || (self.through.is_some() && self.handoff.is_none())
+            || self.episodes.is_some_and(|e| {
+                e.allowance == 0 || e.consumed > e.allowance || e.deadline <= self.recorded_at
+            })
+        {
+            return Err("invalid disabled record".to_owned());
+        }
+        self.handoff
+            .as_deref()
+            .map_or(Ok(()), LifecycleIntent::validate)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredIntent {
+    Active(LifecycleIntent),
+    Disabled(DisabledIntent),
+    Current(CurrentIntent),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurrentIntent {
+    schema: u32,
+    current: LifecycleIntent,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IntentRefusal {
+    #[error("retrieval is durably disabled; operator recovery is required")]
+    Disabled,
     #[error("the consumer binding names no consumer")]
     InvalidConsumer,
     #[error("an authorized recovery needs an operator authorization reference")]
@@ -215,6 +321,8 @@ pub enum IntentRefusal {
     Unavailable(String),
     #[error("every episode of the allowance is consumed")]
     AllowanceExhausted,
+    #[error("the lifecycle timestamp is negative")]
+    InvalidTimestamp,
     #[error("the episode deadline has passed")]
     DeadlineExpired,
     #[error("no intent is recorded")]
@@ -266,6 +374,8 @@ pub struct ProjectionLifecycle {
     threads: Mutex<()>,
     #[cfg(feature = "test-support")]
     barrier: Option<Box<dyn Fn(WriteBarrier) + Send + Sync>>,
+    #[cfg(feature = "test-support")]
+    fail_directory_sync: Option<Arc<AtomicBool>>,
 }
 
 impl ProjectionLifecycle {
@@ -291,8 +401,10 @@ impl ProjectionLifecycle {
                 "the lifecycle directory is not the caller's own directory",
             ));
         }
-        // The umask may have narrowed the requested mode; the caller's own directory is set to exactly owner-only.
+        // The umask may have narrowed the requested mode; the caller's own directory is set to exactly owner-only before the shared check.
         dir_fd.set_permissions(Permissions::from_mode(0o700))?;
+        owner_only_directory(&dir_fd.metadata()?)
+            .map_err(|reason| io::Error::new(io::ErrorKind::InvalidData, reason))?;
         let this = Self {
             data_home: data_home.to_path_buf(),
             dir,
@@ -300,6 +412,8 @@ impl ProjectionLifecycle {
             threads: Mutex::new(()),
             #[cfg(feature = "test-support")]
             barrier: None,
+            #[cfg(feature = "test-support")]
+            fail_directory_sync: None,
         };
         // A temp left by a process cut before its rename is never adopted; it is removed under the writer's lock so a live writer's temp is left alone.
         let lock = this.lock()?;
@@ -342,6 +456,13 @@ impl ProjectionLifecycle {
         self
     }
 
+    /// While `flag` is set, the next directory sync clears it and fails with [`IntentRefusal::DurabilityUnknown`].
+    #[cfg(feature = "test-support")]
+    pub fn with_directory_sync_failure_for_test(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.fail_directory_sync = Some(flag);
+        self
+    }
+
     fn at(&self, barrier: WriteBarrier) {
         #[cfg(feature = "test-support")]
         if let Some(hook) = &self.barrier {
@@ -353,55 +474,96 @@ impl ProjectionLifecycle {
 
     /// Reads the record. Never fails: anything short of a complete owner-only record of this schema is [`ControlState::Unavailable`].
     pub fn read(&self) -> ControlState {
-        let path = self.dir.join(CONTROL_RECORD);
+        Self::read_at(&self.data_home)
+    }
+
+    pub(crate) fn read_at(data_home: &Path) -> ControlState {
+        Self::probe_at(data_home)
+            .unwrap_or_else(|Unreadable(reason)| ControlState::Unavailable(reason))
+    }
+
+    /// Reads the record, keeping a record that could not be read apart from one that was read and rejected. `Err` is an I/O failure or a directory whose mode or owner is not the daemon's own; `open` or the next write repairs those, so a caller must not decide a durable stop from one. `Ok(Unavailable)` is a record whose bytes or own metadata were refused.
+    pub(crate) fn probe_at(data_home: &Path) -> Result<ControlState, Unreadable> {
+        let dir = data_home.join(CONTROL_DIR);
+        let metadata = match open_directory(&dir).and_then(|fd| fd.metadata()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ControlState::Absent);
+            }
+            Err(error) => return Err(Unreadable(error.kind().to_string())),
+        };
+        owner_only_directory(&metadata).map_err(|reason| Unreadable(reason.to_owned()))?;
+        let path = dir.join(CONTROL_RECORD);
         let file = match OpenOptions::new()
             .read(true)
             .custom_flags((OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK).bits() as i32)
             .open(&path)
         {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return ControlState::Absent,
-            Err(error) => return ControlState::Unavailable(error.kind().to_string()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ControlState::Absent);
+            }
+            // A directory without its owner's search bit opens but refuses its entries; `open` repairs that. Otherwise this is the record's own mode, which nothing repairs.
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                if metadata.mode() & 0o100 == 0 {
+                    return Err(Unreadable("directory not searchable".to_owned()));
+                }
+                return Ok(ControlState::Unavailable("record not readable".to_owned()));
+            }
+            Err(error) => return Err(Unreadable(error.kind().to_string())),
         };
         let metadata = match file.metadata() {
             Ok(metadata) => metadata,
-            Err(error) => return ControlState::Unavailable(error.kind().to_string()),
+            Err(error) => return Err(Unreadable(error.kind().to_string())),
         };
+        // Nothing repairs the record's own mode or owner, unlike the directory's, so this is a refused record rather than a transient failure.
         if !metadata.is_file() || metadata.mode() & 0o077 != 0 || !owned_by_caller(&metadata) {
-            return ControlState::Unavailable(
+            return Ok(ControlState::Unavailable(
                 "not the caller's own owner-only regular file".to_owned(),
-            );
+            ));
         }
         if metadata.len() > MAX_RECORD_BYTES {
-            return ControlState::Unavailable("over the size cap".to_owned());
+            return Ok(ControlState::Unavailable("over the size cap".to_owned()));
         }
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
         if let Err(error) = (&file).take(MAX_RECORD_BYTES).read_to_end(&mut bytes) {
-            return ControlState::Unavailable(error.kind().to_string());
+            return Err(Unreadable(error.kind().to_string()));
         }
-        match serde_json::from_slice::<LifecycleIntent>(&bytes) {
-            Ok(intent) if intent.schema != SCHEMA => {
-                ControlState::Unavailable(format!("schema {}", intent.schema))
-            }
-            Ok(intent) => match check_invariants(
-                &intent.consumer.consumer_id,
-                intent.transition,
-                intent.authorization_ref.as_deref(),
-                intent.cause,
-            ) {
-                Ok(())
-                    if !intent
-                        .replacement_capture
+        Ok(match serde_json::from_slice::<StoredIntent>(&bytes) {
+            Ok(StoredIntent::Current(record)) => {
+                let intent = record.current;
+                if record.schema != CURRENT_SCHEMA
+                    || intent.validate().is_err()
+                    || intent.recovery_target.is_none()
+                    || intent
+                        .recovery_target
+                        .is_some_and(|target| target.commit_seq < 0)
+                    || intent.episodes.allowance == 0
+                    || intent.episodes.consumed > intent.episodes.allowance
+                    || intent.recorded_at < 0
+                    || intent.episodes.deadline < intent.recorded_at
+                    || intent
+                        .staged_seed_digest
                         .as_deref()
-                        .is_none_or(ReplacementCapture::stage_is_bound) =>
+                        .is_none_or(|d| !is_canonical_payload_digest(d))
+                    || intent.replacement_capture.is_some()
+                    || intent.prior_disabled.is_some()
                 {
-                    ControlState::Unavailable("certificate names another capture".to_owned())
+                    ControlState::Unavailable("invalid completion record".to_owned())
+                } else {
+                    ControlState::Current(intent)
                 }
+            }
+            Ok(StoredIntent::Disabled(intent)) => match intent.validate() {
+                Ok(()) => ControlState::Disabled(intent),
+                Err(_) => ControlState::Unavailable("invalid disabled record".to_owned()),
+            },
+            Ok(StoredIntent::Active(intent)) => match intent.validate() {
                 Ok(()) => ControlState::Intent(intent),
-                Err(refusal) => ControlState::Unavailable(refusal.to_string()),
+                Err(reason) => ControlState::Unavailable(reason),
             },
             Err(_) => ControlState::Unavailable("malformed record".to_owned()),
-        }
+        })
     }
 
     /// Reads projection generation pins for a reclaimer holding the lifecycle transaction lock.
@@ -421,7 +583,11 @@ impl ProjectionLifecycle {
         let intent = match lifecycle.read() {
             ControlState::Absent => return Ok(BTreeSet::new()),
             ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
-            ControlState::Intent(intent) => intent,
+            ControlState::Intent(intent) | ControlState::Current(intent) => intent,
+            ControlState::Disabled(disabled) => match disabled.handoff {
+                Some(intent) => *intent,
+                None => return Ok(BTreeSet::new()),
+            },
         };
         let mut protected = BTreeSet::new();
         if let Some(digest) = intent.staged_seed_digest {
@@ -450,24 +616,24 @@ impl ProjectionLifecycle {
         request: &LifecycleRequest,
         now: i64,
     ) -> Result<Recorded, IntentRefusal> {
-        check_invariants(
-            &request.consumer.consumer_id,
-            request.transition,
-            request.authorization_ref.as_deref(),
-            request.cause,
-        )?;
-        if request.allowance == 0 {
-            return Err(IntentRefusal::AllowanceExhausted);
-        }
-        if now > request.deadline {
-            return Err(IntentRefusal::DeadlineExpired);
-        }
+        check_request(request, now)?;
         let admission = gate
             .admit(request.transition.hook(), EntryPoint::Reload)
             .map_err(IntentRefusal::Denied)?;
         let _lock = self.lock().map_err(io_refusal)?;
         match self.read() {
             ControlState::Absent => {}
+            ControlState::Current(existing)
+                if existing.attempt_id != request.attempt_id
+                    && existing.staged_seed_digest.as_deref()
+                        == Some(&request.selected_generation)
+                    && existing.consumer.consumer_id != request.consumer.consumer_id => {}
+            ControlState::Current(existing) => {
+                return Err(IntentRefusal::Conflict {
+                    attempt_id: existing.attempt_id,
+                });
+            }
+            ControlState::Disabled(_) => return Err(IntentRefusal::Disabled),
             ControlState::Intent(existing) if existing.is_replay_of(request) => {
                 self.sync_directory()?;
                 return Ok(Recorded {
@@ -482,25 +648,7 @@ impl ProjectionLifecycle {
             }
             ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
         }
-        let intent = LifecycleIntent {
-            schema: SCHEMA,
-            transition: request.transition,
-            selected_generation: request.selected_generation.clone(),
-            kernel_incarnation_id: request.kernel_incarnation_id.clone(),
-            consumer: request.consumer.clone(),
-            cause: request.cause,
-            attempt_id: request.attempt_id.clone(),
-            recovery_target: request.recovery_target,
-            episodes: EpisodeAccounting {
-                allowance: request.allowance,
-                consumed: 0,
-                deadline: request.deadline,
-            },
-            authorization_ref: request.authorization_ref.clone(),
-            staged_seed_digest: None,
-            replacement_capture: None,
-            recorded_at: now,
-        };
+        let intent = new_intent(request, now);
         fits_when_exhausted(&intent)?;
         self.replace(&intent, &admission)?;
         Ok(Recorded {
@@ -519,8 +667,23 @@ impl ProjectionLifecycle {
         gate: &HookGate,
         now: i64,
     ) -> Result<EpisodeAccounting, IntentRefusal> {
+        let (expected, _) = self.admitted_intent(gate)?;
+        self.consume_expected_episode(gate, &expected, now)
+    }
+
+    pub(crate) fn consume_expected_episode(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+        now: i64,
+    ) -> Result<EpisodeAccounting, IntentRefusal> {
         let _lock = self.lock().map_err(io_refusal)?;
         let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
         if now > intent.episodes.deadline {
             return Err(IntentRefusal::DeadlineExpired);
         }
@@ -619,6 +782,8 @@ impl ProjectionLifecycle {
     ) -> Result<(LifecycleIntent, Admission), IntentRefusal> {
         let intent = match self.read() {
             ControlState::Absent => return Err(IntentRefusal::NoIntent),
+            ControlState::Current(_) => return Err(IntentRefusal::NoIntent),
+            ControlState::Disabled(_) => return Err(IntentRefusal::Disabled),
             ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
             ControlState::Intent(intent) => intent,
         };
@@ -658,6 +823,14 @@ impl ProjectionLifecycle {
     }
 
     fn sync_directory(&self) -> Result<(), IntentRefusal> {
+        #[cfg(feature = "test-support")]
+        if self
+            .fail_directory_sync
+            .as_ref()
+            .is_some_and(|flag| flag.swap(false, Ordering::AcqRel))
+        {
+            return Err(IntentRefusal::DurabilityUnknown("injected".to_owned()));
+        }
         self.dir_fd
             .sync_all()
             .map_err(|error| IntentRefusal::DurabilityUnknown(error.kind().to_string()))
@@ -685,18 +858,67 @@ impl ProjectionLifecycle {
                 attempt_id: intent.attempt_id,
             });
         }
+        self.delete_private_family(
+            || {
+                if admission.invalidated.is_cancelled() {
+                    Err(IntentRefusal::Revoked)
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                release_lease();
+                Ok(())
+            },
+        )
+    }
+
+    pub(crate) fn delete_owned_replacement(
+        &self,
+        gate: &HookGate,
+        expected: &ControlState,
+        identity: &crate::projection_gates::InvalidationIdentity,
+        prepare: impl FnOnce() -> Result<(), crate::search_replacement::BuildError>,
+    ) -> Result<(), crate::search_replacement::BuildError> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let admission = match expected {
+            ControlState::Intent(intent) => {
+                Some(gate.admit(intent.transition.hook(), EntryPoint::Reload)?)
+            }
+            ControlState::Disabled(disabled) if disabled.handoff.is_some() => None,
+            _ => return Err(IntentRefusal::NoIntent.into()),
+        };
+        self.delete_private_family(
+            || {
+                if self.read() != *expected {
+                    return Err(IntentRefusal::Revoked.into());
+                }
+                match &admission {
+                    Some(grant) => gate.check_limits(grant, identity, &[])?,
+                    None => gate.cleanup_limits(identity, &[])?,
+                }
+                Ok(())
+            },
+            prepare,
+        )
+    }
+
+    fn delete_private_family<E: From<IntentRefusal>>(
+        &self,
+        check: impl Fn() -> Result<(), E>,
+        prepare: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        check()?;
         self.sync_directory()?;
         let home = self.data_home.join(CONTROL_DIR).join("replacement");
         let descriptor = search_descriptor(&home).map_err(store_refusal)?;
         self.at(WriteBarrier::BeforeFamilyRemoval);
-        if admission.invalidated.is_cancelled() {
-            return Err(IntentRefusal::Revoked);
-        }
-        release_lease();
-        if admission.invalidated.is_cancelled() {
-            return Err(IntentRefusal::Revoked);
-        }
-        delete_sqlite_family(&descriptor).map_err(store_refusal)
+        check()?;
+        prepare()?;
+        check()?;
+        delete_sqlite_family(&descriptor)
+            .map_err(store_refusal)
+            .map_err(E::from)
     }
 
     /// Caller must hold the data home's lifecycle transaction lock while changing capture ownership.
@@ -759,8 +981,168 @@ impl ProjectionLifecycle {
         intent: &LifecycleIntent,
         admission: &Admission,
     ) -> Result<(), IntentRefusal> {
-        let io = io_refusal;
         let bytes = encode(intent)?;
+        self.write_record(&bytes, Some(admission))
+    }
+
+    /// Stops admission without requiring a serving grant or discarding construction obligations.
+    /// Replays sync the existing record and preserve its accounting.
+    pub fn disable(&self, gate: &HookGate, now: i64) -> Result<DisabledIntent, IntentRefusal> {
+        if now < 0 {
+            return Err(IntentRefusal::InvalidTimestamp);
+        }
+        gate.disable();
+        let _lock = self.lock().map_err(io_refusal)?;
+        let handoff = match self.read() {
+            ControlState::Disabled(intent) => {
+                self.sync_directory()?;
+                return Ok(intent);
+            }
+            ControlState::Intent(intent) | ControlState::Current(intent) => Some(Box::new(intent)),
+            ControlState::Absent => None,
+            ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
+        };
+        let intent = DisabledIntent {
+            schema: DISABLED_SCHEMA,
+            handoff,
+            recorded_at: now,
+            episodes: None,
+            through: None,
+            deregistered: false,
+        };
+        self.write_disabled(&intent)?;
+        Ok(intent)
+    }
+
+    pub(crate) fn update_disabled(
+        &self,
+        expected: &DisabledIntent,
+        next: &DisabledIntent,
+    ) -> Result<(), IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        if self.read() != ControlState::Disabled(expected.clone()) {
+            return Err(IntentRefusal::Disabled);
+        }
+        self.write_disabled(next)
+    }
+
+    fn write_disabled(&self, intent: &DisabledIntent) -> Result<(), IntentRefusal> {
+        let bytes =
+            serde_json::to_vec(intent).map_err(|_| IntentRefusal::Io("encode".to_owned()))?;
+        self.write_record(&bytes, None)
+    }
+
+    pub(crate) fn authorize_recovery(
+        &self,
+        gate: &HookGate,
+        expected: &DisabledIntent,
+        request: &LifecycleRequest,
+        identity: &crate::projection_gates::InvalidationIdentity,
+        now: i64,
+    ) -> Result<(), IntentRefusal> {
+        if request.transition != Transition::AuthorizedRecovery
+            || expected
+                .handoff
+                .as_ref()
+                .is_some_and(|old| old.attempt_id == request.attempt_id)
+        {
+            return Err(IntentRefusal::IllegalCombination);
+        }
+        let _lock = self.lock().map_err(io_refusal)?;
+        match self.read() {
+            ControlState::Disabled(disabled) if disabled == *expected => {
+                check_request(request, now)?;
+            }
+            // A prior write renamed this authorization into place but its directory sync did not return; the replay syncs it and reopens admission.
+            ControlState::Intent(existing)
+                if existing.prior_disabled.is_some() && existing.is_replay_of(request) =>
+            {
+                return gate
+                    .authorized_recovery(&self.data_home, identity, || self.sync_directory());
+            }
+            _ => return Err(IntentRefusal::Disabled),
+        }
+        let mut intent = new_intent(request, now);
+        let mut prior = expected.clone();
+        if let Some(handoff) = prior.handoff.as_deref_mut()
+            && !handoff.prior_disabled.as_deref().is_some_and(|inner| {
+                inner.deregistered
+                    && inner
+                        .handoff
+                        .as_deref()
+                        .and_then(|h| h.staged_seed_digest.as_deref())
+                        == Some(request.selected_generation.as_str())
+            })
+        {
+            handoff.prior_disabled = None;
+        }
+        intent.prior_disabled = Some(Box::new(prior));
+        fits_when_exhausted(&intent)?;
+        gate.authorized_recovery(&self.data_home, identity, || {
+            self.write_record(&encode(&intent)?, None)
+        })
+    }
+
+    pub(crate) fn finish_construction(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+    ) -> Result<LifecycleIntent, IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        intent.replacement_capture = None;
+        intent.prior_disabled = None;
+        self.replace(&intent, &admission)?;
+        Ok(intent)
+    }
+
+    pub(crate) fn complete(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+    ) -> Result<(), IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected || intent.replacement_capture.is_some() {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        let bytes = serde_json::to_vec(&CurrentIntent {
+            schema: CURRENT_SCHEMA,
+            current: intent,
+        })
+        .map_err(|_| IntentRefusal::Io("encode".to_owned()))?;
+        self.write_record(&bytes, Some(&admission))
+    }
+
+    pub(crate) fn unpin_construction(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+    ) -> Result<(), IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        intent.staged_seed_digest = None;
+        self.replace(&intent, &admission)
+    }
+
+    fn write_record(
+        &self,
+        bytes: &[u8],
+        admission: Option<&Admission>,
+    ) -> Result<(), IntentRefusal> {
+        let io = io_refusal;
         if bytes.len() as u64 > MAX_RECORD_BYTES {
             return Err(IntentRefusal::Oversized);
         }
@@ -779,7 +1161,7 @@ impl ProjectionLifecycle {
                 .custom_flags(OFlags::CLOEXEC.bits() as i32)
                 .open(&temp)?;
             file.set_permissions(Permissions::from_mode(0o600))?;
-            file.write_all(&bytes)?;
+            file.write_all(bytes)?;
             file.sync_all()?;
             Ok(())
         })();
@@ -788,7 +1170,7 @@ impl ProjectionLifecycle {
             return Err(io(error));
         }
         self.at(WriteBarrier::BeforeRename);
-        if admission.invalidated.is_cancelled() {
+        if admission.is_some_and(|grant| grant.invalidated.is_cancelled()) {
             let _ = fs::remove_file(&temp);
             return Err(IntentRefusal::Revoked);
         }
@@ -800,6 +1182,45 @@ impl ProjectionLifecycle {
         self.sync_directory()?;
         self.at(WriteBarrier::AfterDirectorySync);
         Ok(())
+    }
+}
+
+pub(crate) fn check_request(request: &LifecycleRequest, now: i64) -> Result<(), IntentRefusal> {
+    check_invariants(
+        &request.consumer.consumer_id,
+        request.transition,
+        request.authorization_ref.as_deref(),
+        request.cause,
+    )?;
+    if request.allowance == 0 {
+        return Err(IntentRefusal::AllowanceExhausted);
+    }
+    if now > request.deadline {
+        return Err(IntentRefusal::DeadlineExpired);
+    }
+    Ok(())
+}
+
+fn new_intent(request: &LifecycleRequest, now: i64) -> LifecycleIntent {
+    LifecycleIntent {
+        schema: ACTIVE_SCHEMA,
+        transition: request.transition,
+        selected_generation: request.selected_generation.clone(),
+        kernel_incarnation_id: request.kernel_incarnation_id.clone(),
+        consumer: request.consumer.clone(),
+        cause: request.cause,
+        attempt_id: request.attempt_id.clone(),
+        recovery_target: request.recovery_target,
+        episodes: EpisodeAccounting {
+            allowance: request.allowance,
+            consumed: 0,
+            deadline: request.deadline,
+        },
+        authorization_ref: request.authorization_ref.clone(),
+        staged_seed_digest: None,
+        replacement_capture: None,
+        recorded_at: now,
+        prior_disabled: None,
     }
 }
 
@@ -828,7 +1249,22 @@ fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
         })),
         ..intent.clone()
     };
-    if encode(&exhausted)?.len() as u64 > MAX_RECORD_BYTES {
+    // `disable` wraps the active record and cleanup later fills every optional field, so the accepted intent must fit in that form too.
+    let disabled = DisabledIntent {
+        schema: DISABLED_SCHEMA,
+        handoff: Some(Box::new(exhausted)),
+        recorded_at: i64::MAX,
+        episodes: Some(EpisodeAccounting {
+            allowance: u32::MAX,
+            consumed: u32::MAX,
+            deadline: i64::MAX,
+        }),
+        through: Some(i64::MAX),
+        deregistered: false,
+    };
+    let bytes =
+        serde_json::to_vec(&disabled).map_err(|_| IntentRefusal::Io("encode".to_owned()))?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err(IntentRefusal::Oversized);
     }
     Ok(())
@@ -848,11 +1284,29 @@ impl Drop for FlockRelease<'_> {
     }
 }
 
-fn open_directory(dir: &Path) -> io::Result<File> {
+pub(crate) fn open_directory(dir: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
         .custom_flags((OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC).bits() as i32)
         .open(dir)
+}
+
+/// Why a record could not be read: an I/O failure or a failed owner-only check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unreadable(pub(crate) String);
+
+/// Requires the caller's own directory with no group or other permission bits; every reader and the opener judge the directory by this one predicate.
+fn owner_only_directory(metadata: &fs::Metadata) -> Result<(), &'static str> {
+    if !metadata.is_dir() {
+        return Err("the lifecycle path is not a directory");
+    }
+    if !owned_by_caller(metadata) {
+        return Err("the lifecycle directory is not the caller's own");
+    }
+    if metadata.mode() & 0o077 != 0 {
+        return Err("the lifecycle directory is not owner-only");
+    }
+    Ok(())
 }
 
 fn owned_by_caller(metadata: &fs::Metadata) -> bool {

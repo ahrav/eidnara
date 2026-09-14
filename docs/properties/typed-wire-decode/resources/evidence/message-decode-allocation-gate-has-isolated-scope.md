@@ -96,3 +96,29 @@ The threshold does not claim allocator residency or handler latency.
 - Missing evidence: Final attributed measurements and the owner's attribution choice.
 - Conclusion: resolved on category. R5 stays active; the two strict budget
   comparisons remain in Check, with instrumentation rules stated separately.
+
+## Typed-wire U1 execution, 2026-09-13
+
+`crates/daemon/tests/typed_wire_decode_allocations.rs`, run with
+`cargo test -p daemon --locked --features test-support --test
+typed_wire_decode_allocations`, passes six tests.
+
+Scope: the window opens before `serde_json::from_slice::<IngressMessages>` over
+the `messages` array bytes cut from the frozen 40-message body
+(`before/corpus/decode-40msgs_2KiB_mixed.json`, SHA-256
+`928e9373…b2acf`, checked by `the_frozen_corpora_are_the_recorded_bodies`) and
+closes when the value is returned. The thread-owned recorder counts allocations
+plus reallocations by requested layout size; other threads never enter it.
+
+| Measurement | Events | Peak live bytes | Bound |
+| --- | --- | --- | --- |
+| messages gate, `IngressMessages`, J = 74,934 | 434 | 109,432 | 640 events; below 224,802 |
+| restored envelope control (`Vec<Value>` then typed) | 2,185 | 313,025 | exceeds both |
+| whole request, 40 messages, direct lane | 439 | 109,544 | charge 223,024 |
+| whole request, 200 messages, direct lane | 2,121 | 537,852 | charge 1,047,156 |
+
+The gated value equals the production request's `messages` by value. The
+whole-request rows use the whole body as their denominator and never subtract
+the messages result. Source inspection
+(`source_has_no_envelope_tree_or_replay_entry`) covers envelope trees restored
+under another name.

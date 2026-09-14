@@ -52,7 +52,10 @@ impl Shared {
         let values: Vec<Arc<Value>> = values.iter().cloned().map(Arc::new).collect();
         Self {
             revision: Revision::parse(revision).expect("held revision"),
-            lengths: values.iter().map(|value| canonical_len(value)).collect(),
+            lengths: values
+                .iter()
+                .map(|value| canonical_len(value).expect("value length"))
+                .collect(),
             values,
         }
     }
@@ -91,19 +94,32 @@ fn edit_recipe_fixture_cases_agree_with_the_rust_applier() {
         let result = Recipe::from_json(&case.recipe)
             .and_then(|recipe| recipe.apply(input.base(), previous.as_ref().map(Shared::base)));
         match (case.expect.ok, result) {
-            (true, Ok((output, bytes))) => {
-                let rendered: Vec<Value> = output.iter().map(|value| (**value).clone()).collect();
+            (true, Ok(output)) => {
+                let rendered: Vec<Value> = output
+                    .values
+                    .iter()
+                    .map(|value| (**value).clone())
+                    .collect();
                 assert_eq!(rendered, case.expect.output, "case {:?} output", case.name);
                 assert_eq!(
-                    Some(bytes),
+                    Some(output.bytes),
                     case.expect.canonical_bytes,
                     "case {:?} canonical bytes",
                     case.name
                 );
                 assert_eq!(
-                    bytes,
+                    output.bytes,
                     serde_json::to_vec(&rendered).expect("serializes").len(),
                     "case {:?} measured size matches serialization",
+                    case.name
+                );
+                assert_eq!(
+                    output.lengths,
+                    rendered
+                        .iter()
+                        .map(|value| canonical_len(value).expect("value length"))
+                        .collect::<Vec<_>>(),
+                    "case {:?} per-entry lengths",
                     case.name
                 );
                 // Every kept entry is a source handle; every other entry is a recipe literal.
@@ -114,7 +130,7 @@ fn edit_recipe_fixture_cases_agree_with_the_rust_applier() {
                     .filter_map(|operation| operation["values"].as_array())
                     .flatten()
                     .collect();
-                for value in &output {
+                for value in &output.values {
                     let shared = input
                         .values
                         .iter()
@@ -131,8 +147,12 @@ fn edit_recipe_fixture_cases_agree_with_the_rust_applier() {
             }
             (false, Err(_)) => rejected += 1,
             (true, Err(error)) => panic!("case {:?} rejected: {error}", case.name),
-            (false, Ok((output, _))) => {
-                panic!("case {:?} accepted {} entries", case.name, output.len())
+            (false, Ok(output)) => {
+                panic!(
+                    "case {:?} accepted {} entries",
+                    case.name,
+                    output.values.len()
+                )
             }
         }
     }
@@ -152,10 +172,10 @@ fn edit_recipe_fixture_previous_keeps_share_their_source_handles() {
     let previous = case.previous.as_ref().expect("AE2 has a previous base");
     let previous = Shared::new(&previous.revision, &previous.values);
     let recipe = Recipe::from_json(&case.recipe).expect("valid");
-    let (output, _) = recipe
+    let output = recipe
         .apply(input.base(), Some(previous.base()))
         .expect("applies");
-    assert!(Arc::ptr_eq(&output[0], &previous.values[0]));
-    assert!(Arc::ptr_eq(&output[1], &previous.values[1]));
-    assert!(Arc::ptr_eq(&output[2], &input.values[3]));
+    assert!(Arc::ptr_eq(&output.values[0], &previous.values[0]));
+    assert!(Arc::ptr_eq(&output.values[1], &previous.values[1]));
+    assert!(Arc::ptr_eq(&output.values[2], &input.values[3]));
 }

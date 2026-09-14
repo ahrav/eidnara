@@ -8,16 +8,16 @@ approve their notes, and ACK failure cannot undo applied output.
 ## Evidence trail
 
 Revision: the #533 change on `fix/client-transform-owner` after merging
-`origin/main` at `5def3c71`. Line numbers were verified against that tree.
+`origin/main` at `5def3c71`. Line numbers were verified against `d5a525e8`.
 
 - In [rust-mode-transform.ts](../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts),
   `DeliveryPlan` (`:742-747`) carries `attempted` and `applied` sets. Every
-  page response adds its `note_deliveries` IDs to `attempted` (`:1320`),
+  page response adds its `note_deliveries` IDs to `attempted` (`:1321`),
   including every page of a series whose source changed between pages, since
-  pages are preceded by `assertCurrentPass()` only (`:1298`) and the series
+  pages are preceded by `assertCurrentPass()` only (`:1299`) and the series
   completes. `deliveries.applied` is assigned only inside the synchronous
-  publication block (`:1483`). `run` releases the lease in `.finally` and then
-  calls `deliverTransformNotes` (`:1526-1527`), which sends NACK for attempted
+  publication block (`:1486`). `run` releases the lease in `.finally` and then
+  calls `deliverTransformNotes` (`:1529-1530`), which sends NACK for attempted
   IDs not in `applied` and ACK for the rest, sequentially, and logs failures
   as an `AggregateError` without touching output (`:749-777`). Delivery
   therefore receives only route and ID metadata, after protected state is
@@ -62,9 +62,9 @@ Use per-identity assertions; aggregate counts can hide swapped dispositions.
   block, and the witnesses below.
 - Findings: Every rejection path exercised by the ownership tests ends in a
   NACK of the attempt's known IDs; applied attempts ACK only their own IDs;
-  the per-identity witness at `rust-mode-transform.test.ts:2962` asserts
+  the per-identity witness at `rust-mode-transform.test.ts:3086` asserts
   `[method, transform_pass_id]` tuples across a rejected and an accepted
-  attempt (`:3019-3029`).
+  attempt (`:3143-3153`).
 - Missing evidence: Daemon-side receipt is not observed; the fake client
   records attempted dispositions only.
 - Conclusion: resolved as exercised; the witness list is under the next
@@ -72,24 +72,25 @@ Use per-identity assertions; aggregate counts can hide swapped dispositions.
 
 ### Q: Are deliveries from a completed but refused series NACKed?
 
-- Sources examined: `rust-mode-transform.ts:1298`, `:1320`, `:1483`,
-  `:749-777`, `:1526-1527`; the witnesses below.
+- Sources examined: `rust-mode-transform.ts:1299`, `:1321`, `:1486`,
+  `:749-777`, `:1529-1530`; the witnesses below.
 - Findings: Pages are ownership fences, not rechecks, so a series whose
   source changed between pages reports deliveries on every page, completes,
   and is refused at publication; the between-pages witness asserts that the
   NACK list equals every ID the fake reported and that no ACK occurs. The
-  reconnect witness's mutation case restarts the series once and NACKs both
-  series' IDs.
+  restart witness refuses the restart at `recheckCapture("series-restart")`
+  for mutation and accessor and at the fence for invalidation, so only the
+  first series' `page-zero` is NACKed.
 - Missing evidence: Daemon-side receipt is not observed; the fake client
   records attempted dispositions only.
-- Conclusion (2026-09-13, revision-bound run after merging `origin/main` at
-  `5def3c71`, 1107 pass, 0 fail): resolved as exercised. Witnesses and
+- Conclusion (2026-09-13, revision-bound run at `d5a525e8`, after merging
+  `origin/main` at `5def3c71`, 1122 pass, 0 fail): resolved as exercised. Witnesses and
   markers:
-  - `rust-mode-transform.test.ts:2962` "releases rejected capture state before
+  - `rust-mode-transform.test.ts:3086` "releases rejected capture state before
     a paused NACK and keeps delivery IDs separate". Marker:
     `nackStarted.promise` race after a host edit; non-transform calls equal
     `[["transform.nack", "discarded"], ["transform.ack", "accepted"]]`.
-  - `:2901` "releases capture admission before the ACK so a paused ACK does
+  - `:3025` "releases capture admission before the ACK so a paused ACK does
     not block the next pass". Marker: `ackStarted.promise` race with
     `firstOutput.messages[0]` already `applied[0]`; after the ACK throws,
     the same identity holds and `failureCount` is 0.
@@ -107,16 +108,16 @@ Use per-identity assertions; aggregate counts can hide swapped dispositions.
     deliveries" (exact ACK body for `pass-1`).
   - `:941` "nacks note deliveries when a pass is superseded while its
     transform response is pending" (`calls` 1 before the newer call).
-  - `:2536` "declines before publication and NACKs known deliveries when the
+  - `:2660` "declines before publication and NACKs known deliveries when the
     source changes between pages". Marker: the fake records each
     `transform_pass_id` it reports in `delivered`; after the pass, no
     `transform.ack` call exists and the `transform.nack` IDs equal
-    `delivered` (`:2564-2570`).
-  - `:1902` "stops a series restart after a mid-series reconnect when
-    <mutation|invalidation> lands first" (2 cases). Marker: no ACK; NACK IDs
-    sorted equal `["page-zero", "restarted"]` for mutation and `["page-zero"]`
-    for invalidation (`:1947-1954`).
-  - `:2470` (4 cases; NACK of `retry-discarded`), `:1961` (2 cases; ACK of
-    `candidate` on publish, NACK on decline), `:2025` (NACK `discarded`, then
-    ACK `applied` on the recovery pass), `:2330` (8 cases; NACK of
-    `unapplied`), `:2375` (pre-apply cases; NACK of `nested-unapplied`).
+    `delivered` (`:2688-2694`).
+  - `:2010` "stops a series restart after <reconnect|attempt-mismatch> when
+    <mutation|accessor|invalidation> lands first" (6 cases). Marker: no ACK;
+    NACK IDs sorted equal `["page-zero"]` for every fault because the
+    `series-restart` recheck refuses the restart (`:2071-2078`).
+  - `:2594` (4 cases; NACK of `retry-discarded`), `:2085` (2 cases; ACK of
+    `candidate` on publish, NACK on decline), `:2149` (NACK `discarded`, then
+    ACK `applied` on the recovery pass), `:2454` (8 cases; NACK of
+    `unapplied`), `:2499` (pre-apply cases; NACK of `nested-unapplied`).

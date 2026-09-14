@@ -8,25 +8,27 @@ outcome unknown. Named application recovery is a separate contract.
 ## Evidence trail
 
 Revision: the #533 change on `fix/client-transform-owner` after merging
-`origin/main` at `5def3c71`. Line numbers were verified against that tree.
+`origin/main` at `5def3c71`. Line numbers were verified against `d5a525e8`.
 
 - In [rust-mode-transform.ts](../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts),
-  `sendTransformSeries` (`:1281-1333`) rethrows any transport error that is
-  not a classified page attempt mismatch (`:1310-1314`); only a reconnect
-  result or an attempt mismatch returns a restart marker (`:1315-1318`).
+  `sendTransformSeries` (`:1282-1334`) rethrows any transport error that is
+  not a classified page attempt mismatch (`:1311-1315`); only a reconnect
+  result or an attempt mismatch returns a restart marker (`:1316-1319`).
   `sendTransformSeriesWithSingleRestart` permits one restart per pass and
-  throws on a second (`:1336-1359`). A thrown error reaches the catch at
-  `:1491`, which records a failure through `markFailure` (`:1506`) and never
-  re-sends. The full-array retry after `need_full_sync` (`:1364-1428`) is the
+  throws on a second (`:1337-1361`). A thrown error reaches the catch at
+  `:1494`, which records a failure through `markFailure` (`:1509`) and never
+  re-sends. The full-array retry after `need_full_sync` (`:1366-1431`) is the
   named application recovery and is itself sent once. `state.forceFullWire =
-  true` precedes the first send (`:1361`), so a pass that dispatched and then
+  true` precedes the first send (`:1363`), so a pass that dispatched and then
   failed or declined sends the full history next time rather than a delta
   against a snapshot the daemon may have committed.
-- Each page is preceded by `assertCurrentPass()` only (`:1298`). A content
-  change before a mid-series reconnect therefore does not stop the single
-  restart; the restart runs over the same frozen pages and publication
-  refuses it. Invalidation, clear, and supersession do stop the restart at
-  the next page.
+- Each page is preceded by `assertCurrentPass()` only (`:1299`), so a
+  content change between pages of one series lets the series complete and
+  is refused at publication. A restart does not continue the frozen pages: it
+  calls `sendTransformSeries` again, which rebuilds the series from the
+  payload (`:1286`), so `recheckCapture("series-restart")` (`:1353`) runs
+  first and a content change or accessor installed before the restart refuses
+  it. Invalidation, clear, and supersession stop the restart at the fence.
 - Reachability is `explicit-config-only`: the Rust-mode
   [hook](../../../../../packages/opencode-plugin/src/hooks/context/hook.ts)
   calls the transform series path;
@@ -71,35 +73,35 @@ resend, recording attempted and acknowledged effects by identity.
 
 ### Q: Which faults stop the bounded restart?
 
-- Sources examined: `rust-mode-transform.ts:1281-1359`, `:1361`, `:1491`,
-  `:1506`; the witnesses below.
+- Sources examined: `rust-mode-transform.ts:1282-1361`, `:1363`, `:1494`,
+  `:1509`; the witnesses below.
 - Findings: Generic errors are rethrown and the restart wrapper permits one
-  restart. In the reconnect witness's mutation case the restart runs (two
-  page-zero bodies) because pages are ownership fences only, and publication
-  refuses the restarted series; the invalidation case stops the restart at
-  the fence (one page-zero body). Neither case ACKs. The forced full send
+  restart, preceded by `recheckCapture("series-restart")` because the restart
+  rebuilds the series rather than continuing frozen pages. In the restart
+  witness, mutation and accessor cases are refused by that recheck and the
+  invalidation case by the fence; every case sends one page-zero body,
+  invokes no getter, and NACKs `["page-zero"]`. No case ACKs. The forced full send
   after a dispatched pass is set before the first send, not only on
   `need_full_sync`.
 - Missing evidence: A real transport that writes the request and loses the
   response; the fake throws before returning.
-- Conclusion (2026-09-13, revision-bound run after merging `origin/main` at
-  `5def3c71`, 1107 pass, 0 fail): resolved as exercised for the generic-error
+- Conclusion (2026-09-13, revision-bound run at `d5a525e8`, after merging
+  `origin/main` at `5def3c71`, 1122 pass, 0 fail): resolved as exercised for the generic-error
   contract. Witnesses and markers:
-  - `rust-mode-transform.test.ts:3131` "does not resend after an
+  - `rust-mode-transform.test.ts:3255` "does not resend after an
     outcome-unknown transport failure and recovers on the next attempt".
     Marker: `expect(calls).toHaveLength(1)`, `failureCount` 1, and the host
     array unchanged after the throw; the next call gives `calls` 2.
-  - `:2211` "retains full-sync recovery after a failed retry until a full
+  - `:2335` "retains full-sync recovery after a failed retry until a full
     request publishes". Marker: `bodies` 3 after the thrown full retry and
     `forceFullWire` true; the next call sends one full body and clears the
     flag.
-  - `:1902` "stops a series restart after a mid-series reconnect when
-    <mutation|invalidation> lands first" (2 cases). Marker: exactly one
-    page-zero body and `transform_page_index` 1 pending before the reconnect
-    result (`:1931-1932`); after it, two page-zero bodies for mutation and
-    one for invalidation (`:1942-1944`), no `transform.ack`, NACKs
-    `["page-zero", "restarted"]` or `["page-zero"]`, `failureCount` 0, default
-    owner `chargedBytes` 0.
+  - `:2010` "stops a series restart after <reconnect|attempt-mismatch> when
+    <mutation|accessor|invalidation> lands first" (6 cases). Marker: exactly
+    one page-zero body and `transform_page_index` 1 pending before the restart
+    result (`:2047-2048`); after it, still one page-zero body and `getterCalls`
+    0 (`:2067-2068`), no `transform.ack`, NACK `["page-zero"]`, `failureCount`
+    0, default owner `chargedBytes` 0 (`:2071-2080`).
   - Positive controls: `:594` "restarts a paged transform series after a
     <thrown-code|returned-code|message> attempt mismatch" (3 cases; two
     series starts with distinct page IDs) and `:640` "restarts a paged

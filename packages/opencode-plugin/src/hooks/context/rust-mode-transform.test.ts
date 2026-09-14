@@ -1380,7 +1380,9 @@ describe("recipe application", () => {
                     status: "ok",
                     base_revision: request.base_revision,
                     output_revision: `retained-${index}`,
-                    previous_output_revision: request.previous_output_revision,
+                    ...(request.previous_output_revision
+                        ? { previous_output_revision: request.previous_output_revision }
+                        : {}),
                     operations: [
                         {
                             op: "keep",

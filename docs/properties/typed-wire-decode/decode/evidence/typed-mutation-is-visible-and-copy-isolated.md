@@ -90,3 +90,16 @@ No tests run; contradictory golden assertions remain marked unaudited.
 `/testing:test-strategy` owns the matrix and observation seam.
 `/testing:invariant-test-review` owns the old stale-edit and sibling oracles.
 The identity agent owns downstream equality/digest compatibility.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`, `cargo test -p daemon --locked
+--features test-support` (1,489 tests pass; `lifecycle_cli` is platform-unsupported
+on the aarch64 host). Edits through `content_mut`/`kind_mut` or
+public fields serialize immediately; `mark_modified` is gone. Equality and the
+identity digest cover `(kind, provider_extras)`. Witnesses:
+`a_block_edit_leaves_its_sibling_unchanged_and_envelope_unknowns_are_discarded`,
+`overlay_canonicalizes_only_the_mutated_block`, `one_edited_block_message`
+(siblings equal after an edit), and the receipt-reuse test in `transform.rs`
+where blocks differing only in discarded envelope fields are equal with equal
+digests and the first equal candidate (index 1) is selected.

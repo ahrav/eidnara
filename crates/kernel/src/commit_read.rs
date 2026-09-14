@@ -83,6 +83,14 @@ pub struct CommitPage {
     pub end: PageEnd,
 }
 
+/// A page boundary established from commit shapes alone; no outbox payload was selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitSpan {
+    /// The highest commit sequence verified complete, or `after_commit` when none was.
+    pub through: i64,
+    pub end: PageEnd,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CommitReadError {
     #[error("commit read request is malformed")]
@@ -109,7 +117,7 @@ fn sqlite(error: rusqlite::Error) -> CommitReadError {
     CommitReadError::Kernel(map_sqlite(error))
 }
 
-fn tip(tx: &Transaction<'_>) -> rusqlite::Result<i64> {
+pub(crate) fn tip(tx: &Transaction<'_>) -> rusqlite::Result<i64> {
     tx.query_row_cached(
         "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
         [],
@@ -236,13 +244,22 @@ impl KernelStore {
 
     /// Must run under a reader guard because a restore holds every guard while advancing
     /// `restore_generation` and swapping the database.
-    fn incarnation(&self) -> CommitReadIncarnation {
+    pub(crate) fn incarnation(&self) -> CommitReadIncarnation {
         CommitReadIncarnation {
             open_nonce: self.open_nonce,
             restore_generation: self
                 .restore_generation
                 .load(std::sync::atomic::Ordering::SeqCst),
         }
+    }
+
+    /// Callers must hold a reader or writer guard so a restore cannot occur between this check
+    /// and the guarded write.
+    pub fn require_incarnation(&self, expected: CommitReadIncarnation) -> Result<(), KernelError> {
+        if self.incarnation() != expected {
+            return Err(KernelError::InvalidInput);
+        }
+        Ok(())
     }
 
     /// Reads whole commits in `(after_commit, through_commit]` for a registered consumer until a
@@ -270,12 +287,67 @@ impl KernelStore {
         limit.run(|| self.read_complete_commits_inner(&limit, request, bounds))
     }
 
+    /// Determines the same page boundary as [`Self::read_complete_commits`] from commit shapes
+    /// without reading outbox payloads.
+    pub fn verify_complete_commits(
+        &self,
+        request: &CommitReadRequest,
+        bounds: CommitPageBounds,
+    ) -> Result<CommitSpan, CommitReadError> {
+        self.verify_complete_commits_inner(&AcquireLimit::default(), request, bounds)
+    }
+
+    /// Exhaustion returns `CommitReadError::Kernel(KernelError::Deadline)`, never a partial span.
+    pub fn verify_complete_commits_within_budget(
+        &self,
+        budget: &EvalBudget,
+        request: &CommitReadRequest,
+        bounds: CommitPageBounds,
+    ) -> Result<CommitSpan, CommitReadError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| self.verify_complete_commits_inner(&limit, request, bounds))
+    }
+
+    fn verify_complete_commits_inner(
+        &self,
+        limit: &AcquireLimit,
+        request: &CommitReadRequest,
+        bounds: CommitPageBounds,
+    ) -> Result<CommitSpan, CommitReadError> {
+        let (_, through, end) =
+            self.walk_complete_commits(limit, request, bounds, |_, _, _| Ok(()))?;
+        Ok(CommitSpan { through, end })
+    }
+
     fn read_complete_commits_inner(
         &self,
         limit: &AcquireLimit,
         request: &CommitReadRequest,
         bounds: CommitPageBounds,
     ) -> Result<CommitPage, CommitReadError> {
+        let (commits, through, end) =
+            self.walk_complete_commits(limit, request, bounds, |tx, commit_seq, shape| {
+                let rows = outbox_rows(tx, commit_seq, shape)?;
+                #[cfg(feature = "test-support")]
+                self.materialized_outbox_rows
+                    .fetch_add(rows.len(), std::sync::atomic::Ordering::SeqCst);
+                Ok(CompleteCommit { commit_seq, rows })
+            })?;
+        Ok(CommitPage {
+            commits,
+            through,
+            end,
+        })
+    }
+
+    /// `admit` runs after a commit's shape fits the page and before the page advances past it.
+    fn walk_complete_commits<T>(
+        &self,
+        limit: &AcquireLimit,
+        request: &CommitReadRequest,
+        bounds: CommitPageBounds,
+        mut admit: impl FnMut(&Transaction<'_>, i64, &CommitShape) -> Result<T, CommitReadError>,
+    ) -> Result<(Vec<T>, i64, PageEnd), CommitReadError> {
         if request.consumer_id.trim().is_empty()
             || request.after_commit < 0
             || request.through_commit < request.after_commit
@@ -353,20 +425,13 @@ impl KernelStore {
                 break;
             }
             limit.check()?;
-            let rows = outbox_rows(&tx, commit_seq, &shape)?;
-            #[cfg(feature = "test-support")]
-            self.materialized_outbox_rows
-                .fetch_add(rows.len(), std::sync::atomic::Ordering::SeqCst);
+            let admitted = admit(&tx, commit_seq, &shape)?;
             used_rows += shape.rows;
             used_bytes += shape.payload_bytes;
             through = commit_seq;
-            commits.push(CompleteCommit { commit_seq, rows });
+            commits.push(admitted);
         }
         limit.check()?;
-        Ok(CommitPage {
-            commits,
-            through,
-            end: end.unwrap_or(PageEnd::Exhausted),
-        })
+        Ok((commits, through, end.unwrap_or(PageEnd::Exhausted)))
     }
 }

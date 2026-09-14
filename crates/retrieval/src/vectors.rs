@@ -74,16 +74,10 @@ pub fn complete_embedding_observed(
     observer: &mut dyn FnMut(CompletionPhase),
 ) -> Result<CompletionOutcome, ProjectionError> {
     let generation = completion.generation;
-    if completion.vector.len() != generation.vector_dimension as usize {
-        return Err(ProjectionError::InvalidVector {
-            reason: "dimension",
-        });
-    }
-    if completion.vector.iter().any(|value| !value.is_finite()) {
-        return Err(ProjectionError::InvalidVector {
-            reason: "nonfinite",
-        });
-    }
+    validate_vector(
+        completion.vector.iter().copied(),
+        generation.vector_dimension,
+    )?;
     check_generation(conn, generation)?;
     let occurrence_id = &completion.input.detail.occurrence_id;
     let Some(stored_occurrence) = read_occurrence(conn, occurrence_id)? else {
@@ -332,4 +326,21 @@ pub fn encode(vector: &[f32]) -> Vec<u8> {
         .iter()
         .flat_map(|value| value.to_le_bytes())
         .collect()
+}
+
+pub(crate) fn validate_vector(
+    mut vector: impl ExactSizeIterator<Item = f32>,
+    dimension: u32,
+) -> Result<(), ProjectionError> {
+    if vector.len() != dimension as usize {
+        return Err(ProjectionError::InvalidVector {
+            reason: "dimension",
+        });
+    }
+    if vector.any(|value| !value.is_finite()) {
+        return Err(ProjectionError::InvalidVector {
+            reason: "nonfinite",
+        });
+    }
+    Ok(())
 }

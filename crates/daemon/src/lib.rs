@@ -120,7 +120,6 @@ use crate::metered_decode::{
     DecodeFailure, RAW_VALUE_TOKEN, Refusal, ResidentMeter, decode_metered, footprint_floor_exceeds,
 };
 use host_runtime::{BlockingWorkFailed, CancelSignal};
-use memory_store::WireMessage;
 
 use crate::transform_unit::{
     AdmissionPermit, HistorianFollowup, PageApplyGuard, PassContinuation, PassEntry, PassHold,
@@ -9185,8 +9184,6 @@ impl HandlerCore {
         respond_transform(parsed, response, Some(recipe))
     }
 
-    /// Historian children and dreamer sessions receive their input unchanged; the recipe is one
-    /// keep of the whole input, so no payload crosses the wire twice.
     fn passthrough_transform_response(&self, request: &TransformRequest) -> PreparedOutcome {
         let mut response = transform::TransformResponse::passthrough(
             request
@@ -9207,7 +9204,8 @@ impl HandlerCore {
                 output: NativeOutput {
                     wire_lens: values
                         .iter()
-                        .map(|value| edit_recipe::canonical_len(value))
+                        // An unmeasurable value must fail the reconstructed-size check.
+                        .map(|value| edit_recipe::canonical_len(value).unwrap_or(usize::MAX))
                         .collect(),
                     values,
                 },
@@ -14118,7 +14116,8 @@ fn attach_native_messages_incremental(
                 start_index: chunk.start_index,
                 end_index: chunk.end_index,
                 retained_bytes: native_value_retained_bytes(&value),
-                wire_len: edit_recipe::canonical_len(&value),
+                // `respond_transform` rejects this sentinel before building any recipe.
+                wire_len: edit_recipe::canonical_len(&value).unwrap_or(usize::MAX),
                 value: Arc::new(value),
             }),
     );
@@ -15177,53 +15176,12 @@ enum RecipeInputs<'a> {
     },
 }
 
-/// One CK candidate for recipe matching: a served output message with prepared bytes, or an
-/// ingress shell.
-#[derive(Clone, Copy)]
-enum CkEntry<'a> {
-    Served(&'a transform::ServedMessage),
-    Ingress(
-        &'a WireMessage,
-        &'a std::cell::OnceCell<serde_json::Result<Vec<u8>>>,
-    ),
-}
-
-impl<'a> CkEntry<'a> {
-    fn message(self) -> &'a WireMessage {
-        match self {
-            Self::Served(served) => served,
-            Self::Ingress(message, _) => message,
-        }
-    }
-
-    fn key(self) -> Option<String> {
-        self.message().meta.harness_id.clone()
-    }
-
-    fn same_message(self, other: Self) -> bool {
-        match (self, other) {
-            (Self::Served(left), Self::Served(right)) => {
-                left.canonical_bytes() == right.canonical_bytes()
-            }
-            (Self::Served(served), Self::Ingress(ingress, canonical))
-            | (Self::Ingress(ingress, canonical), Self::Served(served)) => {
-                **served == *ingress
-                    || canonical
-                        .get_or_init(|| crate::served_json::to_vec(ingress))
-                        .as_ref()
-                        .is_ok_and(|bytes| bytes == served.canonical_bytes())
-            }
-            (Self::Ingress(left, _), Self::Ingress(right, _)) => left == right,
-        }
-    }
-}
-
 fn recipe_keyed<'a>(
-    entries: impl Iterator<Item = CkEntry<'a>>,
-) -> Vec<Keyed<Option<String>, CkEntry<'a>>> {
+    entries: impl Iterator<Item = &'a transform::ServedMessage>,
+) -> Vec<Keyed<Option<String>, &'a transform::ServedMessage>> {
     entries
         .map(|entry| Keyed {
-            key: entry.key(),
+            key: entry.meta.harness_id.clone(),
             value: entry,
         })
         .collect()
@@ -15382,36 +15340,21 @@ fn respond_transform(
                 None => (None, None),
             };
             let segments = {
-                let output_keyed = recipe_keyed(output.iter().map(CkEntry::Served));
-                let canonical: Vec<_> = request
-                    .messages
-                    .iter()
-                    .map(|_| std::cell::OnceCell::new())
-                    .collect();
-                let input_keyed = recipe_keyed(
-                    request
-                        .messages
-                        .iter()
-                        .zip(&canonical)
-                        .map(|(message, bytes)| CkEntry::Ingress(&message.ck, bytes)),
-                );
+                let output_keyed = recipe_keyed(output.iter());
                 let previous_keyed = previous_values
                     .as_ref()
-                    .map(|values| recipe_keyed(values.iter().map(CkEntry::Served)));
+                    .map(|values| recipe_keyed(values.iter()));
+                // Typed CK decoding may normalize envelopes, so served outputs are the only keep bases.
                 let built = edit_recipe::build_operations(
                     &output_keyed,
-                    &input_keyed,
+                    &[],
                     previous_keyed.as_deref(),
-                    |a, b| a.same_message(*b),
+                    |a, b| a.canonical_bytes() == b.canonical_bytes(),
                 );
                 response.previous_output_revision =
                     previous_revision.filter(|_| built.used_previous);
-                recipe_segments(built.operations, |entry: CkEntry<'_>| match entry {
-                    CkEntry::Served(served) => PreparedSegment::served(served.clone()),
-                    // Output entries are always served messages; an ingress shell only ever matches.
-                    CkEntry::Ingress(..) => {
-                        unreachable!("recipe inserts come from the output array")
-                    }
+                recipe_segments(built.operations, |served: &transform::ServedMessage| {
+                    PreparedSegment::served(served.clone())
                 })
             };
             response.output_revision = Some(output_revision.clone());
@@ -18469,7 +18412,7 @@ impl Handler {
         let input: Vec<Arc<Value>> = input_values.iter().cloned().map(Arc::new).collect();
         let input_lengths: Vec<usize> = input
             .iter()
-            .map(|v| edit_recipe::canonical_len(v))
+            .map(|v| edit_recipe::canonical_len(v).expect("test input length"))
             .collect();
         let previous_revision = applied
             .as_ref()
@@ -18480,9 +18423,9 @@ impl Handler {
             .unwrap_or_default();
         let previous_lengths: Vec<usize> = previous
             .iter()
-            .map(|v| edit_recipe::canonical_len(v))
+            .map(|v| edit_recipe::canonical_len(v).expect("test previous length"))
             .collect();
-        let (values, _) = recipe
+        let applied_recipe = recipe
             .apply(
                 edit_recipe::SourceBase {
                     revision: &base,
@@ -18498,7 +18441,11 @@ impl Handler {
                     }),
             )
             .expect("wire recipe applies against the client's bases");
-        let values: Vec<Value> = values.iter().map(|value| (**value).clone()).collect();
+        let values: Vec<Value> = applied_recipe
+            .values
+            .iter()
+            .map(|value| (**value).clone())
+            .collect();
         let output_revision = response["output_revision"].as_str().unwrap().to_owned();
         if native {
             client.applied_native = Some((output_revision, values.clone()));
@@ -18518,7 +18465,9 @@ mod tests {
     mod blocking_unit_tests;
 
     use super::*;
-    use crate::metered_decode::{ResidentReserve, footprint_floor, footprint_of, shortfall_count};
+    use crate::metered_decode::{
+        RETAINED_STRING_COPIES, ResidentReserve, footprint_floor, footprint_of, shortfall_count,
+    };
     use std::collections::{HashMap, VecDeque};
 
     use std::sync::{
@@ -21049,6 +20998,537 @@ mod tests {
         }
     }
 
+    /// The string coefficient the frozen corpus outcomes were recorded under: a typed field plus two retained envelope trees.
+    const FROZEN_STRING_COPIES: usize = 3;
+    const _: () = assert!(RETAINED_STRING_COPIES < FROZEN_STRING_COPIES);
+    /// The frozen table's admission expectations were derived for one retained copy.
+    const _: () = assert!(RETAINED_STRING_COPIES == 1);
+
+    /// One corpus body as recorded before the string charge changed: its footprint, the string bytes the meter visited, and its terminal code with an unbounded pool, at the footprint, and one byte under it.
+    struct FrozenOutcome {
+        name: &'static str,
+        footprint: usize,
+        string_bytes: usize,
+        unbounded: &'static str,
+        at_footprint: &'static str,
+        under_footprint: &'static str,
+    }
+
+    const FROZEN_CORPUS_OUTCOMES: &[FrozenOutcome] = &[
+        FrozenOutcome {
+            name: "valid",
+            footprint: 9089,
+            string_bytes: 171,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "method discriminator",
+            footprint: 9095,
+            string_bytes: 173,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "unknown top-level field",
+            footprint: 10030,
+            string_bytes: 186,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "null on an optional field",
+            footprint: 9411,
+            string_bytes: 193,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "null on a defaulted field",
+            footprint: 9378,
+            string_bytes: 182,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "wrong type on a defaulted field",
+            footprint: 9405,
+            string_bytes: 191,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "float on an integer field",
+            footprint: 9387,
+            string_bytes: 185,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "negative on an unsigned field",
+            footprint: 9411,
+            string_bytes: 193,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "integer above u64",
+            footprint: 9411,
+            string_bytes: 193,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "exponent on an integer field",
+            footprint: 9387,
+            string_bytes: 185,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "negative zero",
+            footprint: 9408,
+            string_bytes: 192,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "duplicate top-level key",
+            footprint: 9390,
+            string_bytes: 186,
+            unbounded: "session_mismatch",
+            at_footprint: "session_mismatch",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "duplicate discriminator",
+            footprint: 9384,
+            string_bytes: 184,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "duplicate nested key",
+            footprint: 9360,
+            string_bytes: 176,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "missing required field",
+            footprint: 8782,
+            string_bytes: 154,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "missing serializer profile",
+            footprint: 8734,
+            string_bytes: 138,
+            unbounded: "unknown_serializer_profile",
+            at_footprint: "unknown_serializer_profile",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "unknown serializer profile",
+            footprint: 9089,
+            string_bytes: 171,
+            unbounded: "unknown_serializer_profile",
+            at_footprint: "unknown_serializer_profile",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "null page field",
+            footprint: 9396,
+            string_bytes: 188,
+            unbounded: "invalid_params",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "one page field",
+            footprint: 9408,
+            string_bytes: 192,
+            unbounded: "invalid_params",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "non-string discriminator with kind",
+            footprint: 9363,
+            string_bytes: 177,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "overlong method beside kind",
+            footprint: 9558,
+            string_bytes: 242,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "other route",
+            footprint: 9381,
+            string_bytes: 183,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "trailing bytes",
+            footprint: 9089,
+            string_bytes: 171,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "malformed",
+            footprint: 4677,
+            string_bytes: 23,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "array body",
+            footprint: 4379,
+            string_bytes: 9,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "string body",
+            footprint: 4251,
+            string_bytes: 9,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "empty body",
+            footprint: 0,
+            string_bytes: 0,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "unrecognized_request_shape",
+        },
+        FrozenOutcome {
+            name: "messages as an object",
+            footprint: 9369,
+            string_bytes: 179,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "dense unknown field",
+            footprint: 2569485,
+            string_bytes: 175,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "object-form preset",
+            footprint: 9679,
+            string_bytes: 197,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "number out of range under an ignored field",
+            footprint: 9220,
+            string_bytes: 172,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "lone surrogate under an ignored field",
+            footprint: 9220,
+            string_bytes: 172,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "invalid UTF-8 under an ignored field",
+            footprint: 9220,
+            string_bytes: 172,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token under an ignored field",
+            footprint: 9566,
+            string_bytes: 202,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token with a sibling key",
+            footprint: 9697,
+            string_bytes: 203,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token inside an ignored array",
+            footprint: 9694,
+            string_bytes: 202,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token under the discriminator",
+            footprint: 4716,
+            string_bytes: 36,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token holding a document",
+            footprint: 9703,
+            string_bytes: 205,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token not in first position",
+            footprint: 9953,
+            string_bytes: 203,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token after a key under tail_delta",
+            footprint: 9980,
+            string_bytes: 212,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token after a key in a native message",
+            footprint: 10123,
+            string_bytes: 217,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "escaped discriminator",
+            footprint: 9107,
+            string_bytes: 171,
+            unbounded: "response",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "escaped discriminator beside transform text",
+            footprint: 9393,
+            string_bytes: 181,
+            unbounded: "response",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token after a key inside a message",
+            footprint: 9953,
+            string_bytes: 203,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "nesting at the tree limit",
+            footprint: 25348,
+            string_bytes: 172,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "nesting past the tree limit",
+            footprint: 25348,
+            string_bytes: 172,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+    ];
+
+    /// Bodies whose `Value` tree drops a repeated key or collapses a raw-value document.
+    const VALUE_STRING_ORACLE_EXCLUDED: &[&str] = &[
+        "duplicate top-level key",
+        "duplicate discriminator",
+        "duplicate nested key",
+        "messages as an object",
+        "raw-value token holding a document",
+    ];
+
+    fn value_string_bytes(value: &Value) -> usize {
+        match value {
+            Value::String(text) => text.len(),
+            Value::Array(items) => items.iter().map(value_string_bytes).sum(),
+            Value::Object(map) => map
+                .iter()
+                .map(|(key, value)| key.len() + value_string_bytes(value))
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    /// Every body keeps its unbounded-pool terminal on the lane production selects for it.
+    /// At its frozen footprint and one byte under, a body keeps its frozen terminal unless that terminal was too-large and the body carries string bytes.
+    /// Such a body now takes its unbounded-pool terminal, and its footprint fell by exactly the removed string copies.
+    /// The node floor is coefficient-independent and decides the remaining refusals.
+    #[tokio::test(flavor = "current_thread")]
+    async fn frozen_corpus_footprints_replay_with_only_string_charge_changes() {
+        let corpus = transform_decode_corpus();
+        assert_eq!(
+            corpus.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            FROZEN_CORPUS_OUTCOMES
+                .iter()
+                .map(|frozen| frozen.name)
+                .collect::<Vec<_>>(),
+            "the frozen table names every corpus body in order"
+        );
+        let removed_copies = FROZEN_STRING_COPIES - RETAINED_STRING_COPIES;
+        let too_large = comparable_outcome(request_too_large_error()).0;
+        let mut admitted_by_lower_charge = Vec::new();
+        let mut expected = Vec::new();
+        for ((name, body), frozen) in corpus.iter().zip(FROZEN_CORPUS_OUTCOMES) {
+            let has_revision = !matches!(
+                *name,
+                "malformed"
+                    | "array body"
+                    | "string body"
+                    | "empty body"
+                    | "raw-value token under the discriminator"
+            );
+            let frozen = FrozenOutcome {
+                footprint: frozen.footprint
+                    + if has_revision {
+                        256 + 22 * FROZEN_STRING_COPIES
+                    } else {
+                        0
+                    },
+                string_bytes: frozen.string_bytes + if has_revision { 22 } else { 0 },
+                ..*frozen
+            };
+            assert_eq!(
+                footprint_of(body),
+                frozen.footprint - removed_copies * frozen.string_bytes,
+                "{name}: the footprint fell by exactly the removed string copies"
+            );
+            if !VALUE_STRING_ORACLE_EXCLUDED.contains(name)
+                && let Ok(value) = serde_json::from_slice::<Value>(body)
+            {
+                assert_eq!(
+                    frozen.string_bytes,
+                    value_string_bytes(&value),
+                    "{name}: the recorded string bytes are the tree's string bytes"
+                );
+            }
+
+            let outcome_at = |capacity: usize| async move {
+                let (handler, _store, _dir, _project) =
+                    handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+                let pool = TestPool::with_capacity(capacity);
+                let meter = ResidentMeter::new(&pool);
+                let runner = transform_unit::DetachedRunner::default();
+                let probe = lane_probe(body);
+                let entry = PassEntry {
+                    core: &handler.core,
+                    route: test_route(7),
+                    probe: probe.as_ref(),
+                    meter: &meter,
+                    runner: &runner,
+                };
+                let (_, outcome) = handler.dispatch_body(&entry, body).await;
+                comparable_outcome(outcome)
+            };
+            let unbounded = outcome_at(1 << 30).await;
+            assert_eq!(
+                unbounded.0, frozen.unbounded,
+                "{name}: the unbounded-pool terminal is unchanged"
+            );
+            for (capacity, recorded) in [
+                (frozen.footprint, frozen.at_footprint),
+                (frozen.footprint.saturating_sub(1), frozen.under_footprint),
+            ] {
+                let actual = outcome_at(capacity).await;
+                if actual.0 == recorded {
+                    if recorded == frozen.unbounded {
+                        assert_eq!(
+                            actual, unbounded,
+                            "{name} at {capacity}: the admitted outcome is the unbounded one"
+                        );
+                    }
+                    continue;
+                }
+                assert_eq!(
+                    recorded, too_large,
+                    "{name} at {capacity}: only a frozen too-large terminal may change"
+                );
+                assert!(
+                    frozen.string_bytes > 0,
+                    "{name} at {capacity}: only string bytes lower the charge"
+                );
+                assert_eq!(
+                    actual, unbounded,
+                    "{name} at {capacity}: the lowered charge admits the body to its unbounded-pool outcome"
+                );
+                admitted_by_lower_charge.push((*name, capacity));
+            }
+            for (capacity, recorded) in [
+                (frozen.footprint, frozen.at_footprint),
+                (frozen.footprint.saturating_sub(1), frozen.under_footprint),
+            ] {
+                let fits = frozen.footprint - removed_copies * frozen.string_bytes <= capacity;
+                if recorded == too_large
+                    && frozen.unbounded != too_large
+                    && fits
+                    && !footprint_floor_exceeds(body, capacity)
+                {
+                    expected.push((*name, capacity));
+                }
+            }
+        }
+        assert_eq!(
+            admitted_by_lower_charge, expected,
+            "every frozen too-large terminal that the lowered charge now fits becomes an admission, and nothing else changes"
+        );
+    }
+
     pub(crate) struct TestPool {
         budget: host_runtime::wire::ByteBudget,
         capacity: usize,
@@ -21102,14 +21582,15 @@ mod tests {
             footprint_of(quoted) < footprint_of(bare),
             "commas and colons inside a string must not count as values"
         );
-        // A large text block is charged for every copy the typed decode retains.
+        // A large text block is charged once: the typed decode owns one copy of it.
         let text = "t".repeat(1 << 20);
         let body = format!(
             r#"{{"kind":"transform","messages":[{{"role":"user","content":[{{"kind":{{"type":"text","text":"{text}"}}}}]}}]}}"#
         );
+        let footprint = footprint_of(body.as_bytes());
         assert!(
-            footprint_of(body.as_bytes()) >= 3 * text.len(),
-            "the footprint must cover three copies of {} string bytes",
+            footprint >= text.len() && footprint < 2 * text.len(),
+            "the footprint {footprint} must cover one copy of {} string bytes and not two",
             text.len()
         );
         // Each two wire bytes can produce one value, so the footprint of a scalar-dense body
@@ -22678,13 +23159,12 @@ mod tests {
         ) else {
             panic!("cached transform response failed to encode");
         };
-        // The wire carries the recipe, not the served array; a passthrough of one message is one keep.
         let actual_value: Value = serde_json::from_slice(&actual).unwrap();
         let mut expected_value: Value = serde_json::from_slice(&expected).unwrap();
         expected_value["base_revision"] = json!(request.base_revision.as_ref().unwrap().as_str());
         expected_value["output_revision"] = json!("out-1");
         expected_value["operations"] =
-            json!([{"op": "keep", "source": "input", "start": 0, "count": 1}]);
+            json!([{"op": "insert", "values": [request.messages[0].ck]}]);
         assert_eq!(actual_value, expected_value);
     }
 
@@ -23057,29 +23537,29 @@ mod tests {
     }
 
     #[test]
-    fn colliding_recipe_keys_do_not_reserialize_large_ingress_per_output() {
-        let ingress: Vec<_> = (0..edit_recipe::MAX_CONFIRM_PROBES)
-            .map(|_| WireMessage::synthetic_user_text("x".repeat(256 * 1024)))
+    fn colliding_recipe_keys_do_not_reserialize_previous_output() {
+        let previous: Vec<transform::ServedMessage> = (0..edit_recipe::MAX_CONFIRM_PROBES)
+            .map(|_| {
+                serde_json::from_value(
+                    serde_json::to_value(WireMessage::synthetic_user_text("x".repeat(256 * 1024)))
+                        .unwrap(),
+                )
+                .unwrap()
+            })
             .collect();
         let served: transform::ServedMessage = serde_json::from_value(
             serde_json::to_value(WireMessage::synthetic_user_text("tail")).unwrap(),
         )
         .unwrap();
-        let canonical: Vec<_> = ingress.iter().map(|_| std::cell::OnceCell::new()).collect();
-        let input = recipe_keyed(
-            ingress
-                .iter()
-                .zip(&canonical)
-                .map(|(message, bytes)| CkEntry::Ingress(message, bytes)),
-        );
-        let output = recipe_keyed(std::iter::repeat_n(CkEntry::Served(&served), 32));
+        let previous = recipe_keyed(previous.iter());
+        let output = recipe_keyed(std::iter::repeat_n(&served, 32));
         let before = served_json::FINALIZATIONS.with(std::cell::Cell::get);
-        let built = edit_recipe::build_operations(&output, &input, None, |a, b| a.same_message(*b));
-        let serializations = served_json::FINALIZATIONS.with(std::cell::Cell::get) - before;
-        assert!(
-            serializations <= ingress.len(),
-            "serialized {serializations} times for {} colliding input candidates",
-            ingress.len()
+        let built = edit_recipe::build_operations(&output, &[], Some(&previous), |a, b| {
+            a.canonical_bytes() == b.canonical_bytes()
+        });
+        assert_eq!(
+            served_json::FINALIZATIONS.with(std::cell::Cell::get),
+            before
         );
         assert!(
             matches!(&built.operations[..], [edit_recipe::Operation::Insert { values }] if values.len() == output.len())
@@ -23087,29 +23567,23 @@ mod tests {
     }
 
     #[test]
-    fn recipe_matching_rejects_ingress_with_different_unknown_fields() {
+    fn recipe_matching_compares_served_payload_fields() {
         let value = json!({
             "role": "assistant",
-            "content": [{"kind": {"type": "text", "text": "hello"}, "custom": "A"}],
+            "content": [{"kind": {"type": "text", "text": "hello"}, "custom": "A",
+                "provider_extras": {"custom": {"value": "retained"}}}],
             "meta": {"harness_id": "m1"}
         });
         let served: transform::ServedMessage = serde_json::from_value(value.clone()).unwrap();
-        let same: WireMessage = serde_json::from_value(value.clone()).unwrap();
         let mut changed = value;
         changed["content"][0]["custom"] = json!("B");
-        let different: WireMessage = serde_json::from_value(changed).unwrap();
-        assert!(
-            CkEntry::Served(&served)
-                .same_message(CkEntry::Ingress(&same, &std::cell::OnceCell::new()))
-        );
-        assert!(
-            !CkEntry::Served(&served)
-                .same_message(CkEntry::Ingress(&different, &std::cell::OnceCell::new()))
-        );
+        let same: transform::ServedMessage = serde_json::from_value(changed.clone()).unwrap();
+        assert_eq!(served.canonical_bytes(), same.canonical_bytes());
+        changed["content"][0]["provider_extras"]["custom"]["value"] = json!("changed");
+        let different: transform::ServedMessage = serde_json::from_value(changed).unwrap();
+        assert_ne!(served.canonical_bytes(), different.canonical_bytes());
     }
 
-    /// A retained CK output is a keep source only for the revision the request says it applied;
-    /// a request that advertises none receives a recipe that addresses the input alone.
     #[tokio::test(flavor = "current_thread")]
     async fn wire_recipe_keeps_from_previous_only_when_the_request_applied_it() {
         let (handler, _store, _dir, _project) =
@@ -23152,10 +23626,34 @@ mod tests {
         assert!(keeps_from(&response, "previous") > 0, "{response}");
     }
 
-    /// An unknown pass-through field that changed between passes must not be kept from `previous`:
-    /// the client would republish the stale field while the daemon retains the new one.
+    /// Raw input cannot replay fields discarded or defaults materialized by typed CK decoding.
+    #[test]
+    fn wire_passthrough_recipe_matches_typed_output_not_raw_input() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        for raw in [
+            json!({"role": "user", "content": []}),
+            json!({
+                "role": "user", "custom": true, "origin": null, "provider_extras": {},
+                "meta": {"synthetic": false, "custom": true},
+                "content": [{"kind": {"type": "text", "text": "hello"}, "custom": true,
+                    "provider_extras": {"custom": {"value": "preserved"}}}]
+            }),
+        ] {
+            let mut input = request(vec![ck("m1", 1, "hello")]);
+            input["messages"][0]["ck"] = raw;
+            let input = handler.test_client_prepare_request(input);
+            let parsed: TransformRequest = serde_json::from_value(input.clone()).unwrap();
+            let expected = json!([parsed.messages[0].ck]);
+            let outcome = handler.passthrough_transform_response(&parsed);
+            let response = tool_body(handler.test_client_apply(&input, outcome));
+            assert_eq!(response["messages"], expected, "{response}");
+        }
+    }
+
+    /// Unknown envelope fields stay absent across previous keeps; typed payload edits stay visible.
     #[tokio::test(flavor = "current_thread")]
-    async fn wire_recipe_does_not_keep_previous_output_whose_unknown_field_changed() {
+    async fn wire_recipe_keeps_only_normalized_previous_output() {
         let (handler, _store, _dir, _project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         let mut first = request(vec![ck("m1", 1, "hello"), ck("m2", 2, "again")]);
@@ -23164,8 +23662,24 @@ mod tests {
         second["messages"][1]["ck"]["content"][0]["custom"] = json!("B");
         second["base_revision"] = json!("test-base-changed");
 
+        let mut third = second.clone();
+        third["messages"][1]["ck"]["content"][0]["kind"]["text"] = json!("changed payload");
+        third["base_revision"] = json!("test-base-payload");
         let response = call_transform_request(&handler, first).await;
         assert_eq!(response["status"], "ok", "{response}");
+        assert!(
+            response["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|message| {
+                    message["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|block| block.get("custom").is_none())
+                })
+        );
         let response = call_transform_request(&handler, second).await;
         assert_eq!(response["status"], "ok", "{response}");
         assert!(
@@ -23178,10 +23692,20 @@ mod tests {
             .iter()
             .find(|message| message["meta"]["harness_id"] == "m2")
             .expect("m2 stays in the output");
-        assert_eq!(
-            republished["content"][0]["custom"], "B",
-            "the applied array must carry the current input's field, not the retained one: {response}"
+        assert!(
+            republished["content"][0].get("custom").is_none(),
+            "{response}"
         );
+        let response = call_transform_request(&handler, third).await;
+        assert_eq!(response["status"], "ok", "{response}");
+        let republished = response["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["meta"]["harness_id"] == "m2")
+            .unwrap();
+        assert_eq!(republished["content"][0]["kind"]["text"], "changed payload");
+        assert!(republished["content"][0].get("custom").is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -24065,7 +24589,9 @@ mod tests {
     fn giant_degraded_snapshot_accepts_tail_delta_and_reuses_projection() {
         const GIANT_MESSAGE_COUNT: usize = 5_001;
         const GIANT_BLOCK_COUNT: usize = GIANT_MESSAGE_COUNT;
-        const GIANT_NATIVE_WIRE_BYTES: usize = 26 * 1024 * 1024;
+        // The request holds each payload twice, as typed text and as a native `Value`, so
+        // the fixture needs more than half the 64 MiB snapshot budget in payload to exceed it.
+        const GIANT_NATIVE_WIRE_BYTES: usize = 40 * 1024 * 1024;
         const SESSION_ID: &str = "native-giant-degraded";
 
         let (request, served) = native_cache_fixture(
@@ -24570,7 +25096,6 @@ mod tests {
                     served[2].content_mut()[0] = WireBlock::bare(BlockKind::Text {
                         text: "[dropped]".to_string(),
                     });
-                    served[2].mark_modified();
                 }
                 "transition_salt" => transition_consumed = true,
                 "render_epoch" => request.render_config = "cfg1".to_string(),
@@ -24655,14 +25180,12 @@ mod tests {
                     changed[0].content_mut()[0] = WireBlock::bare(BlockKind::Text {
                         text: String::new(),
                     });
-                    changed[0].mark_modified();
                 }
                 "unmatched_pair" => {
                     if let BlockKind::ToolResult { id, .. } = changed[2].content_mut()[0].kind_mut()
                     {
                         *id = "call-transition-unmatched".to_string();
                     }
-                    changed[2].mark_modified();
                 }
                 "split_coverage" => {
                     changed.remove(1);
@@ -24677,7 +25200,6 @@ mod tests {
                     changed[0].content_mut()[0] = WireBlock::bare(BlockKind::Text {
                         text: String::new(),
                     });
-                    changed[0].mark_modified();
                     let result = changed.pop().unwrap();
                     let call = changed.pop().unwrap();
                     changed.insert(3, call);
@@ -24713,7 +25235,6 @@ mod tests {
         *output = ToolOutput::bare(OutputKind::Text {
             text: text.to_string(),
         });
-        block.mark_modified();
     }
 
     #[test]
@@ -26184,7 +26705,6 @@ mod tests {
                         text: "replayed synthetic carrier sentinel".into(),
                     }));
                 }
-                ck.mark_modified();
                 suffix.push(IngressMessage {
                     mid: mid.into(),
                     ordinal,
@@ -39916,7 +40436,6 @@ fn compaction_mode_projection_cache_reclassifies_synthetic_prefix() {
     for message in &mut fixture.messages {
         message.ck.meta.synthetic = false;
         message.ck.meta.harness_id = Some(message.mid.clone());
-        message.ck.mark_modified();
     }
     let mut live = FixtureBuilder::session_with_boundary().messages;
     for message in &mut live {

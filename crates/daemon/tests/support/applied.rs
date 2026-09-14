@@ -22,8 +22,11 @@ pub fn applied_messages(request: &Value, response: &Value) -> Vec<Value> {
         .iter()
         .map(|message| Arc::new(message["ck"].clone()))
         .collect();
-    let lengths: Vec<usize> = input.iter().map(|value| canonical_len(value)).collect();
-    let (values, _) = recipe
+    let lengths: Vec<usize> = input
+        .iter()
+        .map(|value| canonical_len(value).expect("test input length"))
+        .collect();
+    let applied = recipe
         .apply(
             SourceBase {
                 revision: &base,
@@ -33,5 +36,9 @@ pub fn applied_messages(request: &Value, response: &Value) -> Vec<Value> {
             None,
         )
         .expect("the recipe applies against the request it answers");
-    values.iter().map(|value| (**value).clone()).collect()
+    applied
+        .values
+        .iter()
+        .map(|value| (**value).clone())
+        .collect()
 }

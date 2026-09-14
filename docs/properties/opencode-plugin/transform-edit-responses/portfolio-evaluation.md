@@ -14,16 +14,16 @@ inherits its evaluation. Missing companion records are not reconstructed.
 
 ## Executed state
 
-- Revision: the #533 change on `fix/client-transform-owner` after merging
-  `origin/main` at `5def3c71`. The merge brought in #565's follow-up commits
+- Revision: the #533 change on `fix/client-transform-owner` at `d5a525e8`,
+  after merging `origin/main` at `5def3c71`. The merge brought in #565's follow-up commits
   (built-in prototype accessor scan, boxed-primitive rejection, null-prototype
   tape marker, `Object.hasOwn` descriptor checks, warn-level logging for
   polluted prototypes). `client.ts` is unchanged from `origin/main`.
 - Command, from `packages/opencode-plugin` with Node 24.18.0 first on PATH:
   `bun test src/hooks/context/ src/plugin/messages-transform.test.ts
   src/shared/host-client/client.test.ts`.
-- Result: 1107 pass, 0 fail, 31,373 `expect()` calls, 34 files, Bun 1.3.14,
-  2026-09-13. The "bounded transform ownership" block alone runs 52 cases.
+- Result: 1122 pass, 0 fail, 31,659 `expect()` calls, 34 files, Bun 1.3.14,
+  2026-09-13. The "bounded transform ownership" block alone runs 60 cases.
 - Nine records are `Exercised: yes` (TE17, TE18, TE19, TE20, TE22, TE23,
   TE24, TE26, TE27). Two remain `partial` (TE21, TE30) because their missing
   oracles are #538 work, not because a witness failed.
@@ -34,8 +34,8 @@ inherits its evaluation. Missing companion records are not reconstructed.
   in this tree and the marker assertion that proves the enabling state was
   reached before the fault.
 - Recheck boundaries are stated per site. `recheckCapture` runs after each
-  ordinal prime, before a full-sync retry re-serializes an unchanged body, and
-  at publication. The directory await, the permission await, and each
+  ordinal prime, before the wire is built, before a series restart, before a
+  full-sync retry rebuilds or re-serializes its body, and at publication. The directory await, the permission await, and each
   transport page are `assertCurrentPass()` fences only. A content change
   between pages is refused at publication and every reported delivery is
   NACKed; the series is not stopped at the next page. The witness is
@@ -55,10 +55,12 @@ inherits its evaluation. Missing companion records are not reconstructed.
 - TE19 gains the built-in prototype scan witnesses and the wrapper's
   warn-level polluted-prototype witness.
 - TE25 stays outside this supplement. Successful publication transfers the
-  candidate array, `captured.snapshots`, and the promoted memo to the
-  64-session `wireCaches` owner and `states`; that retention is count-bounded.
-  The separate 64 MiB optional-output byte budget with byte-triggered LRU
-  eviction is #538. This is the current boundary, stated as such.
+  candidate array and `captured.snapshots` to the 64-session `wireCaches`
+  owner, which is count-bounded, and the promoted memo to `state.ordinals`
+  in `states`, which is an unbounded `Map` that only `clearSession` deletes
+  from. The separate 64 MiB optional-output byte budget with byte-triggered
+  LRU eviction is #538; the `states` bound is a gap recorded in the catalog's
+  open questions, not covered by that budget.
 - TE30 stays partial. Two-pass witnesses dispatch a delta after changed
   output; the forced full resend shows realignment after a source-declined
   dispatch; no delta-versus-full control exists.

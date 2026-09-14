@@ -48,10 +48,10 @@ use crate::wire;
 use cache_stability::{CoreState, FrozenUnit, PassInput};
 use context_core::{ClassifierInput, PassPlan, PersistedShape, classify};
 use memory_store::{
-    BlockIdentity, Channel1AppendRow, DeferredExecuteState, LineageAnchor, LineageConstituent,
-    LineageDescentDisposition, LineageDescentRequest, MemoryStore, MemoryStoreError, ModuleMeta,
-    ModuleUsage, NoteDelivery, PassSchedulerObservation, PendingAgentDrop,
-    PendingChannel2Directive, PendingRewriteState, ProjectMemoryComposition,
+    BlockIdentity, BlockIdentityBasis, Channel1AppendRow, DeferredExecuteState, LineageAnchor,
+    LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MemoryStore,
+    MemoryStoreError, ModuleMeta, ModuleUsage, NoteDelivery, PassSchedulerObservation,
+    PendingAgentDrop, PendingChannel2Directive, PendingRewriteState, ProjectMemoryComposition,
     ServedBlockFingerprint, StoredCompartment, TagCacheSummary, TagMintInput, TagRow,
     TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow, TransformCommit,
     TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
@@ -2224,8 +2224,9 @@ impl<'a> TransformIngress<'a> {
         self.projection.is_synthetic(message)
     }
 
+    /// The served copy carries the effective synthetic flag, so its served bytes and identity
+    /// follow the pass-local decision rather than the ingress flag.
     fn rendered_message(&self, message: &IngressMessage) -> WireMessage {
-        // Retained ingress JSON preserves passthrough bytes despite the typed metadata override.
         let mut rendered = message.ck.clone();
         rendered.meta.synthetic = self.is_synthetic(message);
         rendered
@@ -2702,7 +2703,14 @@ fn apply_additive_only(
     }
     let provisional_tail_mid =
         provisional_tail_mid(&wire::MessageProjection::new(&req.messages), req.mid_turn);
-    apply_ingress_meta(&mut meta, req, &projection, provisional_tail_mid, None, &[]);
+    apply_ingress_meta(
+        &mut meta,
+        req,
+        &projection,
+        provisional_tail_mid,
+        None,
+        &IdentityEnforcement::default(),
+    );
     let cc_u1_active = crate::cc_u1_active(serializer_profile, req.tool_present);
     meta.cc_u1_active = cc_u1_active;
     meta.tagging_surface_active = tagging_surface_requested;
@@ -3522,7 +3530,7 @@ fn apply_once(
 
     let provisional_tail_mid = provisional_tail_mid(&req.projection, req.mid_turn);
     let identity_enforce_started_at = Instant::now();
-    let tail_identity_re_adoptions = enforce_block_identity(
+    let identity_enforcement = enforce_block_identity(
         &loaded.meta,
         req,
         &projection,
@@ -4063,7 +4071,7 @@ fn apply_once(
         &projection,
         provisional_tail_mid,
         lineage_anchor_mid,
-        &tail_identity_re_adoptions,
+        &identity_enforcement,
     );
     timings.ingress_meta = elapsed_ms(ingress_meta_started_at);
     meta.cc_u1_active = cc_u1_active;
@@ -5147,7 +5155,7 @@ fn apply_once(
                 output_cache_stats,
             );
     }
-    for re_adoption in &tail_identity_re_adoptions {
+    for re_adoption in &identity_enforcement.tail_re_adoptions {
         eprintln!(
             "daemon: identity re-adopted for tail mid {} old_hash={} new_hash={}",
             re_adoption.mid, re_adoption.old_hash_prefix, re_adoption.new_hash_prefix
@@ -5251,6 +5259,22 @@ struct TailIdentityReAdoption {
     new_hash_prefix: String,
 }
 
+#[derive(Debug, Default)]
+struct IdentityEnforcement {
+    tail_re_adoptions: Vec<TailIdentityReAdoption>,
+    /// `None` when enforcement did not run, so the stored basis stamp is left alone.
+    basis_re_adoptions: Option<Vec<String>>,
+}
+
+/// A fingerprint basis change never alters a vector's length or block tags.
+fn same_block_tags(stored: &[BlockIdentity], vector: &[BlockIdentity]) -> bool {
+    stored.len() == vector.len()
+        && stored
+            .iter()
+            .zip(vector)
+            .all(|(stored, vector)| stored.kind_tag == vector.kind_tag)
+}
+
 fn trailing_blank_identity_replays_stored(
     req: &TransformRequest,
     core: &CoreState,
@@ -5288,8 +5312,10 @@ fn enforce_block_identity(
     core: &CoreState,
     provisional_tail_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
-) -> Result<Vec<TailIdentityReAdoption>, TransformError> {
+) -> Result<IdentityEnforcement, TransformError> {
     let mut re_adoptions = Vec::new();
+    let mut basis_re_adoptions = Vec::new();
+    let replay_basis = meta.block_identity_basis == BlockIdentityBasis::Replay;
     for (mid, vector) in &projection.identity_by_mid {
         if provisional_tail_mid == Some(mid.as_str()) || lineage_anchor_mid == Some(mid.as_str()) {
             continue;
@@ -5311,6 +5337,12 @@ fn enforce_block_identity(
                     new_hash_prefix: block_identity_hash_prefix(vector),
                 });
             }
+            continue;
+        }
+        // Replay and typed fingerprints can differ for identical block bytes.
+        // Matching tags on replay-basis rows indicate a basis change, not identity drift.
+        if replay_basis && same_block_tags(stored, vector) {
+            basis_re_adoptions.push(mid.clone());
             continue;
         }
         if identity_drift_requires_reject(meta, req, core, mid) {
@@ -5345,7 +5377,10 @@ fn enforce_block_identity(
             return Err(TransformError::FrozenRedTargetVanish(target));
         }
     }
-    Ok(re_adoptions)
+    Ok(IdentityEnforcement {
+        tail_re_adoptions: re_adoptions,
+        basis_re_adoptions: Some(basis_re_adoptions),
+    })
 }
 
 fn identity_drift_requires_reject(
@@ -5393,22 +5428,32 @@ fn apply_ingress_meta(
     projection: &FlatProjection,
     provisional_tail_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
-    re_adoptions: &[TailIdentityReAdoption],
+    enforcement: &IdentityEnforcement,
 ) {
     if let Some(mid) = provisional_tail_mid {
         meta.block_identity_by_mid.remove(mid);
     }
-    for re_adoption in re_adoptions {
-        let vector = projection
+    let projected_vector = |mid: &str| {
+        projection
             .identity_by_mid
-            .get(&re_adoption.mid)
-            .expect("identity enforcement only re-adopts projected messages");
+            .get(mid)
+            .cloned()
+            .expect("identity enforcement only re-adopts projected messages")
+    };
+    for re_adoption in &enforcement.tail_re_adoptions {
         meta.block_identity_by_mid
-            .insert(re_adoption.mid.clone(), vector.clone());
+            .insert(re_adoption.mid.clone(), projected_vector(&re_adoption.mid));
     }
     meta.tail_identity_re_adopt_count = meta
         .tail_identity_re_adopt_count
-        .saturating_add(re_adoptions.len() as u64);
+        .saturating_add(enforcement.tail_re_adoptions.len() as u64);
+    if let Some(basis_re_adoptions) = &enforcement.basis_re_adoptions {
+        for mid in basis_re_adoptions {
+            meta.block_identity_by_mid
+                .insert(mid.clone(), projected_vector(mid));
+        }
+        meta.block_identity_basis = BlockIdentityBasis::Typed;
+    }
     for (mid, vector) in &projection.identity_by_mid {
         if provisional_tail_mid == Some(mid.as_str()) || lineage_anchor_mid == Some(mid.as_str()) {
             continue;
@@ -6130,7 +6175,7 @@ fn system_content_for_m0(message: &WireMessage) -> String {
     {
         return text.clone();
     }
-    serde_json::to_string(message.content()).unwrap_or_default()
+    crate::served_json::canonical_blocks_text(message.content()).unwrap_or_default()
 }
 
 fn covered_system_messages_for_coverage(
@@ -7662,7 +7707,6 @@ fn apply_tag_overlay_to_message(
     if ingress.ck.role == "system" || synthetic {
         return;
     }
-    let mut modified = false;
     for block in blocks {
         if block.block_index >= message.content().len() {
             continue;
@@ -7671,8 +7715,7 @@ fn apply_tag_overlay_to_message(
             continue;
         }
         // Each overlay decides against the current payload and clones only when it changes
-        // something, so an untouched block keeps its retained ingress bytes and an
-        // idempotent re-application writes nothing.
+        // something, so an idempotent re-application writes nothing.
         let current = message.content()[block.block_index].kind();
         let mut working: Option<wire::BlockKind> = None;
         // A boundary-lineage alarm forces raw pass-through; only tags stored before the request remain available.
@@ -7698,13 +7741,8 @@ fn apply_tag_overlay_to_message(
                 channel1_block_kind(working.as_ref().unwrap_or(current), reminder).or(working);
         }
         if let Some(next) = working {
-            // `kind_mut` clears the block's retained ingress bytes; otherwise `Serialize` emits the pre-mutation bytes.
             *message.content_mut()[block.block_index].kind_mut() = next;
-            modified = true;
         }
-    }
-    if modified {
-        message.mark_modified();
     }
 }
 
@@ -9570,7 +9608,6 @@ fn replace_with_sentinel(block: &mut WireBlock, text: &str) {
     *block.kind_mut() = wire::BlockKind::Text {
         text: text.to_string(),
     };
-    block.mark_modified();
 }
 
 fn message_strip_unit<'a>(core: &'a CoreState, kind: &str, mid: &str) -> Option<&'a FrozenUnit> {
@@ -9785,11 +9822,7 @@ fn remove_frozen_historical_reasoning(
     rebuilt
         .content_mut()
         .retain(|block| !is_reasoning_block(block));
-    let removed = before.saturating_sub(rebuilt.content().len());
-    if removed > 0 {
-        rebuilt.mark_modified();
-    }
-    removed
+    before.saturating_sub(rebuilt.content().len())
 }
 
 fn apply_surface_strips(
@@ -9810,7 +9843,6 @@ fn apply_surface_strips(
         .flatten();
     if whole_strip.is_some() {
         *rebuilt.content_mut() = vec![WireBlock::bare(wire::BlockKind::Text { text: sentinel })];
-        rebuilt.mark_modified();
         return;
     }
 
@@ -9830,7 +9862,6 @@ fn apply_surface_strips(
             *rebuilt.content_mut()[index].kind_mut() = wire::BlockKind::Text {
                 text: unit.frozen_payload.clone(),
             };
-            rebuilt.content_mut()[index].mark_modified();
             touched = true;
             continue;
         }
@@ -9844,7 +9875,6 @@ fn apply_surface_strips(
                 text: String::new(),
                 signature: None,
             };
-            rebuilt.content_mut()[index].mark_modified();
             touched = true;
             continue;
         }
@@ -9873,14 +9903,12 @@ fn apply_surface_strips(
             if replacement != *text {
                 *rebuilt.content_mut()[index].kind_mut() =
                     wire::BlockKind::Text { text: replacement };
-                rebuilt.content_mut()[index].mark_modified();
                 touched = true;
             }
         }
     }
     if stale_reduce && touched && !rebuilt.content().iter().any(has_meaningful_content) {
         *rebuilt.content_mut() = vec![WireBlock::bare(wire::BlockKind::Text { text: sentinel })];
-        rebuilt.mark_modified();
     }
 }
 
@@ -10824,7 +10852,6 @@ fn apply_frozen_trailing_blank_decision(
         }
         let mutations = message.content().len().max(1);
         *message.content_mut() = vec![canonical_blank];
-        message.mark_modified();
         return mutations;
     };
 
@@ -10853,7 +10880,6 @@ fn apply_frozen_trailing_blank_decision(
         message
             .content_mut()
             .extend((0..keep_count).map(|_| canonical_blank.clone()));
-        message.mark_modified();
         return mutations;
     }
 
@@ -10861,7 +10887,6 @@ fn apply_frozen_trailing_blank_decision(
         return 0;
     }
     message.content_mut().truncate(last_meaningful_index + 1);
-    message.mark_modified();
     trailing_count
 }
 
@@ -10983,7 +11008,6 @@ fn apply_serializer_residual_to_message(
             text: String::new(),
         });
     }
-    message.mark_modified();
     stripped
 }
 
@@ -11288,7 +11312,6 @@ fn build_output_with_tags(
                 };
                 let mut rebuilt = msg.ck.clone();
                 if !reduced.is_empty() {
-                    rebuilt.mark_modified();
                     for block in blocks {
                         if let Some(unit) = reduced.get(&block.block_index) {
                             let display_payload = (unit.frozen_payload == "[dropped]"
@@ -11330,8 +11353,6 @@ fn build_output_with_tags(
                             wire::BlockKind::Text {
                                 text: unit.frozen_payload.clone(),
                             };
-                        rebuilt.content_mut()[block.block_index].mark_modified();
-                        rebuilt.mark_modified();
                     }
                 }
                 if !mutation_exempt {
@@ -11365,7 +11386,6 @@ fn build_output_with_tags(
                                 (!drop_indexes.contains(&index)).then_some(block.clone())
                             })
                             .collect();
-                        rebuilt.mark_modified();
                     }
                     apply_tag_overlay_to_message(
                         &mut rebuilt,
@@ -12657,8 +12677,7 @@ pub(crate) mod tests {
         (absent, explicit)
     }
 
-    /// Wire deserialization preserves original pass-through bytes on each message and block; typed fixtures do not.
-    /// Typed fixtures cannot detect output-overlay bugs that drop pass-through bytes.
+    /// Builds the message through wire deserialization, the shape plugin ingress takes.
     fn wire_item(role: &str, id: &str, ordinal: u64, texts: &[&str]) -> IngressMessage {
         let content: Vec<Value> = texts
             .iter()
@@ -12734,7 +12753,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Wire deserialization retains pass-through bytes on each tool-result block; `output_json` contains raw ToolOutput JSON.
+    /// Builds the tool-result message through wire deserialization; `output_json` is raw ToolOutput JSON.
     fn wire_tool_result(id: &str, ordinal: u64, output_json: Value) -> IngressMessage {
         let ck: WireMessage = serde_json::from_value(json!({
             "role": "user",
@@ -12786,8 +12805,7 @@ pub(crate) mod tests {
         serde_json::to_string(&second.messages).unwrap()
     }
 
-    /// Wire fixtures must preserve every prefixable tool-result output variant and each block's pass-through bytes through serialization.
-    /// Each case fails when the overlay no longer clears the retained bytes of the block it mutates.
+    /// Every prefixable tool-result output variant carries its tag through serialization.
     #[test]
     fn wire_tool_result_output_variants_keep_tags_through_serialization() {
         for (session, output, expected) in [
@@ -12841,7 +12859,7 @@ pub(crate) mod tests {
         run(&s, &req, &spine());
         s.seed_channel1_append_for_test("wire-ch1", "t1#0", "reminder: reduce spent outputs", 5)
             .unwrap();
-        // Ingress retains the original provider-wire bytes; tags exist only on the provider wire, so repeated requests replay identically and appends use the shared overlay-clear path.
+        // Tags exist only on the provider wire, so repeated requests replay identically and appends take the shared overlay path.
         let third = run(&s, &req, &spine());
         let joined = serde_json::to_string(&third.messages).unwrap();
         assert!(
@@ -12850,7 +12868,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// A mutated block must canonicalize while its untouched sibling retains its pass-through bytes verbatim, including unknown fields that serde would drop; message-level provenance must also survive.
+    /// A mutated block canonicalizes while its untouched sibling keeps its typed payload; message-level provenance survives and unknown envelope fields do not.
     #[test]
     fn overlay_canonicalizes_only_the_mutated_block() {
         let dir = tempfile::tempdir().unwrap();
@@ -12882,12 +12900,12 @@ pub(crate) mod tests {
             "mutated block missing its tag: {joined}"
         );
         assert!(
-            joined.contains("sentinel_unknown_field"),
-            "untouched sibling lost retained unknown field: {joined}"
+            joined.contains("provider-native"),
+            "untouched sibling lost its opaque payload: {joined}"
         );
         assert!(
-            joined.contains("must-survive-verbatim"),
-            "untouched sibling bytes not verbatim: {joined}"
+            !joined.contains("sentinel_unknown_field"),
+            "unknown envelope fields are discarded on decode: {joined}"
         );
         assert!(
             joined.contains("message-provenance"),
@@ -13651,7 +13669,6 @@ pub(crate) mod tests {
             .iter()
             .map(|block| wire::WireBlock::bare(block.kind().clone()))
             .collect();
-        projected.ck.mark_modified();
         projected
     }
 
@@ -13990,7 +14007,6 @@ pub(crate) mod tests {
             ),
         ];
         for (block, literal) in &cases {
-            assert!(block.original().is_none());
             let canonical = crate::served_json::canonical_block_bytes(block).unwrap();
             assert_eq!(canonical, *literal);
             assert_eq!(canonical, oracle(block));
@@ -13998,16 +14014,15 @@ pub(crate) mod tests {
             let decoded: WireBlock = serde_json::from_str(&canonical).unwrap();
             assert_eq!(decoded.kind(), block.kind());
         }
-        // Explicit false on ingress is retained text and stays a distinct identity.
+        // Explicit false on ingress decodes to the false default and serializes without
+        // the field: the accepted false-default omission.
         let explicit_false: WireBlock = serde_json::from_str(
             r#"{"kind":{"id":"web_1","input":{"query":"q"},"name":"websearch","provider_executed":false,"type":"tool_call"}}"#,
         )
         .unwrap();
-        assert!(explicit_false.original().is_some());
-        assert!(
-            crate::served_json::canonical_block_bytes(&explicit_false)
-                .unwrap()
-                .contains("\"provider_executed\":false")
+        assert_eq!(
+            crate::served_json::canonical_block_bytes(&explicit_false).unwrap(),
+            r#"{"kind":{"id":"web_1","input":{"query":"q"},"name":"websearch","type":"tool_call"}}"#
         );
     }
 
@@ -14179,21 +14194,21 @@ pub(crate) mod tests {
             r#"{"z":null,"role":"user","content":[{"kind":{"type":"text","text":"é\n"},"unknown":{"😀":-0.0,"é":1.25,"a":18446744073709551615}}],"meta":{"synthetic":false,"future":true}}"#,
         )
         .unwrap();
-        let original_bytes = r#"{"content":[{"kind":{"text":"é\n","type":"text"},"unknown":{"a":18446744073709551615,"é":1.25,"😀":-0.0}}],"meta":{"future":true,"synthetic":false},"role":"user","z":null}"#;
-        let typed_bytes = r#"{"content":[{"kind":{"text":"é\n","type":"text"},"unknown":{"a":18446744073709551615,"é":1.25,"😀":-0.0}}],"meta":{"synthetic":true},"role":"user"}"#;
+        // Unknown envelope keys (`z`, `future`, the block's `unknown`) are discarded on
+        // decode; only typed fields reach the served bytes.
+        let decoded_bytes =
+            r#"{"content":[{"kind":{"text":"é\n","type":"text"}}],"meta":{},"role":"user"}"#;
+        let flagged_bytes = r#"{"content":[{"kind":{"text":"é\n","type":"text"}}],"meta":{"synthetic":true},"role":"user"}"#;
         let edited_bytes = r#"{"content":[{"kind":{"text":"edited","type":"text"}}],"meta":{"synthetic":true},"role":"user"}"#;
-        let mut latent = original.clone();
-        latent.meta.synthetic = true;
-        let mut typed = latent.clone();
-        typed.mark_modified();
-        let mut edited = typed.clone();
+        let mut flagged = original.clone();
+        flagged.meta.synthetic = true;
+        let mut edited = flagged.clone();
         *edited.content_mut()[0].kind_mut() = wire::BlockKind::Text {
             text: "edited".into(),
         };
         for (message, expected) in [
-            (original, original_bytes),
-            (latent, original_bytes),
-            (typed, typed_bytes),
+            (original, decoded_bytes),
+            (flagged, flagged_bytes),
             (edited, edited_bytes),
         ] {
             let served = ServedMessage::from_message(message);
@@ -14226,37 +14241,28 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn served_canonical_frozen_corpus_matches_value_reference_for_both_shells() {
+    fn served_canonical_frozen_corpus_matches_value_reference() {
         let messages: Vec<WireMessage> =
             serde_json::from_str(include_str!("../testdata/wire-golden.json")).unwrap();
         let mut identities = Vec::new();
         for message in messages {
-            let mut typed = message.clone();
-            typed.mark_modified();
-            for block in typed.content_mut() {
-                block.mark_modified();
+            for block in message.content() {
+                identities.push((block.clone(), wire::block_identity_digest(block)));
             }
-            for message in [message, typed] {
-                for block in message.content() {
-                    identities.push((block.clone(), wire::block_identity_digest(block)));
-                }
-                let expected =
-                    serde_json::to_vec(&serde_json::to_value(&message).unwrap()).unwrap();
-                let served = ServedMessage::from_message(message);
-                assert_eq!(served.canonical_bytes(), expected);
-                let output = crate::dispatch::PreparedOutput::transform_recipe(
-                    json!({"operations": null}),
-                    vec![crate::dispatch::RecipeSegment::Insert(vec![
-                        crate::dispatch::PreparedSegment::served(served),
-                    ])],
-                )
-                .unwrap();
-                let mut expected_frame =
-                    b"{\"operations\":[{\"op\":\"insert\",\"values\":[".to_vec();
-                expected_frame.extend(expected);
-                expected_frame.extend(b"]}]}");
-                assert_eq!(output.as_ref(), expected_frame);
-            }
+            let expected = serde_json::to_vec(&serde_json::to_value(&message).unwrap()).unwrap();
+            let served = ServedMessage::from_message(message);
+            assert_eq!(served.canonical_bytes(), expected);
+            let output = crate::dispatch::PreparedOutput::transform_recipe(
+                json!({"operations": null}),
+                vec![crate::dispatch::RecipeSegment::Insert(vec![
+                    crate::dispatch::PreparedSegment::served(served),
+                ])],
+            )
+            .unwrap();
+            let mut expected_frame = b"{\"operations\":[{\"op\":\"insert\",\"values\":[".to_vec();
+            expected_frame.extend(expected);
+            expected_frame.extend(b"]}]}");
+            assert_eq!(output.as_ref(), expected_frame);
         }
         for (left, left_digest) in &identities {
             for (right, right_digest) in &identities {
@@ -14277,8 +14283,11 @@ pub(crate) mod tests {
         latent
             .provider_extras
             .insert("provider".into(), BTreeMap::from([("x".into(), json!(1))]));
-        let mut typed = raw.clone();
-        typed.mark_modified();
+        // Built from parts rather than decoded: equal to `raw` by value, distinct in origin.
+        let typed = WireBlock::bare(wire::BlockKind::Text {
+            text: "same".into(),
+        });
+        assert_eq!(typed, raw);
         let mut unknown = serde_json::to_value(&raw).unwrap();
         unknown["unknown"]["x"] = json!(2);
         let unknown: WireBlock = serde_json::from_value(unknown).unwrap();
@@ -14311,64 +14320,62 @@ pub(crate) mod tests {
             positive.clone(),
         ];
         for positive_first in [false, true] {
-            for typed_zeros in [false, true] {
-                let mut ordered = candidates.clone();
-                if positive_first {
-                    ordered.swap(6, 7);
-                }
-                if typed_zeros {
-                    for block in &mut ordered[5..] {
-                        block.mark_modified();
-                    }
-                }
-                let mut ingress = wire_item("user", "reference", 0, &[]);
-                *ingress.ck.content_mut() = ordered.to_vec();
-                let mut projection = project_messages(&[Arc::new(ingress)]).unwrap();
-                for flat in &mut projection.blocks {
-                    flat.block_index += 10;
-                }
-                let projected: Vec<_> = projection.blocks.iter().collect();
-                let mut message = wire_item("user", "served", 0, &[]).ck;
-                *message.content_mut() = ordered.to_vec();
-                message.content_mut().push(ordered[3].clone());
-                let reference = message
-                    .content()
-                    .iter()
-                    .enumerate()
-                    .map(|(served_index, block)| {
-                        let projected = projected
-                            .iter()
-                            .find(|flat| flat.block_index == served_index)
-                            .copied()
-                            .or_else(|| {
-                                projected
-                                    .iter()
-                                    .copied()
-                                    .find(|flat| flat.wire.as_ref() == block)
-                            });
-                        if let Some(flat) = projected.filter(|flat| flat.wire.as_ref() == block) {
-                            return (
-                                wire::fingerprint_digest(&flat.content_hash),
-                                flat.bytes.len(),
-                            );
-                        }
-                        let serialized = serde_json::to_string(block).unwrap();
-                        (wire::fingerprint(&serialized), serialized.len())
-                    })
-                    .collect::<Vec<_>>();
-                let served = ServedMessage::from_message_reusing(message.clone(), Some(&projected));
-                let fresh = ServedMessage::from_message(message);
-                assert_eq!(served.block_fingerprints.as_ref(), reference);
-                assert_eq!(served.canonical_bytes(), fresh.canonical_bytes());
-                assert_eq!(served.block_fingerprints[7], served.block_fingerprints[6]);
-                assert_ne!(served.block_fingerprints[7], fresh.block_fingerprints[7]);
-                assert_eq!(served.block_fingerprints[8], served.block_fingerprints[3]);
-                assert_eq!(ordered[0].kind(), ordered[3].kind());
-                assert_ne!(ordered[0].provider_extras, ordered[3].provider_extras);
-                assert_eq!(ordered[1].kind(), ordered[3].kind());
-                assert!(ordered[1].original().is_none());
-                assert!(ordered[3].original().is_some());
+            let mut ordered = candidates.clone();
+            if positive_first {
+                ordered.swap(6, 7);
             }
+            let mut ingress = wire_item("user", "reference", 0, &[]);
+            *ingress.ck.content_mut() = ordered.to_vec();
+            let mut projection = project_messages(&[Arc::new(ingress)]).unwrap();
+            for flat in &mut projection.blocks {
+                flat.block_index += 10;
+            }
+            let projected: Vec<_> = projection.blocks.iter().collect();
+            let mut message = wire_item("user", "served", 0, &[]).ck;
+            *message.content_mut() = ordered.to_vec();
+            message.content_mut().push(ordered[3].clone());
+            let reference = message
+                .content()
+                .iter()
+                .enumerate()
+                .map(|(served_index, block)| {
+                    let projected = projected
+                        .iter()
+                        .find(|flat| flat.block_index == served_index)
+                        .copied()
+                        .or_else(|| {
+                            projected
+                                .iter()
+                                .copied()
+                                .find(|flat| flat.wire.as_ref() == block)
+                        });
+                    if let Some(flat) = projected.filter(|flat| flat.wire.as_ref() == block) {
+                        return (
+                            wire::fingerprint_digest(&flat.content_hash),
+                            flat.bytes.len(),
+                        );
+                    }
+                    let serialized = serde_json::to_string(block).unwrap();
+                    (wire::fingerprint(&serialized), serialized.len())
+                })
+                .collect::<Vec<_>>();
+            let served = ServedMessage::from_message_reusing(message.clone(), Some(&projected));
+            let fresh = ServedMessage::from_message(message);
+            assert_eq!(served.block_fingerprints.as_ref(), reference);
+            assert_eq!(served.canonical_bytes(), fresh.canonical_bytes());
+            assert_eq!(served.block_fingerprints[7], served.block_fingerprints[6]);
+            assert_ne!(served.block_fingerprints[7], fresh.block_fingerprints[7]);
+            assert_eq!(served.block_fingerprints[8], served.block_fingerprints[3]);
+            assert_eq!(ordered[0].kind(), ordered[3].kind());
+            assert_ne!(ordered[0].provider_extras, ordered[3].provider_extras);
+            // Blocks that differed only in discarded envelope fields are equal typed
+            // values with equal equality digests.
+            assert_eq!(ordered[1], ordered[3]);
+            assert_eq!(ordered[2], ordered[3]);
+            assert_eq!(
+                wire::block_identity_digest(&ordered[2]),
+                wire::block_identity_digest(&ordered[3])
+            );
         }
         let mut ingress = wire_item("user", "fallback", 0, &[]);
         *ingress.ck.content_mut() = candidates.to_vec();
@@ -14382,13 +14389,15 @@ pub(crate) mod tests {
         let mut message = wire_item("user", "served", 0, &[]).ck;
         *message.content_mut() = vec![raw.clone(), raw, positive];
         let served = ServedMessage::from_message_reusing(message.clone(), Some(&projected));
+        // `typed`, `unknown`, and both `raw` copies are equal typed values, so the first
+        // equal candidate is index 1.
         assert_eq!(
             served.block_fingerprints[0].0,
-            wire::fingerprint_digest(&[3; 32])
+            wire::fingerprint_digest(&[1; 32])
         );
         assert_eq!(
             served.block_fingerprints[1].0,
-            wire::fingerprint_digest(&[3; 32])
+            wire::fingerprint_digest(&[1; 32])
         );
         assert_eq!(
             served.block_fingerprints[2].0,
@@ -14471,8 +14480,6 @@ pub(crate) mod tests {
         if let wire::BlockKind::Text { text } = multi_rendered.content_mut()[1].kind_mut() {
             *text = format!("\u{a7}2\u{a7} {text}");
         }
-        multi_rendered.content_mut()[1].mark_modified();
-        multi_rendered.mark_modified();
 
         let reused =
             ServedMessage::from_message_reusing(multi_rendered.clone(), Some(&multi_blocks));
@@ -14716,7 +14723,6 @@ pub(crate) mod tests {
         if let wire::BlockKind::ToolResult { tool_name, .. } = result.ck.content_mut()[0].kind_mut()
         {
             *tool_name = "edit".to_string();
-            result.ck.content_mut()[0].mark_modified();
         }
         result
     }
@@ -14946,13 +14952,6 @@ pub(crate) mod tests {
         let messages: Vec<wire::IngressMessage> =
             serde_json::from_str(include_str!("../testdata/ingress-projection-corpus.json"))
                 .unwrap();
-        for message in &messages {
-            assert!(
-                message.ck.original().is_some(),
-                "{}: corpus entries decode as retained plugin ingress",
-                message.mid
-            );
-        }
         let projection =
             project_messages(&messages.into_iter().collect::<wire::IngressMessages>()).unwrap();
         for block in &projection.blocks {
@@ -15177,7 +15176,7 @@ pub(crate) mod tests {
             vec![item("covered", 1, "covered"), item("tail", 2, "after")],
         );
         let mutated_projection = project_messages(&mutated_request.messages).unwrap();
-        let re_adoptions = enforce_block_identity(
+        let enforcement = enforce_block_identity(
             &before.meta,
             &normalize_synthetic_todo_ingress(&mutated_request),
             &mutated_projection,
@@ -15193,7 +15192,7 @@ pub(crate) mod tests {
             &mutated_projection,
             None,
             None,
-            &re_adoptions,
+            &enforcement,
         );
         assert_eq!(speculative_meta.tail_identity_re_adopt_count, 1);
         assert_eq!(
@@ -15244,6 +15243,161 @@ pub(crate) mod tests {
             s.load(session).unwrap().meta.tail_identity_re_adopt_count,
             1,
             "a replay of the adopted bytes is not another re-adoption"
+        );
+    }
+
+    fn replay_basis_covered_item(mid: &str, ordinal: u64) -> IngressMessage {
+        let ck: WireMessage = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": [{
+                "kind": {
+                    "type": "tool_call",
+                    "id": "web_1",
+                    "name": "websearch",
+                    "input": {"query": "q"},
+                    "provider_executed": false
+                },
+                "future_block_field": 1
+            }],
+            "meta": {"harness_id": mid},
+        }))
+        .unwrap();
+        IngressMessage {
+            mid: mid.to_string(),
+            ordinal,
+            ck,
+        }
+    }
+
+    const REPLAY_BASIS_COVERED_BYTES: &str = r#"{"future_block_field":1,"kind":{"id":"web_1","input":{"query":"q"},"name":"websearch","provider_executed":false,"type":"tool_call"}}"#;
+
+    /// A replayed-envelope identity vector includes bytes omitted by the typed basis.
+    /// Legacy rows re-adopt under `typed` only when `kind_tag` values match; typed rows
+    /// reject covered drift.
+    #[test]
+    fn replay_basis_identity_rows_re_adopt_once_under_the_typed_basis() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "identity-basis-upgrade";
+        s.replace_compartments(session, &[comp(1, 1, 1, "covered", "SUMMARY")])
+            .unwrap();
+        let messages = || {
+            vec![
+                replay_basis_covered_item("covered", 1),
+                wire_item("tool", "result", 2, &["r"]),
+                item("tail", 3, "tail"),
+            ]
+        };
+        run(&s, &req(session, "cfg0", messages()), &spine());
+        let mut loaded = s.load(session).unwrap();
+        let typed_identity = loaded.meta.block_identity_by_mid["covered"].clone();
+        let replay_identity = vec![BlockIdentity {
+            kind_tag: "tool_call".to_string(),
+            byte_fingerprint: wire::fingerprint(REPLAY_BASIS_COVERED_BYTES),
+        }];
+        assert_eq!(typed_identity.len(), 1);
+        assert_eq!(typed_identity[0].kind_tag, "tool_call");
+        assert_ne!(
+            typed_identity, replay_identity,
+            "the typed basis omits the unknown key and the false flag"
+        );
+        let mut legacy = serde_json::to_value(&loaded.meta).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("block_identity_basis");
+        loaded.meta = serde_json::from_value(legacy).unwrap();
+        loaded
+            .meta
+            .block_identity_by_mid
+            .insert("covered".to_string(), replay_identity.clone());
+        s.commit(session, loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let legacy_row_version = s.load(session).unwrap().row_version;
+
+        let response = transform(
+            &s,
+            &req(session, "cfg0", messages()),
+            &pctx("git:proj", "/nonexistent-docs", 1),
+        )
+        .unwrap_or_else(|error| {
+            panic!("a replay-basis row must re-adopt under the typed basis, got {error:?}")
+        });
+        assert_eq!(response.first_divergence, None);
+        let after = s.load(session).unwrap();
+        assert!(after.row_version.unwrap() > legacy_row_version.unwrap());
+        assert_eq!(after.meta.block_identity_by_mid["covered"], typed_identity);
+        assert_eq!(
+            after.meta.tail_identity_re_adopt_count, 0,
+            "a basis re-adoption is not a live-tail identity change"
+        );
+        assert_eq!(
+            serde_json::to_value(&after.meta).unwrap()["block_identity_basis"],
+            "typed"
+        );
+
+        let replay = transform(
+            &s,
+            &req(session, "cfg0", messages()),
+            &pctx("git:proj", "/nonexistent-docs", 2),
+        )
+        .unwrap();
+        assert_eq!(replay.first_divergence, None);
+        assert_eq!(
+            s.load(session).unwrap().row_version,
+            after.row_version,
+            "a replay of the re-adopted bytes commits nothing"
+        );
+
+        let drift = transform(
+            &s,
+            &req(
+                session,
+                "cfg0",
+                vec![
+                    wire_item("assistant", "covered", 1, &["changed"]),
+                    wire_item("tool", "result", 2, &["r"]),
+                    item("tail", 3, "tail"),
+                ],
+            ),
+            &pctx("git:proj", "/nonexistent-docs", 3),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(drift, TransformError::IdentityDrift(ref mid) if mid == "covered"),
+            "a stamped row rejects covered drift, got {drift:?}"
+        );
+
+        let mut tags_differ = s.load(session).unwrap();
+        let mut legacy = serde_json::to_value(&tags_differ.meta).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("block_identity_basis");
+        tags_differ.meta = serde_json::from_value(legacy).unwrap();
+        tags_differ.meta.block_identity_by_mid.insert(
+            "covered".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: wire::fingerprint(REPLAY_BASIS_COVERED_BYTES),
+            }],
+        );
+        s.commit(
+            session,
+            tags_differ.row_version,
+            &tags_differ.core,
+            &tags_differ.meta,
+        )
+        .unwrap();
+        let drift = transform(
+            &s,
+            &req(session, "cfg0", messages()),
+            &pctx("git:proj", "/nonexistent-docs", 4),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(drift, TransformError::IdentityDrift(ref mid) if mid == "covered"),
+            "a replay-basis row whose block tags differ still rejects, got {drift:?}"
         );
     }
 
@@ -20123,7 +20277,6 @@ pub(crate) mod tests {
             .iter()
             .map(|block| wire::WireBlock::bare(block.kind().clone()))
             .collect();
-        tool_message.ck.mark_modified();
 
         let mut request = astro_request("astro-native-tools", 2_416);
         request.serializer_profile = "opencode-aisdk".to_string();
@@ -26344,6 +26497,50 @@ pub(crate) mod tests {
         );
     }
 
+    /// A multi-block covered system message reaches m0 as the canonical, key-sorted block
+    /// array rather than serde's declaration order.
+    #[test]
+    fn multi_block_covered_system_message_reaches_m0_as_canonical_block_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "m1", "SUMMARY")])
+            .unwrap();
+        let ck: WireMessage = serde_json::from_value(json!({
+            "role": "system",
+            "content": [
+                {"kind": {"type": "text", "text": "alpha"}},
+                {
+                    "kind": {"type": "text", "text": "beta"},
+                    "provider_extras": {"opencode": {"z": 1, "a": 2}}
+                }
+            ],
+            "meta": {"harness_id": "sys0"},
+        }))
+        .unwrap();
+        let system = IngressMessage {
+            mid: "sys0".to_string(),
+            ordinal: 0,
+            ck,
+        };
+        let first = run(
+            &s,
+            &cc_req(
+                "ses",
+                "cfg0",
+                vec![system, item("m1", 1, "covered"), item("t2", 2, "tail")],
+            ),
+            &spine(),
+        );
+        assert_eq!(first.action, "HARD");
+        assert_eq!(
+            covered_system_entries(m0_bytes(&first)),
+            vec![
+                r#"[{"kind":{"text":"alpha","type":"text"}},{"kind":{"text":"beta","type":"text"},"provider_extras":{"opencode":{"a":2,"z":1}}}]"#
+                    .to_string()
+            ]
+        );
+    }
+
     #[test]
     fn prompt_surface_preset_flip_takes_one_hard_then_freezes_defer_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -27035,7 +27232,6 @@ pub(crate) mod tests {
                 data: "redacted-reasoning-adjacency".to_string(),
             }),
         );
-        right.ck.mark_modified();
 
         for messages in [
             // Signed reasoning on both sides of the arc.
@@ -27766,7 +27962,6 @@ pub(crate) mod tests {
             .iter()
             .map(|block| wire::WireBlock::bare(block.kind().clone()))
             .collect();
-        projected.ck.mark_modified();
 
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -27906,7 +28101,6 @@ pub(crate) mod tests {
             .iter()
             .map(|block| wire::WireBlock::bare(block.kind().clone()))
             .collect();
-        projected.ck.mark_modified();
 
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -28272,9 +28466,10 @@ pub(crate) mod tests {
                             .iter()
                             .all(|message| !message.ck.meta.synthetic)
                     );
+                    // Served bytes follow the effective synthetic flag, not the ingress one.
                     assert_eq!(
                         serde_json::to_vec(&result.response.messages()[1]).unwrap(),
-                        serde_json::to_vec(&original.messages[1].ck).unwrap()
+                        serde_json::to_vec(&flagged.messages[1].ck).unwrap()
                     );
                     assert_eq!(
                         fingerprints[1].block_id,
@@ -28980,8 +29175,6 @@ pub(crate) mod tests {
             serde_json::from_value(serde_json::to_value(constructed).unwrap()).unwrap();
         let served = ServedMessage::from_message(message);
         let block = &served.message.content()[0];
-        let block_json = serde_json::to_value(block).unwrap();
-        let message_json = serde_json::to_value(served.message.as_ref()).unwrap();
         let wire::BlockKind::ToolCall {
             id, name, input, ..
         } = block.kind()
@@ -28991,8 +29184,7 @@ pub(crate) mod tests {
         let block_extra = id
             .capacity()
             .saturating_add(name.capacity())
-            .saturating_add(manual_value_retained_bytes(input).saturating_sub(size_of::<Value>()))
-            .saturating_add(manual_value_retained_bytes(&block_json));
+            .saturating_add(manual_value_retained_bytes(input).saturating_sub(size_of::<Value>()));
         let message_retained = size_of::<WireMessage>()
             .saturating_add(served.message.role.capacity())
             .saturating_add(
@@ -29010,8 +29202,7 @@ pub(crate) mod tests {
                     .harness_id
                     .as_ref()
                     .map_or(0, String::capacity),
-            )
-            .saturating_add(manual_value_retained_bytes(&message_json));
+            );
         let served_retained = crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
             .saturating_add(message_retained)
             .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
@@ -29312,7 +29503,6 @@ pub(crate) mod tests {
             wire::BlockKind::Text {
                 text: continuation_summary("EDITED"),
             };
-        Arc::make_mut(&mut edited.messages[0]).ck.content_mut()[1].mark_modified();
         let edited_response = run(&store, &edited, &spine());
         assert_eq!(edited_response.action, "SOFT+");
         assert!(edited_response.reconcile_pending);
@@ -29508,7 +29698,6 @@ pub(crate) mod tests {
             wire::BlockKind::Text {
                 text: continuation_summary("MUTATED"),
             };
-        Arc::make_mut(&mut mutated.messages[0]).ck.content_mut()[1].mark_modified();
         let refused = run(&store, &mutated, &spine());
         assert_eq!(refused.action, "SOFT+");
         assert!(refused.reconcile_pending);
