@@ -411,7 +411,7 @@ describe("promptSyncWithValidatedOutputRetry", () => {
             {
                 path: { id: "ses-classify" },
                 body: {
-                    agent: "dreamer-classifier",
+                    agent: "memory_classifier-classifier",
                     system: systemPrompt,
                     parts: [{ type: "text", text: "classify" }],
                 },

@@ -119,10 +119,14 @@ fn remediation_for(reason: &'static str) -> Option<&'static str> {
         | "incompatible_daemon"
         | "incompatible_module"
         | "incompatible_epochs" => Some("align_versions"),
-        "lifecycle_busy" | "storage_starting" | "kernel_starting" | "synapse_starting"
-        | "stopping" | "starting" => Some("wait_and_retry"),
+        "lifecycle_busy"
+        | "storage_starting"
+        | "kernel_starting"
+        | "local_embeddings_starting"
+        | "stopping"
+        | "starting" => Some("wait_and_retry"),
         "storage_unavailable" | "kernel_unavailable" => Some("inspect_storage"),
-        "synapse_degraded" => Some("inspect_synapse"),
+        "local_embeddings_degraded" => Some("inspect_local_embeddings"),
         "not_running" => Some("run_daemon_start"),
         // Mirrors `warn_remediations` in `RELEASE_CONTRACT_JSON`.
         "kernel_capacity_warn" => Some("inspect_storage"),
@@ -151,8 +155,8 @@ struct Versions {
     proof: Option<&'static str>,
     daemon: Option<String>,
     context: Option<String>,
-    synapse: Option<String>,
-    broca: Option<String>,
+    local_embeddings: Option<String>,
+    model_execution: Option<String>,
 }
 
 impl Versions {
@@ -161,8 +165,8 @@ impl Versions {
         Versions {
             release: Some(release_contract::RELEASE_VERSION),
             context: Some(release_contract::CONTEXT_MODULE_VERSION.to_owned()),
-            synapse: Some(release_contract::SYNAPSE_MODULE_VERSION.to_owned()),
-            broca: Some(release_contract::BROCA_MODULE_VERSION.to_owned()),
+            local_embeddings: Some(release_contract::LOCAL_EMBEDDINGS_MODULE_VERSION.to_owned()),
+            model_execution: Some(release_contract::MODEL_EXECUTION_MODULE_VERSION.to_owned()),
             ..Versions::default()
         }
     }
@@ -1083,7 +1087,7 @@ struct TrustedPayloadManifest {
     mode: String,
     package: TrustedPackageIdentity,
     platform_floor: serde_json::Value,
-    synapse: String,
+    local_embeddings: String,
     launcher: String,
     files: Vec<TrustedPayloadFile>,
 }
@@ -1176,7 +1180,7 @@ fn trusted_payload_sources(
         _ => return Err(invalid),
     };
     // The enforced floor is the contract row `supported_target` reads; the manifest's copies are release-tooling output already bound by `release_contract_sha256` and carry no separate authority.
-    let _ = (&manifest.platform_floor, &manifest.synapse);
+    let _ = (&manifest.platform_floor, &manifest.local_embeddings);
     if manifest.schema != PAYLOAD_MANIFEST_SCHEMA
         || manifest.release.id != "eidnara-host-release"
         || manifest.release.version != release_contract::RELEASE_VERSION
@@ -2041,12 +2045,12 @@ mod tests {
             "lifecycle_busy",
             "storage_starting",
             "kernel_starting",
-            "synapse_starting",
+            "local_embeddings_starting",
             "stopping",
             "starting",
             "storage_unavailable",
             "kernel_unavailable",
-            "synapse_degraded",
+            "local_embeddings_degraded",
             "not_running",
             "kernel_capacity_warn",
             "kernel_lagging",
@@ -2103,12 +2107,12 @@ mod tests {
             "the context module version is this crate's release version"
         );
         assert_eq!(
-            versions.synapse.as_deref(),
-            modules["synapse"]["version"].as_str()
+            versions.local_embeddings.as_deref(),
+            modules["local_embeddings"]["version"].as_str()
         );
         assert_eq!(
-            versions.broca.as_deref(),
-            modules["broca"]["version"].as_str()
+            versions.model_execution.as_deref(),
+            modules["model_execution"]["version"].as_str()
         );
         assert_eq!(versions.release, Some(release_contract::RELEASE_VERSION));
     }
@@ -2244,7 +2248,7 @@ mod tests {
                 "target": target
             },
             "platform_floor": {"kernel_min": "4.18", "glibc_min": "2.28"},
-            "synapse": "certified_cpu",
+            "local_embeddings": "certified_cpu",
             "launcher": "payload/bin/eidnara-host",
             "files": [
                 {

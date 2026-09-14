@@ -169,7 +169,7 @@ describe("shared transport eviction", () => {
         { length: MAX_CONNECTION_FILE_STATES + 1 },
         (_, index) => `/tmp/kernel-transport-test-missing-${index}.json`,
     );
-    const config = (file: string) => ({ subc: { connection_file: file } });
+    const config = (file: string) => ({ host: { connection_file: file } });
     const keyOf = (file: string) => `explicit:${file}`;
 
     test("a client that outlives its shared state's eviction re-resolves through the map instead of redialing outside the cap", async () => {
@@ -231,7 +231,7 @@ describe("shared transport eviction", () => {
         createKernelClient({
             sessionId: SESSION,
             projectRoot: PROJECT,
-            config: { subc: { connection_file: "" } },
+            config: { host: { connection_file: "" } },
         });
         expect(sharedConnectionFilesForTest()).toEqual(["managed-default", "explicit:"]);
     });
@@ -332,7 +332,7 @@ describe("closeKernelSession", () => {
     });
 
     test("releases the shared transport's routes for the session and is a no-op for an unresolved connection file", () => {
-        const config = { subc: { connection_file: MISSING_CONNECTION_FILE } };
+        const config = { host: { connection_file: MISSING_CONNECTION_FILE } };
         createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
         const shared = sharedStateForTest(config)?.module;
         if (!shared) throw new Error("the resolved client must have a shared transport");
@@ -342,7 +342,7 @@ describe("closeKernelSession", () => {
         };
 
         closeKernelSession(config, SESSION);
-        closeKernelSession({ subc: { connection_file: "/tmp/never-resolved.json" } }, SESSION);
+        closeKernelSession({ host: { connection_file: "/tmp/never-resolved.json" } }, SESSION);
 
         expect(closed).toEqual([SESSION]);
     });
@@ -410,7 +410,7 @@ describe("shared-path connection identity", () => {
     });
 
     test("a daemon turnover discovered inside a call is refused, and the client's retry is built under the new generation", async () => {
-        const config = { subc: { connection_file: connectionFile } };
+        const config = { host: { connection_file: connectionFile } };
         const kernel = createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
         const shared = sharedStateForTest(config);
         if (!shared) throw new Error("the resolved client must have a shared transport");
@@ -436,7 +436,7 @@ describe("shared-path connection identity", () => {
     });
 
     test("a state with a call in flight is never evicted; the cap trims it once the call settles", async () => {
-        const config = { subc: { connection_file: connectionFile } };
+        const config = { host: { connection_file: connectionFile } };
         const kernel = createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
         const shared = sharedStateForTest(config);
         if (!shared) throw new Error("the resolved client must have a shared transport");
@@ -453,7 +453,7 @@ describe("shared-path connection identity", () => {
                 sessionId: SESSION,
                 projectRoot: PROJECT,
                 config: {
-                    subc: { connection_file: `/tmp/kernel-transport-test-missing-${index}.json` },
+                    host: { connection_file: `/tmp/kernel-transport-test-missing-${index}.json` },
                 },
             });
         }
@@ -501,7 +501,7 @@ describe("shared-path connection identity", () => {
         createKernelClient({
             sessionId: SESSION,
             projectRoot: PROJECT,
-            config: { subc: { connection_file: "/tmp/kernel-transport-test-missing-extra.json" } },
+            config: { host: { connection_file: "/tmp/kernel-transport-test-missing-extra.json" } },
         });
         expect(sharedStateForTest(config)).toBeUndefined();
         expect(sharedConnectionFilesForTest()).toHaveLength(MAX_CONNECTION_FILE_STATES);
@@ -509,7 +509,7 @@ describe("shared-path connection identity", () => {
     });
 
     test("a token write that names a superseded connection identity is dropped", () => {
-        const config = { subc: { connection_file: connectionFile } };
+        const config = { host: { connection_file: connectionFile } };
         const kernel = createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
         const shared = sharedStateForTest(config);
         if (!shared) throw new Error("the resolved client must have a shared transport");
@@ -534,7 +534,7 @@ describe("shared-path connection identity", () => {
         const pending: Promise<unknown>[] = [];
         for (const file of files) {
             writeFileSync(file, "{}");
-            const config = { subc: { connection_file: file } };
+            const config = { host: { connection_file: file } };
             const kernel = createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
             const shared = sharedStateForTest(config);
             if (!shared) throw new Error("the resolved client must have a shared transport");
@@ -544,7 +544,7 @@ describe("shared-path connection identity", () => {
         await Bun.sleep(0);
         expect(settlers).toHaveLength(MAX_CONNECTION_FILE_STATES);
 
-        const config = { subc: { connection_file: connectionFile } };
+        const config = { host: { connection_file: connectionFile } };
         createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
         expect(sharedStateForTest(config)).toBeDefined();
         expect(sharedConnectionFilesForTest()).toHaveLength(MAX_CONNECTION_FILE_STATES + 1);
@@ -563,14 +563,14 @@ describe("shared-path connection identity", () => {
         createKernelClient({
             sessionId: SESSION,
             projectRoot: PROJECT,
-            config: { subc: { connection_file: join(dir, "extra.json") } },
+            config: { host: { connection_file: join(dir, "extra.json") } },
         });
         expect(sharedConnectionFilesForTest()).toHaveLength(MAX_CONNECTION_FILE_STATES);
         expect(sharedStateForTest(config)).toBeDefined();
     });
 
     test("a view's identity changes when its state is evicted and replaced, so a body built before the eviction is refused", async () => {
-        const config = { subc: { connection_file: connectionFile } };
+        const config = { host: { connection_file: connectionFile } };
         createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
         const shared = sharedStateForTest(config);
         if (!shared) throw new Error("the resolved client must have a shared transport");
@@ -583,7 +583,7 @@ describe("shared-path connection identity", () => {
                 sessionId: SESSION,
                 projectRoot: PROJECT,
                 config: {
-                    subc: { connection_file: `/tmp/kernel-transport-test-missing-${index}.json` },
+                    host: { connection_file: `/tmp/kernel-transport-test-missing-${index}.json` },
                 },
             });
         }
@@ -622,7 +622,7 @@ describe("shared-path project root canonicalization", () => {
     test("a symlinked spelling resolves to the same token bucket as the resolved spelling", () => {
         const resolved = realpathSync.native(join(dir, "real"));
         const link = join(dir, "link");
-        const config = { subc: { connection_file: MISSING_CONNECTION_FILE } };
+        const config = { host: { connection_file: MISSING_CONNECTION_FILE } };
         const tokens = createKernelClient({
             sessionId: SESSION,
             projectRoot: resolved,

@@ -111,16 +111,16 @@ this record agree.
 
 | Site | Test | Category |
 | --- | --- | --- |
-| `:851-885` | `a_panicking_broca_shutdown_still_drains_later_children_and_redacts` (attribute `:851`, `fn` `:852`) | contained: shutdown panic |
-| `:886-917` | `an_erroring_broca_shutdown_still_drains_later_children_and_redacts` (attribute `:886`, `fn` `:887`) | contained: shutdown error |
+| `:851-885` | `a_panicking_model_execution_shutdown_still_drains_later_children_and_redacts` (attribute `:851`, `fn` `:852`) | contained: shutdown panic |
+| `:886-917` | `an_erroring_model_execution_shutdown_still_drains_later_children_and_redacts` (attribute `:886`, `fn` `:887`) | contained: shutdown error |
 | `:918-985` | `a_child_shutdown_failure_makes_the_host_incarnation_non_graceful` (attribute `:918`, `fn` `:919`) | the non-graceful incarnation |
-| `:986-1027` | `a_panicking_broca_health_reports_failing_without_skipping_other_children` (attribute `:986`, `fn` `:987`) | contained: optional-child health panic |
-| `:1028-1049` | `a_panicking_synapse_health_reports_failing_without_unwinding` (attribute `:1028`, `fn` `:1029`) | contained: optional-child health panic |
+| `:986-1027` | `a_panicking_model_execution_health_reports_failing_without_skipping_other_children` (attribute `:986`, `fn` `:987`) | contained: optional-child health panic |
+| `:1028-1049` | `a_panicking_local_embeddings_health_reports_failing_without_unwinding` (attribute `:1028`, `fn` `:1029`) | contained: optional-child health panic |
 
 **The repair.** The lens cited the last span as `:1028-1060`.
 `tests/composite_routing.rs` is 1,049 lines, so `:1060` overruns the end of the
 file by eleven. The test ends on the file's final line: `:1040-1049` are the
-assertions, closing with `Some("synapse health check panicked")` at `:1047`, `);`
+assertions, closing with `Some("local_embeddings health check panicked")` at `:1047`, `);`
 at `:1048` and `}` at `:1049`. The corrected span is `:1028-1049`.
 
 This drift is worth stating precisely because the earlier triage predicted the
@@ -248,6 +248,7 @@ already demonstrates for the shutdown case.
 ## Investigation log
 
 ### Q: Does the O17 enumeration of nine uncontained and two contained positions hold?
+
 - Sources examined: every `self.primary.`, `self.secondary.`,
   `self.tertiary.` and `catch_child_panic` occurrence in
   `crates/host-runtime/src/composite.rs` at `e447c927`, each checked for a
@@ -265,19 +266,21 @@ already demonstrates for the shutdown case.
 - Conclusion: resolved with answer. The contained set is closed and the
   re-derivation matches the lens by exhaustion over the file, not by sampling.
 
-### Q: Is the lens's span for `a_panicking_synapse_health_reports_failing_without_unwinding` correct?
+### Q: Is the lens's span for `a_panicking_local_embeddings_health_reports_failing_without_unwinding` correct?
+
 - Sources examined: `tests/composite_routing.rs` at `e447c927`, its line
   count, and lines `:1028-1049`.
 - Findings: the lens cited `:1028-1060`. The file is 1,049 lines, so `:1060`
   overruns the end by eleven. The test ends on the file's final line:
   `:1040-1049` are the assertions, closing with
-  `Some("synapse health check panicked")` at `:1047`, `);` at `:1048` and `}`
+  `Some("local_embeddings health check panicked")` at `:1047`, `);` at `:1048` and `}`
   at `:1049`.
 - Missing evidence: none.
 - Conclusion: resolved with answer. The corrected span is `:1028-1049` and it
   is the only citation drift in either carried composite record.
 
 ### Q: Why did the triage's blob-identity inference miss this span error?
+
 - Sources examined: the earlier triage's conclusion that "neither needs a
   citation refresh"; the blob hash of `tests/composite_routing.rs` at
   `1c193ae0`, `793a973e` and `e447c927`; the six repairs produced by the four
@@ -294,6 +297,7 @@ already demonstrates for the shutdown case.
   what the blob hashes say.
 
 ### Q: Do this record's citations still resolve against the current checkout?
+
 - Sources examined: `git cat-file -t` for `e447c927`, `1c193ae0` and
   `793a973e`; `git rev-parse HEAD`; `git hash-object`, `wc -l` and `grep -n`
   over `crates/host-runtime/src/composite.rs` and
@@ -308,7 +312,7 @@ already demonstrates for the shutdown case.
   `:342`, and the aggregate `panic!` is at `:347`. `tests/composite_routing.rs`
   is 1,035 lines and blob `7e7aaff6`, not `2201b830`. The five tests are at
   `:840`, `:875`, `:907`, `:974` and `:1015`; the last ends at `:1035` with
-  `Some("synapse health check panicked")` at `:1033`.
+  `Some("local_embeddings health check panicked")` at `:1033`.
 - Missing evidence: the commit path from `e447c927` to `e6b944f`, which this
   checkout does not contain, so the drift cannot be attributed to a specific
   change.

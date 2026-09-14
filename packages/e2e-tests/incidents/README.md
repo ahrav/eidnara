@@ -81,7 +81,7 @@ Use synthetic fixtures only. Published reports allow only schema IDs, family and
 variant IDs, semantic and implementation digests, baseline IDs, static check and
 reason codes, harness, counts, and result classifications.
 
-Never publish prompts, session or memory bodies, historian dumps, credentials,
+Never publish prompts, session or memory bodies, history_summarizer dumps, credentials,
 ambient paths, raw stdout or stderr, exception text, or untrusted process output.
 Raw diagnostics stay capped in owner-only case workspaces and are deleted during
 teardown.

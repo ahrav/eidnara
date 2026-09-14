@@ -347,12 +347,12 @@ and I do not claim the nine defects above are exhaustive.
 | Id | Referenced by | `bd show` result |
 | --- | --- | --- |
 | `#8342` | `412b70f1` subject | `no issue found matching "8342"` |
-| `#1234` | body of a `ctx_search` commit | `no issue found matching "1234"` |
-| `#409` | body of an `compartments` commit | `no issue found matching "409"` |
+| `#1234` | body of a `eidnara_search` commit | `no issue found matching "1234"` |
+| `#409` | body of an `history_segments` commit | `no issue found matching "409"` |
 | `86e3ae26c2ea5a1b` | `78472c83` subject | `no issue found matching ...` |
 
 Caveat, and it matters: `#1234` and `7234` appear together in prose about
-id-shaped `ctx_search` queries, so that one is almost certainly an example string
+id-shaped `eidnara_search` queries, so that one is almost certainly an example string
 rather than a tracker reference, and `#409` sits next to "note #409" in a
 sentence about HTTP-shaped ids, so it is likely the same. `#8342` and
 `86e3ae26c2ea5a1b` read as genuine references to work items that are gone. Also
@@ -451,8 +451,8 @@ matches `grep -c '#\[test\]'` over the same range. No `#[ignore]` and no
 | Pass-scheduler interest history: selection, ordering, byte bounds, mural upsert | 15,583-16,008 | 7 |
 | **Schema version probe, pre-cutover refusal, fresh-and-current open, open lease** | **16,068-16,159** | **4** |
 | State import: atomic bootstrap-only, per-kind preflight, rejection leaves no rows | 16,188-16,319 | 3 |
-| Compartments roundtrip, tail append, overlap refusal, memory ordering | 16,339-16,540 | 5 |
-| Historian publish, abandon fencing, side-channel isolation, transcript bounds | 16,624-17,096 | 9 |
+| HistorySegments roundtrip, tail append, overlap refusal, memory ordering | 16,339-16,540 | 5 |
+| HistorySummarizer publish, abandon fencing, side-channel isolation, transcript bounds | 16,624-17,096 | 9 |
 | Note search scoping, CRUD, at-least-once delivery, ack scoping, paging | 17,202-17,680 | 7 |
 | Note revisions, evaluation-state reset, **migration v51 backfill** | 17,755-18,071 | 5 |
 | Artifact repair, `notes` writer fence, revert truncation, recut epoch | 18,123-18,335 | 6 |
@@ -505,7 +505,7 @@ its tests are integration.
 test binary is UNNAMED, and no CI job runs any scope test at all.**
 
 I grepped `memory-store`, `context-core`, and `tokenizer` across
-`.github/workflows/{ci,claude-code-review,historian-eval,retrieval-benchmark,shm-hardening-optin}.yml`.
+`.github/workflows/{ci,claude-code-review,history_summarizer-eval,retrieval-benchmark,shm-hardening-optin}.yml`.
 There are exactly five hits, all in `ci.yml`, and all in one job:
 
 | Workflow line | Content |
@@ -595,8 +595,8 @@ the headline. Verified counts over that range: 2 `debug_assert!`, 1 `assert!`, 0
   return already establishes the condition, so neither can fire even in a debug
   build. They are restatements, not checks.
 - **`assert!`, 1, and it is not production.** `lib.rs:5250` asserts a known
-  historian side-channel kind, but it sits inside
-  `fail_next_historian_side_channel_for_test`, gated
+  history_summarizer side-channel kind, but it sits inside
+  `fail_next_history_summarizer_side_channel_for_test`, gated
   `#[cfg(any(test, feature = "test-support"))]`. Reachability class: test-only.
 - **`.expect(`, 5.** Three are test-support hook mutexes (`lib.rs:5287`, `:5298`,
   `:9250`). Two are live production invariant claims:
@@ -617,7 +617,7 @@ the headline. Verified counts over that range: 2 `debug_assert!`, 1 `assert!`, 0
 - **Typed fail-closed refusals, roughly 20 `MemoryStoreError` variants** including
   `PreCutoverModuleStore`, `CasConflict`, `AuthorityStateMismatch`,
   `AuthorityGenerationMismatch`, `AuthorityFeedHeadAdvanced`, `NoteCasConflict`,
-  `NoteOwnershipMismatch`, `CompartmentRangeOverlap`,
+  `NoteOwnershipMismatch`, `HistorySegmentRangeOverlap`,
   `FacadeProjectVocabularyMismatch`, and six `ClaimIntent*` variants. Together
   with the four `validate_*` functions (`lib.rs:3816`, `:3924`, `:4013`, `:4199`)
   these are the real guard layer.
@@ -731,7 +731,7 @@ Four problems:
 
 87 tests over 13,930 production lines is roughly one test per 160 lines, and the
 distribution is uneven. The 87 cluster heavily on notes, note-eval claims, and
-the historian, which together account for 43 of them. Sparse by comparison, and
+the history_summarizer, which together account for 43 of them. Sparse by comparison, and
 worth targeted attention:
 
 - The `MIGRATIONS` DDL itself (`lib.rs:432-1312`, 881 lines) has no structural

@@ -11,7 +11,7 @@ nothing at all alongside it.
 ## Evidence trail
 
 1. There is no logging anywhere in the note-evaluation path.
-   `crates/daemon/src/smart_note_evaluation.rs` contains zero occurrences of
+   `crates/daemon/src/conditional_note_evaluation.rs` contains zero occurrences of
    `tracing` (whole-file grep, count 0), and no `warn!`, `debug!`, `info!`,
    `error!`, or `trace!` either. `crates/daemon/src/lib.rs:10880-11560`, which
    spans all seven protocol handlers plus `note_evaluation_claim_scope` and
@@ -33,6 +33,7 @@ nothing at all alongside it.
        "fresh claim committed without a proposed cycle update"
    );
    ```
+
    (`:11251-11254`)
 
    Its comment names the exact failure it is guarding and concedes the guard is
@@ -49,6 +50,7 @@ nothing at all alongside it.
        body["cycle_exhausted"] = json!(true);
    }
    ```
+
    (`:14017-14031`)
 
    Three fields. None names a note, a phase, a predicate, or a count. A client
@@ -59,16 +61,16 @@ nothing at all alongside it.
    (`:13995-14016`): claim id, note id, phase, expiry, revisions, and a snapshot.
    Nothing about the notes that lost or why.
 
-6. The exclusion reasons are numerous and all silent. A pending smart note can be
+6. The exclusion reasons are numerous and all silent. A pending conditional note can be
    absent from every phase's output for any of:
-   - `status != "pending"` (`smart_note_evaluation.rs:705`), though the store
+   - `status != "pending"` (`conditional_note_evaluation.rs:705`), though the store
      already filters that (`crates/memory-store/src/lib.rs:13293`);
    - `retina_handoff` true and `compile_status == Some("compiled")` (`:706`),
      which another registration can turn on, see
      `note-b-wake-owned-and-retina-handoff-are-project-wide-not-per-registration`;
    - `check_quarantined_until > now` (`:724`);
    - `check_next_due_at > now` (`:725`, `:745`);
-   - `policy_version != SMART_NOTE_CHECK_POLICY_VERSION` for the due and liveness
+   - `policy_version != CONDITIONAL_NOTE_CHECK_POLICY_VERSION` for the due and liveness
      phases (`:723`, `:773`);
    - `check_false_since_at` too recent, or `check_last_liveness_at` too recent
      (`:774-777`);
@@ -86,11 +88,11 @@ nothing at all alongside it.
    `check_quarantined_until` set far in the future by a large backoff, and a note
    whose `policy_version` never gets stamped because its compile keeps failing,
    are both indefinitely invisible. `evaluation_backoff_ms` caps at 24 hours
-   (`smart_note_evaluation.rs:355-360`), so a quarantine is bounded, but a
+   (`conditional_note_evaluation.rs:355-360`), so a quarantine is bounded, but a
    repeated failure re-arms it each time.
 
 8. Some state *is* durably visible, which bounds the finding honestly. The note's
-   own columns are readable through `ctx_note read` with `filter: "pending"`
+   own columns are readable through `eidnara_note read` with `filter: "pending"`
    (`lib.rs:11719`), and `render_notes` (`:15057-15163`) formats them. So an
    operator who already suspects a specific note can inspect its
    `check_status`, counters, and timestamps. What is not available is the reverse
@@ -99,7 +101,7 @@ nothing at all alongside it.
 
 ## Failure scenario
 
-A project's smart notes stop firing. The evaluator is registered and healthy, and
+A project's conditional notes stop firing. The evaluator is registered and healthy, and
 its logs show a steady stream of `{"result":"no_work"}`.
 
 The cause is one of: a stray second registration turned `retina_handoff` on; a
@@ -108,7 +110,7 @@ skip them all while the compile phase keeps failing; or a `wake_owned` heartbeat
 from another instance is vetoing every poll.
 
 What the operator can see: `no_work`. `health()` reports `Ok`. No log line, no
-counter, no metric. `ctx_note read` shows notes sitting in `pending`, which is
+counter, no metric. `eidnara_note read` shows notes sitting in `pending`, which is
 their normal resting state and therefore says nothing.
 
 The three causes are distinguished only by reading the note rows *and* the
@@ -155,6 +157,7 @@ and covers the client-facing half.
 ## Investigation log
 
 ### Q: Is note evaluation intended to be observable only through the evaluator
+
 client?
 
 - Sources examined: the response shapes (`lib.rs:13990-14047`), the absence of
@@ -181,8 +184,8 @@ client?
 
 ### Q: Does the `debug_assert!` at `:11251` cover the starvation case it names?
 
-- Sources examined: `:11239-11256`, `select_smart_note_evaluation_cycle`'s return
-  contract (`smart_note_evaluation.rs:895-949`), and the store's fresh-claim
+- Sources examined: `:11239-11256`, `select_conditional_note_evaluation_cycle`'s return
+  contract (`conditional_note_evaluation.rs:895-949`), and the store's fresh-claim
   precondition (`memory-store:13303-13345`).
 - Findings: it covers the specific invariant "a fresh claim implies the selection
   closure produced a candidate, and therefore set `proposed_cycle`", which is a

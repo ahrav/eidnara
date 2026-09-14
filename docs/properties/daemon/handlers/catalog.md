@@ -37,9 +37,9 @@ all three commits. The one CI step that matters moved:
 
 Numeric `lib.rs` anchors in the tables and the h4c and stagelc records are the
 lens agents' at `e447c927`; the daemon has grown since, so they do not hold at
-this branch's HEAD and are read at `e447c927`. The `handle_dreamer_run_task`
-row and the two Dreamer records below cite `lib.rs` by symbol, because those
-paths were rewritten after the lens read; their `dreamer_scheduler.rs` and
+this branch's HEAD and are read at `e447c927`. The `handle_memory_classifier_run_task`
+row and the two MemoryClassifier records below cite `lib.rs` by symbol, because those
+paths were rewritten after the lens read; their `memory_classifier_scheduler.rs` and
 `memory-store` anchors are verified at this branch's HEAD.
 
 Reachability provenance. Twenty-two records are `default-production` and three
@@ -101,6 +101,14 @@ revision; see the refinement list at the end of this section.
   ledger because no daemon code calls it. The facade part's four claim records
   carry `Status: invalidated`.
 
+The mural artifact renderer/store path is removed: `host_mural_artifact`,
+`upsert_project_mural_artifact`, and `cc_mural_input` are absent from the current
+source. `h4c-transform-writes-two-side-effects-before-its-fenced-commit` is
+invalidated as authored because its mural write and inheritance oracle no longer
+exist. Its record fields, evidence, handler-table row, and fault-map constructions
+remain historical. This does not establish atomicity for surviving side effects;
+that requires a separate review. No tests were run for this reconciliation.
+
 ## Handler table
 
 `Txns` counts distinct durable store transactions the handler can commit on one
@@ -109,7 +117,7 @@ recognisable, or says what stands in for one.
 
 | Handler | Mutates | Txns | Identity | Returns |
 | --- | --- | --- | --- | --- |
-| `handle_state_import_value` (`:5591-5774`) | Compartment set for an empty session, via `commit_state_import` (`:5738-5743`) | 1 durable, after N in-memory staging calls | `import_id`, caller-supplied, capped 1..=128 bytes (`:5639`, const `:651`); preflighted (`:5678`) | `{ok, imported, duplicate}` (`:5749-5753`) or `{ok, staged}` (`:5732`) |
+| `handle_state_import_value` (`:5591-5774`) | HistorySegment set for an empty session, via `commit_state_import` (`:5738-5743`) | 1 durable, after N in-memory staging calls | `import_id`, caller-supplied, capped 1..=128 bytes (`:5639`, const `:651`); preflighted (`:5678`) | `{ok, imported, duplicate}` (`:5749-5753`) or `{ok, staged}` (`:5732`) |
 | `handle_agent_drops_value` (`:5776-5890`) | Pending agent-drop queue, via `append_pending_agent_drops_with_command` (`:5868-5874`) | 1 durable, preceded by one read (`:5833`) | `command_id` from `command_id_from_agent_drops_request` (`:5783`) | `{ok, queued, duplicate}` (`:5876`) or `{ok, queued, disposition?}` (`:5879-5883`) |
 | `handle_todo_state_set_value` (`:5935-5974`) | `last_todo_state*` meta, via `set_todo_state` (`:5965`) | 1 | None. Content-keyed by `owner_message_id` + `sha256(normalized)` (`:5960`) | `{ok: true}` only (`:5967`) |
 | `handle_session_flush_value` (`:5976-5993`) | `soft_refresh_pending`, via `arm_soft_refresh` (`:5986`) | 1 | None | `{ok, armed}` (`:5987`) |
@@ -119,10 +127,10 @@ recognisable, or says what stands in for one.
 | `handle_authority_seed_value` (`:7267-7318`) | Authority seed rows | 1 | `(context_store_uuid, project, domain)` plus per-row `source_row_id` (`:7281-7291`) | `{ok, ...}` |
 | `handle_authority_drain_value` (`:7320-7427`) | Authority drain state machine (`:7345`, `:7366`, `:7400`) | 1 per call | `(context_store_uuid, project, domain)` plus `generation` on every action except `begin` (`:7355`, `:7388`), plus `coordinator_token` (`:7358`, `:7392`) | `{ok, authority}` (`:7413`) |
 | `handle_guidance_value` (`:7607-7723`) | `meta.guidance_date`, via `guidance_date_for_session` (`:7674`) committing at `:7751` | 0 or 1. **Can be 0 while returning success** | None | `{ok, bytes, hash, content_hash, preset, ...}` (`:7704-7722`); no field reports whether the date was persisted |
-| `handle_transform_unpaged_value` (`:8007-8615`) | Project mural artifact (`:8210`), historian side channels (`:8252`), pass traces (`:8262`, `:8332`, `:8560`), then the fenced cache-state commit inside `apply_once` | **3 or more, in separate transactions** | None at the handler. The cache-state commit is fenced by `row_version`/`revert_epoch` inside `apply_once` | `TransformResponse` with `committed` (`:8522`) |
+| `handle_transform_unpaged_value` (`:8007-8615`) | Project mural artifact (`:8210`), history_summarizer side channels (`:8252`), pass traces (`:8262`, `:8332`, `:8560`), then the fenced cache-state commit inside `apply_once` | **3 or more, in separate transactions** | None at the handler. The cache-state commit is fenced by `row_version`/`revert_epoch` inside `apply_once` | `TransformResponse` with `committed` (`:8522`) |
 | `handle_state_sync_value` (`:8642-9125`) → `apply_state_sync_wire` (`:9127-9333`) | Full shadow state, via `apply_authority_state_sync` (`:9241-9285`), plus an in-memory capability flag (`:9288-9291`) | 1 durable, plus 1 in-memory effect | `shadow_generation` + `expected_shadow_seq` fence (`:9244-9245`); paged path adds `seed_id` + digest (`:8735-8748`) | `{ok, shadow_generation, shadow_seq, row_version, ...skipped/seeded counts}` (`:9292-9306`) |
 | `handle_transform_page_value` (`:9335-9578`) | Nothing durable itself; assembles pages then delegates to the unpaged path | 0 direct | `transform_page_id` + `transform_page_digest` (consts `:636-641`) | Page ack, or the delegated transform response |
-| `handle_dreamer_run_task` → `DreamerRuntime::run_dreamer_task` (symbol anchors, verified at this branch's HEAD; the function was rewritten after the lens read) | Dreamer receipt and attempt rows in the Dreamer ledger (`begin_dreamer_receipt` before any producer, `begin_dreamer_attempt` before each start, `complete_dreamer_receipt` on every settled arm), plus one `memory_classification` observation per memory through `DreamerRuntime::record_classifications` | 1 receipt write before the model call, 1 attempt write per model, 1 kernel commit after an accepted result, then 1 receipt completion; the kernel commit precedes the completion | `command_id`, 1..=256 bytes (`handle_dreamer_run_task`), under the session's ledger session and the route's authority project, plus an `authority_generation` fence and a `leased_project` check (`run_dreamer_task`); the receipt binding digests `object_ids`, model chain, timeout, and template, schema, and prompt versions; the kernel commit key adds the route and authority-project digests (`classify_kernel_operation_key`) | Replayed receipt response (`replay_dream_task_response`, `read_dream_task_response`), `dreamer_request_conflict`, `dreamer_outcome_unknown`, or the request failure the receipt recorded |
+| `handle_memory_classifier_run_task` → `MemoryClassifierRuntime::run_memory_classifier_task` (symbol anchors, verified at this branch's HEAD; the function was rewritten after the lens read) | MemoryClassifier receipt and attempt rows in the MemoryClassifier ledger (`begin_memory_classifier_receipt` before any producer, `begin_memory_classifier_attempt` before each start, `complete_memory_classifier_receipt` on every settled arm), plus one `memory_classification` observation per memory through `MemoryClassifierRuntime::record_classifications` | 1 receipt write before the model call, 1 attempt write per model, 1 kernel commit after an accepted result, then 1 receipt completion; the kernel commit precedes the completion | `command_id`, 1..=256 bytes (`handle_memory_classifier_run_task`), under the session's ledger session and the route's authority project, plus an `authority_generation` fence and a `leased_project` check (`run_memory_classifier_task`); the receipt binding digests `object_ids`, model chain, timeout, and template, schema, and prompt versions; the kernel commit key adds the route and authority-project digests (`classify_kernel_operation_key`) | Replayed receipt response (`replay_dream_task_response`, `read_dream_task_response`), `memory_classifier_request_conflict`, `memory_classifier_outcome_unknown`, or the request failure the receipt recorded |
 
 Read-only handlers in scope, listed for completeness and carrying no records:
 `handle_authority_status_value` (`:7134-7167`), `handle_mirror_pull_value`
@@ -141,7 +149,7 @@ and shares the abandonment question, but it stages no caller data.
 | --- | --- | --- | --- | --- |
 | `StateSyncSeedCoordinator` (`:939-1020`) | `Idle` -> `AwaitingSeed{generation, expected_seq}` (`:908`, armed at `:8869` or by an explicit reset) -> `Collecting(PendingStateSyncSeed)` accumulating `batches: Vec<ModuleStateSyncWire>` -> `Applying{seed_id, bytes}` (`:906-911`) | None until the terminal step. `Collecting` accumulates in process memory only. The single durable write is `apply_state_sync_wire` on the assembled seed at `:9086` | `Idle` after `release_phase`, plus an out-of-band `completed: Option<CompletedStateSyncSeed>` replay slot holding the full `PreparedOutput` (`:914-921`, set at `:9106-9116`) | The caller, one `state_sync` request per batch. `handle_state_sync_value` (`:8642-9125`) is the only advancer; nothing else drives it |
 | `TransformPageCoordinator` (`:1067-1320`) | `Idle` -> `Collecting(PendingTransformPage)` accumulating `pages: Vec<Value>` -> `Applying{transform_id, bytes}` (`:1035-1039`) | None until the terminal step. The durable write is the whole unpaged transform, `handle_transform_unpaged_value` at `:9528-9536`, which commits cache state behind its own CAS | `Idle` after `release_phase` at `:9554`, plus a `completed: Option<CompletedTransformPage>` replay slot holding the full `PreparedOutput` (`:1042-1047`, set at `:9558-9568`) | The caller, one paged `transform` request per page. `handle_transform_page_value` (`:9335-9578`) is the only advancer |
-| `StateImportCoordinator` (`:1340-1622`) | absent -> `Collecting(PendingStateImport)` accumulating `compartments: Vec<StoredCompartment>` -> `Applying{import_id, bytes}` (`:1334-1337`). There is no `Idle` variant; a map entry exists only while pending | None until the terminal step. `store.preflight_state_import` (`:5678`) reads durable dedup state on every batch. The single durable write is `store.commit_state_import` at `:5738-5743` | Entry removed, by `complete` (`:1415-1427`), `discard` (`:1388-1395`), or `evict_stale` (`:1397-1413`). No replay slot; replay protection is durable, via `StateImportPreflight::Duplicate` (`:5679`) | The caller, one `state_import` request per batch. `handle_state_import_value` (`:5591-5774`) is the only advancer |
+| `StateImportCoordinator` (`:1340-1622`) | absent -> `Collecting(PendingStateImport)` accumulating `history_segments: Vec<StoredHistorySegment>` -> `Applying{import_id, bytes}` (`:1334-1337`). There is no `Idle` variant; a map entry exists only while pending | None until the terminal step. `store.preflight_state_import` (`:5678`) reads durable dedup state on every batch. The single durable write is `store.commit_state_import` at `:5738-5743` | Entry removed, by `complete` (`:1415-1427`), `discard` (`:1388-1395`), or `evict_stale` (`:1397-1413`). No replay slot; replay protection is durable, via `StateImportPreflight::Duplicate` (`:5679`) | The caller, one `state_import` request per batch. `handle_state_import_value` (`:5591-5774`) is the only advancer |
 | `StoreOpenCoordinator` (`:286-322`) | Not a staging machine. Coordinates waiters on a single store open with a lease-wait window and jittered backoff | None of its own; `run_store_open` (`:3543-3655`) performs the open | Waiters released; `StoreOpenWaiterGuard`'s `Drop` (`:324-332`) releases on unwind | `begin_store_open` / `run_store_open`. Out of this part's focus beyond the guard contrast |
 
 Three structural facts fall straight out of that table and drive most of the
@@ -226,7 +234,7 @@ The substance is kept here in full. The ledger's protections, a two-part
 (established by Part 3's `intent-identity-is-producer-and-operation-key` at
 `crates/memory-store/src/lib.rs:1230`, digest guard `:11049-11051`), are not
 available to any handler in this part. Each handler reinvents a narrower version:
-`command_id` alone for recomp, agent drops, and the dreamer; `import_id` alone
+`command_id` alone for recomp, agent drops, and the memory_classifier; `import_id` alone
 for state import; a generation or sequence fence for authority and state sync;
 and nothing for `session.delete`. **None carries a request digest**, so a repeat
 delivery of the same `command_id` with a *different* body is not detected as a
@@ -246,12 +254,12 @@ of the transform's out-of-fence writes carry comments justifying their placement
 (`:8249-8250` for the drain, `:8258-8261` for the trace); the mural write at
 `:8210` carries none.
 
-**The dreamer names its own hazard and then drops the guard.** The handler reads
+**The memory_classifier names its own hazard and then drops the guard.** The handler reads
 its ledger at `:9819-9828` before constructing a producer at `:9848` or starting
 a run at `:9878`, and the comment above that read states the stake plainly:
 replaying a command whose durable response exists "would start a second billable
 run, so the read fails closed and the caller retries" (`:9816-9818`). The read is
-duly hardened, returning `dreamer_ledger_failed` on a read error (`:9822-9827`),
+duly hardened, returning `memory_classifier_ledger_failed` on a read error (`:9822-9827`),
 and the success-path write at `:10016-10038` is equally careful, purging only
 after the row is durable and leaving the child session alive so a retry can
 recover it. The failure path at `:9989-9994` binds the same store call to
@@ -317,8 +325,8 @@ prose above states the open questions instead of pre-empting them; and **F16**
 edits `fault-map.md` only.
 
 Final distributions after the disposition and the later successor record
-`dreamer-dispatched-attempt-always-settles-through-the-receipt`, which
-replaces the invalidated `h4c-dreamer-failure-path-ledger-write-is-unchecked`
+`memory_classifier-dispatched-attempt-always-settles-through-the-receipt`, which
+replaces the invalidated `h4c-memory_classifier-failure-path-ledger-write-is-unchecked`
 and keeps that record's row: **21 `always`, 2 `always-or-unreached`, 3
 `sometimes`, 0 `reachable`, 0 `unreachable`**; **20 safety, 3 liveness, 3
 reachability**; **23 `default-production`, 3 `explicit-config-only`, 0
@@ -345,9 +353,9 @@ lines.
 | [h4c-authority-prepare-route-bind-is-a-second-transaction](#h4c-authority-prepare-route-bind-is-a-second-transaction) | safety | high |
 | [h4c-transform-writes-two-side-effects-before-its-fenced-commit](#h4c-transform-writes-two-side-effects-before-its-fenced-commit) | safety | high |
 | [h4c-guidance-date-returns-success-without-persisting](#h4c-guidance-date-returns-success-without-persisting) | safety | high |
-| [h4c-dreamer-failure-path-ledger-write-is-unchecked](#h4c-dreamer-failure-path-ledger-write-is-unchecked) | safety | high |
-| [dreamer-dispatched-attempt-always-settles-through-the-receipt](#dreamer-dispatched-attempt-always-settles-through-the-receipt) | safety | high |
-| [scheduled-dreamer-slot-runs-once-through-lease-and-receipt](#scheduled-dreamer-slot-runs-once-through-lease-and-receipt) | safety | high |
+| [h4c-memory_classifier-failure-path-ledger-write-is-unchecked](#h4c-memory_classifier-failure-path-ledger-write-is-unchecked) | safety | high |
+| [memory_classifier-dispatched-attempt-always-settles-through-the-receipt](#memory_classifier-dispatched-attempt-always-settles-through-the-receipt) | safety | high |
+| [scheduled-memory_classifier-slot-runs-once-through-lease-and-receipt](#scheduled-memory_classifier-slot-runs-once-through-lease-and-receipt) | safety | high |
 | [h4c-side-channel-drain-result-is-discarded-by-the-caller](#h4c-side-channel-drain-result-is-discarded-by-the-caller) | safety | high |
 | [h4c-session-delete-has-no-caller-supplied-operation-identity](#h4c-session-delete-has-no-caller-supplied-operation-identity) | safety | high |
 | [h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write](#h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write) | safety | high |
@@ -397,7 +405,7 @@ Exercised: partial - `session_recomp_resets_cache_boundary_and_replays_started` 
 Guarantee: A `session.recomp` request never leaves the session reset without a durable recomp command row recording that the reset happened.
 Check: `always` - after any `session.recomp` response, if `reset_session_for_recomp` committed for `(session_id)` then `load_recomp_command(session_id, command_id)` returns a row. `always` because the pairing must hold on every request that reaches the reset, not merely once per campaign.
 Fault/timing angle: The window is `:6077` (reset committed) to `:6114` (command row written). A store write failure, process kill, or disk-full inside that window leaves the session reset and unattributed. The recomp latch from `try_claim_recomp_session` (`:6030`) is released on the way out because `_guard` drops, so a retry is admitted.
-Required faults and enabling state: A session with `has_compartments` true or a nonempty `boundary_id` so `never_minted` is false at `:6058-6059`. Then a fault on the second `record_recomp_command` call at `:6114` only, not the first at `:6060`. **Constructible today, revised this disposition (F3):** a `BEFORE INSERT` trigger carrying `RAISE(ABORT, ...)` on `recomp_commands` (`crates/memory-store/src/lib.rs:6816-6822`), installed through `execute_tag_sql_for_test` (`memory-store:6431-6440`), fails that write, and `RAISE(ABORT)` is not swallowed by the statement's `INSERT OR IGNORE`. Call-site precision is free here rather than difficult: the two `record_recomp_command` sites are on mutually exclusive branches, the `nothing_to_do` early return at `:6060-6074` versus the reset path, so a blanket trigger on the table hits only the call this record targets on a reset-path request. A `SIGKILL` between the two calls remains an alternative.
+Required faults and enabling state: A session with `has_history_segments` true or a nonempty `boundary_id` so `never_minted` is false at `:6058-6059`. Then a fault on the second `record_recomp_command` call at `:6114` only, not the first at `:6060`. **Constructible today, revised this disposition (F3):** a `BEFORE INSERT` trigger carrying `RAISE(ABORT, ...)` on `recomp_commands` (`crates/memory-store/src/lib.rs:6816-6822`), installed through `execute_tag_sql_for_test` (`memory-store:6431-6440`), fails that write, and `RAISE(ABORT)` is not swallowed by the statement's `INSERT OR IGNORE`. Call-site precision is free here rather than difficult: the two `record_recomp_command` sites are on mutually exclusive branches, the `nothing_to_do` early return at `:6060-6074` versus the reset path, so a blanket trigger on the table hits only the call this record targets on a reset-path request. A `SIGKILL` between the two calls remains an alternative.
 Confidence: high - [evidence](evidence/h4c-recomp-reset-precedes-its-ledger-row.md). Read both call sites and the intervening in-memory cache clears at `:6095-6113`; confirmed the early-return `nothing_to_do` path at `:6060-6074` writes the row without a reset, so only the `:6077`-then-`:6114` order is exposed.
 Existing check: `:27313` `session_recomp_resets_cache_boundary_and_replays_started` asserts the reset and the `started` replay; it does not fault the ledger write.
 Impact: The session's cache and boundary are destroyed with no record that a recomp ran. A retry with the same `command_id` finds no row at `:6015`, takes the latch again, and re-resets. The reset is CAS-guarded on a freshly loaded `row_version` (`:6077`), so the second reset commits rather than conflicting, and the caller's `command_id` has provided no protection at all.
@@ -431,12 +439,14 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
-Exercised: partial - `cc_inherits_oc_project_mural_on_a_natural_hard_without_defer_first_apply` (`:18591`) covers the mural inheritance path; it does not reject the pass afterwards. No test asserts what a rejected transform leaves behind.
+Status: invalidated
+Exercised: not yet - the mural artifact path is removed, so the original oracle
+cannot be constructed. The remaining fields describe the source-catalog
+mechanism, not current coverage. Historical coverage: `cc_inherits_oc_project_mural_on_a_natural_hard_without_defer_first_apply` (`:18591`) covers the mural inheritance path; it does not reject the pass afterwards. No test asserts what a rejected transform leaves behind.
 Guarantee: A transform pass that returns `transform_failed` leaves no durable side effect that a successful pass would have produced.
-Check: `always` - for every `handle_transform_unpaged_value` response that is `PreparedOutcome::Error { code: "transform_failed" }`, the project mural artifact and the historian side-channel delivery state are unchanged from immediately before the request. `always` because the failure contract applies per request.
-Fault/timing angle: Both side effects precede the pass engine. `upsert_project_mural_artifact` commits at `:8210-8215`, `drain_historian_side_channels` at `:8252-8256`, and `trace_pass_received` at `:8262`. The rejection path is `reject_transform` at `:8330-8337`, reached from `:8338-8340`. The cache-state commit is fenced inside `apply_once` and is the *last* write, so a CAS rejection also lands here.
-Required faults and enabling state: `serializer_profile == OpencodeAiSdk` and a request carrying a mural, so `host_mural_artifact` returns `Some` at `:8209`. Then any `TransformError` from `run_transform`, or a due historian side-channel row so the drain has work. No injected fault is needed: the pass engine's own rejections are reachable from a crafted request, and `transform_failed` has exactly one site (`:8334`), so the rejection is unambiguous to observe.
+Check: `always` - for every `handle_transform_unpaged_value` response that is `PreparedOutcome::Error { code: "transform_failed" }`, the project mural artifact and the history_summarizer side-channel delivery state are unchanged from immediately before the request. `always` because the failure contract applies per request.
+Fault/timing angle: Both side effects precede the pass engine. `upsert_project_mural_artifact` commits at `:8210-8215`, `drain_history_summarizer_side_channels` at `:8252-8256`, and `trace_pass_received` at `:8262`. The rejection path is `reject_transform` at `:8330-8337`, reached from `:8338-8340`. The cache-state commit is fenced inside `apply_once` and is the *last* write, so a CAS rejection also lands here.
+Required faults and enabling state: `serializer_profile == OpencodeAiSdk` and a request carrying a mural, so `host_mural_artifact` returns `Some` at `:8209`. Then any `TransformError` from `run_transform`, or a due history_summarizer side-channel row so the drain has work. No injected fault is needed: the pass engine's own rejections are reachable from a crafted request, and `transform_failed` has exactly one site (`:8334`), so the rejection is unambiguous to observe.
 Confidence: high - [evidence](evidence/h4c-transform-writes-two-side-effects-before-its-fenced-commit.md). Confirmed the ordering by reading `:8206-8262` and the rejection arm at `:8330-8340`. Note the comments at `:8249-8250` and `:8258-8261` deliberately place the drain and the trace outside the fence; the mural write at `:8210` carries no such statement.
 Existing check: `:18591` for the mural happy path only.
 Impact: The mural artifact is content-keyed by `content_hash` (`:8213`), so a repeat delivery overwrites with identical bytes and the double-apply is benign. The durable damage is narrower than it looks: an artifact from a *rejected* pass becomes the project's inherited mural for later Claude Code passes via `cc_mural_input` (`:8224`). A pass whose content the engine refused still supplies the mural other sessions inherit.
@@ -468,47 +478,47 @@ Open questions:
   METHOD.md rule 3 forbids resolving it from the absence of a doc comment.
   `portfolio-evaluation.md` carries this as bias 2. (needs human input)
 
-### h4c-dreamer-failure-path-ledger-write-is-unchecked
+### h4c-memory_classifier-failure-path-ledger-write-is-unchecked
 
 Type: safety
 Reachability: default-production
 Status: invalidated
 Invalidated: the `let _` on `record_dream_task_command` this record was raised
-on, and the `dream_task_commands` table behind it, were replaced by the Dreamer
-receipt ledger (`crates/memory-store/src/dreamer_ledger.rs`); the route now
+on, and the `dream_task_commands` table behind it, were replaced by the MemoryClassifier
+receipt ledger (`crates/memory-store/src/memory_classifier_ledger.rs`); the route now
 commits an `IN_PROGRESS` receipt before any producer is constructed and checks
 every write on the failure path. The successor record is
-`dreamer-dispatched-attempt-always-settles-through-the-receipt` below. The
+`memory_classifier-dispatched-attempt-always-settles-through-the-receipt` below. The
 evidence file keeps the defect as it stood at `b5dc778e`; its `file:line`
 references resolve there only.
 Exercised: yes - the four tests that exercised the defect's fix are named under
 the successor record.
-Guarantee: A `dreamer.run_task` that fails after consuming a model call records
+Guarantee: A `memory_classifier.run_task` that fails after consuming a model call records
 that outcome durably, so a retry with the same `command_id` does not repeat the
 call.
 Check: `always` - superseded; see the successor record.
 Fault/timing angle: superseded; see the successor record.
 Required faults and enabling state: superseded; see the successor record.
-Confidence: high - [evidence](evidence/h4c-dreamer-failure-path-ledger-write-is-unchecked.md).
+Confidence: high - [evidence](evidence/h4c-memory_classifier-failure-path-ledger-write-is-unchecked.md).
 The unchecked write is gone at HEAD; the evidence file documents where it was.
 Existing check: superseded; see the successor record.
 Impact: A retry re-runs the producer, so the model is called twice for one
 logical command.
 Open questions: None.
 
-### dreamer-dispatched-attempt-always-settles-through-the-receipt
+### memory_classifier-dispatched-attempt-always-settles-through-the-receipt
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `dreamer_run_task_*` tests in `crates/daemon/src/lib.rs`
+Exercised: yes - `memory_classifier_run_task_*` tests in `crates/daemon/src/lib.rs`
 (`mod tests`) construct the cases below over a real store with the scripted
 producer. The three ported receipt tests use the async object-id harness.
 Symbol anchors use the merged source. The main thread reports these checks.
 At `c35a4ad5`:
 
-- `cargo test -p daemon --lib --all-features --locked dreamer`: 50 passed.
-- Fifty further runs of the same compiled libtest binary with the `dreamer`
+- `cargo test -p daemon --lib --all-features --locked memory_classifier`: 50 passed.
+- Fifty further runs of the same compiled libtest binary with the `memory_classifier`
   filter at default concurrency: all 50 tests passed in each of the 50 runs,
   with no retries.
 
@@ -526,91 +536,91 @@ read-only review of the latest merge found no actionable findings.
 These execution and review results do not change the checks' `unaudited`
 adequacy status.
 
-`dreamer_run_task_records_an_exhausted_chain_as_a_terminal_failure`
+`memory_classifier_run_task_records_an_exhausted_chain_as_a_terminal_failure`
 exhausts the chain and replays the failure without a second start.
-`dreamer_run_task_replays_from_the_receipt_and_refuses_a_changed_request` covers
+`memory_classifier_run_task_replays_from_the_receipt_and_refuses_a_changed_request` covers
 success replay and the digest conflict with no producer call.
-`dreamer_run_task_fails_closed_when_the_failure_record_cannot_be_written`
-installs a `RAISE(ABORT)` trigger on `dreamer_receipts`
+`memory_classifier_run_task_fails_closed_when_the_failure_record_cannot_be_written`
+installs a `RAISE(ABORT)` trigger on `memory_classifier_receipts`
 `UPDATE OF state`,
-asserts `dreamer_ledger_failed` with the receipt still `in_progress`, then shows
+asserts `memory_classifier_ledger_failed` with the receipt still `in_progress`, then shows
 the retry settles the receipt as `unknown` with no producer start and a later
-replay still answers `dreamer_outcome_unknown`.
-`dreamer_run_task_keeps_a_known_result_when_only_the_attempt_record_fails`
+replay still answers `memory_classifier_outcome_unknown`.
+`memory_classifier_run_task_keeps_a_known_result_when_only_the_attempt_record_fails`
 faults the attempt row and shows a usable result still completes the
 receipt.
-`dreamer_run_task_settles_a_missing_run_after_restart_as_unknown_without_redispatch`
+`memory_classifier_run_task_settles_a_missing_run_after_restart_as_unknown_without_redispatch`
 drops the request mid-await, rebinds the route under another harness,
 then resumes with the runtime reporting the run `missing`: the probe binds the
 recorded child session under the recorded harness and root, the attempt and
 receipt settle `unknown`, and no second start happens.
-`dreamer_run_task_leaves_a_run_the_runtime_still_holds_open` resumes
+`memory_classifier_run_task_leaves_a_run_the_runtime_still_holds_open` resumes
 with the run still `active` and shows nothing is written or dispatched.
-`dreamer_run_task_settles_a_run_the_runtime_reports_ended_as_unknown`
+`memory_classifier_run_task_settles_a_run_the_runtime_reports_ended_as_unknown`
 resumes with the run reported `terminal` and shows the attempt and receipt settle
 `unknown` at once, with no second start and no second status probe on replay.
-`dreamer_run_task_recovers_a_receipt_stranded_before_any_dispatch`
+`memory_classifier_run_task_recovers_a_receipt_stranded_before_any_dispatch`
 faults attempt insertion, leaving no attempt row, then shows a retry dispatches
 once at generation 2.
-`dreamer_run_task_takes_over_an_undispatched_receipt_and_dispatches_once`
+`memory_classifier_run_task_takes_over_an_undispatched_receipt_and_dispatches_once`
 reopens a receipt with a `NotSent` attempt and shows the successor
 dispatches exactly once under a session the predecessor could not have derived,
 and that the predecessor's writes are fenced.
-`dreamer_run_task_settles_an_open_attempt_without_a_handle_as_unknown`
+`memory_classifier_run_task_settles_an_open_attempt_without_a_handle_as_unknown`
 nulls the recorded handle and shows the retry settles unknown without asking the
 runtime.
-`dreamer_run_task_does_not_replay_a_success_whose_completion_never_landed`
+`memory_classifier_run_task_does_not_replay_a_success_whose_completion_never_landed`
 faults the receipt completion after a usable answer and shows the
 retry settles unknown, keeps the attempt's own terminal, and never replays the
 success.
-`dreamer_run_task_records_a_cancelled_attempt_as_terminal_and_billable`
+`memory_classifier_run_task_records_a_cancelled_attempt_as_terminal_and_billable`
 scripts a timed-out await with a late answer queued behind it and
 shows the attempt ends `cancelled` with no second read of the run, and counts.
-`dreamer_run_task_clamps_the_request_timeout_to_the_host_ceiling`,
+`memory_classifier_run_task_clamps_the_request_timeout_to_the_host_ceiling`,
 `a_request_timeout_is_clamped_to_the_host_ceiling`
 (`crates/daemon/src/classify.rs`, `mod tests`),
-`dreamer_run_task_enforces_the_model_chain_cap_before_dispatch`, and
-`dreamer_run_task_refuses_a_project_whose_attempt_budget_is_exhausted`
+`memory_classifier_run_task_enforces_the_model_chain_cap_before_dispatch`, and
+`memory_classifier_run_task_refuses_a_project_whose_attempt_budget_is_exhausted`
 cover the three bounds; the budget test also shows a changed
 request at exhaustion is a conflict, not a replay, and
-`dreamer_run_task_still_settles_open_receipts_when_the_budget_is_exhausted`
+`memory_classifier_run_task_still_settles_open_receipts_when_the_budget_is_exhausted`
 shows an exhausted budget still settles an open receipt while refusing a
 takeover.
-`dreamer_run_task_stops_the_chain_when_the_attempt_budget_is_spent_mid_chain`
+`memory_classifier_run_task_stops_the_chain_when_the_attempt_budget_is_spent_mid_chain`
 admits a three-model chain at `budget - 1` and shows it dispatches once, records
 the failure through its receipt, and leaves the count at exactly the budget.
-`dreamer_run_task_bounds_the_recovery_probe_by_the_request_deadline` stalls the
+`memory_classifier_run_task_bounds_the_recovery_probe_by_the_request_deadline` stalls the
 scripted producer's `status` and shows the retry answers
-`dreamer_outcome_unknown` within its own `timeout_ms` with nothing written.
-`dreamer_run_task_bounds_producer_startup_by_the_request_deadline` stalls the
+`memory_classifier_outcome_unknown` within its own `timeout_ms` with nothing written.
+`memory_classifier_run_task_bounds_producer_startup_by_the_request_deadline` stalls the
 factory's `connect` and shows a fresh command fails through its receipt within
 `timeout_ms` with no attempt row and no start.
-`dreamer_run_task_leaves_the_receipt_open_while_the_kernel_is_starting` reads
+`memory_classifier_run_task_leaves_the_receipt_open_while_the_kernel_is_starting` reads
 the pool against a kernel still `Starting`, shows `kernel_unavailable` with the
 receipt `in_progress` and no attempt, then opens the kernel and shows the same
 command dispatches once and writes its classifications.
-`dreamer_run_task_refuses_a_pool_over_the_kernel_read_budget_as_too_large`
+`memory_classifier_run_task_refuses_a_pool_over_the_kernel_read_budget_as_too_large`
 shows a read the kernel truncated at its payload budget is refused
 `payload_too_large`, not as an object the project lacks, with no connect.
-`dreamer_run_task_retires_the_prior_classification_of_a_reclassified_memory`
+`memory_classifier_run_task_retires_the_prior_classification_of_a_reclassified_memory`
 runs two commands over one memory and shows one live classification per memory
 carrying the second run's values, the first run's rows invalidated at the
 second commit, and a replay of the second run writing nothing.
-`dreamer_run_task_does_not_purge_the_child_session_once_it_is_fenced`
+`memory_classifier_run_task_does_not_purge_the_child_session_once_it_is_fenced`
 moves the receipt to generation 2 through `on_start` and
-`on_await_output` hooks. Both windows assert `dreamer_ledger_fenced`, no purge,
+`on_await_output` hooks. Both windows assert `memory_classifier_ledger_fenced`, no purge,
 the generation-2 receipt still open, and the generation-1 attempt still open.
 `an_undispatched_receipt_can_be_taken_over_only_without_a_possible_dispatch`
-(`crates/memory-store/tests/dreamer_ledger.rs`) allows no-row and
+(`crates/memory-store/tests/memory_classifier_ledger.rs`) allows no-row and
 `NotSent` takeover, ignores older-generation rows, and blocks an open or failed
 current-generation attempt. Not driven by a test: a resume whose `status` call
 fails; it shares the no-write response shape of the tested `Active` case.
-Guarantee: Every `dreamer.run_task` request that may have reached a model is
+Guarantee: Every `memory_classifier.run_task` request that may have reached a model is
 answered only through its receipt: a terminal answer (`ok: true`,
-`dreamer_run_failed`, or `dreamer_outcome_unknown` read back from a `complete`
-receipt) is returned only after `complete_dreamer_receipt` reports `Applied`;
-every other answer after a possible dispatch is `dreamer_ledger_failed`,
-`dreamer_ledger_fenced`, or an unrecorded `dreamer_outcome_unknown`, and a retry
+`memory_classifier_run_failed`, or `memory_classifier_outcome_unknown` read back from a `complete`
+receipt) is returned only after `complete_memory_classifier_receipt` reports `Applied`;
+every other answer after a possible dispatch is `memory_classifier_ledger_failed`,
+`memory_classifier_ledger_fenced`, or an unrecorded `memory_classifier_outcome_unknown`, and a retry
 over the receipt any of those leaves behind starts no producer. A receipt whose
 generation never reached a model is the one shape a retry may take over; each
 successor attempt dispatches at most once under the new generation. Every
@@ -619,31 +629,31 @@ await, and the recovery probe) runs under the request's `timeout_ms` deadline;
 `purge_session` after a terminal outcome runs under the producer's own request
 timeout instead, so cleanup still happens once the deadline has passed. A
 request dispatches a model only after reading the project's attempt count
-below `DREAMER_ATTEMPT_BUDGET`, once before its receipt is written and again
+below `MEMORY_CLASSIFIER_ATTEMPT_BUDGET`, once before its receipt is written and again
 before each later model; the read and the attempt write are not one atomic
 step, so requests admitted concurrently can each add one attempt past the
 budget. The budget is a bounded guard, not an exact quota. An accepted result
 is committed to canonical kernel state before the receipt completes, and only
 while the run's project still holds `MODULE` authority at the run's generation.
-Check: `always` - for every `dreamer.run_task` response that consumed a model
-attempt, the response is `ok: true`, `dreamer_run_failed`,
-`dreamer_kernel_write_failed`, or a replayed
-`dreamer_outcome_unknown` only if `lookup_dreamer_receipt` for `(project,
-"dreamer.run_task", operation_key)` returns `Complete` (the converse does not
+Check: `always` - for every `memory_classifier.run_task` response that consumed a model
+attempt, the response is `ok: true`, `memory_classifier_run_failed`,
+`memory_classifier_kernel_write_failed`, or a replayed
+`memory_classifier_outcome_unknown` only if `lookup_memory_classifier_receipt` for `(project,
+"memory_classifier.run_task", operation_key)` returns `Complete` (the converse does not
 hold: a run-handle write that fails after dispatch settles the receipt
-`unknown` and still answers `dreamer_ledger_failed`); and for every retry over
+`unknown` and still answers `memory_classifier_ledger_failed`); and for every retry over
 an `in_progress` receipt at generation `g`, the producer factory's `start` count
 does not change unless the atomic takeover predicate finds no row at `g` other
 than `not_sent` rows and moves the receipt to `g + 1`; only the successor may
-then insert attempts for its model chain. The preceding `list_dreamer_attempts`
+then insert attempts for its model chain. The preceding `list_memory_classifier_attempts`
 read alone does not authorize dispatch. `always` because
 the receipt is the retry contract for every outcome that spent a billable call;
-the in-flight duplicate guard at the top of `run_dreamer_task` answers
-`dreamer_run_failed` with no receipt and no attempt, by design, and is outside
+the in-flight duplicate guard at the top of `run_memory_classifier_task` answers
+`memory_classifier_run_failed` with no receipt and no attempt, by design, and is outside
 this condition.
-Fault/timing angle: `begin_dreamer_receipt` runs before any producer is
-constructed (`lib.rs`, `DreamerRuntime::run_dreamer_task`), so a `Complete`
-receipt replays and an `in_progress` one goes to `resume_dreamer_receipt`
+Fault/timing angle: `begin_memory_classifier_receipt` runs before any producer is
+constructed (`lib.rs`, `MemoryClassifierRuntime::run_memory_classifier_task`), so a `Complete`
+receipt replays and an `in_progress` one goes to `resume_memory_classifier_receipt`
 before any connect. The digest includes the kernel scope of the bound root,
 sorted `object_ids`, model chain, requested timeout, await ceiling, output-token
 limit, temperature, template and schema versions, and system-prompt hash, but
@@ -682,29 +692,29 @@ duration, and `Missing` or
 answer was never recorded) while `Active`, a probe error, or a probe the
 deadline cuts off writes nothing; an open one with no
 handle settles `unknown`. Only the absence of a marker reaches
-`take_over_undispatched_dreamer_receipt`, whose single guarded statement checks
+`take_over_undispatched_memory_classifier_receipt`, whose single guarded statement checks
 the current generation for
 `terminal_kind IS NULL OR terminal_kind != 'not_sent'` and moves the fence only
-when no such row exists (`crates/memory-store/src/dreamer_ledger.rs`).
+when no such row exists (`crates/memory-store/src/memory_classifier_ledger.rs`).
 No-row and `NotSent` generations may advance; a possible dispatch blocks
 takeover even if its row lands after the list read. Later predecessor writes
-are fenced (`crates/memory-store/src/dreamer_ledger.rs`); over budget the
+are fenced (`crates/memory-store/src/memory_classifier_ledger.rs`); over budget the
 takeover is refused, while every settling arm still runs. The budget is read
-again before every model after the first (`dreamer_attempt_budget_exhausted`),
+again before every model after the first (`memory_classifier_attempt_budget_exhausted`),
 so one admitted chain overshoots it by at most one attempt. The successor's
 child sessions include the generation (`crates/daemon/src/classify.rs`,
 `attempt_child_session_id`), so they cannot attach to or purge a predecessor's
 run. The exhausted-chain, success, and settle writes
 each match `Applied`, `Fenced`, and `Err` as separate arms.
 Accepted classifications become project-scoped `memory_classification`
-observations with `(ModelInference, DreamerInference)` admission, keyed under
-`dreamer.classify` by the route digest, the authority project's digest, the
+observations with `(ModelInference, MemoryClassifierInference)` admission, keyed under
+`memory_classifier.classify` by the route digest, the authority project's digest, the
 receipt's operation key, and the receipt digest, so two projects that hold one
 root in turn and reuse a session and command id are two kernel receipts. The model's
 `shareable` is recorded true only for a memory the serving view classes normal and
 serves at `ExplicitSearch` at commit time. The same kernel commit retires this project's prior live
 classifications for each memory, meaning rows in its scope, in the memory domain,
-from `dreamer.classify`, selected by that writer identity in the kernel query
+from `memory_classifier.classify`, selected by that writer identity in the kernel query
 (`DependentObservationQuery`); another project's or producer's row citing the
 memory through `classifies` is never returned, so it is neither retired nor a
 failure nor work the writer does while holding the kernel lock. Authority is read
@@ -714,16 +724,16 @@ completes `failed` with the authority code, `authority_unverified` when that rea
 itself fails, so the scheduler consumes the slot instead of retaining it. That commit
 precedes receipt completion: a crash between them leaves canonical effects but
 an unknown receipt outcome on recovery, not a second dispatch. Normal kernel
-write failure is recorded as `dreamer_kernel_write_failed`; a receipt read-back
+write failure is recorded as `memory_classifier_kernel_write_failed`; a receipt read-back
 error, missing terminal receipt, or malformed JSON fails closed rather than
 returning success.
 Required faults and enabling state: A classify run whose authority gate passes
 and whose model chain is exhausted, plus a store fault on
-`complete_dreamer_receipt` (a `BEFORE UPDATE OF state ON dreamer_receipts`
+`complete_memory_classifier_receipt` (a `BEFORE UPDATE OF state ON memory_classifier_receipts`
 trigger raising `ABORT`); for the attempt window the same trigger on
-`dreamer_attempts` `UPDATE OF terminal_kind`; for the restart windows a request
-dropped between `start` and `complete_dreamer_receipt` (the tests drop the
-request future while `await_output` is blocked). `DreamerHarness::crash_after_dispatch`
+`memory_classifier_attempts` `UPDATE OF terminal_kind`; for the restart windows a request
+dropped between `start` and `complete_memory_classifier_receipt` (the tests drop the
+request future while `await_output` is blocked). `MemoryClassifierHarness::crash_after_dispatch`
 uses `tokio::select!` with `wait_for_count(&producer.await_outputs, 1)` to
 observe entry into the output wait before dropping the request, rather than
 inferring that state from 200 ms elapsed. The scripted producer answers
@@ -731,51 +741,51 @@ inferring that state from 200 ms elapsed. The scripted producer answers
 left `in_progress` with no current-generation attempt other than `NotSent`
 rows; for cleanup fencing a generation change inside `on_start` or
 `on_await_output`. The budget bound needs the durable
-attempt count at `DREAMER_ATTEMPT_BUDGET` within `DREAMER_ATTEMPT_BUDGET_WINDOW`
+attempt count at `MEMORY_CLASSIFIER_ATTEMPT_BUDGET` within `MEMORY_CLASSIFIER_ATTEMPT_BUDGET_WINDOW`
 (`crates/daemon/src/classify.rs`), which the test fills through
 `execute_tag_sql_for_test`; the mid-chain stop needs the count at one below
 the budget and a chain whose first model fails. The probe bound needs the
 scripted producer's `status` blocked under a `timeout_ms` both request legs
 share, since the digest covers `timeout_ms`.
-Confidence: high - [evidence](evidence/dreamer-dispatched-attempt-always-settles-through-the-receipt.md).
-The default route dispatches `dreamer.run_task` without a feature or configuration
+Confidence: high - [evidence](evidence/memory_classifier-dispatched-attempt-always-settles-through-the-receipt.md).
+The default route dispatches `memory_classifier.run_task` without a feature or configuration
 gate (`crates/daemon/src/lib.rs`, `dispatch_value_with_inbound_bytes`). The
 exhausted-chain, success, and unknown receipt completions distinguish all three
 transition results; the known-result
 fallback accepts only `Applied` and otherwise tries unknown settlement
-(`run_dreamer_task`, `complete_receipt_as_unknown`).
+(`run_memory_classifier_task`, `complete_receipt_as_unknown`).
 The resume path has one arm per marker shape and every arm that writes is
 driven by a test (the no-write answer for a failed `status` call shares its
 shape with the tested `Active` case); the ledger's row predicates are the fence
-and are tested in `crates/memory-store/tests/dreamer_ledger.rs`.
+and are tested in `crates/memory-store/tests/memory_classifier_ledger.rs`.
 Existing check: the tests named under Exercised; status `unaudited`.
 Impact: A second billable model call for one logical command, or a false
 success after a daemon restart. This is the only handler in this part whose
 repeat cost is an external paid side effect rather than a local write.
 Open questions:
 
-- `DREAMER_ATTEMPT_BUDGET` (200 per project per 24 h) is a host default adopted
+- `MEMORY_CLASSIFIER_ATTEMPT_BUDGET` (200 per project per 24 h) is a host default adopted
   by the implementation ticket; the spec left the number to the plan owner.
   (needs human input)
 
-### scheduled-dreamer-slot-runs-once-through-lease-and-receipt
+### scheduled-memory_classifier-slot-runs-once-through-lease-and-receipt
 
 Type: safety
 Reachability: explicit-config-only - the scheduler runs on every daemon once
 the store opens (`crates/daemon/src/lib.rs`, `Handler::begin_store_open`), but it
 has a project to run only when the user
-tier sets `/dreamer/tasks/review-user-memories/schedule`, a `UserOnly` key
+tier sets `/memory_classifier/tasks/review-user-memories/schedule`, a `UserOnly` key
 (`crates/daemon/src/config.rs`, `tier_class`) that the project tier cannot set,
 and the route's memories authority is `MODULE`
 (`crates/daemon/src/lib.rs`, `SchedulerBridge::scheduled_projects`).
-`DreamerRuntime::new` installs no task input builder, and `install_task_inputs`
+`MemoryClassifierRuntime::new` installs no task input builder, and `install_task_inputs`
 is test-only. Production `classify_inputs` therefore returns `None`: a due
-slot records `dreamer_task_not_runnable` on its lease without a receipt or
+slot records `memory_classifier_task_not_runnable` on its lease without a receipt or
 dispatch. Scheduled model execution is exercised through the test input seam.
 Status: active
 Exercised: yes - the working tree merging `bc007c9a` into `c35a4ad5` passed the
-nextest run recorded below. `dreamer_scheduler::tests` in
-`crates/daemon/src/dreamer_scheduler.rs` drive `tick` with a manual clock over
+nextest run recorded below. `memory_classifier_scheduler::tests` in
+`crates/daemon/src/memory_classifier_scheduler.rs` drive `tick` with a manual clock over
 a real store: due-ness, oldest-first backlog with no back-fill, a run that
 outlasts its period leaving the crossed slot unfilled, per-acquisition
 lease instants, schedule change and removal, a deferred tick that keeps the
@@ -787,24 +797,24 @@ taken from the ledger, expired-versus-live predecessor leases, a not-runnable
 slot ending `applied`, cancellation of a parked loop and of a tick parked in a
 run with a second project still due, and the idle-poll wait
 after a deferred tick or a retained slot.
-`dreamer_scheduled_run_writes_one_receipt_and_a_restart_adds_no_attempt`
+`memory_classifier_scheduled_run_writes_one_receipt_and_a_restart_adds_no_attempt`
 (`lib.rs`, `mod tests`) runs a slot through `SchedulerBridge` with scripted
 object-id inputs, reads the receipt from inside the producer's `start`, and
 uses `tokio::select!` with `wait_for_count(&producer.await_outputs, 1)` to
 observe the output wait before dropping the tick. It shows a restarted
 scheduler recovers the interrupted slot through the receipt with no second start.
-`dreamer_scheduler_sees_only_user_scheduled_module_projects` binds a route under
+`memory_classifier_scheduler_sees_only_user_scheduled_module_projects` binds a route under
 the loader's output for a hostile project tier and for a user tier.
-`dreamer_scheduler_bridge_reports_a_store_failure_instead_of_no_projects`,
-`dreamer_scheduler_bridge_follows_the_most_recent_binding_on_a_root`, and
-`dreamer_scheduler_bridge_reports_a_project_once_across_its_roots` cover the
+`memory_classifier_scheduler_bridge_reports_a_store_failure_instead_of_no_projects`,
+`memory_classifier_scheduler_bridge_follows_the_most_recent_binding_on_a_root`, and
+`memory_classifier_scheduler_bridge_reports_a_project_once_across_its_roots` cover the
 bridge's store-failure, binding-selection, and per-project collapse contracts,
 including a newest root without a schedule unscheduling a project whose older
 roots still carry one.
-`dreamer_scheduler_bridge_reports_a_store_failure_inside_the_run_as_unavailable`
+`memory_classifier_scheduler_bridge_reports_a_store_failure_inside_the_run_as_unavailable`
 fails the protocol's authority gate and shows `StoreUnavailable` with no
 dispatch and no receipt, then the same command running once the store answers.
-`dreamer_scheduler_bridge_refuses_a_root_that_moved_to_another_project` rebinds
+`memory_classifier_scheduler_bridge_refuses_a_root_that_moved_to_another_project` rebinds
 the leased project's root to a second `MODULE` project at the same generation
 and shows the run is refused with no dispatch and no receipt under either.
 `a_failed_lease_acquisition_retains_the_slot_for_the_next_tick`,
@@ -817,11 +827,11 @@ loop waits the idle poll first.
 clock back an hour during a run and shows the next instant is the slot after
 the one that ran, with nothing running until the clock reaches it.
 The passing nextest, clippy, and formatting checks are recorded under
-[the receipt record](#dreamer-dispatched-attempt-always-settles-through-the-receipt).
+[the receipt record](#memory_classifier-dispatched-attempt-always-settles-through-the-receipt).
 The 50-by-50 repetition evidence there applies only to `c35a4ad5`.
 Guarantee: For every project and due instant, the scheduler dispatches at most
-one model run, and only through `DreamerRuntime::run_dreamer_task` under the
-command id `slot_command_id(task, due_at_ms)`, after `acquire_dreamer_task`
+one model run, and only through `MemoryClassifierRuntime::run_memory_classifier_task` under the
+command id `slot_command_id(task, due_at_ms)`, after `acquire_memory_classifier_task`
 returned a claim for the task, or records `NotRunnable` on the lease without a
 dispatch; a restarted scheduler that is handed a
 predecessor's live claim runs that claim's slot, so the interrupted receipt is
@@ -832,10 +842,10 @@ schedule and `MODULE` authority checks are considered for leasing; project
 lookup errors defer the tick, while generation-lookup or lease-acquisition store
 errors retain the affected slot instead of advancing it.
 Check: `always` - at each `TickEvent::Ran { project, due_at_ms }`, correlate the
-returned `dreamer_task` claim's `note_id` and `source_revision` with the task
+returned `memory_classifier_task` claim's `note_id` and `source_revision` with the task
 and due instant. A `NotRunnable` outcome or project-mismatch refusal adds no
 receipt or attempt. For a runnable task, all attempts use the receipt for
-`(project, "dreamer.run_task", operation_key(SCHEDULER_LEDGER_SESSION,
+`(project, "memory_classifier.run_task", operation_key(SCHEDULER_LEDGER_SESSION,
 slot_command_id(task, due_at_ms)))`; each `(generation, attempt_index)` starts
 at most once, and recovering a receipt with a possible dispatch adds no start.
 The original model chain may contain several attempts; an at-most-one-attempt
@@ -848,7 +858,7 @@ slot. A newest root with no schedule excludes the project even if older roots
 have schedules. `always` applies because slot identity and recovery safety
 must hold for every run, including a rebound predecessor claim.
 Fault/timing angle: The scheduler leases before it runs (`run_slot`,
-`dreamer_scheduler.rs:313`) and derives the command id from the claim's
+`memory_classifier_scheduler.rs:313`) and derives the command id from the claim's
 `source_revision`, not the slot that came due (`:367`), so a claim rebound from
 a predecessor names the predecessor's slot. Lease and completion instants are
 read from the clock as each happens, so a long run does not shorten the next
@@ -858,7 +868,7 @@ its period skips the slot it crossed instead of re-ticking at once on an instant
 already in the past, and a wall clock that steps back during a run cannot rewind
 the schedule below the slot that ran. A daemon that dies between `acquire` and
 `complete` leaves a live claim; the successor's registration generation comes from
-`next_dreamer_scheduler_generation` (`memory-store:3975`), above every
+`next_memory_classifier_scheduler_generation` (`memory-store:3975`), above every
 generation the instance recorded, so the shared protocol rebinds the claim to
 the successor rather than refusing it. A lease that expired first is collected
 and the successor leases a fresh claim for its own slot; the predecessor's
@@ -868,13 +878,13 @@ issues, and stays `in_progress`. A store failure inside
 (`memories_authority_for_route`, `crates/daemon/src/lib.rs`, shared with the
 wire route); `tick` returns `TickEvent::Deferred` (`:248`) without reconciling
 the due table, and `run` waits the idle poll before retrying (`:163`). A store
-failure from the generation lookup or from `acquire_dreamer_task` is
+failure from the generation lookup or from `acquire_memory_classifier_task` is
 `TickEvent::Retained` (`run_slot`, `:325`): `tick` does not advance that
 project (`:254`), so the slot stays due, and `run` waits the idle poll as after
 a deferred tick. A `StoreUnavailable` reply from the host (`:377`; the
-bridge maps `authority_lookup_failed`, `dreamer_ledger_failed`, and
+bridge maps `authority_lookup_failed`, `memory_classifier_ledger_failed`, and
 `kernel_unavailable` to it in `SchedulerBridge::run_task`, the codes that leave
-no receipt or an open one with no attempt) and a store failure from `complete_dreamer_task`
+no receipt or an open one with no attempt) and a store failure from `complete_memory_classifier_task`
 (`:402`) retain the slot the same way, with the claim left live under the
 slot's acquisition id; the next tick re-leases that claim and asks for the same
 command id, which the receipt replays or resumes without a second dispatch.
@@ -890,24 +900,24 @@ the project on the scheduler. `run` awaits each tick under `select!` with the
 cancellation token (`:172`): shutdown drops a tick mid-run instead of
 waiting out the run, and the projects still due behind it are not leased; the
 abandoned run is the receipt protocol's to recover. The route is resolved again
-inside `run_dreamer_task`; `SchedulerBridge::run_task` passes
-`DreamerRunRequest::leased_project = Some(&project.project)`, the project the
+inside `run_memory_classifier_task`; `SchedulerBridge::run_task` passes
+`MemoryClassifierRunRequest::leased_project = Some(&project.project)`, the project the
 lease is on, and a route that now resolves to another project is refused as
 `authority_project_mismatch` (`crates/daemon/src/lib.rs`,
-`DreamerRuntime::run_dreamer_task`) before any receipt is written, because an
+`MemoryClassifierRuntime::run_memory_classifier_task`) before any receipt is written, because an
 equal generation on the other project would otherwise pass the generation
 check. Receipt recovery still uses the attempt's recorded identity.
 Required faults and enabling state: A user-tier schedule on a bound route with
 `MODULE` memories authority; for recovery, a tick dropped between `acquire`
 and `complete` while the producer is awaiting output, and a successor started
-before the predecessor's lease expires, `DREAMER_TASK_LEASE_MS` (20 min) after
+before the predecessor's lease expires, `MEMORY_CLASSIFIER_TASK_LEASE_MS` (20 min) after
 acquisition; for the
 deferred tick, a store read failure during `scheduled_projects` while a slot
-is due; for the retained slot, a store failure during `acquire_dreamer_task`,
-inside the durable protocol, or during `complete_dreamer_task` while a slot is
+is due; for the retained slot, a store failure during `acquire_memory_classifier_task`,
+inside the durable protocol, or during `complete_memory_classifier_task` while a slot is
 due; for the refused run, a root rebound to a second `MODULE`
 project between `scheduled_projects` and `run_task`.
-Confidence: high - [evidence](evidence/scheduled-dreamer-slot-runs-once-through-lease-and-receipt.md).
+Confidence: high - [evidence](evidence/scheduled-memory_classifier-slot-runs-once-through-lease-and-receipt.md).
 The lease and receipt keys are derived from one value in one function; the
 recovery tests observe the ledger and the producer, not the scheduler's own
 events.
@@ -933,11 +943,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `status_diagnostics_surface_pending_historian_side_channel_failure` (`:30037`) proves the operator path works, asserting `side_channel_pending_count == 1` and a nonempty `side_channel_last_failure` at `:30073-30076`. Nothing covers the caller path, because there is nothing to cover.
-Guarantee: A historian side-channel delivery that the module attempts and fails is reportable, with the attempted and succeeded counts distinguished.
-Check: `always` - whenever `drain_historian_side_channels` reports `failed > 0` for a session, some surface reports that drain's `attempted` and `succeeded` as **separate values**. `always` because the reporting obligation attaches to every drain that fails, not to one per campaign. The separation is a correction applied this disposition (F5): the earlier form asked only that some surface report a nonzero pending or failed count, and a pending count is a backlog depth that cannot separate a pass which attempted ten and succeeded zero from one that attempted ten and succeeded ten, which is exactly the loss the `Impact` line describes. The store already computes all three counters per row (`memory-store:9572`, `:9575`, `:9581`), so the check compares a surface against values that exist and are discarded.
+Exercised: partial - `status_diagnostics_surface_pending_history_summarizer_side_channel_failure` (`:30037`) proves the operator path works, asserting `side_channel_pending_count == 1` and a nonempty `side_channel_last_failure` at `:30073-30076`. Nothing covers the caller path, because there is nothing to cover.
+Guarantee: A history_summarizer side-channel delivery that the module attempts and fails is reportable, with the attempted and succeeded counts distinguished.
+Check: `always` - whenever `drain_history_summarizer_side_channels` reports `failed > 0` for a session, some surface reports that drain's `attempted` and `succeeded` as **separate values**. `always` because the reporting obligation attaches to every drain that fails, not to one per campaign. The separation is a correction applied this disposition (F5): the earlier form asked only that some surface report a nonzero pending or failed count, and a pending count is a backlog depth that cannot separate a pass which attempted ten and succeeded zero from one that attempted ten and succeeded ten, which is exactly the loss the `Impact` line describes. The store already computes all three counters per row (`memory-store:9572`, `:9575`, `:9581`), so the check compares a surface against values that exist and are discarded.
 Fault/timing angle: No interleaving needed. `:8252` binds the result to `let _`, discarding `attempted`, `succeeded`, and `failed`, which the store computes per row at `crates/memory-store/src/lib.rs:9572-9581`. A drain that fails every row on every pass produces no per-pass signal.
-Required faults and enabling state: A due historian side-channel row plus a delivery failure. The store has a test seam for exactly this, `fail_next_historian_side_channel_for_test` (`memory-store:5249`), used at `:30041`.
+Required faults and enabling state: A due history_summarizer side-channel row plus a delivery failure. The store has a test seam for exactly this, `fail_next_history_summarizer_side_channel_for_test` (`memory-store:5249`), used at `:30041`.
 Confidence: high - [evidence](evidence/h4c-side-channel-drain-result-is-discarded-by-the-caller.md). Read the store function signature and its counter arithmetic; read the module call site and confirmed `let _`. Read the status test and confirmed the operator surface exists, which bounds this finding rather than inflating it.
 Existing check: `:30037` covers the operator surface via `status`. No check covers the discarded per-drain result.
 Impact: Bounded by the operator surface, so this is an observability gap rather than silent loss. What is lost is the per-pass rate: `attempted` versus `succeeded` on a given pass cannot be recovered from a pending count, so a drain that is failing on every pass and one that succeeded look identical from the transform path. METHOD.md's effect-accounting rule wants attempted and acknowledged tracked separately; the store does track them and the module drops both.
@@ -945,7 +955,7 @@ Open questions:
 
 - Does `side_channel_pending_count` distinguish "never attempted" from "attempted
   and failed"? Answering needs the `status` assembly in
-  `historian_status_summary` (`:15447-15736`), which is 4d's range.
+  `history_summarizer_status_summary` (`:15447-15736`), which is 4d's range.
 
 ## Group B: repeat delivery and caller-supplied identity
 
@@ -971,6 +981,7 @@ Confidence: high - [evidence](evidence/h4c-session-delete-has-no-caller-supplied
 Existing check: `:27420` for a single delete.
 Impact: `deleted_rows` at `:6154` is the row count, so a first delivery returns a positive number and a repeat returns zero, both as `ok: true`. A caller cannot distinguish "I deleted it" from "someone else did, or it was never there". Because the operation is destructive and terminal, the practical damage is low, but the retry contract is absent rather than satisfied.
 Open questions:
+
 - The state-import staging this record also cites was deleted in the port to this repository; the remaining mechanism is unchanged.
 
 - Is `deleted_rows == 0` on a repeat intended as the duplicate signal? Nothing
@@ -1298,6 +1309,7 @@ budget for the process lifetime. Enough of them and legitimate large transforms
 start failing with `buffer_overflow` (`lib.rs:9497-9500`) on a daemon that never
 restarts.
 Open questions:
+
 - The state-import staging this record also cites was deleted in the port to this repository; the remaining mechanism is unchanged.
 
 - Was the page coordinator intentionally left without a TTL on the theory that
@@ -1495,8 +1507,8 @@ in scope reads staged state from `memory-store`; and that the rejections are in
 place: pages require `page_index == 0` from `Idle` (`:1197-1199`), imports
 require `batch_seq == 0` from absent (`:1566-1571`), and seeds arm
 `AwaitingSeed` only for `batch_index == 0` (`:8869`).
-Existing check: none in scope. The historian's durable-phase recovery tests
-(`lib.rs:29822`, `:29827`, `:29832`) prove the *historian* reconstructs across a
+Existing check: none in scope. The history_summarizer's durable-phase recovery tests
+(`lib.rs:29822`, `:29827`, `:29832`) prove the *history_summarizer* reconstructs across a
 restart, which makes the contrast worth stating: the staging coordinators
 deliberately do not.
 Impact: this is the intended design as far as the code shows, and the rejections
@@ -1697,7 +1709,7 @@ empty coordinators, so both sides of the boundary are observable. This record
 shares its evidence file with its abrupt sibling, because both halves of the F13
 split link the pre-split file deliberately so no link breaks; per METHOD.md
 step 7 that file needs to become two.
-Existing check: none. The nearest analogue is the historian's seeded-phase
+Existing check: none. The nearest analogue is the history_summarizer's seeded-phase
 recovery family (`lib.rs:29793-29832`), which crosses a restart with durable
 phase state present; the staging coordinators have no equivalent test.
 Impact: without this marker,
@@ -1748,6 +1760,7 @@ can pass on a campaign that never crosses a boundary abruptly, and that record i
 specifically about a crash that discards the acknowledgement and the guard
 together, which a graceful shutdown does not model.
 Open questions:
+
 - The state-import staging this record also cites was deleted in the port to this repository; the remaining mechanism is unchanged.
 
 ## Cross-part relationship
@@ -1762,13 +1775,13 @@ fails (`crates/memory-store/src/lib.rs:4118-4126`, guard at `:4124-4126`, skippe
 report success while the implied write did not happen, and both have the same
 oracle: compare the response against a re-read of the store.
 
-`handle_dreamer_run_task` was previously counted as a third instance and is
+`handle_memory_classifier_run_task` was previously counted as a third instance and is
 **not** one, corrected this disposition (F14). At `:9989-9994` it discards the
 *result* of a write, and at `:9995-9998` it returns `PreparedOutcome::Error`. The
 caller is told the operation failed. That is a different defect, unchecked
 persistence on an error path, and it has a different oracle: the response already
 says `error`, so re-reading it proves nothing, and the oracle is to re-read the
-ledger after a failed run. The dreamer record itself is unchanged; only its
+ledger after a failed run. The memory_classifier record itself is unchanged; only its
 membership in the equivalence is.
 
 Part 3's other relevant analogue is a retention one:
@@ -1784,7 +1797,7 @@ omission rather than a design choice.
 Grouped by shared mechanism rather than by the section headings above, because
 several of the sharpest relationships cross groups. Every dominance statement
 below is a **hypothesis** about which oracle subsumes which, offered to guide
-ordering, not a verified claim; none of them has been tested. The Dreamer record
+ordering, not a verified claim; none of them has been tested. The MemoryClassifier record
 is the exception to the "no executing check" state the rest of this map assumes:
 the tests named under its Exercised field drive its guarantee under injected
 store faults. Every other record keeps the status its own Exercised and Existing
@@ -1807,17 +1820,17 @@ check fields state.
   the pass engine's own rejection and needs no injection.
 - **A success returned, or a write discarded, with no signal to the caller.**
   [h4c-guidance-date-returns-success-without-persisting](#h4c-guidance-date-returns-success-without-persisting),
-  [h4c-dreamer-failure-path-ledger-write-is-unchecked](#h4c-dreamer-failure-path-ledger-write-is-unchecked),
+  [h4c-memory_classifier-failure-path-ledger-write-is-unchecked](#h4c-memory_classifier-failure-path-ledger-write-is-unchecked),
   [h4c-side-channel-drain-result-is-discarded-by-the-caller](#h4c-side-channel-drain-result-is-discarded-by-the-caller).
   Three records whose shared consequence is that the caller's view and the store's
   state can differ with nothing reporting it. They do not dominate one another,
   because each breaks a different signal: guidance withholds a persistence field,
-  the dreamer once discarded a write result on the one path a retry depends on
+  the memory_classifier once discarded a write result on the one path a retry depends on
   (resolved at HEAD, where every receipt write is matched and the receipt is the
   retry contract; the record stays in this group for its mechanism), and the
   transform discards three counters the store computed. They are grouped because
   the guidance no-row arm and the side-channel drain both already have a driving
-  test, and the dreamer's receipt writes are driven under injected faults, and
+  test, and the memory_classifier's receipt writes are driven under injected faults, and
   because METHOD.md's effect-accounting rule is the common lens: attempted and
   acknowledged must be tracked separately, and in all three the module has the
   numbers; two of them still drop them.

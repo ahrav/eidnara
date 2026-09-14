@@ -37,7 +37,7 @@ charge, [`process_limits`][process-limits] refuses more at startup, and the
 [default configuration][config-default] and [validation][config-validate] use
 the same quotient. No production code reads residency;
 [`resident_arena_pages`][resident-api] is a `mincore` probe that only tests
-call. The wire contract's only related statements are that the Synapse
+call. The wire contract's only related statements are that the LocalEmbeddings
 resident cap "is an accounting boundary, not an exact process-RSS claim"
 ([§7.5.1][wire-751]) and that "no timed ring poll, prefault, runtime
 scheduling selector, or fallback path exists" ([§7.7][wire-77]).
@@ -107,6 +107,7 @@ Existing check:
 (unaudited) pins the quotient, the `+1` refusal, and the zero-rounds-to-one
 case.
 Open questions:
+
 - Does the specification intend a physical residency bound at all, or only to
   preserve this admission bound and the per-ring dead-byte bound below? (needs
   human input)
@@ -148,6 +149,7 @@ Existing check: [`unaligned_batch_boundaries_do_not_strand_pages`][t-batch]
 [`page_removal_failure_quarantines_before_capacity_publication`][t-punchfail];
 all unaudited. None asserts the bound as an inequality over a long run.
 Open questions:
+
 - What is the replacement bound when punching is deferred: bytes, pages, a
   time since the last reserve, or "punched by the next idle point"? (needs
   human input)
@@ -235,6 +237,7 @@ afterwards. No test covers underfill, overflow, serializer error, or panic on
 the direct path; [`commit_after_quarantine_is_refused_and_aborts`][t-commitq]
 covers the quarantine arm at ring level.
 Open questions:
+
 - Is a connection close the intended outcome for a serializer failure on a
   response that already won settlement, or must the direct path preserve the
   owned path's request-scoped `encode_failed` terminal? The change is visible
@@ -279,6 +282,7 @@ Existing check: [`into_parts_returns_the_unused_output_reservation`][t-parts],
 [`into_parts_does_not_leave_a_large_allocation_behind_a_small_charge`][t-parts3]
 cover the owned arm only; all unaudited. None found for the direct arm.
 Open questions:
+
 - Which charge class covers the captured source bytes between `handle`
   returning and `publish_one` completing: the egress charge already taken, the
   request scratch charge, or a new class? (needs human input)
@@ -320,6 +324,7 @@ Existing check:
 unaudited. None found for dedup at exactly the cap or for a refusal after an
 unrecovered orphan publish.
 Open questions:
+
 - The daemon maps `Capacity` to [`StoreBusy`][busy], a retryable class, while
   the only production paths that lower usage are failed-ingest cleanup and
   startup recovery ([`run_staging_maintenance`][maintenance] and
@@ -379,6 +384,7 @@ Existing check: [`assert_semantic_oracle`][t-oracle] and
 all unaudited. None found that compares two independent usage sources,
 because only one exists at HEAD.
 Open questions:
+
 - Is the walk retained as a periodic or startup reconciliation, and what is
   the fail-closed action on `counter != walk`: refuse ingest, latch the CAS
   failure ([`latch_cas_failure`][latch]), or adopt the walk value? (needs
@@ -494,7 +500,7 @@ the kernel. Five adjacent observations, not disagreements:
   `ProcessLimitsError::ExceedsResidentBytes` say "resident"; the doc comment
   and the arithmetic bound virtual arena bytes. The audit's "resident-bytes
   bound" language inherits the name. [§7.5.1][wire-751] makes the same
-  distinction explicit for the Synapse pool.
+  distinction explicit for the LocalEmbeddings pool.
 - [§7.7][wire-77] states that no prefault exists. A deferred-punch design that
   re-touches pages ahead of a write to avoid the re-fault would contradict it;
   one that punches later does not.

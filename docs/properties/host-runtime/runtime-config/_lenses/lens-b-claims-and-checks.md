@@ -7,8 +7,8 @@ comments in `runtime.rs` (1,344 lines), `harness_closure.rs` (1,122),
 vocabulary those files mint; and any `docs/` file describing host
 configuration.
 
-Provenance: code read from `the `host` source checkout, `HEAD` =
-`e447c927`, branch `feat/shared-memory-release-gate-audit`. Every line
+Provenance: code read from `the`host` source checkout, `HEAD` =
+`e447c927`, branch`feat/shared-memory-release-gate-audit`. Every line
 reference below was printed at that commit before being written. Method
 contract in [../../METHOD.md](../../../METHOD.md).
 
@@ -20,7 +20,7 @@ three) was grepped across `docs/`. The results:
 
 - **`max_resident_bytes` is the only key any non-catalog `docs/` file names**,
   at `docs/host-wire-protocol.md:423`, and there only to say that the cap
-  covers Synapse parse scratch as a named logical payload.
+  covers LocalEmbeddings parse scratch as a named logical payload.
 - Every other hit is inside `docs/properties/`, which is this catalog's own
   working material and is not a contract.
 - `the historical host performance baseline document:36-38` restates a handful of default *values*
@@ -52,10 +52,10 @@ actually enforces the claim, or records that none does.
 | 7 | `HostInit::storage` is opaque; the handler deserializes it and the host never reads it | `config.rs:251-253` | `serde_json::Value` passed through untouched |
 | 8 | `HostInit`'s `Debug` reports presence and bounded structure only, because the storage descriptor can carry credentials (V24) | `config.rs:258-260` | Partial. `storage` renders as `.is_some()` (`:263`); **`host_capabilities` renders in full** (`:262`) |
 | 9 | `host_capabilities` is a host-to-handler capability channel | `config.rs:250` (field, undocumented) | **Nothing. Zero readers repo-wide.** See L1 |
-| 10 | `invalidate_on_missed` stays `false` until the raw Rust historian client can answer Ping; enabling it earlier would kill healthy long-running awaits | `config.rs:236-238` | `HostConfig::default()` sets `liveness: None` (`:294`), which sends no Pings at all. No check pins the flag |
+| 10 | `invalidate_on_missed` stays `false` until the raw Rust history_summarizer client can answer Ping; enabling it earlier would kill healthy long-running awaits | `config.rs:236-238` | `HostConfig::default()` sets `liveness: None` (`:294`), which sends no Pings at all. No check pins the flag |
 | 11 | Signal acquisition stays outside this crate; the source module-host work will map SIGINT/SIGTERM | `runtime.rs:3-5` | **Nothing. No signal mapping exists**; the caller supplies a `CancellationToken` |
 | 12 | `ingress_budget` is the only budget with a blocking consumer, so nothing outliving a request may draw on it | `runtime.rs:106-107` | The `scratch_budget` split (`:109-111`) and `config.rs:36-43`'s rationale. Structural, no check |
-| 13 | Reserved-class pools are zero-permit when no module declares a reservation, and then unreachable because every route is general-class | `runtime.rs:117-119` | **Contradicted by `broca/mod.rs:164-177`.** See L2 |
+| 13 | Reserved-class pools are zero-permit when no module declares a reservation, and then unreachable because every route is general-class | `runtime.rs:117-119` | **Contradicted by `model_execution/mod.rs:164-177`.** See L2 |
 | 14 | The handler shutdown callback runs at most once per incarnation even when a `run` future is dropped mid-sequence | `runtime.rs:126-129`, `handler.rs:597` | `shutdown_callback_ran.swap(true, SeqCst)` (`:1265-1270`) |
 | 15 | `ShutdownDeadlineExpired` means host tasks could not be reaped within the shutdown deadline even after aborts | `runtime.rs:42-44` | Returned on a path that can run roughly ten times that deadline. See L3 |
 | 16 | The health report is informational; degraded storage must not make transport unready | `runtime.rs:1115-1116` | `Ok(None)`/`Err(_)` both `return` without unreadying (`:1126-1127`) |
@@ -121,7 +121,7 @@ population of it lands on the wrong side of V24 by default.
 /// then unreachable because every route is general-class.
 ```
 
-Broca declares a reservation. `broca/mod.rs:164-177` returns:
+ModelExecution declares a reservation. `model_execution/mod.rs:164-177` returns:
 
 ```
 ResourceDeclaration {
@@ -133,17 +133,17 @@ ResourceDeclaration {
 }
 ```
 
-with `RESERVED_PENDING_REQUESTS = 96` (`broca/config.rs:185`) and
+with `RESERVED_PENDING_REQUESTS = 96` (`model_execution/config.rs:185`) and
 `RESERVED_HANDLER_TASKS = 96` (`:188`). The comment at
-`broca/mod.rs:169-170` makes it deliberate and unconditional: "Constants rather
+`model_execution/mod.rs:169-170` makes it deliberate and unconditional: "Constants rather
 than limits so a test-shrunken supervisor still declares the product contract."
 
 So in the composed host the reserved pools hold 96 permits each and every
-Broca route dispatches against them. The comment's second clause is false, and
+ModelExecution route dispatches against them. The comment's second clause is false, and
 its first clause ("zero-permit when no module declared a reservation") is true
-only of a composition that does not include Broca, which the direct profile
+only of a composition that does not include ModelExecution, which the direct profile
 always does (`composite.rs:10-13` fixes the tertiary as
-`broca/management_surface`).
+`model_execution/management_surface`).
 
 Consequence: `reserved_pending_permits` and `reserved_task_permits`
 (`runtime.rs:120-121`) are `default-production` reachable, not dormant. Any
@@ -219,7 +219,7 @@ let interval = if activation_in_progress {
 
 `activation_in_progress` (`:1051-1071`) walks the report's own metrics and
 returns true when any component's `metrics.storage_state` or
-`metrics.synapse_state` equals the string `"starting"`.
+`metrics.local_embeddings_state` equals the string `"starting"`.
 
 That report is handler output. `HostHandler::health` returns a `HealthReport`
 (`handler.rs:591`) whose `metrics` field is `Option<serde_json::Value>`
@@ -281,7 +281,7 @@ names a live mechanism: the mandatory ring setup of protocol Section 7.7.
 module manifest the refactor edited, and it is clean. It declares
 `ring_transport` and `setup_socket` as `#[doc(hidden)] pub mod` (`:20-21`,
 `:34-35`) and no longer names any deleted module. Its `unsafe_code` comment
-(`:3-7`) describes the Broca `pre_exec` hook, which exists.
+(`:3-7`) describes the ModelExecution `pre_exec` hook, which exists.
 
 **Two residuals of the opposite shape, recorded so a later pass does not
 miscount them as stale.** Both are forward references to unbuilt work, not
@@ -311,14 +311,14 @@ Six, each stated somewhere and checked by no build step.
    (`the_resident_cap_splits_into_three_non_overlapping_pools`) is the only
    thing that checks the sum, and it never runs in CI.
 
-3. **`SCRATCH_RESERVED_BYTES`' sizing rationale names Synapse limits it cannot
-   see.** `config.rs:45-55` sizes the pool for "Synapse's worst parse
+3. **`SCRATCH_RESERVED_BYTES`' sizing rationale names LocalEmbeddings limits it cannot
+   see.** `config.rs:45-55` sizes the pool for "LocalEmbeddings's worst parse
    reservation, full queued-batch budget, one admitted maximum query,
-   `SYNAPSE_WAITER_HEADROOM_BYTES`, per-item/envelope headroom, and
+   `LOCAL_EMBEDDINGS_WAITER_HEADROOM_BYTES`, per-item/envelope headroom, and
    `RETAINED_METADATA_RESERVED_BYTES`", and `:63` says
-   `tests/synapse_bundle.rs` "pins the resulting feasible boundary". That
+   `tests/local_embeddings_bundle.rs` "pins the resulting feasible boundary". That
    binary is not named in CI, so the coupling between this constant and
-   Synapse's own limits is held by an ungated test plus prose.
+   LocalEmbeddings's own limits is held by an ungated test plus prose.
 
 4. **The 50 ms activation probe interval is a bare literal.** `runtime.rs:1130`
    is `Duration::from_millis(50)` with no named constant and no entry in
@@ -402,7 +402,7 @@ them.**
 
 | Binary | Tests | Lines | Subject | CI status |
 | --- | --- | --- | --- | --- |
-| `tests/synapse_bundle.rs` | 24 | 936 | limit feasibility, named by `config.rs:63` | **unnamed** |
+| `tests/local_embeddings_bundle.rs` | 24 | 936 | limit feasibility, named by `config.rs:63` | **unnamed** |
 | `tests/harness_closure.rs` | 15 | 647 | the only exercise of `HarnessClosureStore` | **unnamed** |
 | `tests/ipc_budget_topology.rs` | 9 | 296 | byte-pool separation | **unnamed** |
 | `tests/activation.rs` | 4 | 412 | the activation path L4 depends on | **unnamed** |
@@ -422,7 +422,7 @@ is the one CI-executed path that touches this file at all.
 `tests/harness_closure.rs` deserves separate emphasis. It is the **only**
 place in the repository that constructs a `HarnessClosureStore` for test
 purposes, at 11 sites (`:159`, `:182`, `:253`, `:277`, `:325`, `:414`, `:447`,
-`:462`, `:477`, `:497`, plus `tests/broca_subprocess.rs:853`), each with
+`:462`, `:477`, `:497`, plus `tests/model_execution_subprocess.rs:853`), each with
 `.expect("store")`. So a 1,122-line module with zero in-crate tests and zero
 doctests has exactly one test binary, and CI does not run it.
 

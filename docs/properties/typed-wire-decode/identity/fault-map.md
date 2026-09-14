@@ -20,7 +20,7 @@ and is not a measurement owner or reactivated by these situation markers.
 | Equality/index drift | Missing positions, first candidate, unequal positional entry | `ServedMessage::from_message_reusing` tests | Existing receipt witnesses available but unaudited. |
 | Persisted schema read | Old serialized ingress arrays with range metadata | `durable_expand_messages`, store transcript reader | Real reader exists; replacement/old-row corpus missing. |
 | Upgrade/cache boundary | Old durable vectors with fresh process caches | Handler cache constructors and metadata load | Source exists; no old/new execution supplied. |
-| Synthetic classification | Flagged and unflagged synthetic IDs beside real blocks | Normalized projection and historian snapshot filter | Production filter exists; no marker result imported. |
+| Synthetic classification | Flagged and unflagged synthetic IDs beside real blocks | Normalized projection and history_summarizer snapshot filter | Production filter exists; no marker result imported. |
 | Mutation/alias drift | Edit one owned clone while source and sibling remain shared | Accessors, `Arc` shells, full/incremental projection | Legacy checks use original replay; new oracle missing. |
 | Durable hygiene drift | Same zero-token part, changed byte basis, non-bust refresh | Persisted `tail_hygiene_baseline`, kind-prefixed hashes, prefix comparison | Source verified; no old/new baseline replay. |
 | Durable anchor drift | Stored complete anchor, unchanged summary, actual violation controls | `validate_lineage_anchor` and Defer/reconcile/no-trim consumers | Source verified; no replacement-decoder replay. |

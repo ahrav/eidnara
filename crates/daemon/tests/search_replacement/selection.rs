@@ -131,7 +131,10 @@ fn readers_pin_complete_old_or_new_prefix_and_keep_cancelled_physical_workers_ow
     let engine = fixtures::TestEngine::new();
     let native_gate = engine.block_calls();
     let release = fixtures::GateGuard(Arc::clone(&native_gate));
-    let component = fixtures::component(&engine, host_runtime::synapse::SynapseLimits::default());
+    let component = fixtures::component(
+        &engine,
+        host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
+    );
     let worker_pin = old.clone();
     let cancelled = budget(Duration::from_secs(30));
     let worker_budget = cancelled.clone();

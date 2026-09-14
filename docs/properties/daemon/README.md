@@ -9,7 +9,7 @@ the source's module-wide scope map that fixed the six area boundaries.
 
 | Area | Source part | Subject |
 | --- | --- | --- |
-| `historian/` | `part-4a-historian` | the historian publish path and its validation gate |
+| `history_summarizer/` | `part-4a-history_summarizer` | the history_summarizer publish path and its validation gate |
 | `transform/` | `part-4b-transform` | the transform pass engine and its cache-state transition |
 | `handlers/` | `part-4c-handlers` | durable operation handlers and staging coordinators |
 | `facade/` | `part-4d-facade` | the facade surface, note evaluation, and response assembly |

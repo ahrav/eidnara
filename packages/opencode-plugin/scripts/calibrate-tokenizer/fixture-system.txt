@@ -705,33 +705,33 @@ Use the skill tool to load a skill when a task matches its description.
 ## Eidnara
 
 Messages and tool outputs are tagged with §N§ identifiers (e.g., §1§, §42§).
-Use `ctx_reduce` to manage context size. It supports one operation:
+Use `eidnara_reduce` to manage context size. It supports one operation:
 - `drop`: Remove entirely (best for tool outputs you already acted on).
 Syntax: "3-5", "1,2,9", or "1-5,8,12-15". Last 20 tags are protected.
-Use `ctx_note` for deferred intentions — things to tackle later, not right now. NOT for task tracking (use todos). Notes survive context compression and you'll be reminded at natural work boundaries (after commits, historian runs, todo completion).
-Use `ctx_memory` to manage cross-session project memories. Write new memories or delete stale ones. Memories persist across sessions and are automatically injected into new sessions.
-**Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with `ctx_memory` so future sessions don't repeat the search. Examples:
-- Found a project's source code path after searching → `ctx_memory(action="write", category="ENVIRONMENT", content="OpenCode source is at ~/Work/OSS/opencode")`
-- Discovered a non-obvious build/test command → `ctx_memory(action="write", category="WORKFLOW_RULES", content="Always run the full release checklist before publishing")`
-- Learned a constraint the hard way → `ctx_memory(action="write", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")`
-Use `ctx_search` to search across project memories, session facts, and conversation history from one query.
-Use `ctx_expand` to decompress a compartment range to see the original conversation transcript. Use `start`/`end` from `<compartment start="N" end="M">` attributes. Returns the compacted U:/A: transcript for that message range, capped at ~15K tokens.
-**Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use `ctx_search` before asking the user. Examples:
-- Can't remember where a related codebase or dependency lives → `ctx_search(query="opencode source code path")`
-- Forgot a prior architectural decision or constraint → `ctx_search(query="why did we choose SQLite over postgres")`
-- Need a config value, API key location, or environment detail → `ctx_search(query="embedding provider configuration")`
-- Looking for how something was implemented previously → `ctx_search(query="how does the dreamer lease work")`
-- Want to recall what was decided in an earlier conversation → `ctx_search(query="dashboard release signing setup")`
-`ctx_search` returns ranked results from memories, session facts, and raw message history. Use message ordinals from results with `ctx_expand` to retrieve surrounding conversation context.
-Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are historian records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.
+Use `eidnara_note` for deferred intentions — things to tackle later, not right now. NOT for task tracking (use todos). Notes survive context compression and you'll be reminded at natural work boundaries (after commits, history_summarizer runs, todo completion).
+Use `eidnara_memory` to manage cross-session project memories. Write new memories or delete stale ones. Memories persist across sessions and are automatically injected into new sessions.
+**Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with `eidnara_memory` so future sessions don't repeat the search. Examples:
+- Found a project's source code path after searching → `eidnara_memory(action="write", category="ENVIRONMENT", content="OpenCode source is at ~/Work/OSS/opencode")`
+- Discovered a non-obvious build/test command → `eidnara_memory(action="write", category="WORKFLOW_RULES", content="Always run the full release checklist before publishing")`
+- Learned a constraint the hard way → `eidnara_memory(action="write", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")`
+Use `eidnara_search` to search across project memories, session facts, and conversation history from one query.
+History segments summarize previous conversation ranges; no raw-transcript expansion tool is registered.
+**Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use `eidnara_search` before asking the user. Examples:
+- Can't remember where a related codebase or dependency lives → `eidnara_search(query="opencode source code path")`
+- Forgot a prior architectural decision or constraint → `eidnara_search(query="why did we choose SQLite over postgres")`
+- Need a config value, API key location, or environment detail → `eidnara_search(query="embedding provider configuration")`
+- Looking for how something was implemented previously → `eidnara_search(query="how does the memory_classifier lease work")`
+- Want to recall what was decided in an earlier conversation → `eidnara_search(query="dashboard release signing setup")`
+`eidnara_search` returns ranked results from sources supported by its current schema.
+Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are history_summarizer records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.
 NEVER drop large ranges blindly (e.g., "1-50"). Review each tag before deciding.
-NEVER drop user messages — they are short and will be summarized by compartmentalization automatically. Dropping them loses context the historian needs.
+NEVER drop user messages — they are short and will be summarized by history_segmentalization automatically. Dropping them loses context the history_summarizer needs.
 NEVER drop assistant text messages unless they are exceptionally large. Your conversation messages are lightweight; only large tool outputs are worth dropping.
-Before your turn finishes, consider using `ctx_reduce` to drop large tool outputs you no longer need.
-When `surface_condition` is provided with `write`, the note becomes a project-scoped smart note.
-The dreamer evaluates smart note conditions during nightly runs and surfaces them when conditions are met.
-Example: `ctx_note(action="write", content="Implement X because Y", surface_condition="When PR #42 is merged in this repo")`
-**Temporal awareness**: User messages may be preceded by HTML comments like `<!-- +12m -->`, `<!-- +2h 15m -->`, or `<!-- +3d 4h -->` indicating time elapsed since the previous message's completion. Compartments in `<session-history>` carry `start-date` and `end-date` attributes (YYYY-MM-DD) showing real-time boundaries. Use these when reasoning about workflow pacing, log durations, build times, or how long ago something happened.
+Before your turn finishes, consider using `eidnara_reduce` to drop large tool outputs you no longer need.
+When `surface_condition` is provided with `write`, the note becomes a project-scoped conditional note.
+The memory_classifier evaluates conditional note conditions during nightly runs and surfaces them when conditions are met.
+Example: `eidnara_note(action="write", content="Implement X because Y", surface_condition="When PR #42 is merged in this repo")`
+**Temporal awareness**: User messages may be preceded by HTML comments like `<!-- +12m -->`, `<!-- +2h 15m -->`, or `<!-- +3d 4h -->` indicating time elapsed since the previous message's completion. HistorySegments in `<session-history>` carry `start-date` and `end-date` attributes (YYYY-MM-DD) showing real-time boundaries. Use these when reasoning about workflow pacing, log durations, build times, or how long ago something happened.
 
 ### Reduction Triggers
 - After collecting background agent results (explore/librarian) — drop raw outputs once you extracted what you need.
@@ -744,7 +744,7 @@ Example: `ctx_note(action="write", content="Implement X because Y", surface_cond
 - Large file reads and grep results already acted on.
 
 ### What to Keep
-- ALL user messages and assistant conversation text — these are cheap and compartmentalized automatically.
+- ALL user messages and assistant conversation text — these are cheap and history_segmentalized automatically.
 - Current todo list and active task context.
 - Recent errors and unresolved decisions.
 
@@ -761,8 +761,8 @@ Prefer many small targeted operations over one large blanket operation. Compress
 
 **Key Characteristics:**
 - Route all OpenCode integration through thin adapters in `src/plugin/` and keep feature logic in `src/hooks/`, `src/features/`, and `src/tools/`.
-- Use SQLite-backed durable state from `src/features/context/storage*.ts` for tags, pending ops, compartments, memories, dreamer queue state, and per-session cache-stability watermarks (`cleared_reasoning_through_tag`, `stripped_placeholder_ids`).
-- Use hidden subagents from `src/agents/*.ts` plus prompt builders in `src/features/context/dreamer/task-prompts.ts`, `src/features/context/sidekick/agent.ts`, and `src/hooks/context/compartment-prompt.ts`.
+- Use SQLite-backed durable state from `src/features/context/storage*.ts` for tags, pending ops, history_segments, memories, memory_classifier queue state, and per-session cache-stability watermarks (`cleared_reasoning_through_tag`, `stripped_placeholder_ids`).
+- Use hidden subagents from `src/agents/*.ts` plus prompt builders in `src/features/context/memory_classifier/task-prompts.ts`, `src/features/context/context-researcher/agent.ts`, and `src/hooks/context/history_segment-prompt.ts`.
 - Replay all persistent message mutations (reasoning clearing, placeholder stripping) on every transform pass — including defer passes — so stripped state survives OpenCode's message rebuilds without re-triggering a cache bust.
 
 ## Layers
@@ -782,22 +782,22 @@ Prefer many small targeted operations over one large blanket operation. Compress
 - Used by: `src/index.ts`.
 
 **Eidnara runtime:**
-- Purpose: Execute message transforms, lifecycle hooks, nudging, compaction reactions, command handling, and historian coordination.
+- Purpose: Execute message transforms, lifecycle hooks, nudging, compaction reactions, command handling, and history_summarizer coordination.
 - Location: `src/hooks/context/`
-- Contains: Transform pipeline, postprocess phase, event handlers, command handlers, prompt hashing, compartment runners.
+- Contains: Transform pipeline, postprocess phase, event handlers, command handlers, prompt hashing, history_segment runners.
 - Depends on: `src/features/context/`, `src/shared/`, `src/agents/eidnara-prompt.ts`.
 - Used by: `src/plugin/hooks/create-session-hooks.ts` and `src/plugin/event.ts`.
 
 **Core feature services:**
 - Purpose: Encapsulate reusable stateful services behind pure or narrow APIs.
 - Location: `src/features/context/`
-- Contains: Storage access, scheduler, tagger, compaction handler, memory system, dreamer queue/runner/scheduler, sidekick support.
+- Contains: Storage access, scheduler, tagger, compaction handler, memory system, memory_classifier queue/runner/scheduler, context_researcher support.
 - Depends on: `src/shared/` and Bun SQLite.
 - Used by: `src/hooks/context/`, `src/plugin/tool-registry.ts`, and `src/index.ts`.
 
 **Tool surface:**
 - Purpose: Expose agent tools with validated schemas and storage-backed execution.
-- Location: `src/tools/ctx-reduce/tools.ts`, `src/tools/ctx-expand/tools.ts`, `src/tools/ctx-note/tools.ts`, `src/tools/ctx-memory/tools.ts`
+- Location: `src/tools/eidnara-reduce/tools.ts`, `src/tools/ctx-expand/tools.ts`, `src/tools/eidnara-note/tools.ts`, `src/tools/eidnara-memory/tools.ts`
 - Contains: Tool definitions, argument schemas, action gating, user-facing result formatting.
 - Depends on: `src/features/context/` and `src/hooks/context/read-session-chunk.ts`.
 - Used by: `src/plugin/tool-registry.ts`.
@@ -821,13 +821,13 @@ Prefer many small targeted operations over one large blanket operation. Compress
 **Plugin startup:**
 1. Load and merge config from `src/config/index.ts` — prefer project-root `eidnara.jsonc`, then `.opencode/eidnara.*`, then user config.
 2. Build session hooks in `src/plugin/hooks/create-session-hooks.ts` — create the tagger, scheduler, and compaction handler.
-3. Register tools in `src/plugin/tool-registry.ts` — open the SQLite database, initialize embeddings, and expose `ctx_reduce`, `ctx_expand`, `ctx_note`, and conditional `ctx_memory`.
+3. Register tools in `src/plugin/tool-registry.ts` — open the SQLite database, initialize embeddings, and expose `eidnara_reduce`, `eidnara_search`, `eidnara_note`, and conditional `eidnara_memory`.
 4. Register OpenCode entrypoints in `src/index.ts` — bind message transforms, event hooks, command hooks, and hidden agents.
 
 **Session transform pipeline:**
 1. Enter `createEidnaraHook()` in `src/hooks/context/hook.ts` — open persistent storage, set up in-memory maps, and create the transform.
-2. Run the transform from `src/hooks/context/transform.ts` — tag messages, load session state, prepare compartment injection, and schedule deferred work. On every pass (including defer), replay persisted reasoning clearing using `replayClearedReasoning()` and `replayStrippedInlineThinking()` from `src/hooks/context/strip-content.ts` to maintain stripped state when OpenCode rebuilds messages from its own DB.
-3. Run postprocessing in `src/hooks/context/transform-postprocess-phase.ts` — apply pending ops, heuristic cleanup, reasoning cleanup, stale reduce-call cleanup, compartment rendering, and nudge placement. Stripped placeholder message IDs are read from `stripped_placeholder_ids` in `session_meta` (via `src/features/context/storage-meta-persisted.ts`) and replayed on every pass; the persisted set is updated when new empty shells are detected on cache-busting passes only.
+2. Run the transform from `src/hooks/context/transform.ts` — tag messages, load session state, prepare history_segment injection, and schedule deferred work. On every pass (including defer), replay persisted reasoning clearing using `replayClearedReasoning()` and `replayStrippedInlineThinking()` from `src/hooks/context/strip-content.ts` to maintain stripped state when OpenCode rebuilds messages from its own DB.
+3. Run postprocessing in `src/hooks/context/transform-postprocess-phase.ts` — apply pending ops, heuristic cleanup, reasoning cleanup, stale reduce-call cleanup, history_segment rendering, and nudge placement. Stripped placeholder message IDs are read from `stripped_placeholder_ids` in `session_meta` (via `src/features/context/storage-meta-persisted.ts`) and replayed on every pass; the persisted set is updated when new empty shells are detected on cache-busting passes only.
 4. Persist session state through storage helpers exported by `src/features/context/storage.ts`.
 
 **System prompt stability:**
@@ -838,21 +838,21 @@ Prefer many small targeted operations over one large blanket operation. Compress
 - The todowrite note-nudge fires in `src/hooks/context/hook-handlers.ts` only when ALL todo items have a terminal status (`completed` or `cancelled`). Intermediate todowrite calls during active work do not trigger the nudge.
 
 **Memory and search flow:**
-1. Create, update, merge, archive, list, or search memories through `src/tools/ctx-memory/tools.ts`.
+1. Create, update, merge, archive, list, or search memories through `src/tools/eidnara-memory/tools.ts`.
 2. Store canonical records in `src/features/context/memory/storage-memory.ts` and sync full-text search through the FTS triggers created in `src/features/context/storage-db.ts`.
 3. Generate and store embeddings through `src/features/context/memory/embedding.ts` and `src/features/context/memory/storage-memory-embeddings.ts`.
-4. Inject cached project memories into `<session-history>` through `src/hooks/context/inject-compartments.ts`.
+4. Inject cached project memories into `<session-history>` through `src/hooks/context/inject-history_segments.ts`.
 
-**Dreamer flow:**
+**MemoryClassifier flow:**
 1. Detect eligible projects during `message.updated` handling in `src/hooks/context/hook.ts`.
-2. Enqueue projects on a schedule through `src/features/context/dreamer/scheduler.ts` and `src/features/context/dreamer/queue.ts`.
-3. Serialize dream runs with the lease in `src/features/context/dreamer/lease.ts`.
-4. Spawn one child session per task from `src/features/context/dreamer/runner.ts` using prompts from `src/features/context/dreamer/task-prompts.ts`.
+2. Enqueue projects on a schedule through `src/features/context/memory_classifier/scheduler.ts` and `src/features/context/memory_classifier/queue.ts`.
+3. Serialize dream runs with the lease in `src/features/context/memory_classifier/lease.ts`.
+4. Spawn one child session per task from `src/features/context/memory_classifier/runner.ts` using prompts from `src/features/context/memory_classifier/task-prompts.ts`.
 
 **Command augmentation flow:**
-1. Register `/ctx-status`, `/ctx-flush`, `/ctx-recomp`, `/ctx-aug`, and `/ctx-dream` in `src/features/builtin-commands/commands.ts`.
+1. Register `/eidnara-status`, `/eidnara-flush`, `/eidnara-recomp`, `/eidnara-aug`, and `/ctx-dream` in `src/features/builtin-commands/commands.ts`.
 2. Intercept command execution in `src/hooks/context/command-handler.ts`.
-3. Run sidekick augmentation from `src/features/context/sidekick/agent.ts` or queue dream work through `src/features/context/dreamer/runner.ts`.
+3. Run context_researcher augmentation from `src/features/context/context-researcher/agent.ts` or queue dream work through `src/features/context/memory_classifier/runner.ts`.
 4. Send ignored notifications or real user prompts through `src/hooks/context/send-session-notification.ts`.
 
 ## Key Abstractions
@@ -874,13 +874,13 @@ Prefer many small targeted operations over one large blanket operation. Compress
 
 **Dream queue and lease:**
 - Purpose: Run at most one dream worker at a time and survive restarts.
-- Location: `src/features/context/dreamer/queue.ts`, `src/features/context/dreamer/lease.ts`, `src/features/context/dreamer/storage-dream-state.ts`
+- Location: `src/features/context/memory_classifier/queue.ts`, `src/features/context/memory_classifier/lease.ts`, `src/features/context/memory_classifier/storage-dream-state.ts`
 - Pattern: SQLite-backed queue plus cooperative lease lock.
 
 **User memory pipeline:**
-- Purpose: Extract user behavioral observations from historian output, collect candidates, and promote recurring patterns to stable user memories.
+- Purpose: Extract user behavioral observations from history_summarizer output, collect candidates, and promote recurring patterns to stable user memories.
 - Location: `src/features/context/user-memory/storage-user-memory.ts`, `src/features/context/user-memory/review-user-memories.ts`
-- Pattern: Historian extracts candidates, dreamer reviews and promotes, system prompt injects stable memories.
+- Pattern: HistorySummarizer extracts candidates, memory_classifier reviews and promotes, system prompt injects stable memories.
 
 **Plugin message bus:**
 - Purpose: Enable asynchronous communication between the TUI plugin and server plugin via SQLite.
@@ -888,13 +888,13 @@ Prefer many small targeted operations over one large blanket operation. Compress
 - Pattern: SQLite-backed message queue with direction, type, and payload columns; consumed atomically.
 
 **Compaction markers:**
-- Purpose: Inject OpenCode-compatible compaction boundaries into the message table so `filterCompacted` stops at historian's last compartment boundary.
+- Purpose: Inject OpenCode-compatible compaction boundaries into the message table so `filterCompacted` stops at history_summarizer's last history_segment boundary.
 - Location: `src/hooks/context/compaction-marker.ts`, `src/hooks/context/compaction-marker-manager.ts`
-- Pattern: Write summary/compaction rows into OpenCode's DB after historian publishes; filter them out from raw reads.
+- Pattern: Write summary/compaction rows into OpenCode's DB after history_summarizer publishes; filter them out from raw reads.
 
 **Agent prompt pack:**
 - Purpose: Keep hidden-agent identities and prompt text isolated from runtime wiring.
-- Location: `src/agents/dreamer.ts`, `src/agents/historian.ts`, `src/agents/sidekick.ts`, `src/agents/eidnara-prompt.ts`
+- Location: `src/agents/memory_classifier.ts`, `src/agents/history_summarizer.ts`, `src/agents/context_researcher.ts`, `src/agents/eidnara-prompt.ts`
 - Pattern: Constants plus prompt builders.
 
 **Content stripping and replay:**
@@ -936,26 +936,26 @@ Prefer many small targeted operations over one large blanket operation. Compress
 
 ## Session Modes
 
-Eidnara runs in two effective modes: primary sessions and subagents. The mode decides which heavier features (historian, nudges, prompt-adjunct injections) run for that session, while tag/drop/heuristic plumbing stays on everywhere. The visible reduce surface is additionally gated by whether `ctx_reduce` is actually available in the session's tool allow-list.
+Eidnara runs in two effective modes: primary sessions and subagents. The mode decides which heavier features (history_summarizer, nudges, prompt-adjunct injections) run for that session, while tag/drop/heuristic plumbing stays on everywhere. The visible reduce surface is additionally gated by whether `eidnara_reduce` is actually available in the session's tool allow-list.
 
 | Feature | Primary sessions | Subagents |
 |---|---|---|
 | Tag DB records | ✓ | ✓ |
-| `§N§` tag prefix injection in message text | ✓ when `ctx_reduce` is available | ✓ when `ctx_reduce` is available |
-| `ctx_reduce` tool | tool allow-list controlled | tool allow-list controlled |
-| Historian / compartments / compressor | ✓ | ✗ |
-| Compartment injection (`<session-history>`) | ✓ | ✗ |
+| `§N§` tag prefix injection in message text | ✓ when `eidnara_reduce` is available | ✓ when `eidnara_reduce` is available |
+| `eidnara_reduce` tool | tool allow-list controlled | tool allow-list controlled |
+| HistorySummarizer / history_segments / compressor | ✓ | ✗ |
+| HistorySegment injection (`<session-history>`) | ✓ | ✗ |
 | `<project-docs>`, `<user-profile>`, `<key-files>` system-prompt blocks | ✓ | ✗ |
-| Rolling / tool-heavy / sticky / deferred-note nudges | ✓ when `ctx_reduce` is available | ✓ when `ctx_reduce` is available |
+| Rolling / tool-heavy / sticky / deferred-note nudges | ✓ when `eidnara_reduce` is available | ✓ when `eidnara_reduce` is available |
 | Heuristic tool drops at execute threshold | ✓ | ✓ |
 | Heuristic reasoning clearing | ✓ | ✓ |
 | 85 % force-materialization | ✓ | ✗ |
 | 95 % block + emergency recovery | ✓ | ✗ |
-| Experimental age-tier caveman text compression | opt-in | ✗ |
+| Experimental age-tier terse_text_compression text compression | opt-in | ✗ |
 
-**Subagent rationale:** subagents are driven by a parent agent, have bounded lifetimes, and often run in parallel (council, historian, sidekick, dreamer child sessions). They still benefit from automatic heuristic drops on their own context at execute passes, but turning on historian, prompt-adjunct injections, or caveman text compression in each subagent would create redundant work and per-agent cache churn. Subagents that run into overflow fall back to the existing `overflow-detection.ts` path rather than Eidnara's own 85/95 thresholds.
+**Subagent rationale:** subagents are driven by a parent agent, have bounded lifetimes, and often run in parallel (council, history_summarizer, context_researcher, memory_classifier child sessions). They still benefit from automatic heuristic drops on their own context at execute passes, but turning on history_summarizer, prompt-adjunct injections, or terse_text_compression text compression in each subagent would create redundant work and per-agent cache churn. Subagents that run into overflow fall back to the existing `overflow-detection.ts` path rather than Eidnara's own 85/95 thresholds.
 
-**Reduce availability rationale:** a session whose tool allow-list denies `ctx_reduce` cannot act on `§N§` markers or reduce nudges, so Eidnara hides that visible surface while keeping deterministic parts (historian, heuristic drops, compartment injection, memory).
+**Reduce availability rationale:** a session whose tool allow-list denies `eidnara_reduce` cannot act on `§N§` markers or reduce nudges, so Eidnara hides that visible surface while keeping deterministic parts (history_summarizer, heuristic drops, history_segment injection, memory).
 
 ## Error Handling
 
@@ -1004,7 +1004,7 @@ Eidnara runs in two effective modes: primary sessions and subagents. The mode de
 **`src/agents/`:**
 - Purpose: Define hidden agent identifiers and shared agent prompt helpers.
 - Contains: Agent-name constants and prompt-building helpers.
-- Key files: `src/agents/dreamer.ts`, `src/agents/historian.ts`, `src/agents/sidekick.ts`, `src/agents/eidnara-prompt.ts`
+- Key files: `src/agents/memory_classifier.ts`, `src/agents/history_summarizer.ts`, `src/agents/context_researcher.ts`, `src/agents/eidnara-prompt.ts`
 
 **`src/config/`:**
 - Purpose: Parse and validate plugin configuration.
@@ -1023,13 +1023,13 @@ Eidnara runs in two effective modes: primary sessions and subagents. The mode de
 
 **`src/features/`:**
 - Purpose: Group reusable subsystem logic by feature.
-- Contains: Eidnara services, dreamer runtime, sidekick support, storage, scheduler, tagger, and built-in commands.
-- Key files: `src/features/context/storage-db.ts`, `src/features/context/storage-meta-persisted.ts`, `src/features/context/dreamer/runner.ts`, `src/features/context/memory/storage-memory.ts`, `src/features/context/user-memory/storage-user-memory.ts`, `src/features/builtin-commands/commands.ts`
+- Contains: Eidnara services, memory_classifier runtime, context_researcher support, storage, scheduler, tagger, and built-in commands.
+- Key files: `src/features/context/storage-db.ts`, `src/features/context/storage-meta-persisted.ts`, `src/features/context/memory_classifier/runner.ts`, `src/features/context/memory/storage-memory.ts`, `src/features/context/user-memory/storage-user-memory.ts`, `src/features/builtin-commands/commands.ts`
 
 **`src/tools/`:**
 - Purpose: Define the agent-facing tool surface.
 - Contains: One directory per tool with constants, types, implementation, and tests.
-- Key files: `src/tools/ctx-reduce/tools.ts`, `src/tools/ctx-expand/tools.ts`, `src/tools/ctx-note/tools.ts`, `src/tools/ctx-memory/tools.ts`
+- Key files: `src/tools/eidnara-reduce/tools.ts`, `src/tools/ctx-expand/tools.ts`, `src/tools/eidnara-note/tools.ts`, `src/tools/eidnara-memory/tools.ts`
 
 **`src/shared/`:**
 - Purpose: Keep cross-feature utilities small and dependency-light.
@@ -1054,13 +1054,13 @@ Eidnara runs in two effective modes: primary sessions and subagents. The mode de
 
 **Core Logic:** `src/hooks/context/transform.ts`: run the turn transform; `src/hooks/context/hook.ts`: compose runtime services; `src/hooks/context/strip-content.ts`: strip and replay reasoning, inline thinking, and placeholder messages; `src/features/context/storage-db.ts`: create durable storage; `src/features/context/storage-meta-persisted.ts`: read and write per-session persisted scalars and JSON blobs.
 
-**Tests:** co-locate tests with source as `src/**/*.test.ts`, for example `src/hooks/context/hook.test.ts` and `src/tools/ctx-memory/tools.test.ts`.
+**Tests:** co-locate tests with source as `src/**/*.test.ts`, for example `src/hooks/context/hook.test.ts` and `src/tools/eidnara-memory/tools.test.ts`.
 
 ## Naming Conventions
 
 **Files:** Use kebab-case for multiword module files and reserve `index.ts` for barrel exports or package entry modules: `transform-postprocess-phase.ts`, `storage-memory.ts`, `index.ts`.
 
-**Directories:** Group by feature first, then by tool or subsystem name: `src/features/context/dreamer/`, `src/tools/ctx-memory/`, `src/hooks/context/`.
+**Directories:** Group by feature first, then by tool or subsystem name: `src/features/context/memory_classifier/`, `src/tools/eidnara-memory/`, `src/hooks/context/`.
 
 ## Where to Add New Code
 

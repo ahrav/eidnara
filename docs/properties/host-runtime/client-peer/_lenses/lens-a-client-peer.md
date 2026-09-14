@@ -23,9 +23,9 @@ the same four verified facts rather than on a preamble assertion:
    `Client::connect`, and that binary is described by its own manifest as "the
    production lifecycle/serve executable"
    (`crates/daemon/Cargo.toml:18-19`). `ManagedConnector::connect` at
-   `crates/daemon/src/historian_producer.rs:693` calls it as well, and is not
+   `crates/daemon/src/history_summarizer_producer.rs:693` calls it as well, and is not
    inside a test module. `docs/host-wire-protocol.md:808` names
-   `HistorianProducer` as a `host_runtime::Client` consumer.
+   `HistorySummarizerProducer` as a `host_runtime::Client` consumer.
 4. The doc comment "Thread-confined peer endpoint for integration tests" at
    `ring_transport.rs:626` is therefore **wrong about reachability**, confirming
    the sibling finding the task prompt flagged. `RING_PROFILE` being spelled
@@ -88,7 +88,7 @@ and `client-a-a-clean-host-close-and-a-transport-failure-share-one-code`.
 
 Nothing. `client.rs` has no reconnect path. Recovery is the caller's:
 `ProducerConnector::reconnect` at
-`crates/daemon/src/historian_producer.rs:699` is a separate trait method, and
+`crates/daemon/src/history_summarizer_producer.rs:699` is a separate trait method, and
 `ManagedConnector::connect` (`:693`) builds a fresh `Client`. A fresh `Client`
 means a fresh `Inner` (`client.rs:387-407`) with `Correlations::new(1)`
 (`:393`, `:1731`), an empty `routes` set (`:397`), an empty `pending` map
@@ -291,6 +291,7 @@ Confidence: high - [evidence](../../evidence/client-a-a-retired-generation-forge
 Existing check: none. `dropped_close_retires_and_repeated_close_joins_tasks` (`:3121`) exercises retirement but asserts nothing about cause visibility.
 Impact: An operator or a recovery policy cannot tell a host reload from a ring fault after the fact. Combined with Part 2b's finding that the host reports itself healthy on ring unavailability, neither side of the connection retains the diagnosis.
 Open questions:
+
 - Should `Inner` carry a `retire_cause: OnceLock<&'static str>` so late callers get the real code? This changes the public `CallError` code set, so it is a compatibility decision. (needs human input)
 
 ### client-a-a-clean-host-close-and-a-transport-failure-share-one-code
@@ -307,6 +308,7 @@ Confidence: high - [evidence](../../evidence/client-a-a-clean-host-close-and-a-t
 Existing check: none.
 Impact: This is the significant finding the task anticipated. A recovery policy that wants to back off on transport faults but reconnect promptly on a host reload has no signal to branch on, and Part 2b established the host's own diagnostics are equally silent, so the fault is invisible from both ends.
 Open questions:
+
 - Does a healthy host emit a channel-0 Goodbye before its ring closes? `docs/host-wire-protocol.md` step 4 of graceful shutdown says the host sends best-effort connection Goodbye after the drain, which would give `connection_goodbye` instead. Whether that step is reliably reached before the ring drops is a 2a or 2b question, not answerable from `client.rs`. (unresolved, needs a host-side trace)
 
 ### client-a-a-ring-failure-departs-the-setup-socket-as-a-clean-goodbye
@@ -323,6 +325,7 @@ Confidence: high - [evidence](../../evidence/client-a-a-ring-failure-departs-the
 Existing check: `setup_socket.rs:820` and `:824` assert `observe_peer` returns `Goodbye` and `UnexpectedEof` respectively, but nothing ties either to a client transport state.
 Impact: The host metric intended to count dead peers counts only peers that failed to complete a socket write. A fleet losing rings would look like a fleet of well-behaved clients.
 Open questions:
+
 - Should the bridge thread suppress the goodbye on its failure `break`s so the host classifies correctly? That makes a transport fault look like an abrupt EOF, which is the honest signal. (needs human input)
 
 ### client-a-a-close-completes-before-its-setup-goodbye-is-written
@@ -339,6 +342,7 @@ Confidence: high - [evidence](../../evidence/client-a-a-close-completes-before-i
 Existing check: none.
 Impact: A clean shutdown is recorded by the host as a peer death, which is the exact inverse of the previous record. Together they mean the host's `record_peer_death` signal is uncorrelated with reality in both directions.
 Open questions:
+
 - Should `Inner` hold the bridge thread's `JoinHandle` so `close` can join it under the same 5-second budget? That budget is already shared with route teardown. (needs human input)
 
 ### client-a-every-in-flight-request-is-settled-with-a-classified-send-outcome
@@ -385,6 +389,7 @@ Confidence: medium - [evidence](../../evidence/client-a-a-failed-pong-enqueue-re
 Existing check: `a_ping_at_any_valid_priority_is_answered_with_an_exact_flag_echo` (`:2754`); status `unaudited`.
 Impact: The client's only protocol obligation toward host liveness fails silently. Part 2a's `a-timely-pong-sustains-the-generation-within-a-bounded-round` is the host-side liveness property this could break.
 Open questions:
+
 - Can `encode_owned_frame` reject a flag byte that `validate_inbound:2073-2080` accepted? If not, this branch is unreachable and the record should be downgraded. (unresolved, needs a `wire.rs` read that 2b owns)
 
 ### client-a-pong-egress-is-not-bounded-by-any-client-side-liveness-budget
@@ -401,6 +406,7 @@ Confidence: high - [evidence](../../evidence/client-a-pong-egress-is-not-bounded
 Existing check: `data_saturation_never_starves_a_control_frame` (`:3225`) covers queue-slot starvation, which is a different mechanism; status `unaudited`.
 Impact: Whether the host retires the generation first depends on its probe interval against 30 seconds. If the probe is shorter, an inbound stall presents to the operator as a liveness failure rather than as backpressure.
 Open questions:
+
 - What is the host's probe interval and deadline? Part 2a owns the liveness probe; the comparison against `CLIENT_FRAME_TIMEOUT` needs that number. (unresolved, needs the 2a figure)
 
 ### client-a-live-route-handles-are-bounded-only-by-the-host
@@ -417,6 +423,7 @@ Confidence: high - [evidence](../../evidence/client-a-live-route-handles-are-bou
 Existing check: none.
 Impact: Unbounded caller-driven growth with no local reaper is the recurring shape this catalog has found in every part. Here the damage is transitive: each entry corresponds to a host channel and route permit, so a looping caller exhausts host resources rather than its own.
 Open questions:
+
 - Does the host cap concurrent routes per generation, and does it answer `target_unavailable` on exhaustion as `docs/host-wire-protocol.md:658` implies? If so the transitive bound is real, though undeclared on this side. (unresolved, needs the 2e or 2f route-admission figure)
 
 ### client-a-a-duplicate-host-bind-collapses-two-routes-into-one-handle
@@ -433,6 +440,7 @@ Confidence: high - [evidence](../../evidence/client-a-a-duplicate-host-bind-coll
 Existing check: `a_duplicate_bind_terminal_never_closes_an_owned_route` (`:3587`); status `unaudited`.
 Impact: A host bug or a hostile peer at the setup path turns into cross-caller interference inside one client: caller A's `close_route` silently settles caller B's requests with `route_gone`. Part 2c established that epochs are host-minted and that the activation token cannot gate mapping, so the client has no independent basis to reject a repeated handle.
 Open questions:
+
 - Should `open_route` retire on a duplicate handle, the way it already retires on an unparseable one (`:486`)? Both are host protocol violations the client cannot name a remedy for. (needs human input)
 
 ### client-a-host-shutdown-success-rests-only-on-a-json-echo
@@ -449,6 +457,7 @@ Confidence: high - [evidence](../../evidence/client-a-host-shutdown-success-rest
 Existing check: none found for `host_shutdown` in `client.rs`'s test module.
 Impact: This is the shape a sibling part found on a producer that advanced a durable checkpoint on an acknowledgement truthful about nothing. Here the acknowledgement gates a lifecycle owner's belief that a daemon stopped, which is the precondition for starting a replacement. A stale echo could produce two live daemons.
 Open questions:
+
 - Does the host emit the `host.shutdown` response strictly after its stop is committed, as `:575` claims? That is a 2a or 2e claim about the host's control handler and is not verifiable from `client.rs`. (unresolved, needs the host-side handler)
 - Does any caller of `host_shutdown` treat `Ok` as authority to launch a replacement daemon? `crates/daemon/src/bin/eidnara-host.rs` is the likely site and is outside this sub-part's scope. (unresolved, needs 2f or a daemon pass)
 
@@ -467,6 +476,7 @@ Confidence: medium - [evidence](../../evidence/client-a-route-open-retries-treat
 Existing check: `an_abandoned_control_open_releases_a_late_bound_route` (`:3503`) covers the late-bind remedy that would partially mitigate this; status `unaudited`.
 Impact: If `module_timeout` is a deadline rather than a rejection, each retry can strand a host route and channel permit, bounded only by the 30-second route-open deadline divided by the backoff. The mitigation at `:1572` works only while the generation stays live.
 Open questions:
+
 - Is `module_timeout` emitted after the host proves no bind occurred? `docs/host-wire-protocol.md:658` reserves `target_unavailable` for route admission and gives each code "exactly one recovery rule in Section 10.2", which suggests the codes are meant to be authoritative, but does not state it for `module_timeout`. (unresolved, needs the 2e control-handler pass)
 
 ### client-a-a-host-originated-cancel-retires-the-generation
@@ -483,6 +493,7 @@ Confidence: high - [evidence](../../evidence/client-a-a-host-originated-cancel-r
 Existing check: `inbound_validation_enforces_the_direct_profile_table` (`:2658`); status `unaudited`, and its coverage of `Cancel` specifically is unverified.
 Impact: If a host ever emits `Cancel`, every route on the generation dies. If a host never does, the strictness is free and the finding is a documentation defect rather than a code defect. Which of those holds is the open question.
 Open questions:
+
 - Is host-originated `Cancel` legal in this profile? `docs/host-wire-protocol.md:269` enumerates role-invalid frames and omits `Cancel`, while `:280` gives `Cancel` a no-op disposition without naming a direction. The doc is ambiguous and the code is strict. (needs human input)
 
 ### client-a-the-unmatched-inbound-frame-arm-is-never-entered-in-production
@@ -559,9 +570,9 @@ tasks, queued requests, and aggregate buffered bodies." Code bounds pending
 `Connected --> Recovering: connection failure` and
 `Recovering --> Discovering: bounded backoff, reread file`. Code: `client.rs`
 has no reconnect path at all; `retire` (`:1667`) is terminal for the `Client`
-value. Recovery lives in `crates/daemon/src/historian_producer.rs:699`. The
+value. Recovery lives in `crates/daemon/src/history_summarizer_producer.rs:699`. The
 comment at `client.rs:418-424` shows this is understood and that at least one
-caller does not recover on the post-setup race path: "the historian does not
+caller does not recover on the post-setup race path: "the history_summarizer does not
 reconnect on that path, so a daemon reload race would abort the run instead of
 establishing a replacement." Whether the doc means the state machine is the
 client library's or the consumer's is unresolved.

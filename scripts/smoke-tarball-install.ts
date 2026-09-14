@@ -30,16 +30,34 @@ const PAYLOAD_FILES = [
 /** Packages an operator installs directly. */
 const PARENT_PACKAGES = ["@eidnara/opencode", "@eidnara/pi", "@eidnara/cli"];
 /** The `@eidnara/*` edges each packed manifest must declare, all pinned to VERSION. */
-const LEAF_EDGES: Record<string, { dependencies: string[]; optionalDependencies: string[] }> = {
+const LEAF_EDGES: Record<
+    string,
+    { dependencies: string[]; optionalDependencies: string[] }
+> = {
     "@eidnara/opencode": {
         dependencies: ["@eidnara/shm-native"],
         optionalDependencies: [PAYLOAD_PACKAGE],
     },
-    "@eidnara/pi": { dependencies: ["@eidnara/shm-native"], optionalDependencies: [PAYLOAD_PACKAGE] },
-    "@eidnara/cli": { dependencies: ["@eidnara/shm-native"], optionalDependencies: [PAYLOAD_PACKAGE] },
-    "@eidnara/shm-native": { dependencies: [], optionalDependencies: [PAYLOAD_PACKAGE] },
+    "@eidnara/pi": {
+        dependencies: ["@eidnara/shm-native"],
+        optionalDependencies: [PAYLOAD_PACKAGE],
+    },
+    "@eidnara/cli": {
+        dependencies: ["@eidnara/shm-native"],
+        optionalDependencies: [PAYLOAD_PACKAGE],
+    },
+    "@eidnara/shm-native": {
+        dependencies: [],
+        optionalDependencies: [PAYLOAD_PACKAGE],
+    },
 };
-const PAYLOAD_TARBALL = ["LICENSE", "NOTICE", "README.md", "package.json", ...PAYLOAD_FILES]
+const PAYLOAD_TARBALL = [
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "package.json",
+    ...PAYLOAD_FILES,
+]
     .map((path) => `package/${path}`)
     .sort();
 const TEST_FILE = /\.test\./;
@@ -88,7 +106,11 @@ const TARBALL_RULES: Record<string, TarballRule> = {
         ],
     },
     "@eidnara/pi": {
-        allows: [NPM_ALWAYS, "package/package.json", /^package\/dist\/[^/]+\.js$/],
+        allows: [
+            NPM_ALWAYS,
+            "package/package.json",
+            /^package\/dist\/[^/]+\.js$/,
+        ],
         ships: ["package/dist/index.js", "package/dist/subagent-entry.js"],
         omits: [TEST_FILE],
     },
@@ -98,7 +120,12 @@ const TARBALL_RULES: Record<string, TarballRule> = {
         omits: [TEST_FILE],
     },
     "@eidnara/shm-native": {
-        allows: [NPM_ALWAYS, "package/package.json", "package/index.js", "package/index.ts"],
+        allows: [
+            NPM_ALWAYS,
+            "package/package.json",
+            "package/index.js",
+            "package/index.ts",
+        ],
         ships: ["package/index.js", "package/index.ts", "package/package.json"],
         omits: [],
     },
@@ -106,7 +133,7 @@ const TARBALL_RULES: Record<string, TarballRule> = {
 const FORBIDDEN_EVERYWHERE = [
     /\/features\/context\/memory\//,
     /\/storage/,
-    /\/dreamer\//,
+    /\/memory_classifier\//,
     /\/embedding/,
 ];
 // Mirrors the `Predecessor tokens` step in `.github/workflows/ci.yml`; the bracketed
@@ -131,7 +158,7 @@ const IMPORT_PROBE = [
     'if (typeof t.default?.id !== "string" || typeof t.default?.tui !== "function")',
     '    problems.push("@eidnara/opencode/tui default lacks { id, tui }");',
     'if (typeof p.default !== "function") problems.push("@eidnara/pi default is not callable");',
-    "if (problems.length > 0) { console.error(problems.join(\"\\n\")); process.exit(1); }",
+    'if (problems.length > 0) { console.error(problems.join("\\n")); process.exit(1); }',
     'console.log("opencode, opencode/tui, pi");',
 ].join("\n");
 const START_TIMEOUT_MS = 180_000;
@@ -142,12 +169,19 @@ class SmokeFailure extends Error {}
 const failures: string[] = [];
 
 /** Prints one line per check; a failure is recorded and stops the run so later steps do not act on broken state. */
-function assert(condition: boolean, message: string, detail?: string): asserts condition {
+function assert(
+    condition: boolean,
+    message: string,
+    detail?: string,
+): asserts condition {
     if (condition) {
         console.log(`  ok  ${message}`);
         return;
     }
-    const text = detail === undefined || detail === "" ? message : `${message}: ${detail}`;
+    const text =
+        detail === undefined || detail === ""
+            ? message
+            : `${message}: ${detail}`;
     failures.push(text);
     console.log(`FAIL  ${text}`);
     throw new SmokeFailure(text);
@@ -181,7 +215,8 @@ function run(cmd: string[], options: RunOptions = {}): RunResult {
     const timedOut = result.exitedDueToTimeout === true;
     return {
         // A signal exit reports no exit code, so it is folded into a non-zero status.
-        code: timedOut || result.signalCode !== undefined ? -1 : result.exitCode,
+        code:
+            timedOut || result.signalCode !== undefined ? -1 : result.exitCode,
         stdout: result.stdout?.toString() ?? "",
         stderr: result.stderr?.toString() ?? "",
         timedOut,
@@ -216,7 +251,11 @@ function developerEnv(): Record<string, string> {
 
 function describe(result: RunResult): string {
     if (result.timedOut) return "timed out";
-    const tail = `${result.stdout}\n${result.stderr}`.trim().split("\n").slice(-12).join("\n");
+    const tail = `${result.stdout}\n${result.stderr}`
+        .trim()
+        .split("\n")
+        .slice(-12)
+        .join("\n");
     return `exit ${result.code}\n${tail}`;
 }
 
@@ -228,27 +267,40 @@ function readJson(path: string): Record<string, unknown> {
     return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 }
 
-function assertLeafEdges(name: string, manifest: Record<string, unknown>): void {
+function assertLeafEdges(
+    name: string,
+    manifest: Record<string, unknown>,
+): void {
     const edges = LEAF_EDGES[name];
-    if (edges === undefined) throw new Error(`no leaf edges declared for ${name}`);
+    if (edges === undefined)
+        throw new Error(`no leaf edges declared for ${name}`);
     for (const field of ["dependencies", "optionalDependencies"] as const) {
-        const declared = Object.entries((manifest[field] ?? {}) as Record<string, string>)
+        const declared = Object.entries(
+            (manifest[field] ?? {}) as Record<string, string>,
+        )
             .filter(([dep]) => dep.startsWith("@eidnara/"))
             .sort();
         const expected = [...edges[field]].sort().map((dep) => [dep, VERSION]);
         assert(
             JSON.stringify(declared) === JSON.stringify(expected),
             `${name} ${field} pin ${expected.map(([dep]) => dep).join(", ") || "no @eidnara/* package"}`,
-            declared.map(([dep, range]) => `${dep}@${range}`).join(", ") || "none declared",
+            declared.map(([dep, range]) => `${dep}@${range}`).join(", ") ||
+                "none declared",
         );
     }
 }
 
 function matches(entry: string, pattern: Pattern): boolean {
-    return typeof pattern === "string" ? entry === pattern : pattern.test(entry);
+    return typeof pattern === "string"
+        ? entry === pattern
+        : pattern.test(entry);
 }
 
-function assertEntries(name: string, entries: string[], rule: Partial<TarballRule>): void {
+function assertEntries(
+    name: string,
+    entries: string[],
+    rule: Partial<TarballRule>,
+): void {
     if (rule.allows !== undefined) {
         const allows = rule.allows;
         const strays = entries.filter(
@@ -268,7 +320,11 @@ function assertEntries(name: string, entries: string[], rule: Partial<TarballRul
     }
     for (const pattern of rule.omits ?? []) {
         const hits = entries.filter((entry) => pattern.test(entry));
-        assert(hits.length === 0, `${name} omits ${pattern}`, hits.slice(0, 5).join(", "));
+        assert(
+            hits.length === 0,
+            `${name} omits ${pattern}`,
+            hits.slice(0, 5).join(", "),
+        );
     }
 }
 
@@ -283,12 +339,19 @@ function walkFiles(dir: string, out: string[] = []): string[] {
 
 function readPiPeerVersions(rootDir: string): Record<string, string> {
     const manifest = JSON.parse(
-        readFileSync(join(rootDir, "packages", "pi-plugin", "package.json"), "utf8"),
-    ) as { peerDependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+        readFileSync(
+            join(rootDir, "packages", "pi-plugin", "package.json"),
+            "utf8",
+        ),
+    ) as {
+        peerDependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+    };
     const versions: Record<string, string> = {};
     for (const name of Object.keys(manifest.peerDependencies ?? {})) {
         const pinned = manifest.devDependencies?.[name];
-        if (pinned === undefined) throw new Error(`pi-plugin pins no dev version for peer ${name}`);
+        if (pinned === undefined)
+            throw new Error(`pi-plugin pins no dev version for peer ${name}`);
         versions[name] = pinned;
     }
     return versions;
@@ -298,7 +361,11 @@ function scanPredecessorTokens(extractedRoot: string): string[] {
     const hits: string[] = [];
     for (const path of walkFiles(extractedRoot)) {
         const rel = relative(extractedRoot, path);
-        if (rel.endsWith(".node") || rel.endsWith(".tgz") || rel.includes("/payload/bin/"))
+        if (
+            rel.endsWith(".node") ||
+            rel.endsWith(".tgz") ||
+            rel.includes("/payload/bin/")
+        )
             continue;
         const bytes = readFileSync(path);
         // A NUL byte within the first 8 KiB marks a binary, matching `grep -I`.
@@ -324,8 +391,16 @@ function parseBunLock(path: string): Record<string, unknown[]> {
 }
 
 /** Runs the installed bin as a user would: through its mode bits and `#!/usr/bin/env node`. */
-function daemon(cli: string, project: string, action: string, timeoutMs = DEFAULT_TIMEOUT_MS) {
-    const result = run([cli, "daemon", action, "--json"], { cwd: project, timeoutMs });
+function daemon(
+    cli: string,
+    project: string,
+    action: string,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+) {
+    const result = run([cli, "daemon", action, "--json"], {
+        cwd: project,
+        timeoutMs,
+    });
     let parsed: Record<string, unknown> = {};
     try {
         parsed = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
@@ -346,7 +421,9 @@ function assertDaemon(
         .join(" ");
     assert(
         got.result.code === code &&
-            Object.entries(expected).every(([key, value]) => got.parsed[key] === value),
+            Object.entries(expected).every(
+                ([key, value]) => got.parsed[key] === value,
+            ),
         `eidnara daemon ${action} --json exits ${code} with ${summary}`,
         describe(got.result),
     );
@@ -363,7 +440,8 @@ function main(): void {
         }
     }
     for (const tool of ["node", "npm"]) {
-        if (Bun.which(tool) === null) throw new SmokeFailure(`${tool} is not on PATH`);
+        if (Bun.which(tool) === null)
+            throw new SmokeFailure(`${tool} is not on PATH`);
     }
 
     tmpRoot = mkdtempSync(join(tmpdir(), "eidnara-tarball-smoke-"));
@@ -388,12 +466,21 @@ function main(): void {
 
         const tarballs: Record<string, string> = {};
         for (const [name, dir] of Object.entries(PACKAGE_DIRS)) {
-            const version = readJson(join(rootDir, dir, "package.json")).version;
-            assert(version === VERSION, `${name} is version ${VERSION}`, String(version));
-            const pack = run(["npm", "pack", "--pack-destination", packsDir, "--silent"], {
-                cwd: join(rootDir, dir),
-                timeoutMs: 300_000,
-            });
+            const version = readJson(
+                join(rootDir, dir, "package.json"),
+            ).version;
+            assert(
+                version === VERSION,
+                `${name} is version ${VERSION}`,
+                String(version),
+            );
+            const pack = run(
+                ["npm", "pack", "--pack-destination", packsDir, "--silent"],
+                {
+                    cwd: join(rootDir, dir),
+                    timeoutMs: 300_000,
+                },
+            );
             assert(pack.code === 0, `npm pack ${name}`, describe(pack));
             tarballs[name] = join(packsDir, tarballName(name));
         }
@@ -408,8 +495,14 @@ function main(): void {
         const listings: Record<string, string[]> = {};
         for (const [name, path] of Object.entries(tarballs)) {
             const listed = run(["tar", "-tzf", path]);
-            assert(listed.code === 0, `tar lists ${tarballName(name)}`, describe(listed));
-            listings[name] = listed.stdout.split("\n").filter((line) => line.length > 0);
+            assert(
+                listed.code === 0,
+                `tar lists ${tarballName(name)}`,
+                describe(listed),
+            );
+            listings[name] = listed.stdout
+                .split("\n")
+                .filter((line) => line.length > 0);
         }
         for (const [name, rule] of Object.entries(TARBALL_RULES)) {
             assertEntries(name, listings[name] ?? [], rule);
@@ -427,11 +520,17 @@ function main(): void {
         for (const [name, path] of Object.entries(tarballs)) {
             const dest = join(extractedDir, name.slice("@eidnara/".length));
             mkdirSync(dest, { recursive: true });
-            const extract = run(["tar", "-xzf", path, "-C", dest], { timeoutMs: 300_000 });
+            const extract = run(["tar", "-xzf", path, "-C", dest], {
+                timeoutMs: 300_000,
+            });
             assert(extract.code === 0, `extract ${name}`, describe(extract));
         }
         for (const name of Object.keys(LEAF_EDGES)) {
-            const packed = join(extractedDir, name.slice("@eidnara/".length), "package");
+            const packed = join(
+                extractedDir,
+                name.slice("@eidnara/".length),
+                "package",
+            );
             assertLeafEdges(name, readJson(join(packed, "package.json")));
         }
         const cliEntry = readFileSync(
@@ -450,7 +549,10 @@ function main(): void {
         );
 
         const fileDeps = Object.fromEntries(
-            Object.entries(tarballs).map(([name, path]) => [name, `file:${path}`]),
+            Object.entries(tarballs).map(([name, path]) => [
+                name,
+                `file:${path}`,
+            ]),
         );
         // The Pi extension declares its host packages as optional peers because Pi provides them at load time; the smoke project stands in for Pi, so it installs the pinned versions the package develops against.
         const piPeers = readPiPeerVersions(rootDir);
@@ -460,7 +562,9 @@ function main(): void {
             private: true,
             type: "module",
             dependencies: {
-                ...Object.fromEntries(PARENT_PACKAGES.map((name) => [name, fileDeps[name]])),
+                ...Object.fromEntries(
+                    PARENT_PACKAGES.map((name) => [name, fileDeps[name]]),
+                ),
                 ...piPeers,
             },
             overrides: {
@@ -468,13 +572,26 @@ function main(): void {
                 [PAYLOAD_PACKAGE]: fileDeps[PAYLOAD_PACKAGE],
             },
         };
-        writeFileSync(join(project, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-        const install = run(["bun", "install"], { cwd: project, timeoutMs: 600_000 });
-        assert(install.code === 0, "bun install from tarballs", describe(install));
+        writeFileSync(
+            join(project, "package.json"),
+            `${JSON.stringify(manifest, null, 2)}\n`,
+        );
+        const install = run(["bun", "install"], {
+            cwd: project,
+            timeoutMs: 600_000,
+        });
+        assert(
+            install.code === 0,
+            "bun install from tarballs",
+            describe(install),
+        );
         const noisy = `${install.stdout}\n${install.stderr}`
             .split("\n")
             .filter((line) => line.includes("@eidnara/"))
-            .filter((line) => /warn/i.test(line) || line.includes("registry.npmjs.org"));
+            .filter(
+                (line) =>
+                    /warn/i.test(line) || line.includes("registry.npmjs.org"),
+            );
         assert(
             noisy.length === 0,
             "bun install neither warns about nor fetches @eidnara/* from the registry",
@@ -492,11 +609,19 @@ function main(): void {
         }
         const installedPayload = join(project, "node_modules", PAYLOAD_PACKAGE);
         for (const rel of PAYLOAD_FILES) {
-            assert(existsSync(join(installedPayload, rel)), `installed ${PAYLOAD_PACKAGE}/${rel}`);
+            assert(
+                existsSync(join(installedPayload, rel)),
+                `installed ${PAYLOAD_PACKAGE}/${rel}`,
+            );
         }
         const launcherMode =
-            statSync(join(installedPayload, "payload/bin/eidnara-host")).mode & 0o777;
-        assert(launcherMode === 0o755, "installed launcher mode is 0755", launcherMode.toString(8));
+            statSync(join(installedPayload, "payload/bin/eidnara-host")).mode &
+            0o777;
+        assert(
+            launcherMode === 0o755,
+            "installed launcher mode is 0755",
+            launcherMode.toString(8),
+        );
 
         const imports = run(["bun", "-e", IMPORT_PROBE], { cwd: project });
         assert(
@@ -507,7 +632,11 @@ function main(): void {
 
         // statSync follows the .bin symlink, so this is the mode of the shipped dist/index.js.
         const cliMode = statSync(cli).mode & 0o777;
-        assert((cliMode & 0o111) !== 0, "installed eidnara bin is executable", cliMode.toString(8));
+        assert(
+            (cliMode & 0o111) !== 0,
+            "installed eidnara bin is executable",
+            cliMode.toString(8),
+        );
         const version = run([cli, "--version"], { cwd: project });
         assert(
             version.code === 0 && version.stdout.trim() === VERSION,
@@ -522,8 +651,16 @@ function main(): void {
             ok: true,
             state: "running",
         });
-        const connection = join(scratchEnv().XDG_DATA_HOME, "eidnara", "run", "connection.json");
-        assert(existsSync(connection), `${relative(tmpRoot, connection)} exists`);
+        const connection = join(
+            scratchEnv().XDG_DATA_HOME,
+            "eidnara",
+            "run",
+            "connection.json",
+        );
+        assert(
+            existsSync(connection),
+            `${relative(tmpRoot, connection)} exists`,
+        );
         assertDaemon("status", daemon(cli, project, "status"), 0, {
             ok: true,
             state: "running",
@@ -531,14 +668,19 @@ function main(): void {
         });
         const stop = daemon(cli, project, "stop");
         stopped = stop.result.code === 0;
-        assertDaemon("stop", stop, 0, { ok: true, state: "stopped", command: "stop" });
+        assertDaemon("stop", stop, 0, {
+            ok: true,
+            state: "stopped",
+            command: "stop",
+        });
         assertDaemon("status", daemon(cli, project, "status"), 1, {
             ok: false,
             state: "stopped",
             reason: "not_running",
         });
     } finally {
-        if (startAttempted && !stopped) run([cli, "daemon", "stop", "--json"], { cwd: project });
+        if (startAttempted && !stopped)
+            run([cli, "daemon", "stop", "--json"], { cwd: project });
         if (keep) console.log(`kept ${tmpRoot}`);
         else rmSync(tmpRoot, { recursive: true, force: true });
     }
@@ -549,7 +691,11 @@ try {
     console.log("tarball smoke: ok");
 } catch (error) {
     if (!(error instanceof SmokeFailure)) {
-        failures.push(error instanceof Error ? (error.stack ?? error.message) : String(error));
+        failures.push(
+            error instanceof Error
+                ? (error.stack ?? error.message)
+                : String(error),
+        );
     }
     console.error(`tarball smoke: ${failures.length} check(s) failed`);
     for (const failure of failures) console.error(`  - ${failure}`);

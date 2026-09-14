@@ -1,11 +1,10 @@
 //! Host runtime for the wire contract in `docs/host-wire-protocol.md`.
 
-// `deny(unsafe_code)` permits Broca's scoped `allow` for its `pre_exec` hook.
+// `deny(unsafe_code)` permits ModelExecution's scoped `allow` for its `pre_exec` hook.
 // `PR_SET_PDEATHSIG` terminates harness children when the host dies.
 #![deny(unsafe_code)]
 
 pub mod auth;
-pub mod broca;
 pub mod client;
 pub mod composite;
 pub mod config;
@@ -14,9 +13,10 @@ pub mod generation;
 pub mod handler;
 pub mod harness_closure;
 pub mod lifecycle;
+pub mod local_embeddings;
+pub mod model_execution;
 #[doc(hidden)]
 pub mod ring_transport;
-pub mod synapse;
 
 mod connection;
 mod control;

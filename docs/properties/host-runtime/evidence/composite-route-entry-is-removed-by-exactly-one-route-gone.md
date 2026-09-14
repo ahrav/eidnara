@@ -105,7 +105,7 @@ long as the incarnation is terminating. That is a weaker bound than the record's
 
 | Site | Test | What it pins |
 | --- | --- | --- |
-| `:485-531` | `rejected_broca_bind_gets_exactly_one_broca_route_gone` (attribute `:485`, `fn` `:486`) | exactly one `route_gone` for a rejected bind |
+| `:485-531` | `rejected_model_execution_bind_gets_exactly_one_model_execution_route_gone` (attribute `:485`, `fn` `:486`) | exactly one `route_gone` for a rejected bind |
 | `:532-600` | `a_closed_route_handle_cannot_dispatch_to_stale_child_ownership` (attribute `:532`, `fn` `:533`) | a closed handle cannot dispatch to stale child ownership |
 
 `tests/composite_routing.rs` is byte-identical across the lens-era commits and

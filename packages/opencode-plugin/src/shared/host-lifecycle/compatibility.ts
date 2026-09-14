@@ -94,8 +94,8 @@ const FIXED_MODULES: ReadonlyArray<{
     contractKey: ModuleKey;
 }> = [
     { catalogId: "context", contractKey: "context" },
-    { catalogId: "synapse", contractKey: "synapse" },
-    { catalogId: "broca", contractKey: "broca" },
+    { catalogId: "local_embeddings", contractKey: "local_embeddings" },
+    { catalogId: "model_execution", contractKey: "model_execution" },
 ];
 
 /**
@@ -143,7 +143,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 /** Maps `host.status` `metrics.epochs` wire names to release-contract epoch names. */
 const WIRE_EPOCH_NAMES: Readonly<Record<string, EpochName>> = {
     memory_render_epoch: "memory_render",
-    compartment_render_epoch: "compartment_render",
+    history_segment_render_epoch: "history_segment_render",
     profile_epoch: "profile_claude_code_anthropic",
     tagger_epoch: "tagger",
     state_sync_epoch: "state_sync",

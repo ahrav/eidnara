@@ -9,8 +9,8 @@ import { denyTaskRoutingToCallerAgents } from "./agents/permissions";
 import { loadPluginConfigDetailed } from "./config";
 import { isCompactionEnabled } from "./config/agent-disable";
 import { getEidnaraBuiltinCommands } from "./features/builtin-commands/commands";
-import { SIDEKICK_SYSTEM_PROMPT } from "./features/context/sidekick/agent";
-import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "./features/context/smart-notes/compiler-prompt";
+import { NOTE_CONDITION_COMPILER_SYSTEM_PROMPT } from "./features/context/conditional-notes/compiler-prompt";
+import { CONTEXT_RESEARCHER_SYSTEM_PROMPT } from "./features/context/context-researcher/agent";
 import { createLiveSessionState } from "./hooks/context/live-session-state";
 import {
     configureManagedDemandStart,
@@ -48,11 +48,11 @@ const managedDemandStart = createLazyManagedDemandStart({
 });
 
 const server: Plugin = async (ctx) => {
-    // Broca child processes must not initialize Eidnara.
+    // ModelExecution child processes must not initialize Eidnara.
     // Do not use the buffered logger: it arms a flush timer and appends to the Eidnara log file.
-    if (process.env.EIDNARA_BROCA_CHILD === "1") {
+    if (process.env.EIDNARA_MODEL_EXECUTION_CHILD === "1") {
         console.error(
-            "[eidnara] broca child detected (EIDNARA_BROCA_CHILD=1); skipping plugin startup",
+            "[eidnara] model_execution child detected (EIDNARA_MODEL_EXECUTION_CHILD=1); skipping plugin startup",
         );
         return {};
     }
@@ -114,9 +114,9 @@ const server: Plugin = async (ctx) => {
     }
 
     const liveSessionState = createLiveSessionState();
-    // Both transform modes route `ctx_note`, `ctx_reduce`, and the session commands through the daemon client; the instance owns the one client every consumer shares so disposal can tear down the connection it dialed.
+    // Both transform modes route `eidnara_note`, `eidnara_reduce`, and the session commands through the daemon client; the instance owns the one client every consumer shares so disposal can tear down the connection it dialed.
     const moduleClient: HostModuleClient = createHostModuleClient(
-        pluginConfig.subc?.connection_file,
+        pluginConfig.host?.connection_file,
     );
 
     const hooks = await createSessionHooksAsync({
@@ -254,21 +254,21 @@ const server: Plugin = async (ctx) => {
 
                 config.command = commandConfig;
                 // Hidden-agent overrides remove `thinking_level` because OpenCode does not accept it as an agent config field.
-                const sidekickAgentOverrides = pluginConfig.sidekick
+                const context_researcherAgentOverrides = pluginConfig.context_researcher
                     ? (() => {
                           const {
                               timeout_ms: _timeoutMs,
                               system_prompt: _systemPrompt,
                               thinking_level: _thinkingLevel,
                               ...agentOverrides
-                          } = pluginConfig.sidekick;
+                          } = pluginConfig.context_researcher;
                           return agentOverrides;
                       })()
                     : undefined;
                 const registrations = buildHiddenAgentRegistrations({
-                    smartNoteCompilerPrompt: SMART_NOTE_COMPILER_SYSTEM_PROMPT,
-                    sidekickPrompt: SIDEKICK_SYSTEM_PROMPT,
-                    sidekickOverrides: sidekickAgentOverrides,
+                    noteConditionCompilerPrompt: NOTE_CONDITION_COMPILER_SYSTEM_PROMPT,
+                    context_researcherPrompt: CONTEXT_RESEARCHER_SYSTEM_PROMPT,
+                    context_researcherOverrides: context_researcherAgentOverrides,
                 });
 
                 const agentConfig = { ...(config.agent ?? {}) } as NonNullable<typeof config.agent>;

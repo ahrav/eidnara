@@ -48,8 +48,8 @@ function startResultJson(command: string): string {
             proof: mutating ? "current" : null,
             daemon: "eidnara-host/0.1.0",
             context: null,
-            synapse: null,
-            broca: null,
+            local_embeddings: null,
+            model_execution: null,
         },
     });
 }
@@ -70,8 +70,8 @@ function missingPayloadResultJson(): string {
             proof: null,
             daemon: null,
             context: null,
-            synapse: null,
-            broca: null,
+            local_embeddings: null,
+            model_execution: null,
         },
     });
 }
@@ -158,7 +158,11 @@ function catalogEntry(moduleId: string, moduleVersion = "0.1.0"): CatalogEntry {
     };
 }
 
-const compatibleCatalog = [catalogEntry("context"), catalogEntry("synapse"), catalogEntry("broca")];
+const compatibleCatalog = [
+    catalogEntry("context"),
+    catalogEntry("local_embeddings"),
+    catalogEntry("model_execution"),
+];
 
 function compatibleObservation() {
     return {
@@ -334,7 +338,7 @@ describe("observational commands without a trusted bootstrap (U3 scenario 21)", 
 });
 
 describe("native invocation mapping", () => {
-    test("managed credential envelopes include only bounded Broca credential names", () => {
+    test("managed credential envelopes include only bounded ModelExecution credential names", () => {
         expect(
             buildManagedCredentialEnvelope({
                 OPENAI_API_KEY: "secret",
@@ -466,7 +470,10 @@ describe("native invocation mapping", () => {
                     readiness: {
                         transport: { state: "ready", reason: "healthy" },
                         storage: { state: "unavailable", reason: "storage_unavailable" },
-                        synapse: { state: "degraded", reason: "synapse_degraded" },
+                        local_embeddings: {
+                            state: "degraded",
+                            reason: "local_embeddings_degraded",
+                        },
                     },
                 }),
             });
@@ -475,14 +482,14 @@ describe("native invocation mapping", () => {
                 expect(result.ok).toBe(false);
                 expect(result.reason).toBe("storage_unavailable");
                 expect(result.readiness?.storage?.state).toBe("unavailable");
-                expect(result.readiness?.synapse?.state).toBe("degraded");
+                expect(result.readiness?.local_embeddings?.state).toBe("degraded");
                 expect(result.versions.daemon).toBe("eidnara-host/0.1.0");
                 expect(result.checks.map((check) => [check.id, check.status])).toEqual([
                     ["compatibility.daemon", "pass"],
                     ["compatibility.epochs", "pass"],
                     ["compatibility.modules", "pass"],
+                    ["readiness.local_embeddings", "fail"],
                     ["readiness.storage", "fail"],
-                    ["readiness.synapse", "fail"],
                     ["readiness.transport", "pass"],
                 ]);
             }
@@ -542,7 +549,7 @@ describe("native invocation mapping", () => {
                         readiness: {
                             transport: { state: "ready", reason: "healthy" },
                             storage: { state: "ready", reason: "healthy" },
-                            synapse: { state: "ready", reason: "healthy" },
+                            local_embeddings: { state: "ready", reason: "healthy" },
                             kernel,
                         },
                     }),
@@ -571,7 +578,7 @@ describe("native invocation mapping", () => {
         const cases = [
             { component: "transport", record: { state: "starting", reason: "starting" } },
             { component: "storage", record: { state: "starting", reason: "starting" } },
-            { component: "synapse", record: { state: "starting", reason: "starting" } },
+            { component: "local_embeddings", record: { state: "starting", reason: "starting" } },
             { component: "kernel", record: { state: "starting", reason: "starting" } },
         ] as const;
         for (const { component, record } of cases) {
@@ -586,7 +593,7 @@ describe("native invocation mapping", () => {
                         readiness: {
                             transport: { state: "ready", reason: "healthy" },
                             storage: { state: "ready", reason: "healthy" },
-                            synapse: { state: "ready", reason: "healthy" },
+                            local_embeddings: { state: "ready", reason: "healthy" },
                             kernel: { state: "ready", reason: "healthy" },
                             [component]: record,
                         },
@@ -650,7 +657,7 @@ describe("native invocation mapping", () => {
                         readiness: {
                             transport: { state: "ready", reason: "healthy" },
                             storage: { state: "ready", reason: "healthy" },
-                            synapse: { state: "ready", reason: "healthy" },
+                            local_embeddings: { state: "ready", reason: "healthy" },
                         },
                     }),
                 });
@@ -698,7 +705,7 @@ describe("native invocation mapping", () => {
                 // Never observed, so they must not be asserted as failures that
                 // would point remediation away from the version mismatch.
                 expect(ids).not.toContain("readiness.storage");
-                expect(ids).not.toContain("readiness.synapse");
+                expect(ids).not.toContain("readiness.local_embeddings");
                 // Stages the probe never reached emit no verdict either.
                 expect(ids).not.toContain("compatibility.modules");
                 expect(ids).not.toContain("compatibility.epochs");
@@ -730,7 +737,7 @@ describe("native invocation mapping", () => {
                 // The native result's own readiness survives untouched, and no
                 // probe-derived component is invented on top of it.
                 expect(result.readiness?.storage).toBeUndefined();
-                expect(result.readiness?.synapse).toBeUndefined();
+                expect(result.readiness?.local_embeddings).toBeUndefined();
                 expect(result.checks.some((check) => check.id.startsWith("readiness."))).toBe(
                     false,
                 );
@@ -792,7 +799,10 @@ describe("native invocation mapping", () => {
                         // in the release contract's failing-reason precedence.
                         transport: { state: "unavailable", reason: "authentication_failed" },
                         storage: { state: "unavailable", reason: "storage_unavailable" },
-                        synapse: { state: "degraded", reason: "synapse_degraded" },
+                        local_embeddings: {
+                            state: "degraded",
+                            reason: "local_embeddings_degraded",
+                        },
                     },
                 }),
             });
@@ -807,8 +817,8 @@ describe("native invocation mapping", () => {
                     "compatibility.daemon",
                     "compatibility.epochs",
                     "compatibility.modules",
+                    "readiness.local_embeddings",
                     "readiness.storage",
-                    "readiness.synapse",
                     "readiness.transport",
                 ]);
             }
@@ -1242,7 +1252,9 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                 observation: {
                     ...compatibleObservation(),
                     catalog: compatibleCatalog.map((entry) =>
-                        entry.module_id === "synapse" ? catalogEntry("synapse", "0.2.0") : entry,
+                        entry.module_id === "local_embeddings"
+                            ? catalogEntry("local_embeddings", "0.2.0")
+                            : entry,
                     ),
                 },
             },
@@ -1309,7 +1321,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             // capability, so distinct capabilities still share one probe.
             const outcomes = await Promise.all([
                 policy.demandStart({ origin: "managed-default", capability: "context" }),
-                policy.demandStart({ origin: "managed-default", capability: "synapse" }),
+                policy.demandStart({ origin: "managed-default", capability: "local_embeddings" }),
             ]);
 
             for (const outcome of outcomes) {
@@ -1840,7 +1852,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                 policy.demandStart({ origin: "managed-default", capability: "context" }),
                 // One daemon serves every capability, so a capability-keyed second
                 // start would race the first for the transaction lock.
-                policy.demandStart({ origin: "managed-default", capability: "synapse" }),
+                policy.demandStart({ origin: "managed-default", capability: "local_embeddings" }),
                 // An omitted envelope is the default envelope, so an explicit copy joins.
                 policy.demandStart({
                     origin: "managed-default",
@@ -2350,11 +2362,11 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             });
             expect(magic.storage).toBe("starting");
             expect(probes).toEqual([5_000]);
-            const synapse = await policy.demandStart({
+            const local_embeddings = await policy.demandStart({
                 origin: "managed-default",
-                capability: "synapse",
+                capability: "local_embeddings",
             });
-            expect(synapse.storage).toBeNull();
+            expect(local_embeddings.storage).toBeNull();
             expect(probes).toEqual([5_000]);
         } finally {
             rmSync(root, { recursive: true, force: true });

@@ -9,7 +9,7 @@ External lead: plan KTD2, R6, and Appendix A.3.
 - The plan's 25-byte omission counts the member but not its delimiter.
   `len(',"provider_executed":false'.encode('utf-8')) == 26`. Every typed
   tool kind has other members (`crates/memory-store/src/lib.rs:340-352`).
-- `crates/daemon/src/historian_chunk.rs:418-430` excludes synthetic blocks
+- `crates/daemon/src/history_summarizer_chunk.rs:418-430` excludes synthetic blocks
   from production snapshot items. R6's synthetic todo fingerprint example
   therefore needs another demonstrated path or a test-only classification.
 - `crates/daemon/src/transform.rs:13825-13830,13889-13892` explicitly shows

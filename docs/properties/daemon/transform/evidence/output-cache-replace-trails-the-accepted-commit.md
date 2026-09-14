@@ -104,7 +104,7 @@ violation and would bust the provider prefix.
 
 **Pre-revert entries after a mid-pass truncate.** If the snapshot at `:5381` used
 `loaded.meta.revert_epoch` instead of `meta.revert_epoch`, a
-reconcile-rematerialize pass would reuse entries built over compartments the same
+reconcile-rematerialize pass would reuse entries built over history_segments the same
 pass just deleted. The m0 unit would be re-rendered because the pass is a HARD,
 but tail messages served from cache could carry stale identity or stale tag
 prefixes.

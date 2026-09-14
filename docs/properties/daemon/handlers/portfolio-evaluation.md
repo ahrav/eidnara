@@ -158,7 +158,7 @@ identified a capability genuinely missing.
 ### F3. The "missing capability" claim was false, and it had shaped three sections
 
 Applied in `catalog.md` on four records' `Required faults and enabling state`
-(recomp, authority prepare, state import commit, dreamer). In `fault-map.md`:
+(recomp, authority prepare, state import commit, memory_classifier). In `fault-map.md`:
 framing point three is rewritten, the H3 row inverts, four map rows change verdict,
 the totals change, the blocked-record narrative after the totals is replaced, and
 leverage item 10 is demoted from "first on consequence" to a clarity improvement.
@@ -255,17 +255,17 @@ marker, `side_channel_drain_attempted_more_than_it_succeeded`, is added to the f
 map as the precondition, stated as a fact about the drain rather than about the
 surface.
 
-### F6. The dreamer check was false on three correct paths, and its duplicate half needs concurrency
+### F6. The memory_classifier check was false on three correct paths, and its duplicate half needs concurrency
 
-Applied in `catalog.md` on `h4c-dreamer-failure-path-ledger-write-is-unchecked`:
+Applied in `catalog.md` on `h4c-memory_classifier-failure-path-ledger-write-is-unchecked`:
 `Check`, `Fault/timing angle`, `Required faults`. In `fault-map.md`: that record's
 map row, leverage item 4, and a new coverage-check row.
 
-The check read: "after any `dreamer.run_task` response, `load`ing the dream task
+The check read: "after any `memory_classifier.run_task` response, `load`ing the dream task
 command returns a row". Three response paths are supposed to leave no row.
 Argument rejection returns before the ledger is touched; the authority gate at
 `:9684-9698` returns before it; and the in-flight duplicate guard returns
-`dreamer_run_failed` at `:9803-9809` with no write **by design**, which the code
+`memory_classifier_run_failed` at `:9803-9809` with no write **by design**, which the code
 documents at `:9786-9789` as "the loser returns without any ledger write; its retry
 replays the winner's recorded response". So the check was false against a correct
 implementation on paths the code deliberately built. It is now conditioned on
@@ -428,15 +428,15 @@ returns `Ok(())` when its `is_lower_hex` guard fails
 `guidance_date_for_session` returns `Ok(date_line)` at `:7746-7748` and `:7757-7763`.
 Both report success while the implied write did not happen.
 
-`handle_dreamer_run_task` does not. At `:9989-9994` it discards the *result* of a
+`handle_memory_classifier_run_task` does not. At `:9989-9994` it discards the *result* of a
 write, and at `:9995-9998` it returns `PreparedOutcome::Error`. The caller is told
 the operation failed. That is a different defect, unchecked persistence on an error
 path, and it has a different oracle: for the two success-without-write sites the
 oracle is to compare the response against a re-read of the store, whereas for the
-dreamer the response already says `error`, so re-reading it proves nothing and the
+memory_classifier the response already says `error`, so re-reading it proves nothing and the
 oracle is to re-read the ledger after a failed run. The section now says both, and
 the sentence "this part finds it twice one layer up" is corrected to once. The
-dreamer record itself is unchanged; only its membership in the equivalence is.
+memory_classifier record itself is unchanged; only its membership in the equivalence is.
 
 ### F15. The headline contrast is kept and deflated
 
@@ -541,14 +541,14 @@ the portfolio's internal contradictions are largely gone, and what remains is
 missing coverage plus two decisions nobody has made.
 
 What improved concretely. Four checks that could not fail on their own record's
-scenario now can: the dreamer check no longer demands a ledger row on three paths
+scenario now can: the memory_classifier check no longer demands a ledger row on three paths
 the code deliberately leaves empty, the page-map check no longer contradicts
 `unbind_route`'s last-binding condition, the completed-replay check compares
 retained bytes against the charged counter instead of restating a budget ceiling,
 and the restart-replay check caps commits at one per identity instead of permitting
 two. Two records no longer describe workloads that cannot produce their state: the
 state-sync record now names the post-commit hook it needs rather than pointing at a
-pre-commit hook, and the dreamer's duplicate half now asks for concurrency rather
+pre-commit hook, and the memory_classifier's duplicate half now asks for concurrency rather
 than two sequential calls. One semantics misuse is gone, and with it the part's only
 `unreachable`. Two reachability labels now match the dispatch paths they describe,
 and no record carries a mixed label. One test that was said not to exist has been
@@ -562,7 +562,7 @@ Ready now for test implementation, in this order. The four records F3 unblocked,
 because they are the part's sharpest atomicity findings and the mechanism is a
 `CREATE TRIGGER` statement away: recomp's reset-then-ledger window, authority
 prepare's transition-then-bind window, the state-import commit's cleared staging,
-and the dreamer's unchecked ledger write. Then the two no-fault oracles, sending
+and the memory_classifier's unchecked ledger write. Then the two no-fault oracles, sending
 `session.delete` twice and reading the guidance response against the store, of which
 the second is half-done already. Then the coordinator-internals cluster that
 `:18730` already proves inspectable, taking the corrected multi-route workload for
@@ -618,7 +618,7 @@ own record's guarantee, scenario, or cited rule. Two are the same specific error
 a check that cannot fail on the situation the record was written to describe, which
 is a sharper test than "read the record as an argument". It is worth promoting to a
 question with a yes-or-no answer: *given this record's own Fault/timing angle, can
-this check fail?* For the dreamer, the completed-replay slot and the restart replay
+this check fail?* For the memory_classifier, the completed-replay slot and the restart replay
 guard, the answer was no, and each would have taken one minute to see.
 
 The third pattern is new and is the one worth carrying forward. Five of the sixteen

@@ -546,7 +546,7 @@ pub(crate) fn open_secure_dir_existing(dir_path: &Path) -> Result<Option<OwnedFd
 
 /// `secure_runtime_dir` traverses and validates `dir_path` without following symlinks.
 /// `secure_runtime_dir` normalizes newly created components to mode 0700.
-/// `secure_runtime_dir` rejects a pre-existing final directory that group or other principals could write (`0o775`, `0o777`); a directory with only wider read or execute bits (`0o755`) is tightened to `0o700`. Every caller — the instance guard, lifecycle coordination, the generation and closure stores, and the Broca group registry — therefore fails closed at startup or open on a writable directory rather than adopting it.
+/// `secure_runtime_dir` rejects a pre-existing final directory that group or other principals could write (`0o775`, `0o777`); a directory with only wider read or execute bits (`0o755`) is tightened to `0o700`. Every caller — the instance guard, lifecycle coordination, the generation and closure stores, and the ModelExecution group registry — therefore fails closed at startup or open on a writable directory rather than adopting it.
 /// `secure_runtime_dir` returns a pinned descriptor for the final directory after validating its ownership and mode.
 pub(crate) fn secure_runtime_dir(dir_path: &Path) -> Result<OwnedFd, InstanceError> {
     let flags = HARDENED_DIR_FLAGS;
@@ -1264,7 +1264,7 @@ mod tests {
         let bytes = std::fs::read(published(&guard)).expect("read publication");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse");
         assert_eq!(json["schema"], 2);
-        assert_eq!(json["wire_version"], 2);
+        assert_eq!(json["wire_version"], 3);
         assert_eq!(
             json["setup_socket"],
             guard

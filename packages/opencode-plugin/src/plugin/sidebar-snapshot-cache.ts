@@ -76,7 +76,7 @@ export function applyStickySnapshotCache(
     const memoryCountIsEvidence =
         fresh.memoryState === "available" && fresh.memoryTruncated !== true;
     const stateSurvived =
-        fresh.compartmentCount >= cached.snapshot.compartmentCount &&
+        fresh.history_segmentCount >= cached.snapshot.history_segmentCount &&
         (!memoryCountIsEvidence || fresh.memoryCount >= cached.snapshot.memoryCount);
     if (!hasInFlightEvidence(fresh) && !stateSurvived) {
         dropCached(scope);
@@ -91,7 +91,7 @@ export function applyStickySnapshotCache(
         native_context_usage_percentage: cached.snapshot.native_context_usage_percentage,
         inputTokens: cached.snapshot.inputTokens,
         systemPromptTokens: cached.snapshot.systemPromptTokens,
-        compartmentTokens: cached.snapshot.compartmentTokens,
+        history_segmentTokens: cached.snapshot.history_segmentTokens,
         factTokens: cached.snapshot.factTokens,
         memoryTokens: cached.snapshot.memoryTokens,
         docsTokens: cached.snapshot.docsTokens,
@@ -104,7 +104,9 @@ export function applyStickySnapshotCache(
 
 function hasInFlightEvidence(snapshot: SidebarSnapshot): boolean {
     return (
-        snapshot.compartmentInProgress || snapshot.historianRunning || snapshot.pendingOpsCount > 0
+        snapshot.history_segmentInProgress ||
+        snapshot.history_summarizerRunning ||
+        snapshot.pendingOpsCount > 0
     );
 }
 

@@ -21,7 +21,7 @@ No tool-corruption incident or executable projection test was supplied.
   otherwise retains structured result blocks with raw native part values.
 - [Codec goldens][golden] compare `serde_json::Value` arrays and determinism.
   Those assertions do not compare original JSON envelope whitespace/escapes.
-- [Historian source capture][historian] serializes selected CK messages. Its
+- [HistorySummarizer source capture][history_summarizer] serializes selected CK messages. Its
   [existing atomic raw-publication record][raw-record] is a different guarantee.
 - The [workspace][workspace] contains no retrieval crate or raw-tool search
   writer. No durable raw-buffer/span contract exists in the named RP2.1 path.
@@ -78,10 +78,10 @@ Current golden checks remain unaudited and retain their own catalog records.
 ### Q: Which exact byte boundary covers multipart and redacted input?
 
 - Sources examined: [R2][requirements], [U4][plan], [OpenCode][opencode],
-  [Pi conversion][pi], [goldens][golden] and [historian capture][historian].
+  [Pi conversion][pi], [goldens][golden] and [history_summarizer capture][history_summarizer].
 - Findings: The plan requires exact raw preservation. The codecs operate on
   parsed values; Pi may expose a structured collection rather than one text
-  string. Historian capture serializes its own selected CK representation.
+  string. HistorySummarizer capture serializes its own selected CK representation.
 - Missing evidence: Authoritative capture boundary, encoding of non-text parts,
   span coordinates and policy for canonical admission/redaction changes.
 - Conclusion: needs human input from source-adapter and canonical-policy owners.
@@ -93,6 +93,6 @@ Current golden checks remain unaudited and retain their own catalog records.
 [opencode]: ../../../../../crates/daemon/src/codec/opencode.rs#L490-L559
 [pi]: ../../../../../crates/daemon/src/codec/pi.rs#L846-L917
 [golden]: ../../../../../crates/daemon/src/codec/mod.rs#L59-L94
-[historian]: ../../../../../crates/daemon/src/historian_chunk.rs#L664-L674
-[raw-record]: ../../../daemon/historian/catalog.md#publish-preserves-raw-chunk-messages-atomically
+[history_summarizer]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L664-L674
+[raw-record]: ../../../daemon/history_summarizer/catalog.md#publish-preserves-raw-chunk-messages-atomically
 [workspace]: ../../../../../Cargo.toml#L3-L17

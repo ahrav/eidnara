@@ -52,6 +52,7 @@ to perform its own validation. One consumer honours the descriptor:
 downstream as pathnames. The comment at `serve.rs:510-517` states the hazard in
 the property's own terms - "a directory replaced after validation could serve
 different embedding bytes under a generation the daemon still reported as valid"
+
 - and mitigates it by forwarding the manifest's SHA-256 so the loader verifies
 content. So two store objects are addressed by re-resolved pathname, guarded by
 content hash rather than by descriptor pinning.
@@ -105,7 +106,7 @@ prevents a fourth instance appearing at the `path()` boundary.
 
 ## Investigation log
 
-### Q: How many more instances exist? A sweep of every pathname-based call in the store would settle it.
+### Q: How many more instances exist? A sweep of every pathname-based call in the store would settle it
 
 - Sources examined: every filesystem call site in `generation.rs`
   (`std::fs::*`, `openat`, `statat`, `chmodat`, `mkdirat`, `unlinkat`,
@@ -118,7 +119,7 @@ prevents a fourth instance appearing at the `path()` boundary.
   `serve.rs:509` and `:529`; three entry-level double resolutions under an
   identical pinned parent.
 - Missing evidence: whether `load_bundle` and the ORT loader actually verify the
-  forwarded hashes against the bytes they read. `crates/host-runtime/src/synapse/`
+  forwarded hashes against the bytes they read. `crates/host-runtime/src/local_embeddings/`
   is outside this catalog's scope, so the `serve.rs` mitigation is asserted by
   its comment rather than verified here. Also unestablished: whether any of the
   three entry-level resolutions is reachable by a writer that is not excluded by

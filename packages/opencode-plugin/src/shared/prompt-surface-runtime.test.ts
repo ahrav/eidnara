@@ -272,18 +272,20 @@ describe("prompt-surface runtime", () => {
             default: "full",
             models: { "provider/model": "light" },
             tool_descriptions: {
-                ctx_search: "Custom search description",
+                eidnara_search: "Custom search description",
                 unknown_tool: "Not allowed",
             },
         });
 
         expect(registration.preset).toBe("full");
-        expect(registration.descriptionFor("ctx_search", "Full search")).toBe(
+        expect(registration.descriptionFor("eidnara_search", "Full search")).toBe(
             "Custom search description",
         );
-        expect(registration.descriptionFor("ctx_reduce", "Full reduce")).toBe("Full reduce");
+        expect(registration.descriptionFor("eidnara_reduce", "Full reduce")).toBe("Full reduce");
         expect(warnings).toHaveLength(1);
-        expect(warnings[0]).toContain("unknown_tool");
+        expect(warnings[0]).toBe(
+            "prompt_surface.tool_descriptions.unknown_tool is not a known eidnara_* tool ID; the override was ignored.",
+        );
     });
 
     it("serves built-in light descriptions without a fallback notice and lets a user description override them", () => {
@@ -294,16 +296,18 @@ describe("prompt-surface runtime", () => {
         });
         const config = {
             default: "light" as const,
-            tool_descriptions: { ctx_search: "User light search" },
+            tool_descriptions: { eidnara_search: "User light search" },
         };
 
         const registration = runtime.resolveRegistration(config);
         const guidance = runtime.resolveGuidance(config, "provider/model");
         runtime.resolveGuidance(config, "provider/other");
 
-        expect(registration.descriptionFor("ctx_search", "Full search")).toBe("User light search");
-        expect(registration.descriptionFor("ctx_reduce", "Full reduce")).toBe(
-            LIGHT_TOOL_DESCRIPTIONS.ctx_reduce,
+        expect(registration.descriptionFor("eidnara_search", "Full search")).toBe(
+            "User light search",
+        );
+        expect(registration.descriptionFor("eidnara_reduce", "Full reduce")).toBe(
+            LIGHT_TOOL_DESCRIPTIONS.eidnara_reduce,
         );
         expect(guidance.preset).toBe("light");
         expect(warnings).toEqual([]);

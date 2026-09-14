@@ -14,5 +14,5 @@ Provenance: HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
   `packages/opencode-plugin/src/hooks/context/module-wire.ts:1013-1014`.
 
 Candidate: payload separation with fallback compatibility. Historic storage
-decode and fingerprint migration remain with the identity/historian agent.
+decode and fingerprint migration remain with the identity/history_summarizer agent.
 No cross-version execution evidence is imported from issue descriptions.

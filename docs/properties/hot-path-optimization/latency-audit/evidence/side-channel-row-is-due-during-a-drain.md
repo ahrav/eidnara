@@ -18,15 +18,15 @@ constructible from fixtures that already exist in `crates/memory-store` and
 ## Evidence trail
 
 - The handler drains on every pass at [`lib.rs:8124-8128`][pass-drain],
-  passing `pass_now` and `HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND`, and
+  passing `pass_now` and `HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND`, and
   discards the result.
-- [`drain_historian_side_channels`][drain] deletes delivered rows, then for
-  each kind in [`HISTORIAN_SIDE_CHANNEL_KINDS`][kinds] loads due rows with
-  [`load_due_historian_side_channels`][load-due], whose predicate is
+- [`drain_history_summarizer_side_channels`][drain] deletes delivered rows, then for
+  each kind in [`HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS`][kinds] loads due rows with
+  [`load_due_history_summarizer_side_channels`][load-due], whose predicate is
   `delivered_at_ms IS NULL AND next_attempt_at_ms <= ?3`
   ([`:11205-11206`][due-predicate]). An empty outbox makes the loop a no-op.
 - Rows enter the outbox inside the publish transaction
-  ([`enqueue_historian_side_channels_tx`][enqueue]) and are drained inline
+  ([`enqueue_history_summarizer_side_channels_tx`][enqueue]) and are drained inline
   right after the commit ([`:11074-11083`][publish-drain]), so on the happy
   path nothing is pending when the next pass drains.
 - A failed delivery records `attempt_count + 1` and
@@ -36,20 +36,20 @@ constructible from fixtures that already exist in `crates/memory-store` and
   observation rows also need
   [`user_memory_collection_enabled`][cfg-user-mem]. Both default off, so a
   default campaign never enqueues a row.
-- The seam [`fail_next_historian_side_channel_for_test`][fail-sc] inserts the
+- The seam [`fail_next_history_summarizer_side_channel_for_test`][fail-sc] inserts the
   kind into a set (`:5905-5908`), so three calls arm all three kinds for one
   publish. It is `#[cfg(any(test, feature = "test-support"))]`, and the
   daemon's dev-dependency on `memory-store` enables `test-support`
   ([`Cargo.toml:92`][daemon-cargo]).
 - Two fixtures construct the state today.
-  [`historian_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults-sc]
+  [`history_summarizer_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults-sc]
   publishes a firing carrying one event, one primer, and one user observation
   (`:18712-18750`) with one kind armed per iteration, asserts one pending
   row, then drains with `now_ms = i64::MAX` (`:18786-18788`).
-  [`status_diagnostics_surface_pending_historian_side_channel_failure`][t-status-sc]
+  [`status_diagnostics_surface_pending_history_summarizer_side_channel_failure`][t-status-sc]
   arms `event`, publishes through a daemon handler's store, sleeps 1100 ms,
   and runs a transform pass whose drain delivers the row (`:35598-35604`).
-- [`historian_side_channel_outbox_recovers_after_restart`][t-restart] shows
+- [`history_summarizer_side_channel_outbox_recovers_after_restart`][t-restart] shows
   the other route to a pending row: a failed inline delivery, then a store
   reopen, then a drain.
 
@@ -71,10 +71,10 @@ sleeps 1100 ms for exactly this; a store-driven test passes `i64::MAX`.
 ## What a test must construct
 
 A published firing with all three candidate kinds, on the shape of the
-memory-store fixture; three `fail_next_historian_side_channel_for_test`
+memory-store fixture; three `fail_next_history_summarizer_side_channel_for_test`
 calls, one per kind, before the publish; then a pass at or past the backoff.
 Before the drain delivers, read the outbox (or
-[`historian_side_channel_status`][status-sc] for the count and a direct query
+[`history_summarizer_side_channel_status`][status-sc] for the count and a direct query
 for the kinds) and record, under the three constant markers, that a row of
 that kind is pending with `next_attempt_at_ms <= pass_now`. The markers
 assert the input state; C3 asserts what the drain then does. No existing
@@ -84,9 +84,9 @@ test records the marker, and none has all three kinds due in one pass drain.
 
 ### Q: Is the enabling state constructible from existing fixtures?
 
-- Sources examined: [`fail_next_historian_side_channel_for_test`][fail-sc];
+- Sources examined: [`fail_next_history_summarizer_side_channel_for_test`][fail-sc];
   the three tests named above; [`Cargo.toml:92`][daemon-cargo];
-  [`publish_historian_chunk`][publish] and its inline drain.
+  [`publish_history_summarizer_chunk`][publish] and its inline drain.
 - Findings: Yes. The seam is set-valued, the memory-store fixture already
   publishes all three kinds, and the daemon fixture already drives the pass
   drain against a pending row. Combining them needs no new seam.

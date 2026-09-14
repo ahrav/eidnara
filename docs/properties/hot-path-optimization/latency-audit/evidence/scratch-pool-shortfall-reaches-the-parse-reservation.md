@@ -28,9 +28,9 @@ witness the preconditions, not the handler's outcome.
   `ByteCharge` releases its permits on drop.
 - The scratch pool is one host-wide budget at
   [`scratch_budget: ByteBudget::new(SCRATCH_RESERVED_BYTES)`][pools], and
-  [`SCRATCH_RESERVED_BYTES`][scratchconst] is sized from Synapse terms; it
+  [`SCRATCH_RESERVED_BYTES`][scratchconst] is sized from LocalEmbeddings terms; it
   evaluates to 184,878,336 bytes with `MAX_BODY_LEN` at 64 MiB. The context
-  handler, Synapse, and Broca all draw on it.
+  handler, LocalEmbeddings, and ModelExecution all draw on it.
 - The footprint of a body is [`value_footprint_bound`][footprint]; string
   bytes count three times and nodes count `2 * size_of::<Value>()`, so two
   bodies near the 32 MiB transform cap sum above the pool while each fits
@@ -40,7 +40,7 @@ witness the preconditions, not the handler's outcome.
   [pool split test][t-pools] covers the three non-overlapping pools. Neither
   drives `handle`.
 - The plugin [pages at 512 KiB][paging], so production bodies on the unpaged
-  lane are small; whether Synapse and context load together drain the pool in
+  lane are small; whether LocalEmbeddings and context load together drain the pool in
   production is not verified here.
 
 ## Failure scenario
@@ -78,14 +78,13 @@ are the only existing coverage and none is a handler-level witness.
 - Sources examined: [`SCRATCH_RESERVED_BYTES`][scratchconst], the shared
   [pool][pools], the plugin [paging threshold][paging], the
   [footprint bound][footprint].
-- Findings: The pool is shared by three components, so concurrent Synapse
+- Findings: The pool is shared by three components, so concurrent LocalEmbeddings
   parses and a context transform can compete. No production trace or load
   figure was supplied, and the plugin's 512 KiB pages keep a single context
   body far below the pool.
 - Missing evidence: A production observation of `queue_full` from this arm.
 - Conclusion: unresolved, needs a production observation; the record stays
   `test-only` as the catalog states.
-
 
 ## Shortfall-witness evidence
 

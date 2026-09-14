@@ -2,7 +2,7 @@
 
 Every claim-bearing check for the transform pass engine and the cache-state
 transition: `crates/daemon/src/transform.rs:1-7510`, `injection.rs`,
-`compartment_coverage.rs`, `m0_compose.rs`, `healing.rs`, `m1_compose.rs`,
+`history_segment_coverage.rs`, `m0_compose.rs`, `healing.rs`, `m1_compose.rs`,
 `retained_size.rs`, `divergence.rs`, plus the store-side transform commit in
 `crates/memory-store/src/lib.rs` and `scheduler.rs` as cited adjacent surfaces.
 About 10,124 production lines.
@@ -34,7 +34,7 @@ below is **unaudited**: test adequacy belongs to
 
 **Nothing in this scope executes in CI.** That is the dominant fact of Part 4b,
 and it is the same dominant fact Part 4a found one sub-part over
-(`../historian/existing-checks.md:22-38`). It is worse here in one
+(`../history_summarizer/existing-checks.md:22-38`). It is worse here in one
 respect: the suite is more than twice the size.
 
 The sub-part has **263 in-crate tests in scope**:
@@ -43,7 +43,7 @@ The sub-part has **263 in-crate tests in scope**:
 | --- | --- | --- |
 | `transform.rs`, of 280 in the flat `mod tests` | **226** | **No** |
 | `injection.rs` (`mod tests` at `:458`) | 18 | **No** |
-| `compartment_coverage.rs` (`:217`) | 7 | **No** |
+| `history_segment_coverage.rs` (`:217`) | 7 | **No** |
 | `healing.rs` (`:161`) | 5 | **No** |
 | `divergence.rs` (`:104`) | 7 | **No** |
 | `m0_compose.rs`, `m1_compose.rs`, `retained_size.rs` | **0** | n/a |
@@ -138,12 +138,12 @@ transport that never fails and never disagrees.
 Beside it, in the same per-PR run, sits a large suite over a **wholly separate
 TypeScript transform implementation** of the same contract. Sixteen files under
 `packages/plugin/src/hooks/eidnara/` hold **228 tests** between them:
-`compartment-runner.test.ts`, `compartment-runner-drop-queue.test.ts`,
-`compartment-runner-partial-recomp.test.ts`,
-`compartment-runner-recomp-fk.test.ts`, `compartment-runner-timeout.test.ts`,
-`compartment-runner-validation.test.ts`, `compartment-runner-wrapup.test.ts`,
+`history_segment-runner.test.ts`, `history_segment-runner-drop-queue.test.ts`,
+`history_segment-runner-partial-recomp.test.ts`,
+`history_segment-runner-recomp-fk.test.ts`, `history_segment-runner-timeout.test.ts`,
+`history_segment-runner-validation.test.ts`, `history_segment-runner-wrapup.test.ts`,
 `boundary-execution.test.ts`, `boundary-execution-integration.test.ts`,
-`inject-compartments.test.ts`, `inject-compartments-mural.test.ts`,
+`inject-history_segments.test.ts`, `inject-history_segments-mural.test.ts`,
 `m0m1-taxonomy.test.ts`, `cache-busting-signals.test.ts`,
 `transform-cache-busting-signals.test.ts`, `degraded-reanchor.test.ts`,
 `transform-authority-flip-back.test.ts`, plus the `packages/pi-plugin`
@@ -157,9 +157,9 @@ returns **zero matches**.
 So: 228 executing tests plus 70 caller tests plus 15 replay tests sit next to
 263 non-executing tests, and **nothing compares the two implementations.**
 Unlike Part 4a, 4b has no in-crate TypeScript-oracle golden driver at all;
-there is no counterpart to `historian_validate.rs:1384`
+there is no counterpart to `history_summarizer_validate.rs:1384`
 `validate_golden_matches_typescript_oracle`
-(`../historian/existing-checks.md:124-129`).
+(`../history_summarizer/existing-checks.md:124-129`).
 
 ## In-crate tests, clustered with counts and line ranges
 
@@ -171,7 +171,7 @@ was re-verified at `HEAD`.
 | --- | --- | --- | --- |
 | `transform.rs` | 280 + 5 | `:12626` (`pub(crate) mod tests`), `:9629` (`mod nudge_formula_tests`) | 226 in 4b scope; see the split above |
 | `injection.rs` | **18** | `:458` | 911-line file; `#[cfg(test)]` islands also at `:11`, `:19`, `:362` |
-| `compartment_coverage.rs` | **7** | `:217` | 413-line file |
+| `history_segment_coverage.rs` | **7** | `:217` | 413-line file |
 | `healing.rs` | **5** | `:161` | 267-line file |
 | `divergence.rs` | **7** | `:104` | 178-line file |
 | `m0_compose.rs` | **0** | none | 403 lines |
@@ -207,28 +207,28 @@ Named tests the lenses verified by line, grouped by what they pin:
   (`:20909`) pins one error path that does not commit.
 - **The commit fence**, 1:
   `claim_vector_commit_fence_never_publishes_interleaved_stale_bytes`
-  (`:14185`) covers the claim-vector predicate. Nothing covers the compartment
+  (`:14185`) covers the claim-vector predicate. Nothing covers the history_segment
   predicate's absence on a Defer.
 - **Reconcile, recut and revert**, 4:
   `reconcile_rematerialize_with_unrecut_store_truncates_and_refolds_prefix`
   (`:19870`) drives the revert truncate on a success path;
   `crash_reentry_after_recut_uses_coverage_shrink_for_todo_reanchor`
   (`:21806`) covers re-entry after a committed recut;
-  `boundary_divergence_recut_retries_after_interleaved_historian_publish`
+  `boundary_divergence_recut_retries_after_interleaved_history_summarizer_publish`
   (`:20433`) constructs the publish-wins-the-CAS race;
   `stale_full_state_sync_cannot_rewind_a_committed_divergence_recut`
   (`:20841`) covers the post-commit half.
 - **Divergence suppression budget**, 3: `:20699`, `:20750`, `:20769` iterate
   `BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT` (`:85`, value `3`) and assert
-  escalation. None holds `historian_active` or `wrapup_active` true across the
+  escalation. None holds `history_summarizer_active` or `wrapup_active` true across the
   window, which is the arm that freezes the counter (`:3926-3928`).
 - **Tag mint and served bytes**, 2:
   `first_active_render_commits_tagged_bytes_before_replay` (`:22514`) and its
   subagent twin (`:22588`) prove tags commit with the bytes. Neither compares
   the rendered number to the durable number.
-- **Caveman**, a cluster at `:25463-25490`, `:25606`, `:25660-25684`, plus
+- **TerseTextCompression**, a cluster at `:25463-25490`, `:25606`, `:25660-25684`, plus
   `:25479-25490` on empty and non-empty cases and `:25752-25760` on the
-  protected-window exclusion. All set `caveman_min_chars = 1`. None constructs
+  protected-window exclusion. All set `terse_text_compression_min_chars = 1`. None constructs
   a deeper tier whose output is longer than the frozen payload, which is the
   case the production `assert!` at `:6366-6369` panics on.
 - **Reduction GC and the frozen set**, 1:
@@ -257,7 +257,7 @@ In `crates/memory-store/src/lib.rs`. All six re-verified by name and `fn` line a
 | `:14425` | `transform_snapshot_resists_commit_between_state_and_overlay_reads` |
 | `:14479` | `transform_snapshot_keeps_row_version_and_overlays_from_one_commit` |
 | `:14562` | `transform_cas_conflict_leaves_every_overlay_table_empty` |
-| `:18267` | `truncate_compartments_for_revert_deletes_suffix_and_bumps_epoch` |
+| `:18267` | `truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch` |
 
 `:14562` is the closest existing check to the all-or-nothing commit claim, and
 `:14425` with `:14479` are the closest to the read-linearization half. `:18267`
@@ -291,7 +291,7 @@ seven files.
 | `host_adapter.rs` | 4 | `:163-172` asserts on the **text of the production source** (`split("fn respond_transform")`, then `contains`/`!contains`), so it is a source-shape gate, not an execution test | **No** |
 | `boundary_counter_durability.rs` | 1 | `context_core::CoreState` only; adjacent | **No** |
 | `lifecycle_cli.rs` | 12 | **Zero** mentions of `transform` | **Yes** (`ci.yml:168` at `76cd6f41`, `:172` at `HEAD`) |
-| `broca_roundtrip.rs` | 2 | none | **No** |
+| `model_execution_roundtrip.rs` | 2 | none | **No** |
 | `release_contract_conformance.rs` | 3 | none | **No** |
 
 The one integration binary CI runs is the one with no transform coverage.
@@ -304,14 +304,14 @@ request crosses a process boundary into the module, and it does not run.
 explicitly because three of them can fire in a release build.
 
 - **Live in release, unconditionally: one.** `transform.rs:6366-6369`, a bare
-  `assert!` (not `debug_assert!`) inside `new_caveman_units`:
-  `assert!(compressed.len() <= existing.frozen_payload.len(), "caveman deeper
+  `assert!` (not `debug_assert!`) inside `new_terse_text_compression_units`:
+  `assert!(compressed.len() <= existing.frozen_payload.len(), "terse_text_compression deeper
   tier grew frozen payload for {block_id}")`. Verified at `HEAD` over
-  production lines. Reachable only with caveman enabled, which defaults to
+  production lines. Reachable only with terse_text_compression enabled, which defaults to
   `false` (`config.rs:76`). The relation it guards is the documentation's
   "never compresses an already-compressed payload"; `:6370-6374` keeps the
   shallower bytes on a length tie while `:6378` still records the deeper depth.
-  `CONFIGURATION.md:720-744` (source-catalog path, not present at HEAD) documents caveman with **no failure mode at all**.
+  `CONFIGURATION.md:720-744` (source-catalog path, not present at HEAD) documents terse_text_compression with **no failure mode at all**.
 - **Live in release under an environment variable: two.**
   `transform.rs:2349-2353`, `assert_eq!(incremental.differential_bytes(),
   full.differential_bytes(), "incremental prefix projection byte drift")`, and
@@ -360,11 +360,11 @@ explicitly because three of them can fire in a release build.
 
 **The other seven scope files have almost nothing.** Verified per file over
 production lines only: `injection.rs` (production `1-456`),
-`compartment_coverage.rs` (`1-215`), `healing.rs` (`1-159`), `divergence.rs`
+`history_segment_coverage.rs` (`1-215`), `healing.rs` (`1-159`), `divergence.rs`
 (`1-102`), and `m0_compose.rs`, `m1_compose.rs`, `retained_size.rs`
 (all-production). Zero `assert!`, zero `debug_assert!`, zero `panic!`, zero
 `unreachable!`. Two infallible-by-construction `expect`s:
-`compartment_coverage.rs:196` `.expect("non-empty checked above")` and
+`history_segment_coverage.rs:196` `.expect("non-empty checked above")` and
 `retained_size.rs:67` `.expect("wire values must serialize for
 accounting")`. `scheduler.rs` (adjacent) has two, both static regex
 compilation (`:875`, `:910`).
@@ -396,16 +396,16 @@ are almost no assertions.** All unaudited.
   `:3082`, `:4558`, backed by `valid_m0m1_shape` / `cached_m1_missing`
   (`:6200`), including the "rejected, never cleared" half.
 - **The strict-ordering check** in `resolve_coverage`
-  (`compartment_coverage.rs:180`), which rejects `next.start <= prev.end`
+  (`history_segment_coverage.rs:180`), which rejects `next.start <= prev.end`
   (`:177`) while deliberately allowing coordinate gaps.
 - **The bounded CAS retry**, `MAX_CAS_RETRIES = 8` (`:82`) compared at `:2284`,
   with the sticky recut intent `boundary_divergence_retry |=
   boundary_divergence_detected` at `:2289`.
 - **The store-side commit predicates**: row-version CAS
   (`memory-store/src/lib.rs:7360-7367`), claim-vector match (`:7374-7377`), and the
-  bust-only compartment-sequence re-read inside the transaction
+  bust-only history_segment-sequence re-read inside the transaction
   (`:7378-7387`). The last is the one a Defer skips, because
-  `compartment_max_seq: is_bust_pass.then_some(..)` at `transform.rs:5574` and
+  `history_segment_max_seq: is_bust_pass.then_some(..)` at `transform.rs:5574` and
   `is_bust_pass` (`:4439`) requires `Hard | MigrateHard | Soft`
   (`:4435-4438`).
 - **The two output-integrity guards** (`:11172-11225`, `:11231-11305`), 4e
@@ -423,10 +423,10 @@ recut-intent records constructible.
 
 **No seam between the two out-of-transaction writes and the terminal commit.**
 `store.descend_lineage` (`:3312`) and
-`store.truncate_compartments_for_revert` (`:4646`) both commit their own fenced
+`store.truncate_history_segments_for_revert` (`:4646`) both commit their own fenced
 transactions before `:5565`, and the only hook in the engine fires after both.
 This is the same structural gap Part 4a recorded for the publish transaction
-(`../historian/existing-checks.md:395-402`).
+(`../history_summarizer/existing-checks.md:395-402`).
 
 **No seam inside `commit_transform`.** Verified over
 `memory-store/src/lib.rs:7260-7600`: no hook, no injectable error. The
@@ -435,7 +435,7 @@ partial-commit level by any Rust test; `transform_cas_conflict_leaves_every_over
 (`:14562`) tests outcome-level rejection, which is a different obligation.
 
 **Clock and lease seams: present, by parameter.** `now_ms`,
-`observed_last_response_at_ms`, `historian_active` and `wrapup_active` are all
+`observed_last_response_at_ms`, `history_summarizer_active` and `wrapup_active` are all
 `ProducerContext` fields the fixture builds directly (`run` builds a context
 via `pctx(..)` at `:14332` and mutates it at `:14333`), so cache-TTL and lease
 states are settable without a clock abstraction. What is not settable in one
@@ -459,7 +459,7 @@ proves.
    contract is untestable rather than merely untested.** `descend_lineage`
    (`:3312`) commits 43 lines before the guards that reject the same pass
    (`:3355`, `:3362-3365`, `:3367-3372`), and
-   `truncate_compartments_for_revert` (`:4646`) commits about 900 lines before
+   `truncate_history_segments_for_revert` (`:4646`) commits about 900 lines before
    `:5565`, re-points the pass's own CAS expectation at `:4651` and adopts the
    new epoch at `:4652`, with a `CoverageGap` at `:4704` inside that window.
    The distinction matters and is worth stating precisely. The *specific*
@@ -511,8 +511,8 @@ proves.
    kind touches them.
 
 5. **The Defer commit's watermark write is guarded by nothing on the path that
-   writes it.** `:5156-5159` writes `meta.coverage_compartment_seq` from a read
-   taken outside any predicate, while `:5574` withholds the compartment fence
+   writes it.** `:5156-5159` writes `meta.coverage_history_segment_seq` from a read
+   taken outside any predicate, while `:5574` withholds the history_segment fence
    from exactly that pass class. The nearest existing check,
    `claim_vector_commit_fence_never_publishes_interleaved_stale_bytes`
    (`:14185`), covers the claim-vector predicate instead.
@@ -535,12 +535,12 @@ proves.
    near it tests the TypeScript resolver
    (`packages/plugin/src/config/transform-mode.test.ts:69` (source-catalog path, not present at HEAD)).
 
-8. **The caveman `assert!` is the sub-part's only unconditional production
+8. **The terse_text_compression `assert!` is the sub-part's only unconditional production
    panic and has no test that reaches it.** `:25463-25490`, `:25606` and
-   `:25660-25684` drive `new_caveman_units` with `caveman_min_chars = 1`; none
+   `:25660-25684` drive `new_terse_text_compression_units` with `terse_text_compression_min_chars = 1`; none
    constructs a deeper tier whose output is longer than the frozen payload.
-   Whether that is constructible is a property of `caveman.rs`'s level ladder
-   (4e scope), and the documentation describes caveman with no failure mode.
+   Whether that is constructible is a property of `terse_text_compression.rs`'s level ladder
+   (4e scope), and the documentation describes terse_text_compression with no failure mode.
 
 9. **`docs/AUDIT-KNOWN-ISSUES.md` (source-catalog path, not present at HEAD) has no Rust transform entry.** Fifty-one
    transform-adjacent lines, all about the TypeScript pipeline, in a file whose
@@ -564,7 +564,7 @@ proves.
     enforced as `1` (`config.rs:568-570`). `protected_tags` is the
     safety-relevant one: it is the count of newest tags immune from dropping,
     feeding `newest_active_tag_block_ids` (`transform.rs:4177-4182`) and
-    caveman's protected cutoff (`:6318`). A configuration-reference conformance
+    terse_text_compression's protected cutoff (`:6318`). A configuration-reference conformance
     check comparing documented keys against `config.rs` parsing would catch all
     four; none exists.
 

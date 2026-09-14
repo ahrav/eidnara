@@ -7,7 +7,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 /// Wire version stamped into a grant and echoed by the activating peer; mismatch is fatal.
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// Nonce bytes each side contributes.
 pub const NONCE_LEN: usize = 32;
@@ -25,9 +25,9 @@ pub use crate::descriptor::SETUP_DESCRIPTOR_COUNT as RING_DESCRIPTOR_COUNT;
 
 /// Domain separator for the host's proof. A proof computed under the client domain never
 /// verifies here even with the same key and nonces.
-pub const SERVER_PROOF_DOMAIN: &str = "eidnara-server-v1";
+pub const SERVER_PROOF_DOMAIN: &str = "eidnara-server-v3";
 /// Domain separator for the peer's proof.
-pub const CLIENT_AUTH_DOMAIN: &str = "eidnara-client-v1";
+pub const CLIENT_AUTH_DOMAIN: &str = "eidnara-client-v3";
 /// Role string a connecting peer presents.
 pub const DEFAULT_CLIENT_ROLE: &str = "client";
 /// Prefix of every `daemon_ver` string the host publishes; the remainder is its version.
@@ -117,14 +117,14 @@ pub mod vectors {
 
     /// Host proof over the committed inputs.
     pub const SERVER_PROOF: [u8; PROOF_LEN] = [
-        89, 41, 95, 101, 15, 43, 108, 51, 132, 228, 206, 117, 229, 243, 55, 238, 35, 54, 116, 7,
-        168, 92, 82, 74, 242, 210, 114, 64, 98, 38, 64, 56,
+        8, 85, 246, 183, 53, 167, 124, 30, 98, 139, 55, 104, 107, 155, 175, 182, 20, 23, 143, 13,
+        243, 82, 19, 62, 37, 43, 103, 85, 123, 176, 4, 192,
     ];
 
     /// Peer proof over the committed inputs.
     pub const CLIENT_AUTH: [u8; PROOF_LEN] = [
-        140, 161, 69, 27, 18, 230, 236, 54, 6, 199, 49, 76, 154, 250, 81, 84, 78, 160, 182, 108,
-        253, 146, 214, 55, 25, 147, 137, 168, 222, 41, 215, 159,
+        96, 31, 69, 109, 112, 178, 81, 45, 173, 45, 35, 155, 120, 185, 24, 14, 40, 8, 205, 217, 4,
+        190, 7, 244, 224, 111, 20, 3, 121, 200, 83, 101,
     ];
 
     /// Key `00..1f`, client nonce `20..3f`, server nonce `40..5f`, daemon ID `60..6f`.

@@ -81,7 +81,7 @@ describe("hasShareabilitySensitiveText", () => {
     test("safe project facts are shareable", () => {
         expect(
             hasShareabilitySensitiveText(
-                "The historian runs as a hidden subagent and never busts the prompt cache.",
+                "The history_summarizer runs as a hidden subagent and never busts the prompt cache.",
             ),
         ).toBe(false);
         expect(
@@ -857,7 +857,7 @@ describe("describeProseLength", () => {
 describe("sanitizeConfigValue record keys", () => {
     test("sanitizes user-controlled keys as well as values", () => {
         const flags = {
-            historian: {
+            history_summarizer: {
                 permission: {
                     bash: {
                         "psql postgres://app:s3cr3t@db.internal/prod": "allow",
@@ -868,7 +868,7 @@ describe("sanitizeConfigValue record keys", () => {
             },
         };
         expect(sanitizeConfigValue(flags)).toEqual({
-            historian: {
+            history_summarizer: {
                 permission: {
                     bash: {
                         "psql postgres://app:<REDACTED:password>@db.internal/prod": "allow",

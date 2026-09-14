@@ -47,7 +47,7 @@ quantiles to claim end-to-end latency.
 | e2e/steady/1000msgs_2KiB_code | 25.972 ms, 26.088 ms, 26.222 ms |
 | e2e/steady/1000msgs_2KiB_json_tool | 28.051 ms, 28.234 ms, 28.393 ms |
 | e2e/steady_output_cache/1000msgs_2KiB_mixed | 15.950 ms, 16.013 ms, 16.100 ms |
-| e2e/steady_caveman/1000msgs_2KiB_mixed | 31.621 ms, 31.780 ms, 31.888 ms |
+| e2e/steady_terse_text_compression/1000msgs_2KiB_mixed | 31.621 ms, 31.780 ms, 31.888 ms |
 
 ## Corrected client baseline
 
@@ -74,7 +74,7 @@ harness matches the workspace harness.
 
 The large fixture has 1,000 alternating user/assistant messages, each with
 2,048 ASCII text bytes. The small fixture has 8 messages of 256 bytes. Text
-repeats `alpha beta gamma delta epsilon zeta eta theta `; IDs, session IDs,
+repeats `alpha beta gamma delta epsilon zeta eta theta`; IDs, session IDs,
 roles, and assistant model fields are deterministic. Warm passes append one
 message to raw input after a successful cold prime. The fixture hash covers
 the complete submitted native array for each pass. This corpus is distinct

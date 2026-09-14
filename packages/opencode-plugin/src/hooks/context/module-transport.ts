@@ -8,8 +8,6 @@ import {
     AdmissionClass,
     armExpiryTimer,
     type BindIdentity,
-    BROCA_CREDENTIAL_NAMES,
-    BROCA_CREDENTIAL_VALUE_CAP_BYTES,
     DAEMON_GENERATION_CHANGED_CODE,
     Deadline,
     evictProcessHostClient,
@@ -19,6 +17,8 @@ import {
     isConsumerReconnectTransient,
     isHostCallError,
     isRetryableRouteOpenCode,
+    MODEL_EXECUTION_CREDENTIAL_NAMES,
+    MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES,
     Priority,
     processHostClient,
     type RouteHandle,
@@ -47,7 +47,7 @@ const CONNECT_BACKOFF_MAX_MS = 30_000;
 const HANDSHAKE_TIMEOUT_MS = 2_000;
 const MODULE_SEND_TIMEOUT_MS = 15_000;
 const TRANSFORM_SEND_TIMEOUT_MS = 5_000;
-/** Consumers use this deadline for the module's exported `historian::MAX_WRAPUP_REQUEST_BUDGET`. */
+/** Consumers use this deadline for the module's exported `history_summarizer::MAX_WRAPUP_REQUEST_BUDGET`. */
 export const MAX_WRAPUP_REQUEST_BUDGET_MS = 3_800_000;
 const SERIAL_LANE_MAX_WAITERS = 16;
 const SERIAL_LANE_MAX_WAITERS_PER_SESSION = 8;
@@ -70,7 +70,7 @@ export interface ManagedDemandResult {
 
 export type ManagedDemandStart = (request: {
     origin: ConnectionOrigin;
-    capability: "context" | "synapse";
+    capability: "context" | "local_embeddings";
     signal?: AbortSignal;
     deadlineMs?: number;
     startupEnvelope?: NativeStartupEnvelope;
@@ -94,13 +94,13 @@ function snapshotCredentialSource(
     env: Record<string, string | undefined>,
 ): Readonly<Record<string, string | undefined>> {
     const snapshot: Record<string, string | undefined> = {};
-    for (const name of BROCA_CREDENTIAL_NAMES) snapshot[name] = env[name];
+    for (const name of MODEL_EXECUTION_CREDENTIAL_NAMES) snapshot[name] = env[name];
     return Object.freeze(snapshot);
 }
 
 function managedCredentialSourceVersion(env: Record<string, string | undefined>): string {
     const hash = createHash("sha256").update("eidnara-host-route-credentials-v1");
-    for (const name of BROCA_CREDENTIAL_NAMES) {
+    for (const name of MODEL_EXECUTION_CREDENTIAL_NAMES) {
         const value = env[name] ?? "";
         hash.update(`${Buffer.byteLength(name)}:${name}`);
         hash.update(`${Buffer.byteLength(value)}:${value}`);
@@ -215,10 +215,10 @@ export function buildManagedStartupEnvelope(
     resolvePath: (path: string) => string = realpathSync.native,
 ): NativeStartupEnvelope {
     const credentials: Record<string, string> = {};
-    for (const name of BROCA_CREDENTIAL_NAMES) {
+    for (const name of MODEL_EXECUTION_CREDENTIAL_NAMES) {
         const value = env[name];
         if (value === undefined || value.length === 0) continue;
-        if (Buffer.byteLength(value) > BROCA_CREDENTIAL_VALUE_CAP_BYTES) {
+        if (Buffer.byteLength(value) > MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES) {
             const error = new Error("managed credential value exceeds its size cap") as Error & {
                 code?: string;
             };
@@ -493,9 +493,9 @@ interface OpeningRoute {
 
 export function isModuleCallBodyValid(method: ModuleMethod, body: unknown): boolean {
     if (!isRecord(body)) return false;
-    if (method === "ctx_note") {
+    if (method === "eidnara_note") {
         const keys = Object.keys(body);
-        return keys.length === 2 && body.name === "ctx_note" && isRecord(body.arguments);
+        return keys.length === 2 && body.name === "eidnara_note" && isRecord(body.arguments);
     }
     return body.method === method;
 }
@@ -729,11 +729,11 @@ export class HostModuleTransport {
         /** Producer-backed calls can outlive the default transport budget. */
         timeoutMs?: number;
     }): Promise<unknown> {
-        // Deadline and wrapup policy key off `args.method`; ctx_note is the one facade whose body uses name/arguments instead of a method discriminator.
+        // Deadline and wrapup policy key off `args.method`; eidnara_note is the one facade whose body uses name/arguments instead of a method discriminator.
         if (!isModuleCallBodyValid(args.method, args.body)) {
             throw new TypeError(
-                args.method === "ctx_note"
-                    ? 'module transport ctx_note body must be exactly { name: "ctx_note", arguments: {...} }'
+                args.method === "eidnara_note"
+                    ? 'module transport eidnara_note body must be exactly { name: "eidnara_note", arguments: {...} }'
                     : `module transport body must carry method ${JSON.stringify(args.method)}`,
             );
         }

@@ -1,6 +1,6 @@
 //! This unit computes the compactable/protected split from the in-memory tail.
-//! The in-memory tail alone determines whether a historian run fires.
-//! Historian execution occurs outside this unit.
+//! The in-memory tail alone determines whether a history_summarizer run fires.
+//! HistorySummarizer execution occurs outside this unit.
 //!
 //! Token measurement depends only on caller-provided message and block bytes and context.
 //! This unit performs no I/O and reads no wall clock.
@@ -128,8 +128,8 @@ pub struct BoundaryContext {
     pub usage_percentage: f64,
     /// Fractional inputs are rounded to the nearest token.
     pub usage_input_tokens: f64,
-    /// `last_published_end_ordinal` is `None` before the first compartment; ordinal 0 can be a published end.
-    pub last_compartment_end_ordinal: Option<u64>,
+    /// `last_published_end_ordinal` is `None` before the first history_segment; ordinal 0 can be a published end.
+    pub last_history_segment_end_ordinal: Option<u64>,
     /// Previous boundary ordinal from an earlier calculation; retained so that floor can be reapplied.
     pub prior_boundary_ordinal: u64,
     /// Whether the floor based on `prior_boundary_ordinal` is currently active.
@@ -149,7 +149,7 @@ impl Default for BoundaryContext {
             execute_threshold_percentage: 65.0,
             usage_percentage: 0.0,
             usage_input_tokens: 0.0,
-            last_compartment_end_ordinal: None,
+            last_history_segment_end_ordinal: None,
             prior_boundary_ordinal: 1,
             publication_floor_active: false,
             emergency_tail_scale: None,
@@ -185,7 +185,7 @@ pub struct ProtectedTailTokenTarget {
 pub struct BoundaryResolution {
     /// First protected raw-message ordinal; messages before this are eligible head.
     pub protected_start_ordinal: u64,
-    /// Half-open compactable range from `last_compartment_end_ordinal + 1` to the head cap.
+    /// Half-open compactable range from `last_history_segment_end_ordinal + 1` to the head cap.
     pub eligible_head: Range<u64>,
     /// Scaled protected-tail token target used to walk backward from the newest message.
     pub n_tokens: f64,
@@ -207,13 +207,13 @@ pub struct BoundaryResolution {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WrapupBoundaryResolution {
     pub boundary: BoundaryResolution,
-    /// Number of raw messages of any role above the latest compartment.
-    pub raw_messages_above_last_compartment: usize,
+    /// Number of raw messages of any role above the latest history_segment.
+    pub raw_messages_above_last_history_segment: usize,
     /// First ordinal retained in the verbatim tail after safety snapping.
     pub target_protected_start_ordinal: u64,
 }
 
-/// Chunked tail measurement in the historian's `U:`/`A:`/`TC:` block format.
+/// Chunked tail measurement in the history_summarizer's `U:`/`A:`/`TC:` block format.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkEstimate {
     /// Token count used by trigger decisions.
@@ -235,7 +235,7 @@ pub struct ChunkEstimate {
 pub struct TriggerContext {
     /// The primary protected-tail resolution uses `boundary`.
     pub boundary: BoundaryContext,
-    pub compartment_in_progress: bool,
+    pub history_segment_in_progress: bool,
     pub projected_post_drop_percentage: Option<f64>,
     pub commit_cluster_trigger_enabled: bool,
     pub min_commit_clusters: usize,
@@ -245,7 +245,7 @@ impl Default for TriggerContext {
     fn default() -> Self {
         Self {
             boundary: BoundaryContext::default(),
-            compartment_in_progress: false,
+            history_segment_in_progress: false,
             projected_post_drop_percentage: None,
             commit_cluster_trigger_enabled: true,
             min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS_FOR_TRIGGER,
@@ -322,11 +322,11 @@ fn first_live_message_ordinal(messages: &[BoundaryMsg]) -> Option<u64> {
     messages.iter().map(|message| message.message_ordinal).min()
 }
 
-fn compartment_offset(
-    last_compartment_end_ordinal: Option<u64>,
+fn history_segment_offset(
+    last_history_segment_end_ordinal: Option<u64>,
     messages: &[BoundaryMsg],
 ) -> Option<u64> {
-    last_compartment_end_ordinal
+    last_history_segment_end_ordinal
         .map(|end| end.saturating_add(1))
         .or_else(|| first_live_message_ordinal(messages))
 }
@@ -376,7 +376,7 @@ pub fn derive_protected_tail_token_target(ctx: &BoundaryContext) -> ProtectedTai
 /// The resolver uses original pre-reduction message bytes to resolve the protected-tail boundary.
 ///
 /// The token walk ignores [`BoundaryBlock::rendered`].
-/// Skeletonized render placeholders affect only compose-time presentation; the durable raw session retains original bytes for historian summarization.
+/// Skeletonized render placeholders affect only compose-time presentation; the durable raw session retains original bytes for history_summarizer summarization.
 pub fn resolve_protected_tail_boundary(
     messages: &[BoundaryMsg],
     ctx: &BoundaryContext,
@@ -391,7 +391,8 @@ fn resolve_protected_tail_boundary_with_index(
     index: &TokenIndex,
 ) -> BoundaryResolution {
     let raw_message_count = index.raw_message_count;
-    let offset = compartment_offset(ctx.last_compartment_end_ordinal, messages).unwrap_or(1);
+    let offset =
+        history_segment_offset(ctx.last_history_segment_end_ordinal, messages).unwrap_or(1);
     let usage_percentage = clamp_percentage(ctx.usage_percentage);
     let usage_input_tokens = ctx.usage_input_tokens.max(0.0).round();
 
@@ -475,7 +476,7 @@ fn resolve_protected_tail_boundary_with_index(
     protected_tail_start = index.clamp_ordinal(protected_tail_start);
 
     if ctx.fold_is_only_reclaim && raw_message_count > 0 {
-        // The fold excludes the newest message and its tool pair so the live turn cannot become a durable compartment boundary.
+        // The fold excludes the newest message and its tool pair so the live turn cannot become a durable history_segment boundary.
         let newest_floor = newest_message_protected_floor(&arcs, index);
         protected_tail_start = protected_tail_start.min(newest_floor).max(offset);
         protected_tail_start = index.clamp_ordinal(protected_tail_start);
@@ -522,14 +523,14 @@ fn resolve_protected_tail_boundary_with_index(
 /// The user-boundary snap window uses the resolved context limit and execute threshold rather than a synthetic constant.
 pub fn resolve_wrapup_boundary(
     messages: &[BoundaryMsg],
-    last_compartment_end_ordinal: Option<u64>,
+    last_history_segment_end_ordinal: Option<u64>,
     keep: usize,
     context_limit: f64,
     execute_threshold_percentage: f64,
 ) -> WrapupBoundaryResolution {
     let index = TokenIndex::new(messages);
     let raw_message_count = index.raw_message_count;
-    let offset = compartment_offset(last_compartment_end_ordinal, messages).unwrap_or(1);
+    let offset = history_segment_offset(last_history_segment_end_ordinal, messages).unwrap_or(1);
     let mut live_ordinals = messages
         .iter()
         .map(|message| message.message_ordinal)
@@ -537,7 +538,7 @@ pub fn resolve_wrapup_boundary(
         .collect::<Vec<_>>();
     live_ordinals.sort_unstable();
     live_ordinals.dedup();
-    let raw_messages_above_last_compartment = live_ordinals.len();
+    let raw_messages_above_last_history_segment = live_ordinals.len();
     let keep = keep.max(1);
     if live_ordinals.is_empty() {
         return WrapupBoundaryResolution {
@@ -552,7 +553,7 @@ pub fn resolve_wrapup_boundary(
                 raw_message_count,
                 boundary_reason: "manual-wrapup-empty".to_string(),
             },
-            raw_messages_above_last_compartment: 0,
+            raw_messages_above_last_history_segment: 0,
             target_protected_start_ordinal: offset,
         };
     }
@@ -615,7 +616,7 @@ pub fn resolve_wrapup_boundary(
             raw_message_count,
             boundary_reason,
         },
-        raw_messages_above_last_compartment,
+        raw_messages_above_last_history_segment,
         target_protected_start_ordinal: protected_tail_start,
     }
 }
@@ -673,46 +674,46 @@ fn chunked_message_estimate_with_estimator(
 
 /// Resolves the protected tail and decides whether its eligible head should be compacted.
 ///
-/// An in-progress compartment never fires. Fired decisions consume only the half-open
+/// An in-progress history_segment never fires. Fired decisions consume only the half-open
 /// eligible head and retain the exact [`BoundaryResolution`] used for the decision.
-pub fn check_compartment_trigger(
+pub fn check_history_segment_trigger(
     messages: &[BoundaryMsg],
     ctx: &TriggerContext,
 ) -> TriggerDecision {
-    if ctx.compartment_in_progress {
+    if ctx.history_segment_in_progress {
         return no_fire();
     }
     let index = TokenIndex::new(messages);
     let mut token_estimator = estimate_tokens;
-    check_compartment_trigger_with_index(messages, ctx, &index, &mut token_estimator)
+    check_history_segment_trigger_with_index(messages, ctx, &index, &mut token_estimator)
 }
 
-pub(crate) fn check_compartment_trigger_with_token_estimator(
+pub(crate) fn check_history_segment_trigger_with_token_estimator(
     messages: &[BoundaryMsg],
     ctx: &TriggerContext,
     token_estimator: &mut dyn FnMut(&str) -> usize,
 ) -> TriggerDecision {
-    if ctx.compartment_in_progress {
+    if ctx.history_segment_in_progress {
         return no_fire();
     }
     let index = TokenIndex::new(messages);
-    check_compartment_trigger_with_index(messages, ctx, &index, token_estimator)
+    check_history_segment_trigger_with_index(messages, ctx, &index, token_estimator)
 }
 
 #[cfg(test)]
-pub(crate) fn check_compartment_trigger_retokenized_reference(
+pub(crate) fn check_history_segment_trigger_retokenized_reference(
     messages: &[BoundaryMsg],
     ctx: &TriggerContext,
 ) -> TriggerDecision {
-    if ctx.compartment_in_progress {
+    if ctx.history_segment_in_progress {
         return no_fire();
     }
     let index = TokenIndex::new_retokenized(messages);
     let mut token_estimator = estimate_tokens;
-    check_compartment_trigger_with_index(messages, ctx, &index, &mut token_estimator)
+    check_history_segment_trigger_with_index(messages, ctx, &index, &mut token_estimator)
 }
 
-fn check_compartment_trigger_with_index(
+fn check_history_segment_trigger_with_index(
     messages: &[BoundaryMsg],
     ctx: &TriggerContext,
     index: &TokenIndex,
@@ -724,8 +725,8 @@ fn check_compartment_trigger_with_index(
             ctx.boundary.execute_threshold_percentage,
         )
     });
-    let offset =
-        compartment_offset(ctx.boundary.last_compartment_end_ordinal, messages).unwrap_or(1);
+    let offset = history_segment_offset(ctx.boundary.last_history_segment_end_ordinal, messages)
+        .unwrap_or(1);
     let has_live_at_or_after_offset = messages
         .iter()
         .map(|message| message.message_ordinal)
@@ -784,7 +785,7 @@ fn check_compartment_trigger_with_index(
         {
             return no_fire_with_progress(progress);
         }
-        if has_runnable_compartment_window(
+        if has_runnable_history_segment_window(
             &boundary,
             ctx.boundary.usage_percentage,
             ctx.boundary.execute_threshold_percentage,
@@ -801,7 +802,7 @@ fn check_compartment_trigger_with_index(
         scaled_ctx.emergency_tail_scale = Some(scale);
         let scaled_boundary =
             resolve_protected_tail_boundary_with_index(messages, &scaled_ctx, index);
-        if has_runnable_compartment_window(
+        if has_runnable_history_segment_window(
             &scaled_boundary,
             ctx.boundary.usage_percentage,
             ctx.boundary.execute_threshold_percentage,
@@ -826,7 +827,7 @@ fn check_compartment_trigger_with_index(
     }
 
     let proactive_trigger_percentage =
-        get_proactive_compartment_trigger_percentage(ctx.boundary.execute_threshold_percentage);
+        get_proactive_history_segment_trigger_percentage(ctx.boundary.execute_threshold_percentage);
     if ctx.boundary.usage_percentage < proactive_trigger_percentage {
         return no_fire_with_progress(progress);
     }
@@ -895,7 +896,7 @@ fn clamp_percentage(value: f64) -> f64 {
     value.clamp(0.0, 100.0)
 }
 
-fn get_proactive_compartment_trigger_percentage(execute_threshold_percentage: f64) -> f64 {
+fn get_proactive_history_segment_trigger_percentage(execute_threshold_percentage: f64) -> f64 {
     (execute_threshold_percentage - PROACTIVE_TRIGGER_OFFSET_PERCENTAGE).max(0.0)
 }
 
@@ -934,7 +935,7 @@ fn select_per_run_cap(
     }
 }
 
-fn has_runnable_compartment_window(
+fn has_runnable_history_segment_window(
     boundary: &BoundaryResolution,
     usage_percentage: f64,
     execute_threshold_percentage: f64,
@@ -1828,7 +1829,7 @@ mod tests {
     #[derive(Deserialize)]
     struct TriggerCtxJson {
         boundary: BoundaryCtxJson,
-        compartment_in_progress: bool,
+        history_segment_in_progress: bool,
         projected_post_drop_percentage: Option<f64>,
         commit_cluster_trigger_enabled: bool,
         min_commit_clusters: usize,
@@ -1840,7 +1841,7 @@ mod tests {
         execute_threshold_percentage: f64,
         usage_percentage: f64,
         usage_input_tokens: f64,
-        last_compartment_end_ordinal: Option<u64>,
+        last_history_segment_end_ordinal: Option<u64>,
         prior_boundary_ordinal: u64,
         publication_floor_active: bool,
         emergency_tail_scale: Option<f64>,
@@ -1934,7 +1935,7 @@ mod tests {
             execute_threshold_percentage: json.execute_threshold_percentage,
             usage_percentage: json.usage_percentage,
             usage_input_tokens: json.usage_input_tokens,
-            last_compartment_end_ordinal: json.last_compartment_end_ordinal,
+            last_history_segment_end_ordinal: json.last_history_segment_end_ordinal,
             prior_boundary_ordinal: json.prior_boundary_ordinal,
             publication_floor_active: json.publication_floor_active,
             emergency_tail_scale: json.emergency_tail_scale,
@@ -2119,12 +2120,12 @@ mod tests {
             let msgs = messages(&case.messages);
             let ctx = TriggerContext {
                 boundary: boundary_ctx(&case.ctx.boundary),
-                compartment_in_progress: case.ctx.compartment_in_progress,
+                history_segment_in_progress: case.ctx.history_segment_in_progress,
                 projected_post_drop_percentage: case.ctx.projected_post_drop_percentage,
                 commit_cluster_trigger_enabled: case.ctx.commit_cluster_trigger_enabled,
                 min_commit_clusters: case.ctx.min_commit_clusters,
             };
-            let got = check_compartment_trigger(&msgs, &ctx);
+            let got = check_history_segment_trigger(&msgs, &ctx);
             assert_eq!(got.fire, case.expected.fire, "fire in {}", case.label);
             assert_eq!(
                 got.reason.map(TriggerReason::as_str).map(str::to_string),
@@ -2239,7 +2240,7 @@ mod tests {
             execute_threshold_percentage: 50.0,
             usage_percentage: 81.0,
             usage_input_tokens: 8_100.0,
-            last_compartment_end_ordinal: None,
+            last_history_segment_end_ordinal: None,
             prior_boundary_ordinal: 1,
             publication_floor_active: false,
             emergency_tail_scale: None,
@@ -2568,7 +2569,7 @@ mod tests {
 
         let plan = resolve_wrapup_boundary(&tail, None, 2, 128_000.0, 65.0);
 
-        assert_eq!(plan.raw_messages_above_last_compartment, 5);
+        assert_eq!(plan.raw_messages_above_last_history_segment, 5);
         assert_eq!(plan.target_protected_start_ordinal, 4);
         assert_eq!(plan.boundary.eligible_head, 1..4);
     }
@@ -2616,7 +2617,7 @@ mod tests {
 
         let plan = resolve_wrapup_boundary(&tail, Some(10), 2, 128_000.0, 65.0);
 
-        assert_eq!(plan.raw_messages_above_last_compartment, 0);
+        assert_eq!(plan.raw_messages_above_last_history_segment, 0);
         assert_eq!(plan.target_protected_start_ordinal, 11);
         assert_eq!(plan.boundary.protected_start_ordinal, 11);
         assert_eq!(plan.boundary.eligible_head, 11..11);
@@ -2658,7 +2659,7 @@ mod tests {
             text_msg(2, Role::Assistant, &"old ".repeat(800)),
         ];
         let mut ctx = ctx_for_tests();
-        ctx.last_compartment_end_ordinal = Some(1);
+        ctx.last_history_segment_end_ordinal = Some(1);
         let before = resolve_protected_tail_boundary(&tail, &ctx);
         tail.push(text_msg(3, Role::Assistant, &"new ".repeat(1200)));
         let after = resolve_protected_tail_boundary(&tail, &ctx);
@@ -2679,7 +2680,7 @@ mod tests {
         trigger.boundary.execute_threshold_percentage = 50.0;
         trigger.boundary.usage_percentage = 81.0;
         let boundary = resolve_protected_tail_boundary(&tail, &trigger.boundary);
-        let decision = check_compartment_trigger(&tail, &trigger);
+        let decision = check_history_segment_trigger(&tail, &trigger);
         if let Some(consume) = decision.consume_through_ordinal {
             assert!(consume < boundary.protected_start_ordinal);
         }
@@ -2695,7 +2696,7 @@ mod tests {
         trigger.boundary.execute_threshold_percentage = 50.0;
         trigger.boundary.usage_percentage = 81.0;
 
-        let decision = check_compartment_trigger(&tail, &trigger);
+        let decision = check_history_segment_trigger(&tail, &trigger);
 
         assert!(
             decision.fire,
@@ -2707,12 +2708,12 @@ mod tests {
     }
 
     #[test]
-    fn compartment_ending_at_ordinal_zero_starts_next_window_at_one() {
+    fn history_segment_ending_at_ordinal_zero_starts_next_window_at_one() {
         let tail = (0..=5)
             .map(|ord| text_msg(ord, Role::Assistant, &"published floor ".repeat(1_000)))
             .collect::<Vec<_>>();
         let mut ctx = ctx_for_tests();
-        ctx.last_compartment_end_ordinal = Some(0);
+        ctx.last_history_segment_end_ordinal = Some(0);
         ctx.trigger_budget = Some(1_000.0);
 
         let boundary = resolve_protected_tail_boundary(&tail, &ctx);

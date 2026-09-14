@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-`select_smart_note_evaluation_cycle` returns `None` for two operationally
+`select_conditional_note_evaluation_cycle` returns `None` for two operationally
 different reasons, and the module spends real effort distinguishing them: it
 re-runs selection against a freshly constructed cycle purely to classify the empty
 answer (`crates/daemon/src/lib.rs:11220-11229`). Effort that large on a
@@ -26,15 +26,16 @@ that is situation coverage. Per METHOD.md's rule, that is `sometimes`.
 
    ```
    None => NoteEvalSelection::NoWork {
-       cycle_exhausted: select_smart_note_evaluation_cycle(
+       cycle_exhausted: select_conditional_note_evaluation_cycle(
            &snapshots,
            now,
            retina_handoff,
-           &SmartNoteSelectionCycle::new(mode),
+           &ConditionalNoteSelectionCycle::new(mode),
        )
        .is_some(),
    },
    ```
+
    (`lib.rs:11220-11229`)
 
    The second call differs from the first in exactly one argument: a fresh cycle
@@ -51,7 +52,7 @@ that is situation coverage. Per METHOD.md's rule, that is `sometimes`.
 3. The cursor's monotonicity is what creates the state. `phase_index` only ever
    moves forward within a cycle: `next.phase_index = index` where `index` comes
    from `.skip(cycle.phase_index)`
-   (`crates/daemon/src/smart_note_evaluation.rs:907`, `:941`). Its doc comment
+   (`crates/daemon/src/conditional_note_evaluation.rs:907`, `:941`). Its doc comment
    is explicit: "Position in the mode profile. Phases before it are passed for this
    cycle: work that becomes eligible for an earlier phase waits for the next cycle,
    matching the legacy one-pass sweep shape" (`:864-868`).
@@ -77,6 +78,7 @@ that is situation coverage. Per METHOD.md's rule, that is `sometimes`.
        "no_work"
    },
    ```
+
    (`crates/memory-store/src/lib.rs:13322-13328`)
 
    and the replay path decodes it back:
@@ -92,17 +94,17 @@ that is situation coverage. Per METHOD.md's rule, that is `sometimes`.
    original response."
 
 7. The commit that follows resets the cursor:
-   `*slot_cycle = SmartNoteSelectionCycle::new(mode)` on a fresh `NoWork`
+   `*slot_cycle = ConditionalNoteSelectionCycle::new(mode)` on a fresh `NoWork`
    (`lib.rs:11258-11265`). So the state is one poll wide: the poll that observes it
    also clears it.
 
 8. Reachability of the surrounding machinery is established for the whole lens in
    `_lenses/lens-b-note-evaluation.md`, and it applies unchanged here: the seven
    `note.evaluation.*` methods are routed with no feature gate
-   (`lib.rs:12282-12296`), the shipped setup wizard writes a `dreamer` block and
+   (`lib.rs:12282-12296`), the shipped setup wizard writes a `memory_classifier` block and
    defaults its prompt to yes
    (`packages/cli/src/commands/setup-opencode.ts:262-278` (source-catalog path, not present at HEAD), `:449`), and the default
-   `evaluate-smart-notes` schedule is the non-empty `"0 3 * * *"`
+   `evaluate-conditional-notes` schedule is the non-empty `"0 3 * * *"`
    (`packages/plugin/src/config/schema/eidnara.ts:189` (source-catalog path, not present at HEAD)), so the bridge's two
    early-return gates (`packages/plugin/src/hooks/eidnara/hook.ts:1024` (source-catalog path, not present at HEAD),
    `:1029`) both pass and the bridge registers at `:1210`.
@@ -150,7 +152,7 @@ The cheapest route uses the fallback exclusion, so no clock movement is needed.
 1. Open a store, register an evaluator with `capacity: 1`, and insert two smart
    notes. Drive both to `check_status = "fallback"`, either by three compile
    failures each or by staging the column directly, as the existing revision-matrix
-   test does (`smart_note_evaluation.rs:1278-1337`).
+   test does (`conditional_note_evaluation.rs:1278-1337`).
 2. Poll `note.evaluation.next` on slot 0 with `acquisition_id: "a1"`. It returns a
    fallback claim for the lower-id note. Complete it with
    `{"phase":"fallback","kind":"false"}`.
@@ -197,7 +199,7 @@ correct implementation.
 
 ### Q: Can the state be reached without a prior claim on the same slot?
 
-- Sources examined: `SmartNoteSelectionCycle::new` (`smart_note_evaluation.rs:878-885`),
+- Sources examined: `ConditionalNoteSelectionCycle::new` (`conditional_note_evaluation.rs:878-885`),
   the two cursor mutation sites (`lib.rs:11254-11256` for advance and `:11265` for
   reset), and `new_note_evaluator_slot_cycles` (`:3014-3021`).
 - Findings: no. A fresh cycle has `phase_index: 0`, `remaining` equal to the first
@@ -215,7 +217,7 @@ correct implementation.
 ### Q: Does the nonbillable mode reach it too?
 
 - Sources examined: `NONBILLABLE_CYCLE_PROFILE`
-  (`smart_note_evaluation.rs:849-852`) and `cycle_profile` (`:888-893`).
+  (`conditional_note_evaluation.rs:849-852`) and `cycle_profile` (`:888-893`).
 - Findings: yes, and it is harder to construct. The nonbillable profile has only
   due and liveness, both with a quota of 10 (`NONBILLABLE_PHASE_QUOTA`, `:34`), and
   no fallback phase, so the `attempted_fallback` shortcut is unavailable. Reaching it

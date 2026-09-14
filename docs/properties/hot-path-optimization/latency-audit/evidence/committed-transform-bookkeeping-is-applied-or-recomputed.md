@@ -50,9 +50,9 @@ In-memory mutations after `run_transform()` returns, in order:
   has `cache_state`.
 - [`:8215-8223`][floor-a] reads the publication floor (Emergency95 only), then
   the `#[cfg(test)]` [hook][hook] runs.
-- [`prepare_historian_fire`][prepare] replaces the session's boundary-token
+- [`prepare_history_summarizer_fire`][prepare] replaces the session's boundary-token
   snapshot at [`:5148-5151`][boundary-store] and persists no-fire reasons by
-  CAS at [`record_no_fire:5462`][no-fire]; `spawn_historian_firing` at
+  CAS at [`record_no_fire:5462`][no-fire]; `spawn_history_summarizer_firing` at
   [`:8353`][spawn-fire] detaches the firing task.
 - [`:8387-8394`][pc-store] calls [`store_projection_cache`][store-pc], which
   replaces the `projections` entry for `(session, revert_epoch)`.
@@ -170,7 +170,7 @@ inserts the lineage root and removes the guidance pin after success; each
 stays inside the unchanged transform call after the accepted store commit.
 
 [Emergency95 orchestration][emergency-live] retains the environment across
-async historian waits without a unit permit. Initial and rerun results share
+async history_summarizer waits without a unit permit. Initial and rerun results share
 `PassContinuation`, whose last field, `env`, keeps request charges alive until
 the preceding pass and action values drop. The first unit matches the prepared
 action directly; no separate no-wait helper or optional action is needed.
@@ -213,7 +213,7 @@ the two known baseline deadline tests.
 
 [`emergency_cancellation_between_units_preserves_commit_and_releases_scratch`][emergency-test]
 observes an Emergency95 commit and a completed first unit before cancellation
-during the live historian wait. After release, a second unit returns `cancelled`
+during the live history_summarizer wait. After release, a second unit returns `cancelled`
 without losing initialized durable state or leaking scratch. The real-host
 cancel and close cases additionally retain the committed core after cleanup.
 The [focused receipt][receipt] records ten passing group tests, the parent-run

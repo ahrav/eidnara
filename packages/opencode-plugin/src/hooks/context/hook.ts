@@ -1,5 +1,5 @@
-import { isCompactionEnabled, isSidekickRunnable } from "../../config/agent-disable";
-import type { SidekickConfig } from "../../config/schema/eidnara";
+import { isCompactionEnabled, isContextResearcherRunnable } from "../../config/agent-disable";
+import type { ContextResearcherConfig } from "../../config/schema/eidnara";
 import type { ResolvedTransformMode } from "../../config/transform-mode";
 import {
     clearHookInitFailure,
@@ -16,7 +16,7 @@ import { log } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import { createEidnaraCommandHandler } from "./command-handler";
-import { invalidateToolPermissionDenied } from "./ctx-reduce-availability";
+import { invalidateToolPermissionDenied } from "./eidnara-reduce-availability";
 import { type ContextUsageEntry, createEventHandler } from "./event-handler";
 import {
     createChatMessageHook,
@@ -68,15 +68,15 @@ export interface EidnaraDeps {
                 min_prompt_chars: number;
             };
         };
-        sidekick?: SidekickConfig;
+        context_researcher?: ContextResearcherConfig;
         /** Optional because Zod `.default()` supplies it in loaded configs. */
         system_prompt_injection?: { enabled: boolean; skip_signatures: string[] };
-        caveman_text_compression?: {
+        terse_text_compression?: {
             enabled: boolean;
             min_chars: number;
         };
         transform_mode?: ResolvedTransformMode;
-        subc?: { connection_file: string };
+        host?: { connection_file: string };
         /** Compaction-off mode gate. Resolved ONCE here at the
          *  session-hook construction boundary via isCompactionEnabled; the
          *  resolved boolean is threaded to the transform phases. */
@@ -139,7 +139,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         deps.liveSessionState?.sessionMetadataReadStateBySession ?? new Map();
     const internalChildSessions = deps.liveSessionState?.internalChildSessions ?? new Set<string>();
     const subagentSessions = deps.liveSessionState?.subagentSessions ?? new Set<string>();
-    // One resolver serves the transform, the commands, the todo snapshots, and the Sidekick child, so every daemon call for a session shares one route root.
+    // One resolver serves the transform, the commands, the todo snapshots, and the ContextResearcher child, so every daemon call for a session shares one route root.
     const sessionDirectoryDeps = {
         client: deps.client,
         directory: deps.directory,
@@ -187,7 +187,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
 
     /**
      * `resolveLiveModel` prefers entries in `liveModelBySession` populated by chat and event hooks.
-     * It falls back to the last assistant model in OpenCode's SQLite DB when `/ctx-status` runs
+     * It falls back to the last assistant model in OpenCode's SQLite DB when `/eidnara-status` runs
      * before any hook populates the map, and caches that result for later calls.
      */
     const resolveLiveModel = (
@@ -205,7 +205,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
 
     // Compaction-off mode is resolved once here and threaded to every phase as a boolean.
     const compactionOff = !isCompactionEnabled(deps.config);
-    const sidekickConfig = isSidekickRunnable(deps.config) ? deps.config.sidekick : undefined;
+    const context_researcherConfig = isContextResearcherRunnable(deps.config)
+        ? deps.config.context_researcher
+        : undefined;
     const rustMode = deps.config.transform_mode === "rust";
 
     const moduleClient = deps.rustModeModuleClient;
@@ -247,14 +249,14 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 deps.config.allow_home_project,
             );
             if (memoryProject === undefined) {
-                throw new Error("Could not resolve project identity for ctx_note.");
+                throw new Error("Could not resolve project identity for eidnara_note.");
             }
             return moduleClient.call({
                 sessionId,
                 projectRoot,
-                method: "ctx_note",
+                method: "eidnara_note",
                 body: {
-                    name: "ctx_note",
+                    name: "eidnara_note",
                     arguments: {
                         ...(commandId ? { command_id: commandId } : {}),
                         action,
@@ -305,12 +307,12 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             historyBudgetPercentage: deps.config.history_budget_percentage,
             promptSurface: deps.config.prompt_surface,
             promptSurfaceRuntime: deps.promptSurfaceRuntime,
-            cavemanTextCompression: compactionOff
+            terse_text_compressionTextCompression: compactionOff
                 ? undefined
-                : deps.config.caveman_text_compression?.enabled === true
+                : deps.config.terse_text_compression?.enabled === true
                   ? {
                         enabled: true,
-                        minChars: deps.config.caveman_text_compression.min_chars ?? 500,
+                        minChars: deps.config.terse_text_compression.min_chars ?? 500,
                     }
                   : undefined,
             autoSearch: {
@@ -388,12 +390,12 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         resolveProjectRoot: projectRootForCommand,
         isSessionDeleted: (sessionId) => deletedSessions.has(sessionId),
         isSubagentSession,
-        // The DB fallback gives /ctx-status the model-specific threshold before the first hook after a restart.
+        // The DB fallback gives /eidnara-status the model-specific threshold before the first hook after a restart.
         getLiveModelKey: (sessionId) => {
             const model = resolveLiveModel(sessionId);
             return model ? `${model.providerID}/${model.modelID}` : undefined;
         },
-        // /ctx-flush signals history rebuild, system-prompt adjuncts, and forced materialization.
+        // /eidnara-flush signals history rebuild, system-prompt adjuncts, and forced materialization.
         onFlush: (sessionId) => {
             invalidateToolPermissionDenied(sessionId);
             historyRefreshSessions.add(sessionId);
@@ -419,9 +421,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 params.forcePersist === true,
             );
         },
-        sidekick: sidekickConfig
+        context_researcher: context_researcherConfig
             ? {
-                  config: sidekickConfig,
+                  config: context_researcherConfig,
                   projectPath,
                   resolveSessionDirectory: sessionDirectoryFor,
                   client: deps.client,

@@ -16,12 +16,12 @@ describe("createChildSession", () => {
         const result = await createChildSession({
             client: { session: { create } } as never,
             parentSessionId: "ses_parent",
-            title: "eidnara-sidekick",
+            title: "eidnara-context_researcher",
             directory: "/work/dir",
         });
         expect(result).toEqual({ id: "ses_child" });
         expect(create.mock.calls[0]?.[0]).toEqual({
-            body: { parentID: "ses_parent", title: "eidnara-sidekick" },
+            body: { parentID: "ses_parent", title: "eidnara-context_researcher" },
             query: { directory: "/work/dir" },
         });
     });

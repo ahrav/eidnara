@@ -28,9 +28,9 @@ clones the whole request when any non-synthetic message carries a
 `ck.meta.synthetic = true` on the clone only; the shadow
 [`let req = rebased_req.as_ref().unwrap_or(ingress_req)`][shadow] makes every
 later read inside the pass see the normalized flags. The handler-level
-consumers do not: [`prepare_historian_fire`][historian-fire] passes the
+consumers do not: [`prepare_history_summarizer_fire`][history_summarizer-fire] passes the
 un-normalized `parsed` to [`boundary_messages`][boundary-call] and to
-[`assemble_historian_firing`][assemble], [`store_projection_cache`][store-pc]
+[`assemble_history_summarizer_firing`][assemble], [`store_projection_cache`][store-pc]
 charges `parsed.messages`, and
 [`attach_native_messages_incremental`][native-attach] filters
 `request.messages` by the un-normalized flag at
@@ -50,7 +50,7 @@ out of `identity_by_mid` ([`:489-494`][identity-skip],
 cached prefix blocks ([`:402`][prefix-copy]) and skips synthetic prefix
 messages at [`:393`][inc-skip]. Consumers of the projection copy again:
 [`sel_item_from_flat`][sel-item] clones `input` out of `block.wire`,
-[`sel_kind_for_flat`][sel-kind] clones `tool_input` for the historian's
+[`sel_kind_for_flat`][sel-kind] clones `tool_input` for the history_summarizer's
 [`BoundaryBlock`][boundary-block],
 [`tail_for_selection.clone()`][tail-clone] copies the whole `Vec<SelItem>`,
 [`taggable_source`][taggable] text becomes `source_bytes: Vec<u8>` on every
@@ -75,12 +75,12 @@ Clone sites in scope, what reads the copy, and whether the copy is mutated:
 
 | Site | Copy | Mutation | Downstream artifact |
 | --- | --- | --- | --- |
-| [`normalize`][normalize] | whole `TransformRequest` | `meta.synthetic = true` on matched messages | projection `synthetic`, `identity_by_mid`, `message_meta`; [`live`][live]; [ordinal check][ordinal-check]; [tail loop skip][tail-loop]; [served fingerprint ids][served-fps]; boundary, hygiene, tag mint, historian filters inside the pass |
+| [`normalize`][normalize] | whole `TransformRequest` | `meta.synthetic = true` on matched messages | projection `synthetic`, `identity_by_mid`, `message_meta`; [`live`][live]; [ordinal check][ordinal-check]; [tail loop skip][tail-loop]; [served fingerprint ids][served-fps]; boundary, hygiene, tag mint, history_summarizer filters inside the pass |
 | [`reattach`][reattach] | `WireBlock` per prefix block, new shell | none | `parsed.messages` prefix, then everything above; served bytes of a rebuilt shell use typed fields |
 | [`native-deep`][native-deep] | `Value` per native prefix message | none | sidecar decode (which [copies each raw message again][raw-clone] into [`HarnessMessageMeta.raw`][decode-sidecar]), `native_ingress_chunks` equality, retained-bytes accounting |
 | [`prefix-copy`][prefix-copy] | `FlatBlock` per cached prefix block | none | the incremental `FlatProjection` |
-| [`sel-item`][sel-item], [`sel-kind`][sel-kind], [`tail-clone`][tail-clone] | [`SelKind::ToolCall.input: Value`][sel-kind-enum] per tool call | none (read at [selection.rs:323-331][sel-consume], [boundary.rs:1727-1746][boundary-consume], [injection.rs:400-403][injection-consume]) | reductions, historian tool summaries, todo capture |
-| [`mint-input`][mint-input] | text bytes per taggable block | none after mint | `TagRow.source_bytes`, active-tag match at [`:7364`][active-match], caveman source at [`:5702-5705`][caveman-source] |
+| [`sel-item`][sel-item], [`sel-kind`][sel-kind], [`tail-clone`][tail-clone] | [`SelKind::ToolCall.input: Value`][sel-kind-enum] per tool call | none (read at [selection.rs:323-331][sel-consume], [boundary.rs:1727-1746][boundary-consume], [injection.rs:400-403][injection-consume]) | reductions, history_summarizer tool summaries, todo capture |
+| [`mint-input`][mint-input] | text bytes per taggable block | none after mint | `TagRow.source_bytes`, active-tag match at [`:7364`][active-match], terse_text_compression source at [`:5702-5705`][terse_text_compression-source] |
 | [`make-mut`][make-mut] | whole `Vec<TagRow>` | append mint rows | `tag_rows` for overlay, hygiene, commit inputs at [`:4935-4945`][commit-inputs] |
 | [`part-measure`][part-measure] | content `String` per part | none | hygiene `content_hash`, token cache key, `T`/`U` |
 | [`served-reusing`][served-reusing] | `Value` tree plus bytes per served message | none | wire bytes, `canonical_hash`, `output_identity`, native message keys |
@@ -133,6 +133,7 @@ equality, and none found that runs the differential from
 `crates/daemon/tests/` or the [benches][bench], where `cfg!(test)` is false
 for the library and no test or CI file sets the variable.
 Open questions:
+
 - Is the release-build `assert_eq!` panic under the environment variable the
   intended production contract, or a developer switch? The transform catalog
   queued this as its gap G2 and it is still open. (needs human input)
@@ -144,19 +145,19 @@ Check: `always` - for every pass, assert three observers see the same
 synthetic sets as at HEAD: inside `apply_once` a message is synthetic iff
 `meta.synthetic || any block id has the synthetic_todo_ prefix`; in
 [`cached_boundary_messages`][cached-boundary],
-[`assemble_historian_firing`][assemble], [`store_projection_cache`][store-pc],
+[`assemble_history_summarizer_firing`][assemble], [`store_projection_cache`][store-pc],
 and [`attach_native_messages_incremental`][native-attach] a message is
 synthetic iff `parsed.messages[i].ck.meta.synthetic` as it arrived; and the
 served wire bytes of a message whose flag was set by normalization equal the
 bytes of the same message without the flag, because
 [`Serialize for WireMessage`][ser-msg] replays `original`.
-`always` because the sets decide which blocks count for coverage, historian
+`always` because the sets decide which blocks count for coverage, history_summarizer
 ordinals, native reasoning clears, and the output; the check is on the
 observer, not on a defect.
 Guarantee: Replacing the normalization clone with a shared view changes no
 observer's synthetic set and no served byte.
 Fault/timing angle: A shared-reference design that marks `parsed` in place
-before `apply` widens the normalized view to the historian and native
+before `apply` widens the normalized view to the history_summarizer and native
 attach, and a design that marks through `mark_modified` or rebuilds the
 message drops `original`, so `"synthetic":true` appears on the wire for the
 first time. Both are behavior changes relative to HEAD, not preservation.
@@ -165,7 +166,7 @@ Required faults and enabling state: A prior bust pass that froze a todo pair
 array in which the harness replays the pair as ordinary messages without the
 `synthetic` marker, as
 [`warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live`][t-collapsed]
-constructs at `:27303-27318`; a historian firing on that pass;
+constructs at `:27303-27318`; a history_summarizer firing on that pass;
 `serve_native` on.
 Reachability: default-production - the normalization only runs when
 `ctx.compaction_enabled` ([default true][compaction-default]); the replay
@@ -176,11 +177,12 @@ shadow with
 [`pending_rewrite_passes_isolate_ingress_meta_usage_and_reconcile`][t-pending];
 [`warm_cache_...`][t-collapsed] checks no duplicate tool-use
 ids and cache reuse on the replayed pair. None found that compares the
-historian's `BoundaryMsg` list or `input_ordinals` between a full-array turn
+history_summarizer's `BoundaryMsg` list or `input_ordinals` between a full-array turn
 and a delta turn carrying the same replayed pair; none found that asserts
 the served bytes of a normalized message omit the flag.
 Open questions:
-- Is the historian meant to see the replayed pair as a non-synthetic message
+
+- Is the history_summarizer meant to see the replayed pair as a non-synthetic message
   with zero blocks (full-array lane) or not at all (delta lane)? See the
   disagreement below. (needs human input)
 - [`pending_passthrough_messages`][pending-pass] and
@@ -237,6 +239,7 @@ fingerprint ids;
 `Exact` segments only. None found that asserts a `Served` segment writes
 `canonical_bytes`, and none found for the sorted-key form itself.
 Open questions:
+
 - Is sorted-key canonical JSON a contract with the plugin, or an artifact of
   `preserve_order` being off? No wire document names it. (needs human input)
 
@@ -279,6 +282,7 @@ exercise it;
 covers `mid_pins`. None found for sidecar `order` equality between the
 incremental and full decode, and none found for the chunk-sharing predicate.
 Open questions:
+
 - [`decode_opencode_sidecar_incremental`][sidecar-inc] sets `mid_pins` from
   the suffix decode only; the full decode accumulates pins over the whole
   array. The differential compares output bytes, not sidecars. Is pin
@@ -326,6 +330,7 @@ cover refill and isolation. None found that asserts the cache entry is
 unchanged after a mint pass whose commit fails, and none found for
 `source_bytes` equality against the projected text outside the mint tests.
 Open questions:
+
 - `source_bytes` pass through the store's prepared-field path
   ([`write.bytes("source_bytes", ..)`][mint-prepared]); a detection refuses
   the insert. [R1][r1] owns that policy; this record assumes the bytes that
@@ -336,7 +341,7 @@ Open questions:
 Type: safety
 Check: `always` - for every hygiene part, assert
 `content_hash == hex(sha256(kind_name ++ "\0" ++ content))` where `content`
-is the derived part string ([caveman-substituted and reminder-stripped
+is the derived part string ([terse_text_compression-substituted and reminder-stripped
 text][hyg-text], [`to_string(input)`][hyg-input], or
 [`tool_output_content`][hyg-output]), that excluded parts hash
 `"excluded\0" ++ block.bytes`, that the token cache is keyed by that digest
@@ -354,7 +359,7 @@ projection digest already keys a different cache, the boundary token cache
 ([`token_count`][token-count]), which counts `block.bytes`, not part content.
 Required faults and enabling state: A tail with text, tool call, tool result
 (text and content variants), media, an excluded reduced block, and a
-caveman-substituted text block; the same input measured twice.
+terse_text_compression-substituted text block; the same input measured twice.
 Reachability: default-production - hygiene runs on every pass that reaches
 the measurement.
 Existing check:
@@ -397,7 +402,7 @@ None found:
   `wire.kind()`.
 - A test that a `Served` prepared segment writes `canonical_bytes`, or that
   names the sorted-key form.
-- A two-lane (full array versus delta) comparison of the historian's
+- A two-lane (full array versus delta) comparison of the history_summarizer's
   `BoundaryMsg` list, `input_ordinals`, or the native attachment for the
   same replayed synthetic pair.
 - A test that the tag baseline entry is unchanged after a pass whose mint
@@ -417,11 +422,11 @@ both sides and neither resolved here:
 - The normalized synthetic view stops at the pass boundary. Inside
   `apply_once` every read follows the [shadow][shadow]; the handler passes
   the un-normalized `parsed` to [`boundary_messages`][boundary-call] and
-  [`assemble_historian_firing`][assemble] together with the normalized
+  [`assemble_history_summarizer_firing`][assemble] together with the normalized
   `result.projection`. In the full-array lane a replayed todo message is a
   `BoundaryMsg` whose every block is filtered out by `!block.synthetic`
   ([`:16613`][boundary-filter]) and its ordinal counts in
-  [`build_historian_chunk`][chunk-build]; in the delta lane the same message
+  [`build_history_summarizer_chunk`][chunk-build]; in the delta lane the same message
   is rebuilt from `message_meta` with `synthetic: true` and is excluded by
   the message filter. The transform catalog's `synthetic-strip` record
   states the inside-the-pass invariant; nothing states the outside one.
@@ -443,7 +448,7 @@ both sides and neither resolved here:
 [expand]: ../../../../../crates/daemon/src/lib.rs#L4213-L4300
 [native-deep]: ../../../../../crates/daemon/src/lib.rs#L4271-L4274
 [store-pc]: ../../../../../crates/daemon/src/lib.rs#L4341-L4384
-[historian-fire]: ../../../../../crates/daemon/src/lib.rs#L5052
+[history_summarizer-fire]: ../../../../../crates/daemon/src/lib.rs#L5052
 [boundary-call]: ../../../../../crates/daemon/src/lib.rs#L5132
 [assemble]: ../../../../../crates/daemon/src/lib.rs#L5292-L5296
 [native-sidecar]: ../../../../../crates/daemon/src/lib.rs#L12972-L12992
@@ -480,7 +485,7 @@ both sides and neither resolved here:
 [ordinal-check]: ../../../../../crates/daemon/src/transform.rs#L2986-L2997
 [tail-clone]: ../../../../../crates/daemon/src/transform.rs#L4005
 [commit-inputs]: ../../../../../crates/daemon/src/transform.rs#L4935-L4945
-[caveman-source]: ../../../../../crates/daemon/src/transform.rs#L5702-L5705
+[terse_text_compression-source]: ../../../../../crates/daemon/src/transform.rs#L5702-L5705
 [sel-item]: ../../../../../crates/daemon/src/transform.rs#L6326-L6355
 [pending-pass]: ../../../../../crates/daemon/src/transform.rs#L6637-L6665
 [tag-entry]: ../../../../../crates/daemon/src/transform.rs#L6793-L6818
@@ -536,7 +541,7 @@ both sides and neither resolved here:
 [boundary-consume]: ../../../../../crates/daemon/src/boundary.rs#L1727-L1746
 [injection-consume]: ../../../../../crates/daemon/src/injection.rs#L400-L403
 [todo-prefix]: ../../../../../crates/daemon/src/injection.rs#L187-L189
-[chunk-build]: ../../../../../crates/daemon/src/historian_chunk.rs#L350-L381
+[chunk-build]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L350-L381
 [segment-served]: ../../../../../crates/daemon/src/dispatch.rs#L50-L72
 [compaction-default]: ../../../../../crates/daemon/src/config.rs#L121
 [tail-reclaim]: ../../../../../crates/daemon/src/healing.rs#L130-L139

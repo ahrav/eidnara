@@ -7,21 +7,21 @@ line 81 require one EvalBudget through embedding, SQLite, and dense work,
 with physical ownership retained after client cancellation.
 Sources, date, and SHA: [source register](../catalog.md#source-register).
 Reachability is test-only because no production RP2.1 embedding supervisor
-slice or shared Synapse EvalBudget bridge exists at the pinned revision.
+slice or shared LocalEmbeddings EvalBudget bridge exists at the pinned revision.
 
 ## Evidence trail
 
-- `crates/daemon/src/lib.rs:3646-3660` starts the existing DreamerScheduler
+- `crates/daemon/src/lib.rs:3646-3660` starts the existing MemoryClassifierScheduler
   after store open with the daemon cancellation token and task admission owner.
-- `crates/daemon/src/dreamer_scheduler.rs:163-220` races cancellation with the
+- `crates/daemon/src/memory_classifier_scheduler.rs:163-220` races cancellation with the
   whole tick and sleeps after deferred/retained work rather than busy retrying.
-- `dreamer_scheduler.rs:334-371` uses one review-user-memories task identity.
+- `memory_classifier_scheduler.rs:334-371` uses one review-user-memories task identity.
 - `crates/kernel/src/applicability/checkout.rs:146-203` defines cloneable
   EvalBudget, sticky cancellation, absolute deadline, and BudgetExhausted.
 - `crates/kernel/src/open.rs:1379-1387` installs SQLite progress privately;
   retrieval cannot simply call that installer from another crate.
 - `crates/host-runtime/src/handler.rs:450-455` exposes request cancellation.
-- `crates/host-runtime/src/synapse/mod.rs:669-722` retains a query permit and
+- `crates/host-runtime/src/local_embeddings/mod.rs:669-722` retains a query permit and
   text charge in the tracked worker through its joined native call.
 - `mod.rs:1148-1161` joins tracked work and the synchronous CPU holder at stop.
 
@@ -44,7 +44,7 @@ Query response cancellation does not prove that a started native call stops.
 Current shutdown has no finite native-call completion deadline. Logical
 cancellation latency and physical drain therefore need different contracts.
 Maintenance uses its own approved bounded slice/lease, not a borrowed caller's
-expired request. Reusing the supervisor does not mean reusing Dreamer task IDs.
+expired request. Reusing the supervisor does not mean reusing MemoryClassifier task IDs.
 The async query lane and EvalBudget adapter are cross-plan prerequisites
 shared with RP2.7.U3 (P7 lines 142-147). RP2.1.U3 integrates priority admission
 and embedding maintenance; RP2.7 owns the authorized full query route and its
@@ -67,7 +67,7 @@ instead of interpreting an arbitrary harness timeout as a successful join.
 
 ### Q: Are shared cancellation and a supervisor entirely new primitives?
 
-- Sources examined: EvalBudget, RequestCtx, DreamerScheduler, Synapse tracker.
+- Sources examined: EvalBudget, RequestCtx, MemoryClassifierScheduler, LocalEmbeddings tracker.
 - Findings: All exist separately. The missing work is the RP2.1 bridge and
   bounded embedding registration, with the query lane/EvalBudget adapter shared
   with RP2.7. It is not another timer or cancellation authority.

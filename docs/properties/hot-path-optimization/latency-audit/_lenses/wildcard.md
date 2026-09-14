@@ -13,7 +13,7 @@ consistency under a blocking worker (finding 9).
 This pass hunted outside those frames: the measurement contract that would
 make "faster" a checkable claim, the process-global token-count cache and the
 estimator interface, the secret scanner's whole-input regex pass, the
-historian firing inputs, the cron stepper on the scheduler task, the per-pass
+history_summarizer firing inputs, the cron stepper on the scheduler task, the per-pass
 config merge, and the repository-level constraints that bind any optimization
 regardless of stage. Anchors are checked in `/local/home/ahrav/scratch/eidnara`
 at `913234433ae36a80a6e22c6aac14c7f9aab74386` on 2026-09-10. This is analysis
@@ -44,9 +44,9 @@ only; no test ran and nothing outside this file changed.
   against a [fresh tempfile store][hp-store]. The production handler wraps
   that call with work the bench never sees: the projection-cache lookup,
   side-channel drain, and `trace_pass_received` at [8190-8207][h-pre], the
-  `project_memory` read, `historian_active`, and guidance-date lookups inside
+  `project_memory` read, `history_summarizer_active`, and guidance-date lookups inside
   [`run_transform`][h-run], a `Some` projection-cache input at
-  [8259-8265][h-call], `prepare_historian_fire`, and response encoding in
+  [8259-8265][h-call], `prepare_history_summarizer_fire`, and response encoding in
   [`respond_transform`][respond]. The bench tops out at 1_000 messages because
   the store's 512 KiB durable-text bound rejects a 1_400-message first HARD
   pass ([hot_path.rs:29-35][hp-counts], [291-293][hp-cliff]); that cliff is
@@ -286,21 +286,21 @@ only; no test ran and nothing outside this file changed.
     keyword-bound within `radius` does not exist; it would be a new rule-set
     test, not a property of the evaluator.
 
-### historian-firing-input-is-preserved-by-cheaper-construction
+### history_summarizer-firing-input-is-preserved-by-cheaper-construction
 
 - Type: safety
-- Check: `always` - [`truncate_historian_input_if_needed`][trunc] returns
+- Check: `always` - [`truncate_history_summarizer_input_if_needed`][trunc] returns
   bytes identical to the frozen reference in
-  [`historian_truncate_differential.rs`][diff-ref] (same cut point, same
+  [`history_summarizer_truncate_differential.rs`][diff-ref] (same cut point, same
   marker), and a snapshot item carrying only `bytes.len()` yields the same
   [`compute_chunk_fingerprint`][fp] string as one carrying the bytes.
-- Guarantee: The historian receives the same prompt bytes, and the durable
+- Guarantee: The history_summarizer receives the same prompt bytes, and the durable
   chunk fingerprint still matches across restart.
 - Rationale: The chunk snapshot is built at [417-429][snap-build] with
   `bytes: block.bytes.to_string()`; its only reader is
   [`as_item`][as-item] feeding [`compute_chunk_fingerprint`][fp], which
   reads `item.bytes.len()` into the literal `id:kind:len|...`. That string is
-  stored in [`HistorianDurableState.chunk_fingerprint`][fp-field] and
+  stored in [`HistorySummarizerDurableState.chunk_fingerprint`][fp-field] and
   compared by [`verify_chunk_fingerprint`][fp-verify] and the publish
   predicate at [407-417][fp-predicate], so the format is durable state.
   Truncation at [742-777][trunc] binary-searches UTF-16 unit positions with
@@ -312,11 +312,11 @@ only; no test ran and nothing outside this file changed.
   small windows ([133-140][diff-small]), and the exact-budget identity
   ([117-128][diff-exact]). The golden
   [`forced_overflow_preserves_existing_truncation_output`][t-golden] pins
-  one case from `testdata/historian-chunk-golden.json`.
+  one case from `testdata/history_summarizer-chunk-golden.json`.
 - Fault/timing angle: A fingerprint format change lands while a firing is
   in flight across a restart, so the stored string no longer equals the
   recomputed one and publication fails with `FingerprintMismatch`.
-- Required faults and enabling state: A restart with an in-flight historian
+- Required faults and enabling state: A restart with an in-flight history_summarizer
   firing; a chunk whose text exceeds `token_budget`.
 - Reachability: default-production for the fingerprint (every firing);
   truncation runs only when a chunk exceeds the budget, which needs a large
@@ -327,7 +327,7 @@ only; no test ran and nothing outside this file changed.
 - Open questions:
   - May the specification relax truncation to "any prefix within budget on
     a scalar boundary plus the marker"? The tests pin byte identity and the
-    historian prompt bytes would change. (needs human input)
+    history_summarizer prompt bytes would change. (needs human input)
 
 ### cron-next-occurrence-matches-the-minute-stepper
 
@@ -349,24 +349,24 @@ only; no test ran and nothing outside this file changed.
   that day and a fall-back overlap matches the earlier instant. The cap is
   [`MAX_SEARCH_MS`][cap], 4 x 366 days, 2_108_160 iterations per call for an
   unsatisfiable expression through [`next_cron_occurrence`][occurrence];
-  smart notes cap at `SMART_NOTE_CHECK_CEILING_MS` instead
-  ([236-239][note-cap]). The dreamer scheduler calls it as
+  conditional notes cap at `CONDITIONAL_NOTE_CHECK_CEILING_MS` instead
+  ([236-239][note-cap]). The memory_classifier scheduler calls it as
   [`next_due`][sched-due] on its async task; the schedule defaults to `None`
   ([config.rs:127][sched-default]) and is accepted by
-  [`is_valid_smart_note_cron`][valid] at [config.rs:881-895][sched-accept].
+  [`is_valid_conditional_note_cron`][valid] at [config.rs:881-895][sched-accept].
 - Fault/timing angle: The scheduler's tick runs the stepper synchronously;
   an unsatisfiable schedule pays the full cap on that task.
 - Required faults and enabling state: A `Local` zone with DST; expressions
   such as `30 2 * * *` on spring-forward, `0 0 30 2 *`, `0 0 31 4,6,9,11 *`,
   and `0 0 29 2 *` (satisfiable once within the cap); `after_ms` at the
   `i64` extremes.
-- Reachability: explicit-config-only - the dreamer schedule
-  (`/dreamer/tasks/review-user-memories/schedule`) defaults to `None`;
-  smart notes need a cron on the note.
+- Reachability: explicit-config-only - the memory_classifier schedule
+  (`/memory_classifier/tasks/review-user-memories/schedule`) defaults to `None`;
+  conditional notes need a cron on the note.
 - Existing check:
   [`star_prefixed_day_fields_are_unrestricted_like_vixie_cron`][t-vixie],
   [`next_occurrence_survives_extreme_instants`][t-extreme], the golden
-  [`smart_note_evaluation_golden_matches_production_behaviour`][t-golden-cron]
+  [`conditional_note_evaluation_golden_matches_production_behaviour`][t-golden-cron]
   with a fixture timezone. None for DST or for an unsatisfiable expression.
 - Open questions:
   - Should validation reject calendar-impossible dates instead? That is a
@@ -395,7 +395,7 @@ only; no test ran and nothing outside this file changed.
   read of the override file on every call, with no mtime gate), and a deep
   clone of the merged config at [288][eff-clone]. Per-pass callers are
   [`maybe_spawn_reattach`][call-reattach],
-  [`prepare_historian_fire`][call-fire], and the wrapup path
+  [`prepare_history_summarizer_fire`][call-fire], and the wrapup path
   [5426][call-wrapup]; [`bind`][call-bind] freezes a copy into
   `SessionBinding`, whose doc says config can change while the route stays
   open ([lib.rs:232-233][binding-doc]). One `ConfigCache` per handler holds
@@ -409,7 +409,7 @@ only; no test ran and nothing outside this file changed.
   a later mtime; `prompt_surface.guidance_override_path` configured and its
   file edited; two project roots bound at once.
 - Reachability: default-production for the tier reads
-  (`prepare_historian_fire` runs each pass); explicit-config-only for the
+  (`prepare_history_summarizer_fire` runs each pass); explicit-config-only for the
   override.
 - Existing check:
   [`mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`][t-mtime];
@@ -422,7 +422,7 @@ only; no test ran and nothing outside this file changed.
     reported on every load so a long-running daemon keeps surfacing them; a
     merged cache silences the repeat. Keep that behavior? (needs human
     input)
-  - Should the historian read the bind-frozen config, removing the per-pass
+  - Should the history_summarizer read the bind-frozen config, removing the per-pass
     merge entirely? (needs human input)
 
 ## Repository constraints that bind the optimization (authority document cited)
@@ -496,7 +496,7 @@ only; no test ran and nothing outside this file changed.
 | [`truncation_uses_marker_and_keeps_multibyte_boundaries`][t-marker] | marker suffix, budget, scalar-boundary prefix | unaudited |
 | [`star_prefixed_day_fields_are_unrestricted_like_vixie_cron`][t-vixie] | Vixie `*`-prefix semantics | unaudited |
 | [`next_occurrence_survives_extreme_instants`][t-extreme] | `None` at `i64` extremes | unaudited |
-| [`smart_note_evaluation_golden_matches_production_behaviour`][t-golden-cron] | reduction and due-time golden, fixture timezone | unaudited |
+| [`conditional_note_evaluation_golden_matches_production_behaviour`][t-golden-cron] | reduction and due-time golden, fixture timezone | unaudited |
 | [`mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`][t-mtime] | same mtime hides an edit; new mtime reloads | unaudited |
 | [`project_threshold_may_only_raise`][t-raise] | `ProjectRaiseOnly` threshold | unaudited |
 | [`project_tier_cannot_raise_the_user_memory_gate`][t-gate] | `ProjectRaiseOnly` gate | unaudited |
@@ -557,10 +557,10 @@ sharding note is at 112-113, not 110. The `radius` description in
 `evaluator.rs:35-157`; the whole-input `captures_iter` is at 112 and the
 radius window at 266-297. `effective_with_warnings` spans `config.rs:268-288`
 with its doc at 266-267; `read_tier_cached` spans 368-398.
-`truncate_historian_input_if_needed` spans `historian_chunk.rs:743-777` with
+`truncate_history_summarizer_input_if_needed` spans `history_summarizer_chunk.rs:743-777` with
 its doc at 742 and the marker at 739-740. `next_occurrence` spans
-`smart_note_evaluation.rs:166-192`; `next_cron_occurrence` is 216-218 as
-supplied; `is_valid_smart_note_cron` is 208-210 and `config.rs:887` is its
+`conditional_note_evaluation.rs:166-192`; `next_cron_occurrence` is 216-218 as
+supplied; `is_valid_conditional_note_cron` is 208-210 and `config.rs:887` is its
 call site.
 
 [ci-bench]: ../../../../../.github/workflows/ci.yml#L514-L518
@@ -669,33 +669,33 @@ call site.
 [ms-content]: ../../../../../crates/memory-store/src/lib.rs#L2155-L2163
 [ms-digest]: ../../../../../crates/memory-store/src/lib.rs#L2442-L2477
 
-[snap-build]: ../../../../../crates/daemon/src/historian_chunk.rs#L417-L429
-[as-item]: ../../../../../crates/daemon/src/historian_chunk.rs#L37-L46
-[trunc-call]: ../../../../../crates/daemon/src/historian_chunk.rs#L692
-[trunc]: ../../../../../crates/daemon/src/historian_chunk.rs#L742-L777
-[t-golden]: ../../../../../crates/daemon/src/historian_chunk.rs#L1749-L1760
-[t-marker]: ../../../../../crates/daemon/src/historian_chunk.rs#L1743-L1757
-[fp]: ../../../../../crates/daemon/src/historian.rs#L140-L158
+[snap-build]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L417-L429
+[as-item]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L37-L46
+[trunc-call]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L692
+[trunc]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L742-L777
+[t-golden]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L1749-L1760
+[t-marker]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L1743-L1757
+[fp]: ../../../../../crates/daemon/src/history_summarizer.rs#L140-L158
 [fp-field]: ../../../../../crates/memory-store/src/lib.rs#L673
-[fp-verify]: ../../../../../crates/daemon/src/historian.rs#L326-L334
-[fp-predicate]: ../../../../../crates/daemon/src/historian.rs#L407-L417
-[t-fp]: ../../../../../crates/daemon/src/historian.rs#L3925
-[diff-header]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L1-L11
-[diff-ref]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
-[diff-prod]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L102-L112
-[diff-exact]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L117-L128
-[diff-small]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L133-L140
-[cap]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L31-L34
-[parse]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L125-L145
-[vixie]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L150-L160
-[stepper]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L163-L192
-[valid]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L205-L210
-[occurrence]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L212-L218
-[note-cap]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L236-L239
-[t-golden-cron]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L1126
-[t-extreme]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L1570-L1582
-[t-vixie]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L1584
-[sched-due]: ../../../../../crates/daemon/src/dreamer_scheduler.rs#L412-L416
+[fp-verify]: ../../../../../crates/daemon/src/history_summarizer.rs#L326-L334
+[fp-predicate]: ../../../../../crates/daemon/src/history_summarizer.rs#L407-L417
+[t-fp]: ../../../../../crates/daemon/src/history_summarizer.rs#L3925
+[diff-header]: ../../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L1-L11
+[diff-ref]: ../../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L13-L58
+[diff-prod]: ../../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L102-L112
+[diff-exact]: ../../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L117-L128
+[diff-small]: ../../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L133-L140
+[cap]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34
+[parse]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L125-L145
+[vixie]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L150-L160
+[stepper]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L163-L192
+[valid]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L205-L210
+[occurrence]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L212-L218
+[note-cap]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L236-L239
+[t-golden-cron]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1126
+[t-extreme]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1570-L1582
+[t-vixie]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L1584
+[sched-due]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L412-L416
 [sched-default]: ../../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../../crates/daemon/src/config.rs#L881-L895
 

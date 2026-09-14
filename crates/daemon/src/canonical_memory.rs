@@ -1,6 +1,6 @@
 //! Daemon-internal reader that composes injectable project memory from canonical kernel rows.
 //!
-//! The transform and the historian read through this module. A pass reads once
+//! The transform and the history_summarizer read through this module. A pass reads once
 //! and composes every memory surface of that pass from the same pinned rows.
 //! The reader trims the rows to the pass's memory budget, so a snapshot holds
 //! exactly the rows the `<project-memory>` block renders.

@@ -18,7 +18,7 @@ use napi::{Env, Error, JsValue, Result, Status, Task, Unknown, ValueType, sys};
 use napi_derive::napi;
 use shm_transport::backend::ring::RingGrant;
 use shm_transport::backend::ring::{ProducerError, ProducerReservation, Ring};
-use shm_transport::descriptor::{WIRE_V2_HEADER_BYTES, check_wire_header};
+use shm_transport::descriptor::{WIRE_V3_HEADER_BYTES, check_wire_header};
 use shm_transport::lease::ReceiveLease;
 use shm_transport::profile::host_test_ring_profile;
 
@@ -1004,7 +1004,7 @@ pub fn produce(
     fill: Function<Vec<Unknown<'_>>, u32>,
     before_publish: Function<(), ()>,
 ) -> Result<()> {
-    let header: [u8; WIRE_V2_HEADER_BYTES] = header
+    let header: [u8; WIRE_V3_HEADER_BYTES] = header
         .as_ref()
         .try_into()
         .map_err(|_| error("wire header has invalid length"))?;
@@ -1105,7 +1105,7 @@ pub fn reserve(
         let reservation = ring
             .reserve_until(
                 capacity as usize,
-                [0; WIRE_V2_HEADER_BYTES],
+                [0; WIRE_V3_HEADER_BYTES],
                 Instant::now() + Duration::from_millis(u64::from(timeout_ms)),
             )
             .map_err(reservation_error)?;
@@ -1174,7 +1174,7 @@ pub fn commit_reservation(
             .ok_or_else(|| error("native channel is closed"))?;
         // The header is validated before detaching the producer token, so an invalid
         // length leaves the token's reservation retryable.
-        let header: [u8; WIRE_V2_HEADER_BYTES] = header
+        let header: [u8; WIRE_V3_HEADER_BYTES] = header
             .as_ref()
             .try_into()
             .map_err(|_| error("wire header has invalid length"))?;
@@ -1290,7 +1290,7 @@ mod tests {
         let reservation = ring
             .reserve_until(
                 0,
-                [0; WIRE_V2_HEADER_BYTES],
+                [0; WIRE_V3_HEADER_BYTES],
                 Instant::now() + Duration::from_secs(1),
             )
             .expect("reservation");

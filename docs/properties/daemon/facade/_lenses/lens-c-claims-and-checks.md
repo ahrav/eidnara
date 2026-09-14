@@ -12,7 +12,7 @@ Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927`
 Format model: [../../handlers/existing-checks.md](../../handlers/existing-checks.md).
 
 Scope consumed, all six units: `src/lib.rs:10042-11917`,
-`src/lib.rs:11919-16001`, `src/dispatch.rs`, `src/smart_note_evaluation.rs`,
+`src/lib.rs:11919-16001`, `src/dispatch.rs`, `src/conditional_note_evaluation.rs`,
 `src/memory_tool.rs`, `src/project_docs.rs`, plus the claim intent ledger at
 `lib.rs:10082-10182`. `src/lib.rs:16001-30517` was read as check evidence.
 `src/prompt_surface.rs` and `src/memory_render.rs` were read only where they
@@ -43,13 +43,13 @@ to stay inside the cap; they are named where folded.
 ### C1 — the cross-language drift gate is half-wired
 
 > "Both replay the frozen characterization fixture
-> `crates/daemon/testdata/smart-note-evaluation-golden.json` (transitions,
+> `crates/daemon/testdata/conditional-note-evaluation-golden.json` (transitions,
 > DST schedule vectors, phase selection)."
-> — `packages/plugin/src/features/eidnara/smart-notes/PARITY.md:16`
+> — `packages/plugin/src/features/eidnara/conditional-notes/PARITY.md:16`
 
 Also stated by the module itself: "Both implementations replay the frozen
 fixture ... so lifecycle behavior cannot drift between languages"
-(`smart_note_evaluation.rs:5-6`).
+(`conditional_note_evaluation.rs:5-6`).
 
 Implied property: for every case in the shared fixture, the Rust reducer and
 the TypeScript reducer produce the same lifecycle result, and a regression on
@@ -57,9 +57,9 @@ either side fails a check.
 
 Implementation: **partial.** The fixture holds `constants` (13),
 `transition_cases` (23), `schedule_cases` (16) and `selection_cases` (9),
-counted from `testdata/smart-note-evaluation-golden.json`. The Rust replay
-`smart_note_evaluation_golden_matches_production_behaviour`
-(`smart_note_evaluation.rs:1101`) asserts all four groups: constants at
+counted from `testdata/conditional-note-evaluation-golden.json`. The Rust replay
+`conditional_note_evaluation_golden_matches_production_behaviour`
+(`conditional_note_evaluation.rs:1101`) asserts all four groups: constants at
 `:1110-1122`, the backoff ladder at `:1123-1130`, transitions at `:1132`,
 schedules at `:1145`, selections at `:1156`. The TypeScript replay
 `evaluation-state.test.ts` is 136 lines with 3 `it()` blocks and iterates
@@ -85,7 +85,7 @@ Implied property: no compile outcome is persisted whose `check_hash` differs
 from the digest recomputed from the stored condition, and the module never
 evaluates wire-supplied code.
 
-Implementation: `lib.rs:14174-14177` (`smart_note_check_digest`, delegating to
+Implementation: `lib.rs:14174-14177` (`conditional_note_check_digest`, delegating to
 `memory-store`), the wire-side format gate `artifact 'check_hash' must be 64
 lowercase hex characters` (`:14157`), and the reducer-side rejection
 `check_hash does not match the canonical artifact digest` (`:14217`) inside
@@ -93,7 +93,7 @@ lowercase hex characters` (`:14157`), and the reducer-side rejection
 
 ### C3 — a conditioned note write fails closed without a live evaluator
 
-> "conditioned `ctx_note` writes fail closed without a live protocol-2.0
+> "conditioned `eidnara_note` writes fail closed without a live protocol-2.0
 > registration" — `PARITY.md:19`
 
 The caller-visible form of the same claim is an assertion about durable state:
@@ -115,7 +115,7 @@ gate ... the liveness gate protects first-time mutations, never replays"
 ### C4 — the advertised tool description denies the evaluation the code performs
 
 > "surface_condition is accepted and recorded, but condition evaluation arrives
-> later on this leg." — `lib.rs:15787` (`ctx_note_description`)
+> later on this leg." — `lib.rs:15787` (`eidnara_note_description`)
 
 The light-preset variant says the same: "surface_condition is recorded but not
 evaluated on this Claude Code leg" (`prompt_surface.rs:56-57`, 4e file).
@@ -130,7 +130,7 @@ recorded condition. So the string the model reads understates the contract in
 the direction that matters: the model is told the field is inert, and the field
 can turn a successful write into a refusal.
 
-### C5 — `ctx_reduce`'s closed schema is an authorizer contract, and the handler's tolerance is deliberate
+### C5 — `eidnara_reduce`'s closed schema is an authorizer contract, and the handler's tolerance is deliberate
 
 > "This exact advertised shape is the Thalamus authorization contract.
 > Prompt-surface selection may replace only the top-level description."
@@ -139,7 +139,7 @@ can turn a successful write into a refusal.
 The reason the handler may accept keys the schema forbids is written down, in a
 test comment:
 
-> "ctx_reduce is the one AUTHORIZER-PINNED schema: Thalamus exact-matches the
+> "eidnara_reduce is the one AUTHORIZER-PINNED schema: Thalamus exact-matches the
 > canonical closed shape and fails closed on any deviation, silently disabling
 > the tagging surface. Its imitated-args tolerance lives in the execution
 > unwrap, not the advertised schema."
@@ -167,7 +167,7 @@ halves agree; nothing asserts the handler's accepted key set.
 The module states the same as a precondition: "The caller commits the proposed
 successor only after the store durably commits a fresh claim, and resets the
 cycle only after a fresh durable `no_work`, so replays, recovery, and failures
-never move the cursor" (`smart_note_evaluation.rs:854-860`).
+never move the cursor" (`conditional_note_evaluation.rs:854-860`).
 
 Implied property: cursor position is a function of durably committed fresh
 claims alone.
@@ -256,11 +256,11 @@ hand-kept lists — `MEMORY_CATEGORY_ORDER` (5, `:32-38`) and
 of what a read accepts, and `REJECTED_APPROACH` is advertised as writable while
 being excluded from every read result. Cross-part; 4e owns the lists.
 
-### C12 — `ctx_memory` is advertised as mutating and refuses every mutation
+### C12 — `eidnara_memory` is advertised as mutating and refuses every mutation
 
 > "Create standalone facts, revise changed claims, archive or restore lifecycle
 > state, and merge duplicate claims through the host commit path."
-> — `lib.rs:15775` (`ctx_memory_description`)
+> — `lib.rs:15775` (`eidnara_memory_description`)
 
 The tool is advertised `ExecutionMode::Mutating` (`prompt_surface.rs:209`), its
 schema carries `create` and `revise` `oneOf` arms with required `content` or
@@ -268,7 +268,7 @@ schema carries `create` and `revise` `oneOf` arms with required `content` or
 `mutationTokens` definitions (`:15864-15869`). The spec agrees:
 
 > "Use create, get, revise, archive, restore, or merge; list remains
-> dreamer-only." — `docs/specs/prompt-surface/load-bearing-rules-checklist.md:1197`
+> memory_classifier-only." — `docs/specs/prompt-surface/load-bearing-rules-checklist.md:1197`
 
 Implied property: the five mutating actions are executable through this tool.
 
@@ -281,21 +281,21 @@ by `facade_advertises_anti_memory_but_keeps_mutation_host_owned`
 (`:25786-25790`). So the code and its test agree; the advertisement is the odd
 one out, and nothing checks the advertisement against the refusal.
 
-### C13 — `ctx_search` advertises two corpora it does not search
+### C13 — `eidnara_search` advertises two corpora it does not search
 
 > "Keyword-search saved project memories, session notes, and summarized
-> conversation history." — `lib.rs:15779` (`ctx_search_description`)
+> conversation history." — `lib.rs:15779` (`eidnara_search_description`)
 
 > "Search compacted messages, git commits, and notes while filtering claims
 > already rendered in project-memory ... broad project-memory retrieval stays
 > disabled until the claim retrieval projection is active."
 > — `load-bearing-rules-checklist.md:1221`
 
-Implied property: a `ctx_search` result set can include project memories and
+Implied property: a `eidnara_search` result set can include project memories and
 git commits.
 
-Implementation: `NOT FOUND` for both. `memory_tool::search_compartments_and_notes_for_session`
-(`memory_tool.rs:211-248`) reads exactly `search_compartments_like` (`:224`) and
+Implementation: `NOT FOUND` for both. `memory_tool::search_history_segments_and_notes_for_session`
+(`memory_tool.rs:211-248`) reads exactly `search_history_segments_like` (`:224`) and
 `search_notes_like` (`:229`); `list_committed_claims` is never called from the
 search path, and no git source exists in the module. The spec's own hedge
 ("broad project-memory retrieval stays disabled") licenses the memory half, but
@@ -308,7 +308,7 @@ with each other before either disagrees with the code.
 > — `load-bearing-rules-checklist.md:1079` (rule T-009, source evidence)
 
 > "Recover one message by ordinal in full from the cached raw request when
-> available, otherwise its persisted historian chunk transcript."
+> available, otherwise its persisted history_summarizer chunk transcript."
 > — `lib.rs:15955` (`ctx_expand_schema`, `message` description)
 
 The module contradicts the fallback half twice, in its own words:
@@ -317,7 +317,7 @@ The module contradicts the fallback half twice, in its own words:
 > gone, but it intentionally cannot recover raw tool input or output bytes."
 > — `lib.rs:14538-14540`
 
-> "This Claude Code leg can recover the historian chunk-builder view, not full
+> "This Claude Code leg can recover the history_summarizer chunk-builder view, not full
 > raw messages; tool calls may be summarized and long text may have been
 > truncated before summarization." — `lib.rs:14525`
 
@@ -375,20 +375,20 @@ Implementation: enforced in **bytes** by `validate_string_cap` against
 `MAX_SHORT_FIELD_BYTES = 4 * 1024` (`:14396`, applied `:11557`). JSON Schema
 `maxLength` counts characters, so a 1,024-character CJK query satisfies the
 advertised schema and is rejected by the module with `'query' exceeds the
-1024-byte limit` (`:14410`). The numbers match; the units do not. `ctx_memory`'s
+1024-byte limit` (`:14410`). The numbers match; the units do not. `eidnara_memory`'s
 own `content` `maxLength` (`:15856`) is enforced nowhere, because mutations are
 refused before any cap runs (C12).
 
-### C18 — three sources disagree about whether `ctx_reduce` queues or acknowledges
+### C18 — three sources disagree about whether `eidnara_reduce` queues or acknowledges
 
 > "Mark it discardable; release is queued and delayed until context space is
 > needed." — `load-bearing-rules-checklist.md:884` (rule T-001)
 > "Queue a tagged reduction request for asynchronous delivery."
 > — `prompt_surface.rs:40-42` (light description, 4e file)
 > "Acknowledge a tagged reduction request for asynchronous delivery"
-> — `prompt_surface.rs:60-61` (`CTX_REDUCE_DESCRIPTION`, full preset)
+> — `prompt_surface.rs:60-61` (`EIDNARA_REDUCE_DESCRIPTION`, full preset)
 
-Implied property: a successful `ctx_reduce` call has queued the named tags.
+Implied property: a successful `eidnara_reduce` call has queued the named tags.
 
 Implementation: the module writes nothing —
 `"...deliberately does not mutate it. The response observer owns asynchronous
@@ -398,7 +398,7 @@ advertised `ExecutionMode::Pure` (`prompt_surface.rs:194`), which is the one
 advertisement consistent with the code. So the honest statement is the full
 description and the execution mode; the light description, the spec rule, and
 the response text all assert an effect the module does not perform. Lens A owns
-the record (`facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes`); this
+the record (`facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes`); this
 register adds that the contradiction is four-way and that the `Pure` mode
 declaration is the exculpating side.
 
@@ -423,7 +423,7 @@ Verified independently of lens A, which owns the record.
 
 ### C20 — the admitted facade name set is stated three ways and no two agree
 
-> "Only ctx_memory and ctx_search are accepted on that surface; unsupported
+> "Only eidnara_memory and eidnara_search are accepted on that surface; unsupported
 > names keep a distinct error so a policy or routing mistake is diagnosable from
 > the code alone." — `lib.rs:12344-12351`
 
@@ -450,10 +450,10 @@ unchecked.
 Implied property: a facade mutation's project ownership is validated inside the
 transaction that performs it, not only before it.
 
-Implementation: partial and asymmetric. `ctx_note` calls
+Implementation: partial and asymmetric. `eidnara_note` calls
 `store.enforce_facade_project_vocabulary` **before** opening the command
 (`lib.rs:11584-11591`), and the in-transaction recheck lives in `memory-store`
-(Part 3 boundary). `ctx_memory` has no mutation path to recheck (C12). So the
+(Part 3 boundary). `eidnara_memory` has no mutation path to recheck (C12). So the
 module-side half of the claim is a pre-check, and the "inside the transaction"
 half is asserted about a crate this sub-part does not own.
 
@@ -510,12 +510,12 @@ transform lane that the helper's own doc generalizes.
 > durable response no caller can use and leave the remaining chain unavailable
 > to every retry." — `lib.rs:13164-13169`
 
-Implied property: no truncated classifier output is ever persisted as a dreamer
+Implied property: no truncated classifier output is ever persisted as a memory_classifier
 response.
 
 Implementation: the accept predicate at `:13164` onward, with
 `length_capped_or_invalid` in the same region (`:13058-13202`). FOUND. Folded
-here: the neighbouring `"recorded dreamer response is not valid JSON"`
+here: the neighbouring `"recorded memory_classifier response is not valid JSON"`
 (`:13184`) and the `"raw-only fence"` marker (`:13208`), both of which state
 contracts and neither of which is named by any test.
 
@@ -531,7 +531,7 @@ A's, that is said explicitly.
    ways an error path presents as success. `ctx_expand` adds two more, both
    `mcp_text_result(..., false)`: `"Message {message} is no longer recoverable
    from persisted chunk transcripts."` (`lib.rs:10804-10809`) and `"No compacted
-   compartments found in range {start}-{end}."` (`:10832-10838`). Each is a
+   history_segments found in range {start}-{end}."` (`:10832-10838`). Each is a
    recovery failure delivered with `isError: false` and no field distinguishing
    it from a hit. The same text appears a third time inside the range renderer
    (`:14638`) and a fourth as `"No messages found in range {start}-{end}."`
@@ -539,7 +539,7 @@ A's, that is said explicitly.
    of the six are on the tool whose entire purpose is recovering content the
    agent already lost.
 
-2. **`ctx_note` honours five keys its advertised schema is pinned to exclude.**
+2. **`eidnara_note` honours five keys its advertised schema is pinned to exclude.**
    The handler caps and reads `compiled_provider`, `compiled_config`,
    `compiled_at` and `compile_status` (`lib.rs:11558-11560`, `:14456-14474`) and
    accepts `command_id` (`:11592-11599`), while the advertised property set is
@@ -562,7 +562,7 @@ A's, that is said explicitly.
    a growth-slack constant instead. Low consequence, mechanical to confirm.
 
 4. **The advertised `category` enum is never validated on the read path.**
-   `handle_ctx_memory_facade` reads `category` with `string_arg` and passes it
+   `handle_eidnara_memory_facade` reads `category` with `string_arg` and passes it
    straight to `list_committed_claims` (`lib.rs:10671-10673`), which compares it
    for equality against the stored attribute (`memory_tool.rs:80-84`). A
    category outside the advertised enum is therefore accepted and returns an
@@ -579,11 +579,11 @@ A's, that is said explicitly.
    not. Nothing checks the schema against the filter.
 
 6. **`memory_tool.rs`'s id doc names a result kind that does not exist.**
-   "memory row id for memory results, compartment sequence for compartment
+   "memory row id for memory results, history_segment sequence for history_segment
    results, and note id for note results" (`memory_tool.rs:192-193`) describes
-   three kinds; `MemorySearchSourceKind` has `CompartmentTitle`,
-   `CompartmentBody`, `Note` (`:183-187`) and no memory variant. Separately, the
-   `id` is emitted to the model (`lib.rs:10745`) while `ctx_memory`'s own
+   three kinds; `MemorySearchSourceKind` has `HistorySegmentTitle`,
+   `HistorySegmentBody`, `Note` (`:183-187`) and no memory variant. Separately, the
+   `id` is emitted to the model (`lib.rs:10745`) while `eidnara_memory`'s own
    description instructs "never use local row IDs" (`:15775`). Stale doc plus a
    surface-level tension worth one sentence in the catalog.
 
@@ -598,7 +598,7 @@ A's, that is said explicitly.
    returns from both attempts")` (`:15735`), is the sole written statement of
    that loop's invariant.
 
-8. **`ctx_note`'s advertised `offset` and the 100-note limit.** The schema
+8. **`eidnara_note`'s advertised `offset` and the 100-note limit.** The schema
    advertises `limit` maximum 100 and `offset` minimum 0 with default 0
    (`lib.rs:15968-15969`), and `note_facade_pages_ready_notes_beyond_one_hundred_with_shared_offset_semantics`
    (`:25028`) is the check that names the paging contract. Worth confirming in
@@ -614,7 +614,7 @@ A's, that is said explicitly.
    (`lib.rs:23632`).
 
 10. **The fixture-regeneration gate is documentation only.** "Regenerate with
-    `bun crates/daemon/gen/gen-smart-note-evaluation-golden.ts`; a
+    `bun crates/daemon/gen/gen-conditional-note-evaluation-golden.ts`; a
     regeneration diff means a semantic change and requires review. The generator
     pins frozen copies of the legacy writers so neither reducer is its own
     oracle." (`PARITY.md:16`). No workflow regenerates the fixture and diffs it,
@@ -635,7 +635,7 @@ Eight, each enforced by nothing stronger than a convention a reader must notice.
    produces a misleading panic and nothing notices. Same shape as 4c's 36
    labels, at a twelfth the count.
 
-2. **`ctx_note`'s five unadvertised-but-honoured keys** (lead 2). The convention
+2. **`eidnara_note`'s five unadvertised-but-honoured keys** (lead 2). The convention
    is "the schema is the compatibility surface, the handler is wider", stated
    only as an assertion at `lib.rs:25650`.
 
@@ -654,14 +654,14 @@ Eight, each enforced by nothing stronger than a convention a reader must notice.
 6. **`context_db_schema_version` is null because the module never attaches the
    file** (C23). The prohibition is a whole-crate absence with no guard.
 
-7. **The `"raw-only fence"` marker** (`lib.rs:13208`) and `"recorded dreamer
+7. **The `"raw-only fence"` marker** (`lib.rs:13208`) and `"recorded memory_classifier
    response is not valid JSON"` (`:13184`). Both name contracts; neither appears
    in any test.
 
-8. **`ExecutionMode` as a mutation declaration.** `ctx_reduce` and `ctx_expand`
-   are `Pure`, `ctx_memory` and `ctx_note` are `Mutating`
+8. **`ExecutionMode` as a mutation declaration.** `eidnara_reduce` and `ctx_expand`
+   are `Pure`, `eidnara_memory` and `eidnara_note` are `Mutating`
    (`prompt_surface.rs:194`, `:215`, `:209`, `:227`). Nothing checks a handler
-   against its declared mode, and `ctx_memory` is the counter-example: declared
+   against its declared mode, and `eidnara_memory` is the counter-example: declared
    `Mutating`, refuses every mutation.
 
 ---
@@ -711,7 +711,7 @@ The result is three tiers that **bracket** the truth rather than pin it:
 | Tier | Tests | What it measures |
 | --- | --- | --- |
 | **Reach** | **232** of 256 | Executes at least one line of 4d production code, transitively |
-| **Op-specific (helper fixpoint)** | **88** | Names a 4d-owned tool, claim command, note-evaluation method, settlement API, byte cap, schema, expand renderer, or smart-note contract |
+| **Op-specific (helper fixpoint)** | **88** | Names a 4d-owned tool, claim command, note-evaluation method, settlement API, byte cap, schema, expand renderer, or conditional-note contract |
 | **Op-specific (direct body match)** | **65** | The same rule without the helper fixpoint |
 | **Name rule** | **49** | Test name matches the 4d vocabulary |
 
@@ -741,14 +741,14 @@ issued**; the numbers measure different things.
 | --- | --- | --- | --- |
 | native attachment plumbing | 20 | `:19261-21839` | Largest cluster in scope. The caches are 4c's, the plumbing at `:12450-13055` is 4d's |
 | note-evaluation protocol | 17 | `:23111-24290` | The best-covered 4d-owned protocol; 12 of the 17 name a cycle or quota rule |
-| `ctx_note` | 14 | `:17067-25531` | Includes the ledger-replay test at `:23243` |
-| `ctx_reduce` | 9 | `:17067-27570` | Five of the nine are the `command_id` family at `:27555-27808`, which 4c also claims |
-| `respond_transform` and status helpers | 8 | `:16198-19294` | `usage_numbers`, `projected_post_drop_percentage`; the two historian-trigger tests are 4a's assertions reaching a 4d helper |
+| `eidnara_note` | 14 | `:17067-25531` | Includes the ledger-replay test at `:23243` |
+| `eidnara_reduce` | 9 | `:17067-27570` | Five of the nine are the `command_id` family at `:27555-27808`, which 4c also claims |
+| `respond_transform` and status helpers | 8 | `:16198-19294` | `usage_numbers`, `projected_post_drop_percentage`; the two history_summarizer-trigger tests are 4a's assertions reaching a 4d helper |
 | `drive-fault` | 8 | `:18965-19113` | Feature-gated; `explicit-config-only` |
-| `ctx_memory` | 7 | `:17067-25762` | Includes the mutation-refusal gate at `:25762` |
-| `ctx_search` | 6 | `:17067-25531` | |
+| `eidnara_memory` | 7 | `:17067-25762` | Includes the mutation-refusal gate at `:25762` |
+| `eidnara_search` | 6 | `:17067-25531` | |
 | `ctx_expand` | 6 | `:17067-25657` | Includes both budget checks, `:24517` and `:25657` |
-| smart-note selection types | 6 | `:23904-24241` | Reach `SmartNoteCycleMode` / `SmartNoteSelectionCycle` (26 occurrences) |
+| conditional-note selection types | 6 | `:23904-24241` | Reach `ConditionalNoteCycleMode` / `ConditionalNoteSelectionCycle` (26 occurrences) |
 | prepared settlement | 4 | `:16041-16150` | The only tests of `settle_prepared_with` |
 | tool schemas and manifest | 4 | `:17067-25931` | `:25531` is the contract gate |
 | request byte caps | 3 | `:17542-17589` | `:17542`, `:17567`, and one transitive |
@@ -763,7 +763,7 @@ line at `HEAD`:
 | `:16150` | `production_settlement_cancellation_and_denial_emit_no_body` | The cancellation and reserve-denial arms |
 | `:17542` | `request_byte_cap_widens_for_transform_class_only` | The two-tier cap, small bodies only |
 | `:17567` | `value_footprint_counts_nodes_outside_strings_only` | The footprint bound's counting rule |
-| `:23111` | `smart_note_writes_require_a_live_protocol_v2_registration` | C3's fail-closed gate |
+| `:23111` | `conditional_note_writes_require_a_live_protocol_v2_registration` | C3's fail-closed gate |
 | `:23243` | `conditioned_write_replays_recorded_response_without_live_evaluator` | A recorded **success** replaying past the liveness gate |
 | `:23295` | `note_evaluator_registration_rejects_wrong_versions_and_stale_credentials` | The four-way identity match at `:13877` |
 | `:23381` | `note_evaluator_route_teardown_withdraws_registrations` | `PARITY.md:19`'s boot-ephemeral claim |
@@ -772,13 +772,13 @@ line at `HEAD`:
 | `:23976` | `note_evaluation_fresh_no_work_resets_and_replayed_no_work_does_not` | C6's reset rule |
 | `:24048` | `note_evaluation_spent_cycle_no_work_reports_cycle_exhausted` | The `cycle_exhausted` distinction (`PARITY.md:41-52`) |
 | `:24290` | `note_evaluation_fallback_rotates_before_reclaiming_checked_notes` | C26-class fallback determinism |
-| `:24341` | `ctx_expand_and_ctx_note_facades_are_session_scoped` | Facade session scoping |
+| `:24341` | `ctx_expand_and_eidnara_note_facades_are_session_scoped` | Facade session scoping |
 | `:24901` | `note_evaluate_verdict_writes_are_protocol_retired` | The `protocol_retired` code |
 | `:25028` | `note_facade_pages_ready_notes_beyond_one_hundred_with_shared_offset_semantics` | Lead 8's paging contract |
-| `:25299` | `facade_flat_envelope_precedence_keeps_kind_arm_and_gates_ctx_reduce_name` | `method`/`kind` precedence over `name` |
-| `:25325` | `ctx_reduce_range_parser_rejects_unbounded_and_oversized_ranges` | `MAX_RANGE_ELEMENTS` (`:15166`) |
+| `:25299` | `facade_flat_envelope_precedence_keeps_kind_arm_and_gates_eidnara_reduce_name` | `method`/`kind` precedence over `name` |
+| `:25325` | `eidnara_reduce_range_parser_rejects_unbounded_and_oversized_ranges` | `MAX_RANGE_ELEMENTS` (`:15166`) |
 | `:25333` | `facade_arguments_preserve_decorated_reduced_fields` | The **non**-unwrap half of the reduced envelope |
-| `:25445` | `facade_ctx_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing` | C18's no-write behaviour |
+| `:25445` | `facade_eidnara_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing` | C18's no-write behaviour |
 | `:25531` | `ctx_manifest_schemas_accept_unknown_args_without_advertising_reduced_fields` | The whole schema contract: C5, C11, and the per-tool field sets |
 | `:25657` | `expand_output_is_bounded_to_the_typescript_token_budget` | C16's byte bound |
 | `:25713` | `facade_never_panics_on_malformed_memory_arguments` | Total-function behaviour on bad arguments |
@@ -792,13 +792,13 @@ to handle.
 
 | File | `#[cfg(test)] mod` | Tests | What they cover |
 | --- | --- | --- | --- |
-| `smart_note_evaluation.rs` (1,851 lines) | `:951` | **7** | `:1101` replays the shared golden (13 constants, backoff ladder, 23 transitions, 16 schedules, 9 selections); `:1190` and `:1765` replay `smart-note-evaluation-normative.json` (revision matrix, cycle traces); `:1528`, `:1549` the UTF-16 truncation rule; `:1558` extreme cron instants; `:1578` phase preference |
+| `conditional_note_evaluation.rs` (1,851 lines) | `:951` | **7** | `:1101` replays the shared golden (13 constants, backoff ladder, 23 transitions, 16 schedules, 9 selections); `:1190` and `:1765` replay `conditional-note-evaluation-normative.json` (revision matrix, cycle traces); `:1528`, `:1549` the UTF-16 truncation rule; `:1558` extreme cron instants; `:1578` phase preference |
 | `project_docs.rs` (232 lines) | `:120` | **6** | `:132` empty, `:139` render and hash, `:152` canonicalization, `:168` symlink skip, `:188` size skip, `:212` golden |
 | `memory_tool.rs` (447 lines) | `:361` | **1** | `:396` `list_committed_claims_excludes_anti_memory_even_when_requested` — the sole check behind lead 5 |
 | `dispatch.rs` (511 lines) | none | **0** | Its only checks are the integration binary below |
 
 That is **14 file-local tests**, giving 102 in-crate checks for 4d in total.
-`smart_note_evaluation.rs` is the densest claim-per-test surface in the
+`conditional_note_evaluation.rs` is the densest claim-per-test surface in the
 sub-part: 7 test functions carry roughly 48 fixture cases plus two normative
 matrices over 950 production lines.
 
@@ -821,12 +821,12 @@ over `:16001-30517` only.
 | `canonical_value` (`:15341-15372`) | 6 | **0** |
 | `module_tools` | 1 | **0** |
 | `project_docs` | 1 | **0** (6 file-local) |
-| `smart_note_evaluation` | 6 | **0** (7 file-local) |
+| `conditional_note_evaluation` | 6 | **0** (7 file-local) |
 
 The mutation-ledger row deserves a note. `with_facade_command`,
 `facade_command_outcome` and `command_id_from_facade_request` have zero symbol
 references in the test modules, yet the ledger **is** exercised — through the
-`ctx_note` request path, by `:23243`. So the ledger has behavioural coverage and
+`eidnara_note` request path, by `:23243`. So the ledger has behavioural coverage and
 no unit coverage, which is why a symbol scan alone would have called it
 untested. Stated so a later pass does not repeat either mistake.
 
@@ -875,7 +875,7 @@ Ten tests, all ten on C8's family, and the file re-implements the settlement
 loop by hand (`:181-196`, per lens A) because `settle_prepared_with` is private.
 
 The other six binaries are out of scope for 4d. Counting 4d method literals and
-type names in each: `boundary_counter_durability.rs` 0, `broca_roundtrip.rs` 0,
+type names in each: `boundary_counter_durability.rs` 0, `model_execution_roundtrip.rs` 0,
 `direct_host.rs` **0**, `host_adapter.rs` 1, `lifecycle_cli.rs` 0,
 `release_contract_conformance.rs` 0. So `direct_host.rs`, which 4c counts as its
 best end-to-end coverage, never touches a facade name — the facade has **no**
@@ -914,8 +914,8 @@ distinction decides what the CI green light means.
 
 | File | Relationship to 4d | What it actually tests |
 | --- | --- | --- |
-| `packages/plugin/src/features/eidnara/smart-notes/evaluation-state.test.ts` (136 lines, 3 `it()`) | **Parallel implementation, shared fixture.** The one genuine cross-language gate in scope | Replays `crates/daemon/testdata/smart-note-evaluation-golden.json` (`:54`) but iterates `transition_cases` only (`:105`). The TypeScript reducer, not the Rust port. `schedule_cases` and `selection_cases` are untouched — C1 |
-| `packages/plugin/src/features/eidnara/storage-notes.test.ts` | Parallel implementation, shared normative fixture | References `smart-note-evaluation-normative.json` (`:206`), the same fixture the Rust `:1190` and `:1765` tests replay |
+| `packages/plugin/src/features/eidnara/conditional-notes/evaluation-state.test.ts` (136 lines, 3 `it()`) | **Parallel implementation, shared fixture.** The one genuine cross-language gate in scope | Replays `crates/daemon/testdata/conditional-note-evaluation-golden.json` (`:54`) but iterates `transition_cases` only (`:105`). The TypeScript reducer, not the Rust port. `schedule_cases` and `selection_cases` are untouched — C1 |
+| `packages/plugin/src/features/eidnara/storage-notes.test.ts` | Parallel implementation, shared normative fixture | References `conditional-note-evaluation-normative.json` (`:206`), the same fixture the Rust `:1190` and `:1765` tests replay |
 | `packages/plugin/src/hooks/eidnara/module-state-sync.test.ts` | **Fake of this module.** Producer side of the claim-effects ack | `:1400` "delivers earlier effects first and checkpoints each receipt group atomically" and `:1424` "rejects a checkpoint that would split a receipt group" drive a stubbed `deliver` that fabricates the ack at `:1414` and `:1510`. Never invokes a Cargo target |
 | `packages/plugin/src/hooks/eidnara/module-wire.test.ts` | **Fake of this module.** Wire-level ack validation | Literal `ackedEffectId: 30` / `31` at `:345`, `:355`, `:414`, `:427` |
 
@@ -980,7 +980,7 @@ sidecar metadata must serialize"`. None has a named test.
 
 **The four 4d files.** `dispatch.rs`: 2 `.expect(`, zero `unwrap`, zero
 `panic!`, zero assertions — the safest file in the sub-part, and the guard it
-relies on is a returned `Err` (C8). `smart_note_evaluation.rs`: 19 `.expect(`,
+relies on is a returned `Err` (C8). `conditional_note_evaluation.rs`: 19 `.expect(`,
 19 `.unwrap()`, 14 `panic!` — all inside the `#[cfg(test)] mod` at `:951` and
 its fixture parsing, so the production half of the file has none.
 `project_docs.rs`: 1 `.expect(`, 15 `.unwrap()`, all in the test module at
@@ -1040,7 +1040,7 @@ Attention paid, as instructed, to the success-shaped error paths.
 
 2. **Six success-shaped error paths, one tested.** Tallying lens A's four plus
    lead 1's two: `isError` inside a transport success (no test asserts
-   `health()` stays `Ok` while the facade fails); `ctx_reduce`'s queued
+   `health()` stays `Ok` while the facade fails); `eidnara_reduce`'s queued
    acknowledgement (**tested** at `:25445`, which asserts the no-write
    behaviour); `claim.effects.apply`'s ack (untested, item 1); the two
    error-text-as-durable-outcome note arms at `:11865-11870` and `:11902-11907`
@@ -1080,7 +1080,7 @@ Attention paid, as instructed, to the success-shaped error paths.
 7. **The DST schedule vectors and phase selectors are pinned by one replay that
    runs nowhere.** C1. 16 schedule cases and 9 selection cases in a fixture
    whose entire purpose is preventing cross-language drift, asserted only by
-   `smart_note_evaluation.rs:1145` and `:1156`, in a test module CI never
+   `conditional_note_evaluation.rs:1145` and `:1156`, in a test module CI never
    compiles, while the TypeScript half of the contract is checked on every pull
    request over the 23 transition cases only.
 
@@ -1120,11 +1120,11 @@ Attention paid, as instructed, to the success-shaped error paths.
 
 - Does a second sibling lens own note evaluation? The task named two sibling
   files and only `lens-a-facade-and-assembly.md` exists at `HEAD`, while lens A
-  states a note-evaluation lens owns `smart_note_evaluation.rs`, the
+  states a note-evaluation lens owns `conditional_note_evaluation.rs`, the
   `note.evaluation.*` protocol at `lib.rs:10880-11481`, and note delivery at
   `:11483-11545`. This lens covered note-evaluation *claims and checks* rather
   than leave the register incomplete. If that lens lands, C1, C2, C3, C6, C7,
-  the 17-test cluster, the 7 file-local `smart_note_evaluation.rs` tests, and
+  the 17-test cluster, the 7 file-local `conditional_note_evaluation.rs` tests, and
   quiet areas 3 and 7 will need dedup at synthesis. (needs human input)
 - Is `claim.effects.apply` intended as a protocol-conformance ack? Lens A asks
   this and this lens adds the evidence that decides how urgent it is: no test on
@@ -1137,12 +1137,12 @@ Attention paid, as instructed, to the success-shaped error paths.
   because the TypeScript reducer does not own scheduling? `PARITY.md:87` lists
   "shared Rust cron/schedule primitive" as *deferred* ownership
   (`eidnara-pml.1`), which suggests the asymmetry is known. Unresolved,
-  needs the smart-notes owner.
+  needs the conditional-notes owner.
 - Which side of C17 is the contract, characters or bytes? Three advertised
   `maxLength` values match their byte caps numerically, so the mismatch only
   fires on multi-byte input. Fixing the schema and fixing the cap are both
   breaking changes in one direction. (needs human input)
-- Is `ctx_search`'s advertised project-memory search planned or abandoned? C13.
+- Is `eidnara_search`'s advertised project-memory search planned or abandoned? C13.
   `load-bearing-rules-checklist.md:1221` says "broad project-memory retrieval
   stays disabled until the claim retrieval projection is active", which reads as
   planned; `lib.rs:15779` promises it to the model today. Unresolved, needs the
@@ -1184,7 +1184,7 @@ Attention paid, as instructed, to the success-shaped error paths.
   the whole gate, which asserts five separate things (C5, C11, per-tool field
   sets, the open-schema posture, and the absence of `reduced`/`summary` from
   `properties`).
-- **Lens A's open question on `ctx_reduce`'s schema is answered in-repo.** The
+- **Lens A's open question on `eidnara_reduce`'s schema is answered in-repo.** The
   comment at `:25574-25578` states that the closed schema is the authorizer
   contract and that "its imitated-args tolerance lives in the execution unwrap,
   not the advertised schema". Per METHOD.md rule 3 that settles intent, not

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
-import { invalidateToolPermissionDenied } from "./ctx-reduce-availability";
+import { invalidateToolPermissionDenied } from "./eidnara-reduce-availability";
 import type { ContextUsageEntry } from "./event-handler";
 import {
     createChatMessageHook,

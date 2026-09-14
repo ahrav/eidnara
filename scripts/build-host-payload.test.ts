@@ -41,7 +41,8 @@ function sha256(bytes: Uint8Array | string): string {
 /** Returns struct field names, applying `#[serde(rename = "...")]` to the following field. */
 function rustStructFields(source: string, name: string): string[] {
     const match = new RegExp(`struct ${name} \\{([^}]*)\\}`).exec(source);
-    if (match === null || match[1] === undefined) throw new Error(`struct ${name} not found`);
+    if (match === null || match[1] === undefined)
+        throw new Error(`struct ${name} not found`);
     const fields: string[] = [];
     let rename: string | undefined;
     for (const raw of match[1].split("\n")) {
@@ -89,12 +90,17 @@ describe("build-host-payload", () => {
     let debugAddon: string;
     let built: DevPayloadResult;
     const contractPath = join(rootDir, "release/host-release.json");
-    const lockSha256 = sha256(readFileSync(join(rootDir, "release/production-inputs.lock.json")));
+    const lockSha256 = sha256(
+        readFileSync(join(rootDir, "release/production-inputs.lock.json")),
+    );
 
     beforeAll(() => {
         tmp = mkdtempSync(join(tmpdir(), "eidnara-payload-"));
         launcherPath = join(tmp, "eidnara-host");
-        writeExecutable(launcherPath, fakeLauncherScript(contractPath, lockSha256));
+        writeExecutable(
+            launcherPath,
+            fakeLauncherScript(contractPath, lockSha256),
+        );
         releaseAddon = join(tmp, "release-addon.cjs");
         writeFileSync(
             releaseAddon,
@@ -128,27 +134,42 @@ describe("build-host-payload", () => {
         expect(new Set(Object.keys(manifest.package))).toEqual(
             new Set(rustStructFields(source, "TrustedPackageIdentity")),
         );
-        const fileFields = new Set(rustStructFields(source, "TrustedPayloadFile"));
+        const fileFields = new Set(
+            rustStructFields(source, "TrustedPayloadFile"),
+        );
         expect(fileFields.has("type")).toBe(true);
         for (const entry of manifest.files) {
             expect(new Set(Object.keys(entry))).toEqual(fileFields);
         }
-        const schemaLiteral = /const PAYLOAD_MANIFEST_SCHEMA: &str = "([^"]+)";/.exec(source);
+        const schemaLiteral =
+            /const PAYLOAD_MANIFEST_SCHEMA: &str = "([^"]+)";/.exec(source);
         expect(schemaLiteral?.[1]).toBe(MANIFEST_SCHEMA);
     });
 
     test("digests recompute from the committed release files", () => {
-        const contractBytes = readFileSync(join(rootDir, "release/host-release.json"));
+        const contractBytes = readFileSync(
+            join(rootDir, "release/host-release.json"),
+        );
         const trimmed =
-            contractBytes.at(-1) === 0x0a ? contractBytes.subarray(0, -1) : contractBytes;
-        const lockBytes = readFileSync(join(rootDir, "release/production-inputs.lock.json"));
-        const lock = JSON.parse(lockBytes.toString("utf8")) as { release_contract_sha256: string };
+            contractBytes.at(-1) === 0x0a
+                ? contractBytes.subarray(0, -1)
+                : contractBytes;
+        const lockBytes = readFileSync(
+            join(rootDir, "release/production-inputs.lock.json"),
+        );
+        const lock = JSON.parse(lockBytes.toString("utf8")) as {
+            release_contract_sha256: string;
+        };
         const context = loadReleaseContext(rootDir);
         expect(context.contractSha256).toBe(sha256(trimmed));
         expect(context.contractSha256).toBe(lock.release_contract_sha256);
         expect(context.lockSha256).toBe(sha256(lockBytes));
-        expect(built.manifest.release_contract_sha256).toBe(context.contractSha256);
-        expect(built.manifest.production_inputs_lock_sha256).toBe(context.lockSha256);
+        expect(built.manifest.release_contract_sha256).toBe(
+            context.contractSha256,
+        );
+        expect(built.manifest.production_inputs_lock_sha256).toBe(
+            context.lockSha256,
+        );
     });
 
     test("dev manifest shape: sorted files, modes, literals", () => {
@@ -157,7 +178,9 @@ describe("build-host-payload", () => {
         for (let i = 1; i < paths.length; i += 1) {
             expect(paths[i - 1]! < paths[i]!).toBe(true);
         }
-        const launcher = manifest.files.find((entry) => entry.path === LAUNCHER_PATH);
+        const launcher = manifest.files.find(
+            (entry) => entry.path === LAUNCHER_PATH,
+        );
         const addon = manifest.files.find((entry) => entry.path === ADDON_PATH);
         expect(launcher?.mode).toBe("755");
         expect(addon?.mode).toBe("644");
@@ -180,31 +203,48 @@ describe("build-host-payload", () => {
 
         const unsorted = cloneManifest(valid);
         unsorted.files.reverse();
-        expect(() => validatePayloadManifest(unsorted, context)).toThrow(/ascending/);
+        expect(() => validatePayloadManifest(unsorted, context)).toThrow(
+            /ascending/,
+        );
 
         const noLauncher = cloneManifest(valid);
-        noLauncher.files = noLauncher.files.filter((entry) => entry.path !== LAUNCHER_PATH);
-        expect(() => validatePayloadManifest(noLauncher, context)).toThrow(/launcher/);
+        noLauncher.files = noLauncher.files.filter(
+            (entry) => entry.path !== LAUNCHER_PATH,
+        );
+        expect(() => validatePayloadManifest(noLauncher, context)).toThrow(
+            /launcher/,
+        );
 
         const launcher644 = cloneManifest(valid);
         for (const entry of launcher644.files) {
             if (entry.path === LAUNCHER_PATH) entry.mode = "644";
         }
-        expect(() => validatePayloadManifest(launcher644, context)).toThrow(/mode must be 755/);
+        expect(() => validatePayloadManifest(launcher644, context)).toThrow(
+            /mode must be 755/,
+        );
 
         const extraKey = { ...cloneManifest(valid), extra: true };
-        expect(() => validatePayloadManifest(extraKey, context)).toThrow(/unknown key extra/);
+        expect(() => validatePayloadManifest(extraKey, context)).toThrow(
+            /unknown key extra/,
+        );
 
-        const { synapse: _dropped, ...missingKey } = cloneManifest(valid);
-        expect(() => validatePayloadManifest(missingKey, context)).toThrow(/missing key synapse/);
+        const { local_embeddings: _dropped, ...missingKey } =
+            cloneManifest(valid);
+        expect(() => validatePayloadManifest(missingKey, context)).toThrow(
+            /missing key local_embeddings/,
+        );
 
         const upperSha = cloneManifest(valid);
         upperSha.files[0]!.sha256 = upperSha.files[0]!.sha256.toUpperCase();
-        expect(() => validatePayloadManifest(upperSha, context)).toThrow(/sha256/);
+        expect(() => validatePayloadManifest(upperSha, context)).toThrow(
+            /sha256/,
+        );
 
         const traversal = cloneManifest(valid);
         traversal.files[0]!.path = "payload/../escape";
-        expect(() => validatePayloadManifest(traversal, context)).toThrow(/unsafe payload path/);
+        expect(() => validatePayloadManifest(traversal, context)).toThrow(
+            /unsafe payload path/,
+        );
     });
 
     test("debug-profile addon is refused", () => {
@@ -252,15 +292,24 @@ describe("build-host-payload", () => {
     function shadowRoot(name: string): { shadow: string; packageDir: string } {
         const shadow = join(tmp, name);
         mkdirSync(join(shadow, "packages"), { recursive: true });
-        cpSync(join(rootDir, "release"), join(shadow, "release"), { recursive: true });
-        cpSync(join(rootDir, PAYLOAD_TARGET.dir), join(shadow, PAYLOAD_TARGET.dir), {
+        cpSync(join(rootDir, "release"), join(shadow, "release"), {
             recursive: true,
         });
+        cpSync(
+            join(rootDir, PAYLOAD_TARGET.dir),
+            join(shadow, PAYLOAD_TARGET.dir),
+            {
+                recursive: true,
+            },
+        );
         return { shadow, packageDir: join(shadow, PAYLOAD_TARGET.dir) };
     }
 
     /** A shadow root whose payload package has a dev payload staged into it. */
-    function stagedShadow(name: string): { shadow: string; packageDir: string } {
+    function stagedShadow(name: string): {
+        shadow: string;
+        packageDir: string;
+    } {
         const root = shadowRoot(name);
         buildDevPayload(root.shadow, {
             outDir: root.packageDir,
@@ -276,7 +325,9 @@ describe("build-host-payload", () => {
 
         const { shadow, packageDir } = shadowRoot("shadow-root");
         const packageJsonPath = join(packageDir, "package.json");
-        const pkg = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { files: string[] };
+        const pkg = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+            files: string[];
+        };
         pkg.files.push("extra.txt");
         writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
         expect(() => validatePayloadPackageDir(shadow)).toThrow(/files/);
@@ -292,14 +343,23 @@ describe("build-host-payload", () => {
         const { shadow } = shadowRoot("shadow-launcher");
         const releaseOnly = join(shadow, "target", "release", "eidnara-host");
         mkdirSync(join(shadow, "target", "release"), { recursive: true });
-        writeExecutable(releaseOnly, fakeLauncherScript(contractPath, lockSha256));
+        writeExecutable(
+            releaseOnly,
+            fakeLauncherScript(contractPath, lockSha256),
+        );
         expect(() =>
-            buildDevPayload(shadow, { outDir: join(tmp, "out-launcher"), addonPath: releaseAddon }),
+            buildDevPayload(shadow, {
+                outDir: join(tmp, "out-launcher"),
+                addonPath: releaseAddon,
+            }),
         ).toThrow(/no locally compiled debug eidnara-host/);
 
         const debug = join(shadow, "target", "debug", "eidnara-host");
         mkdirSync(join(shadow, "target", "debug"), { recursive: true });
-        writeExecutable(debug, `${fakeLauncherScript(contractPath, lockSha256)}# debug\n`);
+        writeExecutable(
+            debug,
+            `${fakeLauncherScript(contractPath, lockSha256)}# debug\n`,
+        );
         const result = buildDevPayload(shadow, {
             outDir: join(tmp, "out-launcher"),
             addonPath: releaseAddon,
@@ -311,7 +371,10 @@ describe("build-host-payload", () => {
         const staleContract = join(tmp, "stale-host-release.json");
         writeFileSync(staleContract, '{"stale":true}\n');
         const staleLauncher = join(tmp, "stale-eidnara-host");
-        writeExecutable(staleLauncher, fakeLauncherScript(staleContract, lockSha256));
+        writeExecutable(
+            staleLauncher,
+            fakeLauncherScript(staleContract, lockSha256),
+        );
         expect(() =>
             buildDevPayload(rootDir, {
                 outDir: join(tmp, "out-stale"),
@@ -321,7 +384,10 @@ describe("build-host-payload", () => {
         ).toThrow(/different release\/host-release.json/);
 
         const staleLock = join(tmp, "stale-lock-eidnara-host");
-        writeExecutable(staleLock, fakeLauncherScript(contractPath, "0".repeat(64)));
+        writeExecutable(
+            staleLock,
+            fakeLauncherScript(contractPath, "0".repeat(64)),
+        );
         expect(() =>
             buildDevPayload(rootDir, {
                 outDir: join(tmp, "out-stale-lock"),
@@ -333,7 +399,10 @@ describe("build-host-payload", () => {
 
     test("a launcher that cannot answer release-info is refused", () => {
         const foreign = join(tmp, "foreign-eidnara-host");
-        writeExecutable(foreign, "#!/bin/sh\necho not eidnara-host >&2\nexit 1\n");
+        writeExecutable(
+            foreign,
+            "#!/bin/sh\necho not eidnara-host >&2\nexit 1\n",
+        );
         expect(() =>
             buildDevPayload(rootDir, {
                 outDir: join(tmp, "out-foreign-launcher"),
@@ -346,7 +415,9 @@ describe("build-host-payload", () => {
     test("a staged payload tree without a manifest fails the package check", () => {
         const { shadow, packageDir } = stagedShadow("shadow-orphan");
         rmSync(join(packageDir, "payload-manifest.json"));
-        expect(() => validatePayloadPackageDir(shadow)).toThrow(/manifest.json is missing/);
+        expect(() => validatePayloadPackageDir(shadow)).toThrow(
+            /manifest.json is missing/,
+        );
     });
 
     test("a symlinked payload root fails the package check", () => {
@@ -364,7 +435,9 @@ describe("build-host-payload", () => {
         const outside = join(tmp, "outside-manifest.json");
         renameSync(join(packageDir, "payload-manifest.json"), outside);
         symlinkSync(outside, join(packageDir, "payload-manifest.json"));
-        expect(() => validatePayloadPackageDir(shadow)).toThrow(/must be a regular file/);
+        expect(() => validatePayloadPackageDir(shadow)).toThrow(
+            /must be a regular file/,
+        );
     });
 
     test("a symlinked package.json fails the package check", () => {
@@ -391,11 +464,14 @@ describe("build-host-payload", () => {
 
     test("the CLI refuses a flag where a path value is expected", () => {
         const script = join(rootDir, "scripts", "build-host-payload.ts");
-        const run = Bun.spawnSync(["bun", script, "--dev", "--out", "--check"], {
-            cwd: tmp,
-            stdout: "pipe",
-            stderr: "pipe",
-        });
+        const run = Bun.spawnSync(
+            ["bun", script, "--dev", "--out", "--check"],
+            {
+                cwd: tmp,
+                stdout: "pipe",
+                stderr: "pipe",
+            },
+        );
         expect(run.exitCode).toBe(2);
         expect(run.stderr.toString()).toContain("--out requires a path");
         expect(existsSync(join(tmp, "--check"))).toBe(false);
@@ -404,11 +480,21 @@ describe("build-host-payload", () => {
     test("the CLI accepts only native addon files for --addon", () => {
         const script = join(rootDir, "scripts", "build-host-payload.ts");
         const run = Bun.spawnSync(
-            ["bun", script, "--dev", "--out", "out-cjs", "--addon", releaseAddon],
+            [
+                "bun",
+                script,
+                "--dev",
+                "--out",
+                "out-cjs",
+                "--addon",
+                releaseAddon,
+            ],
             { cwd: tmp, stdout: "pipe", stderr: "pipe" },
         );
         expect(run.exitCode).toBe(2);
-        expect(run.stderr.toString()).toContain("--addon must name a .so or .node file");
+        expect(run.stderr.toString()).toContain(
+            "--addon must name a .so or .node file",
+        );
         expect(existsSync(join(tmp, "out-cjs"))).toBe(false);
     });
 
@@ -417,9 +503,11 @@ describe("build-host-payload", () => {
         expect(bytes.at(-1)).toBe(0x0a);
         expect(built.digest).toBe(sha256(bytes.subarray(0, -1)));
         expect(payloadManifestDigest(built.manifest)).toBe(built.digest);
-        expect(bytes.subarray(0, -1).toString("utf8")).toBe(canonicalJson(built.manifest));
-        expect(canonicalJson({ b: 1, a: { d: [3, { z: 1, y: 2 }], c: 2 } })).toBe(
-            '{"a":{"c":2,"d":[3,{"y":2,"z":1}]},"b":1}',
+        expect(bytes.subarray(0, -1).toString("utf8")).toBe(
+            canonicalJson(built.manifest),
         );
+        expect(
+            canonicalJson({ b: 1, a: { d: [3, { z: 1, y: 2 }], c: 2 } }),
+        ).toBe('{"a":{"c":2,"d":[3,{"y":2,"z":1}]},"b":1}');
     });
 });

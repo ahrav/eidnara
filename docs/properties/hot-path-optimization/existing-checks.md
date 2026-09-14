@@ -115,7 +115,7 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | [Early discard][upload-discard] | Discard releases the declared total even before a page arrives. | unaudited |
 
 The #437 blocking-work tests cover the host seam with a test handler. The
-#438 checks below add the production transform path. Pending-table size or
+# 438 checks below add the production transform path. Pending-table size or
 health counters alone are not physical completion witnesses. A transform may
 have durable effects despite an unknown transport outcome, so terminal counts
 are not durable-effect counts.
@@ -136,7 +136,7 @@ the read-only `test-support` observer.
 | [`stale_apply_release_preserves_newer_attempt_and_matching_release_runs_once`][u-stale] | An old identity cannot release a newer attempt. Matching release runs once while another session keeps nonzero charges. | unaudited |
 | [`four_parked_units_keep_fifth_waiter_off_the_blocking_pool`][u-cap] | Four gates exhaust permits. One explicit fifth poll submits no work and retains decode scratch; dropping it releases scratch and leaves snapshot lookup Missing rather than installing InFlight. A replacement enters only after a held permit returns. | unaudited |
 | [`cancelled_unit_releases_its_charges_without_store_work`][u-cancel] | Cancellation at the unit head leaves no session row or receive trace and returns all permits and scratch. | unaudited |
-| [`emergency_cancellation_between_units_preserves_commit_and_releases_scratch`][u-emergency] | The first unit commits, then waits on a live historian with scratch held and all unit permits free. A later unit sees cancellation; durable initialization survives and scratch returns exactly. | unaudited |
+| [`emergency_cancellation_between_units_preserves_commit_and_releases_scratch`][u-emergency] | The first unit commits, then waits on a live history_summarizer with scratch held and all unit permits free. A later unit sees cancellation; durable initialization survives and scratch returns exactly. | unaudited |
 | [`route_close_keeps_binding_and_scratch_until_transform_finishes`][u-host-close] | Real host cancellation follows a held post-commit transform. Ingress availability at the gate equals baseline minus held body bytes and returns exactly to baseline after route-gone. Binding cleanup and scratch release wait for completion; committed core survives and shared-memory accounting equals its baseline. The test asserts the available-permit measurement sent by one exercised callback, not a callback-invocation count or duplicate-callback check. | unaudited |
 | [`request_cancel_waits_for_committed_transform_and_releases_scratch`][u-host-cancel] | Explicit client cancel observes no server Error publication before release; publication follows completion with all permits returned and exact ingress baseline restored. The binding survives until explicit route close. The client locally drops its pending receiver, so this is not a decoded cancelled-code assertion. | unaudited |
 | [`transform_panic_is_redacted_and_maps_to_wire_internal_error`][u-panic] | The parent requires one exact child pass, the fixed stderr diagnostic, and no canary on stderr or stdout. | unaudited |
@@ -341,15 +341,15 @@ Checks added with the mode-gated authorizer (implementation base
 | [Outer retry bound][outer-guard] | The wrapped history slice is retried at most three times above 105%. | unaudited |
 | [SOFT/defer core branches][core-branches] | Defer queues work without replacing its prefix; SOFT applies rendered delta units. | unaudited |
 | [SOFT producer boundary][soft-producer] | Ordinary SOFT submits m1 and other rendered units, not a replacement m0. | unaudited |
-| [Newest tier][newest-tier] | The newest compartment renders its full tier. | unaudited |
+| [Newest tier][newest-tier] | The newest history_segment renders its full tier. | unaudited |
 | [Archived tier][archived-tier] | Tier 5 is omitted. | unaudited |
 | [Empty tier body][empty-tier] | An empty body retains its title heading below archive tier. | unaudited |
-| [Heading safety][heading-safety] | Historian titles remain on an XML-safe heading line. | unaudited |
+| [Heading safety][heading-safety] | HistorySummarizer titles remain on an XML-safe heading line. | unaudited |
 | [Clean title parity][clean-title] | A clean title stays byte-identical. | unaudited |
 | [Dates and body headings][date-headings] | Date ranges compress and heading-like body lines are indented. | unaudited |
 | [Legacy rendering][legacy-render] | Legacy rows use truncation and their tier rule. | unaudited |
 | [Malformed tier fallback][malformed-tier] | A pseudo-v2 row renders flat content rather than disappearing. | unaudited |
-| [Stored-compartment projection][stored-render] | Stored fields project into the render representation. | unaudited |
+| [Stored-history_segment projection][stored-render] | Stored fields project into the render representation. | unaudited |
 | [Wrapped slice extraction][slice-extract] | The shortest complete literal block is extracted. | unaudited |
 | [Oldest-first fixture][oldest-test] | A character-count fixture checks fit and newest survival. | unaudited |
 | [Render golden][render-golden-test] | JSON expected bodies are compared with the renderer using `no_guard`. | unaudited |
@@ -381,7 +381,7 @@ in these inspected checks. Goldens use JSON and SHA-256, not insta snapshots.
 | [Preserved JSON identities][json-identity-test] | Identity preservation does not exempt integrity fields, credential names, or nested values. | unaudited |
 | [Trace identity policy][trace-identity-test] | A new secret session is refused while a stored session can continue tracing. | unaudited |
 | [active_note_scan_audit_is_atomic_complete_and_opaque][audit-complete] | The test checks audit table counts, field IDs, zero/nonzero findings, opaque IDs, hashed owner keys, secret-byte absence with a positive control, detection-column names, and persistence after reopen. | unaudited |
-| [Last-session-owner expiry][audit-expiry] | Session deletion removes the active note audit; compartment writes have expected scan counts. | unaudited |
+| [Last-session-owner expiry][audit-expiry] | Session deletion removes the active note audit; history_segment writes have expected scan counts. | unaudited |
 | [Last shared owner][audit-last-owner] | Audit rows survive until their final owner expires. | unaudited |
 | [Lineage scan links][audit-lineage] | Copying links existing scans without rescanning and survives source deletion. | unaudited |
 | [Audit backup][audit-backup] | Online backup preserves active audit row counts and content. | unaudited |
@@ -390,7 +390,7 @@ in these inspected checks. Goldens use JSON and SHA-256, not insta snapshots.
 | [Cache-state policy][cache-state-policy] | Payloads redact, existing identities persist, and integrity refusal leaves no rejected row. | unaudited |
 | [Diagnostic content][diagnostic-policy] | Diagnostics are redacted before persistence. | unaudited |
 | [Authority identities][authority-policy] | New secret identities are refused while exact existing bindings are retained. | unaudited |
-| [Mural integrity][mural-policy] | Secret bytes, hashes, and new identities are refused. | unaudited |
+| Mural integrity (historical; removed path) | Source check refused secret bytes, hashes, and new identities. No current mural store check exists. | unaudited |
 | [Workspace seed policy][workspace-policy] | Categories redact and identity refusal preserves rows and audit counts. | unaudited |
 | [Authority creation/checksums][checksum-policy] | Creation and checksum fields refuse secret material. | unaudited |
 | [Note field policy][note-policy] | Content substitutes and integrity fields refuse. | unaudited |
@@ -399,7 +399,7 @@ in these inspected checks. Goldens use JSON and SHA-256, not insta snapshots.
 | [Transaction facade policy][transaction-policy] | Transaction output redacts; replay and size refusal preserve committed audit counts. | unaudited |
 | [Facade authority refusal][facade-refusal] | Non-module authority refuses mutation without changing observed notes or audit counts. | unaudited |
 | [Idempotency identity policy][idempotency-policy] | New secret identities refuse before invocation without substitution or key collapse. | unaudited |
-| [Compartment field policy][compartment-policy] | Content redacts and rejected new message identities leave prior compartments intact. | unaudited |
+| [HistorySegment field policy][history_segment-policy] | Content redacts and rejected new message identities leave prior history_segments intact. | unaudited |
 | [Note transition policy][transition-policy] | Transition content redacts and compiled artifacts refuse secrets. | unaudited |
 
 No full six-policy differential matrix, in-memory no-append assertion, or
@@ -577,7 +577,6 @@ that no related check exists anywhere in the repository.
 [cache-state-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L728
 [diagnostic-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L836
 [authority-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L853
-[mural-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L898
 [workspace-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L944
 [checksum-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L1022
 [note-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L1121
@@ -586,7 +585,7 @@ that no related check exists anywhere in the repository.
 [transaction-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L1253
 [facade-refusal]: ../../../crates/memory-store/tests/production_redaction.rs#L1383
 [idempotency-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L1513
-[compartment-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L1583
+[history_segment-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L1583
 [transition-policy]: ../../../crates/memory-store/tests/production_redaction.rs#L1634
 [fixture-builder]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/decay_render.rs#L809
 [host-catalog]: ../host-runtime/catalog.md

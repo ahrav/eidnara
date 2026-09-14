@@ -1,6 +1,5 @@
 import "@eidnara/opencode/config/prune-config-leaf";
 import { existsSync } from "node:fs";
-import { migrateLegacyAgentEnabledInMemory } from "@eidnara/opencode/config/agent-disable";
 import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
@@ -12,9 +11,9 @@ import {
 } from "@eidnara/opencode/config/project-security";
 import { pruneNestedConfigLeaf } from "@eidnara/opencode/config/prune-config-leaf";
 import {
+    assertKnownConfigKeys,
     type EidnaraConfig,
     EidnaraConfigSchema,
-    REMOVED_CONFIG_KEYS,
 } from "@eidnara/opencode/config/schema/eidnara";
 import { redactConfigIssuePath } from "@eidnara/opencode/config/schema/issue-path";
 import { substituteConfigVariables } from "@eidnara/opencode/config/variable";
@@ -183,13 +182,6 @@ function mergeRawConfigs(
     return merged;
 }
 
-/** Zod strips removed keys silently; this names them so users learn the key no longer does anything. */
-function removedKeyWarnings(raw: Record<string, unknown>): string[] {
-    return REMOVED_CONFIG_KEYS.filter((key) => Object.hasOwn(raw, key)).map(
-        (key) => `"${key}" is no longer a configuration key and is ignored.`,
-    );
-}
-
 /** Omitting keys absent from `userRaw` preserves per-leaf pruning during project-config recovery. */
 function userTierFallbackFor(
     projectRaw: Record<string, unknown>,
@@ -219,7 +211,8 @@ function parsePiConfig(
     warnings: string[];
 } {
     const preMigrationWarnings: string[] = [];
-    const migrated = migrateLegacyAgentEnabledInMemory(rawConfig, preMigrationWarnings);
+    assertKnownConfigKeys(rawConfig);
+    const migrated = rawConfig;
     const parsed = EidnaraConfigSchema.safeParse(migrated);
     if (parsed.success) {
         return { config: parsed.data, warnings: preMigrationWarnings };
@@ -246,7 +239,7 @@ function parsePiConfig(
 
     for (const key of errorPaths) {
         recoveredTopLevelKeys.push(key);
-        const isAgentConfig = key === "historian" || key === "sidekick";
+        const isAgentConfig = key === "history_summarizer" || key === "context_researcher";
 
         // A project config key with a user-tier fallback restores that fallback instead
         // of forcing the schema default.
@@ -361,12 +354,11 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
     for (const loaded of mergeFiles) {
         const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
         warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
-        warnings.push(
-            ...removedKeyWarnings(loaded.config).map((warning) => `${prefix} ${warning}`),
-        );
+        warnings.push();
 
         if (loaded.scope === "project") {
             // The loader sanitizes the untrusted project config before merging it.
+            assertKnownConfigKeys(loaded.config);
             const projectRaw = { ...loaded.config };
             for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
                 warnings.push(`${prefix} ${warning}`);
@@ -472,18 +464,17 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
         return a.scope === "user" ? -1 : 1;
     });
     const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
-    // A cloned repository may delay compaction but must not lower thresholds enough to increase historian work for the user's account.
+    // A cloned repository may delay compaction but must not lower thresholds enough to increase history_summarizer work for the user's account.
     const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
     let userTierFallback: Map<string, unknown> | undefined;
 
     for (const loaded of mergeFiles) {
         const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
         warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
-        warnings.push(
-            ...removedKeyWarnings(loaded.config).map((warning) => `${prefix} ${warning}`),
-        );
+        warnings.push();
 
         if (loaded.scope === "project") {
+            assertKnownConfigKeys(loaded.config);
             const projectRaw = { ...loaded.config };
             for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
                 warnings.push(`${prefix} ${warning}`);

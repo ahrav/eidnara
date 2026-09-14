@@ -6,7 +6,7 @@ import {
     sanitizeString,
 } from "./diagnostics-pi";
 import { writeNewFile } from "./fs-utils";
-import { scopeDumpBucketsToSession } from "./historian-dumps";
+import { scopeDumpBucketsToSession } from "./history_summarizer-dumps";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
 import { filterLogRecords } from "./log-records";
 import { readLogTailLines } from "./log-tail";
@@ -84,9 +84,12 @@ function scopeReportToSession(
     return {
         ...report,
         recentSessions: report.recentSessions.filter((session) => session.sessionId === sessionId),
-        historianDumps: {
-            ...report.historianDumps,
-            byProject: scopeDumpBucketsToSession(report.historianDumps.byProject, sessionId),
+        history_summarizerDumps: {
+            ...report.history_summarizerDumps,
+            byProject: scopeDumpBucketsToSession(
+                report.history_summarizerDumps.byProject,
+                sessionId,
+            ),
         },
     };
 }

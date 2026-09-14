@@ -21,21 +21,22 @@ const KNOWN_SLOTS: Record<string, KnownSlot> = {
         classification: "VERDICT",
         reason: "DEFECT: a transient PRAGMA/read failure is cached as incompatible until the writable DB is closed.",
     },
-    "packages/opencode-plugin/src/features/context/smart-notes/sandbox-runner.ts:asyncModulePromise":
+    "packages/opencode-plugin/src/features/context/conditional-notes/sandbox-runner.ts:asyncModulePromise":
         {
             classification: "VERDICT",
-            reason: "DEFECT: a rejected dynamic-import/WASM-init promise is retained for every later smart-note check.",
+            reason: "DEFECT: a rejected dynamic-import/WASM-init promise is retained for every later conditional-note check.",
         },
-    "packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts:ctxReduceRegisteredGlobally":
+    "packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts:eidnaraReduceRegisteredGlobally":
         {
             classification: "VERDICT",
             reason: "Correct by scope: tool registration is resolved once at plugin boot and cannot change while that instance runs.",
         },
-    "packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts:availabilityBySession": {
-        classification: "VERDICT",
-        reason: "Correct by contract: the first persisted user message freezes that session's tool surface.",
-    },
-    "packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts:permissionDeniedBySession":
+    "packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts:availabilityBySession":
+        {
+            classification: "VERDICT",
+            reason: "Correct by contract: the first persisted user message freezes that session's tool surface.",
+        },
+    "packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts:permissionDeniedBySession":
         {
             classification: "DIAGNOSTIC",
             reason: "Repeatedly assigned on each cache-busting permission read; later reads replace an earlier denial.",

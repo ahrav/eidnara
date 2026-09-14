@@ -4,13 +4,13 @@
 
 Following the open-schema finding into a concrete consequence. The question was
 whether any ignored argument key changes behaviour rather than merely being
-dropped. `ctx_note`'s `surface_condition` is the case where it does, and the
+dropped. `eidnara_note`'s `surface_condition` is the case where it does, and the
 resulting response reports success for an operation the module would otherwise
 have refused.
 
 ## Evidence trail
 
-`crates/daemon/src/lib.rs`, all inside `handle_ctx_note_facade`
+`crates/daemon/src/lib.rs`, all inside `handle_eidnara_note_facade`
 (`:11547-11916`).
 
 - `:11552` — `facade_arguments(request, &["action", "content"])`. Open map, no
@@ -42,7 +42,7 @@ have refused.
   with the refusal text at `:11624`: "Error: Smart-note evaluation is
   unavailable for this Rust-authority project; the note was not written."
   The gate is `condition.is_some()`-guarded, so `None` skips it entirely.
-- `:11631` — `if let Some(condition) = condition`. The smart-note branch
+- `:11631` — `if let Some(condition) = condition`. The conditional-note branch
   (`:11631-11678`) calls `insert_project_note` with
   `surface_condition: Some(condition)` (`:11650`) and answers with the text at
   `:11669-11672`, which names the condition back to the caller.
@@ -53,12 +53,12 @@ have refused.
 
 The advertised schema declares the key:
 
-- `:15960-15975` — `ctx_note_schema` lists `surface_condition` in `properties`
+- `:15960-15975` — `eidnara_note_schema` lists `surface_condition` in `properties`
   with `maxLength: 4096` and the description "Optional externally checkable
   condition to record with the note. Evaluation arrives later." The root is
   `"additionalProperties": true` (`:15963`), so a near-miss spelling is a legal
   argument as far as the advertised schema is concerned.
-- `:15786-15788` — `ctx_note_description` tells the model "surface_condition is
+- `:15786-15788` — `eidnara_note_description` tells the model "surface_condition is
   accepted and recorded, but condition evaluation arrives later on this leg."
 
 So the model is told the key is accepted and recorded, the schema permits any
@@ -69,7 +69,7 @@ neighbouring key, and the handler treats a near-miss as absence.
 The evaluator is not live for the project, which is the state the refusal at
 `:11624` exists to handle. A model emits:
 
-    {"name":"ctx_note","arguments":{
+    {"name":"eidnara_note","arguments":{
        "action":"write",
        "content":"Ping the migration owner",
        "surfaceCondition":"the migration branch merges"}}
@@ -86,7 +86,7 @@ misspelling converts a refusal into a silent semantic downgrade, which is
 strictly worse than either correct outcome.
 
 The mirror case matters too: with a live evaluator, the correctly spelled key
-takes the smart-note branch and the response text at `:11669-11672` echoes the
+takes the conditional-note branch and the response text at `:11669-11672` echoes the
 condition. So a caller comparing the two responses can tell them apart. Without
 a live evaluator there is no such signal, because the plain branch's text
 (`:11704`) is the same text a caller who never asked for a condition receives.
@@ -113,7 +113,7 @@ requirement rather than a fixed configuration.
    for the project. `refuse_conditioned_note_without_evaluator` (`:15318-15339`)
    consults the mutation ledger first, so the command must carry either no
    `command_id` or an unseen one, otherwise the refusal is replaced by a replay.
-2. Call `ctx_note` with `action: "write"`, non-empty `content`, and
+2. Call `eidnara_note` with `action: "write"`, non-empty `content`, and
    `surfaceCondition` (camelCase) set.
 3. Assert the response is not a plain-success "Saved session note" with
    `isError: false`. Either the refusal text at `:11624` or a
@@ -124,7 +124,7 @@ requirement rather than a fixed configuration.
    must produce the refusal, proving the gate is reachable in the test's state.
 5. Negative control: the same call with neither key must produce the plain
    success, proving the test is not simply asserting that all writes fail.
-6. A generalised form: for each key in `ctx_note_schema`'s `properties`, generate
+6. A generalised form: for each key in `eidnara_note_schema`'s `properties`, generate
    the camelCase and hyphenated variants and assert none of them produces a
    different durable outcome than the correctly spelled key without also
    producing a different response. That covers `note_id`, `compiled_provider`,

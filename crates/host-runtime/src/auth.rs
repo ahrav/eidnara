@@ -722,11 +722,11 @@ mod tests {
         for (domain, expected) in [
             (
                 SERVER_PROOF_DOMAIN,
-                "59295f650f2b6c3384e4ce75e5f337ee23367407a85c524af2d2724062264038",
+                "0855f6b735a77c1e628b37686b9bafb614178f0df352133e252b67557bb004c0",
             ),
             (
                 CLIENT_AUTH_DOMAIN,
-                "8ca1451b12e6ec3606c7314c9afa51544ea0b66cfd92d637199389a8de29d79f",
+                "601f456d70b2512dad2d239b78b9180e2808cdd904be07f4e06f140379c85365",
             ),
         ] {
             let proof = compute_proof(

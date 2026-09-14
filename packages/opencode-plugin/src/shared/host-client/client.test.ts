@@ -60,7 +60,7 @@ function catalogResponse(overrides: Record<string, unknown> = {}): Record<string
         op: "catalog.list",
         generation: 1,
         host_ops: HOST_OPS,
-        modules: [module("context"), module("synapse"), module("broca")],
+        modules: [module("context"), module("local_embeddings"), module("model_execution")],
         ...overrides,
     };
 }
@@ -473,8 +473,8 @@ describe("HostClient", () => {
         expect(snapshot.hostOps).toEqual(HOST_OPS);
         expect(snapshot.modules.map((module) => module.module_id)).toEqual([
             "context",
-            "synapse",
-            "broca",
+            "local_embeddings",
+            "model_execution",
         ]);
     });
 

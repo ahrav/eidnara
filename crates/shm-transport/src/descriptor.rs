@@ -16,9 +16,9 @@ pub const SETUP_DOORBELL_COUNT: usize = 4;
 /// doorbells. `setup_auth` re-exports this as `RING_DESCRIPTOR_COUNT`.
 pub const SETUP_DESCRIPTOR_COUNT: usize = SETUP_MAPPING_COUNT + SETUP_DOORBELL_COUNT;
 /// Frozen wire-v2 header length.
-pub const WIRE_V2_HEADER_BYTES: usize = 21;
+pub const WIRE_V3_HEADER_BYTES: usize = 21;
 /// Version byte at `wire_header[4]`.
-pub const WIRE_V2_VERSION: u8 = 2;
+pub const WIRE_V3_VERSION: u8 = 3;
 /// A complete-frame descriptor contains at most two shared spans.
 pub const MAX_SPANS: usize = 2;
 
@@ -26,7 +26,7 @@ pub const MAX_SPANS: usize = 2;
 /// which wire headers are admissible.
 /// Callers that must reject a header before consuming a reservation use this ahead of `commit`, which runs the same check.
 pub fn check_wire_header(
-    wire_header: &[u8; WIRE_V2_HEADER_BYTES],
+    wire_header: &[u8; WIRE_V3_HEADER_BYTES],
     body_len: u64,
 ) -> Result<(), DescriptorError> {
     let declared_len = u32::from_le_bytes([
@@ -35,7 +35,7 @@ pub fn check_wire_header(
         wire_header[2],
         wire_header[3],
     ]);
-    if u64::from(declared_len) != body_len || wire_header[4] != WIRE_V2_VERSION {
+    if u64::from(declared_len) != body_len || wire_header[4] != WIRE_V3_VERSION {
         return Err(DescriptorError::WireHeaderMismatch);
     }
     Ok(())
@@ -205,7 +205,7 @@ crate::redacted_debug!(ReleaseIdentity);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct FrameDescriptor {
     schema_version: u16,
-    wire_header: [u8; WIRE_V2_HEADER_BYTES],
+    wire_header: [u8; WIRE_V3_HEADER_BYTES],
     identity: ReleaseIdentity,
     body_len: u64,
     allocation_start: u64,
@@ -223,7 +223,7 @@ impl FrameDescriptor {
     /// here; `validate` decides whether the snapshot describes an admissible frame.
     pub const fn from_untrusted(
         schema_version: u16,
-        wire_header: [u8; WIRE_V2_HEADER_BYTES],
+        wire_header: [u8; WIRE_V3_HEADER_BYTES],
         identity: ReleaseIdentity,
         body_len: u64,
         allocation_start: u64,
@@ -340,7 +340,7 @@ crate::redacted_debug!(FrameDescriptor);
 /// its lengths agree, so the receiver may build a lease over them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ValidatedFrame {
-    wire_header: [u8; WIRE_V2_HEADER_BYTES],
+    wire_header: [u8; WIRE_V3_HEADER_BYTES],
     identity: ReleaseIdentity,
     body_len: u64,
     allocation_start: u64,
@@ -351,7 +351,7 @@ pub struct ValidatedFrame {
 
 impl ValidatedFrame {
     /// The 21-byte wire-v2 header carried alongside the body.
-    pub const fn wire_header(self) -> [u8; WIRE_V2_HEADER_BYTES] {
+    pub const fn wire_header(self) -> [u8; WIRE_V3_HEADER_BYTES] {
         self.wire_header
     }
 

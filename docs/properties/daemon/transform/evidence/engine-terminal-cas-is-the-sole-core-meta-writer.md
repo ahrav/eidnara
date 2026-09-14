@@ -38,7 +38,7 @@ The terminal commit:
 
 `commit_transform` (`memory-store/src/lib.rs:7260`) runs the whole write set in one
 fenced transaction: the CAS read and check at `:7352-7367`, the claim-vector
-predicate at `:7368-7377`, the compartment predicate at `:7378-7387`, then
+predicate at `:7368-7377`, the history_segment predicate at `:7378-7387`, then
 `cache_state` at `:7390-7399`, `pass_trace` at `:7402-7468`,
 `transform_session_roots` at `:7470-7481`, new `tags` at `:7483-7515`,
 overlay tables at `:7527-7580`, the reduce ledger at `:7582-7591`, and pending
@@ -53,12 +53,12 @@ Complete list of `store.` calls in `:3222-5697` that write:
 | `3312` | `descend_lineage` | durable, pre-CAS, own transaction |
 | `3609` | `commit_transform` | early return, `pending_rewrite` pass-through |
 | `3720` | `commit_transform` | early return, `pending_rewrite` arm |
-| `4646` | `truncate_compartments_for_revert` | durable, pre-CAS, own transaction |
+| `4646` | `truncate_history_segments_for_revert` | durable, pre-CAS, own transaction |
 | `5565` | `commit_transform` | the terminal commit |
 
 Everything else is a read: `load` (`:3301`), `load_transform_snapshot`
-(`:3387`), `max_compartment_end_ordinal` (`:3429`), `has_compartments`
-(`:3553`, `:4054`), `load_compartments` (`:3558`, `:4072`, `:4564`, `:4643`,
+(`:3387`), `max_history_segment_end_ordinal` (`:3429`), `has_history_segments`
+(`:3553`, `:4054`), `load_history_segments` (`:3558`, `:4072`, `:4564`, `:4643`,
 `:4666`, `:4900`, `:5060`), `load_pending_agent_drops` (`:3834`).
 
 The two pre-CAS writes are the exceptions and have their own records:
@@ -93,7 +93,7 @@ row not having moved.
 
 ## What a test must construct
 
-1. Open a store, seed a session so `meta.initialized` is true and compartments
+1. Open a store, seed a session so `meta.initialized` is true and history_segments
    exist.
 2. Capture `(row_version, core_state, meta)` by reading the row directly.
 3. Drive `transform` with an array crafted to raise each error variant in turn.

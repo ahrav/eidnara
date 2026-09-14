@@ -314,7 +314,7 @@ export function getOmpPluginsLockPath(): string {
 // ============================================================================
 
 export {
-    getEidnaraHistorianDir,
+    getEidnaraHistorySummarizerDir,
     getEidnaraLogPath,
 } from "@eidnara/opencode/shared/data-path";
 

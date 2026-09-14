@@ -15,4 +15,4 @@ whole struct derives PartialEq (`crates/memory-store/src/lib.rs:232-240`).
 The accepted tuple is kind plus provider extras. Do not infer byte equality
 from all Value number equalities; the identity workstream owns that caveat.
 
-Remote request retry deduplication and historian receipts are outside scope.
+Remote request retry deduplication and history_summarizer receipts are outside scope.

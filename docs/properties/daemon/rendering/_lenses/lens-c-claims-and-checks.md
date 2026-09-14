@@ -16,7 +16,7 @@ was read back at `HEAD` before it was written.
 The authoritative 4e scope is the seven units the scope map lists at
 [`../../_lenses/scope-map-and-risk-ranking.md:587-595`](../../_lenses/scope-map-and-risk-ranking.md):
 `transform.rs:7511-12623` (5,113), `tail_hygiene.rs` (1,278), `decay_render.rs`
-(849), `caveman.rs` (651), `memory_render.rs` (538), `classify.rs` (490),
+(849), `terse_text_compression.rs` (651), `memory_render.rs` (538), `classify.rs` (490),
 `prompt_surface.rs` (385). All seven line counts were re-derived at `HEAD` and
 sum to 9,304, matching the map. Three corrections, recorded rather than silently
 applied:
@@ -78,12 +78,12 @@ out of a release build; `NOT FOUND` means nothing in the tree enforces it.
 | 4 | "(and its adjacent result) rather than trapping a live session in a deterministic provider-400 loop." (`transform.rs:11230`) | The release repair removes the later owner and its otherwise-orphaned result, and nothing else. | `:11258-11277` removes the pair; `:11297-11299` drops a message the removal emptied. Release only |
 | 5 | "served output contains duplicate tool_use ids: {duplicates:?}" (`transform.rs:11248`) | The returned array has no duplicate id. | **debug only** (`:11246-11250`). Release relies on the repair at `:11251` onward, which is never asserted |
 | 6 | "claude-code-anthropic synthetic prefix must not contain system-role messages" (`transform.rs:12143`) | No system-role message reaches the `m0`/`m1` prefix on the Claude Code leg. | **debug only** (`debug_assert!` `:12139-12144`) |
-| 7 | "Shared rendered-tail hygiene metric for the module's Channel-1 and Channel-2 nudges." (`tail_hygiene.rs:1`) | `u` and `t` count tokens the render actually serves. | Partial. `measure_tail_hygiene` `:458-603` walks `projection.blocks`; render-aware for caveman (`:526`), Channel-1 reminder spans (`:527`, `:553`), drop sentinels (`:528`, `:555`, `:568`), reduced and sentinel arcs (`:505-507`) and `red:` targets (`:508`). **No strip class**: `strip:` appears 0 times in the file |
-| 8 | "Reconstructed each final live tail after its latest compartment coverage boundary, applied persisted drops **and strip transforms**, then ran the same part-typed TypeScript hygiene walk used by the nudge baseline." (`docs/nudge-hygiene-calibration-2026-08-16.md:12`) | The calibrated `{U,T}` are post-strip. | **NOT FOUND** on the Rust side. The Rust walk has no strip handling, so the shipped numbers and the calibrated numbers are measured over different tails |
-| 9 | "Channel 1/2 `ctx_reduce` nudges instead consume the persisted final-tail `{U,T}` hygiene baseline, excluding reasoning from both terms, so live pressure cannot silently escalate their severity." (`packages/pi-plugin/PARITY.md:291-294`) | Reasoning is out of both terms, and severity cannot be silently inflated. | First half implemented: the `Reasoning \| RedactedReasoning \| Opaque` arm returns `excluded_part` at `:583-585`. Second half contradicted by claim 8: a strip inflates `t`, which lowers severity, so the direction of the silent error is *under*-escalation |
+| 7 | "Shared rendered-tail hygiene metric for the module's Channel-1 and Channel-2 nudges." (`tail_hygiene.rs:1`) | `u` and `t` count tokens the render actually serves. | Partial. `measure_tail_hygiene` `:458-603` walks `projection.blocks`; render-aware for terse_text_compression (`:526`), Channel-1 reminder spans (`:527`, `:553`), drop sentinels (`:528`, `:555`, `:568`), reduced and sentinel arcs (`:505-507`) and `red:` targets (`:508`). **No strip class**: `strip:` appears 0 times in the file |
+| 8 | "Reconstructed each final live tail after its latest history_segment coverage boundary, applied persisted drops **and strip transforms**, then ran the same part-typed TypeScript hygiene walk used by the nudge baseline." (`docs/nudge-hygiene-calibration-2026-08-16.md:12`) | The calibrated `{U,T}` are post-strip. | **NOT FOUND** on the Rust side. The Rust walk has no strip handling, so the shipped numbers and the calibrated numbers are measured over different tails |
+| 9 | "Channel 1/2 `eidnara_reduce` nudges instead consume the persisted final-tail `{U,T}` hygiene baseline, excluding reasoning from both terms, so live pressure cannot silently escalate their severity." (`packages/pi-plugin/PARITY.md:291-294`) | Reasoning is out of both terms, and severity cannot be silently inflated. | First half implemented: the `Reasoning \| RedactedReasoning \| Opaque` arm returns `excluded_part` at `:583-585`. Second half contradicted by claim 8: a strip inflates `t`, which lowers severity, so the direction of the silent error is *under*-escalation |
 | 10 | "The `<session-history>` tag is always present (never omitted) so the provider prompt-cache has a stable breakpoint to anchor on — an absent block would shift the bytes after it and bust the cache." (`memory_render.rs:7-9`) | The `m0` block is never absent. | **NOT FOUND** as stated. `M0_EMPTY_BODY` guarantees non-empty *content*, but the splice pushes `m0` only when a frozen unit keyed `"m0"` exists (`transform.rs:11709-11734`), so an absent unit yields an absent block. Lens A observation 20 |
 | 11 | "m1 is the volatile half of the cached prefix and must never be fully empty, because the provider cache anchors a breakpoint at the m1 block and an empty block would shift it." (`memory_render.rs:320-322`) | `assemble_m1` never returns an empty string. | `assemble_m1` `:323-347`; the all-empty branch returns `placeholder` at `:341-343`. Same absent-unit gap as claim 10 at `transform.rs:11735-11755` |
-| 12 | "This row-purity is load-bearing for the m1 digest: `m1_revision_signal` uses `max_compartment_seq` as the complete m1-SOFT leg for compartments BECAUSE the only way these bytes change without a new sequence (a row mutation) routes to a HARD." (`memory_render.rs:357-360`) | `render_new_compartments` bytes are a pure function of row fields, with no clock, age or pressure input. | `:361-375` calls `render_compartment_at_tier(c, 1)` with a literal tier. The consumer is `m1_compose.rs:54`, which is 4b scope, so the invariant spans the 4b/4e boundary |
+| 12 | "This row-purity is load-bearing for the m1 digest: `m1_revision_signal` uses `max_history_segment_seq` as the complete m1-SOFT leg for history_segments BECAUSE the only way these bytes change without a new sequence (a row mutation) routes to a HARD." (`memory_render.rs:357-360`) | `render_new_history_segments` bytes are a pure function of row fields, with no clock, age or pressure input. | `:361-375` calls `render_history_segment_at_tier(c, 1)` with a literal tier. The consumer is `m1_compose.rs:54`, which is 4b scope, so the invariant spans the 4b/4e boundary |
 | 13 | "the cache holds the served bytes" (implied by the render-once discipline at `transform.rs:1-16` and the `"serialized output cache drift"` assertion at `:5478`) | A `tail:{mid}` cache entry equals the bytes served for that mid. | **NOT FOUND**. Every `record_output_item` call (`:11725`, `:11746`, `:11821`, `:12077`, `:12108`) precedes `enforce_unique_tool_use_ids` at `:12147`, which can remove blocks and whole messages without touching `cache_entries`. Lens A contract-vs-code lead 4 |
 | 14 | "a token must be followed by whitespace or ASCII punctuation so malformed text is never partially consumed" (`transform.rs:8411-8412`) | Imitation stripping never eats part of a malformed tag, and code spans pass through verbatim. | `strip_leading_tag_imitations` `:8413-8452`, `well_formed_tag_suffix` `:8475-8490`. Counter-lead: when a whole line is only imitations, `:8443-8445` does not re-emit the trailing newline, so two authored lines merge. That is a content change the doc does not license |
 | 15 | "Remove exactly the prefix added for this block's registered number ... it never trims source whitespace or interprets another block's number." (`transform.rs:8400-8402`) | `strip_tag_prefix` is a byte-exact inverse of `prepend_tag`. | `strip_tag_prefix`, with `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)` at `:8396`. Test `tag_prefix_strip_is_a_byte_exact_inverse` at `:22619` |
@@ -93,9 +93,9 @@ out of a release build; `NOT FOUND` means nothing in the tree enforces it.
 | 19 | "SQLite probes and row hydration always happen after the snapshot has been copied out." (`transform.rs:7545`) | The tag baseline cache lock is not held across store I/O. | `load_cached_tags` `:7639-7697`; the four `tag_baseline_cache()` lock scopes at `:7605`, `:7648`, `:7671`, `:7689` are each a single statement |
 | 20 | "prompt_surface selected light, but built-in light assets are not available yet; using the byte-identical full guidance and tool descriptions until light assets ship." (`prompt_surface.rs:28`) | A light selection may silently serve full bytes, and the caller is told. | **Dead**. `GUIDANCE_LIGHT_PRIMARY`, `GUIDANCE_LIGHT_NO_REDUCE` and `TOOL_LIGHT_DESCRIPTIONS` are unconditionally `Some` at `:33-37`, so `:141` `fallback: light.is_none()` and `:157` are always false and all four consumers (`lib.rs:7594`, `:7599`, `:7600-7601`, `:7718`, `:7720`) are unreachable. Lens A record `render-a-light-surface-fallback-notice-never-served` |
 | 21 | "The last 20 tags stay protected until they age out." (`docs/specs/prompt-surface/light-mapping.md`, rule G-002 / line `L-G-QUEUE`; the same sentence is served to the model) | Exactly the newest 20 tags are exempt from reclamation. | Partial and unit-mismatched. `default_protected_tags()` returns `20` at `transform.rs:893-895`, and `protected_tag_numbers` (`tail_hygiene.rs:401-412`) takes the top `protected_tags` tag numbers. But the strip path converts it to a **message** count: `protected_start = req.messages.len() - protected_tags * 2` at `transform.rs:10198-10201`, gating `:10229`, `:10277` and `:10301`. The `* 2` has no comment and no stated derivation |
-| 22 | "The byte-identity invariant that matters is intra-module determinism (same compartments + budget → same bytes across passes); a differential golden cross-checks the v2 paraphrase path against the TS reference." (`decay_render.rs:10-12`) | The decay body is deterministic and TS-equivalent. | `render_golden_matches_reference` `:629` (7 cases), `render_tight_golden_matches_reference_with_real_estimator` `:787` (7 cases), `redacted_store_shape_matches_ts_at_real_history_budgets` `:663` (4 cases) |
-| 23 | "Keep the transformation order and ASCII word-boundary rules aligned with that source: the committed differential fixture is the compatibility contract." (`caveman.rs:5-6`) | Caveman compression is byte-for-byte equal to `caveman.ts`. | `differential_golden_matches_typescript_oracle` `:626`, over 42 cases in `testdata/caveman-golden.json`. This is the file's **only** test |
-| 24 | "attempts must never attach to (or purge) each other's runs." (`classify.rs:239`) | Derived Broca child session ids are distinct per attempt identity. | `:235-273`; tests `child_ids_are_stable_but_lineage_scoped` `:292` and `child_ids_are_stable_per_attempt_and_distinct_across_attempt_identity` `:452` |
+| 22 | "The byte-identity invariant that matters is intra-module determinism (same history_segments + budget → same bytes across passes); a differential golden cross-checks the v2 paraphrase path against the TS reference." (`decay_render.rs:10-12`) | The decay body is deterministic and TS-equivalent. | `render_golden_matches_reference` `:629` (7 cases), `render_tight_golden_matches_reference_with_real_estimator` `:787` (7 cases), `redacted_store_shape_matches_ts_at_real_history_budgets` `:663` (4 cases) |
+| 23 | "Keep the transformation order and ASCII word-boundary rules aligned with that source: the committed differential fixture is the compatibility contract." (`terse_text_compression.rs:5-6`) | TerseTextCompression compression is byte-for-byte equal to `terse_text_compression.ts`. | `differential_golden_matches_typescript_oracle` `:626`, over 42 cases in `testdata/terse_text_compression-golden.json`. This is the file's **only** test |
+| 24 | "attempts must never attach to (or purge) each other's runs." (`classify.rs:239`) | Derived ModelExecution child session ids are distinct per attempt identity. | `:235-273`; tests `child_ids_are_stable_but_lineage_scoped` `:292` and `child_ids_are_stable_per_attempt_and_distinct_across_attempt_identity` `:452` |
 | 25 | "well-formedness rejection must not echo it either." (`classify.rs:439`) plus "manifest covers {} of the {} requested claims" (`:207`) | Classifier rejection diagnostics never quote untrusted manifest text. | `manifest_validation_diagnostics_never_quote_the_manifest` `:432` |
 
 **Count: 25 claims. 6 have no implementing code in a default production build** —
@@ -142,14 +142,14 @@ here and are not restated. Six further leads:
    `tail_hygiene.rs:1049-1056` calls `measure_tail_hygiene` with
    `&CoreState::default()` and an empty `&HashSet::new()`, so no frozen unit of
    any kind is present in any of the 12 cases. The metric's `red:` arm (`:508`),
-   its caveman arm (`:526`, via `caveman_content` `:422-429`) and the absent
+   its terse_text_compression arm (`:526`, via `terse_text_compression_content` `:422-429`) and the absent
    strip arm are all unreachable from the cross-language corpus. The fixture that
    exists to stop cross-language drift is blind to the render-awareness that
    makes the two implementations hard to keep aligned. One case is *named*
-   `caveman-rendered-not-original-weight`
+   `terse_text_compression-rendered-not-original-weight`
    (`crates/daemon/gen/gen-nudge-hygiene-golden.ts:106-112`), but it encodes
-   the caveman text as literal block content rather than as a `cav:` frozen unit,
-   so it exercises the text arm, not the caveman arm.
+   the terse_text_compression text as literal block content rather than as a `cav:` frozen unit,
+   so it exercises the text arm, not the terse_text_compression arm.
 
 5. **The served guidance promises a tag reserve; the strip path enforces a
    message reserve.** Contract side: the shipped guidance line `L-G-QUEUE`
@@ -253,7 +253,7 @@ Nine, each stated somewhere and mechanically checked nowhere.
    `decay_render.rs:23` is `u32 = 60_000`; `memory_render.rs:16` is
    `f64 = 60_000.0`. Lens A lead 5; re-verified. Nothing ties them.
 4. **The classify byte and chain caps are mirrored by comment only.**
-   `packages/plugin/src/features/eidnara/dreamer/classify.ts:52` says
+   `packages/plugin/src/features/eidnara/memory_classifier/classify.ts:52` says
    "Mirrors `MAX_CLASSIFY_PROMPT_BYTES` in `crates/daemon/src/classify.rs`"
    and `task-config.ts:48` says the same for `MAX_CLASSIFY_MODEL_CHAIN`. Neither
    test parses the Rust source. `task-config.test.ts:39` explicitly delegates one
@@ -424,12 +424,12 @@ Re-counted at `HEAD` by resolving each test attribute to its `fn` line.
 | `classify.rs` | `:274` | **6** | `:284`, `:307`, `:331`, `:432` manifest envelope and diagnostics; `:292`, `:452` child-session identity |
 | `memory_render.rs` | `:377` | **4** | `:407`, `:434` category typing; `:502` the live-TypeScript vocabulary gate; `:528` render-order prefix |
 | `prompt_surface.rs` | `:324` | **2** | `:329` light slots serve authored bytes and assert `!fallback`; `:359` the full manifest is legacy-inert |
-| `caveman.rs` | `:612` | **1** | `:626` the 42-case differential golden. The only test in 651 lines |
+| `terse_text_compression.rs` | `:612` | **1** | `:626` the 42-case differential golden. The only test in 651 lines |
 
 That is **35 file-local tests**. Combined with 237 + 5 from `transform.rs`, 4e has
 **277 in-crate checks**.
 
-`caveman.rs` is the sub-part's thinnest surface by test count: one test for 651
+`terse_text_compression.rs` is the sub-part's thinnest surface by test count: one test for 651
 production lines, and its oracle is a frozen fixture rather than the live
 TypeScript.
 
@@ -457,7 +457,7 @@ at `HEAD`:
 
 | Fixture | Cases | Rust consumer | Cross-language |
 | --- | --- | --- | --- |
-| `caveman-golden.json` | 42 | `caveman.rs:628` | Generated from `caveman.ts`; no TS consumer |
+| `terse_text_compression-golden.json` | 42 | `terse_text_compression.rs:628` | Generated from `terse_text_compression.ts`; no TS consumer |
 | `render-golden.json` | 7 | `decay_render.rs:634` | Generated by `crates/context-core/testdata/gen-golden.ts:159` |
 | `render-tight-golden.json` | 7 | `decay_render.rs:797` | Same generator, `:224` |
 | `nudge-hygiene-golden.json` | 12 | `tail_hygiene.rs:1030` | Generated by `crates/daemon/gen/gen-nudge-hygiene-golden.ts`; **also replayed by two TypeScript legs** |
@@ -477,7 +477,7 @@ term occurrences in each at `HEAD`:
 | `lifecycle_cli.rs` | 635 | 6 | All six are `staged`/`start`/`stop` lifecycle words matched incidentally (`:5`, `:202`, `:211`, `:355`, `:429`, `:612`). **Out of scope** |
 | `prepared_output.rs` | 282 | 0 | 4d |
 | `host_adapter.rs` | 173 | 0 | — |
-| `broca_roundtrip.rs` | 198 | 0 | — |
+| `model_execution_roundtrip.rs` | 198 | 0 | — |
 | `boundary_counter_durability.rs` | 64 | 0 | — |
 | `release_contract_conformance.rs` | 147 | 0 | Credential and closure-digest contracts (`:17`, `:48`, `:130`) |
 
@@ -487,7 +487,7 @@ The final byte-producing stage has no coverage outside the crate's own test
 modules.
 
 **CI, verified at `HEAD` against all five files in `.github/workflows/`**
-(`ci.yml`, `claude-code-review.yml`, `historian-eval.yml`,
+(`ci.yml`, `claude-code-review.yml`, `history_summarizer-eval.yml`,
 `retrieval-benchmark.yml`, `shm-hardening-optin.yml`):
 
 1. **The only `daemon` test invocation in any workflow is
@@ -512,7 +512,7 @@ modules.
    `packages/e2e-tests/src/incident-pool/scenarios/parity-synthetic-todo.ts` is
    the only harness in the tree that drives real Rust rendering across the
    language boundary: it declares `prerequisites: ["cargo", "eidnara", "commons",
-   "subconscious"]` at `:108` and links `crates/daemon/src/injection.rs`
+   "hostonscious"]` at `:108` and links `crates/daemon/src/injection.rs`
    (`:1600`) and `crates/daemon/src/transform.rs` (`:1607`) as its sources.
    It runs on no machine but a developer's, on request.
 
@@ -541,7 +541,7 @@ distinction decides what a green light means.**
 | `packages/pi-plugin/src/tail-hygiene-parity.test.ts:276` "keeps TypeScript and Pi aligned with the Rust-consumed golden" | **Parallel implementations against a shared fixture. Does not execute Rust.** | Reads `crates/daemon/testdata/nudge-hygiene-golden.json` at `:60-68` and runs `measureTailHygiene` (OpenCode) and `measurePiTailHygiene` (Pi) over all 12 cases (`:281-300`). Two of three legs are checked; the Rust leg is bound only by the frozen fixture. Also `:301` a reasoning-arm mutation test and `:337` the 0.651 flagship band |
 | `packages/pi-plugin/src/tail-hygiene-walk-pi.test.ts:713` | **Parallel implementation, same fixture.** | Second Pi-side consumer of the same golden |
 | `packages/plugin/scripts/prompt-surface-gates.test.ts` (6 tests, 7 assertions per `docs/specs/prompt-surface/mutation-results.md:11`) | **Gates the Rust-served artifact bytes, not the Rust code.** The closest thing 4e has to a real cross-language gate | Through `packages/plugin/scripts/prompt-surface-fixture.ts:20-21` it reads the exact assets `prompt_surface.rs:34-36` `include_str!`s — `crates/daemon/assets/guidance_light_primary.txt` and `guidance_light_no_reduce.txt` — and validates the budget fixture, the 37-rule checklist mapping, and the rendered checklist artifact |
-| `packages/plugin/src/hooks/eidnara/tail-hygiene-walk.test.ts`, `caveman.test.ts`, `decay-render.test.ts`, `ctx-reduce-nudge.test.ts`, `tag-messages-collision.test.ts` | **Parallel implementations only. No shared artifact, no Rust reference.** | They test the TypeScript originals the Rust files were ported from. A Rust-side drift is invisible to them |
+| `packages/plugin/src/hooks/eidnara/tail-hygiene-walk.test.ts`, `terse_text_compression.test.ts`, `decay-render.test.ts`, `eidnara-reduce-nudge.test.ts`, `tag-messages-collision.test.ts` | **Parallel implementations only. No shared artifact, no Rust reference.** | They test the TypeScript originals the Rust files were ported from. A Rust-side drift is invisible to them |
 
 **The answer to "does a TypeScript rendering gate exist": yes, one, and it tests
 an artifact rather than the code.** `prompt-surface-gates.test.ts` is the only
@@ -604,7 +604,7 @@ sub-part inventoried so far with no panicking site at all.
 | Process-global tag caches (`transform.rs`) | 6 | `"tag baseline cache mutex"` (`:7605`, `:7648`, `:7671`, `:7689`), `"tag mint frontier cache mutex"` (`:8603`, `:8618`) |
 | Infallible string walks (`transform.rs`) | 4 | `:8511` `"non-empty reminder remainder"`, `:9034` and `:9057` `"non-empty remainder"`, `:9235` `"filtered taggable block"` |
 | Serialization (`transform.rs`) | 4 | `:10817` `"renderer transition classes are serializable"`, `:10827` `"renderer transition classes serialize"`, `:11038` `"wire message metadata must serialize"` — plus `:9011`/`:9016` regex labels |
-| Other files | 11 | `tail_hygiene.rs` 3 (`:378` `"one candidate arc"`, `:643`, `:664`), `classify.rs` 6, `caveman.rs` 1 |
+| Other files | 11 | `tail_hygiene.rs` 3 (`:378` `"one candidate arc"`, `:643`, `:664`), `classify.rs` 6, `terse_text_compression.rs` 1 |
 
 Three of these name a contract with no test: `"renderer transition classes are
 serializable"`, `"wire message metadata must serialize"` and
@@ -612,7 +612,7 @@ serializable"`, `"wire message metadata must serialize"` and
 holding up the `HashMap` iteration discussed below.
 
 **`.unwrap()`: 20, all infallible-by-construction regex compilation.**
-`transform.rs:9927`, `:9972`, `:10154` and `caveman.rs` 17 sites (`:180`, `:204`,
+`transform.rs:9927`, `:9972`, `:10154` and `terse_text_compression.rs` 17 sites (`:180`, `:204`,
 `:237`, `:242`, `:247` and neighbours), every one a `Regex::new(...)` inside a
 `get_or_init` over a literal pattern. Zero `.unwrap()` in `tail_hygiene.rs`,
 `decay_render.rs`, `memory_render.rs`, `classify.rs` or `prompt_surface.rs`
@@ -676,13 +676,13 @@ Ranked by the gap between what the code decides and what any check proves.
    production guard (`scope-map-and-risk-ranking.md:441-443`); lens A recorded
    the correction and this pass re-verified it.
 
-3. **`caveman.rs` is the closest thing 4e has to a zero-test file: 651 lines,
+3. **`terse_text_compression.rs` is the closest thing 4e has to a zero-test file: 651 lines,
    one test.** `differential_golden_matches_typescript_oracle` (`:626`) replays
    42 frozen cases and is the entire check on the file. The header calls the
    fixture "the compatibility contract" (`:5-6`), so the contract is a snapshot,
-   not the live oracle: `packages/plugin/src/hooks/eidnara/caveman.ts` can
+   not the live oracle: `packages/plugin/src/hooks/eidnara/terse_text_compression.ts` can
    change and only a regeneration would notice. No workflow regenerates it. And
-   caveman output feeds the hygiene metric through `caveman_content`
+   terse_text_compression output feeds the hygiene metric through `terse_text_compression_content`
    (`tail_hygiene.rs:422-429`), which the 12-case parity golden cannot reach at
    all (lead 4), so the compression and the metric that consumes it are each
    pinned by a fixture and never checked together.
@@ -737,9 +737,9 @@ Ranked by the gap between what the code decides and what any check proves.
    twins are checked by nothing.
 
 10. **`decay_render.rs`'s budget-guard demotion is the one place a bound removes
-    whole compartments from m0, and its termination is a magic multiplier.**
-    `:330` is `let mut guard = compartments.len() * 5;` and tier 5 renders empty
-    (`:319-322`), so under a binding budget whole compartments leave the artifact.
+    whole history_segments from m0, and its termination is a magic multiplier.**
+    `:330` is `let mut guard = history_segments.len() * 5;` and tier 5 renders empty
+    (`:319-322`), so under a binding budget whole history_segments leave the artifact.
     `budget_guard_demotes_oldest_first` (`:519`) covers the ordering. Part 3 owns
     the ladder and the termination bound per
     `scope-map-and-risk-ranking.md:666`; the `* 5` has no comment on either side
@@ -772,7 +772,7 @@ Ranked by the gap between what the code decides and what any check proves.
   Unresolved, needs a measurement on a real session plus the band owner.
 - Should the `nudge-hygiene-golden.json` corpus carry frozen units? Today all 12
   cases pass `&CoreState::default()` (`tail_hygiene.rs:1049-1056`), so the
-  cross-language fixture cannot reach the `red:`, caveman or strip arms — the
+  cross-language fixture cannot reach the `red:`, terse_text_compression or strip arms — the
   exact render-awareness most likely to drift between three implementations.
   Adding them changes the fixture contract and requires regenerating from the
   TypeScript generator. (needs human input)

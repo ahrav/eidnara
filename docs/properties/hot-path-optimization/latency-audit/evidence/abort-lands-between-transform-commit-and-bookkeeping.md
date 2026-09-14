@@ -39,7 +39,7 @@ a campaign that never opens the window.
 - The only seam after the commit is the `#[cfg(test)]`
   [`between_transform_and_prepare`][hook] hook at [`:8224-8232`][hook],
   declared at [`:2908-2911`][hook-field] as a test-only interleave point. It
-  runs after the roots insert and before `prepare_historian_fire`, so it can
+  runs after the roots insert and before `prepare_history_summarizer_fire`, so it can
   separate the commit from every update except the first. No `test-support`
   feature exposes it to `crates/daemon/tests/` or the benches.
 - The host aborts a dispatch task on cancel at
@@ -66,7 +66,7 @@ on abort.
 ## Timing windows and dependencies
 
 At HEAD: only inside the Emergency95 branch, at one of the three awaits,
-which needs usage at the emergency threshold and a historian firing that is
+which needs usage at the emergency threshold and a history_summarizer firing that is
 busy or ready. Under a blocking worker: on every pass, at the await on the
 worker's join handle, which a cancel, route close, or generation retirement
 can hit while the worker has already committed.

@@ -65,7 +65,7 @@ budgets disable that guard" (`catalog.md:376-378`). At HEAD the request path
 filters `history_budget_tokens` with `is_finite() && *budget >= 0.0`
 (`crates/daemon/src/lib.rs:8156-8159`), so a zero budget is
 default-production reachable through the request, and a negative budget is
-reachable only by calling `render_decayed_compartments` directly. The record
+reachable only by calling `render_decayed_history_segments` directly. The record
 is labelled `default-production` as a whole (`catalog.md:371`). METHOD rule 4
 asks for the label per record with its evidence; the negative clause needs
 its own note.
@@ -179,7 +179,7 @@ not name the two scans as per-call observations. This is a refinement to S1
 folded into the same wording change as (a) and (c).
 
 **(g) H-group reachability given `decay_render` runs only on HARD passes.**
-`render_decayed_compartments` is reached in production only through
+`render_decayed_history_segments` is reached in production only through
 `render_m0` (`crates/daemon/src/memory_render.rs:191-193`), which
 `compose_m0_for_context` calls on `PassPlan::Hard | MigrateHard`
 (`crates/daemon/src/transform.rs:4031-4058`) and on pressure refold inside
@@ -276,7 +276,7 @@ not have; its count classes are observable through the double's
 (`crates/host-runtime/tests/support/mod.rs:187`, `:518-527`). A useful
 existing seam for the commit-versus-bookkeeping gap below is the `cfg(test)`
 hook `between_transform_and_prepare` (`crates/daemon/src/lib.rs:8224-8232`),
-which runs test code between the first transform and historian preparation.
+which runs test code between the first transform and history_summarizer preparation.
 
 ### Anchor verification
 
@@ -431,7 +431,7 @@ Counts: 4 gaps (8, 9, 10, 11), 11 refinements (1 to 7, 12 to 15), 3 biases
    record freezing the predicate and its estimator, and one `sometimes`
    record per threshold crossing.
 4. Transform-level pass-class witnesses (finding 11). Three `sometimes`
-   records: a HARD pass composed m0 with nonempty compartments; a SOFT pass
+   records: a HARD pass composed m0 with nonempty history_segments; a SOFT pass
    took the pressure-refold branch; a pure Defer/SoftPlus pass replayed a
    retained prefix after a HARD.
 

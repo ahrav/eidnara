@@ -198,7 +198,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
     const COLORS = {
         system: "#c084fc",
         docs: "#22d3ee",
-        compartments: "#60a5fa",
+        history_segments: "#60a5fa",
         facts: "#fbbf24",
         memories: "#34d399",
         profile: "#a3e635",
@@ -216,12 +216,12 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
             segs.push({ label: "System", tokens: d.systemPromptTokens, color: COLORS.system });
         if (d.docsTokens > 0)
             segs.push({ label: "Docs", tokens: d.docsTokens, color: COLORS.docs });
-        if (!compactionOff() && d.compartmentTokens > 0)
+        if (!compactionOff() && d.history_segmentTokens > 0)
             segs.push({
-                label: "Compartments",
-                tokens: d.compartmentTokens,
-                color: COLORS.compartments,
-                detail: `(${d.compartmentCount})`,
+                label: "HistorySegments",
+                tokens: d.history_segmentTokens,
+                color: COLORS.history_segments,
+                detail: `(${d.history_segmentCount})`,
             });
         if (d.factTokens > 0)
             segs.push({
@@ -357,7 +357,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 )}
             </box>
 
-            {/* Historian progress, full width; the server reports it only while a
+            {/* HistorySummarizer progress, full width; the server reports it only while a
                 run is active or has just finished. */}
             {!compactionOff() &&
                 s().recompProgress &&
@@ -413,15 +413,15 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                                             {p.kind === "embed" ? (
                                                 <R
                                                     t={t()}
-                                                    l="Compartments"
+                                                    l="HistorySegments"
                                                     v={`${p.processedMessages}/${p.totalMessages} embedded`}
                                                     fg={t().textMuted}
                                                 />
                                             ) : (
                                                 <R
                                                     t={t()}
-                                                    l="Compartments"
-                                                    v={`${p.compartmentsCreated} (${p.passCount} pass${p.passCount === 1 ? "" : "es"})`}
+                                                    l="HistorySegments"
+                                                    v={`${p.history_segmentsCreated} (${p.passCount} pass${p.passCount === 1 ? "" : "es"})`}
                                                     fg={t().textMuted}
                                                 />
                                             )}
@@ -482,19 +482,19 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                                 fg={row.label === "Memories" ? t().accent : t().textMuted}
                             />
                         ))}
-                        {s().readySmartNoteCount > 0 && (
+                        {s().readyConditionalNoteCount > 0 && (
                             <R
                                 t={t()}
-                                l="Smart Notes"
-                                v={`${s().readySmartNoteCount} ready`}
+                                l="Conditional Notes"
+                                v={`${s().readyConditionalNoteCount} ready`}
                                 fg={t().accent}
                             />
                         )}
-                        {s().lastDreamerRunAt && (
+                        {s().lastMemoryClassifierRunAt && (
                             <R
                                 t={t()}
-                                l="Dreamer"
-                                v={`last ${relTime(s().lastDreamerRunAt!)}`}
+                                l="MemoryClassifier"
+                                v={`last ${relTime(s().lastMemoryClassifierRunAt!)}`}
                                 fg={t().textMuted}
                             />
                         )}
@@ -643,7 +643,11 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                                 />
                             )}
                             {typeof s().boundaryPresent === "boolean" && (
-                                <R t={t()} l="Compartments" v={String(s().compartmentCount)} />
+                                <R
+                                    t={t()}
+                                    l="HistorySegments"
+                                    v={String(s().history_segmentCount)}
+                                />
                             )}
                             <R
                                 t={t()}
@@ -657,11 +661,11 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                                     v={`~${fmt(s().compressionBudget!)} tok (${s().compressionUsage} used)`}
                                 />
                             )}
-                            {s().lastDreamerRunAt && (
+                            {s().lastMemoryClassifierRunAt && (
                                 <R
                                     t={t()}
-                                    l="Dreamer"
-                                    v={`last ${relTime(s().lastDreamerRunAt!)}`}
+                                    l="MemoryClassifier"
+                                    v={`last ${relTime(s().lastMemoryClassifierRunAt!)}`}
                                     fg={t().textMuted}
                                 />
                             )}
@@ -1100,7 +1104,7 @@ const tui: TuiPlugin = async (api, _options, meta) => {
             return true;
         }
         if (action === "wrapup-progress-kick") {
-            // The wrapup handler starts the fast progress poll after `/ctx-wrapup` because it emits no message events for the sidebar poll to observe.
+            // The wrapup handler starts the fast progress poll after `/eidnara-wrapup` because it emits no message events for the sidebar poll to observe.
             // The start toast arrives through the ignored-message notification path.
             if (!stillActive()) return false;
             kickRecompProgressRefresh();

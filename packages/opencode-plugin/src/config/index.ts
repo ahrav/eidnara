@@ -9,7 +9,7 @@ import { setOutputReserveConfig } from "../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
 import { isRecord } from "../shared/record-type-guard";
 import { setWindowOverlayPath } from "../shared/window-geometry";
-import { isCompactionEnabled, migrateLegacyAgentEnabledInMemory } from "./agent-disable";
+import { isCompactionEnabled } from "./agent-disable";
 import { eidnaraProjectConfigBasePath, eidnaraUserConfigBasePath } from "./config-paths";
 import type { LoadOutcome } from "./load-outcome";
 import {
@@ -17,7 +17,7 @@ import {
     stripUnsafeProjectConfigFields,
 } from "./project-security";
 import { pruneNestedConfigLeaf } from "./prune-config-leaf";
-import { type EidnaraConfig, EidnaraConfigSchema, REMOVED_CONFIG_KEYS } from "./schema/eidnara";
+import { assertKnownConfigKeys, type EidnaraConfig, EidnaraConfigSchema } from "./schema/eidnara";
 import { redactConfigIssuePath } from "./schema/issue-path";
 import { resolveTransformMode } from "./transform-mode";
 import { type SubstituteFailure, substituteConfigVariables } from "./variable";
@@ -247,9 +247,9 @@ function parsePluginConfig(
     rawConfig: Record<string, unknown>,
     recoveries: ConfigRecovery[] = [],
 ): EidnaraPluginConfig & { configWarnings?: string[] } {
-    // The loader migrates legacy `<agent>.enabled` keys before Zod parsing so opt-outs become `disable: true` without running `doctor`.
     const preMigrationWarnings: string[] = [];
-    const migrated = migrateLegacyAgentEnabledInMemory(rawConfig, preMigrationWarnings);
+    assertKnownConfigKeys(rawConfig);
+    const migrated = rawConfig;
     const parsed = EidnaraConfigSchema.safeParse(migrated);
     const disabledHooks = Array.isArray(rawConfig.disabled_hooks)
         ? rawConfig.disabled_hooks.filter((value): value is string => typeof value === "string")
@@ -302,7 +302,7 @@ function parsePluginConfig(
 
         // Recovery prunes invalid nested leaves from object-valued keys and preserves valid siblings.
         // Preserving valid siblings retains `memory.auto_search` and `memory.git_commit_indexing` settings.
-        // For `historian` and `sidekick`, pruning the invalid leaf keeps the user's `disable` and `model`;
+        // For `history_summarizer` and `context_researcher`, pruning the invalid leaf keeps the user's `disable` and `model`;
         // discarding the whole block would let a project reset them by supplying one invalid leaf.
         // The recovery code deletes the whole key when the issue targets that key or its value is not a prunable object.
         const rawValue = rawConfig[key];
@@ -344,7 +344,7 @@ function parsePluginConfig(
 
         // `redactConfigValue` reports type and length, not resolved values, because `{env:...}` and `{file:...}` substitutions may expand secrets into `rawConfig`.
         delete patched[key];
-        // Optional blocks such as `historian` have no default and are omitted after validation fails.
+        // Optional blocks such as `history_summarizer` have no default and are omitted after validation fails.
         const defaultVal = (defaults as unknown as Record<string, unknown>)[key];
         const reason = customMessagesByKey.get(key);
         const fallback =
@@ -356,8 +356,7 @@ function parsePluginConfig(
         );
     }
 
-    // `patched` derives from `rawConfig` by deleting or pruning keys, so any legacy `enabled` field the retry migrates was already migrated and reported by the first pass.
-    const retryMigrated = migrateLegacyAgentEnabledInMemory(patched, []);
+    const retryMigrated = patched;
     const retryParsed = EidnaraConfigSchema.safeParse(retryMigrated);
     if (retryParsed.success) {
         return {
@@ -384,9 +383,9 @@ export function loadPluginConfig(
 }
 
 function hasUserTierExplicitDaemonConfig(config: Record<string, unknown> | undefined): boolean {
-    const { subc } = config ?? {};
-    if (typeof subc !== "object" || subc === null || Array.isArray(subc)) return false;
-    const connectionFile = (subc as Record<string, unknown>).connection_file;
+    const { host } = config ?? {};
+    if (typeof host !== "object" || host === null || Array.isArray(host)) return false;
+    const connectionFile = (host as Record<string, unknown>).connection_file;
     return typeof connectionFile === "string" && connectionFile.trim().length > 0;
 }
 
@@ -400,13 +399,6 @@ function bindSubstitutionFailures(
         source: loaded.source,
         message,
     }));
-}
-
-/** Zod strips removed keys silently; this names them so users learn the key no longer does anything. */
-function removedKeyWarnings(raw: Record<string, unknown>): string[] {
-    return REMOVED_CONFIG_KEYS.filter((key) => Object.hasOwn(raw, key)).map(
-        (key) => `"${key}" is no longer a configuration key and is ignored.`,
-    );
 }
 
 function withSchemaRecovery(outcome: LoadOutcome, recovered: boolean): LoadOutcome {
@@ -473,7 +465,6 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
 
     if (userLoaded) {
         allWarnings.push(...userLoaded.warnings.map((w) => `[user config] ${w}`));
-        allWarnings.push(...removedKeyWarnings(userLoaded.config).map((w) => `[user config] ${w}`));
         mergedRaw = deepMergeRawConfig(mergedRaw, userLoaded.config);
     }
 
@@ -481,9 +472,8 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
     let projectSanitized = false;
     if (projectLoaded) {
         allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
-        allWarnings.push(
-            ...removedKeyWarnings(projectLoaded.config).map((w) => `[project config] ${w}`),
-        );
+        allWarnings.push();
+        assertKnownConfigKeys(projectLoaded.config);
         projectRaw = { ...projectLoaded.config };
         // Every sanitizer warning marks a project value the loader did not accept as written.
         const stripWarnings = stripUnsafeProjectConfigFields(projectRaw);

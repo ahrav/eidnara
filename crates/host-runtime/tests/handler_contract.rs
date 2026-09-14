@@ -299,7 +299,7 @@ fn limit_defaults_are_finite_and_validated() {
         .expect("minimal but interoperable limits are valid");
 }
 
-fn broca_declaration(retained_resident_bytes: u64) -> ResourceDeclaration {
+fn model_execution_declaration(retained_resident_bytes: u64) -> ResourceDeclaration {
     ResourceDeclaration {
         reserved_handler_tasks: 96,
         reserved_pending_requests: 96,
@@ -312,30 +312,40 @@ fn broca_declaration(retained_resident_bytes: u64) -> ResourceDeclaration {
 fn three_child_composite(
     declaration: ResourceDeclaration,
 ) -> StaticComposite<support::StubComponent, support::StubComponent, support::StubComponent> {
-    let (context, synapse, broca) = support::stub_trio();
-    StaticComposite::new(context, synapse, broca.with_resources(declaration)).expect("distinct ids")
+    let (context, local_embeddings, model_execution) = support::stub_trio();
+    StaticComposite::new(
+        context,
+        local_embeddings,
+        model_execution.with_resources(declaration),
+    )
+    .expect("distinct ids")
 }
 
 /// A 96-slot declaration must leave at least one general slot in each pool:
 #[tokio::test]
 async fn reservations_must_leave_one_general_slot_in_each_pool() {
     for (pending, tasks) in [(96, 200), (200, 96), (96, 96)] {
-        let result =
-            CompositeTestHost::try_start(three_child_composite(broca_declaration(0)), |config| {
+        let result = CompositeTestHost::try_start(
+            three_child_composite(model_execution_declaration(0)),
+            |config| {
                 config.limits.max_pending_requests = pending;
                 config.limits.max_handler_tasks = tasks;
-            })
-            .await;
+            },
+        )
+        .await;
         assert!(
             matches!(result, Err(HostError::InitFailed(_))),
             "limits ({pending}, {tasks}) must fail against a 96-slot reservation"
         );
     }
 
-    let host = CompositeTestHost::start(three_child_composite(broca_declaration(0)), |config| {
-        config.limits.max_pending_requests = 97;
-        config.limits.max_handler_tasks = 97;
-    })
+    let host = CompositeTestHost::start(
+        three_child_composite(model_execution_declaration(0)),
+        |config| {
+            config.limits.max_pending_requests = 97;
+            config.limits.max_handler_tasks = 97;
+        },
+    )
     .await;
     let mut client = host.client().await;
     let (channel, epoch) = client
@@ -445,7 +455,7 @@ async fn a_composite_sizes_the_resident_cap_from_its_own_declarations() {
 
     // Startup rejects the composite rather than allocating retained bytes to ingress.
     let refused = CompositeTestHost::try_start(
-        three_child_composite(broca_declaration(RETAINED)),
+        three_child_composite(model_execution_declaration(RETAINED)),
         |config| {
             config.limits = HostLimits::default();
         },
@@ -473,8 +483,11 @@ async fn a_composite_sizes_the_resident_cap_from_its_own_declarations() {
             assert_eq!(frame.corr, corr);
             frame.body
         }
-        let probe =
-            CompositeTestHost::start(three_child_composite(broca_declaration(0)), |_| {}).await;
+        let probe = CompositeTestHost::start(
+            three_child_composite(model_execution_declaration(0)),
+            |_| {},
+        )
+        .await;
         let mut client = probe.client().await;
         let full = fetch_body(&mut client, None).await;
         let empty = fetch_body(&mut client, Some("no-such-module")).await;
@@ -497,7 +510,7 @@ async fn a_composite_sizes_the_resident_cap_from_its_own_declarations() {
     // The handler-dependent floor equals the interop floor, declaration, and measured catalog charge.
     let floor = host_runtime::config::MIN_RESIDENT_BYTES + RETAINED + catalog_charge;
     let refused = CompositeTestHost::try_start(
-        three_child_composite(broca_declaration(RETAINED)),
+        three_child_composite(model_execution_declaration(RETAINED)),
         |config| {
             config.limits = HostLimits {
                 max_resident_bytes: floor - 1,
@@ -511,7 +524,7 @@ async fn a_composite_sizes_the_resident_cap_from_its_own_declarations() {
         "one byte below the computed floor must fail startup"
     );
     let host = CompositeTestHost::start(
-        three_child_composite(broca_declaration(RETAINED)),
+        three_child_composite(model_execution_declaration(RETAINED)),
         |config| {
             config.limits = HostLimits {
                 max_resident_bytes: floor,
@@ -560,8 +573,9 @@ async fn a_composite_sizes_the_resident_cap_from_its_own_declarations() {
 /// A zero-reservation handler uses only the general pools, so the tightest interoperable limits still admit a request.
 #[tokio::test]
 async fn zero_reservation_handlers_keep_single_pool_admission() {
-    let (context, synapse, broca) = support::stub_trio();
-    let composite = StaticComposite::new(context, synapse, broca).expect("distinct ids");
+    let (context, local_embeddings, model_execution) = support::stub_trio();
+    let composite =
+        StaticComposite::new(context, local_embeddings, model_execution).expect("distinct ids");
     let host = CompositeTestHost::start(composite, |config| {
         config.limits.max_pending_requests = 1;
         config.limits.max_handler_tasks = 1;
@@ -571,13 +585,13 @@ async fn zero_reservation_handlers_keep_single_pool_admission() {
     let (channel, epoch) = client
         .route_open_target(
             "management_surface",
-            "broca",
+            "model_execution",
             "/workspace/project",
             "opencode",
             "s1",
         )
         .await
-        .expect("broca binds");
+        .expect("model_execution binds");
     let corr = client.next_corr();
     client
         .send_frame(
@@ -593,6 +607,6 @@ async fn zero_reservation_handlers_keep_single_pool_admission() {
     let frame = client.frame_within(BUDGET).await.expect("terminal");
     assert_eq!(frame.corr, corr);
     assert_eq!(frame.ty, TY_RESPONSE);
-    assert_eq!(frame.json()["served_by"], "broca");
+    assert_eq!(frame.json()["served_by"], "model_execution");
     host.shutdown().await.expect("graceful shutdown");
 }

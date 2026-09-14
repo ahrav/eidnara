@@ -1,4 +1,4 @@
-//! Drives durable pending embedding work through the in-process Synapse job table to guarded completion.
+//! Drives durable pending embedding work through the in-process LocalEmbeddings job table to guarded completion.
 //!
 //! Pass order is lane binding, eligible-job selection, admission, result polling, and guarded publication.
 //! `admit` passes one `item_id` to `submit` and `charge_admission`; `EpisodeChanged` defers the row.
@@ -10,9 +10,10 @@
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
-use host_runtime::synapse::{
-    DenseUnavailable, InferenceFailureKind, LaneInfo, LaneUnavailableState, PollOutcome,
-    SubmitOutcome, SynapseComponent, SynapseStatus, failure_is_permanent,
+use host_runtime::local_embeddings::{
+    DenseUnavailable, InferenceFailureKind, LaneInfo, LaneUnavailableState,
+    LocalEmbeddingsComponent, LocalEmbeddingsStatus, PollOutcome, SubmitOutcome,
+    failure_is_permanent,
 };
 use kernel::applicability::EvalBudget;
 use kernel::{
@@ -236,7 +237,7 @@ impl PendingObsoletion {
 pub struct EmbeddingDispatcher<'a> {
     kernel: &'a KernelStore,
     projection: &'a SearchProjection,
-    synapse: &'a SynapseComponent,
+    local_embeddings: &'a LocalEmbeddingsComponent,
     faults: Vec<DispatchFault>,
     scan_position: Option<ScanPosition>,
 }
@@ -245,12 +246,12 @@ impl<'a> EmbeddingDispatcher<'a> {
     pub fn new(
         kernel: &'a KernelStore,
         projection: &'a SearchProjection,
-        synapse: &'a SynapseComponent,
+        local_embeddings: &'a LocalEmbeddingsComponent,
     ) -> Self {
         Self {
             kernel,
             projection,
-            synapse,
+            local_embeddings,
             faults: Vec::new(),
             scan_position: None,
         }
@@ -329,11 +330,11 @@ impl<'a> EmbeddingDispatcher<'a> {
         if budget.is_exhausted() {
             return Ok(Some(Blocked::BudgetExhausted));
         }
-        let lane = match serving(self.synapse.status()) {
+        let lane = match serving(self.local_embeddings.status()) {
             Ok(lane) => lane,
             Err(state) => return Ok(Some(Blocked::LaneUnavailable(state))),
         };
-        let binding = lane_binding(&lane, self.synapse.host_incarnation());
+        let binding = lane_binding(&lane, self.local_embeddings.host_incarnation());
         self.check_quarantine()?;
         let bound = if self.take_fault(DispatchFault::RefuseBinding) {
             Err(SearchProjectionError::Store(storage::StoreError::Backend(
@@ -569,7 +570,7 @@ impl<'a> EmbeddingDispatcher<'a> {
         let mut started = Instant::now();
         loop {
             match self
-                .synapse
+                .local_embeddings
                 .poll_admitted(pass.lane, &host_job_id, &item_id, &job.text)
             {
                 // The budget ended while the host still holds the job; the row stays admitted for a later pass to poll.
@@ -589,7 +590,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                     };
                     // The stored input is judged again before its result is trusted: the exact count is what the completion is charged, and a lane that no longer admits the input cannot complete it.
                     let admitted = match self
-                        .synapse
+                        .local_embeddings
                         .preflight_embedding_for_lane(pass.lane, &job.text)
                     {
                         Ok(admitted) => admitted,
@@ -617,7 +618,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                 }
                 // A worker that found the lane down fails its job with the lane's reason; that is the lane's disposition, not the input's, so the row keeps its admitted state until a serving host reconciles it.
                 PollOutcome::Failed { code, .. } => {
-                    return match serving(self.synapse.status()) {
+                    return match serving(self.local_embeddings.status()) {
                         Ok(_) => self.stop(job, &code, pass.now, observer),
                         Err(state) => Ok(Some(Blocked::LaneUnavailable(state))),
                     };
@@ -653,7 +654,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             return Err(SubmitFailure::Quarantined(quarantine));
         }
         let admitted = self
-            .synapse
+            .local_embeddings
             .preflight_embedding_for_lane(pass.lane, &job.text)
             .map_err(SubmitFailure::Unavailable)?;
         if let Some(quarantine) = self.projection.quarantine() {
@@ -664,7 +665,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             return Err(SubmitFailure::BudgetExhausted);
         }
         // The host item is the episode, so a new episode never reuses a job the table retains from a stopped one.
-        self.synapse
+        self.local_embeddings
             .submit_admitted(&admitted, item_id)
             .map_err(SubmitFailure::Unavailable)
     }
@@ -978,7 +979,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             DenseUnavailable::CountUnavailable(InferenceFailureKind::Execution) => Ok(None),
             DenseUnavailable::CountUnavailable(
                 InferenceFailureKind::Artifact | InferenceFailureKind::Invariant,
-            ) => match serving(self.synapse.status()) {
+            ) => match serving(self.local_embeddings.status()) {
                 Err(state) => Ok(Some(Blocked::LaneUnavailable(state))),
                 Ok(_) => Ok(None),
             },
@@ -1185,12 +1186,12 @@ impl Pass<'_> {
     }
 }
 
-fn serving(status: SynapseStatus) -> Result<LaneInfo, LaneUnavailableState> {
+fn serving(status: LocalEmbeddingsStatus) -> Result<LaneInfo, LaneUnavailableState> {
     match status {
-        SynapseStatus::Ready(lane) => Ok(lane),
-        SynapseStatus::Starting => Err(LaneUnavailableState::Starting),
-        SynapseStatus::Disabled { .. } => Err(LaneUnavailableState::Disabled),
-        SynapseStatus::Failing { .. } => Err(LaneUnavailableState::Failing),
+        LocalEmbeddingsStatus::Ready(lane) => Ok(lane),
+        LocalEmbeddingsStatus::Starting => Err(LaneUnavailableState::Starting),
+        LocalEmbeddingsStatus::Disabled { .. } => Err(LaneUnavailableState::Disabled),
+        LocalEmbeddingsStatus::Failing { .. } => Err(LaneUnavailableState::Failing),
     }
 }
 

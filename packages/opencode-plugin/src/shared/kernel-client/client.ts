@@ -73,7 +73,7 @@ export class ConnectionIdentityChangedError extends Error {
 }
 
 export type Surface = "auto_inject" | "auto_search" | "explicit_search";
-export type SourceKind = "assistant" | "model" | "dreamer" | "user";
+export type SourceKind = "assistant" | "model" | "memory_classifier" | "user";
 
 export interface DecisionSpecInput {
     decision_id: string;

@@ -59,10 +59,10 @@ function buildEntryGraphs(): EntryGraphs {
 
 /**
  * Not-ported subsystems; a path under any of them reachable from a bundle root is residue.
- * `search` is anchored under `features/` so `tools/ctx-search`, a shipped Pi tool, does not match.
+ * `search` is anchored under `features/` so `tools/eidnara-search`, a shipped Pi tool, does not match.
  */
 const NOT_PORTED =
-    /\/(memory|dreamer|storage[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory|context-handler|historian|recomp)(\/|\.ts$)|\/features\/[^/]*\/search[^/]*(\/|\.ts$)/;
+    /\/(memory|memory_classifier|storage[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory|context-handler|history_summarizer|recomp)(\/|\.ts$)|\/features\/[^/]*\/search[^/]*(\/|\.ts$)/;
 
 /**
  * Runtime-unreachable modules require a documented exclusion here; an entry
@@ -75,7 +75,7 @@ const AWAITING_CONSUMER = new Map<string, string>([
     ],
     [
         "read-session-pi.ts",
-        "its consumers were the message index and the historian, which read Pi transcripts in TypeScript; the daemon reads transcripts itself",
+        "its consumers were the message index and the history_summarizer, which read Pi transcripts in TypeScript; the daemon reads transcripts itself",
     ],
 ]);
 
@@ -93,7 +93,7 @@ function sourceFiles(dir: string, acc: string[] = []): string[] {
 }
 
 describe("Pi kernel-client bundle reachability", () => {
-    it("reaches no SQLite binding, claim storage, or claim.*/dreamer.* literal from the kernel-client entry", async () => {
+    it("reaches no SQLite binding, claim storage, or claim.*/memory_classifier.* literal from the kernel-client entry", async () => {
         const graph = await bundleModuleGraph(CLIENT_ENTRY);
         expect(graph.inputs.length).toBeGreaterThan(0);
         expect(reachableModules(graph, SQLITE_PATTERN)).toEqual([]);
@@ -101,7 +101,7 @@ describe("Pi kernel-client bundle reachability", () => {
         expect(graph.text).not.toMatch(OPERATION_LITERAL);
     });
 
-    it("reaches no claim storage or claim.*/dreamer.* literal from Pi's resolver and leaves the native host module external", async () => {
+    it("reaches no claim storage or claim.*/memory_classifier.* literal from Pi's resolver and leaves the native host module external", async () => {
         const graph = await bundleModuleGraph(PI_ENTRY);
         expect(graph.inputs.length).toBeGreaterThan(0);
         expect(reachableModules(graph, CLAIM_STORAGE_PATTERN)).toEqual([]);
@@ -109,7 +109,7 @@ describe("Pi kernel-client bundle reachability", () => {
         expect(graph.text).not.toMatch(OPERATION_LITERAL);
     });
 
-    it("the shipped entry points reach only the read-only harness-database reader and carry no claim.*/dreamer.* literal", () => {
+    it("the shipped entry points reach only the read-only harness-database reader and carry no claim.*/memory_classifier.* literal", () => {
         const sources = new Set<string>();
         for (const graph of Object.values(buildEntryGraphs())) {
             for (const binder of databaseBinders(graph)) {
@@ -128,7 +128,7 @@ describe("Pi kernel-client bundle reachability", () => {
         expect(graph).toBeDefined();
         const inputs = new Set((graph?.inputs ?? []).map((input) => resolve(PACKAGE_ROOT, input)));
         for (const module of [
-            "src/commands/ctx-memory-mark.ts",
+            "src/commands/eidnara-memory-mark.ts",
             "../opencode-plugin/src/shared/memory-mark-command.ts",
         ]) {
             expect(inputs).toContain(resolve(PACKAGE_ROOT, module));

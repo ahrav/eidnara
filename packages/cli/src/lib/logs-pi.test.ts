@@ -48,7 +48,10 @@ function reportWithLog(logPath: string): PiDiagnosticReport {
         logFile: { path: logPath, exists: true, sizeKb: 0 },
         recentSessions: [],
         sessionDiscovery: "ok",
-        historianDumps: { byProject: [], legacyDumps: { dir: "/x/legacy", count: 0, recent: [] } },
+        history_summarizerDumps: {
+            byProject: [],
+            legacyDumps: { dir: "/x/legacy", count: 0, recent: [] },
+        },
     };
 }
 
@@ -59,7 +62,7 @@ describe("bundleIssueReport session filtering", () => {
         writeFileSync(
             logPath,
             [
-                "[2026-07-07T12:00:00.000Z] sidekick stderr follows",
+                "[2026-07-07T12:00:00.000Z] context_researcher stderr follows",
                 "```",
                 "  ```json",
                 "inside",
@@ -272,7 +275,7 @@ describe("bundleIssueReport session scoping of diagnostics", () => {
                     lastActiveAt: "2026-05-11T11:00:00.000Z",
                 },
             ],
-            historianDumps: {
+            history_summarizerDumps: {
                 byProject: [
                     {
                         directory: "/work/selected",

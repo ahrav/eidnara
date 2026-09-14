@@ -21,7 +21,7 @@ import {
     getEidnaraStorageDir,
     getOpenCodeCacheDir,
     getProjectEidnaraDir,
-    getProjectEidnaraHistorianDir,
+    getProjectEidnaraHistorySummarizerDir,
     storageSubtreePath,
 } from "./data-path";
 
@@ -233,7 +233,7 @@ describe("data-path", () => {
 
     test("getProjectEidnaraDir composes <project>/.eidnara/context regardless of XDG_DATA_HOME or a trailing slash", () => {
         // Project-local artifacts must remain inside the project so OpenCode's external_directory permission system permits access.
-        // OpenCode treats artifacts under the project directory as project-internal, avoiding historian Read permission prompts.
+        // OpenCode treats artifacts under the project directory as project-internal, avoiding history_summarizer Read permission prompts.
         // XDG_DATA_HOME affects shared storage only.
         process.env.XDG_DATA_HOME = "/tmp/custom-data";
         for (const project of ["/Users/me/Work/proj", "/some/project/"]) {
@@ -241,9 +241,9 @@ describe("data-path", () => {
         }
     });
 
-    test("getProjectEidnaraHistorianDir appends historian/", () => {
-        expect(getProjectEidnaraHistorianDir("/Users/me/Work/proj")).toBe(
-            path.join("/Users/me/Work/proj", ".eidnara", "context", "historian"),
+    test("getProjectEidnaraHistorySummarizerDir appends history_summarizer/", () => {
+        expect(getProjectEidnaraHistorySummarizerDir("/Users/me/Work/proj")).toBe(
+            path.join("/Users/me/Work/proj", ".eidnara", "context", "history_summarizer"),
         );
     });
 

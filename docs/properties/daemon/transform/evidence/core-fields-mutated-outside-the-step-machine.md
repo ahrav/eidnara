@@ -84,11 +84,11 @@ The non-refold Soft path calls `step` at
 units and increments `version` at
 `commons@cb5a5c01:crates/cache-stability/src/lib.rs:234-246`. When the Soft pass
 extends coverage, the module then updates coverage and prunes covered red and
-caveman units at `crates/daemon/src/transform.rs:4745-4749`.
+terse_text_compression units at `crates/daemon/src/transform.rs:4745-4749`.
 
 Both pruning helpers mutate `core.frozen_units` directly:
 
-- `prune_covered_caveman_units`:
+- `prune_covered_terse_text_compression_units`:
   `crates/daemon/src/transform.rs:5953-5966`
 - `prune_covered_red_units`:
   `crates/daemon/src/transform.rs:6442-6457`
@@ -150,7 +150,7 @@ For the prune ordering:
 1. Seed covered `red:` and `cav:` units.
 2. Drive a non-refold Soft pass with `m1.new_coverage.is_some()`.
 3. Assert `version` advances once and the committed frozen set excludes units
-   pruned by `prune_covered_red_units` and `prune_covered_caveman_units`.
+   pruned by `prune_covered_red_units` and `prune_covered_terse_text_compression_units`.
 4. Treat the assertion as a replay-order check: step first, then the two module
    prunes.
 

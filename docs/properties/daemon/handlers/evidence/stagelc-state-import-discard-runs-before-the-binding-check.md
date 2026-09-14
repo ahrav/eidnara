@@ -87,7 +87,7 @@ Reachability, both sides per METHOD.md rule 4:
 ## Failure scenario
 
 Session V is mid-import on channel 1: batches 0 and 1 of 4 are staged, holding a
-`Collecting` phase with two batches of compartments.
+`Collecting` phase with two batches of history_segments.
 
 A request arrives on channel 2 carrying `session_id: "V"` and `v: 0`. Channel 2
 is bound to a different session, or is not bound at all. Control reaches `:5628`,

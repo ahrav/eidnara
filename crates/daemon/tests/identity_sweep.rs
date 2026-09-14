@@ -1,4 +1,4 @@
-//! Bounded identity sweeps against a real kernel, a real projection, and an in-process Synapse host.
+//! Bounded identity sweeps against a real kernel, a real projection, and an in-process LocalEmbeddings host.
 //! An independent reference and holder ledger predicts every survivor; a genuinely unreferenced identity is gone after reopen; live work, shared payloads, and host-held jobs survive selection races and rechecks; a lost reclamation reply is reconciled without a second effect.
 
 mod support;
@@ -15,8 +15,8 @@ use daemon::embedding_publication::{
 };
 use daemon::identity_sweep::{IdentitySweeper, SweepError, SweepReport};
 use daemon::search_projection::SearchProjection;
-use host_runtime::synapse::PollOutcome;
-use host_runtime::synapse::{SynapseComponent, SynapseLimits};
+use host_runtime::local_embeddings::PollOutcome;
+use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsLimits};
 use kernel::applicability::EvalBudget;
 use kernel::{CurrentInputDescriptor, ProjectScope};
 use retrieval::batch::{VectorGeneration, register_generation};
@@ -36,7 +36,7 @@ const OLD_GENERATION: &str = "gen-0";
 fn pass(
     corpus: &Corpus,
     projection: &SearchProjection,
-    synapse: &SynapseComponent,
+    local_embeddings: &LocalEmbeddingsComponent,
     bounds: &DispatchBounds,
     wait: Duration,
     now: i64,
@@ -47,7 +47,7 @@ fn pass(
         result_wait: wait,
         ..*bounds
     };
-    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, projection, synapse);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, projection, local_embeddings);
     let end = tokio::task::block_in_place(|| {
         dispatcher
             .run_pass(
@@ -124,7 +124,7 @@ fn survives(reference: &Reference) -> bool {
 }
 
 /// Reads every job pair's ledger facts outside the API under test, asking the host directly whether it still answers for the row's job.
-fn references(data_home: &Path, synapse: &SynapseComponent) -> Vec<Reference> {
+fn references(data_home: &Path, local_embeddings: &LocalEmbeddingsComponent) -> Vec<Reference> {
     let conn = inspect(data_home);
     let mut statement = conn
         .prepare(
@@ -150,7 +150,7 @@ fn references(data_home: &Path, synapse: &SynapseComponent) -> Vec<Reference> {
                     .zip(episode.as_deref())
                     .is_some_and(|(job, episode)| {
                         !matches!(
-                            synapse.poll_admitted(&lane(FINGERPRINT), job, episode, &text),
+                            local_embeddings.poll_admitted(&lane(FINGERPRINT), job, episode, &text),
                             PollOutcome::Restarted
                         )
                     });
@@ -169,9 +169,12 @@ fn references(data_home: &Path, synapse: &SynapseComponent) -> Vec<Reference> {
 }
 
 /// What the ledger predicts remains after a sweep of every candidate.
-fn predicted(data_home: &Path, synapse: &SynapseComponent) -> BTreeSet<(String, String, Row)> {
+fn predicted(
+    data_home: &Path,
+    local_embeddings: &LocalEmbeddingsComponent,
+) -> BTreeSet<(String, String, Row)> {
     let before = inventory(data_home);
-    let survivors: BTreeSet<(String, String)> = references(data_home, synapse)
+    let survivors: BTreeSet<(String, String)> = references(data_home, local_embeddings)
         .into_iter()
         .filter(survives)
         .map(|reference| (reference.occurrence, reference.generation))
@@ -288,10 +291,10 @@ fn plant_retired_generation(
 
 fn sweep(
     projection: &SearchProjection,
-    synapse: &SynapseComponent,
+    local_embeddings: &LocalEmbeddingsComponent,
     limit: NonZeroUsize,
 ) -> SweepReport {
-    let mut sweeper = IdentitySweeper::new(projection, synapse);
+    let mut sweeper = IdentitySweeper::new(projection, local_embeddings);
     tokio::task::block_in_place(|| {
         sweeper
             .run_sweep(limit, &budget(Duration::from_secs(30)))
@@ -299,11 +302,15 @@ fn sweep(
     })
 }
 
-fn embed_all(corpus: &Corpus, projection: &SearchProjection, synapse: &SynapseComponent) -> usize {
+fn embed_all(
+    corpus: &Corpus,
+    projection: &SearchProjection,
+    local_embeddings: &LocalEmbeddingsComponent,
+) -> usize {
     let (_, events) = pass(
         corpus,
         projection,
-        synapse,
+        local_embeddings,
         &bounds(),
         Duration::from_secs(5),
         NOW,
@@ -340,11 +347,11 @@ async fn the_reference_ledger_predicts_survivors_and_eligible_identities_are_gon
         .map(|object| occurrence_of(&rows, object))
         .collect();
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
 
     // Nothing is eligible on a fresh projection: a sweep is a witnessed no-op.
     let untouched = inventory(dir.path());
-    let report = sweep(&projection, &synapse, ten());
+    let report = sweep(&projection, &local_embeddings, ten());
     assert_eq!(
         report,
         SweepReport {
@@ -371,7 +378,7 @@ async fn the_reference_ledger_predicts_survivors_and_eligible_identities_are_gon
         })
         .unwrap();
     assert_eq!(
-        embed_all(&corpus, &projection, &synapse),
+        embed_all(&corpus, &projection, &local_embeddings),
         4,
         "echo is held back below"
     );
@@ -389,14 +396,18 @@ async fn the_reference_ledger_predicts_survivors_and_eligible_identities_are_gon
     tombstone(&projection, occ[1], 50);
     let required = required_vectors(dir.path());
     let payloads = payload_count(dir.path());
-    let expected = predicted(dir.path(), &synapse);
+    let expected = predicted(dir.path(), &local_embeddings);
     assert!(
         expected.len() < inventory(dir.path()).len(),
         "the ledger predicts real reclamation"
     );
     let fixed = singletons(dir.path());
 
-    let report = sweep(&projection, &synapse, NonZeroUsize::new(11).unwrap());
+    let report = sweep(
+        &projection,
+        &local_embeddings,
+        NonZeroUsize::new(11).unwrap(),
+    );
     assert_eq!(report.held, Vec::<Candidate>::new());
     assert_eq!(report.inspected, 11);
     assert_eq!(report.survivors, 0);
@@ -464,7 +475,7 @@ async fn the_reference_ledger_predicts_survivors_and_eligible_identities_are_gon
     drop(projection);
     let projection = SearchProjection::open(dir.path()).unwrap();
     assert_eq!(inventory(dir.path()), expected, "reopen changes nothing");
-    let again = sweep(&projection, &synapse, ten());
+    let again = sweep(&projection, &local_embeddings, ten());
     assert_eq!(
         again,
         SweepReport {
@@ -498,13 +509,13 @@ async fn a_bounded_sweep_reclaims_at_most_its_limit() {
         .collect();
     let (projection, rows) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
-    assert_eq!(embed_all(&corpus, &projection, &synapse), 3);
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    assert_eq!(embed_all(&corpus, &projection, &local_embeddings), 3);
     for (seq, object) in objects.iter().enumerate() {
         tombstone(&projection, occurrence_of(&rows, object), 50 + seq as i64);
     }
     let one = NonZeroUsize::new(1).unwrap();
-    let first = sweep(&projection, &synapse, one);
+    let first = sweep(&projection, &local_embeddings, one);
     assert_eq!(
         (
             first.candidates,
@@ -514,7 +525,7 @@ async fn a_bounded_sweep_reclaims_at_most_its_limit() {
         (1, 1, 1)
     );
     assert_eq!(inventory(dir.path()).len(), 4);
-    let rest = sweep(&projection, &synapse, ten());
+    let rest = sweep(&projection, &local_embeddings, ten());
     assert_eq!(
         (rest.candidates, rest.jobs_reclaimed, rest.vectors_reclaimed),
         (2, 2, 2)
@@ -531,8 +542,8 @@ async fn a_spent_budget_reports_the_sweep_it_cut_short() {
     let object = corpus.publish("a", "a text");
     let (projection, rows) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
-    assert_eq!(embed_all(&corpus, &projection, &synapse), 1);
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    assert_eq!(embed_all(&corpus, &projection, &local_embeddings), 1);
     tombstone(&projection, occurrence_of(&rows, &object), 50);
     let before = inventory(dir.path());
     assert!(!before.is_empty());
@@ -541,7 +552,7 @@ async fn a_spent_budget_reports_the_sweep_it_cut_short() {
         Some(std::time::Instant::now() - Duration::from_millis(1)),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
-    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+    let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
     let cut = tokio::task::block_in_place(|| sweeper.run_sweep(ten(), &spent).unwrap());
     assert_eq!(
         cut,
@@ -560,7 +571,7 @@ async fn a_spent_budget_reports_the_sweep_it_cut_short() {
     // A revoked grant ends the sweep the same way: the token is cancelled, the budget is not, and nothing is selected or reclaimed.
     let revoked = CancellationToken::new();
     revoked.cancel();
-    let mut sweeper = IdentitySweeper::new(&projection, &synapse).cancelled_by(revoked);
+    let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings).cancelled_by(revoked);
     let cut = tokio::task::block_in_place(|| {
         sweeper
             .run_sweep(ten(), &budget(Duration::from_secs(30)))
@@ -575,7 +586,7 @@ async fn a_spent_budget_reports_the_sweep_it_cut_short() {
     );
     assert_eq!(inventory(dir.path()), before);
 
-    let swept = sweep(&projection, &synapse, ten());
+    let swept = sweep(&projection, &local_embeddings, ten());
     assert_eq!(
         (
             swept.candidates,
@@ -606,7 +617,7 @@ async fn races_with_selection_preserve_live_work_and_release_makes_candidates_re
         .map(|object| occurrence_of(&rows, object))
         .collect();
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     // old, twin, late are embedded; fresh stays pending for the race.
     projection
         .write(|conn| {
@@ -617,7 +628,7 @@ async fn races_with_selection_preserve_live_work_and_release_makes_candidates_re
             Ok(())
         })
         .unwrap();
-    assert_eq!(embed_all(&corpus, &projection, &synapse), 3);
+    assert_eq!(embed_all(&corpus, &projection, &local_embeddings), 3);
     tombstone(&projection, occ[0], 50);
     plant_retired_generation(&projection, &[(occ[2], texts[2])], &[]);
 
@@ -650,7 +661,7 @@ async fn races_with_selection_preserve_live_work_and_release_makes_candidates_re
             Ok(())
         })
         .unwrap();
-    assert_eq!(embed_all(&corpus, &projection, &synapse), 1);
+    assert_eq!(embed_all(&corpus, &projection, &local_embeddings), 1);
     projection
         .write(|conn| {
             conn.execute(
@@ -715,7 +726,7 @@ async fn races_with_selection_preserve_live_work_and_release_makes_candidates_re
     assert_eq!(required_vectors(dir.path()), required);
 
     // The next sweep reclaims what release made eligible and nothing else.
-    let report = sweep(&projection, &synapse, ten());
+    let report = sweep(&projection, &local_embeddings, ten());
     assert_eq!(
         (
             report.candidates,
@@ -755,18 +766,18 @@ async fn held_native_work_survives_until_the_host_releases_it() {
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
-    let synapse = component(
+    let local_embeddings = component(
         &engine,
-        SynapseLimits {
+        LocalEmbeddingsLimits {
             max_retained_jobs: 1,
-            ..SynapseLimits::default()
+            ..LocalEmbeddingsLimits::default()
         },
     );
     // The caller's pass returns while the host still runs the job.
     let (_, events) = pass(
         &corpus,
         &projection,
-        &synapse,
+        &local_embeddings,
         &bounds(),
         Duration::from_millis(50),
         NOW,
@@ -789,13 +800,16 @@ async fn held_native_work_survives_until_the_host_releases_it() {
     assert_eq!(state, "obsolete");
 
     // Native work still running: held.
-    let report = sweep(&projection, &synapse, ten());
+    let report = sweep(&projection, &local_embeddings, ten());
     assert_eq!(
         (report.candidates, report.held.len(), report.jobs_reclaimed),
         (1, 1, 0)
     );
     assert_eq!(inventory(dir.path()).len(), 2);
-    assert_eq!(predicted(dir.path(), &synapse), inventory(dir.path()));
+    assert_eq!(
+        predicted(dir.path(), &local_embeddings),
+        inventory(dir.path())
+    );
 
     // Native exit with the result leased in the table: still held, and the host proves the result is ready.
     TestEngine::release(&gate);
@@ -812,22 +826,25 @@ async fn held_native_work_survives_until_the_host_releases_it() {
         .unwrap();
     let ready = std::time::Instant::now();
     while !matches!(
-        synapse.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "held text"),
+        local_embeddings.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "held text"),
         PollOutcome::Page(_)
     ) && ready.elapsed() < Duration::from_secs(5)
     {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(matches!(
-        synapse.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "held text"),
+        local_embeddings.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "held text"),
         PollOutcome::Page(_)
     ));
-    let report = sweep(&projection, &synapse, ten());
+    let report = sweep(&projection, &local_embeddings, ten());
     assert_eq!(
         (report.candidates, report.held.len(), report.jobs_reclaimed),
         (1, 1, 0)
     );
-    assert_eq!(predicted(dir.path(), &synapse), inventory(dir.path()));
+    assert_eq!(
+        predicted(dir.path(), &local_embeddings),
+        inventory(dir.path())
+    );
 
     // Retaining the second result evicts the first job, releasing its identity.
     projection
@@ -839,12 +856,12 @@ async fn held_native_work_survives_until_the_host_releases_it() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(embed_all(&corpus, &projection, &synapse), 1);
+    assert_eq!(embed_all(&corpus, &projection, &local_embeddings), 1);
     assert!(
-        !synapse.holds_job(&host_job),
+        !local_embeddings.holds_job(&host_job),
         "retention keeps one job: the newer result evicts the held one"
     );
-    let report = sweep(&projection, &synapse, ten());
+    let report = sweep(&projection, &local_embeddings, ten());
     assert_eq!(
         (report.candidates, report.held.len(), report.jobs_reclaimed),
         (1, 0, 1)
@@ -870,12 +887,12 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     // The pass returns with the row admitted while the host still runs the job.
     pass(
         &corpus,
         &projection,
-        &synapse,
+        &local_embeddings,
         &bounds(),
         Duration::from_millis(50),
         NOW,
@@ -896,7 +913,7 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
     let mut served = None;
     let ready = std::time::Instant::now();
     while served.is_none() && ready.elapsed() < Duration::from_secs(5) {
-        match synapse.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "lost text") {
+        match local_embeddings.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "lost text") {
             PollOutcome::Page(page) => served = Some(page),
             _ => std::thread::sleep(Duration::from_millis(5)),
         }
@@ -933,7 +950,7 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
                 // The identity dies and a sweep runs between the applied commit and the reconciliation read.
                 if event == PublicationEvent::Reconciling {
                     tombstone(&projection, occurrence, 50);
-                    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+                    let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
                     report = Some(
                         sweeper
                             .run_sweep(ten(), &budget(Duration::from_secs(30)))
@@ -954,7 +971,7 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
 
     // Dropping the page releases the identity; the next sweep reclaims it.
     drop(page);
-    let report = sweep(&projection, &synapse, ten());
+    let report = sweep(&projection, &local_embeddings, ten());
     assert_eq!(
         (report.jobs_reclaimed, report.vectors_reclaimed),
         (1, 1),
@@ -990,8 +1007,8 @@ async fn resumed_candidate_free_pages_advance_to_eligible_jobs_and_wrap() {
             tombstone(&projection, occurrence, 50);
         }
         let engine = TestEngine::new();
-        let synapse = component(&engine, SynapseLimits::default());
-        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, None);
+        let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+        let mut sweeper = IdentitySweeper::resuming(&projection, &local_embeddings, None);
         let two = NonZeroUsize::new(2).unwrap();
         let before = inventory(dir.path());
         assert_eq!(
@@ -1010,7 +1027,7 @@ async fn resumed_candidate_free_pages_advance_to_eligible_jobs_and_wrap() {
         assert_eq!(cursor, Some(job_id_of(dir.path(), &ordered[1])));
         drop(sweeper);
 
-        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor.clone());
+        let mut sweeper = IdentitySweeper::resuming(&projection, &local_embeddings, cursor.clone());
         let cancelled = budget(Duration::from_secs(30));
         cancelled.cancel();
         assert_eq!(
@@ -1025,7 +1042,7 @@ async fn resumed_candidate_free_pages_advance_to_eligible_jobs_and_wrap() {
         let cursor = sweeper.cursor().map(str::to_owned);
         drop(sweeper);
 
-        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor);
+        let mut sweeper = IdentitySweeper::resuming(&projection, &local_embeddings, cursor);
         assert_eq!(
             tokio::task::block_in_place(|| {
                 sweeper
@@ -1048,7 +1065,7 @@ async fn resumed_candidate_free_pages_advance_to_eligible_jobs_and_wrap() {
         assert_eq!(cursor.is_some(), count == 4);
         drop(sweeper);
         tombstone(&projection, &ordered[0], 60);
-        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor);
+        let mut sweeper = IdentitySweeper::resuming(&projection, &local_embeddings, cursor);
         if count == 4 {
             assert_eq!(
                 tokio::task::block_in_place(|| {
@@ -1063,7 +1080,7 @@ async fn resumed_candidate_free_pages_advance_to_eligible_jobs_and_wrap() {
         let cursor = sweeper.cursor().map(str::to_owned);
         assert_eq!(cursor, None);
         drop(sweeper);
-        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor);
+        let mut sweeper = IdentitySweeper::resuming(&projection, &local_embeddings, cursor);
         assert_eq!(
             tokio::task::block_in_place(|| {
                 sweeper
@@ -1103,11 +1120,11 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
-    let synapse = component(&engine, SynapseLimits::default());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     pass(
         &corpus,
         &projection,
-        &synapse,
+        &local_embeddings,
         &bounds(),
         Duration::from_millis(50),
         NOW,
@@ -1116,7 +1133,7 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
         tombstone(&projection, occurrence, 60);
     }
 
-    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+    let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
     let one = NonZeroUsize::new(1).unwrap();
     for occurrence in held_occurrences {
         let report = tokio::task::block_in_place(|| {
@@ -1160,10 +1177,10 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     let kept = corpus.publish("kept", "kept text");
     let (projection, rows) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
-    assert_eq!(embed_all(&corpus, &projection, &synapse), 2);
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    assert_eq!(embed_all(&corpus, &projection, &local_embeddings), 2);
     tombstone(&projection, occurrence_of(&rows, &gone), 50);
-    let expected = predicted(dir.path(), &synapse);
+    let expected = predicted(dir.path(), &local_embeddings);
     let required = required_vectors(dir.path());
     let before = inventory(dir.path());
 
@@ -1171,7 +1188,7 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     let blocker = Connection::open(search_path(dir.path())).unwrap();
     blocker.busy_timeout(Duration::ZERO).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+    let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
     let report = tokio::task::block_in_place(|| {
         sweeper
             .run_sweep(ten(), &budget(Duration::from_secs(30)))
@@ -1190,7 +1207,7 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     blocker.execute_batch("COMMIT").unwrap();
 
     // A reply lost after the write applied: the rows say the identity is gone, once.
-    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+    let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
     sweeper.lose_next_reclaim_reply_for_test();
     let report = tokio::task::block_in_place(|| {
         sweeper
@@ -1238,8 +1255,8 @@ async fn a_sweep_quarantine_stops_a_fresh_writer_of_the_projection() {
     let gone = corpus.publish("gone", "gone text");
     let (projection, rows) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let synapse = component(&engine, SynapseLimits::default());
-    assert_eq!(embed_all(&corpus, &projection, &synapse), 1);
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    assert_eq!(embed_all(&corpus, &projection, &local_embeddings), 1);
     tombstone(&projection, occurrence_of(&rows, &gone), 50);
     let before = inventory(dir.path());
     let database = Connection::open(search_path(dir.path())).unwrap();
@@ -1250,7 +1267,7 @@ async fn a_sweep_quarantine_stops_a_fresh_writer_of_the_projection() {
         )
         .unwrap();
 
-    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+    let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
     let error = tokio::task::block_in_place(|| {
         sweeper
             .run_sweep(ten(), &budget(Duration::from_secs(30)))
@@ -1271,7 +1288,7 @@ async fn a_sweep_quarantine_stops_a_fresh_writer_of_the_projection() {
              RENAME TO embedding_recovery_authorizations",
         )
         .unwrap();
-    let mut fresh = IdentitySweeper::new(&projection, &synapse);
+    let mut fresh = IdentitySweeper::new(&projection, &local_embeddings);
     let again = tokio::task::block_in_place(|| {
         fresh
             .run_sweep(ten(), &budget(Duration::from_secs(30)))

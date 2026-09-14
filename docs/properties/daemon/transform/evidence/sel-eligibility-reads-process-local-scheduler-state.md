@@ -24,8 +24,8 @@ fields are process-local, not request-derived and not store-derived:
    with `observed_in_process: false` (`:4475-4481`), and then returns `None`
    (`:4482`). The durable anchor is read and discarded.
 
-2. `historian_active` (`lib.rs:8311`), documented at `transform.rs:601-603` as
-   "True while this process has a historian firing/awaiting/validation/publish
+2. `history_summarizer_active` (`lib.rs:8311`), documented at `transform.rs:601-603` as
+   "True while this process has a history_summarizer firing/awaiting/validation/publish
    lease".
 
 3. `wrapup_active` (`lib.rs:8312`), documented at `transform.rs:604-606` as
@@ -43,11 +43,11 @@ Where each reaches the eligibility decision:
   `BaseDecision::Defer` immediately when
   `usage.percentage == 0.0 && session.last_response_time_ms == 0`
   (`scheduler.rs:476-478`).
-- `historian_active` is one of five conjuncts in `ordinary_historian_veto`
+- `history_summarizer_active` is one of five conjuncts in `ordinary_history_summarizer_veto`
   (`transform.rs:4098-4104`), which forces `selection_class` to
   `PassClass::Defer` (`:4131-4135`) and removes the ordinary-Execute arm from
   `independent_bust_opportunity` (`:4293-4295`).
-- `wrapup_active` ORs with `historian_active` into
+- `wrapup_active` ORs with `history_summarizer_active` into
   `active_legitimate_publication_window` (`transform.rs:3924`), which freezes the
   boundary-divergence pending count (`:3926-3928`) and blocks the recut
   (`:3943-3946`).
@@ -56,7 +56,7 @@ A fifth process-local input is the tag baseline cache. `load_cached_tags`
 (`transform.rs:7639-7696`) reads a process-global
 `static tag_baseline_cache()` (`:7597-7600`). Its output, `tag_rows`, feeds
 `tag_tokens_by_block` (`:4136-4144`), the tag-window protection set
-(`:4168-4183`), and the caveman age basis (`:4492-4497`). The cache is bounded by
+(`:4168-4183`), and the terse_text_compression age basis (`:4492-4497`). The cache is bounded by
 `TAG_BASELINE_CACHE_BUDGET_BYTES` (`:144`), so an eviction changes which path
 `load_cached_tags` takes, though the verified reload arms (`:7671-7678`,
 `:7684-7695`) are intended to make the result path-independent.
@@ -74,7 +74,7 @@ advisory holds, so no reduction is selected and any queued drop waits another
 pass. Nothing in the response or the timing line names the cause.
 
 The shared-store variant is worse: two module processes against one store, one
-holding a historian lease and one not, reach different `ordinary_historian_veto`
+holding a history_summarizer lease and one not, reach different `ordinary_history_summarizer_veto`
 values for the same request and store row, so one busts and one defers. Because
 the bust renders and freezes bytes, the two processes produce two different
 frozen renders for the same conversation state.
@@ -83,7 +83,7 @@ frozen renders for the same conversation state.
 
 The window opens at process start and closes, per session, at the first
 `record_response_observation` call (`lib.rs:4485`). It reopens on every restart.
-The shared-store window is the duration of a historian lease, which
+The shared-store window is the duration of a history_summarizer lease, which
 `transform.rs:601-603` does not bound.
 
 ## What a test must construct
@@ -93,7 +93,7 @@ advance the clock past the cache TTL, then construct a *fresh* handler over the
 same store and issue a transform. Assert on `response.materialize_reason`: the
 idle HARD would report `"ttl_expired"` via `classify_materialize_reason`
 (`transform.rs:12561-12613`), so its absence is the observable. The shared-store
-case needs two handlers and a way to hold a historian lease on one, which
+case needs two handlers and a way to hold a history_summarizer lease on one, which
 `with_producer_factory` (`lib.rs:3676-3770`) supports.
 
 ## Investigation log

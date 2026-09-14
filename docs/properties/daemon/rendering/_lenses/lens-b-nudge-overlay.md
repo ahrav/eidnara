@@ -51,10 +51,10 @@ site, so its ordering interacts with the other four.
   re-copies the rows to the descended key (`memory-store/src/lib.rs:8642-8654`,
   `:8736-8739`). There is no age or count reaper.
 
-### 3. The auto-search user hint (`<ctx-search-hint>`)
+### 3. The auto-search user hint (`<eidnara-search-hint>`)
 
-- **What it is.** Up to three caveman-compressed fragments of stored compartment
-  bodies, wrapped in a `<ctx-search-hint>` element and **appended to the user's
+- **What it is.** Up to three terse_text_compression-compressed fragments of stored history_segment
+  bodies, wrapped in a `<eidnara-search-hint>` element and **appended to the user's
   own text block** (`transform.rs:9084-9117`, applied at `:8249-8250` via
   `append_user_hint_to_block` at `:8345-8355`).
 - **Created by.** `maybe_decide_live_user_hint` (`:8766-8823`), called at
@@ -304,7 +304,7 @@ reach the provider array verbatim.
    `todoToolPresent` as a `boolean` and always sends it, so the absent-field
    case does not arise there either.
 4. `memory-store/src/lib.rs:2458-2461` — `channel1_reduce_suppressed` is documented
-   as "Set by ctx_reduce after the agent has acted on a reminder." A repository
+   as "Set by eidnara_reduce after the agent has acted on a reminder." A repository
    grep finds exactly six occurrences of the identifier: the field itself, three
    production reads (`transform.rs:9156`, `:9565`, `:9593`), one production
    clear (`transform.rs:9157`), and one write to `true`, at
@@ -385,13 +385,13 @@ reach the provider array verbatim.
     built on it and gates the temporal marker, the user hint, and the authored
     user tail window.
 21. `transform.rs:8989-8997` — `has_stacked_user_hint_augmentation` suppresses a
-    new hint when the raw prompt already contains `<sidekick-augmentation>`,
-    `<ctx-search-hint>`, or `<ctx-search-auto>`. It inspects the user's own
+    new hint when the raw prompt already contains `<context_researcher-augmentation>`,
+    `<eidnara-search-hint>`, or `<eidnara-search-auto>`. It inspects the user's own
     bytes, so a user who types one of those strings suppresses the feature, and
     a user who types the full envelope produces something the model cannot tell
     from an injected hint.
 22. `transform.rs:8843-8961` — `run_user_hint_lexical_search` reads only
-    `store.load_compartment_candidates` (`:8866`). No notes and no commits are
+    `store.load_history_segment_candidates` (`:8866`). No notes and no commits are
     searched, which does not match the schema description of the feature (see
     the contract leads).
 23. `transform.rs:1145-1310` — `TransformTimings` carries `tag_mint_new`
@@ -443,6 +443,7 @@ Impact: A defer pass that swapped the pair would change bytes mid-prefix,
 busting the provider prompt cache and, on Anthropic, presenting a tool result the
 model never asked for at a position it has already reasoned past.
 Open questions:
+
 - The stale-anchor arm at `transform.rs:7495-7500` drops the pair on a *bust*
   when the anchor vanished without a coverage move. Can the same vanish happen
   on a defer pass, where `reanchor_kept_synthetic_todo_if_folded_or_shrunk` is
@@ -485,6 +486,7 @@ comment in `transform.rs` explicitly forbids. A future caller that trusts the
 `injection.rs` wording would manufacture a synthetic tool call without host
 authority, which is precisely what `transform.rs:739-741` says must never happen.
 Open questions:
+
 - Which of the two doc comments is the intended contract? Fail-closed is what
   ships and is the safer reading; the `injection.rs` wording is at minimum
   stale. (needs human input)
@@ -524,6 +526,7 @@ response field. If it carried a real tool result, the matching tool call becomes
 an orphan, which is exactly the shape the sibling lens found has no production
 detection (`render-a-orphan-tool-arc-has-no-production-detection`).
 Open questions:
+
 - Can a tool-call id reaching `decode_opencode` or `decode_pi` be chosen by
   anything other than the harness itself? Unresolved, needs 4f.
 - Is the prefix check deliberately loose so that a pair frozen under an older
@@ -566,11 +569,12 @@ made, with a `completed` status and a zero timestamp
 (`injection.rs:345`, `:355-358`). It cannot tell that from its own work, so it
 may reason about the todo list as something it already did. The three text
 overlays are better off: Channel-1 and Channel-2 carry `<system-reminder>`
-(`transform.rs:9859`, `:9559`), the hint carries `<ctx-search-hint>`
+(`transform.rs:9859`, `:9559`), the hint carries `<eidnara-search-hint>`
 (`:9111`), and the temporal mark is an HTML comment (`:8205`). All four of those
 markers are plain text a user or a tool result can forge, so they are a
 convention, not a boundary.
 Open questions:
+
 - Is the `synthetic_todo_` id prefix intended as the provenance marker for
   the model? It is deterministic and visible in the Anthropic `tool_use` id, so
   it is a real signal, but nothing documents it as one. (needs human input)
@@ -619,6 +623,7 @@ already cached, so the prefix diverges and the whole cached prompt is discarded.
 On the divergence path this also shows up as a served-fingerprint mismatch
 (`transform.rs:5513-5520`), which is a report of the symptom, not a prevention.
 Open questions:
+
 - Is the missing gate deliberate on the grounds that Channel-1 only ever targets
   a fresh tool result? The selector does not encode that assumption, and the
   three fallback conditions above defeat it. (needs human input)
@@ -663,13 +668,14 @@ of the projection; if a block id is ever reconstructed on a later pass the old
 reminder reappears, quoting a token count from a session state that no longer
 exists.
 Open questions:
+
 - Can a `block_id` be reconstructed after leaving the projection? Block ids are
   `wire::block_id(&message_id, block_index)`, so a message that re-enters the
   request with the same mid and block layout would collide. Whether that happens
   depends on the projection cache and lineage handling, which is 4b scope.
   Unresolved, needs 4b.
 - Should the reaper key on the overlay frontier, on tag retirement, or on
-  compartment coverage? A design decision. (needs human input)
+  history_segment coverage? A design decision. (needs human input)
 
 ### nudge-b-channel1-suppression-flag-is-never-set
 
@@ -680,17 +686,17 @@ Exercised: partial — `channel1_hygiene_ratio_nudge_replays_and_suppresses_refi
 (`transform.rs:23551-23590`) covers the suppression *effect*, but only by writing
 the flag directly into the store at `:23577`. That is the only write to `true`
 in the repository. The test does not run in CI.
-Guarantee: The documented ctx_reduce feedback loop exists: after the agent acts
+Guarantee: The documented eidnara_reduce feedback loop exists: after the agent acts
 on a reminder, the next transform suppresses new Channel-1 appends.
-Check: `always` — assert that on any pass following a `ctx_reduce` that froze at
+Check: `always` — assert that on any pass following a `eidnara_reduce` that froze at
 least one reduction, `decide_channel1` takes the suppressed arm
 (`transform.rs:9593-9595`) on the next transform for that session. `always`
 because the documented contract is unconditional once the antecedent holds.
-Fault/timing angle: The window is between the `ctx_reduce` facade commit and the
+Fault/timing angle: The window is between the `eidnara_reduce` facade commit and the
 next transform pass. If the flag were ever set, the clear at
 `transform.rs:9157` would consume it on the first `tagging_active` pass, so the
 suppression is a single-pass token.
-Required faults and enabling state: A `ctx_reduce` call that applies a reduction,
+Required faults and enabling state: A `eidnara_reduce` call that applies a reduction,
 followed by a `tagging_active` transform pass. The suppression cannot be observed
 because nothing sets the flag.
 Confidence: high — [evidence](../evidence/nudge-b-channel1-suppression-flag-is-never-set.md).
@@ -708,6 +714,7 @@ throttled only by the cadence gate, which keys on `reclaimable_tokens` growth
 re-arms the ladder from `Gentle`. So compliance resets the nudge cycle rather
 than suppressing it, which is a different behaviour from the documented one.
 Open questions:
+
 - Was the writer removed, or never written? `memory_store::ModuleMeta` carries the
   field with `#[serde(default)]` (`:2460`), so a stored `true` from an older
   writer would still be honoured. Whether such a writer ever shipped needs the
@@ -757,6 +764,7 @@ arming watermark exists to prevent on the other arm. It also means the two
 module rearm helpers are dead code in the shipped configuration, which is a
 maintenance hazard: a reader sees a rearm protocol that is not wired up.
 Open questions:
+
 - Is the delegation deliberate, with the module treating the OpenCode host as
   the sole lease owner? The comment at `transform.rs:3509-3511` says tags are
   kept available on non-CC profiles so "the OpenCode host can receive the same
@@ -805,6 +813,7 @@ warning for that cycle. The TTL bounds the damage to one arming cycle, which is
 the right shape; the concern is that the primary retirement path has no
 corroboration at all.
 Open questions:
+
 - Is the CC leg live? If not, this whole arm plus `channel2_directive_id`, the
   arming watermark, and the lease TTL are unreached in the shipped
   configuration, which would change the label to something closer to
@@ -845,24 +854,25 @@ Confidence: high — [evidence](../evidence/nudge-b-auto-search-hint-injects-una
 Verified the append target is the user's own text block
 (`transform.rs:8249-8250`, `append_user_hint_to_block` at `:8345-8355` pushes
 onto `BlockKind::Text`), that the envelope is the plain string
-`<ctx-search-hint>` (`:9111`), and that the same string in ingress bytes is
+`<eidnara-search-hint>` (`:9111`), and that the same string in ingress bytes is
 treated as an existing augmentation (`has_stacked_user_hint_augmentation`,
 `:8989-8997`), which proves the envelope is forgeable from the user side.
-Verified the injected fragments come from stored compartment bodies
-(`run_user_hint_lexical_search` reads only `load_compartment_candidates`,
+Verified the injected fragments come from stored history_segment bodies
+(`run_user_hint_lexical_search` reads only `load_history_segment_candidates`,
 `:8866`), so the content is earlier-conversation material this turn's author did
 not write.
 Existing check: `transform.rs:23075-23090`, `:23030-23048`, `:23049-23073`;
 none run in CI.
 Impact: The provider sees a user message that ends with three fragments of
 earlier conversation plus the instruction "If the fragments above seem relevant
-to the current request, you may run ctx_search to retrieve full context"
+to the current request, you may run eidnara_search to retrieve full context"
 (`:9109`). Attributed to the user, that reads as the user's own instruction. The
 module's own code shows it knows this is a text convention and not a boundary:
 `is_system_reminder_transport_message`'s comment says wire "intentionally has no
 transport-origin field" and settles for a text-shape discriminator
 (`:8525-8527`).
 Open questions:
+
 - Is a caller-supplied value causing this? Yes, indirectly and by design: the
   user's own prompt is the search query, so the caller's bytes select which
   unauthored content gets injected. Recorded as resolved in the evidence file.
@@ -903,6 +913,7 @@ delivery: none of them leave a counter. The only adjacent signal is the
 served-output divergence record (`:5513-5520`), which reports the byte symptom
 without naming the cause.
 Open questions:
+
 - Is `tag_mint_new` the intended precedent, meaning the other overlays were
   simply never given counters, or is there a deliberate reason tags are counted
   and reminders are not? (needs human input)
@@ -954,6 +965,7 @@ whether the sibling's index-shift hazard
 (`render-a-overlay-targets-stale-indices-after-full-drop-filter`) misapplies two
 or three overlays at once rather than one.
 Open questions:
+
 - Can a single block ever carry all four? A tool result is not eligible for the
   temporal marker (that requires an authored user message, `:8642-8647`) and not
   eligible for the user hint (that requires `role == "user"`, `:8789`), so the
@@ -980,9 +992,9 @@ Open questions:
    describes a path its own tests reach only by calling it directly. Record
    `nudge-b-todo-availability-fail-open-is-unreachable`.
 
-2. **`channel1_reduce_suppressed` is documented as written by `ctx_reduce` and is
+2. **`channel1_reduce_suppressed` is documented as written by `eidnara_reduce` and is
    written by nothing.**
-   Contract side: `memory-store/src/lib.rs:2458-2460` — "Set by ctx_reduce after the
+   Contract side: `memory-store/src/lib.rs:2458-2460` — "Set by eidnara_reduce after the
    agent has acted on a reminder. The next transform suppresses new Channel-1
    appends while still replaying every stored append row."
    Code side: the only write to `true` in the worktree is
@@ -1005,18 +1017,18 @@ Open questions:
    `nudge-b-channel1-append-first-applies-without-a-frontier-gate`.
 
 4. **The auto-search hint is documented as searching memories, conversation, and
-   commits; it searches only compartments.**
+   commits; it searches only history_segments.**
    Contract side: `assets/eidnara.schema.json:1607` — "transform-time
-   ctx_search on each new user message"; `:1612` — "when relevant memories,
+   eidnara_search on each new user message"; `:1612` — "when relevant memories,
    conversation, or commits are found". `packages/docs/src/content/docs/reference/configuration.md:119-120`
-   repeats both. `README.md:200` says it "run[s] a background `ctx_search` each
+   repeats both. `README.md:200` says it "run[s] a background `eidnara_search` each
    turn".
    Code side: `run_user_hint_lexical_search` (`transform.rs:8843-8961`) reads
-   exactly one source, `store.load_compartment_candidates` (`:8866`), and scores
+   exactly one source, `store.load_history_segment_candidates` (`:8866`), and scores
    it with a local inverse-document-frequency sum (`:8898-8946`). No note table
-   and no commit index is consulted, and it is not the `ctx_search` code path at
+   and no commit index is consulted, and it is not the `eidnara_search` code path at
    all. The comment at `:9111-9112` half-acknowledges this: "Native search
-   returns memory and compartment results only, so it does not emit commit
+   returns memory and history_segment results only, so it does not emit commit
    SHA/age metadata." That sentence describes a different search than the one
    the function performs. Not itself a safety defect, but the configuration doc
    overstates the feature's reach, and a user disabling it to stop notes from
@@ -1069,7 +1081,7 @@ Open questions:
   `TransformError::SyntheticTodoAnchorMissing` (`:12125-12132`) rather than a
   drop. Whether a defer pass can lose an anchor at all needs a pass-plan trace.
   Unresolved.
-- Should the `<system-reminder>` and `<ctx-search-hint>` envelopes be treated as
+- Should the `<system-reminder>` and `<eidnara-search-hint>` envelopes be treated as
   a security boundary? They are not one today: any tool result or user message
   can contain the same bytes, and
   `is_system_reminder_transport_message`'s own comment concedes that text shape

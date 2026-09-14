@@ -51,7 +51,7 @@
                     "evidence_refs": []
                 },
                 {
-                    "id": "var-parity-a3-ctx-reduce-survival",
+                    "id": "var-parity-a3-eidnara-reduce-survival",
                     "lane": "green",
                     "source_claims": [
                         "claim-parity-a3"
@@ -74,11 +74,11 @@
                         "check-a3-pure-defer"
                     ],
                     "verifier_binding": {
-                        "driver": "src/incident-pool/scenarios/source-linked-regressions.ts#driveAgedCtxReduceSurvival",
-                        "verifier": "src/incident-pool/scenarios/source-linked-regressions.ts#verifyAgedCtxReduceSurvival",
+                        "driver": "src/incident-pool/scenarios/source-linked-regressions.ts#driveAgedEidnaraReduceSurvival",
+                        "verifier": "src/incident-pool/scenarios/source-linked-regressions.ts#verifyAgedEidnaraReduceSurvival",
                         "binding_status": "live",
                         "invalid_state_evidence": [
-                            "crafted vanished-ctx_reduce final wire is rejected (source-linked-regressions.test.ts)",
+                            "crafted vanished-eidnara_reduce final wire is rejected (source-linked-regressions.test.ts)",
                             "crafted bust observation is rejected (source-linked-regressions.test.ts)",
                             "crafted uncached-transition count is rejected (source-linked-regressions.test.ts)",
                             "crafted raw-served or missing rust pass is rejected (source-linked-regressions.test.ts)",

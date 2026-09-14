@@ -1,10 +1,10 @@
-//! Memory-tool adapter for search over compartments and notes.
+//! Memory-tool adapter for search over history_segments and notes.
 //!
-//! Search combines compartment and note hits with deterministic rank, recency,
+//! Search combines history_segment and note hits with deterministic rank, recency,
 //! and identifier ordering, and preserves store errors as [`MemoryToolError`].
 
 use memory_store::{
-    MemoryStore, MemoryStoreError, StoredCompartmentSearchRow, StoredNoteSearchRow,
+    MemoryStore, MemoryStoreError, StoredHistorySegmentSearchRow, StoredNoteSearchRow,
 };
 
 /// Failure returned by memory-tool adapters.
@@ -22,8 +22,8 @@ impl From<MemoryStoreError> for MemoryToolError {
 /// Field that supplied a memory-search hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemorySearchSourceKind {
-    CompartmentTitle,
-    CompartmentBody,
+    HistorySegmentTitle,
+    HistorySegmentBody,
     Note,
 }
 
@@ -47,18 +47,18 @@ struct RankedSearchResult {
     recency: i64,
 }
 
-/// Searches one session's compartment titles, bodies, and notes.
+/// Searches one session's history_segment titles, bodies, and notes.
 ///
 /// Blank queries and zero limits return no rows without reading the store.
 /// Matching is lowercase-based and non-regex. Title and note hits rank before
-/// compartment-body hits. Equal ranks sort by descending sequence or update time,
+/// history_segment-body hits. Equal ranks sort by descending sequence or update time,
 /// then ascending source identifier. Results are truncated after sorting.
 /// Snippets contain at most 200 Unicode scalar values plus truncation ellipses.
 ///
 /// # Errors
 ///
-/// Returns a store error if either compartment or note search fails.
-pub fn search_compartments_and_notes_for_session(
+/// Returns a store error if either history_segment or note search fails.
+pub fn search_history_segments_and_notes_for_session(
     store: &MemoryStore,
     project_path: &str,
     session_id: &str,
@@ -71,8 +71,8 @@ pub fn search_compartments_and_notes_for_session(
     }
 
     let mut ranked = Vec::new();
-    for compartment in store.search_compartments_like(session_id, query)? {
-        if let Some(hit) = compartment_search_hit(compartment, query) {
+    for history_segment in store.search_history_segments_like(session_id, query)? {
+        if let Some(hit) = history_segment_search_hit(history_segment, query) {
             ranked.push(hit);
         }
     }
@@ -121,52 +121,52 @@ fn note_search_hit(note: StoredNoteSearchRow, query: &str) -> RankedSearchResult
     }
 }
 
-fn compartment_search_hit(
-    compartment: StoredCompartmentSearchRow,
+fn history_segment_search_hit(
+    history_segment: StoredHistorySegmentSearchRow,
     query: &str,
 ) -> Option<RankedSearchResult> {
-    if first_match(&compartment.title, query).is_some() {
+    if first_match(&history_segment.title, query).is_some() {
         return Some(RankedSearchResult {
             rank: 1,
-            recency: compartment.sequence,
+            recency: history_segment.sequence,
             result: MemorySearchResult {
-                source_kind: MemorySearchSourceKind::CompartmentTitle,
-                id: compartment.sequence,
-                snippet: snippet_around_match(&compartment.title, query),
+                source_kind: MemorySearchSourceKind::HistorySegmentTitle,
+                id: history_segment.sequence,
+                snippet: snippet_around_match(&history_segment.title, query),
                 category: None,
-                sequence: Some(compartment.sequence),
-                title: Some(compartment.title),
+                sequence: Some(history_segment.sequence),
+                title: Some(history_segment.title),
                 note_status: None,
                 surface_condition: None,
             },
         });
     }
 
-    let body = compartment_body_text(&compartment);
+    let body = history_segment_body_text(&history_segment);
     first_match(&body, query).map(|_| RankedSearchResult {
         rank: 2,
-        recency: compartment.sequence,
+        recency: history_segment.sequence,
         result: MemorySearchResult {
-            source_kind: MemorySearchSourceKind::CompartmentBody,
-            id: compartment.sequence,
+            source_kind: MemorySearchSourceKind::HistorySegmentBody,
+            id: history_segment.sequence,
             snippet: snippet_around_match(&body, query),
             category: None,
-            sequence: Some(compartment.sequence),
-            title: Some(compartment.title),
+            sequence: Some(history_segment.sequence),
+            title: Some(history_segment.title),
             note_status: None,
             surface_condition: None,
         },
     })
 }
 
-fn compartment_body_text(compartment: &StoredCompartmentSearchRow) -> String {
+fn history_segment_body_text(history_segment: &StoredHistorySegmentSearchRow) -> String {
     let mut parts = Vec::new();
-    push_unique_text(&mut parts, &compartment.content);
+    push_unique_text(&mut parts, &history_segment.content);
     for tier in [
-        &compartment.p1,
-        &compartment.p2,
-        &compartment.p3,
-        &compartment.p4,
+        &history_segment.p1,
+        &history_segment.p2,
+        &history_segment.p3,
+        &history_segment.p4,
     ] {
         if let Some(text) = tier.as_deref() {
             push_unique_text(&mut parts, text);

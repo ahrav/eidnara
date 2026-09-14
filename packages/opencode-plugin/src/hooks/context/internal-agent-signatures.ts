@@ -14,9 +14,9 @@ export const INTERNAL_OPENCODE_AGENT_SIGNATURES: readonly string[] = [
  * Matching is by substring, so each entry is a whole product-specific sentence.
  */
 export const EIDNARA_INTERNAL_AGENT_SIGNATURES: readonly string[] = [
-    "You are Historian — the hippocampus of a long-running coding agent.",
-    // SMART_NOTE_COMPILER_SYSTEM_PROMPT
-    "You are the Eidnara smart-note compiler for the memory system.",
-    // SIDEKICK_SYSTEM_PROMPT
-    "You are Sidekick, a focused memory-retrieval subagent for an AI coding assistant.",
+    "You are HistorySummarizer — the hippocampus of a long-running coding agent.",
+    // NOTE_CONDITION_COMPILER_SYSTEM_PROMPT
+    "You are the Eidnara conditional-note compiler for the memory system.",
+    // CONTEXT_RESEARCHER_SYSTEM_PROMPT
+    "You are ContextResearcher, a focused memory-retrieval subagent for an AI coding assistant.",
 ];

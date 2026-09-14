@@ -56,8 +56,8 @@ const completeStoppedResult = JSON.stringify({
         proof: null,
         daemon: null,
         context: null,
-        synapse: null,
-        broca: null,
+        local_embeddings: null,
+        model_execution: null,
     },
 });
 

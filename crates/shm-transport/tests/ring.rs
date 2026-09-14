@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use shm_transport::MAX_FRAME_BYTES;
-use shm_transport::backend::ring::{ProducerError, Ring, RingError, RingGrant, wire_v2_header};
+use shm_transport::backend::ring::{ProducerError, Ring, RingError, RingGrant, wire_v3_header};
 use shm_transport::descriptor::{HardwareProfileId, TransportDescriptor};
 use shm_transport::lease::LeaseError;
 use shm_transport::profile::{ProfileConfig, TargetProfile, WorkerTopology, ring_profile};
@@ -31,7 +31,7 @@ fn lease_limited_profile() -> TargetProfile {
 
 fn publish(ring: &Ring, body: &[u8]) {
     let mut reservation = ring
-        .try_reserve(body.len(), wire_v2_header(body.len()).unwrap())
+        .try_reserve(body.len(), wire_v3_header(body.len()).unwrap())
         .unwrap();
     reservation.write(body).unwrap();
     reservation.commit(body.len()).unwrap();
@@ -41,16 +41,16 @@ fn publish(ring: &Ring, body: &[u8]) {
 fn boundary_round_trips_include_wrap_and_exact_maximum() {
     let ring = Ring::create(&profile(), 7).unwrap();
 
-    let mut underfilled = ring.try_reserve(8, wire_v2_header(8).unwrap()).unwrap();
+    let mut underfilled = ring.try_reserve(8, wire_v3_header(8).unwrap()).unwrap();
     underfilled.write(&[1, 2, 3, 4]).unwrap();
     assert_eq!(underfilled.commit(8), Err(ProducerError::Underfill));
     assert!(ring.try_receive().unwrap().is_none());
 
-    let mut overflow = ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap();
+    let mut overflow = ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap();
     assert_eq!(overflow.write(&[1, 2]), Err(ProducerError::Overflow));
     assert!(ring.try_receive().unwrap().is_none());
 
-    let mut exact = ring.try_reserve(8, wire_v2_header(4).unwrap()).unwrap();
+    let mut exact = ring.try_reserve(8, wire_v3_header(4).unwrap()).unwrap();
     exact.write(&[1, 2, 3, 4]).unwrap();
     exact.commit(4).unwrap();
     assert_eq!(
@@ -92,7 +92,7 @@ fn boundary_round_trips_include_wrap_and_exact_maximum() {
     }
 
     let mut reservation = ring
-        .try_reserve(MAX_FRAME_BYTES, wire_v2_header(MAX_FRAME_BYTES).unwrap())
+        .try_reserve(MAX_FRAME_BYTES, wire_v3_header(MAX_FRAME_BYTES).unwrap())
         .unwrap();
     let chunk = vec![0xa5; 1024 * 1024];
     for _ in 0..64 {
@@ -110,7 +110,7 @@ fn boundary_round_trips_include_wrap_and_exact_maximum() {
         ring.try_reserve(MAX_FRAME_BYTES + 1, [0; 21]).unwrap_err(),
         ProducerError::BoundExceedsSpans
     );
-    ring.try_reserve(0, wire_v2_header(0).unwrap())
+    ring.try_reserve(0, wire_v3_header(0).unwrap())
         .unwrap()
         .abort();
     let (descriptors, bytes) = ring.conservation().unwrap();
@@ -127,7 +127,7 @@ fn retained_oldest_lease_enforces_fifo_reclamation() {
     let second_len = MAX_FRAME_BYTES - first_len;
 
     let mut first = ring
-        .try_reserve(first_len, wire_v2_header(first_len).unwrap())
+        .try_reserve(first_len, wire_v3_header(first_len).unwrap())
         .unwrap();
     let chunk = vec![1; 1024 * 1024];
     for _ in 0..40 {
@@ -137,7 +137,7 @@ fn retained_oldest_lease_enforces_fifo_reclamation() {
     let first_lease = ring.try_receive().unwrap().unwrap();
 
     let mut second = ring
-        .try_reserve(second_len, wire_v2_header(second_len).unwrap())
+        .try_reserve(second_len, wire_v3_header(second_len).unwrap())
         .unwrap();
     for _ in 0..24 {
         second.write(&chunk).unwrap();
@@ -146,11 +146,11 @@ fn retained_oldest_lease_enforces_fifo_reclamation() {
     ring.try_receive().unwrap().unwrap().release().unwrap();
 
     assert_eq!(
-        ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap_err(),
+        ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap_err(),
         ProducerError::Exhausted
     );
     assert_eq!(
-        ring.reserve_until(1, wire_v2_header(1).unwrap(), Instant::now())
+        ring.reserve_until(1, wire_v3_header(1).unwrap(), Instant::now())
             .unwrap_err(),
         ProducerError::Deadline
     );
@@ -160,7 +160,7 @@ fn retained_oldest_lease_enforces_fifo_reclamation() {
     assert_eq!(bytes.free, 0);
 
     first_lease.release().unwrap();
-    let mut reservation = ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap();
+    let mut reservation = ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap();
     assert_eq!(
         ring.resident_arena_pages().unwrap(),
         0,
@@ -181,7 +181,7 @@ fn quarantine_rejects_all_operations_and_reports_conservation() {
     ring.enter_quarantine();
 
     assert_eq!(
-        ring.try_reserve(1, wire_v2_header(1).unwrap()).unwrap_err(),
+        ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap_err(),
         ProducerError::Quarantined
     );
     assert!(matches!(ring.try_receive(), Err(RingError::Quarantined)));
@@ -256,7 +256,7 @@ fn sealed_sparse_object_repeated_setup_and_stress_conservation() {
         assert_eq!(lease.len(), len);
         assert_eq!(lease.segment(0).unwrap().read_byte(0), Some(state as u8));
         lease.release().unwrap();
-        ring.try_reserve(0, wire_v2_header(0).unwrap())
+        ring.try_reserve(0, wire_v3_header(0).unwrap())
             .unwrap()
             .abort();
         let (descriptors, bytes) = ring.conservation().unwrap();
@@ -264,7 +264,7 @@ fn sealed_sparse_object_repeated_setup_and_stress_conservation() {
         assert_eq!(descriptors.published, 0);
         assert_eq!(bytes.free, MAX_FRAME_BYTES as u64);
     }
-    ring.try_reserve(0, wire_v2_header(0).unwrap())
+    ring.try_reserve(0, wire_v3_header(0).unwrap())
         .unwrap()
         .abort();
     let (descriptors, bytes) = ring.conservation().unwrap();
@@ -496,7 +496,7 @@ fn two_process_zero_copy_exchange_uses_authenticated_grant() {
     drop(descriptors);
 
     let mut reservation = ring
-        .try_reserve(MAX_FRAME_BYTES, wire_v2_header(MAX_FRAME_BYTES).unwrap())
+        .try_reserve(MAX_FRAME_BYTES, wire_v3_header(MAX_FRAME_BYTES).unwrap())
         .unwrap();
     let chunk = vec![7; 1024 * 1024];
     for _ in 0..64 {
@@ -508,7 +508,7 @@ fn two_process_zero_copy_exchange_uses_authenticated_grant() {
     // capacity doorbell. The conservation check below proves the release was reclaimed.
     ring.reserve_until(
         1,
-        wire_v2_header(1).unwrap(),
+        wire_v3_header(1).unwrap(),
         Instant::now() + Duration::from_secs(5),
     )
     .unwrap()

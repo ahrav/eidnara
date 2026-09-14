@@ -3,8 +3,8 @@
 ## Discovery trigger
 
 `compute_budget_pressure` (`crates/context-core/src/decay.rs:130-145`) is the single
-value that couples every compartment's tier decision together: it is computed
-once per render pass and then fed to `rendered_tier` for every compartment
+value that couples every history_segment's tier decision together: it is computed
+once per render pass and then fed to `rendered_tier` for every history_segment
 (`crates/daemon/src/decay_render.rs:278-296`). Its only test,
 `pressure_self_tunes_toward_budget` (`decay.rs:208-221`), asserts a relative
 ordering (tighter budget gives higher pressure) and one lower bound. Nothing
@@ -20,7 +20,7 @@ The function, read line by line:
   `history_budget <= 0.0`. Note that a NaN budget fails this comparison
   (every comparison with NaN is false), so NaN flows past the guard.
 - `crates/context-core/src/decay.rs:134-143` — accumulates `natural_cost` by
-  summing `TIER_COST[natural_tier]` for compartments whose natural tier is
+  summing `TIER_COST[natural_tier]` for history_segments whose natural tier is
   below 5. The guard at `:140` (`if natural_tier < 5`) bounds the index to
   1..=4, so the array access at `:141` into `TIER_COST`
   (`[u32; 6]`, `:42`) cannot panic. Slot 0 is documented as unused (`:41`) and
@@ -39,7 +39,7 @@ Range analysis of `:144`:
 | `<= 0.0` | not reached | `1.0` via `:131-133` |
 
 Measured in a scratch crate outside the repository, using the extracted kernel
-and a 200-element compartment slice at importance 50:
+and a 200-element history_segment slice at importance 50:
 
 ```
 budget=1e0                       -> p=4.137e3
@@ -63,7 +63,7 @@ So two of the three clauses hold and one does not:
   division.
 
 Note also that `natural_cost` itself cannot be NaN or infinite: it is a sum of
-at most `compartments.len()` values drawn from `TIER_COST`, each at most 322,
+at most `history_segments.len()` values drawn from `TIER_COST`, each at most 322,
 so it is bounded by `322 * len` and stays finite for any slice that fits in
 memory.
 
@@ -72,16 +72,16 @@ memory.
 The interesting failure is not a panic; the function is total and never panics.
 It is the silent `+inf` return, which propagates into `z_value`
 (`crates/context-core/src/decay.rs:67-70`) and there splits into two behaviours:
-compartments at index 2 or beyond get `z = +inf` and archive, while the newest
-compartment at index 1 gets `z = 0.0 / 0.0 = NaN` and renders at tier 4. That
+history_segments at index 2 or beyond get `z = +inf` and archive, while the newest
+history_segment at index 1 gets `z = 0.0 / 0.0 = NaN` and renders at tier 4. That
 combined failure is recorded separately as
-`core-decay-newest-compartment-tier-floor`; this record owns the upstream cause.
+`core-decay-newest-history_segment-tier-floor`; this record owns the upstream cause.
 
 The NaN clause is currently satisfied, so the failure scenario for it is a
 regression scenario: someone replaces the `.max(P_FLOOR)` idiom with an
 explicit comparison or a clamp during a readability pass, and a NaN budget then
 produces a NaN pressure. With a NaN pressure, `z` is NaN for *every*
-compartment, every ladder comparison is false, `tier` returns 5 everywhere,
+history_segment, every ladder comparison is false, `tier` returns 5 everywhere,
 `should_archive` returns false everywhere, and `rendered_tier` returns 4
 everywhere. The entire session history would render as uniform tier-4 anchors
 with nothing archived, which is a plausible-looking output that no assertion
@@ -93,7 +93,7 @@ None at runtime. The function is pure, allocation-free apart from reading the
 caller's slice, and clock-free.
 
 Dependency direction: this record is upstream of
-`core-decay-newest-compartment-tier-floor`. Constraining the output here to be
+`core-decay-newest-history_segment-tier-floor`. Constraining the output here to be
 finite would remove the enabling state there. The two are kept separate because
 the tier-1 floor is also violable by a caller passing `+inf` directly to `tier`,
 bypassing `compute_budget_pressure` entirely.
@@ -104,8 +104,8 @@ bypassing `compute_budget_pressure` entirely.
    `f64::MIN_POSITIVE`, `5e-324` (the smallest positive subnormal), `1e-300`,
    `1.0`, a realistic token budget, `f64::MAX`, `f64::INFINITY`, and
    `f64::NAN`.
-2. A compartment-slice sweep including the empty slice, a single element, and a
-   slice long enough that many compartments reach natural tier 5 (so the
+2. A history_segment-slice sweep including the empty slice, a single element, and a
+   slice long enough that many history_segments reach natural tier 5 (so the
    `:140` guard is exercised on both branches), with importances including the
    clamp edges.
 3. For every pair, assert `!result.is_nan()` and `result >= P_FLOOR`.
@@ -116,7 +116,7 @@ bypassing `compute_budget_pressure` entirely.
 5. A `sometimes` marker that the empty-slice case was exercised, since
    `natural_cost` is then `0.0` and the result is `0.1` for any positive
    budget; that is a distinct operational situation (a session with no
-   compartments) rather than just another grid point.
+   history_segments) rather than just another grid point.
 
 Semantics: `always` for the NaN-free and lower-bound clauses, since the value is
 consumed on every render pass and there is no optional path. The finiteness

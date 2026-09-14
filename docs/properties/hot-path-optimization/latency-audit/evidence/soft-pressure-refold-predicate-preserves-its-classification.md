@@ -30,13 +30,13 @@ a pass lands in while every H record still passes.
   content and `m0_tokens >= 500` and `m1_tokens as f64 > m0_tokens as f64 *
   0.15`. Both counts are direct [`tokenizer::estimate_tokens`][soft-direct]
   calls, not the injected `estimate_tokens` parameter.
-- When `pressure_refold` is true the arm loads compartments and calls
+- When `pressure_refold` is true the arm loads history_segments and calls
   [`compose_m0_for_context`][refold-branch] with the injected estimator; the
   parent's [H2][h2] names that as the "pressure refold" boundary distinct from
   an ordinary SOFT.
 - [`M1_PLACEHOLDER`][placeholder] is the string [`assemble_m206-231`][assemble]
   returns when every m1 piece is empty, so `m1_has_content` is exactly "some
-  compartment, profile, or note block rendered".
+  history_segment, profile, or note block rendered".
 - `history_budget_tokens` reaches the predicate from the handler's
   `ProducerContext` at [`lib.rs:8247-8250`][budget-filter], which admits only
   finite values `>= 0.0` from the request and falls back to the bound

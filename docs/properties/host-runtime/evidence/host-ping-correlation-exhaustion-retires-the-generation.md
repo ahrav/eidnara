@@ -5,7 +5,7 @@
 The wire protocol states the no-reuse rule for both directions and names its own violation. The host
 enforces it on ingress with a watermark and does not enforce it on egress at all: the ping allocator
 is an unbounded `fetch_add` with no exhaustion branch. `docs/host-wire-protocol.md:748` even
-records the defect as scheduled work - "Published `HistorianProducer` currently saturates at
+records the defect as scheduled work - "Published `HistorySummarizerProducer` currently saturates at
 `u64::MAX`; compatibility work in the source module-host work MUST replace saturation with checked
 exhaustion and generation retirement."
 
@@ -60,6 +60,7 @@ time and the collision is benign in practice. The contractual violation is the r
 `:748` states as "A correlation MUST NOT be reused, even after terminal completion."
 
 The documented behaviour - "before another request, sender MUST retire the generation and reconnect"
+
 - has no implementing code on this path.
 
 ## Timing windows and dependencies

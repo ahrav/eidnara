@@ -119,11 +119,10 @@ describe("eidnara JSON schema", () => {
         const schema = buildSchema() as {
             properties: {
                 language: { pattern?: string };
-                mural: { properties: { model: { pattern?: string; minLength?: number } } };
                 models: {
                     properties: { window_overlay_path: { pattern?: string; minLength?: number } };
                 };
-                subc: {
+                host: {
                     properties: { connection_file: { pattern?: string; minLength?: number } };
                 };
                 pi: {
@@ -155,9 +154,8 @@ describe("eidnara JSON schema", () => {
 
         // Trimmed-then-non-empty strings: `minLength: 1` alone would admit "   ".
         for (const field of [
-            schema.properties.mural.properties.model,
             schema.properties.models.properties.window_overlay_path,
-            schema.properties.subc.properties.connection_file,
+            schema.properties.host.properties.connection_file,
             schema.properties.pi.properties.subagent_extensions.items,
         ]) {
             expect(field.pattern).toBe("\\S");

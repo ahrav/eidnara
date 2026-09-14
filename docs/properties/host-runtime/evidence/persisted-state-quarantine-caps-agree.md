@@ -68,6 +68,7 @@ release: the gate at `lifecycle.rs:278` returns `Ok(true)` and the start is
 refused with `unsupported_state_schema` and `align_versions`, which is the
 intended forward-compatibility behaviour. A 100 KiB manifest sits well under
 1 MiB, so it is decoded normally and is quarantined only if its schema is unknown
+
 - a different mechanism entirely. The size threshold that is supposed to be one
 value is two, and the maintainer who moves one on the comment's authority moves
 only one.
@@ -82,7 +83,7 @@ threshold is 1 MiB while the lifecycle record's is 64 KiB, even though both are
 trusted persisted selectors.
 
 One aggravator is verified and worth naming: `MAX_MANIFEST_BYTES` is an overloaded
-identifier inside `host-runtime`. `crates/host-runtime/src/synapse/bundle.rs:12` declares
+identifier inside `host-runtime`. `crates/host-runtime/src/local_embeddings/bundle.rs:12` declares
 `const MAX_MANIFEST_BYTES: u64 = 64 * 1024`, and
 `crates/host-runtime/src/harness_closure.rs:25` declares
 `const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024`. Three constants share one

@@ -60,9 +60,9 @@ status. The current pass assigns no adequacy verdict to those checks.
 | [Codec round-trip identity][codec] | Reuse the exact decode/encode contract. RP2.1 adds durable raw-byte/source-span fidelity, not a second codec round-trip guarantee. The old citation `codec/mod.rs:78-89` is now the loop at `82-93`; the Pi loop is `207-218`. |
 | [Codec identity stamp][stamp] | Reuse native-part alignment investigation. Current fingerprint/stamp code is `codec/sidecar.rs:169-212`; it is not an occurrence/payload allocator. No forged-stamp bug is imported as a demonstrated RP2.1 defect. |
 | [Missing capture classes][capture] | Reuse the capture coverage obligation. Current bookkeeping is `codec/mod.rs:260-277`, rather than the old `254-271`. New source-class markers cannot use a missing-class waiver as exercise evidence. |
-| [Historian raw publication][raw] | Reuse the historian's atomic raw-copy claim. Its old `historian_chunk.rs:717-727` source construction is now `664-674`. That is serialized selected CK messages, not a five-class search transaction. Storage-side old line citations were not revalidated here and are not imported as current proof. |
+| [HistorySummarizer raw publication][raw] | Reuse the history_summarizer's atomic raw-copy claim. Its old `history_summarizer_chunk.rs:717-727` source construction is now `664-674`. That is serialized selected CK messages, not a five-class search transaction. Storage-side old line citations were not revalidated here and are not imported as current proof. |
 | [Canonical withheld-read reporting][withheld] | Reuse the distinction between withheld, empty and disabled reads. Verified current mapping at `canonical_memory.rs:99-127,141-174`. Dense coverage adds a different observation axis. |
-| [Scheduled Dreamer slot][scheduler] | Reuse the existing supervisor lease/receipt claim. Current task identity is `dreamer_scheduler.rs:25-36,133-136`, and bridge selection is `lib.rs:13979-14044`. RP2.1 adds message cleanup, git sweeps and embedding work; this pass does not duplicate scheduling semantics. |
+| [Scheduled MemoryClassifier slot][scheduler] | Reuse the existing supervisor lease/receipt claim. Current task identity is `memory_classifier_scheduler.rs:25-36,133-136`, and bridge selection is `lib.rs:13979-14044`. RP2.1 adds message cleanup, git sweeps and embedding work; this pass does not duplicate scheduling semantics. |
 | [Mirror replay][mirror] and [mirror conflict][mirror-conflict] | Both records are invalidated. HEAD has neither `crates/memory-store/src/claim_mirror.rs` nor its test file. Their old test claims cannot cover a proposed search database. |
 
 No exact existing catalog guarantee covers RP2.1 local transaction atomicity,
@@ -77,7 +77,7 @@ Legacy records retain historical source references, exercise claims and CI
 statements. Those claims do not transfer to this HEAD or to RP2.1 merely because
 their Markdown links resolve. Only the current locations explicitly checked
 above are treated as current source evidence; test adequacy stays unaudited.
-The historian storage-side references remain unverified here. Invalidated
+The history_summarizer storage-side references remain unverified here. Invalidated
 claim-mirror records remain historical and cannot supply executable coverage.
 Codec value equality does not certify exact serialized source bytes, and a
 missing capture class recorded in a fixture is not a required-scenario witness.
@@ -114,8 +114,8 @@ broader than their observation boundaries, especially "both lanes" and
 [codec]: ../../daemon/decisions/catalog.md#codec-b-round-trip-identity-is-claimed-in-one-direction-on-one-case-per-harness
 [stamp]: ../../daemon/decisions/catalog.md#codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity
 [capture]: ../../daemon/decisions/catalog.md#codec-b-declared-missing-capture-classes-are-never-decoded
-[raw]: ../../daemon/historian/catalog.md#publish-preserves-raw-chunk-messages-atomically
+[raw]: ../../daemon/history_summarizer/catalog.md#publish-preserves-raw-chunk-messages-atomically
 [withheld]: ../../daemon/transform/catalog.md#canonical-read-staleness-is-distinguishable-from-emptiness
-[scheduler]: ../../daemon/handlers/catalog.md#scheduled-dreamer-slot-runs-once-through-lease-and-receipt
+[scheduler]: ../../daemon/handlers/catalog.md#scheduled-memory_classifier-slot-runs-once-through-lease-and-receipt
 [mirror]: ../../memory-store/catalog.md#mirror-receipt-replay-applies-effects-once
 [mirror-conflict]: ../../memory-store/catalog.md#mirror-receipt-conflict-rejects-divergent-replay

@@ -1,0 +1,58 @@
+/**
+ * Shape rules shared by every `eidnara_memory` write path: a create or revise
+ * either carries positive content under a taxonomy category or an anti-memory
+ * payload under the anti-memory category, never both.
+ */
+
+import { ANTI_MEMORY_CATEGORY, MemoryInputError } from "../../shared/kernel-client/anti-memory";
+import { WRITABLE_MEMORY_CATEGORIES } from "./constants";
+import type { EidnaraMemoryAction } from "./types";
+
+export interface EidnaraMemoryWriteShape {
+    action?: EidnaraMemoryAction;
+    content?: string;
+    category?: string;
+    antiMemory?: unknown;
+}
+
+export function requireTaxonomyCategory(category: string | undefined): string | undefined {
+    if (category === undefined || category === "") return undefined;
+    if (!(WRITABLE_MEMORY_CATEGORIES as readonly string[]).includes(category)) {
+        throw new MemoryInputError(
+            `unknown claim category: ${category} (expected one of ${WRITABLE_MEMORY_CATEGORIES.join(", ")})`,
+        );
+    }
+    return category;
+}
+
+/** The wrappers fall back to unvalidated raw arguments when schema parsing fails, so each optional string field is type-checked before any `.trim()` call can throw a TypeError outside the input-error path. `null` stays admitted: every downstream read treats it as absent. */
+export function assertEidnaraMemoryFieldTypes(args: EidnaraMemoryWriteShape): void {
+    for (const field of ["content", "category", "reason", "objectId"] as const) {
+        const value = (args as Record<string, unknown>)[field];
+        if (value !== undefined && value !== null && typeof value !== "string") {
+            throw new MemoryInputError(`'${field}' must be a string`);
+        }
+    }
+}
+
+/** `null` in `content` or `antiMemory` counts as absent on both arms, the same admission the field-type check grants, so a raw-argument anti-memory create carrying `content: null` is a valid anti-memory write rather than a mixed one. */
+export function assertEidnaraMemoryWriteShape(args: EidnaraMemoryWriteShape): void {
+    assertEidnaraMemoryFieldTypes(args);
+    if (args.action !== "create" && args.action !== "revise") return;
+    const category = requireTaxonomyCategory(args.category?.trim());
+    const antiArm = category === ANTI_MEMORY_CATEGORY || args.antiMemory != null;
+    if (antiArm) {
+        if (category !== ANTI_MEMORY_CATEGORY || !args.antiMemory || args.content != null) {
+            throw new MemoryInputError(
+                `${args.action} anti-memory requires category ${ANTI_MEMORY_CATEGORY}, antiMemory payload, and no content`,
+            );
+        }
+        return;
+    }
+    if (args.antiMemory != null) {
+        throw new MemoryInputError(`${args.action} positive memory cannot carry antiMemory`);
+    }
+    if (args.action === "create" && (!category || !args.content?.trim())) {
+        throw new MemoryInputError("create requires non-empty content and category");
+    }
+}

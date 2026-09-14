@@ -43,7 +43,7 @@ command_id)` is answered from that record without re-running the mutation.
 The second, less obvious route into the same arm:
 
 `:15313-15339` — `refuse_conditioned_note_without_evaluator` calls
-`store.facade_mutation_ledger_response(identity_scope, "ctx_note", action, command_id)`
+`store.facade_mutation_ledger_response(identity_scope, "eidnara_note", action, command_id)`
 (`:15326`) and, on a hit, calls
 `facade_command_outcome(Ok(FacadeMutationOutcome::Duplicate(stored)), "notes")`
 (`:15329-15332`). Its doc comment (`:15313-15317`) explains why: "a retried
@@ -62,7 +62,7 @@ on the request first and then on the arguments: `command_id`, `tool_use_id`,
 trims, rejects empty (`:15271-15273`), and caps at
 `MAX_AGENT_DROPS_COMMAND_ID_BYTES = 128` (`:14392`, checked at `:15274-15278`).
 
-`ctx_note` resolves it only for mutations (`:11592-11599`) and, when it resolves
+`eidnara_note` resolves it only for mutations (`:11592-11599`) and, when it resolves
 to `None`, proceeds anyway after a one-shot stderr warning
 (`:11600-11602`, `log_missing_facade_command_id` at `:10339-10349`). So an
 unledgered mutation is a legal outcome, which is why the situation needs a
@@ -71,7 +71,7 @@ positive marker rather than an inference from "a mutation happened".
 ### What is exercised today
 
 - `lib.rs:27555`, `:27668`, `:27695`, `:27734`, `:27808` are the `command_id`
-  tests. All five drive `ctx_reduce` plus `agent_drops.append`, and
+  tests. All five drive `eidnara_reduce` plus `agent_drops.append`, and
   `agent_drops.append` has its own duplicate mechanism reporting
   `"duplicate": true` (`:25498-25501`), which is NOT the facade mutation ledger.
 - Grepping `lib.rs:16001-30517` for `with_facade_command`,
@@ -90,8 +90,8 @@ situation NOT occurring is that other records pass vacuously:
   asserts that a retry after a transient failure can still succeed. If no retry
   ever hits the ledger, the assertion never evaluates the branch it is about.
 - The replay-distinguishability claim behind
-  `facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes` contrasts
-  `ctx_reduce`'s silence with the `replayed` marker other paths carry. That
+  `facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes` contrasts
+  `eidnara_reduce`'s silence with the `replayed` marker other paths carry. That
   contrast is only meaningful if the marker is observed at least once.
 - `refuse_conditioned_note_without_evaluator`'s entire reason to consult the
   ledger (`:15313-15317`) is unexercised, so its ordering claim, "the liveness
@@ -108,7 +108,7 @@ The three causes the doc comment names map to three different constructions:
    over the same store reaches the same rows. That construction also proves the
    ledger is not in-process state.
 3. **Expired evaluator lease.** `has_live_note_evaluator` (`:11618`) flips to
-   false, so a conditioned `ctx_note` write that previously committed now hits
+   false, so a conditioned `eidnara_note` write that previously committed now hits
    `refuse_conditioned_note_without_evaluator`, which finds the ledger row and
    replays the ORIGINAL SUCCESS instead of refusing. That is the most interesting
    of the three, because the replay overrides a gate that would otherwise reject.
@@ -119,7 +119,7 @@ distinct ledgered commands for one session before retrying will find the row
 gone and get a fresh execution, so a soak-style campaign must retry inside that
 horizon or the marker will not fire.
 
-Reachability: default-production. `ctx_note` is advertised in a default build
+Reachability: default-production. `eidnara_note` is advertised in a default build
 (`manifest` at `lib.rs:15977-15991`, `prompt_surface::module_tools` at
 `prompt_surface.rs:160-230`, default preset `Full` at
 `prompt_surface.rs:112-122`), and nothing gates the ledger.
@@ -140,7 +140,7 @@ different situation.
 The campaign must reach it at least once. The cheapest construction:
 
 1. A bound, authority-managed facade route with a store.
-2. A `ctx_note` `write` with `command_id: "c1"` and `content`. Assert the
+2. A `eidnara_note` `write` with `command_id: "c1"` and `content`. Assert the
    response is a plain success.
 3. The same call again with `command_id: "c1"`. Assert the response carries
    `"replayed": true` and that the note count did not increase, which is what
@@ -168,11 +168,11 @@ produces it.
 ### Q: Does any existing inline test already reach the `Duplicate` arm?
 
 - Sources examined: `lib.rs:27555`, `:27570`, `:27668`, `:27695`, `:27734`,
-  `:27808`, the six `ctx_reduce`/`command_id` tests found by name;
+  `:27808`, the six `eidnara_reduce`/`command_id` tests found by name;
   `lib.rs:25445-25505`, the mixed-delivery test, whose `duplicate: true`
   assertion at `:25498-25501` comes from `handle_agent_drops_value`, not from
   `facade_command_outcome`; `lib.rs:15290-15311` for the arm itself;
-  `lib.rs:27570`, `ctx_reduce_no_targets_refuses_without_a_ledger_row`, whose
+  `lib.rs:27570`, `eidnara_reduce_no_targets_refuses_without_a_ledger_row`, whose
   name asserts the ABSENCE of a ledger row and so is evidence the suite is aware
   of the ledger.
 - Findings: the `agent_drops.append` duplicate marker and the facade mutation

@@ -3,13 +3,13 @@
 Every claim-bearing check for the facade surface, note evaluation, and response
 assembly: `crates/daemon/src/lib.rs` ranges `10042-11917` and `11919-16001`,
 plus four whole files the scope map assigns to this sub-part, `dispatch.rs` (511
-lines), `smart_note_evaluation.rs` (1,851), `memory_tool.rs` (447) and
+lines), `conditional_note_evaluation.rs` (1,851), `memory_tool.rs` (447) and
 `project_docs.rs` (232). That is 5,959 in-`lib.rs` lines plus 3,041 file lines,
 about 9,000 production lines. The sub-part owns the single facade entry point and
 its eleven routed names (five `ctx_*` tools plus six claim commands), the claim
 intent ledger and claim effects at `lib.rs:10068-10255`, the
 `note.evaluation.*` protocol at `:10880-11481`, note delivery at `:11483-11545`,
-the smart-note reducer and selector, prepared-output measurement and settlement,
+the conditional-note reducer and selector, prepared-output measurement and settlement,
 the advertised tool schemas, and the status envelope.
 
 Provenance. `HEAD` is `e447c927` ("refactor(shm): trim final review leftovers").
@@ -25,7 +25,7 @@ commits. All four describe one step; only the file moved.
 
 Reconciliation at this repository's HEAD. The six claim commands, their
 handlers, `claim_route_root`, `claim_mirror_error`, the `memory_tool` claim
-adapters, and the `ctx_memory` mirror reads are gone from `crates/daemon`; the
+adapters, and the `eidnara_memory` mirror reads are gone from `crates/daemon`; the
 facade routes the five `ctx_*` names only. Every entry below that names a claim
 handler, `list_committed_claims`, `stage_claim_intent`,
 `inspect_claim_intents`, or `acknowledge_claim_intent` describes the source
@@ -35,8 +35,8 @@ both in `lib.rs` `mod tests`, both status `unaudited`:
 - `retired_claim_facade_names_are_unsupported` sends each of the six names
   through the `name`, `kind`, and `method` envelopes and asserts
   `facade_envelope_not_supported` or `unrecognized_request_shape`, then sends
-  `ctx_memory` `get` and asserts a tool error naming canonical kernel state,
-  and sends `ctx_memory` `list` and asserts the unknown-action error, since
+  `eidnara_memory` `get` and asserts a tool error naming canonical kernel state,
+  and sends `eidnara_memory` `list` and asserts the unknown-action error, since
   `list` is no longer an advertised action.
 - `daemon_production_source_names_no_claim_lane_identifier` walks every `.rs`
   file under `crates/daemon/src`, splits off each file's `#[cfg(test)] mod
@@ -122,7 +122,7 @@ than pin it:
 | Tier | Tests | What it measures |
 | --- | --- | --- |
 | **Reach** | **232** of 256 | Executes at least one line of 4d production code, transitively |
-| **Op-specific, helper fixpoint** | **88** | Names a 4d-owned tool, claim command, note-evaluation method, settlement API, byte cap, schema, expand renderer, or smart-note contract |
+| **Op-specific, helper fixpoint** | **88** | Names a 4d-owned tool, claim command, note-evaluation method, settlement API, byte cap, schema, expand renderer, or conditional-note contract |
 | **Op-specific, direct body match** | **65** | The same rule with the fixpoint removed |
 | **Name rule** | **49** | Test name matches the 4d vocabulary |
 
@@ -141,14 +141,14 @@ at `HEAD`:
 
 | File | `#[cfg(test)]` / `mod tests` | Tests |
 | --- | --- | --- |
-| `smart_note_evaluation.rs` | `:951-952` | **7** |
+| `conditional_note_evaluation.rs` | `:951-952` | **7** |
 | `project_docs.rs` | `:120-121` | **6** |
 | `memory_tool.rs` | `:361-362` | **1** |
 | `dispatch.rs` | none | **0** |
 
 `dispatch.rs` is the only 4d file with no test module at all, and it is also the
 file carrying the sub-part's best-tested claim; its ten checks live in the
-integration binary instead. `smart_note_evaluation.rs` is the densest
+integration binary instead. `conditional_note_evaluation.rs` is the densest
 claim-per-test surface in the sub-part: 7 test functions carry roughly 48 fixture
 cases plus two normative matrices over about 950 production lines.
 
@@ -275,7 +275,7 @@ covered - `storage-claim-operations.test.ts` carries 12 `ackedEffectId` sites at
 *skipped* effects rather than fabricated ones. It does not close the gap, and it
 lives entirely on the side that is not the one making the claim.
 
-The same shape appears once more, on the shared smart-note fixture, and there the
+The same shape appears once more, on the shared conditional-note fixture, and there the
 asymmetry is sharper because the fixture is shared rather than parallel. See
 suspiciously quiet area 7.
 
@@ -288,14 +288,14 @@ named tool, method literal, or type. Every cited `fn` line was re-read at `HEAD`
 | --- | --- | --- | --- |
 | native attachment plumbing | 20 | `:19261-21839` | Largest cluster in scope. The caches are 4c's; the plumbing at `:12450-13055` is 4d's |
 | note-evaluation protocol | 17 | `:23111-24290` | Best-covered 4d-owned protocol; 12 of the 17 name a cycle or quota rule |
-| `ctx_note` | 14 | `:17067-25531` | Includes the ledger-replay test at `:23243` |
-| `ctx_reduce` | 9 | `:17067-27570` | Five are the `command_id` family at `:27555-27808`, which 4c also claims |
-| `respond_transform` and status helpers | 8 | `:16198-19294` | `usage_numbers`, `projected_post_drop_percentage`; two historian-trigger tests are 4a assertions reaching a 4d helper |
+| `eidnara_note` | 14 | `:17067-25531` | Includes the ledger-replay test at `:23243` |
+| `eidnara_reduce` | 9 | `:17067-27570` | Five are the `command_id` family at `:27555-27808`, which 4c also claims |
+| `respond_transform` and status helpers | 8 | `:16198-19294` | `usage_numbers`, `projected_post_drop_percentage`; two history_summarizer-trigger tests are 4a assertions reaching a 4d helper |
 | `drive-fault` | 8 | `:18965-19113` | Feature-gated, `explicit-config-only` |
-| `ctx_memory` | 7 | `:17067-25762` | Includes the mutation-refusal gate at `:25762` |
-| `ctx_search` | 6 | `:17067-25531` | |
+| `eidnara_memory` | 7 | `:17067-25762` | Includes the mutation-refusal gate at `:25762` |
+| `eidnara_search` | 6 | `:17067-25531` | |
 | `ctx_expand` | 6 | `:17067-25657` | Includes both budget checks, `:24517` and `:25657` |
-| smart-note selection types | 6 | `:23904-24241` | Reach `SmartNoteCycleMode` / `SmartNoteSelectionCycle` |
+| conditional-note selection types | 6 | `:23904-24241` | Reach `ConditionalNoteCycleMode` / `ConditionalNoteSelectionCycle` |
 | prepared settlement | 4 | `:16041-16150` | The only tests of `settle_prepared_with` |
 | tool schemas and manifest | 4 | `:17067-25931` | `:25531` is the contract gate |
 | request byte caps | 3 | `:17542-17589` | `:17542`, `:17567`, and one transitive |
@@ -309,7 +309,7 @@ Named tests the lens records lean on, verified by name and `fn` line at `HEAD`:
 | `:16150` | `production_settlement_cancellation_and_denial_emit_no_body` | The cancellation and reserve-denial arms |
 | `:17542` | `request_byte_cap_widens_for_transform_class_only` | The two-tier cap, on small bodies only |
 | `:17567` | `value_footprint_counts_nodes_outside_strings_only` | The footprint bound's counting rule |
-| `:23111` | `smart_note_writes_require_a_live_protocol_v2_registration` | The fail-closed conditioned-write gate |
+| `:23111` | `conditional_note_writes_require_a_live_protocol_v2_registration` | The fail-closed conditioned-write gate |
 | `:23243` | `conditioned_write_replays_recorded_response_without_live_evaluator` | A recorded **success** replaying past the liveness gate |
 | `:23295` | `note_evaluator_registration_rejects_wrong_versions_and_stale_credentials` | The four-way identity match at `:13877` |
 | `:23381` | `note_evaluator_route_teardown_withdraws_registrations` | The boot-ephemeral registration claim |
@@ -318,17 +318,17 @@ Named tests the lens records lean on, verified by name and `fn` line at `HEAD`:
 | `:23976` | `note_evaluation_fresh_no_work_resets_and_replayed_no_work_does_not` | The cursor reset rule |
 | `:24048` | `note_evaluation_spent_cycle_no_work_reports_cycle_exhausted` | The `cycle_exhausted` distinction |
 | `:24290` | `note_evaluation_fallback_rotates_before_reclaiming_checked_notes` | Fallback rotation determinism |
-| `:24341` | `ctx_expand_and_ctx_note_facades_are_session_scoped` | Facade session scoping |
+| `:24341` | `ctx_expand_and_eidnara_note_facades_are_session_scoped` | Facade session scoping |
 | `:24901` | `note_evaluate_verdict_writes_are_protocol_retired` | The `protocol_retired` code |
 | `:25028` | `note_facade_pages_ready_notes_beyond_one_hundred_with_shared_offset_semantics` | The advertised paging contract |
-| `:25299` | `facade_flat_envelope_precedence_keeps_kind_arm_and_gates_ctx_reduce_name` | `method`/`kind` precedence over `name` |
-| `:25325` | `ctx_reduce_range_parser_rejects_unbounded_and_oversized_ranges` | `MAX_RANGE_ELEMENTS` (`:15166`) |
+| `:25299` | `facade_flat_envelope_precedence_keeps_kind_arm_and_gates_eidnara_reduce_name` | `method`/`kind` precedence over `name` |
+| `:25325` | `eidnara_reduce_range_parser_rejects_unbounded_and_oversized_ranges` | `MAX_RANGE_ELEMENTS` (`:15166`) |
 | `:25333` | `facade_arguments_preserve_decorated_reduced_fields` | The **non**-unwrap half of the reduced envelope |
-| `:25445` | `facade_ctx_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing` | `ctx_reduce`'s no-write behaviour |
-| `:25531` | `ctx_manifest_schemas_accept_unknown_args_without_advertising_reduced_fields` | The whole schema contract: the authorizer-pinned `ctx_reduce` bytes, the derived category enum, the per-tool field sets, the open-schema posture, and the absence of `reduced`/`summary` from `properties`. Lens A's `:25632-25641` and `:25652-25653` are both inside this one test, which runs to about `:25654` |
+| `:25445` | `facade_eidnara_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing` | `eidnara_reduce`'s no-write behaviour |
+| `:25531` | `ctx_manifest_schemas_accept_unknown_args_without_advertising_reduced_fields` | The whole schema contract: the authorizer-pinned `eidnara_reduce` bytes, the derived category enum, the per-tool field sets, the open-schema posture, and the absence of `reduced`/`summary` from `properties`. Lens A's `:25632-25641` and `:25652-25653` are both inside this one test, which runs to about `:25654` |
 | `:25657` | `expand_output_is_bounded_to_the_typescript_token_budget` | The expand byte bound, not the token claim |
 | `:25713` | `facade_never_panics_on_malformed_memory_arguments` | Total-function behaviour on bad arguments |
-| `:25762` | `facade_advertises_anti_memory_but_keeps_mutation_host_owned` | The `ctx_memory` mutation refusal, asserting `isError == true` and the message text at `:25786-25790` |
+| `:25762` | `facade_advertises_anti_memory_but_keeps_mutation_host_owned` | The `eidnara_memory` mutation refusal, asserting `isError == true` and the message text at `:25786-25790` |
 
 ### File-local tests in the 4d files
 
@@ -337,14 +337,14 @@ carry their own test modules, which no `lib.rs` count reaches.
 
 | File | Tests | What they cover |
 | --- | --- | --- |
-| `smart_note_evaluation.rs` | **7** | `:1101` replays the shared golden (13 constants, the backoff ladder, 23 transitions at `:1132`, 16 schedules at `:1145`, 9 selections at `:1156`); `:1190` and `:1765` replay `smart-note-evaluation-normative.json` (revision matrix, cycle traces); `:1528` and `:1549` the UTF-16 truncation rule; `:1558` extreme cron instants; `:1578` phase preference |
+| `conditional_note_evaluation.rs` | **7** | `:1101` replays the shared golden (13 constants, the backoff ladder, 23 transitions at `:1132`, 16 schedules at `:1145`, 9 selections at `:1156`); `:1190` and `:1765` replay `conditional-note-evaluation-normative.json` (revision matrix, cycle traces); `:1528` and `:1549` the UTF-16 truncation rule; `:1558` extreme cron instants; `:1578` phase preference |
 | `project_docs.rs` | **6** | `:132` empty, `:139` render and hash, `:152` canonicalization, `:168` symlink skip, `:188` size skip, `:212` golden |
 | `memory_tool.rs` | **1** | `:396` `list_committed_claims_excludes_anti_memory_even_when_requested` |
 | `dispatch.rs` | **0** | Its only checks are the integration binary below |
 
 That is **14 file-local tests**, giving 102 in-crate checks for 4d. The four
 fixture-group counts in the golden were re-derived from
-`crates/daemon/testdata/smart-note-evaluation-golden.json` at `HEAD`: 13
+`crates/daemon/testdata/conditional-note-evaluation-golden.json` at `HEAD`: 13
 constants, 23 `transition_cases`, 16 `schedule_cases`, 9 `selection_cases`.
 
 ### Targets in scope with zero test-module references
@@ -366,12 +366,12 @@ Re-counted by matching each identifier across the whole file and again over
 | `canonical_value` (`:15341-15372`) | 6 | **0** |
 | `module_tools` | 1 | **0** |
 | `project_docs` | 1 | **0** in `lib.rs`; 6 file-local |
-| `smart_note_evaluation` | 6 | **0** in `lib.rs`; 7 file-local |
+| `conditional_note_evaluation` | 6 | **0** in `lib.rs`; 7 file-local |
 
 The mutation-ledger row needs a note so a later pass does not repeat either of two
 opposite mistakes. `with_facade_command`, `facade_command_outcome` and
 `command_id_from_facade_request` have zero symbol references in the test modules,
-yet the ledger **is** exercised, through the `ctx_note` request path, by `:23243`.
+yet the ledger **is** exercised, through the `eidnara_note` request path, by `:23243`.
 A symbol scan alone would have called it untested; a behavioural claim alone would
 have called it covered. It has behavioural coverage of the success-replay arm and
 no unit coverage of anything.
@@ -391,8 +391,8 @@ files. No `mutants.toml`. No coverage configuration, so every placement statemen
 in this file is structural rather than measured. No `daemon` entry in
 `.config/nextest.toml`, so no 4d test is serialized, grouped, or
 timeout-adjusted. The nearest thing to generated coverage is the pair of
-table-driven fixtures, `smart-note-evaluation-golden.json` and
-`smart-note-evaluation-normative.json`.
+table-driven fixtures, `conditional-note-evaluation-golden.json` and
+`conditional-note-evaluation-normative.json`.
 
 ## Integration tests and CI status
 
@@ -424,7 +424,7 @@ hand (`:181-196`) because `settle_prepared_with` is private.
 
 **The other six binaries are out of scope for 4d,** by 4d method-literal and
 type-name count in each: `boundary_counter_durability.rs` 0,
-`broca_roundtrip.rs` 0, `direct_host.rs` **0**, `host_adapter.rs` 1,
+`model_execution_roundtrip.rs` 0, `direct_host.rs` **0**, `host_adapter.rs` 1,
 `lifecycle_cli.rs` 0, `release_contract_conformance.rs` 0.
 
 That `direct_host.rs` count is the finding. 4c counts `direct_host.rs` as its best
@@ -449,21 +449,21 @@ green light means.
 
 | File | Relationship to 4d | What it actually tests |
 | --- | --- | --- |
-| `smart-notes/evaluation-state.test.ts` (136 lines, 3 blocks) | **Parallel implementation, shared fixture.** The one genuine cross-language gate in scope | Loads `crates/daemon/testdata/smart-note-evaluation-golden.json` (`:54`) and iterates `transition_cases` only (`:105`). Re-verified at `HEAD`: `schedule_cases` and `selection_cases` appear nowhere in the file |
-| `eidnara/storage-notes.test.ts` | Parallel implementation, shared normative fixture | References `smart-note-evaluation-normative.json` (`:206`), the fixture the Rust `:1190` and `:1765` tests replay |
+| `conditional-notes/evaluation-state.test.ts` (136 lines, 3 blocks) | **Parallel implementation, shared fixture.** The one genuine cross-language gate in scope | Loads `crates/daemon/testdata/conditional-note-evaluation-golden.json` (`:54`) and iterates `transition_cases` only (`:105`). Re-verified at `HEAD`: `schedule_cases` and `selection_cases` appear nowhere in the file |
+| `eidnara/storage-notes.test.ts` | Parallel implementation, shared normative fixture | References `conditional-note-evaluation-normative.json` (`:206`), the fixture the Rust `:1190` and `:1765` tests replay |
 | `hooks/eidnara/module-state-sync.test.ts` | **Producer tested against a fake delivery.** Not a fake of this module's claim-effects handler, because the handler has no counterpart test to pair with | `:1400` and `:1424` call `drainClaimEffectPrefix` with an inline `deliver` closure (`:1405-1415`) returning the ack the producer requires (`:1414`). Separately, `:1510` is inside `class DeterministicClaimMirrorFacade` (`:1444`), which is claim-**mirror**, not claim-effects |
 | `hooks/eidnara/module-wire.test.ts` | **Claim-mirror decode tests only.** Contains no test of the claim-effects wire validator | `ackedEffectId: 30` / `31` at `:345`, `:414`, `:427` are all arguments to `decodeClaimMirrorReceiptResponse`. `decodeClaimEffectDeliveryResponse` (`module-wire.ts:717`) has zero test references in `packages/plugin` |
 
-The asymmetry 4c found holds here and is sharper, because the smart-note fixture
+The asymmetry 4c found holds here and is sharper, because the conditional-note fixture
 is **shared** rather than parallel. `PARITY.md:16` claims "Both replay the frozen
 characterization fixture ... (transitions, DST schedule vectors, phase
-selection)", and `smart_note_evaluation.rs:5-6` restates it as "lifecycle behavior
+selection)", and `conditional_note_evaluation.rs:5-6` restates it as "lifecycle behavior
 cannot drift between languages". That holds only if both replays run. One runs on
 every pull request over 23 of the fixture's 48 cases; the other runs nowhere and
 is the one covering the remaining 25.
 
 The fixture-regeneration gate is documentation only. `PARITY.md:16` instructs
-regeneration with `bun crates/daemon/gen/gen-smart-note-evaluation-golden.ts`
+regeneration with `bun crates/daemon/gen/gen-conditional-note-evaluation-golden.ts`
 and states that "a regeneration diff means a semantic change and requires
 review". No workflow regenerates the fixture and diffs it, so a fixture that
 drifts from the legacy writers it was generated from is caught by review alone.
@@ -508,7 +508,7 @@ metadata must serialize"`. **None has a named test.**
 
 **The four 4d files.** `dispatch.rs` is the safest: 2 `.expect(`, zero `unwrap`,
 zero `panic!`, zero assertions, and the guard it relies on is a returned `Err`.
-`smart_note_evaluation.rs` carries 19 `.expect(`, 19 `.unwrap()` and 14 `panic!`,
+`conditional_note_evaluation.rs` carries 19 `.expect(`, 19 `.unwrap()` and 14 `panic!`,
 all inside the test module at `:951-952` and its fixture parsing, so the
 production half of the file has none. `project_docs.rs` has 1 `.expect(` and 15
 `.unwrap()`, all in the test module at `:120-121`. `memory_tool.rs` has 3
@@ -559,7 +559,7 @@ a parameter suppression rather than a discarded fallible call.
    evaluator registrations mutex"` (`:10946`, `:11022`, `:11082`) and `"note
    evaluator slot cycle mutex"` (`:11186`). Same shape as 4c's 36 labels at a
    twelfth the count.
-2. `ctx_note`'s five unadvertised-but-honoured keys. The handler caps and reads
+2. `eidnara_note`'s five unadvertised-but-honoured keys. The handler caps and reads
    `compiled_provider`, `compiled_config`, `compiled_at` and `compile_status`
    (`:11558-11560`, `:14456-14474`) and accepts `command_id` (`:11592-11599`),
    while the advertised property set is asserted to be exactly eight keys
@@ -576,14 +576,14 @@ a parameter suppression rather than a discarded fallible call.
    three times, stated nowhere, and the response path does the opposite.
 5. The advertised-versus-accepted name set. Nothing ties `handle_facade_value`'s
    eleven match arms (`:10046-10057`) to `module_tools`, and the only prose
-   statement of the set (`:12344-12351`, "Only ctx_memory and ctx_search are
+   statement of the set (`:12344-12351`, "Only eidnara_memory and eidnara_search are
    accepted on that surface") names two.
 6. `context_db_schema_version` is null because the module never attaches the file
    (`:15447-15455`). The prohibition is a whole-crate absence claim with no guard.
-7. The `"raw-only fence"` marker (`:13208`) and `"recorded dreamer response is not
+7. The `"raw-only fence"` marker (`:13208`) and `"recorded memory_classifier response is not
    valid JSON"` (`:13184`). Both name contracts; neither appears in any test.
 8. `ExecutionMode` as a mutation declaration. Nothing checks a handler against its
-   declared mode, and `ctx_memory` is the counter-example: declared `Mutating`
+   declared mode, and `eidnara_memory` is the counter-example: declared `Mutating`
    (`prompt_surface.rs:209`), refuses every mutation
    (`"Error: claim mutations require the host claim-operation commit path."`,
    `lib.rs:10692-10694`).
@@ -597,7 +597,7 @@ consumed by `prepared_output.rs:254`. Production has no source whose measured an
 written lengths differ, so without this seam the length check would be
 unfalsifiable.
 
-**Injectable zone on the reducer.** `reduce_smart_note_evaluation` takes the
+**Injectable zone on the reducer.** `reduce_conditional_note_evaluation` takes the
 timezone as a parameter; production passes `&chrono::Local` at `lib.rs:14244`, and
 `chrono-tz` is already a `[dev-dependencies]` entry
 (`crates/daemon/Cargo.toml:67`). So a two-zone differential on the reducer needs
@@ -616,9 +616,9 @@ installable from a module test today. See `fault-map.md` for what that unblocks
 and for the correction it forces on 4c's framing.
 
 **Other store-side seams, none of which is a named write-failure injector.**
-`fail_next_historian_side_channel_for_test` (`memory-store/src/lib.rs:5249`),
-`set_before_max_compartment_end_read_hook` (`:5283`),
-`set_abandon_historian_hook` (`:5294`), the read-only counters
+`fail_next_history_summarizer_side_channel_for_test` (`memory-store/src/lib.rs:5249`),
+`set_before_max_history_segment_end_read_hook` (`:5283`),
+`set_abandon_history_summarizer_hook` (`:5294`), the read-only counters
 `tag_number_query_count_for_test` (`:6426`) and
 `authority_seed_transaction_count_for_test` (`:11992`), and two seeders (`:6654`,
 `:7083`).
@@ -650,7 +650,7 @@ Ranked by the gap between what the code decides and what any check proves.
    | Path | Location | Tested? |
    | --- | --- | --- |
    | `isError` inside a successful transport response | Every `tool_error_result` is a `PreparedOutcome::Response`; `health()` (`:12003-12046`) reports `Ok` while every facade call fails | **No.** No test asserts `health()` stays `Ok` while the facade fails |
-   | `ctx_reduce`'s queued acknowledgement | `mcp_text_result(format!("Queued: {}.", ...), false)` at `:10587`, after the comment at `:10585-10586` states it "deliberately does not mutate" | **Yes**, `:25445` asserts the no-write behaviour |
+   | `eidnara_reduce`'s queued acknowledgement | `mcp_text_result(format!("Queued: {}.", ...), false)` at `:10587`, after the comment at `:10585-10586` states it "deliberately does not mutate" | **Yes**, `:25445` asserts the no-write behaviour |
    | `claim.effects.apply`'s ack | `:10184-10255`, returning `"ackedEffectId": previous` at `:10253` with no store call | **No**, on either side. Item 1 |
    | Note CAS conflict recorded as the command's durable outcome | `Ok(facade_text_response(..., true))` at `:11865-11870`, inside the ledger closure | **No.** `:23243` proves a recorded **success** replays; nothing replays a recorded failure |
    | Dismiss-not-found recorded the same way | `:11902-11907` | **No** |
@@ -658,7 +658,7 @@ Ranked by the gap between what the code decides and what any check proves.
 
    One of six has a check, and it is the one whose behaviour was deliberate. Two of
    the six are on `ctx_expand`, whose entire purpose is recovering content the
-   agent already lost. The tested one is the **first** row, `ctx_reduce`, covered
+   agent already lost. The tested one is the **first** row, `eidnara_reduce`, covered
    in this crate at `lib.rs:25445-25474`. `catalog.md` previously attributed that
    coverage to the second row and placed it across a language boundary; this table
    was right and the catalog has been corrected to match it.
@@ -667,7 +667,7 @@ Ranked by the gap between what the code decides and what any check proves.
    cross-language fixture are pinned by one replay that runs nowhere.** The
    fixture exists to prevent cross-language drift and `PARITY.md:16` names all
    three case groups. 16 `schedule_cases` and 9 `selection_cases` are asserted
-   only by `smart_note_evaluation.rs:1145` and `:1156`, in a test module CI never
+   only by `conditional_note_evaluation.rs:1145` and `:1156`, in a test module CI never
    compiles, while the TypeScript half replays the 23 `transition_cases` on every
    pull request (`evaluation-state.test.ts:105`) and touches neither other group.
    So 25 of the fixture's 48 cases are enforced by a check that runs on no

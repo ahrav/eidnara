@@ -204,11 +204,11 @@ export function removePiSettingsPackage(
 export function writeEidnaraConfig(
     configPath: string,
     options: {
-        historianModel: string;
-        historianThinkingLevel?: string;
-        sidekickEnabled: boolean;
-        sidekickModel?: string;
-        sidekickThinkingLevel?: string;
+        history_summarizerModel: string;
+        history_summarizerThinkingLevel?: string;
+        context_researcherEnabled: boolean;
+        context_researcherModel?: string;
+        context_researcherThinkingLevel?: string;
         modelRefToCanonical?: (ref: string) => string;
         onInvalidAgentFields?: (kind: AgentBlockKind, fields: string[]) => void;
     },
@@ -230,24 +230,26 @@ export function writeEidnaraConfig(
     const toCanonical = options.modelRefToCanonical ?? piModelRefToCanonical;
     // comment-json keeps a section's comments as symbol-keyed metadata on the
     // parsed object; a spread copy would drop them from the rewritten file.
-    const historian = isRecord(config.historian) ? config.historian : {};
-    historian.model = toCanonical(options.historianModel);
-    historian.thinking_level = options.historianThinkingLevel;
-    delete historian.disable;
-    delete historian.enabled;
-    reportInvalid("historian", compactObject(historian));
-    config.historian = historian;
+    const history_summarizer = isRecord(config.history_summarizer) ? config.history_summarizer : {};
+    history_summarizer.model = toCanonical(options.history_summarizerModel);
+    history_summarizer.thinking_level = options.history_summarizerThinkingLevel;
+    delete history_summarizer.disable;
+    delete history_summarizer.enabled;
+    reportInvalid("history_summarizer", compactObject(history_summarizer));
+    config.history_summarizer = history_summarizer;
 
-    const sidekick = isRecord(config.sidekick) ? config.sidekick : {};
-    sidekick.model =
-        options.sidekickEnabled && options.sidekickModel
-            ? toCanonical(options.sidekickModel)
+    const context_researcher = isRecord(config.context_researcher) ? config.context_researcher : {};
+    context_researcher.model =
+        options.context_researcherEnabled && options.context_researcherModel
+            ? toCanonical(options.context_researcherModel)
             : undefined;
-    sidekick.thinking_level = options.sidekickEnabled ? options.sidekickThinkingLevel : undefined;
-    sidekick.disable = options.sidekickEnabled ? undefined : true;
-    sidekick.enabled = undefined;
-    reportInvalid("sidekick", compactObject(sidekick));
-    config.sidekick = sidekick;
+    context_researcher.thinking_level = options.context_researcherEnabled
+        ? options.context_researcherThinkingLevel
+        : undefined;
+    context_researcher.disable = options.context_researcherEnabled ? undefined : true;
+    context_researcher.enabled = undefined;
+    reportInvalid("context-researcher", compactObject(context_researcher));
+    config.context_researcher = context_researcher;
     writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
 }
 
@@ -258,7 +260,7 @@ export function writeEidnaraConfig(
  */
 async function pickCopilotThinkingLevel(
     prompts: PromptIO,
-    role: "historian" | "sidekick",
+    role: "history_summarizer" | "context-researcher",
     model: string,
 ): Promise<string | undefined> {
     if (!model.startsWith("github-copilot/")) return undefined;
@@ -374,19 +376,22 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         prompts.log.warn(`Skipped ${host.displayName} package registration.`);
     }
 
-    const historianModel = await pickModel(prompts, allModels, "historian");
-    const historianThinkingLevel = await pickCopilotThinkingLevel(
+    const history_summarizerModel = await pickModel(prompts, allModels, "history_summarizer");
+    const history_summarizerThinkingLevel = await pickCopilotThinkingLevel(
         prompts,
-        "historian",
-        historianModel,
+        "history_summarizer",
+        history_summarizerModel,
     );
 
-    const sidekickEnabled = await prompts.confirm("Enable sidekick for /ctx-aug?", false);
-    const sidekickModel = sidekickEnabled
-        ? await pickModel(prompts, allModels, "sidekick")
+    const context_researcherEnabled = await prompts.confirm(
+        "Enable context_researcher for /eidnara-aug?",
+        false,
+    );
+    const context_researcherModel = context_researcherEnabled
+        ? await pickModel(prompts, allModels, "context-researcher")
         : undefined;
-    const sidekickThinkingLevel = sidekickModel
-        ? await pickCopilotThinkingLevel(prompts, "sidekick", sidekickModel)
+    const context_researcherThinkingLevel = context_researcherModel
+        ? await pickCopilotThinkingLevel(prompts, "context-researcher", context_researcherModel)
         : undefined;
 
     const eidnara = readEidnaraModes(configPath);
@@ -427,11 +432,11 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
                 prompts.log.success(registration.message);
             }
             writeEidnaraConfig(configPath, {
-                historianModel,
-                historianThinkingLevel,
-                sidekickEnabled,
-                sidekickModel,
-                sidekickThinkingLevel,
+                history_summarizerModel,
+                history_summarizerThinkingLevel,
+                context_researcherEnabled,
+                context_researcherModel,
+                context_researcherThinkingLevel,
                 modelRefToCanonical: host.modelRefToCanonical,
                 onInvalidAgentFields: (kind, fields) =>
                     prompts.log.warn(
@@ -491,17 +496,17 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     const summary = [
         `${host.displayName} plugin: ${configureHost ? settingsPath : "skipped"}`,
         `Eidnara config: ${configPath}`,
-        `Historian: ${historianModel}${thinkingSuffix(historianThinkingLevel)}`,
-        sidekickEnabled
-            ? `Sidekick: ${sidekickModel}${thinkingSuffix(sidekickThinkingLevel)}`
-            : "Sidekick: disabled",
+        `HistorySummarizer: ${history_summarizerModel}${thinkingSuffix(history_summarizerThinkingLevel)}`,
+        context_researcherEnabled
+            ? `ContextResearcher: ${context_researcherModel}${thinkingSuffix(context_researcherThinkingLevel)}`
+            : "ContextResearcher: disabled",
     ].join("\n");
 
     prompts.note(summary, dryRun ? "Configuration (dry run — not written)" : "Configuration");
     prompts.outro(
         dryRun
             ? "Dry run complete — nothing was written."
-            : `Start a ${host.displayName} session and try /ctx-aug`,
+            : `Start a ${host.displayName} session and try /eidnara-aug`,
     );
     return 0;
 }

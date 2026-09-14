@@ -37,7 +37,7 @@ fn activation_in_progress(report: &HealthReport) -> bool {
             let metrics = component.get("metrics").and_then(serde_json::Value::as_object);
             metrics.is_some_and(|metrics| {
                 metrics.get("storage_state").and_then(serde_json::Value::as_str) == Some("starting")
-                    || metrics.get("synapse_state").and_then(serde_json::Value::as_str) == Some("starting")
+                    || metrics.get("local_embeddings_state").and_then(serde_json::Value::as_str) == Some("starting")
             })
         })
     })

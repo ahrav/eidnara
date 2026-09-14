@@ -24,7 +24,7 @@ the projection digest changes every reported hash and mixes cache entries.
   previous generations before tokenizing; its doc says callers must hash a
   domain-separated injective encoding and names the hygiene encoding.
 - [`measure_tail_hygiene`][hygiene] derives the content per block kind: for
-  `Text` the caveman-substituted and reminder-stripped text
+  `Text` the terse_text_compression-substituted and reminder-stripped text
   ([text branch][hyg-text]); for `ToolCall` `serde_json::to_string(input)`
   ([input branch][hyg-input]); for `ToolResult` the reminder-stripped
   [`tool_output_content`][hyg-output] ([result branch][hyg-result]); for `Media`
@@ -74,7 +74,7 @@ Namespace-aware removal drops the entry matching both identity fields. Route
 invalidation, whose caller names only a session, removes that ID across
 namespaces. Full reset clears the table. These operations take the table lock
 once and never wait on a walk. Every hit still checks the caller's source and
-caveman state, so repopulation does not authorize stale results.
+terse_text_compression state, so repopulation does not authorize stale results.
 
 A poisoned session memo is replaced with an empty memo while its guard is
 held, its charge is zeroed, then `clear_poison` runs. A poisoned table is
@@ -88,7 +88,7 @@ characterization fix the hash input and exact measurement output.
 ## What a test must construct
 
 A tail with a text block, a tool call, tool results in text and content
-variants, a media block, an excluded reduced block, a caveman-substituted text
+variants, a media block, an excluded reduced block, a terse_text_compression-substituted text
 block, and an empty or sentinel text part; measure the same input twice with a
 cold and a warm token cache. For each part assert
 `content_hash == hex(sha256(kind_name ++ "\0" ++ content))` with `content`
@@ -130,11 +130,11 @@ anchors above identify each branch.
   [benchmark ownership][bench]. Live anchors are checked on 2026-09-12.
 - Findings: Each session memo maps block identity to its own kind-prefixed
   digest, kind, and tokens. The projection digest is only an invalidator.
-  A length-prefixed SHA-256 fingerprint of the caveman unit, contextual
+  A length-prefixed SHA-256 fingerprint of the terse_text_compression unit, contextual
   exclusion, and text-role eligibility also gate reuse; one `is_text_role`
   predicate serves the memo and the measurement branch. Tag attribution,
   protection, coverage, reduced eligibility, full result parts, and the
-  content signature are recomputed each call. A borrowed caveman map is built
+  content signature are recomputed each call. A borrowed terse_text_compression map is built
   once per walk. The first duplicate key wins, matching the reference scan.
   Lookup does not repeatedly scan all frozen units. The renderer's
   `FrozenUnitIndex` also builds reduction and tail-message indexes, so hygiene
@@ -145,7 +145,7 @@ anchors above identify each branch.
   insert, using the same routine as the charge; an entry that would exceed the
   budget is refused and counted, and the admitted working set is kept. A
   refused block stays cold; the admitted prefix stays warm on later walks. The
-  memo retains no caveman payload bytes. This is not a peak-allocation bound:
+  memo retains no terse_text_compression payload bytes. This is not a peak-allocation bound:
   the measurement also owns temporary data and result allocations. The
   declaration adds the per-session caps, each session's table row and shared
   memo allocation, and `size_of::<OnceLock<HygieneMemos>>()`. Charges include
@@ -200,7 +200,7 @@ anchors above identify each branch.
   its table lookup or `Arc` clone. The timed loop measures the fully warm path
   only; cold walks, edits, and refusals are not timed, and the 2,500-message
   cell is not reported. The empty-core, empty-tag cell does not exercise
-  caveman invalidation or populated attribution, and U is zero.
+  terse_text_compression invalidation or populated attribution, and U is zero.
 - Missing evidence: No independently replayable pre-memo characterization
   artifact, allocator/RSS validation, production workload, concurrent-session
   timing, or cold-call timing is established here.

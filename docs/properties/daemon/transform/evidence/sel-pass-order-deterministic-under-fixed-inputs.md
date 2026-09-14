@@ -37,8 +37,8 @@ Ordered artifacts, all order-stable by construction:
   "deduped by target, deterministic order".
 - `effective_reductions` returns a `BTreeMap` (`:6891-6919`); the doc comment at
   `:6884-6886` says "Keyed by target_id → (kind, payload), deterministic".
-- `surviving_caveman_units` uses `BTreeMap<String, FrozenUnit>` (`:6410-6435`).
-- `new_caveman_units` sorts candidates explicitly:
+- `surviving_terse_text_compression_units` uses `BTreeMap<String, FrozenUnit>` (`:6410-6435`).
+- `new_terse_text_compression_units` sorts candidates explicitly:
   `candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))`
   at `:6344`, keying on `(tag_number, block_id)`. Both components are total, so
   the tiebreak is complete.

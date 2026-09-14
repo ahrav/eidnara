@@ -2,7 +2,7 @@
 //!
 //! The daemon reads one size-capped, strictly decoded startup envelope from the launcher's pipe.
 //! The daemon revalidates the staged generation named by the envelope.
-//! The daemon composes the fixed Eidnara, Synapse, and Broca profile.
+//! The daemon composes the fixed Eidnara, LocalEmbeddings, and ModelExecution profile.
 //! `host_runtime::run` acquires the lifetime fence before the runtime lock and writes the `starting` record before publication.
 //! `host_runtime::run` performs activation after publication.
 
@@ -15,21 +15,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hmac::{Hmac, Mac};
-use host_runtime::broca::BrocaComponent;
-use host_runtime::broca::backend::{
-    BackendError, BackendFuture, BackendRequest, BackendTerminal, ErrorClass, EventSink, Harness,
-    HarnessDispatchBackend, LlmExecutionBackend,
-};
-use host_runtime::broca::opencode::{OpenCodeBackend, OpenCodeRuntime};
-use host_runtime::broca::pi::{PiBackend, PiRuntimeDescriptor};
-use host_runtime::broca::subprocess::group_registry::StateRoot;
-use host_runtime::broca::subprocess::{CREDENTIAL_VALUE_CAP_BYTES, EnvSnapshot};
 use host_runtime::generation::{GenerationStore, ValidatedGeneration};
 use host_runtime::harness_closure::{
     ClosureCandidate, ClosureManifest, HarnessClosureStore, ValidatedHarnessClosure,
     manifest_digest,
 };
-use host_runtime::synapse::{SynapseComponent, SynapseConfig, SynapseLimits};
+use host_runtime::local_embeddings::{
+    LocalEmbeddingsComponent, LocalEmbeddingsConfig, LocalEmbeddingsLimits,
+};
+use host_runtime::model_execution::ModelExecutionComponent;
+use host_runtime::model_execution::backend::{
+    BackendError, BackendFuture, BackendRequest, BackendTerminal, ErrorClass, EventSink, Harness,
+    HarnessDispatchBackend, LlmExecutionBackend,
+};
+use host_runtime::model_execution::opencode::{OpenCodeBackend, OpenCodeRuntime};
+use host_runtime::model_execution::pi::{PiBackend, PiRuntimeDescriptor};
+use host_runtime::model_execution::subprocess::group_registry::StateRoot;
+use host_runtime::model_execution::subprocess::{CREDENTIAL_VALUE_CAP_BYTES, EnvSnapshot};
 use host_runtime::{CancellationToken, HostConfig, HostHandler, HostInit, StaticComposite};
 use sha2::Sha256;
 
@@ -1024,11 +1026,11 @@ fn storage_init(root: &Path) -> Result<HostInit, &'static str> {
     })
 }
 
-fn synapse_component(generation: &ValidatedGeneration) -> SynapseComponent {
+fn local_embeddings_component(generation: &ValidatedGeneration) -> LocalEmbeddingsComponent {
     #[cfg(target_os = "macos")]
     {
         let _ = generation;
-        return SynapseComponent::unsupported("synapse_unsupported");
+        return LocalEmbeddingsComponent::unsupported("local_embeddings_unsupported");
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1040,7 +1042,7 @@ fn synapse_component(generation: &ValidatedGeneration) -> SynapseComponent {
             .iter()
             .find(|entry| entry.path == ORT_LIBRARY)
         else {
-            return SynapseComponent::new(None);
+            return LocalEmbeddingsComponent::new(None);
         };
         let descriptor_root = generation.descriptor_root_path();
         let bundle_dir = descriptor_root.join(BUNDLE_DIR);
@@ -1054,14 +1056,14 @@ fn synapse_component(generation: &ValidatedGeneration) -> SynapseComponent {
             .iter()
             .find(|entry| entry.path == bundle_manifest_path)
         else {
-            return SynapseComponent::new(None);
+            return LocalEmbeddingsComponent::new(None);
         };
-        SynapseComponent::new(Some(SynapseConfig {
+        LocalEmbeddingsComponent::new(Some(LocalEmbeddingsConfig {
             bundle_dir,
             ort_library: descriptor_root.join(ORT_LIBRARY),
             bundle_manifest_sha256: Some(bundle_manifest.sha256.clone()),
             ort_library_sha256: ort.sha256.clone(),
-            limits: SynapseLimits::default(),
+            limits: LocalEmbeddingsLimits::default(),
         }))
     }
 }
@@ -1094,15 +1096,15 @@ pub fn run() -> Result<(), &'static str> {
             .map(|(name, value)| (OsString::from(name), OsString::from(value))),
     )
     .map_err(|_| "credential snapshot exceeds bounds")?;
-    let synapse = synapse_component(&generation);
-    let broca_state =
-        StateRoot::resolve(Some(&root)).map_err(|_| "broca state root is unavailable")?;
+    let local_embeddings = local_embeddings_component(&generation);
+    let model_execution_state =
+        StateRoot::resolve(Some(&root)).map_err(|_| "model_execution state root is unavailable")?;
     let backend: Arc<dyn LlmExecutionBackend> =
-        Arc::new(harness_backend(&envelope, &env, &broca_state)?);
-    let broca = if envelope.credentials.is_empty() {
-        BrocaComponent::new(backend, broca_state)
+        Arc::new(harness_backend(&envelope, &env, &model_execution_state)?);
+    let model_execution = if envelope.credentials.is_empty() {
+        ModelExecutionComponent::new(backend, model_execution_state)
     } else {
-        BrocaComponent::new_with_credentials(backend, env.clone(), broca_state)
+        ModelExecutionComponent::new_with_credentials(backend, env.clone(), model_execution_state)
     };
     // The daemon commits its own harness selection when the host hands it the bearer key, before publication, so a launcher killed after publication cannot leave a daemon serving harnesses that no selection on disk records. The launcher's later commit rewrites the same content.
     let selection_root = closure_root(&root);
@@ -1122,8 +1124,8 @@ pub fn run() -> Result<(), &'static str> {
     let composite = StaticComposite::new(
         daemon::Handler::new_with_connection_file(Some(publication))
             .with_connection_key_hook(commit_selection),
-        synapse,
-        broca,
+        local_embeddings,
+        model_execution,
     )
     .map_err(|_| "composite construction failed")?;
 
@@ -1133,7 +1135,7 @@ pub fn run() -> Result<(), &'static str> {
         payload_manifest_digest: envelope.payload_manifest_digest.clone(),
         init,
         limits: host_runtime::HostLimits {
-            // The runtime deducts every linked component's declared retention from the resident budget, so the budget grows by the composite's own declarations; an unsupported or ORT-less synapse declares zero.
+            // The runtime deducts every linked component's declared retention from the resident budget, so the budget grows by the composite's own declarations; an unsupported or ORT-less local_embeddings declares zero.
             max_resident_bytes: host_runtime::HostLimits::default().max_resident_bytes
                 + composite
                     .resource_declarations()

@@ -603,7 +603,10 @@ fn native_worker_cancellation_and_cleanup_failure_do_not_certify_removal() {
     let engine = fixtures::TestEngine::new();
     let native_gate = engine.block_calls();
     let release = fixtures::GateGuard(Arc::clone(&native_gate));
-    let component = fixtures::component(&engine, host_runtime::synapse::SynapseLimits::default());
+    let component = fixtures::component(
+        &engine,
+        host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
+    );
     let worker_pin = case.old.as_ref().unwrap().clone();
     let cancelled = budget(Duration::from_secs(30));
     let worker_budget = cancelled.clone();

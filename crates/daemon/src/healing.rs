@@ -8,8 +8,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SerializerProfile {
     OwnedLlmRunner,
-    /// OwnedBroca has identical serializer semantics to OwnedLlmRunner but retains a distinct wire ID.
-    OwnedBroca,
+    /// OwnedModelExecution has identical serializer semantics to OwnedLlmRunner but retains a distinct wire ID.
+    OwnedModelExecution,
     ClaudeCodeAnthropic,
     OpencodeAiSdk,
     Pi,
@@ -17,7 +17,7 @@ pub enum SerializerProfile {
 
 const ALL_PROFILES: [SerializerProfile; 5] = [
     SerializerProfile::OwnedLlmRunner,
-    SerializerProfile::OwnedBroca,
+    SerializerProfile::OwnedModelExecution,
     SerializerProfile::ClaudeCodeAnthropic,
     SerializerProfile::OpencodeAiSdk,
     SerializerProfile::Pi,
@@ -27,7 +27,7 @@ impl SerializerProfile {
     pub const fn wire_id(self) -> &'static str {
         match self {
             Self::OwnedLlmRunner => "owned-llmrunner",
-            Self::OwnedBroca => "owned-broca",
+            Self::OwnedModelExecution => "owned-model_execution",
             Self::ClaudeCodeAnthropic => "claude-code-anthropic",
             Self::OpencodeAiSdk => "opencode-aisdk",
             Self::Pi => "pi",
@@ -37,7 +37,7 @@ impl SerializerProfile {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "owned-llmrunner" => Some(Self::OwnedLlmRunner),
-            "owned-broca" => Some(Self::OwnedBroca),
+            "owned-model_execution" => Some(Self::OwnedModelExecution),
             "claude-code-anthropic" => Some(Self::ClaudeCodeAnthropic),
             "opencode-aisdk" => Some(Self::OpencodeAiSdk),
             "pi" => Some(Self::Pi),
@@ -94,7 +94,7 @@ pub struct QuirkResidual {
 pub const fn coverage(profile: SerializerProfile) -> HealingCoverage {
     match profile {
         SerializerProfile::OwnedLlmRunner
-        | SerializerProfile::OwnedBroca
+        | SerializerProfile::OwnedModelExecution
         | SerializerProfile::Pi => HealingCoverage {
             drops_empty_content: true,
             autofills_reasoning: true,
@@ -132,7 +132,7 @@ pub const fn tail_reclaim(profile: SerializerProfile) -> bool {
     match profile {
         SerializerProfile::ClaudeCodeAnthropic
         | SerializerProfile::OwnedLlmRunner
-        | SerializerProfile::OwnedBroca
+        | SerializerProfile::OwnedModelExecution
         | SerializerProfile::Pi
         | SerializerProfile::OpencodeAiSdk => true,
     }
@@ -145,7 +145,7 @@ pub const fn quirk_residual(profile: SerializerProfile) -> QuirkResidual {
             strips_reasoning_from_merged_assistants: true,
         },
         SerializerProfile::OwnedLlmRunner
-        | SerializerProfile::OwnedBroca
+        | SerializerProfile::OwnedModelExecution
         | SerializerProfile::ClaudeCodeAnthropic
         | SerializerProfile::Pi => QuirkResidual {
             requires_non_anthropic_empty_sentinels: false,
@@ -192,8 +192,8 @@ mod tests {
                 no_residual,
             ),
             (
-                SerializerProfile::OwnedBroca,
-                "owned-broca",
+                SerializerProfile::OwnedModelExecution,
+                "owned-model_execution",
                 drops_and_autofills,
                 no_residual,
             ),

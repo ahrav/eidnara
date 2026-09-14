@@ -17,41 +17,41 @@ rows a pass touches, so any restructuring must preserve those exactly.
 
 ## Evidence trail
 
-- The handler calls [`drain_historian_side_channels`][drain-call] before the
-  transform with [`HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND`][kinds] (32) and
+- The handler calls [`drain_history_summarizer_side_channels`][drain-call] before the
+  transform with [`HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND`][kinds] (32) and
   discards the result.
-- [`drain_historian_side_channels`][drain] first runs
-  [`delete_delivered_historian_side_channels`][delete-all] in one fenced
+- [`drain_history_summarizer_side_channels`][drain] first runs
+  [`delete_delivered_history_summarizer_side_channels`][delete-all] in one fenced
   transaction, returns early when `per_kind_limit == 0`, then iterates
-  [`HISTORIAN_SIDE_CHANNEL_KINDS`][kinds] (`event`, `primer`,
+  [`HISTORY_SUMMARIZER_SIDE_CHANNEL_KINDS`][kinds] (`event`, `primer`,
   `user_observation`); per kind it loads due rows with
   `per_kind_limit.min(32)`, delivers each, deletes on success, records a
   failure otherwise, and returns the first bookkeeping error after the loop.
   Its [doc][drain-doc] states the mark-then-delete intent.
-- [`load_due_historian_side_channels`][load-due] selects
+- [`load_due_history_summarizer_side_channels`][load-due] selects
   `delivered_at_ms IS NULL AND next_attempt_at_ms <= ?3`, `INDEXED BY` the
   [order index][idx-order], `ORDER BY firing_seq, source_start, source_end,
   item_index LIMIT ?4`.
-- [`deliver_historian_side_channel`][deliver] runs the target insert and
-  [`mark_historian_side_channel_delivered_tx`][mark] in one `with_conn_fenced`
+- [`deliver_history_summarizer_side_channel`][deliver] runs the target insert and
+  [`mark_history_summarizer_side_channel_delivered_tx`][mark] in one `with_conn_fenced`
   call per kind; the mark updates under `delivered_at_ms IS NULL` and returns
   `QueryReturnedNoRows` when `changed != 1`, which rolls the transaction back.
   A test-only `fail_once` seam at [`:11234-11245`][fail-once] injects a
   failure per kind.
-- [`record_historian_side_channel_failure`][failure] computes
+- [`record_history_summarizer_side_channel_failure`][failure] computes
   `delay = 1000 * 2^min(attempt_count, 6)` capped at
   [60,000][kinds], sets `next_attempt_at_ms = now + delay`, increments
   `attempt_count`, and stores the error truncated to 2,000 characters.
-- [`delete_delivered_historian_side_channel`][delete-one] deletes the one row
+- [`delete_delivered_history_summarizer_side_channel`][delete-one] deletes the one row
   under `delivered_at_ms IS NOT NULL` in a second fenced transaction.
-- [`historian_side_channel_status`][status-sc] counts pending rows as
+- [`history_summarizer_side_channel_status`][status-sc] counts pending rows as
   `delivered_at_ms IS NULL`.
-- Targets: [`insert_historian_events_tx`][events-insert] and
-  [`insert_historian_user_observation_tx`][obs-insert] are plain inserts;
-  [`insert_historian_primer_tx`][primer-insert] upserts on
+- Targets: [`insert_history_summarizer_events_tx`][events-insert] and
+  [`insert_history_summarizer_user_observation_tx`][obs-insert] are plain inserts;
+  [`insert_history_summarizer_primer_tx`][primer-insert] upserts on
   `(project_path, harness, session_id, source_start_message_id,
   source_end_message_id)`.
-- Rows are enqueued by [`publish_historian_chunk`][publish]; the outbox
+- Rows are enqueued by [`publish_history_summarizer_chunk`][publish]; the outbox
   [primary key][outbox-sql] is `(session_id, firing_seq, kind, source_start,
   source_end, item_index)`. The publish task also drains after a committed
   publish ([`:11074-11083`][publish-drain]), so two drainers can overlap on one
@@ -67,7 +67,7 @@ drain's leftover delete removes it, and `load_due` never selects it because it
 filters on `delivered_at_ms IS NULL`. A design that deletes inside the delivery
 transaction must make the delete affect exactly one row or roll back; a delete
 that affects zero rows because a concurrent drainer already retired the row,
-and still commits the target insert, duplicates a `compartment_events` or
+and still commits the target insert, duplicates a `history_segment_events` or
 `user_memory_candidates` row. An empty-drain shortcut that skips the leftover
 delete leaves marked rows in the table and changes nothing the status counts,
 but changes which rows a later pass touches. A reorder that changes kind
@@ -174,7 +174,7 @@ the retirement share one transaction; the baseline already held the insert and
 the mark in one transaction, so it is not a behavior change. The gap the
 baseline left, a crash between the mark commit and the delete commit, is
 closed by construction because no second commit exists. The discriminating
-assertion is a direct `deliver_historian_side_channel` call after which the
+assertion is a direct `deliver_history_summarizer_side_channel` call after which the
 row is already absent, before any drain runs; the baseline would have left it
 marked until the drain's second commit. The test then reads the due rows a
 second time before one drain delivers the rest, and each stale delivery

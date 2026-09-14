@@ -43,38 +43,39 @@ are no, and the per-poll cost is linear in the unbounded quantity.
                          AND terminal_kind IS NULL)
      ORDER BY id
    ```
+
    (`:13292-13297`), collected into a `Vec` at `:13298-13301`.
 
 4. Every candidate is converted per poll. `lib.rs:11203-11207`:
 
    ```
-   let snapshots: Vec<SmartNoteSelectionSnapshot> = candidates
+   let snapshots: Vec<ConditionalNoteSelectionSnapshot> = candidates
        .iter()
-       .map(smart_note_selection_snapshot)
+       .map(conditional_note_selection_snapshot)
        .collect();
    ```
 
-   and `smart_note_selection_snapshot` (`lib.rs:13963-13985`) clones three
+   and `conditional_note_selection_snapshot` (`lib.rs:13963-13985`) clones three
    `String`s per note: `status` (`:13966`), `compile_status` (`:13967`), and
    `check_status` (`:13970-13976`).
 
 5. Selection then walks the whole vector up to four times, once per phase, because
    each phase filters and sorts the full slice
-   (`crates/daemon/src/smart_note_evaluation.rs:717-727`, `:741-751`,
-   `:767-779`, `:793-796`) and `select_smart_note_evaluation_cycle` calls them in
+   (`crates/daemon/src/conditional_note_evaluation.rs:717-727`, `:741-751`,
+   `:767-779`, `:793-796`) and `select_conditional_note_evaluation_cycle` calls them in
    a loop (`:916-937`). The fallback branch passes `notes.len()` as the limit
    (`:933`), so it sorts and collects the entire fallback subset rather than
    taking one.
 
 6. The per-poll cost was considered and partially optimized, which sharpens rather
-   than softens the finding. `SmartNoteSelectionSnapshot::has_compiled_check`
+   than softens the finding. `ConditionalNoteSelectionSnapshot::has_compiled_check`
    carries this doc comment: "Only artifact PRESENCE affects selection, so the
    snapshot avoids copying the artifact body for every pending note on every
    acquisition poll" (`:690-692`). That sentence states the loop it is optimizing:
    every pending note, every poll.
 
 7. Growth is caller-driven and reachable from the model-facing facade. A
-   `ctx_note` write with a non-empty `surface_condition` lands as
+   `eidnara_note` write with a non-empty `surface_condition` lands as
    `type = 'smart', status = 'pending'` (`memory-store:10183-10189`), and content is
    capped per note at `MAX_NOTE_CONTENT_BYTES`, 64 KiB (`lib.rs:14395`, enforced
    at `:11556`). So each note is bounded and the count is not.
@@ -85,7 +86,7 @@ are no, and the per-poll cost is linear in the unbounded quantity.
    gate admits every write.
 
 9. Nothing drains `pending` except evaluation reaching a `met` outcome, which
-   sets `status = "ready"` (`smart_note_evaluation.rs:421`), or a user dismissal.
+   sets `status = "ready"` (`conditional_note_evaluation.rs:421`), or a user dismissal.
    A note whose condition never fires stays `pending` forever and stays in the
    candidate set forever. `check_status = "fallback"` notes in particular never
    leave `pending` on a `False` outcome (`:647-656`).
@@ -95,10 +96,10 @@ are no, and the per-poll cost is linear in the unbounded quantity.
 An agent working through a long task parks follow-ups as conditioned notes. This
 is the documented intended use: `docs/AUDIT-KNOWN-ISSUES.md:903-916` (source-catalog path, not present at HEAD) (A54)
 describes exactly this pattern, "did we park a follow-up about X?", and accepts
-by design that pending smart notes are searchable, so parking many of them is
+by design that pending conditional notes are searchable, so parking many of them is
 expected behaviour rather than abuse.
 
-Over months, a project accumulates several thousand pending smart notes whose
+Over months, a project accumulates several thousand pending conditional notes whose
 conditions have not fired. Nothing removes them: no age reaper, no volume cap,
 and no eviction. The evaluator polls `note.evaluation.next` on its drain
 schedule.
@@ -106,7 +107,7 @@ schedule.
 Each poll:
 
 1. Reads every pending row's candidate projection from SQLite.
-2. Allocates one `SmartNoteSelectionSnapshot` per row, with three `String`
+2. Allocates one `ConditionalNoteSelectionSnapshot` per row, with three `String`
    allocations each.
 3. Filters and sorts the full slice up to four times.
 4. Returns one note id, or none.
@@ -128,7 +129,7 @@ product.
 
 ## What a test must construct
 
-1. Open a store, register an evaluator, and insert N pending smart notes with
+1. Open a store, register an evaluator, and insert N pending conditional notes with
    conditions, for N in something like `{10, 100, 1000}`.
 2. Call `note.evaluation.next` once per N.
 3. Assert the number of rows the candidate query returned is bounded by a declared
@@ -166,14 +167,14 @@ as a deliberate observation rather than an oversight in the test.
   authority, writer-fence, and feed maintenance, not volume control. The
   `DELETE` at `:8675` is inside a different subsystem's cleanup and is keyed on
   something other than note age or count.
-- Missing evidence: the plugin's dreamer maintenance tasks. The task registry
-  (`packages/plugin/src/features/eidnara/dreamer/task-registry.ts:22` (source-catalog path, not present at HEAD)) lists
-  `evaluate-smart-notes`, and there is a
+- Missing evidence: the plugin's memory_classifier maintenance tasks. The task registry
+  (`packages/plugin/src/features/eidnara/memory_classifier/task-registry.ts:22` (source-catalog path, not present at HEAD)) lists
+  `evaluate-conditional-notes`, and there is a
   `retrospective-orphan-sweep.ts` that also references it (`:35`). An orphan sweep
   is the shape that would reap notes, and I did not read it. If it reaps only
   orphans (notes whose anchor block is gone) rather than aged notes, it would not
   bound this.
-- Conclusion: unresolved, needs a sweep of the plugin's dreamer maintenance tasks,
+- Conclusion: unresolved, needs a sweep of the plugin's memory_classifier maintenance tasks,
   starting with `retrospective-orphan-sweep.ts`. Note that a plugin-side reaper
   would bound the durable set but would not bound the Rust module's per-poll
   materialization, which is the half this record asserts; a `LIMIT` on the
@@ -182,7 +183,7 @@ as a deliberate observation rather than an oversight in the test.
 ### Q: Would a `LIMIT` on the candidate query even be correct?
 
 - Sources examined: the four selectors' order keys
-  (`smart_note_evaluation.rs:728`, `:752`, `:780`, `:797-803`) and the candidate
+  (`conditional_note_evaluation.rs:728`, `:752`, `:780`, `:797-803`) and the candidate
   query's `ORDER BY id` (`memory-store:13296`).
 - Findings: not naively. The query orders by `id` and each phase orders by a
   different column, so `LIMIT 200 ORDER BY id` would silently exclude the note

@@ -735,7 +735,7 @@ describe("OMP doctor", () => {
         expect(calls.some((args) => args[0] === "config" && args[1] === "set")).toBe(false);
     });
 
-    it("reports historian dumps for recent OMP sessions", async () => {
+    it("reports history_summarizer dumps for recent OMP sessions", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-dumps-"));
         roots.push(root);
         const agentDir = join(root, ".omp", "agent");
@@ -757,9 +757,9 @@ describe("OMP doctor", () => {
             join(slugDir, "2026-07-07T12-00-00-000Z_omp1.jsonl"),
             `${JSON.stringify({ type: "session", version: 3, id: "omp1", cwd: project })}\n`,
         );
-        const dumpDir = join(project, ".eidnara", "context", "historian");
+        const dumpDir = join(project, ".eidnara", "context", "history_summarizer");
         mkdirSync(dumpDir, { recursive: true });
-        writeFileSync(join(dumpDir, "dump-001.xml"), "<compartments></compartments>\n");
+        writeFileSync(join(dumpDir, "dump-001.xml"), "<history_segments></history_segments>\n");
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -783,7 +783,7 @@ describe("OMP doctor", () => {
 
         expect(code).toBe(0);
         const output = prompts.messages.join("\n");
-        expect(output).toContain("Historian debug dumps: 1 file(s) across 1 project(s)");
+        expect(output).toContain("HistorySummarizer debug dumps: 1 file(s) across 1 project(s)");
         expect(output).toContain(`[${project}] 1 file(s)`);
         expect(output).toContain("dump-001.xml");
     });

@@ -5,7 +5,7 @@
 METHOD.md's effect-accounting rule requires attempted and acknowledged effects to
 be tracked separately when a response can be lost. Scanning this lens's scope for
 places where the store already computes that pair and the module throws it away,
-`drain_historian_side_channels` at `crates/daemon/src/lib.rs:8252` is bound to
+`drain_history_summarizer_side_channels` at `crates/daemon/src/lib.rs:8252` is bound to
 `let _` while the store fills in three counters for it.
 
 References are to `crates/daemon/src/lib.rs` unless the store is named.
@@ -20,10 +20,10 @@ Verified at `HEAD` `b5dc778e`; `daemon` is unchanged between `76cd6f41` and
 8249        // A previous publish may have committed while one independent side channel failed.
 8250        // Retry on normal traffic rather than creating another background timer.
 8251        let side_channel_drain_started_at = Instant::now();
-8252        let _ = store.drain_historian_side_channels(
+8252        let _ = store.drain_history_summarizer_side_channels(
 8253            &parsed.session_id,
 8254            pass_now,
-8255            HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND,
+8255            HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND,
 8256        );
 8257        let side_channel_drain_ms = side_channel_drain_started_at.elapsed().as_secs_f64() * 1_000.0;
 ```
@@ -38,15 +38,15 @@ took and keeps that, while discarding what the drain did.
 **What the store returns.**
 
 ```
-9551    pub fn drain_historian_side_channels(
+9551    pub fn drain_history_summarizer_side_channels(
 9552        &self,
 9553        session_id: &str,
 9554        now_ms: i64,
 9555        per_kind_limit: usize,
-9556    ) -> Result<HistorianSideChannelDrainResult, MemoryStoreError> {
-9557        let mut result = HistorianSideChannelDrainResult::default();
+9556    ) -> Result<HistorySummarizerSideChannelDrainResult, MemoryStoreError> {
+9557        let mut result = HistorySummarizerSideChannelDrainResult::default();
 9558        let mut bookkeeping_error = None;
-9559        self.delete_delivered_historian_side_channels(session_id)?;
+9559        self.delete_delivered_history_summarizer_side_channels(session_id)?;
 ```
 
 (`crates/memory-store/src/lib.rs:9551-9559`.) And the per-row accounting:
@@ -54,10 +54,10 @@ took and keeps that, while discarding what the drain did.
 ```
 9571            for row in rows {
 9572                result.attempted += 1;
-9573                match self.deliver_historian_side_channel(&row, now_ms) {
+9573                match self.deliver_history_summarizer_side_channel(&row, now_ms) {
 9574                    Ok(()) => {
 9575                        result.succeeded += 1;
-9576                        if let Err(error) = self.delete_delivered_historian_side_channel(&row) {
+9576                        if let Err(error) = self.delete_delivered_history_summarizer_side_channel(&row) {
 9577                            bookkeeping_error.get_or_insert(error);
 9578                        }
 9579                    }
@@ -68,7 +68,7 @@ took and keeps that, while discarding what the drain did.
 (`crates/memory-store/src/lib.rs:9571-9581`.) So `attempted`, `succeeded`, and
 `failed` are all computed. The `let _` at module `:8252` discards all three, and
 also discards the `Err` arm of the `Result`, which covers the
-`delete_delivered_historian_side_channels` failure at store `:9559`.
+`delete_delivered_history_summarizer_side_channels` failure at store `:9559`.
 
 **The operator surface exists.** This bounds the finding and is the reason this
 record is an observability gap rather than silent loss:
@@ -76,25 +76,25 @@ record is an observability gap rather than silent loss:
 ```
 30071        let status =
 30072            call_dispatch_request(&handler, json!({ "kind": "status", "session_id": "ses" })).await;
-30073        assert_eq!(status["historian"]["side_channel_pending_count"], 1);
-30074        assert!(status["historian"]["side_channel_last_failure"]
+30073        assert_eq!(status["history_summarizer"]["side_channel_pending_count"], 1);
+30074        assert!(status["history_summarizer"]["side_channel_last_failure"]
 30075            .as_str()
 30076            .is_some_and(|error| error.contains("event")));
 ```
 
-The test is `status_diagnostics_surface_pending_historian_side_channel_failure` at
-`:30037`, and it uses the store seam `fail_next_historian_side_channel_for_test`
+The test is `status_diagnostics_surface_pending_history_summarizer_side_channel_failure` at
+`:30037`, and it uses the store seam `fail_next_history_summarizer_side_channel_for_test`
 at `:30041`. So an operator polling `status` sees a pending count and the last
 failure string.
 
 **What the caller sees.** Nothing. The transform response is assembled from
-`result.response` at `:8521` with `response.historian = Some(diagnostics)` at
-`:8528`. The diagnostics come from the historian trigger path, not from the drain
+`result.response` at `:8521` with `response.history_summarizer = Some(diagnostics)` at
+`:8528`. The diagnostics come from the history_summarizer trigger path, not from the drain
 result, which was discarded 270 lines earlier.
 
 ## Failure scenario
 
-1. A historian publish commits, and one side channel, for example the event
+1. A history_summarizer publish commits, and one side channel, for example the event
    channel, fails to deliver. A row remains due.
 2. Normal traffic continues. Every transform pass calls the drain at `:8252`.
 3. The delivery keeps failing, perhaps because the destination is
@@ -120,18 +120,18 @@ No interleaving. The discard is unconditional on every transform pass.
 
 Dependency: whether `side_channel_pending_count` distinguishes "never attempted"
 from "attempted and failed". If it does, this record collapses to a minor
-convenience gap. `historian_status_summary` assembles that field and lives at
+convenience gap. `history_summarizer_status_summary` assembles that field and lives at
 `:15447-15736` per the region map, which is 4d's range, so this lens did not read
 it.
 
-Dependency: `HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND`, passed at `:8255`. Store
+Dependency: `HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND`, passed at `:8255`. Store
 `:9560-9562` returns early with a zeroed result when the limit is 0, so a
 misconfigured limit would also present as a discarded no-op. The constant is in
 the `:596-669` budget block.
 
 ## What a test must construct
 
-- A session with a due historian side-channel row and a delivery that fails.
+- A session with a due history_summarizer side-channel row and a delivery that fails.
   `:30037-30076` already constructs exactly this and is the natural base.
 - A transform pass driven over that session, so `:8252` runs with work available.
 - Oracle: this property is about reportability, so the oracle is a surface check
@@ -152,14 +152,14 @@ the `:596-669` budget block.
 ### Q: Does `side_channel_pending_count` distinguish "never attempted" from "attempted and failed"?
 
 - Sources examined: `:30073-30076` for what the field reports in the one covered
-  scenario; the region map entry for `historian_status_summary` at `:15447-15736`;
+  scenario; the region map entry for `history_summarizer_status_summary` at `:15447-15736`;
   the store's counter arithmetic at `crates/memory-store/src/lib.rs:9571-9581`.
 - Findings: the test asserts a pending count of 1 *and* a nonempty
   `side_channel_last_failure` containing the failing kind. The presence of a
   last-failure string suggests the store records failure detail per row, so an
   attempted-and-failed row is distinguishable from an untouched one at the store
   level. Whether `status` exposes that distinction cleanly is a different question.
-- Missing evidence: the body of `historian_status_summary`, in 4d's range.
+- Missing evidence: the body of `history_summarizer_status_summary`, in 4d's range.
 - Conclusion: unresolved, needs 4d. The likely answer is that the level signal is
   adequate for an operator and the rate signal is genuinely absent. Recording the
   record at that reduced severity rather than claiming silent loss.

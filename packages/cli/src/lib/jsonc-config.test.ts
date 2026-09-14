@@ -165,7 +165,7 @@ describe("readJsoncConfigForUpdate comment round-trip", () => {
             [
                 "{",
                 "  // leading comment",
-                '  "historian": { "model": "a" }, // trailing comment',
+                '  "history_summarizer": { "model": "a" }, // trailing comment',
                 "  /* block comment */",
                 '  "packages": [ /* inside array */ "one" ]',
                 "}",
@@ -174,7 +174,7 @@ describe("readJsoncConfigForUpdate comment round-trip", () => {
 
         try {
             const config = readJsoncConfigForUpdate(path);
-            expect(config).toEqual({ historian: { model: "a" }, packages: ["one"] });
+            expect(config).toEqual({ history_summarizer: { model: "a" }, packages: ["one"] });
             config.added = true;
             const written = stringify(config, null, 2);
             expect(written).toContain("// leading comment");

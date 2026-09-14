@@ -9,12 +9,12 @@ use crate::arena::{ArenaSpan, MAX_FRAME_BYTES};
 use crate::backend::ring::RingGrant;
 use crate::backend::sample::{SAMPLE_PREFIX_BYTES, SamplePrefix};
 use crate::descriptor::{
-    FrameDescriptor, Incarnation, MAX_SPANS, ReleaseIdentity, WIRE_V2_HEADER_BYTES,
+    FrameDescriptor, Incarnation, MAX_SPANS, ReleaseIdentity, WIRE_V3_HEADER_BYTES,
 };
 
 /// Byte length of the fixed frame-descriptor encoding the fuzz targets decode.
 pub const FRAME_DESCRIPTOR_BYTES: usize =
-    2 + WIRE_V2_HEADER_BYTES + 16 + 4 + 8 + 8 + 8 + 8 + 1 + 32;
+    2 + WIRE_V3_HEADER_BYTES + 16 + 4 + 8 + 8 + 8 + 8 + 1 + 32;
 
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     let mut buffer = [0u8; 8];
@@ -30,9 +30,9 @@ pub fn frame_descriptor(bytes: &[u8]) -> bool {
         return false;
     }
     let schema = u16::from_le_bytes([bytes[0], bytes[1]]);
-    let mut wire_header = [0u8; WIRE_V2_HEADER_BYTES];
-    wire_header.copy_from_slice(&bytes[2..2 + WIRE_V2_HEADER_BYTES]);
-    let identity_offset = 2 + WIRE_V2_HEADER_BYTES;
+    let mut wire_header = [0u8; WIRE_V3_HEADER_BYTES];
+    wire_header.copy_from_slice(&bytes[2..2 + WIRE_V3_HEADER_BYTES]);
+    let identity_offset = 2 + WIRE_V3_HEADER_BYTES;
     let mut incarnation = [0u8; 16];
     incarnation.copy_from_slice(&bytes[identity_offset..identity_offset + 16]);
     let lane_offset = identity_offset + 16;

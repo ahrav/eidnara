@@ -18,14 +18,14 @@ record.
 ## Ready and complete name different boundaries
 
 `JobState::Ready` contains resident vectors and a ResultLease
-(`crates/host-runtime/src/synapse/jobs.rs:91-106`). The word does not imply a
+(`crates/host-runtime/src/local_embeddings/jobs.rs:91-106`). The word does not imply a
 durable product write. `embedding-complete-requires-durable-vector` deliberately
 observes reopened storage instead of a ready poll or an attempted SQL write.
 
 ## Logical stop and physical stop can disagree
 
-Synapse joins started native calls after request expiry
-(`crates/host-runtime/src/synapse/mod.rs:669-722`, `:1148-1161`). A shared
+LocalEmbeddings joins started native calls after request expiry
+(`crates/host-runtime/src/local_embeddings/mod.rs:669-722`, `:1148-1161`). A shared
 EvalBudget must not let expired work report a successful query or release its
 physical reservations early. A finite native-call drain bound is not established
 by that ownership. The supervisor record keeps this as an unresolved production

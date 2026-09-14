@@ -5,8 +5,8 @@ is, what that proof buys it, and at exactly which instruction it becomes able to
 map host shared memory. The peer is treated as hostile throughout, the way Part 1
 treated a hostile peer sharing memory.
 
-Code read at `the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, commit `e447c927`. Every line reference
+Code read at `the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`, commit`e447c927`. Every line reference
 below was opened and confirmed at that commit.
 
 In scope for this lens: `crates/host-runtime/src/setup_socket.rs` (826),
@@ -46,8 +46,8 @@ without reading a byte when none is free (`runtime.rs:1035-1040`).
 | # | Direction | Message | What the sender proves | What the receiver grants |
 | --- | --- | --- | --- | --- |
 | 1 | peer to host | `ClientHello { client_nonce, role }` (`auth.rs:26-29`) | nothing; `role` is parsed and discarded (`auth.rs:70-83`, doc `:215`) | nothing |
-| 2 | host to peer | `ServerProof { daemon_id, server_nonce, daemon_ver, server_proof }` (`auth.rs:31-37`) | host holds the key: `HMAC-SHA256(key, "eidnara-server-v1" ‖ client_nonce ‖ server_nonce ‖ daemon_id)` (`auth.rs:246-252`) | nothing; the host has not yet authenticated the peer |
-| 3 | peer to host | `ClientAuth { client_auth }` (`auth.rs:55-58`) | peer holds the key, under the same nonce pair and the `"eidnara-client-v1"` domain (`auth.rs:268-274`) | **everything.** Host returns `Authenticated` (`auth.rs:279`) |
+| 2 | host to peer | `ServerProof { daemon_id, server_nonce, daemon_ver, server_proof }` (`auth.rs:31-37`) | host holds the key: `HMAC-SHA256(key, "eidnara-server-v3" ‖ client_nonce ‖ server_nonce ‖ daemon_id)` (`auth.rs:246-252`) | nothing; the host has not yet authenticated the peer |
+| 3 | peer to host | `ClientAuth { client_auth }` (`auth.rs:55-58`) | peer holds the key, under the same nonce pair and the `"eidnara-client-v3"` domain (`auth.rs:268-274`) | **everything.** Host returns `Authenticated` (`auth.rs:279`) |
 | - | host internal | acquire connection permit, release handshake permit (`connection.rs:137-141`) | - | authenticated capacity |
 | - | host internal | `ring.prepare` on a blocking thread, bounded by `transport_setup_deadline` (`connection.rs:146-164`) | - | two memfds and a `WireDescriptor` |
 | - | host internal | mint a fresh 32-byte hex activation token (`connection.rs:165`, `:212-226`) | - | - |
@@ -63,6 +63,7 @@ without reading a byte when none is free (`runtime.rs:1035-1040`).
 that follows `authenticate_server`. That is the only gate. Everything after it is
 unconditional from the peer's point of view: `connection.rs:146-164` builds the
 ring, and `setup_socket.rs:249-260` - the *first* statement of `activate_server`
+
 - sends the grant and both file descriptors before reading a single setup-phase
 byte from the peer. So authorization to map is exactly "possession of the 32-byte
 connection-file key", proved once in message 3.
@@ -264,6 +265,7 @@ connection file's `0600` mode and the runtime directory's `0700` mode. Any futur
 design that treats the token as a second factor, for example to fence a
 compromised key, would be relying on a check that runs after the asset is gone.
 Open questions:
+
 - Was descriptor-before-validation chosen so the host need not hold the ring
   while waiting on a peer round trip, or is it incidental? Reordering to
   `Activate`-then-grant would make the token a real gate, at the cost of one
@@ -302,6 +304,7 @@ Impact: if the nonce ever became derived, fixed, or counter-based, one observed
 transcript would become a permanent credential for that incarnation, and it would
 still satisfy the existing test if the counter merely incremented.
 Open questions:
+
 - `client_nonce` is unchecked. Should the host reject an all-zero or repeated
   client nonce, or is server-nonce freshness genuinely sufficient? The doc claims
   sufficiency at `host-wire-protocol.md:177`. (needs human input)
@@ -340,6 +343,7 @@ Impact: without per-incarnation rotation, an old snapshot would be a permanent
 bearer credential, and `daemon_ver` fencing (`auth.rs:346-348`) would be the only
 thing distinguishing incarnations.
 Open questions:
+
 - Where are the two bootstrap tests named at `auth.rs:390-392`? Not found in
   `crates/host-runtime/tests/` in this pass. Locating them changes this record's
   `Existing check` line. (unresolved, needs a repository-wide test search)
@@ -379,6 +383,7 @@ comparison were always-true, activation would stop distinguishing the peer that
 received a grant from any other authenticated peer, and the doc's "one-use
 activation token" (`host-wire-protocol.md:561`) would be vacuous.
 Open questions:
+
 - The token is compared but never *consumed* into any store. "One-use" holds only
   because each connection mints its own. Is that the intended reading of
   `host-wire-protocol.md:561`? (needs human input)
@@ -421,6 +426,7 @@ worth holding because the socket's own mode is the layer a reader would believe,
 and a future change that moves the socket out of the `0700` directory would
 inherit an unprotected window.
 Open questions:
+
 - Would binding through a temporary name and `renameat` into place, or setting
   the umask around the bind, be preferred to relying on the parent directory?
   (needs human input)
@@ -463,6 +469,7 @@ the host adopt and then unlink an attacker-planted object, or bind over a live
 socket. The conjunction is exactly the shape that passes for the wrong reason
 when one clause is dropped.
 Open questions:
+
 - The stale-socket branch removes and rebinds. Is there a case where the occupant
   is a *live* socket of a still-running incarnation that lost its lock, and
   should the instance lock be consulted before the unlink? (needs human input)
@@ -502,6 +509,7 @@ Impact: this is the only thing standing between a same-uid squatter and a peer's
 connecting. A leaked `ClientAuth` is not directly a credential, since it is
 nonce-bound, but it is an oracle on the key.
 Open questions:
+
 - Should the peer stat the socket for owner and mode before connecting, as the
   connection-file reader already does for the file (`connection_file.rs:267-287`)?
   It would be defence in depth over a check the mutual proof already carries.
@@ -544,6 +552,7 @@ Impact: without the bound an unauthenticated peer drives unbounded task and
 descriptor growth. `host-wire-protocol.md:161` states the requirement as a
 MUST, and the code satisfies it; the residual is the class-crossing window.
 Open questions:
+
 - Should the 2-second post-auth setup window have its own bound rather than
   sharing `max_connections`? Sixty-four concurrent stalled setups each hold a
   prepared ring, which is 128 MiB of arena per connection by
@@ -588,6 +597,7 @@ Impact: with `max_connections = 1` a single stranded charge is a permanent
 denial. The existing tests were written for exactly that reason, so the
 uncovered exit is a gap in an otherwise deliberate campaign.
 Open questions:
+
 - Does dropping a `PreparedRing` inside a detached `spawn_blocking` release the
   admission charge, or does that require `sender.discard()`? Answering it needs
   `ring_transport.rs` and the transport crate. (unresolved, needs 2b)
@@ -629,6 +639,7 @@ Impact: the cap is the only thing between a post-commit peer and a 4 GiB
 allocation, and the sentinel is the one read on this socket with no deadline, so
 the two properties are what keep an idle authenticated connection cheap.
 Open questions:
+
 - Should `read_message_unbounded` be renamed to say what it actually is,
   time-unbounded and length-capped? The current name invites the exact wrong
   conclusion, and the re-scope document drew it. (needs human input)
@@ -675,6 +686,7 @@ alias and replay-claim checks into the native boundary, so the native side is no
 the stronger one. The weaker boundary is the managed Rust client. Part 1's record
 should be re-read with that in mind rather than assumed still-oriented.
 Open questions:
+
 - Can an aliased grant pair actually arise? The only producer is
   `ring_transport.rs:324-327`, which encodes two distinct rings, so today this is
   latent. It becomes live under a rogue or impersonating host, which is the
@@ -718,6 +730,7 @@ escalation, but it does mean the setup socket is not the only way into the ring,
 and any reasoning that starts "the peer must have authenticated" is unsound for
 in-process callers.
 Open questions:
+
 - Is `attach` intended as production surface, test surface, or a
   worker-thread re-attach path? `create_test_pair` at `lib.rs:631` suggests the
   test reading. (needs human input)

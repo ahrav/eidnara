@@ -12,10 +12,10 @@
  * The full entry must not load in subagents because its handlers can recursively spawn subagents and alter subagent prompts.
  * The full entry injects key files, project documentation, user profiles, and session history into subagent prompts.
  *
- * `--no-session` children receive `ctx_search`; `todowrite` is enabled unless configuration disables it.
- * `ctx_search` provides read-only search over shared memories, messages, and Git.
+ * `--no-session` children receive `eidnara_search`; `todowrite` is enabled unless configuration disables it.
+ * `eidnara_search` provides read-only search over shared project memories.
  *
- * Hidden child sessions omit `ctx_note` and `ctx_expand` because they have no useful transcript or parent note ID.
+ * Hidden child sessions omit `eidnara_note` because they have no parent note ID.
  *
  * `PiSubagentRunner` starts child Pi processes with `EIDNARA_PI_SUBAGENT=1` and this entry's `--extension` path.
  *
@@ -61,7 +61,7 @@ export default function eidnaraSubagentExtension(pi: ExtensionAPI): void {
                 resolveProjectIdentity: (ctx) =>
                     resolveProjectIdentityForSession(ctx.cwd, cfg.allow_home_project),
                 memoryToolEnabled: false,
-                // Hidden child sessions omit `ctx_note` and `ctx_expand` because they have no useful transcript or parent note ID.
+                // Hidden child sessions have no parent note ID.
                 sessionScopedToolsDisabled: true,
                 todowriteEnabled: cfg.todowrite.enabled !== false,
                 todowriteCommandEnabled: false,
@@ -69,8 +69,8 @@ export default function eidnaraSubagentExtension(pi: ExtensionAPI): void {
             });
 
             log(
-                `[pi-subagent] registered tools: ctx_search${cfg.todowrite.enabled !== false ? ", todowrite" : ""}` +
-                    ` (ctx_note omitted: --no-session child; memory=${cfg.memory.enabled})`,
+                `[pi-subagent] registered tools: eidnara_search${cfg.todowrite.enabled !== false ? ", todowrite" : ""}` +
+                    ` (eidnara_note omitted: --no-session child; memory=${cfg.memory.enabled})`,
             );
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);

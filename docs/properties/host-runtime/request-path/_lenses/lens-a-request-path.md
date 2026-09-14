@@ -28,12 +28,12 @@ verified here, not assumed.
    `runtime.rs:118-119` claims the reserved pools are "Zero-permit when no
    module declared a reservation, and then unreachable because every route is
    general-class". That comment is not a reachability answer:
-   `broca/mod.rs:164-176` declares `route_class: RouteClass::Reserved` with
+   `model_execution/mod.rs:164-176` declares `route_class: RouteClass::Reserved` with
    `RESERVED_PENDING_REQUESTS = 96` and `RESERVED_HANDLER_TASKS = 96`
-   (`broca/config.rs:185`, `:188`), and `serve.rs:575` composes that exact
-   Broca component. Both permit classes are live in production.
+   (`model_execution/config.rs:185`, `:188`), and `serve.rs:575` composes that exact
+   ModelExecution component. Both permit classes are live in production.
 3. **Only two of this sub-part's five test binaries run in CI.** Every
-   `host-runtime` invocation in `the source repository `ci.yml` workflow` carries a `--test` filter:
+   `host-runtime` invocation in `the source repository`ci.yml`workflow` carries a `--test` filter:
    `:132-134`, `:178-179`, `:187`, `:190`. The named binaries are `client`,
    `lifecycle`, `shm_failure_modes`, `shm_soak`, plus `--doc`. So
    `tests/dispatch.rs`, `tests/routing.rs`, `tests/handler_contract.rs`, and
@@ -164,9 +164,9 @@ returning (`dispatch.rs:934-937`). No handler callback runs on that path.
 | Bound | Value | Scope | Acquisition |
 | --- | --- | --- | --- |
 | `task_permits` | `max_handler_tasks` (default 256) minus reservations | host-global, general class | `try_acquire_owned` on the read loop |
-| `reserved_task_permits` | 96 (Broca) | host-global, reserved class | same |
+| `reserved_task_permits` | 96 (ModelExecution) | host-global, reserved class | same |
 | `pending_permits` | `max_pending_requests` (default 1024) minus reservations | host-global, general class | same |
-| `reserved_pending_permits` | 96 (Broca) | host-global, reserved class | same |
+| `reserved_pending_permits` | 96 (ModelExecution) | host-global, reserved class | same |
 
 Defaults at `config.rs:131-132`; pool construction at `runtime.rs:905-912`.
 All four are **host-global, not per-generation**, so one connection can consume
@@ -412,6 +412,7 @@ answered. Protocol §10.1 makes an unobserved terminal `outcome_unknown` on the
 client side; the host has no matching classification, so the two ends cannot be
 reconciled after a close.
 Open questions:
+
 - Should routed terminals carry a `written` hook for metering, given the hook
   is a boxed closure per frame? (needs human input)
 
@@ -452,6 +453,7 @@ nothing was answered. Combined with Part 2d's finding that a clean host close
 and a transport failure share one code, the client cannot attribute the loss,
 and any effect the handler already applied is invisible to it.
 Open questions:
+
 - Does any production handler use `output_from_writer` with a computed
   `exact_len` that could disagree with its serializer? That is `daemon`'s
   side of the boundary. (unresolved, needs an `daemon` audit)
@@ -489,6 +491,7 @@ the fourth part of the catalog to find it. A handler failure reaches the client
 as a terminal success with an empty body. The client cannot distinguish it from
 a legitimately empty result, so it will not retry and will not surface an error.
 Open questions:
+
 - Does any client treat an empty-body `Response` as a protocol violation? That
   is Part 2d's and Part 5's surface. (unresolved, needs a client-side check)
 
@@ -566,6 +569,7 @@ three exits there is no frame at all, so that remedy never triggers and the
 client burns its full 30-second route deadline. Repeated bind panics therefore
 cost one route deadline each.
 Open questions:
+
 - Is the `CloseWins` silent exit reachable on a generation that stays live
   afterwards, or does every producer of that decision also retire the
   generation? `settle_route` is called from host shutdown, so the host is at
@@ -603,6 +607,7 @@ correlation under bounded route deadline" and `server_busy` "with backoff". A
 draining host therefore invites un-backed-off `route.open` retries from exactly
 the clients it is trying to shed, while backing off their routed traffic.
 Open questions:
+
 - Which code does the protocol intend for a `route.open` during shutdown? §12
   step 1 names `server_busy` for routed requests and is silent on `route.open`;
   §8.3 reserves `target_unavailable` for route admission failures such as
@@ -644,6 +649,7 @@ Impact: Handler-task capacity is reclaimed only by handler cooperation, client
 timeout can hold all 256 general task permits, at which point every other
 route's traffic gets `server_busy` while the host reports itself healthy.
 Open questions:
+
 - Should the host own a request deadline at all, given protocol §11's rule that
   each operation owns exactly one absolute deadline and it assigns the request
   deadline to the client? Adding one would create the multiplied timer §11
@@ -717,10 +723,10 @@ Required faults and enabling state: A client pipelining more requests than
 and the pending count exceeds the task count.
 Confidence: high - [evidence](../../evidence/req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs.md).
 Verified pool construction at `runtime.rs:905-912`, class selection at
-`dispatch.rs:873-879` from `route_tracker`'s stored class, and Broca's live
+`dispatch.rs:873-879` from `route_tracker`'s stored class, and ModelExecution's live
 96/96 reserved declaration.
-Existing check: `tests/dispatch.rs:976` `saturated_broca_reserve_cannot_consume_a_general_slot`,
-`:1074` `saturated_general_capacity_cannot_consume_the_broca_reserve`,
+Existing check: `tests/dispatch.rs:976` `saturated_model_execution_reserve_cannot_consume_a_general_slot`,
+`:1074` `saturated_general_capacity_cannot_consume_the_model_execution_reserve`,
 `tests/handler_contract.rs:323` `reservations_must_leave_one_general_slot_in_each_pool`,
 `:636` `zero_reservation_handlers_keep_single_pool_admission`. Status unaudited.
 None in CI.
@@ -728,6 +734,7 @@ Impact: All four pools are host-global, so one connection can hold every general
 permit. Per-connection fairness is not provided at this layer; if it is
 required, it is required somewhere else and nothing here supplies it.
 Open questions:
+
 - Is per-connection handler-capacity fairness owned anywhere? `connection_permits`
   bounds connection count but not per-connection dispatch share. (unresolved,
   needs sub-part 2f's `runtime.rs` and `config.rs` pass)
@@ -767,6 +774,7 @@ unbounded growth. The consequence is a stale `PendingEntry` holding a
 generation, which makes `handle_cancel` for that key a live no-op against an
 already-dead task.
 Open questions:
+
 - Does the forced path always drop the `GenerationCore` immediately afterwards?
   `close_generation` removes the connection at `dispatch.rs:1409-1413`, but
   `force_close_all_routes` does not call it. (unresolved, needs sub-part 2f)
@@ -808,6 +816,7 @@ requests, so malformed control traffic degrades application throughput on every
 connection, while a capacity-rejection flood is contained per generation. The
 two attack surfaces have different blast radii for the same client behaviour.
 Open questions:
+
 - Protocol §8.3 says a control request is "one consumer request against the
   global unsettled bound", which the semantic path honours. Is charging
   malformed traffic to the *global* pool rather than a per-generation one the
@@ -882,7 +891,7 @@ classes. Status unaudited. Not in CI.
 Impact: The reserved class exists specifically to survive general-load
 saturation. If reserved *task* exhaustion is never constructed, the carve-out's
 second half is unverified, and `runtime.rs:118-119`'s claim that the reserved
-pools may be "unreachable" would go unchallenged even though Broca makes them
+pools may be "unreachable" would go unchallenged even though ModelExecution makes them
 live.
 Open questions: None.
 

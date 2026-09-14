@@ -31,7 +31,7 @@ witness it, not to assert C1's outcome.
   [`#[cfg(test)]` interleave hook][hook] at `:8224-8232`, whose field is
   declared at [`:2908-2911`][hook-field] with the comment that it runs where
   concurrent publication otherwise cannot interleave deterministically.
-- [`prepare_historian_fire`][prepare] loads again at [`:5013`][prepare-load];
+- [`prepare_history_summarizer_fire`][prepare] loads again at [`:5013`][prepare-load];
   on the ordinary arm it is called at [`:8336-8338`][prepare-b]. After an
   awaited inline firing the handler reruns `run_transform` and reloads the
   floor ([`:8264-8271`][rerun]).
@@ -40,12 +40,12 @@ witness it, not to assert C1's outcome.
   comments there state that a publish is the only event that advances the
   floor and that abandon also bumps `row_version`, which is why the floor
   rather than the version is compared.
-- The other actor in the existing test is the historian publish:
-  [`publish_historian_chunk`][publish] commits through a second handle and
+- The other actor in the existing test is the history_summarizer publish:
+  [`publish_history_summarizer_chunk`][publish] commits through a second handle and
   drains afterwards ([`:10762-10771`][publish-drain]).
 - [`handler_emergency_refolds_when_active_run_publishes_before_live_wait_capture`][t-emergency]
   installs the hook at [`:34942-34945`][t-hook-install] to release a blocked
-  producer and wait until the store shows `historian.state == Idle`, so the
+  producer and wait until the store shows `history_summarizer.state == Idle`, so the
   publish lands inside the window; a second test installs the hook at
   [`:35389-35392`][t-hook-second] to mutate snapshots.
 - Every load in the window goes through [`MemoryStore::load`][load], which
@@ -62,9 +62,9 @@ floors. C1 then passes for both the current design and a single-load design.
 ## Timing windows and dependencies
 
 The window is between the transform's commit and
-[`prepare_historian_fire`][prepare]
+[`prepare_history_summarizer_fire`][prepare]
 or the [floor check][floor-b]. Entering it needs a concurrent writer with its
-own store handle: a historian publish, a wrapup recut, or a state sync. The
+own store handle: a history_summarizer publish, a wrapup recut, or a state sync. The
 hook is the only deterministic seam at HEAD and is compiled out of release
 builds.
 
@@ -129,12 +129,12 @@ restores this upstream order and gives W11 a separate post-commit gate.
 The [emergency interleave test][marker-test] now carries the marker. Inside the
 `between_transform_and_prepare` hook it reads the `row_version` the transform
 committed, releases the blocked producer, waits for the publish to leave the
-historian idle, and records the `row_version` that publish committed; after
+history_summarizer idle, and records the `row_version` that publish committed; after
 the pass it asserts the published version exceeds the transform's. Both values
 come from the store through the test's own handle, not from the pass's
 post-commit read, which is C1's subject. The hook runs after the Emergency95
 [pre-floor read][pre-floor-live], so the publish lands between that read and
-`prepare_historian_fire`'s load; the [final floor read][floor-live] is a
+`prepare_history_summarizer_fire`'s load; the [final floor read][floor-live] is a
 scalar read after this change and still observes the publish: the response
 carries the fold.
 
@@ -156,7 +156,7 @@ temporary earlier C5 hook position in `d6060f79` is historical, not the final se
 
 `handler_emergency_refolds_when_active_run_publishes_before_live_wait_capture`
 still records both row versions through the test's store reference, releases
-the blocked producer, waits for the durable historian state to become idle,
+the blocked producer, waits for the durable history_summarizer state to become idle,
 and asserts `published > transform_committed`. These are observations outside
 the pass's own read. The test uses an `Arc` clone of the store, not a separately
 opened SQLite connection, and does not capture the publisher's return value
@@ -185,7 +185,7 @@ Both source versions require four scalar reads in this witness. Upstream's
 [assertion](https://github.com/ahrav/eidnara/blob/e451a2b4/crates/daemon/src/lib.rs#L37731-L37750)
 explicitly distinguishes those four reads from the six-read Busy path excluded
 by the hook. The rebased [Busy test][busy-live] separately requires six reads:
-live-completion refold and preparation add a historian-phase read and floor
+live-completion refold and preparation add a history_summarizer-phase read and floor
 read before the inline follow-up. The [post-publish witness][post-publish-live]
 still requires four. The rebased Emergency95 group reports four passes with
 both oracles unchanged; no count was relaxed to accept the other path.

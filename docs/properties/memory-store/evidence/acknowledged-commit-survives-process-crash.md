@@ -57,11 +57,11 @@ CAS itself.
 
 The unrecoverable variant is a write whose *effect* was communicated outward
 before the crash. `commit_state_import` (`lib.rs:7145-7205`) records
-`state_imports` in the same transaction as the compartments, so replay is
-idempotent by design. But `deliver_historian_side_channel`
+`state_imports` in the same transaction as the history_segments, so replay is
+idempotent by design. But `deliver_history_summarizer_side_channel`
 (`lib.rs:9662-9718`) commits the domain insert and the delivered mark together;
 if that commit is lost, the outbox row reappears as undelivered and
-`insert_historian_events_tx` (`lib.rs:12388-12409`) runs a plain `INSERT` with
+`insert_history_summarizer_events_tx` (`lib.rs:12388-12409`) runs a plain `INSERT` with
 no `OR IGNORE` and no unique constraint on the outbox identity. Loss of the
 commit is safe there (nothing was inserted either). Loss of an fsync *after* a
 partial WAL flush is not a case SQLite permits, so the residual risk is

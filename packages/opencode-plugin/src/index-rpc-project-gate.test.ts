@@ -46,12 +46,12 @@ describe("RPC server project gate in the plugin entry", () => {
         directory = mkdtempSync(join(tmpdir(), "eidnara-rpc-gate-project-"));
         configHome = mkdtempSync(join(tmpdir(), "eidnara-rpc-gate-config-"));
         dataHome = mkdtempSync(join(tmpdir(), "eidnara-rpc-gate-data-"));
-        for (const key of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "EIDNARA_BROCA_CHILD"]) {
+        for (const key of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "EIDNARA_MODEL_EXECUTION_CHILD"]) {
             savedEnv[key] = process.env[key];
         }
         process.env.XDG_CONFIG_HOME = configHome;
         process.env.XDG_DATA_HOME = dataHome;
-        delete process.env.EIDNARA_BROCA_CHILD;
+        delete process.env.EIDNARA_MODEL_EXECUTION_CHILD;
         rpcStartSpy = spyOn(rpcServer.EidnaraRpcServer.prototype, "start").mockImplementation(
             async () => {},
         );

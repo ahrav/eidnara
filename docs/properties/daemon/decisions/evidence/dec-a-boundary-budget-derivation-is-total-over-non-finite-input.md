@@ -85,7 +85,7 @@ The `is_finite` pre-check is load-bearing: `f64::clamp` returns NaN when `self` 
 NaN, so without this guard a NaN usage would propagate into
 `raw_n = (usable * ALPHA * (1.0 - usage / 100.0)).round()` at `:382`.
 
-**The one unvalidated float.** `check_compartment_trigger_with_index`
+**The one unvalidated float.** `check_history_segment_trigger_with_index`
 (`boundary.rs:751-882`) takes the caller's budget as-is at `:756-761`:
 
 ```
@@ -112,7 +112,7 @@ passing `Some(f64::NAN)` bypasses every guard. Tracing where it would go:
   would be NaN, and `TriggerProgress` is a diagnostics structure. That is the only
   place a NaN could surface.
 
-Production never passes `Some`. `lib.rs:4998` inside `prepare_historian_fire`:
+Production never passes `Some`. `lib.rs:4998` inside `prepare_history_summarizer_fire`:
 
 ```
 trigger_budget: None,
@@ -181,7 +181,7 @@ here because all three functions are pure and take scalars.
    `ceiling_n`, `headroom`, and `reserve` are all finite.
 3. `clamp_percentage` over the same non-finite set, asserting the result is in
    `[0.0, 100.0]`.
-4. The `trigger_budget` passthrough: `check_compartment_trigger` with
+4. The `trigger_budget` passthrough: `check_history_segment_trigger` with
    `trigger_budget: Some(f64::NAN)` and a non-empty message set, asserting that the
    returned `TriggerProgress.tail_size_bar` is finite. That case fails today, which
    is why the record's open question asks whether the field should be validated.
@@ -192,7 +192,7 @@ beside them.
 
 ## Investigation log
 
-### Q: Should `check_compartment_trigger_with_index` validate `ctx.trigger_budget`?
+### Q: Should `check_history_segment_trigger_with_index` validate `ctx.trigger_budget`?
 
 - Sources examined: `boundary.rs:756-761` and `:380-382` (both `unwrap_or_else`
   sites); `boundary.rs:222-224` (the `trigger_budget` field declaration on

@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 The source catalog identified an adjacent-only `Vec::dedup` call on an ordered
-historian fallback chain. That defect premise is invalidated by the implementation
+history_summarizer fallback chain. That defect premise is invalidated by the implementation
 at `74044960ee91641dec95c8552f15282844a18b13`. The record retains the uniqueness
 guarantee and its existing check; it is not an open defect campaign.
 

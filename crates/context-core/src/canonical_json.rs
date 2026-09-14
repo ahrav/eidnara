@@ -20,9 +20,9 @@ use std::fmt::Write as _;
 use serde_json::{Number, Value};
 use sha2::{Digest, Sha256};
 
-/// Version of the input shape a Dreamer request digest is computed over.
-pub const DREAMER_REQUEST_ENCODING_VERSION: u32 = 1;
-pub const DREAMER_REQUEST_DIGEST_PROTOCOL: &str = "eidnara-dreamer-request-v1";
+/// Version of the input shape a MemoryClassifier request digest is computed over.
+pub const MEMORY_CLASSIFIER_REQUEST_ENCODING_VERSION: u32 = 1;
+pub const MEMORY_CLASSIFIER_REQUEST_DIGEST_PROTOCOL: &str = "eidnara-memory_classifier-request-v1";
 
 /// Both runtimes represent integers through 2^53 - 1 exactly.
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
@@ -134,10 +134,10 @@ fn protocol_digest(protocol: &str, value: &Value) -> Result<String, ContractErro
     Ok(lower_hex(&hasher.finalize()))
 }
 
-/// Computes the digest a Dreamer receipt binds its request to, over the
+/// Computes the digest a MemoryClassifier receipt binds its request to, over the
 /// effect-defining inputs the caller assembled.
-pub fn compute_dreamer_request_digest(inputs: &Value) -> Result<String, ContractError> {
-    protocol_digest(DREAMER_REQUEST_DIGEST_PROTOCOL, inputs)
+pub fn compute_memory_classifier_request_digest(inputs: &Value) -> Result<String, ContractError> {
+    protocol_digest(MEMORY_CLASSIFIER_REQUEST_DIGEST_PROTOCOL, inputs)
 }
 
 /// Reports whether `text` contains exactly `expected_len` lowercase ASCII hex bytes.
@@ -168,16 +168,20 @@ mod tests {
             "eidnara-canonical-json-contract-v1"
         );
         assert_eq!(
-            DREAMER_REQUEST_DIGEST_PROTOCOL,
-            "eidnara-dreamer-request-v1"
+            MEMORY_CLASSIFIER_REQUEST_DIGEST_PROTOCOL,
+            "eidnara-memory_classifier-request-v1"
         );
         assert_eq!(
-            fixture["dreamerRequestDigestProtocol"].as_str().unwrap(),
-            DREAMER_REQUEST_DIGEST_PROTOCOL
+            fixture["memory_classifierRequestDigestProtocol"]
+                .as_str()
+                .unwrap(),
+            MEMORY_CLASSIFIER_REQUEST_DIGEST_PROTOCOL
         );
         assert_eq!(
-            fixture["dreamerRequestEncodingVersion"].as_u64().unwrap(),
-            u64::from(DREAMER_REQUEST_ENCODING_VERSION)
+            fixture["memory_classifierRequestEncodingVersion"]
+                .as_u64()
+                .unwrap(),
+            u64::from(MEMORY_CLASSIFIER_REQUEST_ENCODING_VERSION)
         );
     }
 
@@ -198,15 +202,15 @@ mod tests {
     /// The digest is the documented formula over the canonical bytes, computed
     /// here independently of `protocol_digest` and of `lower_hex`.
     #[test]
-    fn dreamer_request_digest_is_sha256_over_protocol_and_canonical_bytes() {
+    fn memory_classifier_request_digest_is_sha256_over_protocol_and_canonical_bytes() {
         for case in fixture()["canonicalization"].as_array().unwrap() {
             let canonical = case["canonical"].as_str().unwrap();
             let mut hasher = Sha256::new();
-            hasher.update(b"eidnara-dreamer-request-v1\n");
+            hasher.update(b"eidnara-memory_classifier-request-v1\n");
             hasher.update(canonical.as_bytes());
             let expected = format!("{:x}", hasher.finalize());
             assert_eq!(
-                compute_dreamer_request_digest(&case["value"]).unwrap(),
+                compute_memory_classifier_request_digest(&case["value"]).unwrap(),
                 expected,
                 "case {}",
                 case["name"]
@@ -222,12 +226,12 @@ mod tests {
         let b = serde_json::json!({"a": [1, 2], "b": 1});
         let c = serde_json::json!({"a": [2, 1], "b": 1});
         assert_eq!(
-            compute_dreamer_request_digest(&a).unwrap(),
-            compute_dreamer_request_digest(&b).unwrap()
+            compute_memory_classifier_request_digest(&a).unwrap(),
+            compute_memory_classifier_request_digest(&b).unwrap()
         );
         assert_ne!(
-            compute_dreamer_request_digest(&a).unwrap(),
-            compute_dreamer_request_digest(&c).unwrap()
+            compute_memory_classifier_request_digest(&a).unwrap(),
+            compute_memory_classifier_request_digest(&c).unwrap()
         );
     }
 

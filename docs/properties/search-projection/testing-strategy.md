@@ -45,7 +45,7 @@ Primary property:
 
 - [embedding-input-is-rejected-before-inference](embedding/catalog.md#embedding-input-is-rejected-before-inference)
 
-Combine real tokenizer preflight with the deterministic Synapse engine's
+Combine real tokenizer preflight with the deterministic LocalEmbeddings engine's
 observable attempt boundary. Take the counter baseline after certification.
 Use valid control input, exact-token limit, limit plus one while bytes fit,
 byte-cap edge/overflow, unavailable count, and unavailable identity. Compare
@@ -193,7 +193,7 @@ gated reads and no prune horizon; direct tip reads retain their own rule.
 Negative controls accept stale projected grants, publish after source loss,
 bypass one hook gate, silently abandon a pending consumer, or rewrite canonical
 facts during repair. N1.3 source sweeps remain source-owner work, not general
-Dreamer scope. Product fences, gates, and recovery authorization remain proposed.
+MemoryClassifier scope. Product fences, gates, and recovery authorization remain proposed.
 
 ### T8. Contended backfill and shared-deadline physical census
 
@@ -280,7 +280,7 @@ post-run scope reduction is not permitted.
 
 The [source register](source-register.md#current-implementation-evidence-and-qualifications)
 links inspected current-head fixtures: kernel proof/test-support and canonical
-digest, CAS crash pattern, deterministic Synapse engine, ManualClock, real
+digest, CAS crash pattern, deterministic LocalEmbeddings engine, ManualClock, real
 daemon eligibility/serving, and generation lifecycle. Use existing proptest and
 temporary-store patterns. No broad deterministic-simulation framework or new
 development dependency is the default. Existing fixture code is reusable

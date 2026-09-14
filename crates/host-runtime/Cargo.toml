@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Directly linked host for the context, Synapse, and Broca components."
+description = "Directly linked host for the context, LocalEmbeddings, and ModelExecution components."
 
 [features]
 # `test-support` re-exports `host_status_response_json` at the crate root for downstream integration tests.
@@ -37,7 +37,7 @@ criterion = { workspace = true }
 hdrhistogram = "=7.6.0"
 
 [[test]]
-name = "broca_subprocess"
+name = "model_execution_subprocess"
 harness = false
 
 [[bench]]

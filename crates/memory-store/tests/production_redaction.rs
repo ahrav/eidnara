@@ -16,7 +16,7 @@ use memory_store::{
     AuthoritySeedRow, DURABLE_WRITE_REGISTRY, FacadeMutationOutcome, LineageAnchor,
     LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MemoryStore,
     MemoryStoreError, ModuleMeta, NoteEvaluationInput, NoteInput, NoteTransitionInput,
-    NoteWriteInput, StoredCompartment, TailHygieneBaseline,
+    NoteWriteInput, StoredHistorySegment, TailHygieneBaseline,
 };
 use rusqlite::{Connection, backup::Backup};
 use scan_audit::{ScanAuditCounts, scan_audit_counts};
@@ -216,20 +216,20 @@ fn active_scan_audit_expires_with_its_session_note_owner() {
     assert_eq!(scan_audit_counts(temp.path()), ScanAuditCounts::EMPTY);
 
     store
-        .append_compartments(
+        .append_history_segments(
             "source",
-            &[StoredCompartment {
+            &[StoredHistorySegment {
                 sequence: 1,
                 start_message: 1,
                 end_message: 3,
                 start_message_id: "m1#0".to_string(),
                 end_message_id: "m3#0".to_string(),
-                content: "copied password=compartment-secret".to_string(),
-                ..StoredCompartment::default()
+                content: "copied password=history_segment-secret".to_string(),
+                ..StoredHistorySegment::default()
             }],
         )
         .unwrap();
-    // The compartment prepares session_id, start_message_id, end_message_id, title, and
+    // The history_segment prepares session_id, start_message_id, end_message_id, title, and
     // content; only content carries a detection.
     assert_eq!(
         scan_audit_counts(temp.path()),
@@ -895,52 +895,6 @@ fn authority_routes_reject_new_secret_identities_and_preserve_exact_existing_bin
 }
 
 #[test]
-fn mural_artifacts_reject_secret_bytes_hashes_and_new_identity() {
-    let temp = tempfile::tempdir().unwrap();
-    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-mural");
-    let store = MemoryStore::open(&descriptor).unwrap();
-
-    for (project, data, hash) in [
-        (
-            "password=project-secret",
-            "data:image/png;base64,YQ==",
-            "hash",
-        ),
-        ("project", "password=mural-secret", "hash"),
-        (
-            "project",
-            "data:image/png;base64,YQ==",
-            "password=hash-secret",
-        ),
-    ] {
-        let error = store
-            .upsert_project_mural_artifact(project, data.as_bytes(), hash, 1)
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            memory_store::MemoryStoreError::Redaction(_)
-        ));
-        assert!(!error.to_string().contains("secret"));
-    }
-    let persisted: i64 = Connection::open(temp.path().join("memory.sqlite"))
-        .unwrap()
-        .query_row("SELECT COUNT(*) FROM project_mural_artifacts", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(
-        persisted, 0,
-        "a rejected artifact was stored under some project key"
-    );
-    assert!(
-        store
-            .load_project_mural_artifact("project")
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[test]
 fn workspace_member_seed_redacts_share_categories_and_rejects_secret_identities() {
     let temp = tempfile::tempdir().unwrap();
     let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-workspace");
@@ -1580,11 +1534,12 @@ fn new_idempotency_identities_reject_without_substitution_or_collapse() {
 }
 
 #[test]
-fn compartment_content_redacts_and_new_message_identities_reject() {
+fn history_segment_content_redacts_and_new_message_identities_reject() {
     let temp = tempfile::tempdir().unwrap();
-    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-compartment");
+    let descriptor =
+        MemoryStore::test_descriptor(temp.path(), "production-redaction-history_segment");
     let store = MemoryStore::open(&descriptor).unwrap();
-    let compartment = StoredCompartment {
+    let history_segment = StoredHistorySegment {
         sequence: 1,
         start_message: 1,
         end_message: 2,
@@ -1593,13 +1548,13 @@ fn compartment_content_redacts_and_new_message_identities_reject() {
         title: "password=title-secret".to_string(),
         content: "password=content-secret".to_string(),
         p1: Some("password=p1-secret".to_string()),
-        ..StoredCompartment::default()
+        ..StoredHistorySegment::default()
     };
 
     store
-        .replace_compartments("session", std::slice::from_ref(&compartment))
+        .replace_history_segments("session", std::slice::from_ref(&history_segment))
         .unwrap();
-    let stored = store.load_compartments("session").unwrap();
+    let stored = store.load_history_segments("session").unwrap();
     assert_eq!(stored[0].title, "password=<REDACTED:password>");
     assert_eq!(stored[0].content, "password=<REDACTED:password>");
     assert_eq!(
@@ -1608,16 +1563,16 @@ fn compartment_content_redacts_and_new_message_identities_reject() {
     );
 
     // A non-overlapping range exercises redaction validation instead of overlap validation.
-    let rejected = StoredCompartment {
+    let rejected = StoredHistorySegment {
         sequence: 2,
         start_message: 3,
         end_message: 4,
         start_message_id: "password=identity-secret".to_string(),
         end_message_id: "message-4".to_string(),
-        ..compartment
+        ..history_segment
     };
     let error = store
-        .append_compartments("session", &[rejected])
+        .append_history_segments("session", &[rejected])
         .unwrap_err();
     assert!(
         matches!(
@@ -1627,7 +1582,7 @@ fn compartment_content_redacts_and_new_message_identities_reject() {
         "{error:?}"
     );
     assert!(!error.to_string().contains("identity-secret"));
-    assert_eq!(store.load_compartments("session").unwrap().len(), 1);
+    assert_eq!(store.load_history_segments("session").unwrap().len(), 1);
 }
 
 #[test]
@@ -1670,7 +1625,7 @@ fn note_transition_content_redacts_and_compiled_artifacts_reject() {
             project_path: "project",
             route_project_root: None,
             session_id: "session",
-            content: "smart note",
+            content: "conditional note",
             surface_condition: Some("always"),
             anchor_block_id: None,
             now_ms: 3,

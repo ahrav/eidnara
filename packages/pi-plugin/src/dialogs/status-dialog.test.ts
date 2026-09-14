@@ -11,8 +11,8 @@ import { buildPiStatusDetail, showStatusDialog } from "./status-dialog";
 
 const DAEMON_STATUS: RustSessionStatus = {
     usage: { current_total_input_tokens: 42_000, context_limit_tokens: 100_000 },
-    compartment_count: 4,
-    compartment_tokens: 23,
+    history_segment_count: 4,
+    history_segment_tokens: 23,
     pending_drop_count: 2,
     wrapup_active: true,
     tail_hygiene: {
@@ -106,7 +106,7 @@ describe("Pi status dialog", () => {
         expect(detail.inputTokens).toBe(50_000);
     });
 
-    it("maps the daemon status onto usage, compartments, pending drops, hygiene, and historian and holds storage-only fields neutral", () => {
+    it("maps the daemon status onto usage, history_segments, pending drops, hygiene, and history_summarizer and holds storage-only fields neutral", () => {
         const sessionId = "ses-status-daemon";
         const detail = buildPiStatusDetail(
             fakePi,
@@ -119,16 +119,16 @@ describe("Pi status dialog", () => {
         expect(detail.inputTokens).toBe(42_000);
         expect(detail.contextLimit).toBe(100_000);
         expect(detail.usagePercentage).toBe(42);
-        expect(detail.compartmentCount).toBe(4);
-        expect(detail.compartmentTokens).toBe(23);
+        expect(detail.history_segmentCount).toBe(4);
+        expect(detail.history_segmentTokens).toBe(23);
         expect(detail.pendingOpsCount).toBe(2);
-        expect(detail.historianRunning).toBe(true);
+        expect(detail.history_summarizerRunning).toBe(true);
         expect(detail.tailHygiene).toMatchObject({ u: 65_100, t: 100_000, evaluable: true });
         expect(detail.historyBlockTokens).toBe(23);
-        // Compartments carry the daemon's count; the conversation bucket absorbs the remainder.
+        // HistorySegments carry the daemon's count; the conversation bucket absorbs the remainder.
         expect(
             detail.systemPromptTokens +
-                detail.compartmentTokens +
+                detail.history_segmentTokens +
                 detail.conversationTokens +
                 detail.toolDefinitionTokens,
         ).toBe(42_000);
@@ -136,7 +136,7 @@ describe("Pi status dialog", () => {
         expect(detail).toMatchObject({
             memoryBlockCount: 0,
             sessionNoteCount: 0,
-            readySmartNoteCount: 0,
+            readyConditionalNoteCount: 0,
             lastTransformError: null,
             isSubagent: false,
             activeTags: 0,
@@ -159,9 +159,9 @@ describe("Pi status dialog", () => {
         await showStatusDialog(fakePi, ctx as never, deps(), daemonSource(DAEMON_STATUS));
         expect(text()).toContain("Hygiene 65.1% · 65,100 / 100,000 tok");
         expect(text()).toContain("Conversation includes model Reasoning; hygiene excludes it");
-        expect(text()).toContain("Counts: 4 compartments");
+        expect(text()).toContain("Counts: 4 history_segments");
         expect(text()).toContain("Pending drops: 2");
-        expect(text()).toContain("Historian: running");
+        expect(text()).toContain("HistorySummarizer: running");
         expect(text()).not.toContain("Context:");
     });
 
@@ -169,7 +169,7 @@ describe("Pi status dialog", () => {
         const sessionId = "ses-status-refresh";
         const settled: RustSessionStatus = {
             ...DAEMON_STATUS,
-            compartment_count: 5,
+            history_segment_count: 5,
             pending_drop_count: 0,
             wrapup_active: false,
         };
@@ -187,18 +187,18 @@ describe("Pi status dialog", () => {
                 deps(),
                 daemonSource(DAEMON_STATUS, () => (answers.shift() ?? (async () => settled))()),
             );
-            expect(text()).toContain("Historian: running");
+            expect(text()).toContain("HistorySummarizer: running");
 
             reset();
             await refresh();
-            expect(text()).toContain("Counts: 5 compartments");
+            expect(text()).toContain("Counts: 5 history_segments");
             expect(text()).toContain("Pending drops: 0");
-            expect(text()).toContain("Historian: idle");
+            expect(text()).toContain("HistorySummarizer: idle");
 
             reset();
             await refresh();
-            expect(text()).toContain("Counts: 5 compartments");
-            expect(text()).toContain("Historian: idle");
+            expect(text()).toContain("Counts: 5 history_segments");
+            expect(text()).toContain("HistorySummarizer: idle");
         } finally {
             dispose();
         }
@@ -301,15 +301,15 @@ describe("Pi status dialog", () => {
             deps(),
             sessionId,
             fakeKernelResolver().kernel.snapshot("explicit_search"),
-            { ...DAEMON_STATUS, usage: {}, compartment_tokens: 50 },
+            { ...DAEMON_STATUS, usage: {}, history_segment_tokens: 50 },
         );
         expect(detail.inputTokens).toBe(100);
         expect(detail.systemPromptTokens).toBeGreaterThan(0);
-        expect(detail.compartmentTokens).toBeGreaterThan(0);
+        expect(detail.history_segmentTokens).toBeGreaterThan(0);
         expect(detail.conversationTokens).toBeGreaterThanOrEqual(0);
         expect(
             detail.systemPromptTokens +
-                detail.compartmentTokens +
+                detail.history_segmentTokens +
                 detail.conversationTokens +
                 detail.toolDefinitionTokens,
         ).toBe(100);
@@ -326,7 +326,7 @@ describe("Pi status dialog", () => {
         );
         expect(detail.inputTokens).toBe(0);
         expect(detail.systemPromptTokens).toBe(0);
-        expect(detail.compartmentTokens).toBe(0);
+        expect(detail.history_segmentTokens).toBe(0);
         expect(detail.conversationTokens).toBe(0);
         expect(detail.toolDefinitionTokens).toBe(0);
     });

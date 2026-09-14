@@ -2,21 +2,21 @@ import type { ToolDefinition } from "@opencode-ai/plugin";
 import type { EidnaraPluginConfig } from "../config";
 import { isCompactionEnabled } from "../config/agent-disable";
 import { resolveProjectIdentityForSession } from "../features/context/project-identity";
-import { setCtxReduceRegisteredGlobally } from "../hooks/context/ctx-reduce-availability";
+import { setEidnaraReduceRegisteredGlobally } from "../hooks/context/eidnara-reduce-availability";
 import { kernelClientResolver } from "../hooks/context/kernel-transport";
 import type { SessionDirectoryResolver } from "../hooks/context/session-directory";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../shared/prompt-surface-runtime";
 import { createPromptSurfaceRuntime } from "../shared/prompt-surface-runtime";
-import { CTX_MEMORY_ACTIONS, createCtxMemoryTools } from "../tools/ctx-memory";
-import { createCtxNoteTools } from "../tools/ctx-note";
-import { createCtxReduceTools } from "../tools/ctx-reduce";
-import { createCtxSearchTools } from "../tools/ctx-search";
+import { createEidnaraMemoryTools, EIDNARA_MEMORY_ACTIONS } from "../tools/eidnara-memory";
+import { createEidnaraNoteTools } from "../tools/eidnara-note";
+import { createEidnaraReduceTools } from "../tools/eidnara-reduce";
+import { createEidnaraSearchTools } from "../tools/eidnara-search";
 import { normalizeToolArgSchemas } from "./normalize-tool-arg-schemas";
 import type { RustToolBackends } from "./rust-tool-backends";
 
 /** Tool ids the registry omits when `isCompactionEnabled` reports compaction off. */
-const COMPACTION_OFF_REMOVED_TOOL_IDS = ["ctx_reduce"] as const;
+const COMPACTION_OFF_REMOVED_TOOL_IDS = ["eidnara_reduce"] as const;
 
 export function getCompactionOffRemovedToolIds(): readonly string[] {
     return COMPACTION_OFF_REMOVED_TOOL_IDS;
@@ -36,7 +36,7 @@ export function createToolRegistry(args: {
     }
 
     const compactionOff = !isCompactionEnabled(pluginConfig);
-    setCtxReduceRegisteredGlobally(!compactionOff);
+    setEidnaraReduceRegisteredGlobally(!compactionOff);
 
     const resolveProjectPath = (directory: string) =>
         resolveProjectIdentityForSession(directory, pluginConfig.allow_home_project);
@@ -44,18 +44,18 @@ export function createToolRegistry(args: {
     // Registration does not depend on daemon state; each call resolves its own client.
     const kernelClient = kernelClientResolver(pluginConfig);
     const allTools: Record<string, ToolDefinition> = {
-        ...(compactionOff ? {} : createCtxReduceTools({ rustToolBackends })),
-        ...createCtxNoteTools({ resolveProjectPath, rustToolBackends }),
-        ...createCtxSearchTools({
+        ...(compactionOff ? {} : createEidnaraReduceTools({ rustToolBackends })),
+        ...createEidnaraNoteTools({ resolveProjectPath, rustToolBackends }),
+        ...createEidnaraSearchTools({
             kernelClient,
             resolveProjectPath,
             resolveSessionDirectory: args.resolveSessionDirectory,
         }),
-        ...createCtxMemoryTools({
+        ...createEidnaraMemoryTools({
             kernelClient,
             resolveProjectPath,
             resolveSessionDirectory: args.resolveSessionDirectory,
-            allowedActions: [...CTX_MEMORY_ACTIONS],
+            allowedActions: [...EIDNARA_MEMORY_ACTIONS],
         }),
     };
 

@@ -11,10 +11,10 @@ import {
     type CompatibilityProbeResult,
     createManagedLifecyclePolicy,
     kernelReadiness,
+    local_embeddingsReadiness,
     type ManagedCompatibilityClient,
     managedProbes,
     readCompatibilitySnapshot,
-    synapseReadiness,
 } from "./managed-policy";
 import { STORAGE_HARD_BUDGET_MS } from "./policy";
 
@@ -27,7 +27,7 @@ function entry(moduleId: string, moduleVersion = "0.1.0"): CatalogEntry {
     };
 }
 
-const catalog = [entry("context"), entry("synapse"), entry("broca")];
+const catalog = [entry("context"), entry("local_embeddings"), entry("model_execution")];
 
 function peer(daemonVer = hostRelease.versions.daemon, daemonId = 7): AuthenticatedPeer {
     return {
@@ -43,7 +43,7 @@ function wireEpochs(overrides: Record<string, unknown> = {}) {
     return {
         epochs: {
             memory_render_epoch: hostRelease.epochs.memory_render,
-            compartment_render_epoch: hostRelease.epochs.compartment_render,
+            history_segment_render_epoch: hostRelease.epochs.history_segment_render,
             profile_epoch: hostRelease.epochs.profile_claude_code_anthropic,
             tagger_epoch: hostRelease.epochs.tagger,
             state_sync_epoch: hostRelease.epochs.state_sync,
@@ -109,7 +109,9 @@ describe("managed authenticated compatibility probe", () => {
         const snapshot = await readCompatibilitySnapshot(
             client({
                 catalog: catalog.map((candidate) =>
-                    candidate.module_id === "broca" ? entry("broca", "0.2.0") : candidate,
+                    candidate.module_id === "model_execution"
+                        ? entry("model_execution", "0.2.0")
+                        : candidate,
                 ),
                 calls,
             }),
@@ -752,53 +754,65 @@ describe("kernel readiness from host.status metrics", () => {
     });
 });
 
-describe("synapse readiness from host.status metrics", () => {
-    const withSynapse = (synapse: unknown) => ({
+describe("local_embeddings readiness from host.status metrics", () => {
+    const withLocalEmbeddings = (local_embeddings: unknown) => ({
         components: {
             context: { status: "ok", metrics: { storage_state: "ready" } },
-            ...(synapse === undefined ? {} : { synapse }),
+            ...(local_embeddings === undefined ? {} : { local_embeddings }),
         },
     });
 
     test("an absent component is an unproven lane, not an unsupported one", () => {
         // The fixed profile reports `unsupported` as an explicit literal, so
         // omission is never read as proof of that state.
-        expect(synapseReadiness(withSynapse(undefined))).toEqual({
+        expect(local_embeddingsReadiness(withLocalEmbeddings(undefined))).toEqual({
             state: "degraded",
-            reason: "synapse_degraded",
+            reason: "local_embeddings_degraded",
         });
-        expect(synapseReadiness({})).toEqual({
+        expect(local_embeddingsReadiness({})).toEqual({
             state: "degraded",
-            reason: "synapse_degraded",
+            reason: "local_embeddings_degraded",
         });
     });
 
     test("wire states pass through with their reasons", () => {
         for (const [state, expected] of [
             ["ready", { state: "ready", reason: "healthy" }],
-            ["starting", { state: "starting", reason: "synapse_starting" }],
-            ["degraded", { state: "degraded", reason: "synapse_degraded" }],
-            ["unsupported", { state: "unsupported", reason: "synapse_unsupported" }],
+            ["starting", { state: "starting", reason: "local_embeddings_starting" }],
+            ["degraded", { state: "degraded", reason: "local_embeddings_degraded" }],
+            ["unsupported", { state: "unsupported", reason: "local_embeddings_unsupported" }],
         ] as const) {
             expect(
-                synapseReadiness(withSynapse({ status: "ok", metrics: { synapse_state: state } })),
+                local_embeddingsReadiness(
+                    withLocalEmbeddings({
+                        status: "ok",
+                        metrics: { local_embeddings_state: state },
+                    }),
+                ),
             ).toEqual(expected);
         }
     });
 
     test("a named component without a wire state is a failure, not an absent lane", () => {
-        expect(synapseReadiness(withSynapse({ status: "failing", metrics: {} }))).toEqual({
+        expect(
+            local_embeddingsReadiness(withLocalEmbeddings({ status: "failing", metrics: {} })),
+        ).toEqual({
             state: "degraded",
-            reason: "synapse_degraded",
-        });
-        expect(synapseReadiness(withSynapse({ status: "ok", metrics: null }))).toEqual({
-            state: "degraded",
-            reason: "synapse_degraded",
+            reason: "local_embeddings_degraded",
         });
         expect(
-            synapseReadiness(
-                withSynapse({ status: "degraded", metrics: { synapse_state: "unexpected" } }),
+            local_embeddingsReadiness(withLocalEmbeddings({ status: "ok", metrics: null })),
+        ).toEqual({
+            state: "degraded",
+            reason: "local_embeddings_degraded",
+        });
+        expect(
+            local_embeddingsReadiness(
+                withLocalEmbeddings({
+                    status: "degraded",
+                    metrics: { local_embeddings_state: "unexpected" },
+                }),
             ),
-        ).toEqual({ state: "degraded", reason: "synapse_degraded" });
+        ).toEqual({ state: "degraded", reason: "local_embeddings_degraded" });
     });
 });

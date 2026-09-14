@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "e37a7ed70222f80a9f3a71e74c2b77cd2320292b91197057084c998e2ffd36fb";
+    "283aa10bdc19af0174f0f33b599cc9b76fb4613d30687e33a5c553af6d68a4e4";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -78,7 +78,7 @@ string_enum!(TaintClass {
     RepoUntrustedText => "repo_untrusted_text",
     ToolUntrustedOutput => "tool_untrusted_output",
     AssistantInference => "assistant_inference",
-    DreamerInference => "dreamer_inference",
+    MemoryClassifierInference => "memory_classifier_inference",
     Personal => "personal",
     Unclassifiable => "unclassifiable",
 });
@@ -3568,7 +3568,7 @@ const fn automatic_ceiling(source: SourceClass, taint: TaintClass) -> Maturity {
             TaintClass::RepoUntrustedText
             | TaintClass::ToolUntrustedOutput
             | TaintClass::AssistantInference
-            | TaintClass::DreamerInference
+            | TaintClass::MemoryClassifierInference
             | TaintClass::Personal
             | TaintClass::Unclassifiable,
         ) => Maturity::Candidate,
@@ -3652,7 +3652,7 @@ const fn source_allows_taint(source: SourceClass, taint: TaintClass) -> bool {
             taint,
             TaintClass::UserInferred
                 | TaintClass::AssistantInference
-                | TaintClass::DreamerInference
+                | TaintClass::MemoryClassifierInference
                 | TaintClass::Personal
                 | TaintClass::Unclassifiable
         ),

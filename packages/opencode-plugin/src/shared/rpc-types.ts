@@ -39,9 +39,9 @@ export interface SidebarSnapshot {
      */
     native_compaction_active?: boolean;
     systemPromptTokens: number;
-    compartmentCount: number;
-    /** Historical compartment rows retained while native compaction owns the window. */
-    archivedCompartmentCount?: number;
+    history_segmentCount: number;
+    /** Historical history_segment rows retained while native compaction owns the window. */
+    archivedHistorySegmentCount?: number;
     /** Rows the kernel serves this project on the `explicit_search` surface. */
     memoryCount: number;
     /** True when the read behind `memoryCount` was truncated by the daemon's per-read bounds, making the count a lower bound. */
@@ -50,16 +50,16 @@ export interface SidebarSnapshot {
     memoryState: string | null;
     memoryBlockCount: number;
     pendingOpsCount: number;
-    historianRunning: boolean;
-    compartmentInProgress: boolean;
+    history_summarizerRunning: boolean;
+    history_segmentInProgress: boolean;
     sessionNoteCount: number;
-    readySmartNoteCount: number;
+    readyConditionalNoteCount: number;
     cacheTtl: string;
     /** Persistent runtime failure shown directly in the sidebar when non-null. */
     lastTransformError: string | null;
-    lastDreamerRunAt: number | null;
+    lastMemoryClassifierRunAt: number | null;
     projectIdentity: string | null;
-    compartmentTokens: number;
+    history_segmentTokens: number;
     factTokens: number;
     memoryTokens: number;
     /**
@@ -115,12 +115,12 @@ export interface SidebarSnapshot {
         processedMessages: number;
         totalMessages: number;
         passCount: number;
-        compartmentsCreated: number;
+        history_segmentsCreated: number;
         message?: string;
         note?: string;
     } | null;
-    dreamerProgress?: { task: string; processed: number; total: number } | null;
-    dreamerBacklog?: Record<string, { pending: number; total: number }>;
+    memory_classifierProgress?: { task: string; processed: number; total: number } | null;
+    memory_classifierBacklog?: Record<string, { pending: number; total: number }>;
 }
 
 /** A `+` suffix marks a truncated read; the count is a lower bound. */
@@ -199,8 +199,6 @@ export interface StatusDetail extends SidebarSnapshot {
     compressionUsage: string | null;
     /** toastDurationMs is the effective configured toast duration in ms after config resolution. */
     toastDurationMs: number;
-    /* */
-    mural?: { present: boolean; ageMs: number | null };
     /** loggerDiagnostics records runtime logger write failures observed by this plugin process. */
     loggerDiagnostics: LoggerDiagnostics;
 }

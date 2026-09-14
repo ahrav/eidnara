@@ -3,11 +3,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
     type AuthenticatedPeer,
-    BROCA_CREDENTIAL_NAMES,
     type CatalogEntry,
     HostClient,
     type HostClientOptions,
     type HostStatusSnapshot,
+    MODEL_EXECUTION_CREDENTIAL_NAMES,
     sameDaemonId,
 } from "../host-client";
 import { BootstrapError, checkPlatform, type PlatformReaders } from "./bootstrap";
@@ -36,7 +36,7 @@ export function buildManagedCredentialEnvelope(
     env: Record<string, string | undefined>,
 ): NativeStartupEnvelope {
     const credentials = Object.fromEntries(
-        BROCA_CREDENTIAL_NAMES.flatMap((name) => {
+        MODEL_EXECUTION_CREDENTIAL_NAMES.flatMap((name) => {
             const value = env[name];
             return value === undefined || value.length === 0 ? [] : [[name, value]];
         }),
@@ -74,20 +74,23 @@ function storageState(metrics: Record<string, unknown>): "ready" | "starting" | 
     return state === "ready" || state === "unavailable" ? state : "starting";
 }
 
-export type SynapseReadiness =
+export type LocalEmbeddingsReadiness =
     | { state: "ready"; reason: "healthy" }
-    | { state: "starting"; reason: "synapse_starting" }
-    | { state: "degraded"; reason: "synapse_degraded" }
-    | { state: "unsupported"; reason: "synapse_unsupported" };
+    | { state: "starting"; reason: "local_embeddings_starting" }
+    | { state: "degraded"; reason: "local_embeddings_degraded" }
+    | { state: "unsupported"; reason: "local_embeddings_unsupported" };
 
-export function synapseReadiness(metrics: Record<string, unknown>): SynapseReadiness {
-    const component = componentRecord(metrics, "synapse");
-    const state = asRecord(component?.metrics)?.synapse_state;
+export function local_embeddingsReadiness(
+    metrics: Record<string, unknown>,
+): LocalEmbeddingsReadiness {
+    const component = componentRecord(metrics, "local_embeddings");
+    const state = asRecord(component?.metrics)?.local_embeddings_state;
     if (state === "ready") return { state: "ready", reason: "healthy" };
-    if (state === "starting") return { state: "starting", reason: "synapse_starting" };
-    if (state === "unsupported") return { state: "unsupported", reason: "synapse_unsupported" };
-    // The fixed profile always carries a Synapse lane and reports `unsupported` as an explicit literal, so an absent component, like a named one with a missing or out-of-set state, is a lane that cannot prove readiness and fails rather than reading as absent or unsupported.
-    return { state: "degraded", reason: "synapse_degraded" };
+    if (state === "starting") return { state: "starting", reason: "local_embeddings_starting" };
+    if (state === "unsupported")
+        return { state: "unsupported", reason: "local_embeddings_unsupported" };
+    // The fixed profile always carries a LocalEmbeddings lane and reports `unsupported` as an explicit literal, so an absent component, like a named one with a missing or out-of-set state, is a lane that cannot prove readiness and fails rather than reading as absent or unsupported.
+    return { state: "degraded", reason: "local_embeddings_degraded" };
 }
 
 export type KernelReadiness =
@@ -342,7 +345,7 @@ async function probeManagedReadiness(root: string, budgetMs: number): Promise<Ob
     const { snapshot: compatibility, status } = probe;
     if (status === null) {
         // The probe short-circuited at the daemon or module stage, so
-        // `host.status` never ran and storage and Synapse were never
+        // `host.status` never ran and storage and LocalEmbeddings were never
         // observed. Report only what the handshake proved and leave the
         // unobserved components absent rather than asserting failures that
         // would point remediation away from the version mismatch.
@@ -353,7 +356,7 @@ async function probeManagedReadiness(root: string, budgetMs: number): Promise<Ob
     }
     const storage = storageState(status.metrics);
     const kernel = kernelReadiness(status.metrics);
-    const synapse = synapseReadiness(status.metrics);
+    const local_embeddings = local_embeddingsReadiness(status.metrics);
     return {
         ...compatibility,
         readiness: {
@@ -367,7 +370,7 @@ async function probeManagedReadiness(root: string, budgetMs: number): Promise<Ob
                           ? "storage_starting"
                           : "storage_unavailable",
             },
-            synapse,
+            local_embeddings,
             kernel,
         },
     };

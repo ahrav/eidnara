@@ -32,7 +32,7 @@ export const CHECK_IDS = [
     "compatibility.epochs",
     "compatibility.modules",
     "compatibility.proof",
-    "credentials.broca",
+    "credentials.model_execution",
     "filesystem.capacity.bootstrap",
     "filesystem.capacity.generation",
     "filesystem.permissions",
@@ -44,7 +44,7 @@ export const CHECK_IDS = [
     "platform.support",
     "readiness.kernel",
     "readiness.storage",
-    "readiness.synapse",
+    "readiness.local_embeddings",
     "readiness.transport",
 ] as const;
 
@@ -58,7 +58,7 @@ export const REMEDIATIONS = [
     "inspect_daemon_process",
     "inspect_kernel_projector",
     "inspect_storage",
-    "inspect_synapse",
+    "inspect_local_embeddings",
     "install_native_payload",
     "reinstall_eidnara",
     "report_bug",
@@ -100,8 +100,8 @@ export const FAILING_REASONS = [
     "kernel_unavailable",
     "storage_starting",
     "kernel_starting",
-    "synapse_degraded",
-    "synapse_starting",
+    "local_embeddings_degraded",
+    "local_embeddings_starting",
     "harness_unavailable",
     "stopping",
     "starting",
@@ -118,7 +118,7 @@ export const NON_FAILING_REASONS = [
     "no_required_consumer",
     "started",
     "stopped",
-    "synapse_unsupported",
+    "local_embeddings_unsupported",
 ] as const;
 
 /** `cli.readiness_states.transport` */
@@ -127,8 +127,13 @@ export const TRANSPORT_READINESS_STATES = ["ready", "starting", "unavailable"] a
 /** `cli.readiness_states.storage` */
 export const STORAGE_READINESS_STATES = ["ready", "starting", "unavailable"] as const;
 
-/** `cli.readiness_states.synapse` */
-export const SYNAPSE_READINESS_STATES = ["ready", "starting", "degraded", "unsupported"] as const;
+/** `cli.readiness_states.local_embeddings` */
+export const LOCAL_EMBEDDINGS_READINESS_STATES = [
+    "ready",
+    "starting",
+    "degraded",
+    "unsupported",
+] as const;
 
 /** `cli.readiness_states.kernel` */
 export const KERNEL_READINESS_STATES = ["ready", "starting", "unavailable"] as const;
@@ -156,7 +161,7 @@ export const INSTALL_LAYOUTS = [
 
 /** `epochs` keys */
 export const EPOCH_NAMES = [
-    "compartment_render",
+    "history_segment_render",
     "memory_render",
     "profile_claude_code_anthropic",
     "state_sync",
@@ -164,7 +169,7 @@ export const EPOCH_NAMES = [
 ] as const;
 
 /** `versions.modules` keys */
-export const MODULE_KEYS = ["broca", "context", "synapse"] as const;
+export const MODULE_KEYS = ["model_execution", "context", "local_embeddings"] as const;
 
 export type DaemonCommand = (typeof DAEMON_COMMANDS)[number];
 export type DaemonState = (typeof DAEMON_STATES)[number];
@@ -175,7 +180,7 @@ export type FailingReason = (typeof FAILING_REASONS)[number];
 export type NonFailingReason = (typeof NON_FAILING_REASONS)[number];
 export type TransportReadinessState = (typeof TRANSPORT_READINESS_STATES)[number];
 export type StorageReadinessState = (typeof STORAGE_READINESS_STATES)[number];
-export type SynapseReadinessState = (typeof SYNAPSE_READINESS_STATES)[number];
+export type LocalEmbeddingsReadinessState = (typeof LOCAL_EMBEDDINGS_READINESS_STATES)[number];
 export type KernelReadinessState = (typeof KERNEL_READINESS_STATES)[number];
 export type HarnessUnavailableReason = (typeof HARNESS_UNAVAILABLE_REASONS)[number];
 export type InstallLayout = (typeof INSTALL_LAYOUTS)[number];
@@ -214,9 +219,9 @@ export const VOCABULARY_SOURCES: ReadonlyArray<{
         json: hostRelease.cli.readiness_states.storage,
     },
     {
-        name: "cli.readiness_states.synapse",
-        tuple: SYNAPSE_READINESS_STATES,
-        json: hostRelease.cli.readiness_states.synapse,
+        name: "cli.readiness_states.local_embeddings",
+        tuple: LOCAL_EMBEDDINGS_READINESS_STATES,
+        json: hostRelease.cli.readiness_states.local_embeddings,
     },
     {
         name: "cli.readiness_states.kernel",

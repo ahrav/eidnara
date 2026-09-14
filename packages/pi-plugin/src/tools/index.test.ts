@@ -24,33 +24,45 @@ describe("registerEidnaraTools", () => {
         }> = [
             {
                 options: {},
-                tools: ["ctx_search", "ctx_memory", "ctx_note", "todowrite", "ctx_reduce"],
+                tools: [
+                    "eidnara_search",
+                    "eidnara_memory",
+                    "eidnara_note",
+                    "todowrite",
+                    "eidnara_reduce",
+                ],
                 commands: ["todos"],
             },
             {
                 options: { compactionOff: true },
-                tools: ["ctx_search", "ctx_memory", "ctx_note", "todowrite"],
+                tools: ["eidnara_search", "eidnara_memory", "eidnara_note", "todowrite"],
                 commands: ["todos"],
             },
             {
                 options: { todowriteEnabled: false },
-                tools: ["ctx_search", "ctx_memory", "ctx_note", "ctx_reduce"],
+                tools: ["eidnara_search", "eidnara_memory", "eidnara_note", "eidnara_reduce"],
                 commands: [],
             },
             // Lean subagent entries keep the tool but not the slash command.
             {
                 options: { todowriteCommandEnabled: false },
-                tools: ["ctx_search", "ctx_memory", "ctx_note", "todowrite", "ctx_reduce"],
+                tools: [
+                    "eidnara_search",
+                    "eidnara_memory",
+                    "eidnara_note",
+                    "todowrite",
+                    "eidnara_reduce",
+                ],
                 commands: [],
             },
-            // Retrieval-only sidekick subagents drop memory and session-scoped tools.
+            // Retrieval-only context_researcher subagents drop memory and session-scoped tools.
             {
                 options: {
                     memoryToolEnabled: false,
                     sessionScopedToolsDisabled: true,
                     todowriteCommandEnabled: false,
                 },
-                tools: ["ctx_search", "todowrite"],
+                tools: ["eidnara_search", "todowrite"],
                 commands: [],
             },
         ];
@@ -94,8 +106,8 @@ describe("registerEidnaraTools", () => {
         registerEidnaraTools(pi, baseOptions);
 
         const expectedFields: Record<string, string[]> = {
-            ctx_search: ["query", "limit", "sources"],
-            ctx_memory: [
+            eidnara_search: ["query", "limit", "sources"],
+            eidnara_memory: [
                 "action",
                 "content",
                 "category",
@@ -104,7 +116,7 @@ describe("registerEidnaraTools", () => {
                 "objectIds",
                 "reason",
             ],
-            ctx_note: [
+            eidnara_note: [
                 "action",
                 "content",
                 "surface_condition",
@@ -113,7 +125,7 @@ describe("registerEidnaraTools", () => {
                 "limit",
                 "offset",
             ],
-            ctx_reduce: ["drop"],
+            eidnara_reduce: ["drop"],
         };
         for (const [name, fields] of Object.entries(expectedFields)) {
             const definition = registered.get(name);
@@ -127,7 +139,7 @@ describe("registerEidnaraTools", () => {
         }
     });
 
-    it("registered ctx_note resolves the project identity from the invocation cwd", async () => {
+    it("registered eidnara_note resolves the project identity from the invocation cwd", async () => {
         const registered = new Map<string, { execute: (...args: never[]) => unknown }>();
         const pi = {
             registerTool: (tool: { name: string; execute: (...args: never[]) => unknown }) => {
@@ -149,7 +161,7 @@ describe("registerEidnaraTools", () => {
                 ctx.cwd === "/tmp/project-b" ? "git:project-b" : undefined,
         });
 
-        const noteTool = registered.get("ctx_note");
+        const noteTool = registered.get("eidnara_note");
         expect(noteTool).toBeDefined();
         const result = await noteTool?.execute(
             "call-1" as never,
@@ -187,34 +199,29 @@ function readA1GoldenTools(): Record<
         a1GoldenSectionOffset(document, A1_TOOL_SECTION_HEADING),
         a1GoldenSectionOffset(document, A1_HASH_BASELINE_HEADING),
     );
-    const headings = [...toolSection.matchAll(/^### (ctx_[a-z_]+) —.*$/gm)];
+    const headings = [...toolSection.matchAll(/^### (eidnara_[a-z_]+) —.*$/gm)];
     return Object.fromEntries(
-        headings
-            .map((heading, index) => {
-                const start = (heading.index ?? 0) + heading[0].length;
-                const end = headings[index + 1]?.index ?? toolSection.length;
-                const body = toolSection.slice(start, end);
-                const description = body.match(/\*\*Description:\*\*\s+```\n([\s\S]*?)\n```/)?.[1];
-                const parameters = body.match(
-                    /\*\*Parameters \(JSON Schema per parameter, as serialized to the provider\):\*\*\s+```json\n([\s\S]*?)\n```/,
-                )?.[1];
-                if (description === undefined || parameters === undefined) {
-                    throw new Error(`Malformed A1 golden tool section: ${heading[1]}`);
-                }
-                return [
-                    heading[1],
-                    {
-                        description,
-                        parameters: JSON.parse(parameters) as Record<string, unknown>,
-                    },
-                ] as const;
-            })
-            .filter(([toolId]) => !UNREGISTERED_CATALOG_TOOL_IDS.has(toolId)),
+        headings.map((heading, index) => {
+            const start = (heading.index ?? 0) + heading[0].length;
+            const end = headings[index + 1]?.index ?? toolSection.length;
+            const body = toolSection.slice(start, end);
+            const description = body.match(/\*\*Description:\*\*\s+```\n([\s\S]*?)\n```/)?.[1];
+            const parameters = body.match(
+                /\*\*Parameters \(JSON Schema per parameter, as serialized to the provider\):\*\*\s+```json\n([\s\S]*?)\n```/,
+            )?.[1];
+            if (description === undefined || parameters === undefined) {
+                throw new Error(`Malformed A1 golden tool section: ${heading[1]}`);
+            }
+            return [
+                heading[1],
+                {
+                    description,
+                    parameters: JSON.parse(parameters) as Record<string, unknown>,
+                },
+            ] as const;
+        }),
     );
 }
-
-/** Tool ids the prompt-surface catalog names but neither adapter builds. */
-const UNREGISTERED_CATALOG_TOOL_IDS = new Set<string>(["ctx_expand"]);
 
 function captureRegisteredTools(
     options: Parameters<typeof registerEidnaraTools>[1],
@@ -236,8 +243,8 @@ describe("registerEidnaraTools — prompt-surface registration", () => {
             ...baseOptions,
             promptSurface: { default: "full" },
         });
-        const implicitIds = [...implicit.keys()].filter((id) => id.startsWith("ctx_"));
-        const explicitIds = [...explicit.keys()].filter((id) => id.startsWith("ctx_"));
+        const implicitIds = [...implicit.keys()].filter((id) => id.startsWith("eidnara_"));
+        const explicitIds = [...explicit.keys()].filter((id) => id.startsWith("eidnara_"));
 
         expect(implicitIds.sort()).toEqual(Object.keys(golden).sort());
         expect(explicitIds.sort()).toEqual(Object.keys(golden).sort());
@@ -257,12 +264,12 @@ describe("registerEidnaraTools — prompt-surface registration", () => {
             ...baseOptions,
             promptSurface: { default: "light" },
         });
-        const registeredIds = [...full.keys()].filter((id) => id.startsWith("ctx_"));
+        const registeredIds = [...full.keys()].filter((id) => id.startsWith("eidnara_"));
         expect(registeredIds.sort()).toEqual([
-            "ctx_memory",
-            "ctx_note",
-            "ctx_reduce",
-            "ctx_search",
+            "eidnara_memory",
+            "eidnara_note",
+            "eidnara_reduce",
+            "eidnara_search",
         ]);
         for (const toolId of registeredIds) {
             expect(light.get(toolId)?.description).toBe(
@@ -284,16 +291,16 @@ describe("registerEidnaraTools — prompt-surface registration", () => {
             promptSurface: {
                 default: "full",
                 models: { "provider/model": "light" },
-                tool_descriptions: { ctx_search: "Pi custom search surface" },
+                tool_descriptions: { eidnara_search: "Pi custom search surface" },
             },
             promptSurfaceRuntime: runtime,
         });
 
-        expect(overridden.get("ctx_search")?.description).toBe("Pi custom search surface");
-        expect(overridden.get("ctx_reduce")?.description).toBe(
-            baseline.get("ctx_reduce")?.description,
+        expect(overridden.get("eidnara_search")?.description).toBe("Pi custom search surface");
+        expect(overridden.get("eidnara_reduce")?.description).toBe(
+            baseline.get("eidnara_reduce")?.description,
         );
-        for (const toolId of [...baseline.keys()].filter((id) => id.startsWith("ctx_"))) {
+        for (const toolId of [...baseline.keys()].filter((id) => id.startsWith("eidnara_"))) {
             expect(overridden.get(toolId)?.parameters).toEqual(baseline.get(toolId)?.parameters);
         }
         expect(warnings).toEqual([]);

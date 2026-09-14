@@ -89,13 +89,13 @@ not HEAD. The current disposition follows them.
 ### Q: Is the project tier supposed to be able to write this key at all?
 
 - Sources examined: `config.rs:6-7` (the header's allow-list: "may override
-  trusted memory, auto-search, caveman, promotion, and privacy settings. User-profile
-  and historian budgets remain user-tier only"); `:526-528` (project parse);
+  trusted memory, auto-search, terse_text_compression, promotion, and privacy settings. User-profile
+  and history_summarizer budgets remain user-tier only"); `:526-528` (project parse);
   `:539` (the user-profile budget's project-tier warning); `:538` (the deprecated
   `/memory/budget_tokens` project-tier warning); `CONFIGURATION.md:591` (source-catalog path, not present at HEAD), which
   carries no user-only marker for this key.
 - Findings: the header's phrasing is compatible with the injection budget being
-  project-writable, because it names only the user-profile and historian budgets
+  project-writable, because it names only the user-profile and history_summarizer budgets
   as user-tier. So the tiering is intentional. The missing range is a separate
   question from the tiering.
 - Missing evidence: none needed for the record. The record's guarantee is about

@@ -10,15 +10,15 @@ Reachability is test-only because no production RP2.1 priority driver exists.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/synapse/mod.rs:206-225` has separate query admission
+- `crates/host-runtime/src/local_embeddings/mod.rs:206-225` has separate query admission
   capacity and batch JobTable bounds but one shared FIFO CPU semaphore.
 - `mod.rs:634-668` computes the query deadline before nonblocking admission.
 - `mod.rs:678-722` waits for CPU within the tracked query worker and checks the
   deadline again before native work.
 - `mod.rs:843-871` registers batch workers on the same CPU semaphore.
-- `crates/host-runtime/tests/synapse_protocol.rs:186-233` constructs mixed
+- `crates/host-runtime/tests/local_embeddings_protocol.rs:186-233` constructs mixed
   query/batch order and asserts query, query, batch, query. It tests FIFO.
-- `crates/host-runtime/src/synapse/bundle.rs:582-604` checks coexistence of
+- `crates/host-runtime/src/local_embeddings/bundle.rs:582-604` checks coexistence of
   query memory, queue metadata, and scratch. It does not impose query priority.
 - Existing admission and request records are reused for these local gates.
 

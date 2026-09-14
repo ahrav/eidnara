@@ -15,7 +15,7 @@ import {
 const active = rustPrereqs.ok && foldInfraEnabled();
 
 describe.skipIf(!rustPrereqs.ok)("rust invariant: fold under pressure", () => {
-    it.skipIf(active)("is gated on a historian-capable qualification runner", () => {
+    it.skipIf(active)("is gated on a history_summarizer-capable qualification runner", () => {
         printSkip("fold-under-pressure", FOLD_SKIP_REASON);
         expect(foldInfraEnabled()).toBe(false);
     });

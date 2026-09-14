@@ -4,19 +4,17 @@
 
 pub mod boundary;
 pub mod canonical_memory;
-pub mod caveman;
 pub(crate) mod chunk_text;
 pub mod claim_sources;
 pub mod classify;
 pub mod codec;
 mod commit_stream;
-pub(crate) mod compartment_coverage;
+pub(crate) mod conditional_note_evaluation;
 pub(crate) mod config;
 pub mod coverage;
 pub mod decay_render;
 pub mod dispatch;
 pub(crate) mod divergence;
-pub(crate) mod dreamer_scheduler;
 pub mod edit_recipe;
 pub mod embedding_dispatch;
 pub mod embedding_publication;
@@ -25,16 +23,18 @@ pub mod git_reconcile;
 pub mod git_sources;
 pub mod harness_sources;
 pub mod healing;
-pub mod historian;
-pub mod historian_chunk;
-pub mod historian_producer;
-pub(crate) mod historian_prompt;
-pub(crate) mod historian_validate;
+pub(crate) mod history_segment_coverage;
+pub mod history_summarizer;
+pub mod history_summarizer_chunk;
+pub mod history_summarizer_producer;
+pub(crate) mod history_summarizer_prompt;
+pub(crate) mod history_summarizer_validate;
 pub mod identity_sweep;
 pub mod injection;
 pub mod kernel_routes;
 pub mod m0_compose;
 pub(crate) mod m1_compose;
+pub(crate) mod memory_classifier_scheduler;
 pub(crate) mod memory_render;
 pub mod memory_tool;
 pub mod message_cleanup;
@@ -51,8 +51,8 @@ pub mod search_writer;
 pub mod selection;
 pub mod served_json;
 pub mod session_resolver;
-pub(crate) mod smart_note_evaluation;
 mod tail_hygiene;
+pub mod terse_text_compression;
 mod token_cache;
 pub(crate) mod transform_unit;
 pub mod wire;
@@ -76,11 +76,11 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
-use crate::smart_note_evaluation::{
-    CheckOutcome, CompileOutcome, CompiledCheckArtifact, FallbackOutcome, SmartNoteCycleMode,
-    SmartNoteEvaluationOutcome, SmartNoteLifecycleState, SmartNoteSelectionCycle,
-    SmartNoteSelectionSnapshot, is_valid_smart_note_cron, reduce_smart_note_evaluation,
-    select_smart_note_evaluation_cycle,
+use crate::conditional_note_evaluation::{
+    CheckOutcome, CompileOutcome, CompiledCheckArtifact, ConditionalNoteCycleMode,
+    ConditionalNoteEvaluationOutcome, ConditionalNoteLifecycleState, ConditionalNoteSelectionCycle,
+    ConditionalNoteSelectionSnapshot, FallbackOutcome, is_valid_conditional_note_cron,
+    reduce_conditional_note_evaluation, select_conditional_note_evaluation_cycle,
 };
 use async_trait::async_trait;
 use chrono::{Local, TimeZone};
@@ -92,20 +92,21 @@ use host_runtime::{
 use lease::LeaseError;
 #[cfg(test)]
 use memory_store::TagNumberRow;
-use memory_store::dreamer_ledger::{
-    DreamerAttemptSpec, DreamerBeginOutcome, DreamerReceiptBinding, DreamerReceiptKey,
-    DreamerReceiptState, DreamerTerminalKind, DreamerTransition, dreamer_request_digest,
+use memory_store::memory_classifier_ledger::{
+    MemoryClassifierAttemptSpec, MemoryClassifierBeginOutcome, MemoryClassifierReceiptBinding,
+    MemoryClassifierReceiptKey, MemoryClassifierReceiptState, MemoryClassifierTerminalKind,
+    MemoryClassifierTransition, memory_classifier_request_digest,
 };
 use memory_store::{
-    AuthoritySeedRow, DeferredExecuteState, FacadeMutationOutcome, HistorianPhase, MemoryStore,
-    MemoryStoreError, ModuleDropSeedRow, ModuleMeta, ModuleStateSyncError, ModuleStateSyncRequest,
-    ModuleStripSeedRow, ModuleWorkspaceMemberRow, ModuleWorkspaceRow, NoteCasOutcome,
-    NoteConditionCompile, NoteEvalAbandonOutcome, NoteEvalAcquireOutcome, NoteEvalCandidate,
-    NoteEvalClaim, NoteEvalCompleteOutcome, NoteEvalReducedState, NoteEvalRenewOutcome,
-    NoteEvalSelection, NoteInput, NoteNudgeAnchorSeed, NoteWriteInput, PendingAgentDrop,
-    PendingAgentDropSeedRow, PendingCompactionMarkerState, RecordWrapupCommandOutcome,
-    StoredChunkTranscript, StoredCompartment, StoredNote, TodoStateSetOutcome, UserHintSeedRow,
-    WrapupCommandRecord, canonical_root,
+    AuthoritySeedRow, DeferredExecuteState, FacadeMutationOutcome, HistorySummarizerPhase,
+    MemoryStore, MemoryStoreError, ModuleDropSeedRow, ModuleMeta, ModuleStateSyncError,
+    ModuleStateSyncRequest, ModuleStripSeedRow, ModuleWorkspaceMemberRow, ModuleWorkspaceRow,
+    NoteCasOutcome, NoteConditionCompile, NoteEvalAbandonOutcome, NoteEvalAcquireOutcome,
+    NoteEvalCandidate, NoteEvalClaim, NoteEvalCompleteOutcome, NoteEvalReducedState,
+    NoteEvalRenewOutcome, NoteEvalSelection, NoteInput, NoteNudgeAnchorSeed, NoteWriteInput,
+    PendingAgentDrop, PendingAgentDropSeedRow, PendingCompactionMarkerState,
+    RecordWrapupCommandOutcome, StoredHistorySegment, StoredNote, TodoStateSetOutcome,
+    UserHintSeedRow, WrapupCommandRecord, canonical_root,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -122,29 +123,32 @@ use crate::metered_decode::{
 use host_runtime::{BlockingWorkFailed, CancelSignal};
 
 use crate::transform_unit::{
-    AdmissionPermit, HistorianFollowup, PageApplyGuard, PassContinuation, PassEntry, PassHold,
-    TRANSFORM_ADMISSION_PERMITS, TRANSFORM_UNITS_AT_ONCE, UnitOutcome, UnitPermit,
+    AdmissionPermit, HistorySummarizerFollowup, PageApplyGuard, PassContinuation, PassEntry,
+    PassHold, TRANSFORM_ADMISSION_PERMITS, TRANSFORM_UNITS_AT_ONCE, UnitOutcome, UnitPermit,
 };
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
 use classify::{
     CLASSIFY_AWAIT_TIMEOUT, CLASSIFY_MAX_OUTPUT_TOKENS, CLASSIFY_PROMPT_TEMPLATE_VERSION,
     CLASSIFY_SCHEMA_VERSION, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK, CLASSIFY_TEMPERATURE,
-    Classification, ClassifyPoolRow, DREAMER_ATTEMPT_BUDGET, DREAMER_ATTEMPT_BUDGET_WINDOW,
-    MAX_CLASSIFY_MODEL_CHAIN, MAX_CLASSIFY_OBJECTS, MAX_CLASSIFY_PROMPT_BYTES,
-    attempt_child_session_id, classify_request_timeout, object_id_is_renderable,
-    parse_classify_output, render_classify_prompt,
+    Classification, ClassifyPoolRow, MAX_CLASSIFY_MODEL_CHAIN, MAX_CLASSIFY_OBJECTS,
+    MAX_CLASSIFY_PROMPT_BYTES, MEMORY_CLASSIFIER_ATTEMPT_BUDGET,
+    MEMORY_CLASSIFIER_ATTEMPT_BUDGET_WINDOW, attempt_child_session_id, classify_request_timeout,
+    object_id_is_renderable, parse_classify_output, render_classify_prompt,
 };
-use config::{ConfigCache, DaemonConfig, derive_historian_chunk_tokens};
+use config::{ConfigCache, DaemonConfig, derive_history_summarizer_chunk_tokens};
 use healing::{SerializerProfile, tail_reclaim};
-use historian::{HistorianProducerDriver, reattach_historian_producer, run_historian_firing};
-use historian_chunk::{
-    AssembleHistorianFiringOutcome, AssembledHistorianFiring, HistorianAssemblerConfig,
-    assemble_historian_firing,
+use history_summarizer::{
+    HistorySummarizerProducerDriver, reattach_history_summarizer_producer,
+    run_history_summarizer_firing,
 };
-use historian_producer::{
-    HistorianProducer, HistorianProducerConfig, HistorianProducerError, HistorianSendOutcome,
-    RunState,
+use history_summarizer_chunk::{
+    AssembleHistorySummarizerFiringOutcome, AssembledHistorySummarizerFiring,
+    HistorySummarizerAssemblerConfig, assemble_history_summarizer_firing,
+};
+use history_summarizer_producer::{
+    HistorySummarizerProducer, HistorySummarizerProducerConfig, HistorySummarizerProducerError,
+    HistorySummarizerSendOutcome, RunState,
 };
 use prompt_surface::{PromptSurfacePreset, PromptSurfaceSelection};
 use scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT;
@@ -236,7 +240,7 @@ pub mod bench_internals {
 #[cfg(test)]
 mod differential_goldens;
 use transform::{
-    HistorianDiagnostics, ProjectionCacheInput, SerializedOutputCache, TransformRequest,
+    HistorySummarizerDiagnostics, ProjectionCacheInput, SerializedOutputCache, TransformRequest,
     TransformWithProjection, transform_with_projection_cached,
 };
 
@@ -328,52 +332,14 @@ fn apply_claude_code_config_controls(
     request.auto_search_enabled = config.auto_search.enabled;
     request.auto_search_score_threshold = config.auto_search.score_threshold;
     request.auto_search_min_prompt_chars = config.auto_search.min_prompt_chars;
-    request.caveman_enabled = config.caveman.enabled;
-    request.caveman_min_chars = config.caveman.min_size;
+    request.terse_text_compression_enabled = config.terse_text_compression.enabled;
+    request.terse_text_compression_min_chars = config.terse_text_compression.min_size;
     // Thalamus does not send a todowrite verdict, and Claude Code has no native todowrite surface.
     // The transform leaves `None` intact because synthesis treats missing todowrite authority as unavailable.
     // Synthesis treats missing todowrite authority as unavailable rather than manufacturing an unreachable tool call.
     if config.prompt_surface_guidance_override.is_some() {
         request.prompt_surface_guidance_override = config.prompt_surface_guidance_override.clone();
     }
-}
-
-/// The OpenCode host adapter normalizes the already-rendered mural to the exact m0 input contract.
-fn host_mural_artifact(input: Option<&m0_compose::M0MuralInput>) -> Option<(String, String)> {
-    let input = input?;
-    if !input.enabled || !input.supports_vision {
-        return None;
-    }
-    let data_url = input
-        .data_url
-        .as_deref()
-        .filter(|value| !value.is_empty())?;
-    let content_hash = input
-        .content_hash
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{:x}", Sha256::digest(data_url.as_bytes())));
-    Some((data_url.to_string(), content_hash))
-}
-
-/// The adapter rehydrates the shared m0 composer input from one project artifact.
-fn cc_mural_input(
-    store: &MemoryStore,
-    project_path: &str,
-) -> Result<Option<m0_compose::M0MuralInput>, MemoryStoreError> {
-    let Some(artifact) = store.load_project_mural_artifact(project_path)? else {
-        return Ok(None);
-    };
-    let Ok(data_url) = String::from_utf8(artifact.data_url) else {
-        return Ok(None);
-    };
-    Ok((!data_url.is_empty()).then_some(m0_compose::M0MuralInput {
-        enabled: true,
-        supports_vision: true,
-        data_url: Some(data_url),
-        content_hash: Some(artifact.content_hash),
-    }))
 }
 
 /// The handler rejects transform requests when the route is unbound or the request session differs from the channel's bound session; it never defaults a project because that could read another project's store.
@@ -686,8 +652,8 @@ impl Drop for UnitHeartbeat {
 
 /// Compatibility requires this exact memory-render format epoch.
 pub const MEMORY_RENDER_FORMAT_EPOCH: u32 = release_contract::MEMORY_RENDER_EPOCH;
-/// Compatibility requires this exact compartment-render format epoch.
-pub const COMPARTMENT_RENDER_FORMAT_EPOCH: u32 = release_contract::COMPARTMENT_RENDER_EPOCH;
+/// Compatibility requires this exact history_segment-render format epoch.
+pub const HISTORY_SEGMENT_RENDER_FORMAT_EPOCH: u32 = release_contract::HISTORY_SEGMENT_RENDER_EPOCH;
 /// Compatibility requires this exact Claude Code Anthropic profile epoch.
 pub const PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC: u32 =
     release_contract::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC;
@@ -701,7 +667,7 @@ pub const fn profile_render_epoch(profile: SerializerProfile) -> u32 {
     match profile {
         SerializerProfile::ClaudeCodeAnthropic => PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC,
         SerializerProfile::OwnedLlmRunner
-        | SerializerProfile::OwnedBroca
+        | SerializerProfile::OwnedModelExecution
         | SerializerProfile::OpencodeAiSdk
         | SerializerProfile::Pi => 0,
     }
@@ -744,12 +710,13 @@ const DEFAULT_PROTECTED_TAGS: usize = 20;
 const DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED: bool = true;
 const DEFAULT_MIN_COMMIT_CLUSTERS: usize = 3;
 #[cfg(test)]
-const DEFAULT_HISTORIAN_CHUNK_TOKENS: usize = 32_000;
-const DEFAULT_HISTORIAN_MIN_CHUNK_TOKENS: usize = 0;
-/// Each status page returns at most the configured number of newly published compartments.
-const SESSION_STATUS_COMPARTMENT_PAGE_LIMIT: usize = 50;
-/// After a historian abandon, suppress refires for the cooldown duration.
-const HISTORIAN_FAILURE_BACKOFF_MS: i64 = historian::HISTORIAN_FAILURE_BACKOFF_MS;
+const DEFAULT_HISTORY_SUMMARIZER_CHUNK_TOKENS: usize = 32_000;
+const DEFAULT_HISTORY_SUMMARIZER_MIN_CHUNK_TOKENS: usize = 0;
+/// Each status page returns at most the configured number of newly published history_segments.
+const SESSION_STATUS_HISTORY_SEGMENT_PAGE_LIMIT: usize = 50;
+/// After a history_summarizer abandon, suppress refires for the cooldown duration.
+const HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS: i64 =
+    history_summarizer::HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS;
 const SESSION_UNRESOLVED_MESSAGE: &str = "session unresolved; launch Claude Code through the Eidnara wrapper so ctx_* can bind to this conversation";
 const OPENCODE_HARNESS: &str = "opencode";
 const STATE_SYNC_SEED_MAX_ID_BYTES: usize = 128;
@@ -827,7 +794,7 @@ const MAX_ACTIVE_PROJECTION_LEASES: usize = MAX_ACTIVE_SNAPSHOT_LEASES;
 /// The handler mints one marker per transform start and replaces it only on success, so failing sessions would otherwise accumulate markers for the process lifetime.
 const MAX_IN_FLIGHT_SNAPSHOT_ENTRIES: usize = 4_096;
 const WRAPUP_REQUEST_MARGIN: Duration = Duration::from_secs(5);
-const HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND: usize = 32;
+const HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND: usize = 32;
 
 /// Distinguishes an explicit JSON `null` (`Some(None)`, a clear) from an omitted field (`None`).
 ///
@@ -860,7 +827,7 @@ struct ModuleStateSyncWire {
     #[serde(default)]
     seed_boundary_id: Option<String>,
     #[serde(default)]
-    compartments: Vec<ModuleCompartmentWire>,
+    history_segments: Vec<ModuleHistorySegmentWire>,
     #[serde(default)]
     user_profile: Option<Vec<String>>,
     /// None means omitted; Some(None) is an explicit workspace clear.
@@ -911,7 +878,7 @@ struct ModuleStateSyncWire {
     strip_seed_skipped: usize,
     #[serde(default)]
     reasoning_cleared_through_tag: Option<u64>,
-    /// The field records host capability to create smart notes; omission means unavailable.
+    /// The field records host capability to create conditional notes; omission means unavailable.
     #[serde(default)]
     note_evaluation_available: Option<bool>,
 }
@@ -980,12 +947,14 @@ fn state_sync_seq_mismatch_error(expected: u64, found: u64) -> PreparedOutcome {
     }
 }
 
-fn historian_compartment_sync_busy_error(phase: HistorianPhase) -> PreparedOutcome {
+fn history_summarizer_history_segment_sync_busy_error(
+    phase: HistorySummarizerPhase,
+) -> PreparedOutcome {
     PreparedOutcome::Error {
-        code: "historian_compartment_sync_busy".to_string(),
+        code: "history_summarizer_history_segment_sync_busy".to_string(),
         message: json!({
-            "code": "historian_compartment_sync_busy",
-            "historian_phase": phase.as_str(),
+            "code": "history_summarizer_history_segment_sync_busy",
+            "history_summarizer_phase": phase.as_str(),
             "retryable": true,
         })
         .to_string(),
@@ -1635,7 +1604,7 @@ impl TransformPageCoordinator {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ModuleCompartmentWire {
+struct ModuleHistorySegmentWire {
     sequence: i64,
     start_message: i64,
     end_message: i64,
@@ -1693,9 +1662,9 @@ fn default_importance() -> i32 {
     50
 }
 
-impl From<ModuleCompartmentWire> for StoredCompartment {
-    fn from(value: ModuleCompartmentWire) -> Self {
-        StoredCompartment {
+impl From<ModuleHistorySegmentWire> for StoredHistorySegment {
+    fn from(value: ModuleHistorySegmentWire) -> Self {
+        StoredHistorySegment {
             sequence: value.sequence,
             start_message: value.start_message,
             end_message: value.end_message,
@@ -1763,13 +1732,6 @@ impl TransformRequest {
                     .as_ref()
                     .map_or(0, String::capacity),
             )
-            .saturating_add(self.mural.as_ref().map_or(0, |mural| {
-                mural
-                    .data_url
-                    .as_ref()
-                    .map_or(0, String::capacity)
-                    .saturating_add(mural.content_hash.as_ref().map_or(0, String::capacity))
-            }))
             .saturating_add(
                 self.full_array_fingerprint
                     .as_ref()
@@ -2992,13 +2954,13 @@ pub struct HandlerCore {
     spawn_gate: Arc<Mutex<()>>,
     cancel: CancellationToken,
     tasks: TaskTracker,
-    producer_factory: Arc<dyn HistorianProducerFactory>,
+    producer_factory: Arc<dyn HistorySummarizerProducerFactory>,
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
     #[cfg(test)]
     fixed_config: Option<DaemonConfig>,
     reattaching_sessions: Arc<Mutex<HashMap<String, CancellationToken>>>,
-    live_historian_sessions: Arc<Mutex<HashMap<String, LiveHistorianSession>>>,
+    live_history_summarizer_sessions: Arc<Mutex<HashMap<String, LiveHistorySummarizerSession>>>,
     wrapup_sessions: Arc<Mutex<HashMap<String, LiveWrapupSession>>>,
     recomp_sessions: Arc<Mutex<HashSet<String>>>,
     transform_snapshots: Arc<Mutex<TransformSnapshotCache>>,
@@ -3030,7 +2992,7 @@ pub struct HandlerCore {
     status_snapshot_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     collector_now: Mutex<Option<Instant>>,
-    /// Test-only interleave seam runs after the cheap historian read and before the fenced state-sync transaction.
+    /// Test-only interleave seam runs after the cheap history_summarizer read and before the fenced state-sync transaction.
     #[cfg(test)]
     state_sync_before_apply_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     connect_failure_commit_hook: ConnectFailureCommitHook,
@@ -3058,9 +3020,9 @@ pub struct HandlerCore {
     transform_admission: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
     transform_page_discard_logs: Mutex<Vec<String>>,
-    /// The durable classify protocol behind `dreamer.run_task`; the scheduler
+    /// The durable classify protocol behind `memory_classifier.run_task`; the scheduler
     /// that drives it unattended is spawned once the store opens.
-    dreamer: Arc<DreamerRuntime>,
+    memory_classifier: Arc<MemoryClassifierRuntime>,
     /// Facade callers without a host tool-call ID receive one warning per resolved session, and the mutation proceeds.
     missing_facade_command_id_sessions: Mutex<HashSet<String>>,
 }
@@ -3085,7 +3047,6 @@ struct NoteEvaluatorRegistration {
     route: RouteHandle,
     policy_version: i64,
     capacity: i64,
-    retina_handoff: bool,
     wake_owned: bool,
     expires_at: i64,
     /// Each evaluator slot owns one boot-ephemeral pair of fair-selection cycles.
@@ -3100,15 +3061,15 @@ struct NoteEvaluatorRegistration {
 /// Per-slot mutex guards are never held across .await; other slots and registrations remain independent.
 #[derive(Debug)]
 struct NoteEvaluatorSlotCycles {
-    full: SmartNoteSelectionCycle,
-    nonbillable: SmartNoteSelectionCycle,
+    full: ConditionalNoteSelectionCycle,
+    nonbillable: ConditionalNoteSelectionCycle,
 }
 
 impl NoteEvaluatorSlotCycles {
     fn new() -> Self {
         Self {
-            full: SmartNoteSelectionCycle::new(SmartNoteCycleMode::Full),
-            nonbillable: SmartNoteSelectionCycle::new(SmartNoteCycleMode::Nonbillable),
+            full: ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Full),
+            nonbillable: ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Nonbillable),
         }
     }
 }
@@ -3121,36 +3082,41 @@ fn new_note_evaluator_slot_cycles(capacity: i64) -> Arc<Vec<Mutex<NoteEvaluatorS
     )
 }
 
-/// Creates historian producer drivers for project and harness bindings.
+/// Creates history_summarizer producer drivers for project and harness bindings.
 #[async_trait]
-pub trait HistorianProducerFactory: Send + Sync {
+pub trait HistorySummarizerProducerFactory: Send + Sync {
     /// Connects one producer using the route's credential fingerprints.
     async fn connect(
         &self,
         project_root: &Path,
         harness: &str,
         credential_fingerprints: &std::collections::BTreeMap<String, String>,
-    ) -> Result<Box<dyn HistorianProducerDriver + Send>, HistorianProducerError>;
+    ) -> Result<Box<dyn HistorySummarizerProducerDriver + Send>, HistorySummarizerProducerError>;
 }
 
-struct RealHistorianProducerFactory {
+struct RealHistorySummarizerProducerFactory {
     connection_file: PathBuf,
     cancellation: CancellationToken,
 }
 
 #[async_trait]
-impl HistorianProducerFactory for RealHistorianProducerFactory {
+impl HistorySummarizerProducerFactory for RealHistorySummarizerProducerFactory {
     async fn connect(
         &self,
         project_root: &Path,
         harness: &str,
         credential_fingerprints: &std::collections::BTreeMap<String, String>,
-    ) -> Result<Box<dyn HistorianProducerDriver + Send>, HistorianProducerError> {
+    ) -> Result<Box<dyn HistorySummarizerProducerDriver + Send>, HistorySummarizerProducerError>
+    {
         Ok(Box::new(
-            HistorianProducer::connect(HistorianProducerConfig {
+            HistorySummarizerProducer::connect(HistorySummarizerProducerConfig {
                 cancellation: Some(self.cancellation.clone()),
                 credential_fingerprints: credential_fingerprints.clone(),
-                ..HistorianProducerConfig::new(self.connection_file.clone(), project_root, harness)
+                ..HistorySummarizerProducerConfig::new(
+                    self.connection_file.clone(),
+                    project_root,
+                    harness,
+                )
             })
             .await?,
         ))
@@ -3159,94 +3125,97 @@ impl HistorianProducerFactory for RealHistorianProducerFactory {
 
 struct MissingProducerFactory;
 
-struct DreamerRunGuard {
+struct MemoryClassifierRunGuard {
     registry: Arc<Mutex<HashSet<String>>>,
     session_id: String,
 }
 
-/// The durable classify protocol behind `dreamer.run_task`, owned apart from
+/// The durable classify protocol behind `memory_classifier.run_task`, owned apart from
 /// the request handler so the wire route and the scheduler drive one
 /// implementation.
-pub(crate) struct DreamerRuntime {
-    producer_factory: Arc<dyn HistorianProducerFactory>,
+pub(crate) struct MemoryClassifierRuntime {
+    producer_factory: Arc<dyn HistorySummarizerProducerFactory>,
     /// The canonical store the pool is read from and classifications are
     /// written to.
     kernel: Arc<kernel_routes::KernelOpenCoordinator>,
-    /// active_dreamer_runs contains only module-minted zero-tool dreamer sessions; prefixes are diagnostics only.
+    /// active_memory_classifier_runs contains only module-minted zero-tool memory_classifier sessions; prefixes are diagnostics only.
     /// Registered IDs may bypass transform only after route validation.
-    active_dreamer_runs: Arc<Mutex<HashSet<String>>>,
+    active_memory_classifier_runs: Arc<Mutex<HashSet<String>>>,
     /// [`DreamCommandGuard`].
     inflight_dream_commands: Arc<Mutex<HashSet<(String, String)>>>,
     /// Where a scheduled task's classify inputs come from; `None` until a task
     /// has a Rust-owned input builder, so nothing unattended can dispatch.
-    task_inputs: Mutex<Option<Arc<dyn DreamerTaskInputs>>>,
+    task_inputs: Mutex<Option<Arc<dyn MemoryClassifierTaskInputs>>>,
 }
 
 /// Builds the classify inputs of one scheduled task from canonical state.
-pub(crate) trait DreamerTaskInputs: Send + Sync {
+pub(crate) trait MemoryClassifierTaskInputs: Send + Sync {
     fn classify_inputs(
         &self,
-        project: &dreamer_scheduler::ScheduledProject,
+        project: &memory_classifier_scheduler::ScheduledProject,
         task: &str,
     ) -> Option<ClassifyRequest>;
 }
 
-impl DreamerRuntime {
+impl MemoryClassifierRuntime {
     fn new(
-        producer_factory: Arc<dyn HistorianProducerFactory>,
+        producer_factory: Arc<dyn HistorySummarizerProducerFactory>,
         kernel: Arc<kernel_routes::KernelOpenCoordinator>,
     ) -> Self {
         Self {
             producer_factory,
             kernel,
-            active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
+            active_memory_classifier_runs: Arc::new(Mutex::new(HashSet::new())),
             inflight_dream_commands: Arc::new(Mutex::new(HashSet::new())),
             task_inputs: Mutex::new(None),
         }
     }
 
     #[cfg(test)]
-    fn install_task_inputs(&self, inputs: Arc<dyn DreamerTaskInputs>) {
-        *self.task_inputs.lock().expect("dreamer task inputs mutex") = Some(inputs);
+    fn install_task_inputs(&self, inputs: Arc<dyn MemoryClassifierTaskInputs>) {
+        *self
+            .task_inputs
+            .lock()
+            .expect("memory_classifier task inputs mutex") = Some(inputs);
     }
 
     fn classify_inputs(
         &self,
-        project: &dreamer_scheduler::ScheduledProject,
+        project: &memory_classifier_scheduler::ScheduledProject,
         task: &str,
     ) -> Option<ClassifyRequest> {
         self.task_inputs
             .lock()
-            .expect("dreamer task inputs mutex")
+            .expect("memory_classifier task inputs mutex")
             .as_ref()
             .and_then(|inputs| inputs.classify_inputs(project, task))
     }
 
-    fn unregister_dreamer_run(&self, session_id: &str) {
-        self.active_dreamer_runs
+    fn unregister_memory_classifier_run(&self, session_id: &str) {
+        self.active_memory_classifier_runs
             .lock()
-            .expect("dreamer registry mutex")
+            .expect("memory_classifier registry mutex")
             .remove(session_id);
     }
 
-    fn dreamer_run_registered(&self, session_id: &str) -> bool {
-        self.active_dreamer_runs
+    fn memory_classifier_run_registered(&self, session_id: &str) -> bool {
+        self.active_memory_classifier_runs
             .lock()
-            .expect("dreamer registry mutex")
+            .expect("memory_classifier registry mutex")
             .contains(session_id)
     }
 }
 
-impl Drop for DreamerRunGuard {
+impl Drop for MemoryClassifierRunGuard {
     fn drop(&mut self) {
         self.registry
             .lock()
-            .expect("dreamer registry mutex")
+            .expect("memory_classifier registry mutex")
             .remove(&self.session_id);
     }
 }
 
-/// Exactly one dreamer.run_task executes per durable (ledger_session, command_id) identity.
+/// Exactly one memory_classifier.run_task executes per durable (ledger_session, command_id) identity.
 /// Concurrent duplicates must not start a billable chain or race the ledger INSERT OR IGNORE with different outcomes.
 /// Serializing dream-task commands guarantees each derived child session has at most one live run registration.
 struct DreamCommandGuard {
@@ -3292,10 +3261,10 @@ impl Drop for ReattachGuard {
     }
 }
 
-type LiveHistorianCompletionWait = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type LiveHistorySummarizerCompletionWait = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 #[derive(Clone)]
-struct LiveHistorianSession {
+struct LiveHistorySummarizerSession {
     token: Arc<()>,
     completion: Arc<Notify>,
     /// Cancelled by `session.delete` so the firing drops its producer instead of finishing a
@@ -3304,7 +3273,7 @@ struct LiveHistorianSession {
 }
 
 struct SessionSetGuard {
-    sessions: Arc<Mutex<HashMap<String, LiveHistorianSession>>>,
+    sessions: Arc<Mutex<HashMap<String, LiveHistorySummarizerSession>>>,
     session_id: String,
     token: Arc<()>,
     completion: Arc<Notify>,
@@ -3324,36 +3293,36 @@ impl Drop for SessionSetGuard {
     }
 }
 
-enum LiveHistorianSessionClaim {
+enum LiveHistorySummarizerSessionClaim {
     Acquired(SessionSetGuard),
-    Busy(LiveHistorianCompletionWait),
+    Busy(LiveHistorySummarizerCompletionWait),
 }
 
-struct PreparedHistorianFiring {
-    diagnostics: HistorianDiagnostics,
-    task: HistorianFiringTask,
+struct PreparedHistorySummarizerFiring {
+    diagnostics: HistorySummarizerDiagnostics,
+    task: HistorySummarizerFiringTask,
 }
 
-enum PreparedHistorianAction {
-    Complete(HistorianDiagnostics),
+enum PreparedHistorySummarizerAction {
+    Complete(HistorySummarizerDiagnostics),
     Busy {
-        diagnostics: HistorianDiagnostics,
-        completion: LiveHistorianCompletionWait,
+        diagnostics: HistorySummarizerDiagnostics,
+        completion: LiveHistorySummarizerCompletionWait,
     },
-    FireReady(Box<PreparedHistorianFiring>),
+    FireReady(Box<PreparedHistorySummarizerFiring>),
 }
 
-struct HistorianPrepareContext<'a> {
+struct HistorySummarizerPrepareContext<'a> {
     now: i64,
     snapshot_generation: u64,
-    timings: &'a mut HistorianTriggerTimings,
-    /// The pass's pinned canonical memory read, so the historian prompt and the
+    timings: &'a mut HistorySummarizerTriggerTimings,
+    /// The pass's pinned canonical memory read, so the history_summarizer prompt and the
     /// m0 of the same pass compose from one snapshot.
     project_memory: Option<&'a canonical_memory::CanonicalMemoryRead>,
 }
 
 #[derive(Default)]
-struct HistorianTriggerTimings {
+struct HistorySummarizerTriggerTimings {
     elapsed_ms: f64,
     boundary_build_ms: f64,
     trigger_eval_ms: f64,
@@ -3362,12 +3331,12 @@ struct HistorianTriggerTimings {
     tokenized_blocks: usize,
 }
 
-struct HistorianTriggerTimer<'a> {
+struct HistorySummarizerTriggerTimer<'a> {
     started_at: Instant,
-    timings: &'a mut HistorianTriggerTimings,
+    timings: &'a mut HistorySummarizerTriggerTimings,
 }
 
-impl Drop for HistorianTriggerTimer<'_> {
+impl Drop for HistorySummarizerTriggerTimer<'_> {
     fn drop(&mut self) {
         self.timings.elapsed_ms += self.started_at.elapsed().as_secs_f64() * 1_000.0;
     }
@@ -3416,9 +3385,9 @@ impl Drop for WrapupSessionGuard {
 }
 
 enum PreparedWrapupAction {
-    Busy(LiveHistorianCompletionWait),
+    Busy(LiveHistorySummarizerCompletionWait),
     Nothing(String),
-    FireReady(Box<HistorianFiringTask>),
+    FireReady(Box<HistorySummarizerFiringTask>),
     Failed(String),
 }
 
@@ -3489,20 +3458,23 @@ struct WrapupSnapshotPublicationFence {
     after_store_publish: ConnectFailureCommitHook,
 }
 
-impl historian::HistorianPublicationFence for WrapupSnapshotPublicationFence {
+impl history_summarizer::HistorySummarizerPublicationFence for WrapupSnapshotPublicationFence {
     fn publish(
         &self,
         store: &MemoryStore,
-        request: memory_store::HistorianPublishRequest<'_>,
-    ) -> Result<memory_store::HistorianPublishResult, memory_store::HistorianPublishError> {
+        request: memory_store::HistorySummarizerPublishRequest<'_>,
+    ) -> Result<
+        memory_store::HistorySummarizerPublishResult,
+        memory_store::HistorySummarizerPublishError,
+    > {
         // The lock prevents a transform from retiring the cached raw snapshot between validation and additive writes.
         let snapshots = self.snapshots.lock().expect("transform snapshots mutex");
         if !snapshots.ready_generation_matches(&self.session_id, self.generation) {
-            return Err(memory_store::HistorianPublishError::FenceRejected {
+            return Err(memory_store::HistorySummarizerPublishError::FenceRejected {
                 reason: "transform snapshot generation changed before publication".to_string(),
             });
         }
-        let published = store.publish_historian_chunk(request);
+        let published = store.publish_history_summarizer_chunk(request);
         #[cfg(test)]
         if let Some(hook) = self
             .after_store_publish
@@ -3524,21 +3496,24 @@ struct ReattachSnapshotPublicationFence {
     after_store_publish: ConnectFailureCommitHook,
 }
 
-impl historian::HistorianPublicationFence for ReattachSnapshotPublicationFence {
+impl history_summarizer::HistorySummarizerPublicationFence for ReattachSnapshotPublicationFence {
     fn publish(
         &self,
         store: &MemoryStore,
-        request: memory_store::HistorianPublishRequest<'_>,
-    ) -> Result<memory_store::HistorianPublishResult, memory_store::HistorianPublishError> {
+        request: memory_store::HistorySummarizerPublishRequest<'_>,
+    ) -> Result<
+        memory_store::HistorySummarizerPublishResult,
+        memory_store::HistorySummarizerPublishError,
+    > {
         // The lock prevents cache replacement between validation and additive writes.
         // The lock prevents later transforms from replacing the request's selected messages before their history rows are stored.
         let snapshots = self.snapshots.lock().expect("transform snapshots mutex");
         if !snapshots.generation_present_in_flight_or_ready(&self.session_id, self.generation) {
-            return Err(memory_store::HistorianPublishError::FenceRejected {
+            return Err(memory_store::HistorySummarizerPublishError::FenceRejected {
                 reason: "transform snapshot state changed after reattach started".to_string(),
             });
         }
-        let published = store.publish_historian_chunk(request);
+        let published = store.publish_history_summarizer_chunk(request);
         #[cfg(test)]
         if let Some(hook) = self
             .after_store_publish
@@ -3552,17 +3527,17 @@ impl historian::HistorianPublicationFence for ReattachSnapshotPublicationFence {
     }
 }
 
-struct HistorianFiringTask {
+struct HistorySummarizerFiringTask {
     store: Arc<MemoryStore>,
     session_id: String,
     project_path: String,
     project_root: PathBuf,
     harness: String,
     project_slug: String,
-    firing: AssembledHistorianFiring,
+    firing: AssembledHistorySummarizerFiring,
     live_guard: SessionSetGuard,
     connect_failure_commit_hook: ConnectFailureCommitHook,
-    publication_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
+    publication_fence: Option<Arc<dyn history_summarizer::HistorySummarizerPublicationFence>>,
     credential_fingerprints: std::collections::BTreeMap<String, String>,
 }
 
@@ -3573,15 +3548,16 @@ struct SchedulerObservation {
 }
 
 #[async_trait]
-impl HistorianProducerFactory for MissingProducerFactory {
+impl HistorySummarizerProducerFactory for MissingProducerFactory {
     async fn connect(
         &self,
         _project_root: &Path,
         _harness: &str,
         _credential_fingerprints: &std::collections::BTreeMap<String, String>,
-    ) -> Result<Box<dyn HistorianProducerDriver + Send>, HistorianProducerError> {
-        Err(HistorianProducerError::Client(
-            historian_producer::HistorianClientFailure {
+    ) -> Result<Box<dyn HistorySummarizerProducerDriver + Send>, HistorySummarizerProducerError>
+    {
+        Err(HistorySummarizerProducerError::Client(
+            history_summarizer_producer::HistorySummarizerClientFailure {
                 code: "connection_unavailable".to_owned(),
                 message: "daemon has no host connection file".to_owned(),
             },
@@ -3596,7 +3572,6 @@ struct PassIntake {
     parsed: TransformRequest,
     binding: SessionBinding,
     lineage_root: PathBuf,
-    serializer_profile: Option<SerializerProfile>,
     pass_load: Result<ModuleMeta, MemoryStoreError>,
     native_delta_frontier: Option<NativeDeltaFrontier>,
     snapshot_generation: u64,
@@ -3632,12 +3607,12 @@ struct PassStart {
 
 /// A pass that has transformed at least once. The result is replaced by each rerun; the floor
 /// is the publication floor read after the first transform and after each rerun that a
-/// historian step follows, which the settle's final check compares against; the trigger
-/// timings accumulate across the historian preparations.
+/// history_summarizer step follows, which the settle's final check compares against; the trigger
+/// timings accumulate across the history_summarizer preparations.
 struct TransformedPass {
     result: TransformWithProjection,
     emergency_pre_floor: Option<u64>,
-    trigger_timings: HistorianTriggerTimings,
+    trigger_timings: HistorySummarizerTriggerTimings,
 }
 
 /// The handler-side timing brackets taken before the pass's store work begins.
@@ -3795,7 +3770,7 @@ impl Handler {
         Self::new_with_connection_file(None)
     }
 
-    /// Creates a handler that connects historian producers through `connection_file` when present.
+    /// Creates a handler that connects history_summarizer producers through `connection_file` when present.
     /// Registers `hook` to run once with the incarnation bearer key when the host installs it, before publication.
     pub fn with_connection_key_hook(self, hook: ConnectionKeyHook) -> Self {
         *self
@@ -3807,8 +3782,8 @@ impl Handler {
 
     pub fn new_with_connection_file(connection_file: Option<PathBuf>) -> Self {
         let cancel = CancellationToken::new();
-        let producer_factory: Arc<dyn HistorianProducerFactory> = match connection_file {
-            Some(path) => Arc::new(RealHistorianProducerFactory {
+        let producer_factory: Arc<dyn HistorySummarizerProducerFactory> = match connection_file {
+            Some(path) => Arc::new(RealHistorySummarizerProducerFactory {
                 connection_file: path,
                 cancellation: cancel.clone(),
             }),
@@ -3825,7 +3800,7 @@ impl Handler {
             spawn_gate: Arc::new(Mutex::new(())),
             cancel,
             tasks: TaskTracker::new(),
-            dreamer: Arc::new(DreamerRuntime::new(
+            memory_classifier: Arc::new(MemoryClassifierRuntime::new(
                 Arc::clone(&producer_factory),
                 Arc::clone(&kernel),
             )),
@@ -3835,7 +3810,7 @@ impl Handler {
             #[cfg(test)]
             fixed_config: None,
             reattaching_sessions: Arc::new(Mutex::new(HashMap::new())),
-            live_historian_sessions: Arc::new(Mutex::new(HashMap::new())),
+            live_history_summarizer_sessions: Arc::new(Mutex::new(HashMap::new())),
             wrapup_sessions: Arc::new(Mutex::new(HashMap::new())),
             recomp_sessions: Arc::new(Mutex::new(HashSet::new())),
             transform_snapshots: Arc::new(Mutex::new(TransformSnapshotCache::new(
@@ -3955,7 +3930,7 @@ impl HandlerCore {
         let cancel = self.cancel.clone();
         let store_slot = Arc::clone(&self.store);
         let bindings = Arc::clone(&self.bindings);
-        let dreamer = Arc::clone(&self.dreamer);
+        let memory_classifier = Arc::clone(&self.memory_classifier);
         if admission
             .spawn(async move {
                 let _guard = StoreOpenWaiterGuard {
@@ -3977,15 +3952,15 @@ impl HandlerCore {
                 // holds the store until shutdown joins it.
                 if opened && let Some(store) = store_slot.lock().expect("store slot mutex").clone()
                 {
-                    let host: Arc<dyn dreamer_scheduler::SchedulerHost> =
+                    let host: Arc<dyn memory_classifier_scheduler::SchedulerHost> =
                         Arc::new(SchedulerBridge {
                             store,
                             bindings,
-                            dreamer,
+                            memory_classifier,
                         });
-                    let scheduler = dreamer_scheduler::DreamerScheduler::new(Arc::new(
-                        dreamer_scheduler::WallClock,
-                    ));
+                    let scheduler = memory_classifier_scheduler::MemoryClassifierScheduler::new(
+                        Arc::new(memory_classifier_scheduler::WallClock),
+                    );
                     task_admission.spawn(scheduler.run(host, cancel.clone()));
                 }
                 // SQLite supplies the path that derives the kernel root.
@@ -4153,7 +4128,7 @@ impl HandlerCore {
 #[cfg(test)]
 impl Handler {
     fn with_producer_factory_and_config(
-        factory: Arc<dyn HistorianProducerFactory>,
+        factory: Arc<dyn HistorySummarizerProducerFactory>,
         config: DaemonConfig,
     ) -> Self {
         Self::with_producer_factory_config_resolver(
@@ -4164,7 +4139,7 @@ impl Handler {
     }
 
     fn with_producer_factory_config_resolver(
-        factory: Arc<dyn HistorianProducerFactory>,
+        factory: Arc<dyn HistorySummarizerProducerFactory>,
         config: DaemonConfig,
         session_resolver: Arc<dyn SessionResolver>,
     ) -> Self {
@@ -4179,7 +4154,7 @@ impl Handler {
             spawn_gate: Arc::new(Mutex::new(())),
             cancel: CancellationToken::new(),
             tasks: TaskTracker::new(),
-            dreamer: Arc::new(DreamerRuntime::new(
+            memory_classifier: Arc::new(MemoryClassifierRuntime::new(
                 Arc::clone(&factory),
                 Arc::clone(&kernel),
             )),
@@ -4188,7 +4163,7 @@ impl Handler {
             config: Mutex::new(ConfigCache::default()),
             fixed_config: Some(config),
             reattaching_sessions: Arc::new(Mutex::new(HashMap::new())),
-            live_historian_sessions: Arc::new(Mutex::new(HashMap::new())),
+            live_history_summarizer_sessions: Arc::new(Mutex::new(HashMap::new())),
             wrapup_sessions: Arc::new(Mutex::new(HashMap::new())),
             recomp_sessions: Arc::new(Mutex::new(HashSet::new())),
             transform_snapshots: Arc::new(Mutex::new(TransformSnapshotCache::new(
@@ -4348,7 +4323,7 @@ impl HandlerCore {
             .is_some_and(|entries| entries.iter().any(|entry| entry.expires_at > now))
     }
 
-    fn live_note_evaluator_policy(&self, project: &str, now: i64) -> (bool, bool) {
+    fn live_note_evaluator_policy(&self, project: &str, now: i64) -> bool {
         let registrations = self
             .note_evaluator_registrations
             .lock()
@@ -4358,13 +4333,11 @@ impl HandlerCore {
             .into_iter()
             .flatten()
             .filter(|entry| entry.expires_at > now);
-        let mut retina_handoff = false;
         let mut wake_owned = false;
         for entry in live {
-            retina_handoff |= entry.retina_handoff;
             wake_owned |= entry.wake_owned;
         }
-        (retina_handoff, wake_owned)
+        wake_owned
     }
 
     /// Only the server-side route binding chooses the notes-authority project scope.
@@ -4616,17 +4589,6 @@ impl HandlerCore {
         )
     }
 
-    /// The most recent full transform request retains raw CK parts until its bounded snapshot is evicted.
-    /// `ctx_expand` uses raw CK parts only for a same-session recovery view.
-    /// persisted historian transcripts remain the durable fallback for the default view.
-    fn cached_expand_messages(&self, session_id: &str) -> Option<wire::IngressMessages> {
-        self.transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex")
-            .ready_delta_request(session_id)
-            .map(|request| request.messages.clone())
-    }
-
     fn store_projection_cache(
         &self,
         request: &TransformRequest,
@@ -4708,8 +4670,9 @@ impl HandlerCore {
             self.clear_note_evaluation_capability_if_unbound(&root);
         }
         if let Some(session) = last_session_route {
-            if session.starts_with("eidnara-dreamer:") {
-                self.dreamer.unregister_dreamer_run(&session);
+            if session.starts_with("eidnara-memory_classifier:") {
+                self.memory_classifier
+                    .unregister_memory_classifier_run(&session);
             }
             self.purge_session_state(&session, "route_teardown");
         }
@@ -4892,27 +4855,31 @@ impl HandlerCore {
             .effective_for_project(project_root)
     }
 
-    fn historian_active(
+    fn history_summarizer_active(
         &self,
         store: &MemoryStore,
         session_id: &str,
         pass_state: PassState<'_>,
     ) -> bool {
         if self
-            .live_historian_sessions
+            .live_history_summarizer_sessions
             .lock()
-            .expect("live historian mutex")
+            .expect("live history_summarizer mutex")
             .contains_key(session_id)
         {
             return true;
         }
         match pass_state {
             // A loaded non-idle phase without a live run may have completed since the pass load.
-            PassState::Loaded(meta) if meta.historian.state == HistorianPhase::Idle => false,
+            PassState::Loaded(meta)
+                if meta.history_summarizer.state == HistorySummarizerPhase::Idle =>
+            {
+                false
+            }
             PassState::Unavailable => false,
             PassState::Loaded(_) | PassState::Reload => store
-                .load_historian_phase(session_id)
-                .map(|phase| phase != HistorianPhase::Idle)
+                .load_history_summarizer_phase(session_id)
+                .map(|phase| phase != HistorySummarizerPhase::Idle)
                 .unwrap_or(false),
         }
     }
@@ -5001,26 +4968,30 @@ impl HandlerCore {
             .unwrap_or_else(|| self.guidance_date_line_for_ms(pass_now))
     }
 
-    fn live_historian_completion_wait(
+    fn live_history_summarizer_completion_wait(
         &self,
         session_id: &str,
-    ) -> Option<LiveHistorianCompletionWait> {
+    ) -> Option<LiveHistorySummarizerCompletionWait> {
         let live = self
-            .live_historian_sessions
+            .live_history_summarizer_sessions
             .lock()
-            .expect("live historian mutex");
+            .expect("live history_summarizer mutex");
         live.get(session_id).map(|entry| {
-            Box::pin(entry.completion.clone().notified_owned()) as LiveHistorianCompletionWait
+            Box::pin(entry.completion.clone().notified_owned())
+                as LiveHistorySummarizerCompletionWait
         })
     }
 
-    fn try_claim_live_historian_session(&self, session_id: &str) -> LiveHistorianSessionClaim {
+    fn try_claim_live_history_summarizer_session(
+        &self,
+        session_id: &str,
+    ) -> LiveHistorySummarizerSessionClaim {
         let mut live = self
-            .live_historian_sessions
+            .live_history_summarizer_sessions
             .lock()
-            .expect("live historian mutex");
+            .expect("live history_summarizer mutex");
         if let Some(entry) = live.get(session_id) {
-            return LiveHistorianSessionClaim::Busy(Box::pin(
+            return LiveHistorySummarizerSessionClaim::Busy(Box::pin(
                 entry.completion.clone().notified_owned(),
             ));
         }
@@ -5029,14 +5000,14 @@ impl HandlerCore {
         let cancel = CancellationToken::new();
         live.insert(
             session_id.to_string(),
-            LiveHistorianSession {
+            LiveHistorySummarizerSession {
                 token: Arc::clone(&token),
                 completion: Arc::clone(&completion),
                 cancel: cancel.clone(),
             },
         );
-        LiveHistorianSessionClaim::Acquired(SessionSetGuard {
-            sessions: Arc::clone(&self.live_historian_sessions),
+        LiveHistorySummarizerSessionClaim::Acquired(SessionSetGuard {
+            sessions: Arc::clone(&self.live_history_summarizer_sessions),
             session_id: session_id.to_string(),
             token,
             completion,
@@ -5044,15 +5015,15 @@ impl HandlerCore {
         })
     }
 
-    /// Cancels every historian firing or reattach running for `session_id`.
+    /// Cancels every history_summarizer firing or reattach running for `session_id`.
     ///
     /// The tasks drop their producers at the next await and release their guards; a later
     /// firing for a recreated session with the same id is then no longer `Busy`.
-    fn cancel_historian_work(&self, session_id: &str) {
+    fn cancel_history_summarizer_work(&self, session_id: &str) {
         if let Some(live) = self
-            .live_historian_sessions
+            .live_history_summarizer_sessions
             .lock()
-            .expect("live historian mutex")
+            .expect("live history_summarizer mutex")
             .get(session_id)
         {
             live.cancel.cancel();
@@ -5127,7 +5098,7 @@ impl HandlerCore {
         now: i64,
     ) -> Option<&'static str> {
         let route_project_root = binding.project_root.to_string_lossy().to_string();
-        // Historian output publishes under the memories authority project, as transforms and
+        // HistorySummarizer output publishes under the memories authority project, as transforms and
         // wrapups do; the route root is kept separately for the producer connection.
         let Ok(project_path) =
             Self::authority_project_path(&store, &route_project_root, "memories")
@@ -5138,14 +5109,14 @@ impl HandlerCore {
         let Ok(loaded) = store.load(&parsed.session_id) else {
             return Some("recovery_load_failed");
         };
-        let phase = loaded.meta.historian.state.clone();
-        if phase == HistorianPhase::Idle {
+        let phase = loaded.meta.history_summarizer.state.clone();
+        if phase == HistorySummarizerPhase::Idle {
             return Some("recovered");
         }
         if self
-            .live_historian_sessions
+            .live_history_summarizer_sessions
             .lock()
-            .expect("live historian mutex")
+            .expect("live history_summarizer mutex")
             .contains_key(&parsed.session_id)
         {
             return None;
@@ -5153,11 +5124,11 @@ impl HandlerCore {
         let mut latch = self.reattaching_sessions.lock().expect("reattach mutex");
         if latch.contains_key(&parsed.session_id) {
             return Some(match phase {
-                HistorianPhase::AwaitingProducer => "reattaching",
-                HistorianPhase::Firing
-                | HistorianPhase::Validating
-                | HistorianPhase::Publishing => "recovering",
-                HistorianPhase::Idle => "recovered",
+                HistorySummarizerPhase::AwaitingProducer => "reattaching",
+                HistorySummarizerPhase::Firing
+                | HistorySummarizerPhase::Validating
+                | HistorySummarizerPhase::Publishing => "recovering",
+                HistorySummarizerPhase::Idle => "recovered",
             });
         }
         let cancel = CancellationToken::new();
@@ -5172,7 +5143,7 @@ impl HandlerCore {
         };
 
         match phase {
-            HistorianPhase::AwaitingProducer => {
+            HistorySummarizerPhase::AwaitingProducer => {
                 let publication_fence = Arc::new(ReattachSnapshotPublicationFence {
                     snapshots: Arc::clone(&self.transform_snapshots),
                     session_id: session_id.clone(),
@@ -5184,7 +5155,7 @@ impl HandlerCore {
                 let project_root = binding.project_root.clone();
                 let harness = loaded
                     .meta
-                    .historian
+                    .history_summarizer
                     .producer_harness
                     .clone()
                     .unwrap_or_else(|| OPENCODE_HARNESS.to_string());
@@ -5194,62 +5165,53 @@ impl HandlerCore {
                     .filter(|b| !b.synthetic)
                     .cloned()
                     .collect();
-                let Some(range) = loaded.meta.historian.chunk_range.clone() else {
+                let Some(range) = loaded.meta.history_summarizer.chunk_range.clone() else {
                     drop(guard);
                     return Some("recovering");
                 };
-                let chunk = historian_chunk::build_historian_chunk(
+                let chunk = history_summarizer_chunk::build_history_summarizer_chunk(
                     parsed.messages.as_slice(),
                     &live,
                     range.from_ordinal,
-                    derive_historian_chunk_tokens(config.historian_context_limit_tokens),
+                    derive_history_summarizer_chunk_tokens(
+                        config.history_summarizer_context_limit_tokens,
+                    ),
                     range.to_ordinal.saturating_add(1),
                 );
-                let prior_compartments = match store.load_compartments(&session_id) {
+                let prior_history_segments = match store.load_history_segments(&session_id) {
                     Ok(cs) => cs
                         .iter()
-                        .map(historian_chunk::stored_range)
+                        .map(history_summarizer_chunk::stored_range)
                         .collect::<Vec<_>>(),
                     Err(_) => Vec::new(),
                 };
-                let raw_chunk_messages = serde_json::to_string(
-                    &parsed
-                        .messages
-                        .iter()
-                        .filter(|message| {
-                            !message.ck.meta.synthetic
-                                && message.ordinal >= chunk.chunk.start_index
-                                && message.ordinal <= chunk.chunk.end_index
-                        })
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap_or_else(|_| "[]".to_string());
-                let boundary_dates = historian_chunk::native_boundary_dates(&parsed.messages);
+                let boundary_dates =
+                    history_summarizer_chunk::native_boundary_dates(&parsed.messages);
                 let fingerprint_items: Vec<_> =
                     chunk.snapshot.iter().map(|item| item.as_item()).collect();
-                let observed = historian::compute_chunk_fingerprint(&fingerprint_items);
+                let observed = history_summarizer::compute_chunk_fingerprint(&fingerprint_items);
                 let spawned = self.spawn_module_task(async move {
                     let _guard = guard;
                     let result = async {
-                        let action = historian::handle_restart_load(
+                        let action = history_summarizer::handle_restart_load(
                             &store,
                             &session_id,
-                            now + HISTORIAN_FAILURE_BACKOFF_MS,
+                            now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                         )?;
                         match action {
-                            historian::RestartAction::Done => {
-                                return Ok(historian::HistorianReattachOutcome::Done);
+                            history_summarizer::RestartAction::Done => {
+                                return Ok(history_summarizer::HistorySummarizerReattachOutcome::Done);
                             }
-                            historian::RestartAction::AbandonedAndRefireEligible { firing_seq } => {
-                                return Ok(historian::HistorianReattachOutcome::RefireEligible {
+                            history_summarizer::RestartAction::AbandonedAndRefireEligible { firing_seq } => {
+                                return Ok(history_summarizer::HistorySummarizerReattachOutcome::RefireEligible {
                                     firing_seq,
                                 });
                             }
-                            historian::RestartAction::ReattachProducer { .. } => {}
+                            history_summarizer::RestartAction::ReattachProducer { .. } => {}
                         }
                         let mut producer = tokio::select! {
                             () = cancel.cancelled() => {
-                                return Err(historian::HistorianDriveError::Cancelled);
+                                return Err(history_summarizer::HistorySummarizerDriveError::Cancelled);
                             }
                             connected = factory.connect(
                                 &project_root,
@@ -5257,65 +5219,67 @@ impl HandlerCore {
                                 &credential_fingerprints,
                             ) => connected?,
                         };
-                        let reattach = reattach_historian_producer(
+                        let reattach = reattach_history_summarizer_producer(
                             &mut *producer,
-                            historian::HistorianReattachRequest {
+                            history_summarizer::HistorySummarizerReattachRequest {
                                 store: &store,
                                 session_id: &session_id,
                                 project_path: &project_path,
                                 observed_chunk_fingerprint: &observed,
                                 validation_chunk: &chunk.chunk,
                                 chunk_transcript: &chunk.text,
-                                raw_chunk_messages: &raw_chunk_messages,
+
                                 boundary_dates: &boundary_dates,
-                                prior_compartments: &prior_compartments,
-                                validate_options: historian_validate::ValidateOptions {
-                                    sequence_offset: prior_compartments.len() as u64 + 1,
+                                prior_history_segments: &prior_history_segments,
+                                validate_options: history_summarizer_validate::ValidateOptions {
+                                    sequence_offset: prior_history_segments.len() as u64 + 1,
                                     in_emergency: false,
                                     memory_enabled: config.memory_enabled,
                                     auto_promote: config.auto_promote,
                                     user_memory_collection_enabled: config
                                         .user_memory_collection_enabled,
-                                    force_keep_last_compartment: false,
+                                    force_keep_last_history_segment: false,
                                 },
                                 publication_floor_ordinal: range.to_ordinal,
                                 now_ms: now,
-                                failure_backoff_at_ms: now + HISTORIAN_FAILURE_BACKOFF_MS,
+                                failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                                 completion_now_ms: now_ms,
                                 publication_fence: Some(publication_fence.as_ref()),
                             },
                         );
                         tokio::select! {
                             () = cancel.cancelled() => {
-                                Err(historian::HistorianDriveError::Cancelled)
+                                Err(history_summarizer::HistorySummarizerDriveError::Cancelled)
                             }
                             outcome = reattach => outcome,
                         }
                     }
                     .await;
                     if let Err(e) = result {
-                        eprintln!("daemon: historian reattach failed for {session_id}: {e}");
+                        eprintln!("daemon: history_summarizer reattach failed for {session_id}: {e}");
                     }
                 });
                 // ever perform.
                 spawned.map(|_| "reattaching")
             }
-            HistorianPhase::Firing | HistorianPhase::Validating | HistorianPhase::Publishing => {
+            HistorySummarizerPhase::Firing
+            | HistorySummarizerPhase::Validating
+            | HistorySummarizerPhase::Publishing => {
                 let spawned = self.spawn_module_task(async move {
                     let _guard = guard;
-                    if let Err(e) = historian::handle_restart_load(
+                    if let Err(e) = history_summarizer::handle_restart_load(
                         &store,
                         &session_id,
-                        now + HISTORIAN_FAILURE_BACKOFF_MS,
+                        now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                     ) {
                         eprintln!(
-                            "daemon: historian restart recovery failed for {session_id}: {e}"
+                            "daemon: history_summarizer restart recovery failed for {session_id}: {e}"
                         );
                     }
                 });
                 spawned.map(|_| "recovering")
             }
-            HistorianPhase::Idle => Some("recovered"),
+            HistorySummarizerPhase::Idle => Some("recovered"),
         }
     }
 
@@ -5338,29 +5302,29 @@ impl HandlerCore {
         })
     }
 
-    fn prepare_historian_fire(
+    fn prepare_history_summarizer_fire(
         &self,
         store: Arc<MemoryStore>,
         parsed: &TransformRequest,
         binding: &SessionBinding,
         project_path: &str,
         projection: &crate::wire::FlatProjection,
-        prepare: HistorianPrepareContext<'_>,
-    ) -> PreparedHistorianAction {
-        let HistorianPrepareContext {
+        prepare: HistorySummarizerPrepareContext<'_>,
+    ) -> PreparedHistorySummarizerAction {
+        let HistorySummarizerPrepareContext {
             now,
             snapshot_generation,
             timings,
             project_memory,
         } = prepare;
-        let trigger_timer = HistorianTriggerTimer {
+        let trigger_timer = HistorySummarizerTriggerTimer {
             started_at: Instant::now(),
             timings,
         };
         let loaded = match store.load(&parsed.session_id) {
             Ok(loaded) => loaded,
             Err(e) => {
-                return PreparedHistorianAction::Complete(HistorianDiagnostics {
+                return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                     fired: false,
                     reason: None,
                     no_fire: Some(format!("state_load_failed:{e}")),
@@ -5371,24 +5335,24 @@ impl HandlerCore {
                 });
             }
         };
-        let mut not_fired = HistorianDiagnostics {
+        let mut not_fired = HistorySummarizerDiagnostics {
             fired: false,
             reason: None,
             no_fire: None,
-            state: loaded.meta.historian.state.as_str().to_string(),
+            state: loaded.meta.history_summarizer.state.as_str().to_string(),
             progress: None,
-            last_failure: loaded.meta.historian.last_failure.clone(),
+            last_failure: loaded.meta.history_summarizer.last_failure.clone(),
             project_memory: None,
         };
         if loaded.meta.pending_rewrite.is_some() {
-            return PreparedHistorianAction::Complete(HistorianDiagnostics {
+            return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 no_fire: Some("pending_rewrite".to_string()),
                 ..not_fired
             });
         }
-        if let Some(completion) = self.live_historian_completion_wait(&parsed.session_id) {
-            return PreparedHistorianAction::Busy {
-                diagnostics: HistorianDiagnostics {
+        if let Some(completion) = self.live_history_summarizer_completion_wait(&parsed.session_id) {
+            return PreparedHistorySummarizerAction::Busy {
+                diagnostics: HistorySummarizerDiagnostics {
                     no_fire: Some("busy".to_string()),
                     ..not_fired
                 },
@@ -5396,7 +5360,7 @@ impl HandlerCore {
             };
         }
         let cfg = self.effective_config(&binding.project_root);
-        if loaded.meta.historian.state != HistorianPhase::Idle {
+        if loaded.meta.history_summarizer.state != HistorySummarizerPhase::Idle {
             let no_fire = self
                 .maybe_spawn_reattach(
                     Arc::clone(&store),
@@ -5407,7 +5371,7 @@ impl HandlerCore {
                     now,
                 )
                 .unwrap_or("busy");
-            return PreparedHistorianAction::Complete(HistorianDiagnostics {
+            return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 no_fire: Some(no_fire.to_string()),
                 ..not_fired
             });
@@ -5429,17 +5393,17 @@ impl HandlerCore {
             .timings
             .tokenized_blocks
             .saturating_add(tokenized_blocks);
-        let compartment_end_result = store.max_compartment_end_ordinal(&parsed.session_id);
-        let last_compartment_end_ordinal = match compartment_end_result {
+        let history_segment_end_result = store.max_history_segment_end_ordinal(&parsed.session_id);
+        let last_history_segment_end_ordinal = match history_segment_end_result {
             Ok(ordinal) if ordinal > 0 => Some(ordinal as u64),
             Ok(_) | Err(_) if loaded.meta.ordinal_continuation_base.is_some() => {
                 let detail = "continued_ordinal_offset_missing";
                 eprintln!(
-                    "daemon: aborting historian trigger for {}: {detail}",
+                    "daemon: aborting history_summarizer trigger for {}: {detail}",
                     parsed.session_id
                 );
                 self.record_no_fire(&store, &parsed.session_id, &loaded, detail);
-                return PreparedHistorianAction::Complete(HistorianDiagnostics {
+                return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                     no_fire: Some(detail.to_string()),
                     ..not_fired
                 });
@@ -5465,7 +5429,7 @@ impl HandlerCore {
         let trigger = {
             let mut formatted_token_estimator =
                 |bytes: &str| token_cache_snapshot.formatted_token_count(bytes);
-            boundary::check_compartment_trigger_with_token_estimator(
+            boundary::check_history_segment_trigger_with_token_estimator(
                 &boundary_messages,
                 &TriggerContext {
                     boundary: BoundaryContext {
@@ -5474,15 +5438,16 @@ impl HandlerCore {
                             .execute_threshold_or(cfg.execute_threshold_percentage),
                         usage_percentage,
                         usage_input_tokens: input_tokens,
-                        last_compartment_end_ordinal,
-                        prior_boundary_ordinal: last_compartment_end_ordinal.unwrap_or(0),
-                        publication_floor_active: last_compartment_end_ordinal.unwrap_or(0) > 0,
+                        last_history_segment_end_ordinal,
+                        prior_boundary_ordinal: last_history_segment_end_ordinal.unwrap_or(0),
+                        publication_floor_active: last_history_segment_end_ordinal.unwrap_or(0) > 0,
                         emergency_tail_scale: None,
                         trigger_budget: None,
                         fold_is_only_reclaim,
                     },
                     projected_post_drop_percentage,
-                    compartment_in_progress: loaded.meta.historian.state != HistorianPhase::Idle,
+                    history_segment_in_progress: loaded.meta.history_summarizer.state
+                        != HistorySummarizerPhase::Idle,
                     commit_cluster_trigger_enabled: DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED,
                     min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
                 },
@@ -5502,14 +5467,14 @@ impl HandlerCore {
             trigger
                 .progress
                 .as_ref()
-                .map(|p| transform::HistorianTriggerProgress {
+                .map(|p| transform::HistorySummarizerTriggerProgress {
                     eligible_chunk_tokens: p.eligible_chunk_tokens,
                     tail_size_bar: p.tail_size_bar,
                     protected_tail_n_tokens: p.n_tokens,
                     protected_start_ordinal: p.protected_start_ordinal,
                 });
         if !trigger.fire {
-            let reason = if loaded.meta.historian.state == HistorianPhase::Idle {
+            let reason = if loaded.meta.history_summarizer.state == HistorySummarizerPhase::Idle {
                 "trigger_false"
             } else {
                 "busy"
@@ -5527,7 +5492,7 @@ impl HandlerCore {
                 };
                 self.record_no_fire(&store, &parsed.session_id, &loaded, &detail);
             }
-            return PreparedHistorianAction::Complete(HistorianDiagnostics {
+            return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 no_fire: Some(reason.to_string()),
                 ..not_fired
             });
@@ -5535,7 +5500,7 @@ impl HandlerCore {
         let trigger_reason = trigger.reason.map(|r| r.as_str().to_string());
         if cfg.model_chain.is_empty() {
             self.record_no_fire(&store, &parsed.session_id, &loaded, "no_models");
-            return PreparedHistorianAction::Complete(HistorianDiagnostics {
+            return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 reason: trigger_reason,
                 no_fire: Some("no_models".to_string()),
                 ..not_fired
@@ -5543,19 +5508,19 @@ impl HandlerCore {
         }
         let Some(boundary) = trigger.boundary.clone() else {
             self.record_no_fire(&store, &parsed.session_id, &loaded, "missing_boundary");
-            return PreparedHistorianAction::Complete(HistorianDiagnostics {
+            return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 no_fire: Some("missing_boundary".to_string()),
                 ..not_fired
             });
         };
         if loaded
             .meta
-            .historian
+            .history_summarizer
             .failure_backoff_at_ms
             .is_some_and(|backoff_at_ms| now < backoff_at_ms)
         {
             self.record_no_fire(&store, &parsed.session_id, &loaded, "backoff");
-            return PreparedHistorianAction::Complete(HistorianDiagnostics {
+            return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 reason: trigger_reason,
                 no_fire: Some("backoff".to_string()),
                 ..not_fired
@@ -5578,17 +5543,19 @@ impl HandlerCore {
                 "fold-only profile must not carry frozen tail reductions"
             );
         }
-        let assemble = assemble_historian_firing(
+        let assemble = assemble_history_summarizer_firing(
             &store,
             &parsed.messages,
             &live,
             &projection.identity_by_mid,
-            HistorianAssemblerConfig {
+            HistorySummarizerAssemblerConfig {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.to_string(),
                 project_slug: project_slug.clone(),
                 model_chain: cfg.model_chain.clone(),
-                token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
+                token_budget: derive_history_summarizer_chunk_tokens(
+                    cfg.history_summarizer_context_limit_tokens,
+                ),
                 boundary,
                 // `project_memory` was read under `binding.config`; the gate must come from the same config or a reload between bind and fire pairs `memory_enabled: true` with no read.
                 memory_enabled: binding.config.memory_enabled,
@@ -5597,23 +5564,23 @@ impl HandlerCore {
                 user_memory_collection_enabled: cfg.user_memory_collection_enabled,
                 extraction_free: false,
                 in_emergency: parsed.emergency_recovery_armed,
-                force_keep_last_compartment: false,
+                force_keep_last_history_segment: false,
                 fold_is_only_reclaim,
-                failure_backoff_at_ms: now + HISTORIAN_FAILURE_BACKOFF_MS,
-                min_chunk_tokens: DEFAULT_HISTORIAN_MIN_CHUNK_TOKENS,
+                failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
+                min_chunk_tokens: DEFAULT_HISTORY_SUMMARIZER_MIN_CHUNK_TOKENS,
             },
             now,
         );
         let firing = match assemble {
-            Ok(AssembleHistorianFiringOutcome::Fire(firing)) => *firing,
-            Ok(AssembleHistorianFiringOutcome::NoFire(reason)) => {
+            Ok(AssembleHistorySummarizerFiringOutcome::Fire(firing)) => *firing,
+            Ok(AssembleHistorySummarizerFiringOutcome::NoFire(reason)) => {
                 self.record_no_fire(
                     &store,
                     &parsed.session_id,
                     &loaded,
                     &format!("assemble:{reason:?}"),
                 );
-                return PreparedHistorianAction::Complete(HistorianDiagnostics {
+                return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                     reason: trigger_reason,
                     no_fire: Some(format!("assemble:{reason:?}")),
                     ..not_fired
@@ -5626,24 +5593,24 @@ impl HandlerCore {
                     &loaded,
                     &format!("assemble_failed:{e}"),
                 );
-                return PreparedHistorianAction::Complete(HistorianDiagnostics {
+                return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                     reason: trigger_reason,
                     no_fire: Some(format!("assemble_failed:{e}")),
                     ..not_fired
                 });
             }
         };
-        let diagnostics = HistorianDiagnostics {
+        let diagnostics = HistorySummarizerDiagnostics {
             fired: true,
             reason: trigger_reason,
             project_memory: firing.project_memory.clone(),
             ..not_fired.clone()
         };
-        let live_guard = match self.try_claim_live_historian_session(&parsed.session_id) {
-            LiveHistorianSessionClaim::Acquired(live_guard) => live_guard,
-            LiveHistorianSessionClaim::Busy(completion) => {
-                return PreparedHistorianAction::Busy {
-                    diagnostics: HistorianDiagnostics {
+        let live_guard = match self.try_claim_live_history_summarizer_session(&parsed.session_id) {
+            LiveHistorySummarizerSessionClaim::Acquired(live_guard) => live_guard,
+            LiveHistorySummarizerSessionClaim::Busy(completion) => {
+                return PreparedHistorySummarizerAction::Busy {
+                    diagnostics: HistorySummarizerDiagnostics {
                         reason: diagnostics.reason,
                         no_fire: Some("busy".to_string()),
                         ..not_fired
@@ -5652,9 +5619,9 @@ impl HandlerCore {
                 };
             }
         };
-        PreparedHistorianAction::FireReady(Box::new(PreparedHistorianFiring {
+        PreparedHistorySummarizerAction::FireReady(Box::new(PreparedHistorySummarizerFiring {
             diagnostics,
-            task: HistorianFiringTask {
+            task: HistorySummarizerFiringTask {
                 store,
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.to_string(),
@@ -5693,28 +5660,30 @@ impl HandlerCore {
         if loaded.meta.pending_rewrite.is_some() {
             return PreparedWrapupAction::Failed("a boundary rewrite is pending".to_string());
         }
-        if let Some(completion) = self.live_historian_completion_wait(&parsed.session_id) {
+        if let Some(completion) = self.live_history_summarizer_completion_wait(&parsed.session_id) {
             return PreparedWrapupAction::Busy(completion);
         }
-        if loaded.meta.historian.state != HistorianPhase::Idle {
+        if loaded.meta.history_summarizer.state != HistorySummarizerPhase::Idle {
             return PreparedWrapupAction::Failed(format!(
-                "historian recovery is required from {}",
-                loaded.meta.historian.state.as_str()
+                "history_summarizer recovery is required from {}",
+                loaded.meta.history_summarizer.state.as_str()
             ));
         }
         if !allow_unknown_module_retry
-            && let Some(until) = loaded.meta.historian.failure_backoff_at_ms
+            && let Some(until) = loaded.meta.history_summarizer.failure_backoff_at_ms
             && until > now
         {
             return PreparedWrapupAction::Failed(format!(
-                "historian failure backoff active for {} ms",
+                "history_summarizer failure backoff active for {} ms",
                 until.saturating_sub(now)
             ));
         }
 
         let cfg = self.effective_config(&binding.project_root);
         if cfg.model_chain.is_empty() {
-            return PreparedWrapupAction::Failed("no historian models are configured".to_string());
+            return PreparedWrapupAction::Failed(
+                "no history_summarizer models are configured".to_string(),
+            );
         }
         let live = projection
             .blocks
@@ -5723,49 +5692,51 @@ impl HandlerCore {
             .cloned()
             .collect::<Vec<_>>();
         let project_slug = project_slug(&binding.project_root);
-        let assemble = assemble_historian_firing(
+        let assemble = assemble_history_summarizer_firing(
             &store,
             &parsed.messages,
             &live,
             &projection.identity_by_mid,
-            HistorianAssemblerConfig {
+            HistorySummarizerAssemblerConfig {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
                 project_memory: self.project_memory_read(binding, &cfg, now),
                 model_chain: cfg.model_chain,
-                token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
+                token_budget: derive_history_summarizer_chunk_tokens(
+                    cfg.history_summarizer_context_limit_tokens,
+                ),
                 boundary: boundary.clone(),
                 memory_enabled: cfg.memory_enabled,
                 auto_promote: cfg.auto_promote,
                 user_memory_collection_enabled: cfg.user_memory_collection_enabled,
                 extraction_free: false,
                 in_emergency: false,
-                force_keep_last_compartment: false,
+                force_keep_last_history_segment: false,
                 fold_is_only_reclaim: true,
-                failure_backoff_at_ms: now + HISTORIAN_FAILURE_BACKOFF_MS,
-                min_chunk_tokens: DEFAULT_HISTORIAN_MIN_CHUNK_TOKENS,
+                failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
+                min_chunk_tokens: DEFAULT_HISTORY_SUMMARIZER_MIN_CHUNK_TOKENS,
             },
             now,
         );
         let firing = match assemble {
-            Ok(AssembleHistorianFiringOutcome::Fire(firing)) => {
+            Ok(AssembleHistorySummarizerFiringOutcome::Fire(firing)) => {
                 let mut firing = *firing;
-                firing.validate_options.force_keep_last_compartment = !firing.chunk.has_more;
+                firing.validate_options.force_keep_last_history_segment = !firing.chunk.has_more;
                 firing
             }
-            Ok(AssembleHistorianFiringOutcome::NoFire(reason)) => {
+            Ok(AssembleHistorySummarizerFiringOutcome::NoFire(reason)) => {
                 return PreparedWrapupAction::Nothing(format!("{reason:?}"));
             }
             Err(error) => return PreparedWrapupAction::Failed(format!("assembly failed: {error}")),
         };
-        let live_guard = match self.try_claim_live_historian_session(&parsed.session_id) {
-            LiveHistorianSessionClaim::Acquired(guard) => guard,
-            LiveHistorianSessionClaim::Busy(completion) => {
+        let live_guard = match self.try_claim_live_history_summarizer_session(&parsed.session_id) {
+            LiveHistorySummarizerSessionClaim::Acquired(guard) => guard,
+            LiveHistorySummarizerSessionClaim::Busy(completion) => {
                 return PreparedWrapupAction::Busy(completion);
             }
         };
-        PreparedWrapupAction::FireReady(Box::new(HistorianFiringTask {
+        PreparedWrapupAction::FireReady(Box::new(HistorySummarizerFiringTask {
             store,
             session_id: parsed.session_id.clone(),
             project_path,
@@ -5780,15 +5751,15 @@ impl HandlerCore {
         }))
     }
 
-    fn refresh_historian_diagnostics(
+    fn refresh_history_summarizer_diagnostics(
         &self,
         store: &MemoryStore,
         session_id: &str,
-        mut diagnostics: HistorianDiagnostics,
-    ) -> HistorianDiagnostics {
+        mut diagnostics: HistorySummarizerDiagnostics,
+    ) -> HistorySummarizerDiagnostics {
         if let Ok(loaded) = store.load(session_id) {
-            diagnostics.state = loaded.meta.historian.state.as_str().to_string();
-            diagnostics.last_failure = loaded.meta.historian.last_failure.clone();
+            diagnostics.state = loaded.meta.history_summarizer.state.as_str().to_string();
+            diagnostics.last_failure = loaded.meta.history_summarizer.last_failure.clone();
         }
         diagnostics
     }
@@ -5801,19 +5772,22 @@ impl HandlerCore {
         loaded: &memory_store::LoadedState,
         reason: &str,
     ) {
-        if loaded.meta.historian.last_no_fire.as_deref() == Some(reason) {
+        if loaded.meta.history_summarizer.last_no_fire.as_deref() == Some(reason) {
             return;
         }
         let mut meta = loaded.meta.clone();
-        meta.historian.last_no_fire = Some(reason.to_string());
+        meta.history_summarizer.last_no_fire = Some(reason.to_string());
         let _ = store.commit(session_id, loaded.row_version, &loaded.core, &meta);
     }
 
-    async fn execute_historian_firing_task(
-        factory: Arc<dyn HistorianProducerFactory>,
-        task: HistorianFiringTask,
-    ) -> Result<historian::HistorianDriveOutcome, historian::HistorianDriveError> {
-        let HistorianFiringTask {
+    async fn execute_history_summarizer_firing_task(
+        factory: Arc<dyn HistorySummarizerProducerFactory>,
+        task: HistorySummarizerFiringTask,
+    ) -> Result<
+        history_summarizer::HistorySummarizerDriveOutcome,
+        history_summarizer::HistorySummarizerDriveError,
+    > {
+        let HistorySummarizerFiringTask {
             store,
             session_id,
             project_path,
@@ -5831,7 +5805,7 @@ impl HandlerCore {
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
         let connected = tokio::select! {
-            () = cancel.cancelled() => return Err(historian::HistorianDriveError::Cancelled),
+            () = cancel.cancelled() => return Err(history_summarizer::HistorySummarizerDriveError::Cancelled),
             connected = factory.connect(&project_root, &harness, &credential_fingerprints) => {
                 connected
             }
@@ -5847,17 +5821,17 @@ impl HandlerCore {
                 );
                 request.publication_fence = publication_fence.as_deref();
                 tokio::select! {
-                    () = cancel.cancelled() => Err(historian::HistorianDriveError::Cancelled),
-                    outcome = run_historian_firing(&mut *producer, request) => outcome,
+                    () = cancel.cancelled() => Err(history_summarizer::HistorySummarizerDriveError::Cancelled),
+                    outcome = run_history_summarizer_firing(&mut *producer, request) => outcome,
                 }
             }
             Err(err) => {
-                let failure_backoff_at_ms = historian::completion_failure_backoff_at_ms(
+                let failure_backoff_at_ms = history_summarizer::completion_failure_backoff_at_ms(
                     failure_started_at_ms,
                     configured_failure_backoff_at_ms,
                     now_ms(),
                 );
-                let backoff_error = record_historian_connect_failure(
+                let backoff_error = record_history_summarizer_connect_failure(
                     &store,
                     &session_id,
                     failure_backoff_at_ms,
@@ -5866,48 +5840,53 @@ impl HandlerCore {
                 )
                 .err()
                 .map(Box::new);
-                Err(historian::HistorianDriveError::ProducerConnect {
-                    source: Box::new(err),
-                    backoff_error,
-                })
+                Err(
+                    history_summarizer::HistorySummarizerDriveError::ProducerConnect {
+                        source: Box::new(err),
+                        backoff_error,
+                    },
+                )
             }
         }
     }
 
     /// Emergency-pass firing is bounded by the completion-wait budget.
-    async fn run_historian_firing_inline(
+    async fn run_history_summarizer_firing_inline(
         &self,
-        task: HistorianFiringTask,
-    ) -> Result<historian::HistorianDriveOutcome, historian::HistorianDriveError> {
+        task: HistorySummarizerFiringTask,
+    ) -> Result<
+        history_summarizer::HistorySummarizerDriveOutcome,
+        history_summarizer::HistorySummarizerDriveError,
+    > {
         let factory = Arc::clone(&self.producer_factory);
         let Some(handle) =
-            self.spawn_module_task(Self::execute_historian_firing_task(factory, task))
+            self.spawn_module_task(Self::execute_history_summarizer_firing_task(factory, task))
         else {
-            return Err(historian::HistorianDriveError::Producer(
-                HistorianProducerError::TimedOut,
+            return Err(history_summarizer::HistorySummarizerDriveError::Producer(
+                HistorySummarizerProducerError::TimedOut,
             ));
         };
-        match tokio::time::timeout(historian::completion_wait_budget(), handle).await {
+        match tokio::time::timeout(history_summarizer::completion_wait_budget(), handle).await {
             Ok(Ok(outcome)) => outcome,
-            Ok(Err(join_err)) => Err(historian::HistorianDriveError::Producer(
-                HistorianProducerError::RunFailed {
+            Ok(Err(join_err)) => Err(history_summarizer::HistorySummarizerDriveError::Producer(
+                HistorySummarizerProducerError::RunFailed {
                     run_id: String::new(),
                     detail: format!("inline firing task panicked: {join_err}"),
                     classification: None,
                     class_field_present: false,
                 },
             )),
-            Err(_elapsed) => Err(historian::HistorianDriveError::Producer(
-                HistorianProducerError::TimedOut,
+            Err(_elapsed) => Err(history_summarizer::HistorySummarizerDriveError::Producer(
+                HistorySummarizerProducerError::TimedOut,
             )),
         }
     }
 
-    async fn await_live_historian_completion(
+    async fn await_live_history_summarizer_completion(
         &self,
-        completion: LiveHistorianCompletionWait,
+        completion: LiveHistorySummarizerCompletionWait,
     ) -> bool {
-        tokio::time::timeout(historian::completion_wait_budget(), completion)
+        tokio::time::timeout(history_summarizer::completion_wait_budget(), completion)
             .await
             .is_ok()
     }
@@ -5921,7 +5900,7 @@ impl HandlerCore {
         {
             return budget;
         }
-        historian::MAX_WRAPUP_REQUEST_BUDGET
+        history_summarizer::MAX_WRAPUP_REQUEST_BUDGET
             .checked_sub(WRAPUP_REQUEST_MARGIN)
             .unwrap_or(Duration::ZERO)
     }
@@ -5946,29 +5925,32 @@ impl HandlerCore {
 
     async fn run_wrapup_firing(
         &self,
-        task: HistorianFiringTask,
+        task: HistorySummarizerFiringTask,
         deadline: Instant,
-    ) -> Result<historian::HistorianDriveOutcome, WrapupFiringError> {
+    ) -> Result<history_summarizer::HistorySummarizerDriveOutcome, WrapupFiringError> {
         let Some(remaining) = Self::remaining_wrapup_budget(deadline) else {
             return Err(WrapupFiringError::Retryable(
                 RetryableWrapupReason::BudgetExhausted,
-                "wrapup request budget expired before historian round".to_string(),
+                "wrapup request budget expired before history_summarizer round".to_string(),
             ));
         };
-        let wait = historian::wrapup_round_wait_budget().min(remaining);
+        let wait = history_summarizer::wrapup_round_wait_budget().min(remaining);
         let factory = Arc::clone(&self.producer_factory);
         let Some(handle) =
-            self.spawn_module_task(Self::execute_historian_firing_task(factory, task))
+            self.spawn_module_task(Self::execute_history_summarizer_firing_task(factory, task))
         else {
             return Err(WrapupFiringError::Retryable(
                 RetryableWrapupReason::SnapshotUnavailable,
-                "module task admission closed before historian round".to_owned(),
+                "module task admission closed before history_summarizer round".to_owned(),
             ));
         };
         match tokio::time::timeout(wait, handle).await {
             Ok(Ok(Ok(outcome))) => Ok(outcome),
             Ok(Ok(Err(error))) => {
-                if matches!(&error, historian::HistorianDriveError::NoModels) {
+                if matches!(
+                    &error,
+                    history_summarizer::HistorySummarizerDriveError::NoModels
+                ) {
                     return Err(WrapupFiringError::Terminal {
                         reason: "no_models",
                         detail: error.to_string(),
@@ -5976,36 +5958,36 @@ impl HandlerCore {
                 }
                 if matches!(
                     &error,
-                    historian::HistorianDriveError::Producer(error)
+                    history_summarizer::HistorySummarizerDriveError::Producer(error)
                         if error.is_unknown_module()
                 ) || matches!(
                     &error,
-                    historian::HistorianDriveError::ProducerConnect { source, .. }
+                    history_summarizer::HistorySummarizerDriveError::ProducerConnect { source, .. }
                         if source.is_unknown_module()
                 ) {
                     return Err(WrapupFiringError::UnknownModule(error.to_string()));
                 }
                 let reason = match &error {
-                    historian::HistorianDriveError::State(
-                        historian::HistorianStateError::Publish(
-                            memory_store::HistorianPublishError::CasConflict { .. }
-                            | memory_store::HistorianPublishError::FenceRejected { .. },
+                    history_summarizer::HistorySummarizerDriveError::State(
+                        history_summarizer::HistorySummarizerStateError::Publish(
+                            memory_store::HistorySummarizerPublishError::CasConflict { .. }
+                            | memory_store::HistorySummarizerPublishError::FenceRejected { .. },
                         ),
                     )
-                    | historian::HistorianDriveError::State(
-                        historian::HistorianStateError::Store(MemoryStoreError::CasConflict {
-                            ..
-                        }),
+                    | history_summarizer::HistorySummarizerDriveError::State(
+                        history_summarizer::HistorySummarizerStateError::Store(
+                            MemoryStoreError::CasConflict { .. },
+                        ),
                     ) => RetryableWrapupReason::SnapshotStale,
-                    historian::HistorianDriveError::ProducerConnect {
+                    history_summarizer::HistorySummarizerDriveError::ProducerConnect {
                         backoff_error: None,
                         ..
                     }
-                    | historian::HistorianDriveError::Producer(_)
-                    | historian::HistorianDriveError::Validation(_) => {
+                    | history_summarizer::HistorySummarizerDriveError::Producer(_)
+                    | history_summarizer::HistorySummarizerDriveError::Validation(_) => {
                         RetryableWrapupReason::BackoffActive
                     }
-                    historian::HistorianDriveError::ProducerConnect {
+                    history_summarizer::HistorySummarizerDriveError::ProducerConnect {
                         backoff_error: Some(_),
                         ..
                     } => RetryableWrapupReason::SnapshotUnavailable,
@@ -6015,47 +5997,53 @@ impl HandlerCore {
             }
             Ok(Err(error)) => Err(WrapupFiringError::Retryable(
                 RetryableWrapupReason::SnapshotUnavailable,
-                format!("historian task failed: {error}"),
+                format!("history_summarizer task failed: {error}"),
             )),
             Err(_) if Instant::now() >= deadline => Err(WrapupFiringError::Retryable(
                 RetryableWrapupReason::BudgetExhausted,
-                "wrapup request budget expired during historian round".to_string(),
+                "wrapup request budget expired during history_summarizer round".to_string(),
             )),
             Err(_) => Err(WrapupFiringError::Retryable(
                 RetryableWrapupReason::SnapshotUnavailable,
-                "historian round timed out after 600 seconds".to_string(),
+                "history_summarizer round timed out after 600 seconds".to_string(),
             )),
         }
     }
 
-    async fn await_wrapup_historian_completion(
+    async fn await_wrapup_history_summarizer_completion(
         &self,
-        completion: LiveHistorianCompletionWait,
+        completion: LiveHistorySummarizerCompletionWait,
         deadline: Instant,
     ) -> Result<(), String> {
         let Some(remaining) = Self::remaining_wrapup_budget(deadline) else {
-            return Err("wrapup request budget expired before joining historian".to_string());
+            return Err(
+                "wrapup request budget expired before joining history_summarizer".to_string(),
+            );
         };
-        let wait = historian::completion_wait_budget().min(remaining);
+        let wait = history_summarizer::completion_wait_budget().min(remaining);
         match tokio::time::timeout(wait, completion).await {
             Ok(()) => Ok(()),
             Err(_) if Instant::now() >= deadline => {
-                Err("wrapup request budget expired while joining historian".to_string())
+                Err("wrapup request budget expired while joining history_summarizer".to_string())
             }
-            Err(_) => Err("timed out while joining the active historian run".to_string()),
+            Err(_) => Err("timed out while joining the active history_summarizer run".to_string()),
         }
     }
 
-    fn spawn_historian_firing(&self, task: HistorianFiringTask) {
+    fn spawn_history_summarizer_firing(&self, task: HistorySummarizerFiringTask) {
         let factory = Arc::clone(&self.producer_factory);
         let _ = self.spawn_module_task(async move {
             let session_id = task.session_id.clone();
-            let result = Self::execute_historian_firing_task(factory, task).await;
+            let result = Self::execute_history_summarizer_firing_task(factory, task).await;
             match result {
                 Ok(outcome) => {
-                    eprintln!("daemon: historian firing finished for {session_id}: {outcome:?}")
+                    eprintln!(
+                        "daemon: history_summarizer firing finished for {session_id}: {outcome:?}"
+                    )
                 }
-                Err(e) => eprintln!("daemon: historian firing failed for {session_id}: {e}"),
+                Err(e) => {
+                    eprintln!("daemon: history_summarizer firing failed for {session_id}: {e}")
+                }
             }
         });
     }
@@ -6145,7 +6133,7 @@ impl HandlerCore {
             return PreparedOutcome::Error {
                 code: "bad_request".to_string(),
                 message: format!(
-                    "ctx_reduce drop request has no valid tags: {} not found",
+                    "eidnara_reduce drop request has no valid tags: {} not found",
                     format_plain_tag_numbers(&unknown_numbers)
                 ),
             };
@@ -6358,8 +6346,8 @@ impl HandlerCore {
                 };
             }
         };
-        let has_compartments = match store.has_compartments(&session_id) {
-            Ok(has_compartments) => has_compartments,
+        let has_history_segments = match store.has_history_segments(&session_id) {
+            Ok(has_history_segments) => has_history_segments,
             Err(error) => {
                 return PreparedOutcome::Error {
                     code: "store_load_failed".to_string(),
@@ -6367,7 +6355,7 @@ impl HandlerCore {
                 };
             }
         };
-        let never_minted = !has_compartments && loaded.core.boundary_id.trim().is_empty();
+        let never_minted = !has_history_segments && loaded.core.boundary_id.trim().is_empty();
         if never_minted {
             return match store.record_recomp_command(
                 &session_id,
@@ -6445,7 +6433,7 @@ impl HandlerCore {
             Some(store) => store,
             None => return store_unavailable_error(),
         };
-        // Session notes live under the notes authority project, where `ctx_note` wrote them.
+        // Session notes live under the notes authority project, where `eidnara_note` wrote them.
         let note_project_path = match Self::authority_project_path(
             &store,
             &binding.project_root.to_string_lossy(),
@@ -6456,7 +6444,7 @@ impl HandlerCore {
         };
         match store.delete_session(&session_id, &note_project_path) {
             Ok(deleted_rows) => {
-                self.cancel_historian_work(&session_id);
+                self.cancel_history_summarizer_work(&session_id);
                 self.wrapup_sessions
                     .lock()
                     .expect("wrapup sessions mutex")
@@ -6489,17 +6477,18 @@ impl HandlerCore {
             Some(store) => store,
             None => return store_unavailable_error(),
         };
-        let include_compartments_after_seq = match request.get("include_compartments_after_seq") {
-            Some(value) => {
-                let Some(after_sequence) = value.as_i64().filter(|value| *value >= -1) else {
-                    return invalid_params_error(
-                        "include_compartments_after_seq must be an integer >= -1",
-                    );
-                };
-                Some((after_sequence, SESSION_STATUS_COMPARTMENT_PAGE_LIMIT))
-            }
-            None => None,
-        };
+        let include_history_segments_after_seq =
+            match request.get("include_history_segments_after_seq") {
+                Some(value) => {
+                    let Some(after_sequence) = value.as_i64().filter(|value| *value >= -1) else {
+                        return invalid_params_error(
+                            "include_history_segments_after_seq must be an integer >= -1",
+                        );
+                    };
+                    Some((after_sequence, SESSION_STATUS_HISTORY_SEGMENT_PAGE_LIMIT))
+                }
+                None => None,
+            };
         let sample_wrapup_latch = || {
             self.wrapup_sessions
                 .lock()
@@ -6508,16 +6497,17 @@ impl HandlerCore {
                 .map(|session| (Arc::as_ptr(&session.token) as usize, session.rounds))
         };
         let latch_before = sample_wrapup_latch();
-        let mut snapshot =
-            match store.load_session_status_snapshot(&session_id, include_compartments_after_seq) {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    return PreparedOutcome::Error {
-                        code: "store_load_failed".to_string(),
-                        message: error.to_string(),
-                    };
-                }
-            };
+        let mut snapshot = match store
+            .load_session_status_snapshot(&session_id, include_history_segments_after_seq)
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return PreparedOutcome::Error {
+                    code: "store_load_failed".to_string(),
+                    message: error.to_string(),
+                };
+            }
+        };
         #[cfg(test)]
         if let Some(hook) = self
             .status_snapshot_hook
@@ -6530,7 +6520,7 @@ impl HandlerCore {
         let mut wrapup_latch = sample_wrapup_latch();
         if latch_before != wrapup_latch {
             snapshot = match store
-                .load_session_status_snapshot(&session_id, include_compartments_after_seq)
+                .load_session_status_snapshot(&session_id, include_history_segments_after_seq)
             {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
@@ -6543,11 +6533,11 @@ impl HandlerCore {
             wrapup_latch = sample_wrapup_latch();
         }
         let loaded = snapshot.loaded;
-        let compartment_count = snapshot.compartment_count;
+        let history_segment_count = snapshot.history_segment_count;
         let pending_drop_count = snapshot.pending_drop_count;
         let tag_count = snapshot.tag_count;
         let pass_trace = snapshot.pass_trace;
-        let compartment_page = snapshot.compartment_page;
+        let history_segment_page = snapshot.history_segment_page;
         let coverage = loaded
             .meta
             .coverage_ordinal
@@ -6566,14 +6556,15 @@ impl HandlerCore {
         let descent_counters = &loaded.meta.lineage_descent_counters;
         let descent_pending_build_skew = descent_counters.pending_build_skew;
         let descent_pending_no_responses = descent_counters.pending_no_responses;
-        let historian = historian_status_summary(&loaded.meta.historian);
-        let consecutive_publish_failures = loaded.meta.historian.consecutive_publish_failures;
+        let history_summarizer = history_summarizer_status_summary(&loaded.meta.history_summarizer);
+        let consecutive_publish_failures =
+            loaded.meta.history_summarizer.consecutive_publish_failures;
         let publish_health = if consecutive_publish_failures >= 3 {
             format!("publish health degraded: {consecutive_publish_failures} consecutive failures")
         } else {
             format!("publish failures: {consecutive_publish_failures}")
         };
-        let compartment_tokens = loaded
+        let history_segment_tokens = loaded
             .core
             .frozen_units
             .iter()
@@ -6637,9 +6628,9 @@ impl HandlerCore {
         });
         let summary = sanitize_status_text(
             &format!(
-                "session {short_session} (last active {age}): {} {}, coverage ordinal {coverage}, boundary {boundary}, {} pending {}, {} {}, pending m1 delta {}, last historian: {historian}, {publish_health}, surface {surface}",
-                compartment_count,
-                plural_word(compartment_count, "compartment"),
+                "session {short_session} (last active {age}): {} {}, coverage ordinal {coverage}, boundary {boundary}, {} pending {}, {} {}, pending m1 delta {}, last history_summarizer: {history_summarizer}, {publish_health}, surface {surface}",
+                history_segment_count,
+                plural_word(history_segment_count, "history_segment"),
                 pending_drop_count,
                 plural_word(pending_drop_count, "drop"),
                 tag_count,
@@ -6659,13 +6650,13 @@ impl HandlerCore {
             "coverage_ordinal": loaded.meta.coverage_ordinal,
             "row_version": loaded.row_version,
             "boundary_present": !loaded.core.boundary_id.trim().is_empty(),
-            "compartment_count": compartment_count,
-            "compartment_tokens": compartment_tokens,
+            "history_segment_count": history_segment_count,
+            "history_segment_tokens": history_segment_tokens,
             "pending_drop_count": pending_drop_count,
             "tag_count": tag_count,
             "pending_m1_delta": pending_m1_delta,
             "pending_m1_age_ms": pending_m1_age_ms,
-            "historian": {
+            "history_summarizer": {
                 "consecutive_publish_failures": consecutive_publish_failures,
                 "publish_health_degraded": consecutive_publish_failures >= 3,
             },
@@ -6693,7 +6684,7 @@ impl HandlerCore {
             },
             "epochs": {
                 "memory_render_epoch": MEMORY_RENDER_FORMAT_EPOCH,
-                "compartment_render_epoch": COMPARTMENT_RENDER_FORMAT_EPOCH,
+                "history_segment_render_epoch": HISTORY_SEGMENT_RENDER_FORMAT_EPOCH,
                 "profile_epoch": PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC,
                 "tagger_epoch": TAGGER_FEATURE_EPOCH,
                 "state_sync_deltas": true,
@@ -6705,33 +6696,36 @@ impl HandlerCore {
             },
             "tail_hygiene": tail_hygiene,
         });
-        if let Some(page) = compartment_page {
-            let compartments = page
-                .compartments
+        if let Some(page) = history_segment_page {
+            let history_segments = page
+                .history_segments
                 .into_iter()
-                .map(|compartment| {
+                .map(|history_segment| {
                     json!({
-                        "sequence": compartment.sequence,
-                        "start_message": compartment.start_message,
-                        "end_message": compartment.end_message,
-                        "start_message_id": compartment.start_message_id,
-                        "end_message_id": compartment.end_message_id,
-                        "title": compartment.title,
-                        "content": compartment.content,
-                        "p1": compartment.p1,
-                        "p2": compartment.p2,
-                        "p3": compartment.p3,
-                        "p4": compartment.p4,
-                        "importance": compartment.importance,
-                        "episode_type": compartment.episode_type,
-                        "created_at": compartment.created_at,
+                        "sequence": history_segment.sequence,
+                        "start_message": history_segment.start_message,
+                        "end_message": history_segment.end_message,
+                        "start_message_id": history_segment.start_message_id,
+                        "end_message_id": history_segment.end_message_id,
+                        "title": history_segment.title,
+                        "content": history_segment.content,
+                        "p1": history_segment.p1,
+                        "p2": history_segment.p2,
+                        "p3": history_segment.p3,
+                        "p4": history_segment.p4,
+                        "importance": history_segment.importance,
+                        "episode_type": history_segment.episode_type,
+                        "created_at": history_segment.created_at,
                     })
                 })
                 .collect::<Vec<_>>();
             let body = response
                 .as_object_mut()
                 .expect("session.status response is an object");
-            body.insert("compartments".to_string(), Value::Array(compartments));
+            body.insert(
+                "history_segments".to_string(),
+                Value::Array(history_segments),
+            );
             body.insert("max_sequence".to_string(), json!(page.max_sequence));
         }
         respond(response)
@@ -6990,13 +6984,13 @@ impl HandlerCore {
             }
         };
         let entry_now = now_ms();
-        if let Some(until) = entry_state.meta.historian.failure_backoff_at_ms
+        if let Some(until) = entry_state.meta.history_summarizer.failure_backoff_at_ms
             && until > entry_now
         {
             return Self::retryable_wrapup_response(
                 RetryableWrapupReason::BackoffActive,
                 format!(
-                    "historian failure backoff active for {} ms",
+                    "history_summarizer failure backoff active for {} ms",
                     until.saturating_sub(entry_now)
                 ),
             );
@@ -7023,7 +7017,7 @@ impl HandlerCore {
             }
         };
         let parsed = Arc::clone(&ready.request);
-        let initial_snapshot = match store.load_historian_assembly_snapshot(&session_id) {
+        let initial_snapshot = match store.load_history_summarizer_assembly_snapshot(&session_id) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return PreparedOutcome::Error {
@@ -7054,10 +7048,10 @@ impl HandlerCore {
             .expect("boundary token cache mutex")
             .replace(&parsed.session_id, boundary_messages.token_cache_snapshot);
         let boundary_messages = boundary_messages.messages;
-        let initial_compartments = initial_snapshot.compartments;
-        let initial_end = initial_compartments
+        let initial_history_segments = initial_snapshot.history_segments;
+        let initial_end = initial_history_segments
             .iter()
-            .map(|compartment| compartment.end_message as u64)
+            .map(|history_segment| history_segment.end_message as u64)
             .max();
         let wrapup_cfg = self.effective_config(&binding.project_root);
         let (wrapup_context_limit, _, _) =
@@ -7091,7 +7085,7 @@ impl HandlerCore {
                 };
             }
         }
-        if plan.raw_messages_above_last_compartment <= keep
+        if plan.raw_messages_above_last_history_segment <= keep
             || !wrapup_has_remaining_messages(&parsed.messages, initial_end, target)
         {
             return self.terminal_wrapup_response(
@@ -7105,7 +7099,7 @@ impl HandlerCore {
                     rounds: 0,
                     summary: format!(
                         "nothing to compact; {} raw messages already fit within the keep watermark of {keep}",
-                        plan.raw_messages_above_last_compartment,
+                        plan.raw_messages_above_last_history_segment,
                     ),
                     reason: None,
                     detail: None,
@@ -7157,19 +7151,19 @@ impl HandlerCore {
             }
             let round_now = now_ms();
             if unknown_module_observed_at.is_none()
-                && let Some(until) = current_state.meta.historian.failure_backoff_at_ms
+                && let Some(until) = current_state.meta.history_summarizer.failure_backoff_at_ms
                 && until > round_now
             {
                 failure = Some((
                     RetryableWrapupReason::BackoffActive,
                     format!(
-                        "historian failure backoff active for {} ms",
+                        "history_summarizer failure backoff active for {} ms",
                         until.saturating_sub(round_now)
                     ),
                 ));
                 break;
             }
-            let current_end = match store.max_compartment_end_ordinal(&session_id) {
+            let current_end = match store.max_history_segment_end_ordinal(&session_id) {
                 Ok(ordinal) => (ordinal > 0).then_some(ordinal as u64),
                 Err(error) => {
                     return PreparedOutcome::Error {
@@ -7208,7 +7202,7 @@ impl HandlerCore {
             match prepared {
                 PreparedWrapupAction::Busy(completion) => {
                     if let Err(reason) = self
-                        .await_wrapup_historian_completion(completion, deadline)
+                        .await_wrapup_history_summarizer_completion(completion, deadline)
                         .await
                     {
                         let retry_reason = if reason.contains("request budget expired") {
@@ -7223,12 +7217,12 @@ impl HandlerCore {
                 PreparedWrapupAction::Nothing(reason) => {
                     failure = Some((
                         RetryableWrapupReason::SnapshotUnavailable,
-                        format!("historian made no forward progress: {reason}"),
+                        format!("history_summarizer made no forward progress: {reason}"),
                     ));
                     break;
                 }
                 PreparedWrapupAction::Failed(reason) => {
-                    if reason == "no historian models are configured" {
+                    if reason == "no history_summarizer models are configured" {
                         terminal_failure = Some(("no_models", reason));
                         break;
                     }
@@ -7250,15 +7244,15 @@ impl HandlerCore {
                         after_store_publish: Arc::clone(&self.publication_fence_write_hook),
                     }));
                     match self.run_wrapup_firing(task, deadline).await {
-                        Ok(historian::HistorianDriveOutcome::Completed(_)) => {
+                        Ok(history_summarizer::HistorySummarizerDriveOutcome::Completed(_)) => {
                             let after_end = store
-                                .max_compartment_end_ordinal(&session_id)
+                                .max_history_segment_end_ordinal(&session_id)
                                 .ok()
                                 .and_then(|ordinal| (ordinal > 0).then_some(ordinal as u64));
                             if after_end <= current_end {
                                 failure = Some((
                                     RetryableWrapupReason::SnapshotUnavailable,
-                                    "historian completed without advancing the compartment boundary"
+                                    "history_summarizer completed without advancing the history_segment boundary"
                                         .to_string(),
                                 ));
                                 break;
@@ -7266,10 +7260,11 @@ impl HandlerCore {
                             rounds += 1;
                             wrapup_guard.set_rounds(rounds);
                         }
-                        Ok(historian::HistorianDriveOutcome::Busy(_)) => {
+                        Ok(history_summarizer::HistorySummarizerDriveOutcome::Busy(_)) => {
                             failure = Some((
                                 RetryableWrapupReason::SnapshotUnavailable,
-                                "historian became busy before the round started".to_string(),
+                                "history_summarizer became busy before the round started"
+                                    .to_string(),
                             ));
                             break;
                         }
@@ -7311,8 +7306,8 @@ impl HandlerCore {
             }
         }
 
-        let final_compartments = match store.load_compartments(&session_id) {
-            Ok(compartments) => compartments,
+        let final_history_segments = match store.load_history_segments(&session_id) {
+            Ok(history_segments) => history_segments,
             Err(error) => {
                 return PreparedOutcome::Error {
                     code: "store_load_failed".to_string(),
@@ -7320,9 +7315,9 @@ impl HandlerCore {
                 };
             }
         };
-        let final_end = final_compartments
+        let final_end = final_history_segments
             .iter()
-            .map(|compartment| compartment.end_message as u64)
+            .map(|history_segment| history_segment.end_message as u64)
             .max();
         let compacted_messages = parsed
             .messages
@@ -7331,9 +7326,9 @@ impl HandlerCore {
             .filter(|message| initial_end.is_none_or(|end| message.ordinal > end))
             .filter(|message| final_end.is_some_and(|end| message.ordinal <= end))
             .count();
-        let compartments_created = final_compartments
+        let history_segments_created = final_history_segments
             .len()
-            .saturating_sub(initial_compartments.len());
+            .saturating_sub(initial_history_segments.len());
         debug_assert!(
             failure.is_some()
                 || terminal_failure.is_some()
@@ -7350,7 +7345,7 @@ impl HandlerCore {
                     disposition: "failed",
                     rounds,
                     summary: format!(
-                        "compacted {compacted_messages} messages into {compartments_created} compartments; wrapup stopped permanently"
+                        "compacted {compacted_messages} messages into {history_segments_created} history_segments; wrapup stopped permanently"
                     ),
                     reason: Some(reason),
                     detail: Some(detail),
@@ -7363,7 +7358,7 @@ impl HandlerCore {
             Some((reason, detail)) => Self::retryable_wrapup_response(
                 reason,
                 format!(
-                    "compacted {compacted_messages} messages into {compartments_created} compartments; {detail}; {effect}"
+                    "compacted {compacted_messages} messages into {history_segments_created} history_segments; {detail}; {effect}"
                 ),
             ),
             None if rounds == 0 => self.terminal_wrapup_response(
@@ -7393,7 +7388,7 @@ impl HandlerCore {
                     disposition: "completed",
                     rounds,
                      summary: format!(
-                         "compacted {compacted_messages} messages into {compartments_created} compartments; {effect}"
+                         "compacted {compacted_messages} messages into {history_segments_created} history_segments; {effect}"
                      ),
                      reason: None,
                      detail: None,
@@ -8162,7 +8157,7 @@ impl HandlerCore {
                     "row_version": state.row_version,
                     "epochs": {
                         "memory_render_epoch": MEMORY_RENDER_FORMAT_EPOCH,
-                        "compartment_render_epoch": COMPARTMENT_RENDER_FORMAT_EPOCH,
+                        "history_segment_render_epoch": HISTORY_SEGMENT_RENDER_FORMAT_EPOCH,
                         "profile_epoch": PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC,
                         "tagger_epoch": TAGGER_FEATURE_EPOCH,
                         "state_sync_deltas": true,
@@ -8195,7 +8190,7 @@ impl HandlerCore {
                 };
             }
         };
-        let side_channel_status = match store.historian_side_channel_status(session_id) {
+        let side_channel_status = match store.history_summarizer_side_channel_status(session_id) {
             Ok(status) => status,
             Err(e) => {
                 return PreparedOutcome::Error {
@@ -8204,15 +8199,15 @@ impl HandlerCore {
                 };
             }
         };
-        let mut historian = json!(&loaded.meta.historian);
-        let historian_fields = historian
+        let mut history_summarizer = json!(&loaded.meta.history_summarizer);
+        let history_summarizer_fields = history_summarizer
             .as_object_mut()
-            .expect("historian status serializes as an object");
-        historian_fields.insert(
+            .expect("history_summarizer status serializes as an object");
+        history_summarizer_fields.insert(
             "side_channel_pending_count".to_string(),
             json!(side_channel_status.pending_count),
         );
-        historian_fields.insert(
+        history_summarizer_fields.insert(
             "side_channel_last_failure".to_string(),
             json!(side_channel_status.last_failure),
         );
@@ -8222,13 +8217,13 @@ impl HandlerCore {
             "session_id": session_id,
             "initialized": loaded.meta.initialized,
             "row_version": loaded.row_version,
-            "historian": historian,
+            "history_summarizer": history_summarizer,
             "publication_floor_ordinal": loaded.meta.publication_floor_ordinal,
             "tail_identity_re_adopt_count": loaded.meta.tail_identity_re_adopt_count,
             "pass_trace": pass_trace,
             "epochs": {
                 "memory_render_epoch": MEMORY_RENDER_FORMAT_EPOCH,
-                "compartment_render_epoch": COMPARTMENT_RENDER_FORMAT_EPOCH,
+                "history_segment_render_epoch": HISTORY_SEGMENT_RENDER_FORMAT_EPOCH,
                 "profile_epoch": PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC,
                 "tagger_epoch": TAGGER_FEATURE_EPOCH,
                 "state_sync_deltas": true,
@@ -8336,7 +8331,7 @@ impl HandlerCore {
         }
         if parsed
             .session_id
-            .starts_with(historian::HISTORIAN_CHILD_SESSION_PREFIX)
+            .starts_with(history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX)
         {
             if parsed.tail_delta.is_some() {
                 return need_full_sync_response(&parsed);
@@ -8344,7 +8339,10 @@ impl HandlerCore {
             ticket.accept();
             return self.passthrough_transform_response(&parsed);
         }
-        if self.dreamer.dreamer_run_registered(&parsed.session_id) {
+        if self
+            .memory_classifier
+            .memory_classifier_run_registered(&parsed.session_id)
+        {
             match self.resolve_binding(channel, &parsed.session_id) {
                 Ok(_) => {
                     if parsed.tail_delta.is_some() {
@@ -8356,14 +8354,16 @@ impl HandlerCore {
                 Err(BindingError::Unbound) => {
                     return PreparedOutcome::Error {
                         code: "route_unbound".to_string(),
-                        message: "registered dreamer session has no bound route".to_string(),
+                        message: "registered memory_classifier session has no bound route"
+                            .to_string(),
                     };
                 }
                 Err(BindingError::SessionMismatch) => {
                     return PreparedOutcome::Error {
                         code: "session_mismatch".to_string(),
-                        message: "registered dreamer session does not match the bound route"
-                            .to_string(),
+                        message:
+                            "registered memory_classifier session does not match the bound route"
+                                .to_string(),
                     };
                 }
             }
@@ -8472,7 +8472,6 @@ impl HandlerCore {
             parsed,
             binding,
             lineage_root,
-            serializer_profile,
             pass_load,
             native_delta_frontier,
             snapshot_generation: 0,
@@ -8528,7 +8527,7 @@ impl HandlerCore {
     }
 
     /// Unit one of a pass: the store work before the transform, the transform and its
-    /// commit, the lineage record, the historian preparation, and, when the pass is not an
+    /// commit, the lineage record, the history_summarizer preparation, and, when the pass is not an
     /// Emergency95 pass, the settle. Those all run on one thread, so an abort of the handler
     /// future cannot fall between the commit and what the commit implies.
     ///
@@ -8560,7 +8559,7 @@ impl HandlerCore {
         };
         let emergency = pass.result.scheduler_pass == scheduler::PassDecision::Emergency95;
         let action = if env.parsed.is_subagent {
-            PreparedHistorianAction::Complete(HistorianDiagnostics {
+            PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
                 fired: false,
                 reason: Some("subagent_session".to_string()),
                 no_fire: Some("subagent_session".to_string()),
@@ -8570,14 +8569,14 @@ impl HandlerCore {
                 project_memory: None,
             })
         } else {
-            self.prepare_historian(&env, &mut pass)
+            self.prepare_history_summarizer(&env, &mut pass)
         };
         let diagnostics = match action {
-            PreparedHistorianAction::Complete(diagnostics) => diagnostics,
-            PreparedHistorianAction::Busy { diagnostics, .. } if !emergency => diagnostics,
-            PreparedHistorianAction::FireReady(prepared) if !emergency => {
+            PreparedHistorySummarizerAction::Complete(diagnostics) => diagnostics,
+            PreparedHistorySummarizerAction::Busy { diagnostics, .. } if !emergency => diagnostics,
+            PreparedHistorySummarizerAction::FireReady(prepared) if !emergency => {
                 let diagnostics = prepared.diagnostics.clone();
-                self.spawn_historian_firing(prepared.task);
+                self.spawn_history_summarizer_firing(prepared.task);
                 diagnostics
             }
             action => {
@@ -8604,11 +8603,14 @@ impl HandlerCore {
             action,
         } = carry;
         let action = match action {
-            PreparedHistorianAction::Busy {
+            PreparedHistorySummarizerAction::Busy {
                 diagnostics,
                 completion,
             } => {
-                if self.await_live_historian_completion(completion).await {
+                if self
+                    .await_live_history_summarizer_completion(completion)
+                    .await
+                {
                     let rerun = match self.run_rerun_unit(entry, &env, pass).await {
                         Ok(rerun) => rerun,
                         Err(outcome) => return outcome,
@@ -8616,21 +8618,24 @@ impl HandlerCore {
                     pass = rerun.pass;
                     rerun.action
                 } else {
-                    PreparedHistorianAction::Complete(diagnostics)
+                    PreparedHistorySummarizerAction::Complete(diagnostics)
                 }
             }
             action => action,
         };
         let (diagnostics, followup) = match action {
-            PreparedHistorianAction::Complete(diagnostics)
-            | PreparedHistorianAction::Busy { diagnostics, .. } => {
-                (diagnostics, HistorianFollowup::Unchanged)
+            PreparedHistorySummarizerAction::Complete(diagnostics)
+            | PreparedHistorySummarizerAction::Busy { diagnostics, .. } => {
+                (diagnostics, HistorySummarizerFollowup::Unchanged)
             }
-            PreparedHistorianAction::FireReady(prepared) => {
+            PreparedHistorySummarizerAction::FireReady(prepared) => {
                 let diagnostics = prepared.diagnostics.clone();
-                let followup = match self.run_historian_firing_inline(prepared.task).await {
-                    Ok(_) => HistorianFollowup::Published,
-                    Err(_) => HistorianFollowup::Failed,
+                let followup = match self
+                    .run_history_summarizer_firing_inline(prepared.task)
+                    .await
+                {
+                    Ok(_) => HistorySummarizerFollowup::Published,
+                    Err(_) => HistorySummarizerFollowup::Failed,
                 };
                 (diagnostics, followup)
             }
@@ -8651,18 +8656,19 @@ impl HandlerCore {
                     return UnitOutcome::Terminal(cancelled_before_transform());
                 }
                 let diagnostics = match followup {
-                    HistorianFollowup::Published => {
+                    HistorySummarizerFollowup::Published => {
                         if let Err(outcome) = core.rerun_transform_and_read_floor(&env, &mut pass) {
                             return UnitOutcome::Terminal(outcome);
                         }
                         diagnostics
                     }
-                    HistorianFollowup::Failed => core.refresh_historian_diagnostics(
-                        &env.store,
-                        &env.parsed.session_id,
-                        diagnostics,
-                    ),
-                    HistorianFollowup::Unchanged => diagnostics,
+                    HistorySummarizerFollowup::Failed => core
+                        .refresh_history_summarizer_diagnostics(
+                            &env.store,
+                            &env.parsed.session_id,
+                            diagnostics,
+                        ),
+                    HistorySummarizerFollowup::Unchanged => diagnostics,
                 };
                 UnitOutcome::Terminal(core.settle_transform_pass(&env, pass, diagnostics))
             }))
@@ -8676,7 +8682,7 @@ impl HandlerCore {
         }
     }
 
-    /// A live historian completion requires a refold and another preparation before deciding whether to fire inline.
+    /// A live history_summarizer completion requires a refold and another preparation before deciding whether to fire inline.
     async fn run_rerun_unit(
         &self,
         entry: &PassEntry<'_>,
@@ -8699,7 +8705,7 @@ impl HandlerCore {
                 if let Err(outcome) = core.rerun_transform_and_read_floor(&env, &mut pass) {
                     return UnitOutcome::Terminal(outcome);
                 }
-                let action = core.prepare_historian(&env, &mut pass);
+                let action = core.prepare_history_summarizer(&env, &mut pass);
                 UnitOutcome::Continue(Box::new(PassContinuation { pass, action, env }))
             }))
             .await;
@@ -8719,10 +8725,9 @@ impl HandlerCore {
         let PassIntake {
             held,
             store,
-            mut parsed,
+            parsed,
             binding,
             lineage_root,
-            serializer_profile,
             pass_load,
             native_delta_frontier,
             snapshot_generation,
@@ -8732,37 +8737,7 @@ impl HandlerCore {
         let project_path = Self::authority_project_path(&store, &route_project_root, "memories")?;
         let note_project_path = Self::authority_project_path(&store, &route_project_root, "notes")?;
         let pass_now = now_ms();
-        match serializer_profile {
-            Some(SerializerProfile::OpencodeAiSdk) => {
-                if let Some((data_url, content_hash)) = host_mural_artifact(parsed.mural.as_ref())
-                    && let Err(error) = store.upsert_project_mural_artifact(
-                        &project_path,
-                        data_url.as_bytes(),
-                        &content_hash,
-                        pass_now,
-                    )
-                {
-                    return Err(PreparedOutcome::Error {
-                        code: "mural_artifact_store_failed".to_string(),
-                        message: error.to_string(),
-                    });
-                }
-            }
-            Some(SerializerProfile::ClaudeCodeAnthropic) => {
-                match cc_mural_input(&store, &project_path) {
-                    Ok(mural) => {
-                        parsed.mural = mural;
-                    }
-                    Err(error) => {
-                        return Err(PreparedOutcome::Error {
-                            code: "mural_artifact_store_failed".to_string(),
-                            message: error.to_string(),
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
+
         let parsed = Arc::new(parsed);
         let pass_state = PassState::from(&pass_load);
         let projection_cache_lookup_started_at = Instant::now();
@@ -8773,17 +8748,17 @@ impl HandlerCore {
         let projection_cache_lookup_ms =
             projection_cache_lookup_started_at.elapsed().as_secs_f64() * 1_000.0;
         let side_channel_drain_started_at = Instant::now();
-        let _ = store.drain_historian_side_channels(
+        let _ = store.drain_history_summarizer_side_channels(
             &parsed.session_id,
             pass_now,
-            HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND,
+            HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND,
         );
         let side_channel_drain_ms = side_channel_drain_started_at.elapsed().as_secs_f64() * 1_000.0;
         let trace_received_started_at = Instant::now();
         let _ = store.trace_pass_received(&parsed.session_id, pass_now);
         let trace_received_ms = trace_received_started_at.elapsed().as_secs_f64() * 1_000.0;
         // One canonical read per pass: every memory surface of the pass (m0, the
-        // m1 revision signal, and a historian firing this pass triggers), and
+        // m1 revision signal, and a history_summarizer firing this pass triggers), and
         // every attempt the transform makes, composes from the same pinned
         // snapshot. `None` when memory is disabled, so the kernel store is not
         // touched for a block that is never rendered.
@@ -8875,7 +8850,11 @@ impl HandlerCore {
                 pass_state,
             ),
             guidance_date: Some(self.guidance_date_for_transform(&parsed.session_id, *pass_now)),
-            historian_active: self.historian_active(store, &parsed.session_id, pass_state),
+            history_summarizer_active: self.history_summarizer_active(
+                store,
+                &parsed.session_id,
+                pass_state,
+            ),
             wrapup_active: self.wrapup_active(&parsed.session_id),
             #[cfg(test)]
             injected_reductions: self
@@ -8927,7 +8906,7 @@ impl HandlerCore {
         }
     }
 
-    /// Reruns after a historian firing landed, then reads the publication floor the same way
+    /// Reruns after a history_summarizer firing landed, then reads the publication floor the same way
     /// the first transform did after its commit.
     fn rerun_transform_and_read_floor(
         &self,
@@ -9000,22 +8979,22 @@ impl HandlerCore {
         Ok(TransformedPass {
             result,
             emergency_pre_floor,
-            trigger_timings: HistorianTriggerTimings::default(),
+            trigger_timings: HistorySummarizerTriggerTimings::default(),
         })
     }
 
-    fn prepare_historian(
+    fn prepare_history_summarizer(
         &self,
         env: &PassEnv,
         pass: &mut TransformedPass,
-    ) -> PreparedHistorianAction {
-        self.prepare_historian_fire(
+    ) -> PreparedHistorySummarizerAction {
+        self.prepare_history_summarizer_fire(
             Arc::clone(&env.store),
             &env.parsed,
             &env.binding,
             &env.project_path,
             &pass.result.projection,
-            HistorianPrepareContext {
+            HistorySummarizerPrepareContext {
                 now: env.pass_now,
                 snapshot_generation: env.snapshot_generation,
                 timings: &mut pass.trigger_timings,
@@ -9031,7 +9010,7 @@ impl HandlerCore {
         &self,
         env: &PassEnv,
         mut pass: TransformedPass,
-        diagnostics: HistorianDiagnostics,
+        diagnostics: HistorySummarizerDiagnostics,
     ) -> PreparedOutcome {
         let parsed = &env.parsed;
         let store = &env.store;
@@ -9078,7 +9057,7 @@ impl HandlerCore {
         let projection_cache_store_ms =
             projection_cache_store_started_at.elapsed().as_secs_f64() * 1_000.0;
         let mut response = result.response;
-        response.historian = Some(diagnostics);
+        response.history_summarizer = Some(diagnostics);
         let Some(output_revision) = self.output_revisions.allocate() else {
             return revision_exhausted_error();
         };
@@ -9787,14 +9766,14 @@ impl HandlerCore {
                 seed.last_execute_ordinal,
             )
         });
-        let compartments = parsed
-            .compartments
+        let history_segments = parsed
+            .history_segments
             .into_iter()
-            .map(StoredCompartment::from)
+            .map(StoredHistorySegment::from)
             .collect::<Vec<_>>();
-        if !compartments.is_empty() {
-            let historian_phase = match store.load(&binding.session) {
-                Ok(loaded) => loaded.meta.historian.state,
+        if !history_segments.is_empty() {
+            let history_summarizer_phase = match store.load(&binding.session) {
+                Ok(loaded) => loaded.meta.history_summarizer.state,
                 Err(error) => {
                     return PreparedOutcome::Error {
                         code: "store_load_failed".to_string(),
@@ -9802,8 +9781,10 @@ impl HandlerCore {
                     };
                 }
             };
-            if historian_phase != HistorianPhase::Idle {
-                return historian_compartment_sync_busy_error(historian_phase);
+            if history_summarizer_phase != HistorySummarizerPhase::Idle {
+                return history_summarizer_history_segment_sync_busy_error(
+                    history_summarizer_phase,
+                );
             }
         }
         let root_path = binding.project_root.to_string_lossy().to_string();
@@ -9822,7 +9803,7 @@ impl HandlerCore {
         });
         let acked_watermarks = parsed.acked_watermarks.unwrap_or_else(|| {
             json!({
-                "compartment_seq": compartments.iter().map(|c| c.sequence).max(),
+                "history_segment_seq": history_segments.iter().map(|c| c.sequence).max(),
                 "last_todo_state": parsed.last_todo_state.is_some(),
             })
         });
@@ -9871,7 +9852,7 @@ impl HandlerCore {
                 .collect::<Vec<_>>(),
             strip_seed_skipped: parsed.strip_seed_skipped,
             reasoning_cleared_through_tag: parsed.reasoning_cleared_through_tag,
-            compartments: &compartments,
+            history_segments: &history_segments,
             user_profile: &user_profile,
             user_profile_present,
             workspace: workspace.as_ref(),
@@ -9913,8 +9894,8 @@ impl HandlerCore {
             Err(ModuleStateSyncError::AuthoritySeqMismatch { expected, found }) => {
                 state_sync_seq_mismatch_error(expected, found)
             }
-            Err(ModuleStateSyncError::HistorianBusy { phase }) => {
-                historian_compartment_sync_busy_error(phase)
+            Err(ModuleStateSyncError::HistorySummarizerBusy { phase }) => {
+                history_summarizer_history_segment_sync_busy_error(phase)
             }
             Err(ModuleStateSyncError::InvalidSeedBoundary { declared, detail }) => {
                 PreparedOutcome::Error {
@@ -10185,13 +10166,13 @@ impl HandlerCore {
         }
     }
 
-    async fn handle_dreamer_run_task(
+    async fn handle_memory_classifier_run_task(
         &self,
         channel: RouteHandle,
         request: &Value,
     ) -> PreparedOutcome {
         let (ledger_session, binding) =
-            match self.management_binding(channel, request, "dreamer.run_task") {
+            match self.management_binding(channel, request, "memory_classifier.run_task") {
                 Ok(value) => value,
                 Err(outcome) => return outcome,
             };
@@ -10199,34 +10180,38 @@ impl HandlerCore {
             return store_unavailable_error();
         };
         let Some(task) = request.get("task").and_then(Value::as_str) else {
-            return invalid_params_error("dreamer.run_task requires task");
+            return invalid_params_error("memory_classifier.run_task requires task");
         };
         if task != CLASSIFY_TASK {
-            return invalid_params_error(format!("unknown dreamer task {task:?}"));
+            return invalid_params_error(format!("unknown memory_classifier task {task:?}"));
         }
         let Some(command_id) = request.get("command_id").and_then(Value::as_str) else {
-            return invalid_params_error("dreamer.run_task requires command_id");
+            return invalid_params_error("memory_classifier.run_task requires command_id");
         };
         if command_id.trim().is_empty() || command_id.len() > 256 {
-            return invalid_params_error("dreamer.run_task command_id must be 1-256 bytes");
+            return invalid_params_error(
+                "memory_classifier.run_task command_id must be 1-256 bytes",
+            );
         }
         let Some(authority_generation) =
             request.get("authority_generation").and_then(Value::as_u64)
         else {
-            return invalid_params_error("dreamer.run_task requires authority_generation");
+            return invalid_params_error(
+                "memory_classifier.run_task requires authority_generation",
+            );
         };
         let Some(payload) = request.get("payload").and_then(Value::as_object) else {
-            return invalid_params_error("dreamer.run_task requires an object payload");
+            return invalid_params_error("memory_classifier.run_task requires an object payload");
         };
         let task = match ClassifyRequest::parse(payload) {
             Ok(task) => task,
             Err(outcome) => return outcome,
         };
-        self.dreamer
-            .run_dreamer_task(
+        self.memory_classifier
+            .run_memory_classifier_task(
                 store,
-                DreamerRunRequest {
-                    route: DreamerRoute::of(&binding),
+                MemoryClassifierRunRequest {
+                    route: MemoryClassifierRoute::of(&binding),
                     ledger_session: &ledger_session,
                     command_id,
                     authority_generation,
@@ -10238,27 +10223,27 @@ impl HandlerCore {
     }
 }
 
-impl DreamerRuntime {
-    fn register_dreamer_run(&self, session_id: &str) -> DreamerRunGuard {
-        self.active_dreamer_runs
+impl MemoryClassifierRuntime {
+    fn register_memory_classifier_run(&self, session_id: &str) -> MemoryClassifierRunGuard {
+        self.active_memory_classifier_runs
             .lock()
-            .expect("dreamer registry mutex")
+            .expect("memory_classifier registry mutex")
             .insert(session_id.to_string());
-        DreamerRunGuard {
-            registry: Arc::clone(&self.active_dreamer_runs),
+        MemoryClassifierRunGuard {
+            registry: Arc::clone(&self.active_memory_classifier_runs),
             session_id: session_id.to_string(),
         }
     }
 
-    /// The durable classify protocol behind `dreamer.run_task`, shared by the
+    /// The durable classify protocol behind `memory_classifier.run_task`, shared by the
     /// wire route and the scheduler: the authority gate, the receipt, the
     /// attempt chain, and every ledger write.
-    async fn run_dreamer_task(
+    async fn run_memory_classifier_task(
         &self,
         store: Arc<MemoryStore>,
-        run: DreamerRunRequest<'_>,
+        run: MemoryClassifierRunRequest<'_>,
     ) -> PreparedOutcome {
-        let DreamerRunRequest {
+        let MemoryClassifierRunRequest {
             route,
             ledger_session,
             command_id,
@@ -10318,7 +10303,7 @@ impl DreamerRuntime {
                 .expect("dream command registry mutex");
             if !inflight.insert(command_key.clone()) {
                 return PreparedOutcome::Error {
-                    code: "dreamer_run_failed".to_string(),
+                    code: "memory_classifier_run_failed".to_string(),
                     message:
                         "this command is already executing; retry replays its recorded outcome"
                             .to_string(),
@@ -10332,10 +10317,10 @@ impl DreamerRuntime {
 
         // The receipt is the durable authority over this request; the in-process
         // guard above only spares a concurrent duplicate the ledger round trip.
-        let operation_key = dreamer_operation_key(ledger_session, command_id);
-        let receipt_key = DreamerReceiptKey {
+        let operation_key = memory_classifier_operation_key(ledger_session, command_id);
+        let receipt_key = MemoryClassifierReceiptKey {
             project: &authority_project,
-            producer: DREAMER_RECEIPT_PRODUCER,
+            producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
             operation_key: &operation_key,
         };
         let system_prompt_hash = sha256_hex(CLASSIFY_SYSTEM_PROMPT.as_bytes());
@@ -10345,7 +10330,7 @@ impl DreamerRuntime {
         // receipt is keyed by authority project, several roots can hold one
         // project, and the classifications land in one root's scope, so a
         // completed receipt must not answer a request from another root.
-        let request_digest = match dreamer_request_digest(&json!({
+        let request_digest = match memory_classifier_request_digest(&json!({
             "digest_version": CLASSIFY_REQUEST_DIGEST_VERSION,
             "task": task,
             "kernel_scope": route.kernel_project.scope_id(),
@@ -10363,12 +10348,12 @@ impl DreamerRuntime {
             Ok(digest) => digest,
             Err(error) => {
                 return PreparedOutcome::Error {
-                    code: "dreamer_ledger_failed".to_string(),
+                    code: "memory_classifier_ledger_failed".to_string(),
                     message: error.to_string(),
                 };
             }
         };
-        let binding_record = DreamerReceiptBinding {
+        let binding_record = MemoryClassifierReceiptBinding {
             database_incarnation_id: context_store_uuid.clone(),
             authority_generation,
             request_digest,
@@ -10379,25 +10364,30 @@ impl DreamerRuntime {
         // is written: an exhausted project dispatches nothing new and leaves no
         // open receipt behind, while a command the ledger already holds still
         // replays, refuses, or settles under the same rules as below.
-        let over_budget = match dreamer_attempt_budget_exhausted(&store, &authority_project) {
-            Ok(over_budget) => over_budget,
-            Err(error) => return dreamer_ledger_failed(error),
-        };
+        let over_budget =
+            match memory_classifier_attempt_budget_exhausted(&store, &authority_project) {
+                Ok(over_budget) => over_budget,
+                Err(error) => return memory_classifier_ledger_failed(error),
+            };
         if over_budget {
-            match store.lookup_dreamer_receipt(receipt_key) {
+            match store.lookup_memory_classifier_receipt(receipt_key) {
                 Ok(Some(_)) => {}
-                Ok(None) => return dreamer_budget_exhausted(),
-                Err(error) => return dreamer_ledger_failed(error),
+                Ok(None) => return memory_classifier_budget_exhausted(),
+                Err(error) => return memory_classifier_ledger_failed(error),
             }
         }
-        let generation = match store.begin_dreamer_receipt(receipt_key, &binding_record, now_ms()) {
-            Ok(DreamerBeginOutcome::Begun { generation }) => generation,
-            Ok(DreamerBeginOutcome::Complete { result_json, .. }) => {
+        let generation = match store.begin_memory_classifier_receipt(
+            receipt_key,
+            &binding_record,
+            now_ms(),
+        ) {
+            Ok(MemoryClassifierBeginOutcome::Begun { generation }) => generation,
+            Ok(MemoryClassifierBeginOutcome::Complete { result_json, .. }) => {
                 return replay_dream_task_response(&result_json);
             }
-            Ok(DreamerBeginOutcome::InProgress { generation }) => {
+            Ok(MemoryClassifierBeginOutcome::InProgress { generation }) => {
                 match self
-                    .resume_dreamer_receipt(
+                    .resume_memory_classifier_receipt(
                         &store,
                         receipt_key,
                         generation,
@@ -10411,20 +10401,20 @@ impl DreamerRuntime {
                     Err(outcome) => return outcome,
                 }
             }
-            Ok(DreamerBeginOutcome::DigestConflict { .. }) => {
+            Ok(MemoryClassifierBeginOutcome::DigestConflict { .. }) => {
                 return PreparedOutcome::Error {
-                    code: "dreamer_request_conflict".to_string(),
+                    code: "memory_classifier_request_conflict".to_string(),
                     message: "this command id was recorded for a request with different inputs"
                         .to_string(),
                 };
             }
-            Ok(DreamerBeginOutcome::BindingMismatch {
+            Ok(MemoryClassifierBeginOutcome::BindingMismatch {
                 field,
                 expected,
                 found,
             }) => {
                 return PreparedOutcome::Error {
-                    code: "dreamer_request_conflict".to_string(),
+                    code: "memory_classifier_request_conflict".to_string(),
                     message: format!(
                         "this command id was recorded under {field} {expected}, request used {found}"
                     ),
@@ -10432,7 +10422,7 @@ impl DreamerRuntime {
             }
             Err(error) => {
                 return PreparedOutcome::Error {
-                    code: "dreamer_ledger_failed".to_string(),
+                    code: "memory_classifier_ledger_failed".to_string(),
                     message: error.to_string(),
                 };
             }
@@ -10445,16 +10435,18 @@ impl DreamerRuntime {
             Ok(pool) => pool,
             Err(PoolFailure::Kernel(outcome)) => return outcome,
             Err(PoolFailure::Request(rejection)) => {
-                return match store.complete_dreamer_receipt(
+                return match store.complete_memory_classifier_receipt(
                     receipt_key,
                     generation,
-                    DreamerTerminalKind::Failed,
+                    MemoryClassifierTerminalKind::Failed,
                     &rejection.to_string(),
                     now_ms(),
                 ) {
-                    Ok(DreamerTransition::Applied) => read_dream_task_response(&store, receipt_key),
-                    Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
-                    Err(error) => dreamer_ledger_failed(error),
+                    Ok(MemoryClassifierTransition::Applied) => {
+                        read_dream_task_response(&store, receipt_key)
+                    }
+                    Ok(MemoryClassifierTransition::Fenced) => memory_classifier_ledger_fenced(),
+                    Err(error) => memory_classifier_ledger_failed(error),
                 };
             }
         };
@@ -10470,15 +10462,15 @@ impl DreamerRuntime {
             }
             // The pre-dispatch check permits at most one attempt beyond the budget.
             if attempt > 0 {
-                match dreamer_attempt_budget_exhausted(&store, &authority_project) {
+                match memory_classifier_attempt_budget_exhausted(&store, &authority_project) {
                     Ok(false) => {}
                     Ok(true) => {
                         last_error = format!(
-                            "dreamer attempt budget exhausted after {attempts} attempt(s); the remaining models in the chain are not dispatched"
+                            "memory_classifier attempt budget exhausted after {attempts} attempt(s); the remaining models in the chain are not dispatched"
                         );
                         break;
                     }
-                    Err(error) => return dreamer_ledger_failed(error),
+                    Err(error) => return memory_classifier_ledger_failed(error),
                 }
             }
             let child_session = attempt_child_session_id(
@@ -10520,10 +10512,10 @@ impl DreamerRuntime {
             }
             // The attempt row precedes the model call, but not connection setup:
             // its presence means a dispatch may have happened.
-            if let Err(stop) = ledger_stop(store.begin_dreamer_attempt(
+            if let Err(stop) = ledger_stop(store.begin_memory_classifier_attempt(
                 receipt_key,
                 generation,
-                &DreamerAttemptSpec {
+                &MemoryClassifierAttemptSpec {
                     attempt_index,
                     model,
                     prompt_template_version: CLASSIFY_PROMPT_TEMPLATE_VERSION,
@@ -10540,11 +10532,11 @@ impl DreamerRuntime {
             // The start future has not been polled. A deadline during the ledger
             // write leaves the attempt unsent.
             if Instant::now() >= deadline {
-                if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
+                if let Err(stop) = ledger_stop(store.finish_memory_classifier_attempt(
                     receipt_key,
                     generation,
                     attempt_index,
-                    DreamerTerminalKind::NotSent,
+                    MemoryClassifierTerminalKind::NotSent,
                     now_ms(),
                 )) {
                     return stop;
@@ -10554,7 +10546,7 @@ impl DreamerRuntime {
                 break;
             }
             attempts += 1;
-            let _dreamer_run_guard = self.register_dreamer_run(&child_session);
+            let _memory_classifier_run_guard = self.register_memory_classifier_run(&child_session);
             let started = match tokio::time::timeout(
                 classify_attempt_timeout(CLASSIFY_AWAIT_TIMEOUT, deadline),
                 producer.start_with_generation(
@@ -10569,26 +10561,26 @@ impl DreamerRuntime {
             .await
             {
                 Ok(started) => started,
-                Err(_) => Err(HistorianProducerError::TimedOut),
+                Err(_) => Err(HistorySummarizerProducerError::TimedOut),
             };
             // Only a start error carries proof that the request never reached the
             // model runtime; an error from the await path follows a run that
             // already started.
             let start_not_sent = matches!(
                 &started,
-                Err(error) if error.send_outcome() == Some(HistorianSendOutcome::NotSent)
+                Err(error) if error.send_outcome() == Some(HistorySummarizerSendOutcome::NotSent)
             );
             // The run handle is the dispatch marker a later incarnation resolves
             // against the runtime; a dispatched run the ledger cannot follow
             // settles as unknown rather than staying open with no handle.
             if let Ok(handle) = &started {
-                let recorded = store.record_dreamer_run_handle(
+                let recorded = store.record_memory_classifier_run_handle(
                     receipt_key,
                     generation,
                     attempt_index,
                     &handle.run_id,
                 );
-                let handle_fenced = matches!(recorded, Ok(DreamerTransition::Fenced));
+                let handle_fenced = matches!(recorded, Ok(MemoryClassifierTransition::Fenced));
                 if let Err(stop) = ledger_stop(recorded) {
                     if !handle_fenced {
                         let _ = producer.purge_session(&child_session).await;
@@ -10614,31 +10606,33 @@ impl DreamerRuntime {
                 Err(error) => Err(error),
             };
             let attempt_terminal = match &attempt_output {
-                Ok(_) => DreamerTerminalKind::Complete,
-                Err(HistorianProducerError::TimedOut) => DreamerTerminalKind::Cancelled,
+                Ok(_) => MemoryClassifierTerminalKind::Complete,
+                Err(HistorySummarizerProducerError::TimedOut) => {
+                    MemoryClassifierTerminalKind::Cancelled
+                }
                 Err(error)
                     if error.is_idempotency_conflict() || error.is_cross_incarnation_unknown() =>
                 {
-                    DreamerTerminalKind::Unknown
+                    MemoryClassifierTerminalKind::Unknown
                 }
-                Err(_) if start_not_sent => DreamerTerminalKind::NotSent,
-                Err(_) => DreamerTerminalKind::Failed,
+                Err(_) if start_not_sent => MemoryClassifierTerminalKind::NotSent,
+                Err(_) => MemoryClassifierTerminalKind::Failed,
             };
-            let finished = store.finish_dreamer_attempt(
+            let finished = store.finish_memory_classifier_attempt(
                 receipt_key,
                 generation,
                 attempt_index,
                 attempt_terminal,
                 now_ms(),
             );
-            let attempt_fenced = matches!(finished, Ok(DreamerTransition::Fenced));
+            let attempt_fenced = matches!(finished, Ok(MemoryClassifierTransition::Fenced));
             if let Err(stop) = ledger_stop(finished) {
                 // A usable result in hand is a known outcome even though its attempt
                 // row cannot record one, so it is offered as the receipt's terminal
                 // response first. A fenced attempt write is not: another
                 // generation owns the command, so nothing canonical is written
                 // for it here.
-                let fenced = matches!(&stop, PreparedOutcome::Error { code, .. } if code == "dreamer_ledger_fenced");
+                let fenced = matches!(&stop, PreparedOutcome::Error { code, .. } if code == "memory_classifier_ledger_fenced");
                 if !fenced
                     && let Ok(result) = &attempt_output
                     && let Ok(classifications) = parse_output(result, expected_ids)
@@ -10672,13 +10666,15 @@ impl DreamerRuntime {
                         &commit,
                     )
                     .to_string();
-                    if let Ok(DreamerTransition::Applied) = store.complete_dreamer_receipt(
-                        receipt_key,
-                        generation,
-                        DreamerTerminalKind::Complete,
-                        &response_json,
-                        now_ms(),
-                    ) {
+                    if let Ok(MemoryClassifierTransition::Applied) = store
+                        .complete_memory_classifier_receipt(
+                            receipt_key,
+                            generation,
+                            MemoryClassifierTerminalKind::Complete,
+                            &response_json,
+                            now_ms(),
+                        )
+                    {
                         let _ = producer.purge_session(&child_session).await;
                         return read_dream_task_response(&store, receipt_key);
                     }
@@ -10718,15 +10714,18 @@ impl DreamerRuntime {
                     if primary.is_idempotency_conflict() || primary.is_cross_incarnation_unknown() {
                         // A run may already be active under this child session.
                         return PreparedOutcome::Error {
-                            code: "dreamer_outcome_unknown".to_string(),
+                            code: "memory_classifier_outcome_unknown".to_string(),
                             message: primary.to_string(),
                         };
                     }
                     let purge_result = producer.purge_session(&child_session).await;
                     let purge_failed = purge_result.is_err();
-                    last_error =
-                        historian_producer::attach_cleanup(primary, purge_result, "session.delete")
-                            .to_string();
+                    last_error = history_summarizer_producer::attach_cleanup(
+                        primary,
+                        purge_result,
+                        "session.delete",
+                    )
+                    .to_string();
                     if purge_failed {
                         break;
                     }
@@ -10736,21 +10735,23 @@ impl DreamerRuntime {
         if output.is_none() {
             let response = json!({
                 "ok": false,
-                "code": "dreamer_run_failed",
+                "code": "memory_classifier_run_failed",
                 "message": if last_error.is_empty() { "classify producer has no usable model" } else { &last_error },
             });
             // A failure that cannot be recorded is not a terminal answer: an
             // unrecorded failure would let a retry dispatch the whole chain again.
-            return match store.complete_dreamer_receipt(
+            return match store.complete_memory_classifier_receipt(
                 receipt_key,
                 generation,
-                DreamerTerminalKind::Failed,
+                MemoryClassifierTerminalKind::Failed,
                 &response.to_string(),
                 now_ms(),
             ) {
-                Ok(DreamerTransition::Applied) => read_dream_task_response(&store, receipt_key),
-                Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
-                Err(error) => dreamer_ledger_failed(error),
+                Ok(MemoryClassifierTransition::Applied) => {
+                    read_dream_task_response(&store, receipt_key)
+                }
+                Ok(MemoryClassifierTransition::Fenced) => memory_classifier_ledger_fenced(),
+                Err(error) => memory_classifier_ledger_failed(error),
             };
         }
         let (model, classifications, child_session, mut producer) =
@@ -10767,7 +10768,7 @@ impl DreamerRuntime {
             &authority_project,
             authority_generation,
         ) {
-            Some(refusal) => (DreamerTerminalKind::Failed, refusal.to_string()),
+            Some(refusal) => (MemoryClassifierTerminalKind::Failed, refusal.to_string()),
             None => match self
                 .record_classifications(
                     route.kernel_project,
@@ -10784,7 +10785,7 @@ impl DreamerRuntime {
                 .await
             {
                 Ok(commit) => (
-                    DreamerTerminalKind::Complete,
+                    MemoryClassifierTerminalKind::Complete,
                     classify_success_response(
                         &model,
                         attempts,
@@ -10795,31 +10796,31 @@ impl DreamerRuntime {
                     .to_string(),
                 ),
                 Err(detail) => (
-                    DreamerTerminalKind::Failed,
+                    MemoryClassifierTerminalKind::Failed,
                     json!({
                         "ok": false,
-                        "code": "dreamer_kernel_write_failed",
+                        "code": "memory_classifier_kernel_write_failed",
                         "message": detail,
                     })
                     .to_string(),
                 ),
             },
         };
-        match store.complete_dreamer_receipt(
+        match store.complete_memory_classifier_receipt(
             receipt_key,
             generation,
             terminal_kind,
             &response_json,
             now_ms(),
         ) {
-            Ok(DreamerTransition::Applied) => {
+            Ok(MemoryClassifierTransition::Applied) => {
                 // The child session is deleted only once the response is durable, so a
                 // crash between the two leaves the run reattachable rather than lost.
                 let _ = producer.purge_session(&child_session).await;
                 read_dream_task_response(&store, receipt_key)
             }
-            Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
-            Err(error) => dreamer_ledger_failed(error),
+            Ok(MemoryClassifierTransition::Fenced) => memory_classifier_ledger_fenced(),
+            Err(error) => memory_classifier_ledger_failed(error),
         }
     }
 
@@ -10836,33 +10837,33 @@ impl DreamerRuntime {
     /// A missing or ended runtime handle, or a marker with no handle, settles
     /// as terminal `unknown` and is never dispatched again. A runtime whose
     /// status cannot be queried answers `unknown` without a write; an active
-    /// run is left for a later retry. Unlike the historian's reattach path,
+    /// run is left for a later retry. Unlike the history_summarizer's reattach path,
     /// this resolver never refires a missing run.
     ///
     /// The connect, bind, and `status` probe together run under the request's
     /// remaining `deadline`; a probe that does not finish in time answers
     /// `unknown` without a write, like a runtime whose status cannot be read.
-    async fn resume_dreamer_receipt(
+    async fn resume_memory_classifier_receipt(
         &self,
         store: &MemoryStore,
-        key: DreamerReceiptKey<'_>,
+        key: MemoryClassifierReceiptKey<'_>,
         generation: u64,
         credential_fingerprints: &std::collections::BTreeMap<String, String>,
         over_budget: bool,
         deadline: Instant,
     ) -> Result<u64, PreparedOutcome> {
         let attempts = store
-            .list_dreamer_attempts(key)
-            .map_err(dreamer_ledger_failed)?;
+            .list_memory_classifier_attempts(key)
+            .map_err(memory_classifier_ledger_failed)?;
         let Some(marker) = attempts.into_iter().rfind(|attempt| {
             attempt.generation == generation
-                && attempt.terminal_kind != Some(DreamerTerminalKind::NotSent)
+                && attempt.terminal_kind != Some(MemoryClassifierTerminalKind::NotSent)
         }) else {
             // Taking over dispatches, so it spends budget like a fresh request.
             if over_budget {
-                return Err(dreamer_budget_exhausted());
+                return Err(memory_classifier_budget_exhausted());
             }
-            return ledger_stop(store.take_over_undispatched_dreamer_receipt(
+            return ledger_stop(store.take_over_undispatched_memory_classifier_receipt(
                 key,
                 generation,
                 now_ms(),
@@ -10870,7 +10871,7 @@ impl DreamerRuntime {
             .map(|()| generation + 1);
         };
         let unknown = |message: String| PreparedOutcome::Error {
-            code: "dreamer_outcome_unknown".to_string(),
+            code: "memory_classifier_outcome_unknown".to_string(),
             message,
         };
         let settle = |message: String| {
@@ -10956,11 +10957,10 @@ impl HandlerCore {
             return unrecognized_request_error(&request);
         };
         match name {
-            "ctx_memory" => self.handle_ctx_memory_facade(channel, &request).await,
-            "ctx_search" => self.handle_ctx_search_facade(channel, &request).await,
-            "ctx_expand" => self.handle_ctx_expand_facade(channel, &request).await,
-            "ctx_reduce" => self.handle_ctx_reduce_facade(channel, &request).await,
-            "ctx_note" => self.handle_ctx_note_facade(channel, &request).await,
+            "eidnara_memory" => self.handle_eidnara_memory_facade(channel, &request).await,
+            "eidnara_search" => self.handle_eidnara_search_facade(channel, &request).await,
+            "eidnara_reduce" => self.handle_eidnara_reduce_facade(channel, &request).await,
+            "eidnara_note" => self.handle_eidnara_note_facade(channel, &request).await,
             _ => unrecognized_request_error(&request),
         }
     }
@@ -11122,13 +11122,13 @@ impl HandlerCore {
         })
     }
 
-    async fn handle_ctx_reduce_facade(
+    async fn handle_eidnara_reduce_facade(
         &self,
         channel: RouteHandle,
         request: &Value,
     ) -> PreparedOutcome {
         let Some(args) = facade_arguments(request, &["drop"]) else {
-            return invalid_params_error("ctx_reduce arguments must be an object");
+            return invalid_params_error("eidnara_reduce arguments must be an object");
         };
         let Some(raw_drop) = non_empty_string_arg(&args, "drop") else {
             return tool_error_result("Error: 'drop' must be provided.".to_string());
@@ -11191,7 +11191,7 @@ impl HandlerCore {
             })
             .collect::<Vec<_>>();
         if queueable.is_empty() {
-            let reason = ctx_reduce_ack_details(&unknown, &already_queued);
+            let reason = eidnara_reduce_ack_details(&unknown, &already_queued);
             return tool_error_result(format!(
                 "Refused: no valid tags to queue. {}",
                 if reason.is_empty() {
@@ -11219,7 +11219,7 @@ impl HandlerCore {
         if !deferred.is_empty() {
             details.push(format!("deferred drop {}", format_tag_numbers(&deferred)));
         }
-        let validation_detail = ctx_reduce_ack_details(&unknown, &already_queued);
+        let validation_detail = eidnara_reduce_ack_details(&unknown, &already_queued);
         if !validation_detail.is_empty() {
             details.push(validation_detail);
         }
@@ -11228,16 +11228,16 @@ impl HandlerCore {
         mcp_text_result(format!("Queued: {}.", details.join("; ")), false)
     }
 
-    async fn handle_ctx_memory_facade(
+    async fn handle_eidnara_memory_facade(
         &self,
         channel: RouteHandle,
         request: &Value,
     ) -> PreparedOutcome {
         let Some(args) = facade_arguments(request, &["action"]) else {
-            return invalid_params_error("ctx_memory arguments must be an object");
+            return invalid_params_error("eidnara_memory arguments must be an object");
         };
         let Some(action) = string_arg(&args, "action") else {
-            return invalid_params_error("ctx_memory requires an action");
+            return invalid_params_error("eidnara_memory requires an action");
         };
         let facade_scope = match self
             .resolve_facade_scope(channel, Some(&args), "memories", false)
@@ -11262,21 +11262,21 @@ impl HandlerCore {
                 "Error: memory mutations are served through the kernel commit path by the host memory tool, not by this module."
                     .to_string(),
             ),
-            _ => tool_error_result("Error: Unknown ctx_memory action.".to_string()),
+            _ => tool_error_result("Error: Unknown eidnara_memory action.".to_string()),
         }
     }
 
-    async fn handle_ctx_search_facade(
+    async fn handle_eidnara_search_facade(
         &self,
         channel: RouteHandle,
         request: &Value,
     ) -> PreparedOutcome {
         let Some(args) = facade_arguments(request, &["query"]) else {
-            return invalid_params_error("ctx_search arguments must be an object");
+            return invalid_params_error("eidnara_search arguments must be an object");
         };
         let args = &args;
         let Some(query) = non_empty_string_arg(args, "query") else {
-            return tool_error_result("Error: 'query' is required for ctx_search.");
+            return tool_error_result("Error: 'query' is required for eidnara_search.");
         };
         if let Err(error) = validate_string_cap(args, "query", MAX_QUERY_BYTES) {
             return tool_error_result(format!("Error: {error}."));
@@ -11295,7 +11295,7 @@ impl HandlerCore {
         };
         let memory_project = facade_scope.memory_project_path.as_str();
         let conversation_key = facade_scope.conversation_key.as_str();
-        match memory_tool::search_compartments_and_notes_for_session(
+        match memory_tool::search_history_segments_and_notes_for_session(
             &store,
             memory_project,
             conversation_key,
@@ -11308,8 +11308,8 @@ impl HandlerCore {
                     .map(|result| {
                         json!({
                             "source": match result.source_kind {
-                                memory_tool::MemorySearchSourceKind::CompartmentTitle => "compartment_title",
-                                memory_tool::MemorySearchSourceKind::CompartmentBody => "compartment_body",
+                                memory_tool::MemorySearchSourceKind::HistorySegmentTitle => "history_segment_title",
+                                memory_tool::MemorySearchSourceKind::HistorySegmentBody => "history_segment_body",
                                 memory_tool::MemorySearchSourceKind::Note => "note",
                             },
                             "id": result.id,
@@ -11328,125 +11328,6 @@ impl HandlerCore {
         }
     }
 
-    async fn handle_ctx_expand_facade(
-        &self,
-        channel: RouteHandle,
-        request: &Value,
-    ) -> PreparedOutcome {
-        let Some(args) = facade_arguments(request, &["message", "start"]) else {
-            return invalid_params_error("ctx_expand arguments must be an object");
-        };
-        let args = &args;
-        let facade_scope = match self
-            .resolve_facade_scope(channel, Some(args), "memories", false)
-            .await
-        {
-            Ok(scope) => scope,
-            Err(outcome) => return outcome,
-        };
-        let store = match self.store() {
-            Some(store) => store,
-            None => return store_unavailable_error(),
-        };
-        let session_id = facade_scope.conversation_key.as_str();
-        if let Some(message) = i64_arg(args, "message").filter(|value| *value >= 0) {
-            if let Some(raw_message) =
-                self.cached_expand_messages(session_id)
-                    .and_then(|messages| {
-                        messages.into_iter().find(|candidate| {
-                            i64::try_from(candidate.ordinal).ok() == Some(message)
-                        })
-                    })
-            {
-                return mcp_text_result(render_cached_message_expand(&raw_message), false);
-            }
-            return match store.load_chunk_transcript_for_message(session_id, message) {
-                Ok(Some(row)) => {
-                    if let Some(raw_message) = durable_expand_messages(std::slice::from_ref(&row))
-                        .into_iter()
-                        .find(|candidate| i64::try_from(candidate.ordinal).ok() == Some(message))
-                    {
-                        mcp_text_result(render_cached_message_expand(&raw_message), false)
-                    } else {
-                        mcp_text_result(render_message_expand(row, message), false)
-                    }
-                }
-                Ok(None) => mcp_text_result(
-                    format!(
-                        "Message {message} is no longer recoverable from persisted chunk transcripts. The span was evicted or was compacted before transcript capture."
-                    ),
-                    false,
-                ),
-                Err(error) => tool_error_result(format!("Error: {error}")),
-            };
-        }
-        let Some(start) = i64_arg(args, "start") else {
-            return tool_error_result(
-                "Error: provide either message=<ordinal>, or start and end (non-negative integers, start <= end).",
-            );
-        };
-        let Some(end) = i64_arg(args, "end") else {
-            return tool_error_result(
-                "Error: provide either message=<ordinal>, or start and end (non-negative integers, start <= end).",
-            );
-        };
-        if start < 0 || end < start {
-            return tool_error_result(
-                "Error: provide either message=<ordinal>, or start and end (non-negative integers, start <= end).",
-            );
-        }
-        let last_compacted_ordinal = match store.last_compacted_ordinal(session_id) {
-            Ok(ordinal) => ordinal,
-            Err(error) => return tool_error_result(format!("Error: {error}")),
-        };
-        if last_compacted_ordinal < start {
-            return mcp_text_result(
-                format!(
-                    "No compacted compartments found in range {start}-{end}. The range may be live tail, outside this session's history, or compacted before transcript capture."
-                ),
-                false,
-            );
-        }
-        let bounded_end = end
-            .min(last_compacted_ordinal)
-            .min(start.saturating_add(CTX_EXPAND_MAX_ORDINAL_SPAN - 1));
-        let compartments = match store.load_compartments_for_range(
-            session_id,
-            start,
-            bounded_end,
-            CTX_EXPAND_MAX_ROWS,
-        ) {
-            Ok(compartments) => compartments,
-            Err(error) => return tool_error_result(format!("Error: {error}")),
-        };
-        let transcripts = match store.load_chunk_transcripts_for_range_bounded(
-            session_id,
-            start,
-            bounded_end,
-            CTX_EXPAND_MAX_ROWS,
-        ) {
-            Ok(transcripts) => transcripts,
-            Err(error) => return tool_error_result(format!("Error: {error}")),
-        };
-        if args.get("verbose").and_then(Value::as_bool) == Some(true) {
-            let durable_messages = durable_expand_messages(&transcripts);
-            let rendered = self
-                .cached_expand_messages(session_id)
-                .or_else(|| (!durable_messages.is_empty()).then_some(durable_messages))
-                .map(|messages| render_verbose_range_expand(&messages, start, bounded_end))
-                .filter(|result| !result.text.is_empty())
-                .map(|result| render_verbose_expand_result(start, bounded_end, result))
-                .unwrap_or_else(|| {
-                    render_verbose_transcript_range_expand(start, bounded_end, &transcripts)
-                });
-            return mcp_text_result(rendered, false);
-        }
-        mcp_text_result(
-            render_range_expand(start, bounded_end, &compartments, &transcripts),
-            false,
-        )
-    }
-
     fn handle_note_evaluation_register(
         &self,
         channel: RouteHandle,
@@ -11460,7 +11341,6 @@ impl HandlerCore {
                 "protocol_version",
                 "policy_version",
                 "capacity",
-                "retina_handoff",
                 "wake_owned",
             ],
         ) {
@@ -11497,10 +11377,6 @@ impl HandlerCore {
             Ok(_) => return note_evaluation_bad_request("'capacity' must be in 1..=16"),
             Err(outcome) => return outcome,
         };
-        let retina_handoff = match note_evaluation_bool_field(body, "retina_handoff") {
-            Ok(value) => value,
-            Err(outcome) => return outcome,
-        };
         let wake_owned = match note_evaluation_bool_field(body, "wake_owned") {
             Ok(value) => value,
             Err(outcome) => return outcome,
@@ -11535,7 +11411,6 @@ impl HandlerCore {
                 route: channel,
                 policy_version,
                 capacity,
-                retina_handoff,
                 wake_owned,
                 expires_at,
                 slot_cycles: new_note_evaluator_slot_cycles(capacity),
@@ -11563,7 +11438,6 @@ impl HandlerCore {
                 "token",
                 "registration_generation",
                 "evaluator_instance",
-                "retina_handoff",
                 "wake_owned",
             ],
         ) {
@@ -11572,10 +11446,6 @@ impl HandlerCore {
         };
         let identity = match note_evaluation_identity_fields(body) {
             Ok(identity) => identity,
-            Err(outcome) => return outcome,
-        };
-        let retina_handoff = match note_evaluation_opt_bool_field(body, "retina_handoff") {
-            Ok(value) => value,
             Err(outcome) => return outcome,
         };
         let wake_owned = match note_evaluation_opt_bool_field(body, "wake_owned") {
@@ -11605,10 +11475,6 @@ impl HandlerCore {
         };
         entry.expires_at = now + NOTE_EVALUATOR_LEASE_MS;
         let mut policy_changed = false;
-        if let Some(retina_handoff) = retina_handoff {
-            policy_changed |= entry.retina_handoff != retina_handoff;
-            entry.retina_handoff = retina_handoff;
-        }
         if let Some(wake_owned) = wake_owned {
             policy_changed |= entry.wake_owned != wake_owned;
             entry.wake_owned = wake_owned;
@@ -11740,7 +11606,7 @@ impl HandlerCore {
         if evaluator_slot < 0 || evaluator_slot >= registration.capacity {
             return note_evaluation_bad_request("'evaluator_slot' must be in 0..capacity");
         }
-        let (retina_handoff, wake_owned) = self.live_note_evaluator_policy(&project, now);
+        let wake_owned = self.live_note_evaluator_policy(&project, now);
         if wake_owned {
             // A wake-flag change before the next poll causes the veto to skip the store, leaving no replayable acquisition decision.
             return respond(json!({ "result": "no_work", "wake_owned": true }));
@@ -11751,19 +11617,19 @@ impl HandlerCore {
         // The acquisition path holds only the slot lock during synchronous store acquisition so polls for one slot serialize without blocking other slots or registrations.
         // `slot_cycle` advances only on fresh durable outcomes.
         let mode = if exclude_billable {
-            SmartNoteCycleMode::Nonbillable
+            ConditionalNoteCycleMode::Nonbillable
         } else {
-            SmartNoteCycleMode::Full
+            ConditionalNoteCycleMode::Full
         };
         let mut slot_cycles = registration.slot_cycles[evaluator_slot as usize]
             .lock()
             .expect("note evaluator slot cycle mutex");
         let slot_cycle = match mode {
-            SmartNoteCycleMode::Full => &mut slot_cycles.full,
-            SmartNoteCycleMode::Nonbillable => &mut slot_cycles.nonbillable,
+            ConditionalNoteCycleMode::Full => &mut slot_cycles.full,
+            ConditionalNoteCycleMode::Nonbillable => &mut slot_cycles.nonbillable,
         };
         let cycle = slot_cycle.clone();
-        let mut proposed_cycle: Option<SmartNoteSelectionCycle> = None;
+        let mut proposed_cycle: Option<ConditionalNoteSelectionCycle> = None;
         match store.acquire_note_evaluation(
             &project,
             acquisition_id,
@@ -11771,13 +11637,12 @@ impl HandlerCore {
             evaluator_slot,
             identity.registration_generation,
             |candidates| {
-                let snapshots: Vec<SmartNoteSelectionSnapshot> = candidates
+                let snapshots: Vec<ConditionalNoteSelectionSnapshot> = candidates
                     .iter()
-                    .map(smart_note_selection_snapshot)
+                    .map(conditional_note_selection_snapshot)
                     .collect();
                 // The nonbillable cycle runs only due and liveness; compile and fallback claims require LLM prompts and run in the scheduled full-budget drain.
-                let selection =
-                    select_smart_note_evaluation_cycle(&snapshots, now, retina_handoff, &cycle);
+                let selection = select_conditional_note_evaluation_cycle(&snapshots, now, &cycle);
                 match selection {
                     Some((note_id, phase, next_cycle)) => {
                         proposed_cycle = Some(next_cycle);
@@ -11785,11 +11650,10 @@ impl HandlerCore {
                     }
                     // The stored record distinguishes a spent pass from an empty queue so replays preserve the cause.
                     None => NoteEvalSelection::NoWork {
-                        cycle_exhausted: select_smart_note_evaluation_cycle(
+                        cycle_exhausted: select_conditional_note_evaluation_cycle(
                             &snapshots,
                             now,
-                            retina_handoff,
-                            &SmartNoteSelectionCycle::new(mode),
+                            &ConditionalNoteSelectionCycle::new(mode),
                         )
                         .is_some(),
                     },
@@ -11814,7 +11678,7 @@ impl HandlerCore {
                     NoteEvalAcquireOutcome::NoWork {
                         replayed: false, ..
                     } => {
-                        *slot_cycle = SmartNoteSelectionCycle::new(mode);
+                        *slot_cycle = ConditionalNoteSelectionCycle::new(mode);
                     }
                     _ => {}
                 }
@@ -12096,13 +11960,13 @@ impl HandlerCore {
         }
     }
 
-    async fn handle_ctx_note_facade(
+    async fn handle_eidnara_note_facade(
         &self,
         channel: RouteHandle,
         request: &Value,
     ) -> PreparedOutcome {
         let Some(args) = facade_arguments(request, &["action", "content"]) else {
-            return invalid_params_error("ctx_note arguments must be an object");
+            return invalid_params_error("eidnara_note arguments must be an object");
         };
         let args = &args;
         if let Err(error) = validate_string_cap(args, "content", MAX_NOTE_CONTENT_BYTES)
@@ -12150,7 +12014,7 @@ impl HandlerCore {
             None
         };
         if is_mutation && command_id.is_none() {
-            self.log_missing_facade_command_id(session, "ctx_note", action);
+            self.log_missing_facade_command_id(session, "eidnara_note", action);
         }
 
         match action {
@@ -12173,7 +12037,7 @@ impl HandlerCore {
                         session,
                         action,
                         command_id.as_deref(),
-                        "Error: Smart-note evaluation is unavailable for this Rust-authority project; the note was not written.",
+                        "Error: Conditional-note evaluation is unavailable for this Rust-authority project; the note was not written.",
                     );
                 }
                 let condition_compile = match note_condition_compile_args(args) {
@@ -12187,7 +12051,7 @@ impl HandlerCore {
                             project,
                             "notes",
                             session,
-                            "ctx_note",
+                            "eidnara_note",
                             action,
                             command_id.as_deref(),
                             |tx| {
@@ -12219,7 +12083,7 @@ impl HandlerCore {
                                     ?;
                                 facade_text_response(
                                     format!(
-                                        "Created smart note #{}. Dreamer will evaluate the condition during nightly runs:\n- Content: {}\n- Condition: {}",
+                                        "Created conditional note #{}. MemoryClassifier will evaluate the condition during nightly runs:\n- Content: {}\n- Condition: {}",
                                         note.id, note.content, condition
                                     ),
                                     false,
@@ -12235,7 +12099,7 @@ impl HandlerCore {
                             project,
                             "notes",
                             session,
-                            "ctx_note",
+                            "eidnara_note",
                             action,
                             command_id.as_deref(),
                             |tx| {
@@ -12302,8 +12166,8 @@ impl HandlerCore {
                     Ok(notes) => notes,
                     Err(error) => return tool_error_result(format!("Error: {error}")),
                 };
-                let smart_notes =
-                    match store.read_smart_notes(project, &smart_statuses, limit, offset) {
+                let conditional_notes =
+                    match store.read_conditional_notes(project, &smart_statuses, limit, offset) {
                         Ok(notes) => notes,
                         Err(error) => return tool_error_result(format!("Error: {error}")),
                     };
@@ -12324,7 +12188,7 @@ impl HandlerCore {
                 mcp_text_result(
                     render_notes(
                         session_notes,
-                        smart_notes,
+                        conditional_notes,
                         session_total,
                         smart_total,
                         offset,
@@ -12391,7 +12255,7 @@ impl HandlerCore {
                         session,
                         action,
                         command_id.as_deref(),
-                        "Error: Smart-note evaluation is unavailable for this Rust-authority project; the note was not updated.",
+                        "Error: Conditional-note evaluation is unavailable for this Rust-authority project; the note was not updated.",
                     );
                 }
                 facade_command_outcome(
@@ -12400,7 +12264,7 @@ impl HandlerCore {
                         project,
                         "notes",
                         session,
-                        "ctx_note",
+                        "eidnara_note",
                         action,
                         command_id.as_deref(),
                         |tx| {
@@ -12446,7 +12310,7 @@ impl HandlerCore {
                         project,
                         "notes",
                         session,
-                        "ctx_note",
+                        "eidnara_note",
                         action,
                         command_id.as_deref(),
                         |tx| {
@@ -12470,7 +12334,7 @@ impl HandlerCore {
                     "notes",
                 )
             }
-            _ => tool_error_result("Error: Unknown ctx_note action.".to_string()),
+            _ => tool_error_result("Error: Unknown eidnara_note action.".to_string()),
         }
     }
 }
@@ -12628,7 +12492,7 @@ impl CompositeComponent for Handler {
             "epochs".to_owned(),
             json!({
                 "memory_render_epoch": MEMORY_RENDER_FORMAT_EPOCH,
-                "compartment_render_epoch": COMPARTMENT_RENDER_FORMAT_EPOCH,
+                "history_segment_render_epoch": HISTORY_SEGMENT_RENDER_FORMAT_EPOCH,
                 "profile_epoch": PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC,
                 "tagger_epoch": TAGGER_FEATURE_EPOCH,
                 "state_sync_epoch": STATE_SYNC_EPOCH,
@@ -12899,7 +12763,7 @@ pub mod kernel_route_fixtures {
             "operation_key": key,
             "request_digest": sha256_hex(digest_seed.as_bytes()),
             "actor": "assistant",
-            "cause": "ctx_memory",
+            "cause": "eidnara_memory",
         })
     }
 
@@ -13350,7 +13214,7 @@ impl HandlerCore {
                 | "authority.drain_seed"
                 | "authority.drain_memories"
                 | "authority.drain_notes"
-                | "authority.drain_compartments"
+                | "authority.drain_history_segments"
                 | "authority.drain_reconcile"
                 | "authority.drain_verify"
                 | "authority.drain_flip"
@@ -13358,7 +13222,10 @@ impl HandlerCore {
                 "mirror.pull" => self.handle_mirror_pull_value(&request),
                 "guidance.get" => self.handle_guidance_value(channel, &request),
                 "manifest.get" => self.handle_prompt_surface_manifest_value(channel, &request),
-                "dreamer.run_task" => self.handle_dreamer_run_task(channel, &request).await,
+                "memory_classifier.run_task" => {
+                    self.handle_memory_classifier_run_task(channel, &request)
+                        .await
+                }
                 "transform" => {
                     self.handle_transform_dispatch(entry, request, inbound_bytes)
                         .await
@@ -14227,7 +14094,7 @@ fn classify_attempt_timeout(ceiling: Duration, deadline: Instant) -> Duration {
 /// A length-capped generation is not parsed: its tail is missing, and the
 /// parser would report a coverage gap that hides the real cause.
 fn parse_output(
-    result: &historian_producer::ProducerOutput,
+    result: &history_summarizer_producer::ProducerOutput,
     expected_ids: &BTreeSet<String>,
 ) -> Result<Vec<Classification>, String> {
     if result.length_capped {
@@ -14282,7 +14149,7 @@ enum PoolFailure {
 
 /// What a classification commit is keyed and stamped by.
 struct ClassifyWriteIdentity<'a> {
-    /// The Dreamer receipt's project; the kernel key includes it because a route digest is the same for every project that held the root in turn.
+    /// The MemoryClassifier receipt's project; the kernel key includes it because a route digest is the same for every project that held the root in turn.
     authority_project: &'a str,
     operation_key: &'a str,
     /// The receipt's request digest, reused as the kernel request digest.
@@ -14314,7 +14181,7 @@ struct ClassifyCommit {
     classified: usize,
 }
 
-impl DreamerRuntime {
+impl MemoryClassifierRuntime {
     /// Reads canonical memory rows at the kernel tip and renders the prompt.
     ///
     /// Missing, invisible, and cross-project IDs return the same request failure.
@@ -14411,7 +14278,7 @@ impl DreamerRuntime {
 
     /// Records `classifications` as one observation per memory in the memory domain.
     /// Each recorded classification depends on the memory it classifies.
-    /// Each is admitted under the Dreamer source and taint classes.
+    /// Each is admitted under the MemoryClassifier source and taint classes.
     /// Each retires that memory's earlier classification by this project in the same commit; another project's row citing the memory is left alone.
     /// `shareable` is recorded true only when the model said so and the serving view, at commit time, classes the memory normal and serves it at `ExplicitSearch`.
     /// The commit is keyed by the receipt's operation key and digest under the project's namespace, so a repeat under the same receipt replays the kernel's receipt and writes nothing new.
@@ -14425,7 +14292,7 @@ impl DreamerRuntime {
             .kernel
             .kernel_store()
             .map_err(|state| format!("kernel unavailable: {}", state.state_key()))?;
-        // The kernel keys receipts store-wide, the Dreamer ledger per project:
+        // The kernel keys receipts store-wide, the MemoryClassifier ledger per project:
         // the route and authority-project digests join the key so two projects'
         // commands with one session and command id stay two kernel receipts,
         // including two projects that held the same root in turn.
@@ -14493,7 +14360,7 @@ impl DreamerRuntime {
                                     && row.visibility(kernel::Surface::ExplicitSearch)
                                         != kernel::SurfaceVisibility::Hidden
                             });
-                        // Retire prior classifications in this commit to maintain one live classification per memory. `classifies` and `memory_classification` are free-form literals `kernel.commit` does not reserve, so any project, and any producer in this one, may attach such rows to the memory; the query selects only rows this code path wrote (memory domain, `dreamer.classify` source, this project's scope), so the writer holds the lock for its own rows and not for an arbitrary number of another producer's.
+                        // Retire prior classifications in this commit to maintain one live classification per memory. `classifies` and `memory_classification` are free-form literals `kernel.commit` does not reserve, so any project, and any producer in this one, may attach such rows to the memory; the query selects only rows this code path wrote (memory domain, `memory_classifier.classify` source, this project's scope), so the writer holds the lock for its own rows and not for an arbitrary number of another producer's.
                         for prior in envelope.live_dependent_observations(
                             &kernel::DependentObservationQuery {
                                 dependency_object_id: &classification.object_id,
@@ -14545,12 +14412,12 @@ impl DreamerRuntime {
                             sensitivity: kernel::Sensitivity::Normal,
                         })?;
                         // The classes are this code path's, whatever any caller
-                        // asserted: a model's inference, under the Dreamer's taint.
+                        // asserted: a model's inference, under the MemoryClassifier's taint.
                         envelope.record_admission(kernel::AdmissionRequest {
                             candidate_id: None,
                             subject_object_id: Some(observation_id),
                             source_class: Some(kernel::SourceClass::ModelInference),
-                            taint_class: Some(kernel::TaintClass::DreamerInference),
+                            taint_class: Some(kernel::TaintClass::MemoryClassifierInference),
                             event: kernel::AdmissionEvent {
                                 kind: kernel::EventKind::Other,
                                 trigger_object_id: Some(classification.object_id.clone()),
@@ -14697,13 +14564,13 @@ fn classify_write_refusal(
     }
 }
 
-/// The daemon state the Dreamer scheduler reads and drives: the open store,
+/// The daemon state the MemoryClassifier scheduler reads and drives: the open store,
 /// the live route bindings a run's harness and configuration come from, and
 /// the durable classify protocol.
 struct SchedulerBridge {
     store: Arc<MemoryStore>,
     bindings: Arc<Mutex<RouteBindings>>,
-    dreamer: Arc<DreamerRuntime>,
+    memory_classifier: Arc<MemoryClassifierRuntime>,
 }
 
 impl SchedulerBridge {
@@ -14717,7 +14584,7 @@ impl SchedulerBridge {
 }
 
 #[async_trait]
-impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
+impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
     fn store(&self) -> &MemoryStore {
         &self.store
     }
@@ -14725,7 +14592,9 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
     /// The newest root speaks for a project: roots collapse by project before
     /// the winner's schedule is read, so a newest binding without a schedule
     /// unschedules the project.
-    fn scheduled_projects(&self) -> Result<Vec<dreamer_scheduler::ScheduledProject>, String> {
+    fn scheduled_projects(
+        &self,
+    ) -> Result<Vec<memory_classifier_scheduler::ScheduledProject>, String> {
         let store = &self.store;
         let latest_roots: Vec<(u64, PathBuf, Option<String>)> = self
             .bindings
@@ -14737,7 +14606,10 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
                 (
                     seq,
                     root.to_path_buf(),
-                    binding.config.dreamer_review_user_memories_schedule.clone(),
+                    binding
+                        .config
+                        .memory_classifier_review_user_memories_schedule
+                        .clone(),
                 )
             })
             .collect();
@@ -14765,9 +14637,9 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
             .into_iter()
             .filter_map(
                 |(project, (_, route_root, schedule, authority_generation))| {
-                    Some(dreamer_scheduler::ScheduledProject {
+                    Some(memory_classifier_scheduler::ScheduledProject {
                         project,
-                        task: dreamer_scheduler::ScheduledTask::ReviewUserMemories,
+                        task: memory_classifier_scheduler::ScheduledTask::ReviewUserMemories,
                         route_root,
                         authority_generation,
                         schedule: schedule?,
@@ -14779,36 +14651,36 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
 
     async fn run_task(
         &self,
-        project: &dreamer_scheduler::ScheduledProject,
+        project: &memory_classifier_scheduler::ScheduledProject,
         task: &str,
         command_id: &str,
-    ) -> dreamer_scheduler::TaskRunOutcome {
+    ) -> memory_classifier_scheduler::TaskRunOutcome {
         // A host that never schedules cleanup still refuses to run it, so no configuration or flag can reach a reclamation through this daemon; every other kind has its Rust-owned inputs looked up below.
         match project.task {
-            dreamer_scheduler::ScheduledTask::MessageIndexCleanup => {
-                return dreamer_scheduler::TaskRunOutcome::NotRunnable {
+            memory_classifier_scheduler::ScheduledTask::MessageIndexCleanup => {
+                return memory_classifier_scheduler::TaskRunOutcome::NotRunnable {
                     reason: "message-index cleanup has no production enable path".to_string(),
                 };
             }
-            dreamer_scheduler::ScheduledTask::ReviewUserMemories => {}
+            memory_classifier_scheduler::ScheduledTask::ReviewUserMemories => {}
         }
         let Some(binding) = self.binding_for_root(&project.route_root) else {
-            return dreamer_scheduler::TaskRunOutcome::NotRunnable {
+            return memory_classifier_scheduler::TaskRunOutcome::NotRunnable {
                 reason: "no live route is bound to the project".to_string(),
             };
         };
-        let Some(inputs) = self.dreamer.classify_inputs(project, task) else {
-            return dreamer_scheduler::TaskRunOutcome::NotRunnable {
+        let Some(inputs) = self.memory_classifier.classify_inputs(project, task) else {
+            return memory_classifier_scheduler::TaskRunOutcome::NotRunnable {
                 reason: format!("task {task} has no Rust-owned classify inputs on this daemon"),
             };
         };
         let outcome = self
-            .dreamer
-            .run_dreamer_task(
+            .memory_classifier
+            .run_memory_classifier_task(
                 Arc::clone(&self.store),
-                DreamerRunRequest {
-                    route: DreamerRoute::of(&binding),
-                    ledger_session: dreamer_scheduler::SCHEDULER_LEDGER_SESSION,
+                MemoryClassifierRunRequest {
+                    route: MemoryClassifierRoute::of(&binding),
+                    ledger_session: memory_classifier_scheduler::SCHEDULER_LEDGER_SESSION,
                     command_id,
                     authority_generation: project.authority_generation,
                     leased_project: Some(&project.project),
@@ -14816,7 +14688,7 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
                 },
             )
             .await;
-        dreamer_scheduler::TaskRunOutcome::Ran {
+        memory_classifier_scheduler::TaskRunOutcome::Ran {
             response: match outcome {
                 PreparedOutcome::Response(output) => output
                     .measure()
@@ -14826,21 +14698,25 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
                         measured.write_to(&mut bytes).ok()?;
                         serde_json::from_slice(&bytes).ok()
                     })
-                    .unwrap_or_else(|| json!({"ok": false, "code": "dreamer_ledger_corrupt"})),
-                // The protocol classifies only these codes as store errors; all others are command responses. `authority_lookup_failed` and `dreamer_ledger_failed` leave no receipt or an open one; `kernel_unavailable` leaves the receipt open without an attempt, so a re-leased command retries the pool read on the next tick.
+                    .unwrap_or_else(
+                        || json!({"ok": false, "code": "memory_classifier_ledger_corrupt"}),
+                    ),
+                // The protocol classifies only these codes as store errors; all others are command responses. `authority_lookup_failed` and `memory_classifier_ledger_failed` leave no receipt or an open one; `kernel_unavailable` leaves the receipt open without an attempt, so a re-leased command retries the pool read on the next tick.
                 PreparedOutcome::Error { code, message }
                     if code == "authority_lookup_failed"
-                        || code == "dreamer_ledger_failed"
+                        || code == "memory_classifier_ledger_failed"
                         || code == "kernel_unavailable" =>
                 {
-                    return dreamer_scheduler::TaskRunOutcome::StoreUnavailable {
+                    return memory_classifier_scheduler::TaskRunOutcome::StoreUnavailable {
                         reason: format!("{code}: {message}"),
                     };
                 }
                 PreparedOutcome::Error { code, message } => {
                     json!({"ok": false, "code": code, "message": message})
                 }
-                PreparedOutcome::Streamed => json!({"ok": false, "code": "dreamer_run_failed"}),
+                PreparedOutcome::Streamed => {
+                    json!({"ok": false, "code": "memory_classifier_run_failed"})
+                }
             },
         }
     }
@@ -14850,7 +14726,7 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
 /// them from its session binding, a scheduled run from the binding of a live
 /// route on the project.
 #[derive(Clone, Copy)]
-pub(crate) struct DreamerRoute<'a> {
+pub(crate) struct MemoryClassifierRoute<'a> {
     pub(crate) project_root: &'a Path,
     pub(crate) harness: &'a str,
     pub(crate) credential_fingerprints: &'a std::collections::BTreeMap<String, String>,
@@ -14858,7 +14734,7 @@ pub(crate) struct DreamerRoute<'a> {
     pub(crate) kernel_project: &'a kernel_routes::ProjectBinding,
 }
 
-impl<'a> DreamerRoute<'a> {
+impl<'a> MemoryClassifierRoute<'a> {
     fn of(binding: &'a SessionBinding) -> Self {
         Self {
             project_root: &binding.project_root,
@@ -14885,7 +14761,7 @@ pub(crate) struct ClassifyRequest {
 const MAX_CLASSIFY_OBJECT_ID_BYTES: usize = 512;
 
 impl ClassifyRequest {
-    /// Validates the wire `payload` of a `dreamer.run_task` request. A payload
+    /// Validates the wire `payload` of a `memory_classifier.run_task` request. A payload
     /// that carries a host-rendered prompt or the retired `items` list is refused
     /// outright rather than having those fields ignored, so a caller built
     /// against the retired shape learns it at once.
@@ -14975,9 +14851,9 @@ impl ClassifyRequest {
 }
 
 /// One classify run as the durable protocol sees it, whoever asked for it.
-pub(crate) struct DreamerRunRequest<'a> {
+pub(crate) struct MemoryClassifierRunRequest<'a> {
     /// The route the model runs are dispatched under.
-    pub(crate) route: DreamerRoute<'a>,
+    pub(crate) route: MemoryClassifierRoute<'a>,
     pub(crate) ledger_session: &'a str,
     pub(crate) command_id: &'a str,
     pub(crate) authority_generation: u64,
@@ -14988,11 +14864,11 @@ pub(crate) struct DreamerRunRequest<'a> {
     pub(crate) task: &'a ClassifyRequest,
 }
 
-/// The receipt producer every `dreamer.run_task` request is recorded under.
-const DREAMER_RECEIPT_PRODUCER: &str = "dreamer.run_task";
+/// The receipt producer every `memory_classifier.run_task` request is recorded under.
+const MEMORY_CLASSIFIER_RECEIPT_PRODUCER: &str = "memory_classifier.run_task";
 /// The kernel producer classification writes are committed under; the
 /// operation key is the receipt's, so the kernel write replays with the receipt.
-const CLASSIFY_KERNEL_PRODUCER: &str = "dreamer.classify";
+const CLASSIFY_KERNEL_PRODUCER: &str = "memory_classifier.classify";
 /// The observation kind a classification is recorded as, in the memory domain.
 const CLASSIFY_OBSERVATION_KIND: &str = "memory_classification";
 /// The dependency kind linking a classification to the memory it classifies.
@@ -15004,7 +14880,7 @@ const CLASSIFY_REQUEST_DIGEST_VERSION: u32 = 3;
 /// The receipt's operation key for one client request: a digest of the
 /// length-prefixed ledger session and command id, so the two cannot alias and
 /// the key fits the ledger's bound whatever the command id's length.
-fn dreamer_operation_key(ledger_session: &str, command_id: &str) -> String {
+fn memory_classifier_operation_key(ledger_session: &str, command_id: &str) -> String {
     let mut bytes = Vec::with_capacity(ledger_session.len() + command_id.len() + 32);
     for part in [ledger_session, command_id] {
         bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
@@ -15013,40 +14889,43 @@ fn dreamer_operation_key(ledger_session: &str, command_id: &str) -> String {
     sha256_hex(&bytes)
 }
 
-/// Whether `project` has dispatched at least `DREAMER_ATTEMPT_BUDGET` attempts
-/// within `DREAMER_ATTEMPT_BUDGET_WINDOW`, judged from the durable attempt rows.
-fn dreamer_attempt_budget_exhausted(
+/// Whether `project` has dispatched at least `MEMORY_CLASSIFIER_ATTEMPT_BUDGET` attempts
+/// within `MEMORY_CLASSIFIER_ATTEMPT_BUDGET_WINDOW`, judged from the durable attempt rows.
+fn memory_classifier_attempt_budget_exhausted(
     store: &MemoryStore,
     project: &str,
 ) -> Result<bool, MemoryStoreError> {
     let window_start = now_ms().saturating_sub(
-        i64::try_from(DREAMER_ATTEMPT_BUDGET_WINDOW.as_millis()).unwrap_or(i64::MAX),
+        i64::try_from(MEMORY_CLASSIFIER_ATTEMPT_BUDGET_WINDOW.as_millis()).unwrap_or(i64::MAX),
     );
-    Ok(store.count_dreamer_attempts(project, window_start)? >= DREAMER_ATTEMPT_BUDGET)
+    Ok(
+        store.count_memory_classifier_attempts(project, window_start)?
+            >= MEMORY_CLASSIFIER_ATTEMPT_BUDGET,
+    )
 }
 
-fn dreamer_budget_exhausted() -> PreparedOutcome {
+fn memory_classifier_budget_exhausted() -> PreparedOutcome {
     PreparedOutcome::Error {
-        code: "dreamer_budget_exhausted".to_string(),
+        code: "memory_classifier_budget_exhausted".to_string(),
         message: format!(
-            "this project has dispatched {DREAMER_ATTEMPT_BUDGET} or more dreamer attempts in the last {} s; nothing new is dispatched until the window passes",
-            DREAMER_ATTEMPT_BUDGET_WINDOW.as_secs()
+            "this project has dispatched {MEMORY_CLASSIFIER_ATTEMPT_BUDGET} or more memory_classifier attempts in the last {} s; nothing new is dispatched until the window passes",
+            MEMORY_CLASSIFIER_ATTEMPT_BUDGET_WINDOW.as_secs()
         ),
     }
 }
 
-fn dreamer_ledger_failed(error: MemoryStoreError) -> PreparedOutcome {
+fn memory_classifier_ledger_failed(error: MemoryStoreError) -> PreparedOutcome {
     PreparedOutcome::Error {
-        code: "dreamer_ledger_failed".to_string(),
+        code: "memory_classifier_ledger_failed".to_string(),
         message: error.to_string(),
     }
 }
 
 /// Another generation owns the receipt, so this run writes nothing further and
 /// reports no outcome of its own.
-fn dreamer_ledger_fenced() -> PreparedOutcome {
+fn memory_classifier_ledger_fenced() -> PreparedOutcome {
     PreparedOutcome::Error {
-        code: "dreamer_ledger_fenced".to_string(),
+        code: "memory_classifier_ledger_fenced".to_string(),
         message: "another daemon generation took over this command; its outcome is recorded there"
             .to_string(),
     }
@@ -15055,12 +14934,12 @@ fn dreamer_ledger_fenced() -> PreparedOutcome {
 /// Turns a guarded ledger transition into the response that stops the request
 /// when it did not land: `Fenced` and store errors each end the request.
 fn ledger_stop(
-    transition: Result<DreamerTransition, MemoryStoreError>,
+    transition: Result<MemoryClassifierTransition, MemoryStoreError>,
 ) -> Result<(), PreparedOutcome> {
     match transition {
-        Ok(DreamerTransition::Applied) => Ok(()),
-        Ok(DreamerTransition::Fenced) => Err(dreamer_ledger_fenced()),
-        Err(error) => Err(dreamer_ledger_failed(error)),
+        Ok(MemoryClassifierTransition::Applied) => Ok(()),
+        Ok(MemoryClassifierTransition::Fenced) => Err(memory_classifier_ledger_fenced()),
+        Err(error) => Err(memory_classifier_ledger_failed(error)),
     }
 }
 
@@ -15072,16 +14951,16 @@ fn ledger_stop(
 /// outcome.
 fn settle_dispatched_attempt_as_unknown(
     store: &MemoryStore,
-    key: DreamerReceiptKey<'_>,
+    key: MemoryClassifierReceiptKey<'_>,
     generation: u64,
     attempt_index: u32,
     stop: PreparedOutcome,
 ) -> PreparedOutcome {
-    let _ = store.finish_dreamer_attempt(
+    let _ = store.finish_memory_classifier_attempt(
         key,
         generation,
         attempt_index,
-        DreamerTerminalKind::Unknown,
+        MemoryClassifierTerminalKind::Unknown,
         now_ms(),
     );
     complete_receipt_as_unknown(store, key, generation, stop)
@@ -15092,25 +14971,25 @@ fn settle_dispatched_attempt_as_unknown(
 /// fenced write reports the fence, because another generation owns the outcome.
 fn complete_receipt_as_unknown(
     store: &MemoryStore,
-    key: DreamerReceiptKey<'_>,
+    key: MemoryClassifierReceiptKey<'_>,
     generation: u64,
     stop: PreparedOutcome,
 ) -> PreparedOutcome {
     let envelope = json!({
         "ok": false,
-        "code": "dreamer_outcome_unknown",
+        "code": "memory_classifier_outcome_unknown",
         "message": "the model was dispatched but its outcome could not be recorded",
     });
-    match store.complete_dreamer_receipt(
+    match store.complete_memory_classifier_receipt(
         key,
         generation,
-        DreamerTerminalKind::Unknown,
+        MemoryClassifierTerminalKind::Unknown,
         &envelope.to_string(),
         now_ms(),
     ) {
-        Ok(DreamerTransition::Applied) => stop,
-        Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
-        Err(error) => dreamer_ledger_failed(error),
+        Ok(MemoryClassifierTransition::Applied) => stop,
+        Ok(MemoryClassifierTransition::Fenced) => memory_classifier_ledger_fenced(),
+        Err(error) => memory_classifier_ledger_failed(error),
     }
 }
 
@@ -15121,26 +15000,30 @@ fn kernel_unavailable(state: &kernel_routes::KernelOutcome) -> PoolFailure {
     })
 }
 
-fn read_dream_task_response(store: &MemoryStore, key: DreamerReceiptKey<'_>) -> PreparedOutcome {
-    match store.lookup_dreamer_receipt(key) {
+fn read_dream_task_response(
+    store: &MemoryStore,
+    key: MemoryClassifierReceiptKey<'_>,
+) -> PreparedOutcome {
+    match store.lookup_memory_classifier_receipt(key) {
         Ok(receipt) => match receipt.map(|receipt| receipt.state) {
-            Some(DreamerReceiptState::Complete { result_json, .. }) => {
+            Some(MemoryClassifierReceiptState::Complete { result_json, .. }) => {
                 replay_dream_task_response(&result_json)
             }
             _ => PreparedOutcome::Error {
-                code: "dreamer_ledger_corrupt".to_string(),
-                message: "completed dreamer receipt is missing or not terminal".to_string(),
+                code: "memory_classifier_ledger_corrupt".to_string(),
+                message: "completed memory_classifier receipt is missing or not terminal"
+                    .to_string(),
             },
         },
-        Err(error) => dreamer_ledger_failed(error),
+        Err(error) => memory_classifier_ledger_failed(error),
     }
 }
 
 fn replay_dream_task_response(response_json: &str) -> PreparedOutcome {
     let Ok(response) = serde_json::from_str::<Value>(response_json) else {
         return PreparedOutcome::Error {
-            code: "dreamer_ledger_corrupt".to_string(),
-            message: "recorded dreamer response is not valid JSON".to_string(),
+            code: "memory_classifier_ledger_corrupt".to_string(),
+            message: "recorded memory_classifier response is not valid JSON".to_string(),
         };
     };
     if response.get("ok").and_then(Value::as_bool) == Some(false) {
@@ -15148,12 +15031,12 @@ fn replay_dream_task_response(response_json: &str) -> PreparedOutcome {
             code: response
                 .get("code")
                 .and_then(Value::as_str)
-                .unwrap_or("dreamer_run_failed")
+                .unwrap_or("memory_classifier_run_failed")
                 .to_string(),
             message: response
                 .get("message")
                 .and_then(Value::as_str)
-                .unwrap_or("dreamer task failed")
+                .unwrap_or("memory_classifier task failed")
                 .to_string(),
         };
     }
@@ -15710,7 +15593,7 @@ fn assemble_state_sync_seed(
         .rev()
         .find_map(|batch| batch.note_evaluation_available);
     let mut final_batch = batches.pop().expect("final seed batch");
-    let mut compartments = Vec::new();
+    let mut history_segments = Vec::new();
     let mut drop_seeds = Vec::new();
     let mut pending_agent_drops = Vec::new();
     let mut auto_search_hint_decisions = Vec::new();
@@ -15719,7 +15602,7 @@ fn assemble_state_sync_seed(
     let mut strip_seeds = Vec::new();
     let mut user_profile = None;
     for mut batch in batches {
-        compartments.append(&mut batch.compartments);
+        history_segments.append(&mut batch.history_segments);
         drop_seeds.append(&mut batch.drop_seeds);
         pending_agent_drops.append(&mut batch.pending_agent_drops);
         auto_search_hint_decisions.append(&mut batch.auto_search_hint_decisions);
@@ -15734,7 +15617,7 @@ fn assemble_state_sync_seed(
                 .append(&mut profile);
         }
     }
-    compartments.append(&mut final_batch.compartments);
+    history_segments.append(&mut final_batch.history_segments);
     drop_seeds.append(&mut final_batch.drop_seeds);
     pending_agent_drops.append(&mut final_batch.pending_agent_drops);
     auto_search_hint_decisions.append(&mut final_batch.auto_search_hint_decisions);
@@ -15756,7 +15639,7 @@ fn assemble_state_sync_seed(
         seed_batch_total: None,
         seed_complete: None,
         seed_boundary_id: final_batch.seed_boundary_id,
-        compartments,
+        history_segments,
         user_profile,
         workspace: final_batch.workspace,
         last_todo_state: final_batch.last_todo_state,
@@ -15944,11 +15827,12 @@ fn note_evaluation_opt_bool_field(
     }
 }
 
-fn smart_note_selection_snapshot(note: &NoteEvalCandidate) -> SmartNoteSelectionSnapshot {
-    SmartNoteSelectionSnapshot {
+fn conditional_note_selection_snapshot(
+    note: &NoteEvalCandidate,
+) -> ConditionalNoteSelectionSnapshot {
+    ConditionalNoteSelectionSnapshot {
         id: note.id,
         status: note.status.clone(),
-        compile_status: note.compile_status.clone(),
         created_at: note.created_at_ms,
         has_compiled_check: note.has_compiled_check,
         last_checked_at: note.last_checked_at,
@@ -16029,7 +15913,7 @@ fn note_evaluation_acquire_response(outcome: NoteEvalAcquireOutcome) -> Prepared
 
 fn parse_note_evaluation_wire_outcome(
     value: &Value,
-) -> Result<(String, SmartNoteEvaluationOutcome), PreparedOutcome> {
+) -> Result<(String, ConditionalNoteEvaluationOutcome), PreparedOutcome> {
     let Some(outcome) = value.as_object() else {
         return Err(note_evaluation_bad_request("'outcome' must be an object"));
     };
@@ -16066,19 +15950,19 @@ fn parse_note_evaluation_wire_outcome(
         ))),
     };
     let parsed = match (phase, kind) {
-        ("compile", "compiled_met") => SmartNoteEvaluationOutcome::Compile(
+        ("compile", "compiled_met") => ConditionalNoteEvaluationOutcome::Compile(
             CompileOutcome::CompiledMet(artifact.take().expect("artifact presence checked")),
         ),
-        ("compile", "compiled_false") => SmartNoteEvaluationOutcome::Compile(
+        ("compile", "compiled_false") => ConditionalNoteEvaluationOutcome::Compile(
             CompileOutcome::CompiledFalse(artifact.take().expect("artifact presence checked")),
         ),
         ("compile", "compilation_failed") => {
-            SmartNoteEvaluationOutcome::Compile(CompileOutcome::CompilationFailed)
+            ConditionalNoteEvaluationOutcome::Compile(CompileOutcome::CompilationFailed)
         }
-        ("due", kind) => SmartNoteEvaluationOutcome::Due(check(kind)?),
-        ("liveness", kind) => SmartNoteEvaluationOutcome::Liveness(check(kind)?),
-        ("fallback", "met") => SmartNoteEvaluationOutcome::Fallback(FallbackOutcome::Met),
-        ("fallback", "false") => SmartNoteEvaluationOutcome::Fallback(FallbackOutcome::False),
+        ("due", kind) => ConditionalNoteEvaluationOutcome::Due(check(kind)?),
+        ("liveness", kind) => ConditionalNoteEvaluationOutcome::Liveness(check(kind)?),
+        ("fallback", "met") => ConditionalNoteEvaluationOutcome::Fallback(FallbackOutcome::Met),
+        ("fallback", "false") => ConditionalNoteEvaluationOutcome::Fallback(FallbackOutcome::False),
         (phase, kind) => {
             return Err(note_evaluation_bad_request(format!(
                 "kind '{kind}' is not valid for phase '{phase}'"
@@ -16137,7 +16021,9 @@ fn parse_note_evaluation_wire_artifact(
         ));
     }
     let check_cron = field("check_cron")?;
-    if check_cron.len() > NOTE_EVALUATOR_MAX_CRON_BYTES || !is_valid_smart_note_cron(check_cron) {
+    if check_cron.len() > NOTE_EVALUATOR_MAX_CRON_BYTES
+        || !is_valid_conditional_note_cron(check_cron)
+    {
         return Err(note_evaluation_bad_request(
             "artifact 'check_cron' must be a valid 5-field cron of at most 256 bytes",
         ));
@@ -16150,7 +16036,7 @@ fn parse_note_evaluation_wire_artifact(
     })
 }
 
-fn smart_note_check_digest(
+fn conditional_note_check_digest(
     surface_condition: Option<&str>,
     artifact: &CompiledCheckArtifact,
 ) -> String {
@@ -16166,7 +16052,7 @@ fn apply_note_evaluation_outcome(
     claim: &NoteEvalClaim,
     note: &StoredNote,
     phase: &str,
-    outcome: &SmartNoteEvaluationOutcome,
+    outcome: &ConditionalNoteEvaluationOutcome,
     project: &str,
     now: i64,
 ) -> Result<NoteEvalReducedState, String> {
@@ -16177,19 +16063,19 @@ fn apply_note_evaluation_outcome(
         ));
     }
     let compiled_artifact = match outcome {
-        SmartNoteEvaluationOutcome::Compile(CompileOutcome::CompiledMet(artifact))
-        | SmartNoteEvaluationOutcome::Compile(CompileOutcome::CompiledFalse(artifact)) => {
+        ConditionalNoteEvaluationOutcome::Compile(CompileOutcome::CompiledMet(artifact))
+        | ConditionalNoteEvaluationOutcome::Compile(CompileOutcome::CompiledFalse(artifact)) => {
             Some(artifact)
         }
         _ => None,
     };
     if let Some(artifact) = compiled_artifact {
-        let expected = smart_note_check_digest(note.surface_condition.as_deref(), artifact);
+        let expected = conditional_note_check_digest(note.surface_condition.as_deref(), artifact);
         if expected != artifact.check_hash {
             return Err("check_hash does not match the canonical artifact digest".to_string());
         }
     }
-    let pre = SmartNoteLifecycleState {
+    let pre = ConditionalNoteLifecycleState {
         status: note.status.clone(),
         ready_at: note.ready_at,
         ready_reason: note.ready_reason.clone(),
@@ -16213,7 +16099,7 @@ fn apply_note_evaluation_outcome(
         check_last_liveness_at: note.check_last_liveness_at,
         policy_version: note.policy_version.unwrap_or(0),
     };
-    let reduction = reduce_smart_note_evaluation(&pre, outcome, note.id, now, &chrono::Local);
+    let reduction = reduce_conditional_note_evaluation(&pre, outcome, note.id, now, &chrono::Local);
     let next = reduction.next;
     let (compiled_source_revision, compiled_project_path) = if compiled_artifact.is_some() {
         (Some(claim.source_revision), Some(project.to_string()))
@@ -16726,10 +16612,6 @@ const MAX_MEMORY_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_NOTE_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_SHORT_FIELD_BYTES: usize = 4 * 1024;
 const MAX_QUERY_BYTES: usize = 1024;
-const CTX_EXPAND_BYTE_BUDGET: usize = 15_000 * 4;
-const CTX_EXPAND_MAX_ORDINAL_SPAN: i64 = 10_000;
-const CTX_EXPAND_MAX_ROWS: usize = 64;
-const CTX_EXPAND_TRUNCATION_MARKER: &str = "\n\n[truncated at the ~15,000-token ctx_expand budget]";
 
 fn validate_string_cap(
     args: &Map<String, Value>,
@@ -16810,113 +16692,7 @@ fn usize_arg(args: &Map<String, Value>, key: &str) -> Option<usize> {
         .and_then(|value| usize::try_from(value).ok())
 }
 
-fn truncate_expand_output(mut output: String) -> String {
-    if output.len() <= CTX_EXPAND_BYTE_BUDGET {
-        return output;
-    }
-    let mut boundary = CTX_EXPAND_BYTE_BUDGET.saturating_sub(CTX_EXPAND_TRUNCATION_MARKER.len());
-    while !output.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    output.truncate(boundary);
-    output.push_str(CTX_EXPAND_TRUNCATION_MARKER);
-    output
-}
-
-fn append_expand_piece(output: &mut String, piece: &str) -> bool {
-    if output.len().saturating_add(piece.len()) <= CTX_EXPAND_BYTE_BUDGET {
-        output.push_str(piece);
-        return true;
-    }
-    let available = CTX_EXPAND_BYTE_BUDGET.saturating_sub(
-        output
-            .len()
-            .saturating_add(CTX_EXPAND_TRUNCATION_MARKER.len()),
-    );
-    let mut boundary = piece.len().min(available);
-    while !piece.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    output.push_str(&piece[..boundary]);
-    output.push_str(CTX_EXPAND_TRUNCATION_MARKER);
-    false
-}
-
-fn append_expand_line(output: &mut String, line: &str) -> bool {
-    append_expand_piece(output, line) && append_expand_piece(output, "\n")
-}
-
-fn render_message_expand(row: StoredChunkTranscript, message: i64) -> String {
-    let mut lines = vec![
-        format!(
-            "Message {message} is covered by compartment {} ({}-{}).",
-            row.compartment_seq, row.start_ordinal, row.end_ordinal
-        ),
-        "This Claude Code leg can recover the historian chunk-builder view, not full raw messages; tool calls may be summarized and long text may have been truncated before summarization.".to_string(),
-        String::new(),
-        format!(
-            "### Compartment {} ({}-{})",
-            row.compartment_seq, row.start_ordinal, row.end_ordinal
-        ),
-    ];
-    lines.push(row.transcript.unwrap_or_else(|| {
-        "[no longer recoverable: transcript bytes could not be decompressed]".to_string()
-    }));
-    truncate_expand_output(lines.join("\n"))
-}
-
-fn render_cached_message_expand(message: &wire::IngressMessage) -> String {
-    let role = match message.ck.role.as_str() {
-        "assistant" => "A (assistant)",
-        "user" => "U (user)",
-        role => role,
-    };
-    let parts = message
-        .ck
-        .content()
-        .iter()
-        .filter_map(render_cached_expand_part)
-        .collect::<Vec<_>>();
-    let mut lines = vec![
-        format!("[{}] {role} — full recovery:", message.ordinal),
-        String::new(),
-    ];
-    if parts.is_empty() {
-        lines.push(
-            "  (no recoverable content — message had only structural/reasoning parts)".to_string(),
-        );
-    } else {
-        lines.extend(parts);
-    }
-    lines.join("\n")
-}
-
-fn render_cached_expand_part(part: &wire::WireBlock) -> Option<String> {
-    match part.kind() {
-        wire::BlockKind::Text { text } if !text.trim().is_empty() => {
-            Some(format!("  [text]\n{text}"))
-        }
-        wire::BlockKind::ToolCall {
-            id, name, input, ..
-        } => Some(format!("  [tool: {name} #{id}]\n  input: {input}")),
-        wire::BlockKind::ToolResult {
-            id,
-            tool_name,
-            output,
-            ..
-        } => Some(format!(
-            "  [tool: {tool_name} #{id}]\n  output:\n{}",
-            expand_tool_output_text(output)
-        )),
-        wire::BlockKind::Media(_) => Some("  [media]".to_string()),
-        wire::BlockKind::Text { .. }
-        | wire::BlockKind::Reasoning { .. }
-        | wire::BlockKind::RedactedReasoning { .. }
-        | wire::BlockKind::Opaque(_) => None,
-    }
-}
-
-fn ctx_reduce_ack_details(unknown: &[u64], already_queued: &[u64]) -> String {
+fn eidnara_reduce_ack_details(unknown: &[u64], already_queued: &[u64]) -> String {
     let mut details = Vec::new();
     if !unknown.is_empty() {
         details.push(format!(
@@ -16949,432 +16725,16 @@ fn format_tag_numbers(numbers: &[u64]) -> String {
         .join(", ")
 }
 
-fn render_range_expand(
-    start: i64,
-    end: i64,
-    compartments: &[StoredCompartment],
-    transcripts: &[StoredChunkTranscript],
-) -> String {
-    let mut matching = compartments
-        .iter()
-        .filter(|comp| comp.end_message >= start && comp.start_message <= end)
-        .collect::<Vec<_>>();
-    matching.sort_by_key(|comp| comp.sequence);
-    if matching.is_empty() {
-        return format!(
-            "No compacted compartments found in range {start}-{end}. The range may be live tail, outside this session's history, or compacted before transcript capture."
-        );
-    }
-
-    let durable_messages = durable_expand_messages(transcripts);
-    if !durable_messages.is_empty() {
-        return render_durable_range_expand(start, end, &durable_messages);
-    }
-
-    let mut output = format!("Messages {start}-{end} from persisted historian chunk transcripts:");
-    for compartment in matching {
-        if !append_expand_piece(&mut output, "\n\n")
-            || !append_expand_line(
-                &mut output,
-                &format!(
-                    "### Compartment {} ({}-{})",
-                    compartment.sequence, compartment.start_message, compartment.end_message
-                ),
-            )
-        {
-            break;
-        }
-        let transcript = transcripts
-            .iter()
-            .find(|row| row.compartment_seq == compartment.sequence)
-            .and_then(|row| row.transcript.as_deref())
-            .map(|transcript| slice_expand_transcript(transcript, start, end))
-            .filter(|transcript| !transcript.is_empty())
-            .unwrap_or(
-                "[no longer recoverable: this compartment transcript was evicted, was not recorded, or only covered ordinals outside the requested range]".to_string(),
-            );
-        if !append_expand_piece(&mut output, &transcript) {
-            break;
-        }
-    }
-    truncate_expand_output(output)
-}
-
-fn durable_expand_messages(transcripts: &[StoredChunkTranscript]) -> wire::IngressMessages {
-    let mut messages = BTreeMap::new();
-    for transcript in transcripts {
-        let Some(raw_messages) = transcript.raw_messages_json.as_deref() else {
-            continue;
-        };
-        let Ok(raw_messages) = serde_json::from_str::<wire::IngressMessages>(raw_messages) else {
-            continue;
-        };
-        for message in raw_messages {
-            let Ok(ordinal) = i64::try_from(message.ordinal) else {
-                continue;
-            };
-            if ordinal >= transcript.start_ordinal && ordinal <= transcript.end_ordinal {
-                messages.entry(message.ordinal).or_insert(message);
-            }
-        }
-    }
-    messages.into_values().collect()
-}
-
-fn render_durable_range_expand(
-    start: i64,
-    end: i64,
-    messages: &[Arc<wire::IngressMessage>],
-) -> String {
-    let messages = messages
-        .iter()
-        .filter(|message| {
-            let ordinal = i64::try_from(message.ordinal).unwrap_or(i64::MAX);
-            ordinal >= start && ordinal <= end
-        })
-        .collect::<Vec<_>>();
-    let Some(first) = messages.first() else {
-        return format!(
-            "No messages found in range {start}-{end}. The range may be outside this session's persisted historian transcripts."
-        );
-    };
-    let last = messages.last().expect("nonempty checked above");
-    let mut output = format!(
-        "Messages {}-{} from persisted raw message history:",
-        first.ordinal, last.ordinal
-    );
-    for message in messages {
-        if !append_expand_piece(&mut output, "\n\n")
-            || !append_expand_piece(&mut output, &render_durable_range_message(message))
-        {
-            break;
-        }
-    }
-    truncate_expand_output(output)
-}
-
-fn render_durable_range_message(message: &wire::IngressMessage) -> String {
-    let role = match message.ck.role.as_str() {
-        "assistant" => "A",
-        "user" => "U",
-        role => role,
-    };
-    let parts = message
-        .ck
-        .content()
-        .iter()
-        .filter_map(render_durable_range_part)
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        format!("[{}] {role}:", message.ordinal)
-    } else {
-        format!("[{}] {role}: {}", message.ordinal, parts.join(" / "))
-    }
-}
-
-fn render_durable_range_part(part: &wire::WireBlock) -> Option<String> {
-    match part.kind() {
-        wire::BlockKind::Text { text } => {
-            (!text.trim().is_empty()).then(|| text.trim().to_string())
-        }
-        wire::BlockKind::ToolCall { name, input, .. } => {
-            let argument = verbose_expand_key_argument(input);
-            Some(if argument.is_empty() {
-                format!("TC: {name}")
-            } else {
-                format!("TC: {name}({argument})")
-            })
-        }
-        wire::BlockKind::ToolResult {
-            tool_name, output, ..
-        } => Some(format!(
-            "TR: {tool_name} → output ~{} tok",
-            tokenizer::estimate_tokens(&expand_tool_output_text(output))
-        )),
-        wire::BlockKind::Media(_) => Some("[media]".to_string()),
-        wire::BlockKind::Reasoning { .. }
-        | wire::BlockKind::RedactedReasoning { .. }
-        | wire::BlockKind::Opaque(_) => None,
-    }
-}
-
-fn slice_expand_transcript(transcript: &str, start: i64, end: i64) -> String {
-    transcript
-        .lines()
-        .filter_map(|line| {
-            let (span, _) = line.strip_prefix('[')?.split_once("] ")?;
-            let (span_start, span_end) = parse_expand_ordinal_span(span)?;
-            let clipped_start = span_start.max(start);
-            let clipped_end = span_end.min(end);
-            (clipped_start <= clipped_end).then(|| {
-                if clipped_start == span_start && clipped_end == span_end {
-                    line.to_string()
-                } else if clipped_start == clipped_end {
-                    format!(
-                        "[{clipped_start}] [historian transcript coalesced across ordinals {span_start}-{span_end}; exact raw payload unavailable]"
-                    )
-                } else {
-                    format!(
-                        "[{clipped_start}-{clipped_end}] [historian transcript coalesced across ordinals {span_start}-{span_end}; exact raw payload unavailable]"
-                    )
-                }
-            })
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-const CTX_EXPAND_VERBOSE_TOKEN_BUDGET: usize = 15_000;
-const CTX_EXPAND_VERBOSE_TEXT_PREVIEW_CHARS: usize = 200;
-const CTX_EXPAND_VERBOSE_REASONING_PREVIEW_CHARS: usize = 120;
-const CTX_EXPAND_VERBOSE_ARGUMENT_PREVIEW_CHARS: usize = 60;
-
-struct VerboseRangeExpand {
-    text: String,
-    last_ordinal: i64,
-    truncated: bool,
-}
-
-fn render_verbose_range_expand(
-    messages: &[Arc<wire::IngressMessage>],
-    start: i64,
-    end: i64,
-) -> VerboseRangeExpand {
-    render_verbose_range_expand_with_budget(messages, start, end, CTX_EXPAND_VERBOSE_TOKEN_BUDGET)
-}
-
-fn render_verbose_range_expand_with_budget(
-    messages: &[Arc<wire::IngressMessage>],
-    start: i64,
-    end: i64,
-    token_budget: usize,
-) -> VerboseRangeExpand {
-    let mut output = Vec::new();
-    let mut used_tokens = 0;
-    let mut last_ordinal = start.saturating_sub(1);
-    let mut truncated = false;
-    for message in messages.iter().filter(|message| {
-        let ordinal = i64::try_from(message.ordinal).unwrap_or(i64::MAX);
-        ordinal >= start && ordinal <= end
-    }) {
-        let block = render_verbose_expand_message(message);
-        let block_tokens = tokenizer::estimate_tokens(&block);
-        if used_tokens + block_tokens > token_budget && !output.is_empty() {
-            truncated = true;
-            break;
-        }
-        used_tokens += block_tokens;
-        last_ordinal = i64::try_from(message.ordinal).unwrap_or(i64::MAX);
-        output.push(block);
-    }
-    VerboseRangeExpand {
-        text: output.join("\n\n"),
-        last_ordinal,
-        truncated,
-    }
-}
-
-fn render_verbose_expand_result(start: i64, end: i64, result: VerboseRangeExpand) -> String {
-    let mut output = format!(
-        "Messages {start}-{} (verbose). Recover any one in full with ctx_expand(message=<ordinal>):\n\n{}",
-        result.last_ordinal, result.text
-    );
-    if result.truncated {
-        output.push_str(&format!(
-            "\n\nTruncated at message {} (budget: ~{CTX_EXPAND_VERBOSE_TOKEN_BUDGET} tokens). Call again with start={} end={end} verbose=true for more.",
-            result.last_ordinal,
-            result.last_ordinal.saturating_add(1),
-        ));
-    }
-    output
-}
-
-fn render_verbose_expand_message(message: &wire::IngressMessage) -> String {
-    let role = match message.ck.role.as_str() {
-        "assistant" => "A (assistant)",
-        "user" => "U (user)",
-        role => role,
-    };
-    let previews = message
-        .ck
-        .content()
-        .iter()
-        .filter_map(render_verbose_expand_part)
-        .collect::<Vec<_>>();
-    if previews.is_empty() {
-        format!("[{}] {role}", message.ordinal)
-    } else {
-        format!("[{}] {role}\n{}", message.ordinal, previews.join("\n"))
-    }
-}
-
-fn render_verbose_expand_part(part: &wire::WireBlock) -> Option<String> {
-    match part.kind() {
-        wire::BlockKind::Text { text } => {
-            let preview = truncate_expand_preview(text, CTX_EXPAND_VERBOSE_TEXT_PREVIEW_CHARS);
-            (!preview.is_empty()).then(|| format!("    • {preview}"))
-        }
-        wire::BlockKind::ToolCall { name, input, .. } => {
-            let argument = verbose_expand_key_argument(input);
-            let head = if argument.is_empty() {
-                name.to_string()
-            } else {
-                format!("{name}({argument})")
-            };
-            Some(format!("    • tool {head}"))
-        }
-        wire::BlockKind::ToolResult {
-            tool_name, output, ..
-        } => Some(format!(
-            "    • tool {tool_name} → output ~{} tok",
-            tokenizer::estimate_tokens(&expand_tool_output_text(output))
-        )),
-        wire::BlockKind::Reasoning { text, .. } => Some(format!(
-            "    • [reasoning] {}",
-            truncate_expand_preview(text, CTX_EXPAND_VERBOSE_REASONING_PREVIEW_CHARS)
-        )),
-        wire::BlockKind::Media(_) => Some("    • [media]".to_string()),
-        wire::BlockKind::RedactedReasoning { .. } => Some("    • [redacted_reasoning]".to_string()),
-        wire::BlockKind::Opaque(opaque) => Some(format!("    • [{}]", opaque.kind)),
-    }
-}
-
-fn verbose_expand_key_argument(input: &Value) -> String {
-    let Some(input) = input.as_object() else {
-        return String::new();
-    };
-    for key in [
-        "filePath",
-        "path",
-        "pattern",
-        "query",
-        "symbol",
-        "module",
-        "action",
-        "description",
-    ] {
-        if let Some(value) = input
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-        {
-            return truncate_expand_preview(value, CTX_EXPAND_VERBOSE_ARGUMENT_PREVIEW_CHARS);
-        }
-    }
-    String::new()
-}
-
-fn expand_tool_output_text(output: &wire::ToolOutput) -> String {
-    match &output.kind {
-        wire::OutputKind::Text { text } | wire::OutputKind::ErrorText { text } => text.clone(),
-        wire::OutputKind::Json { value } | wire::OutputKind::ErrorJson { value } => {
-            value.to_string()
-        }
-        wire::OutputKind::ExecutionDenied { reason } => reason.clone().unwrap_or_default(),
-        wire::OutputKind::Content { blocks } | wire::OutputKind::ErrorContent { blocks } => {
-            serde_json::to_string(blocks).unwrap_or_default()
-        }
-    }
-}
-
-fn render_verbose_transcript_range_expand(
-    start: i64,
-    end: i64,
-    transcripts: &[StoredChunkTranscript],
-) -> String {
-    let mut entries = Vec::new();
-    for transcript in transcripts {
-        let Some(transcript) = transcript.transcript.as_deref() else {
-            continue;
-        };
-        for line in transcript.lines() {
-            let Some((span, role_and_content)) = line
-                .strip_prefix('[')
-                .and_then(|line| line.split_once("] "))
-            else {
-                continue;
-            };
-            let Some((role, content)) = role_and_content.split_once(": ") else {
-                continue;
-            };
-            let Some((span_start, span_end)) = parse_expand_ordinal_span(span) else {
-                continue;
-            };
-            for ordinal in span_start.max(start)..=span_end.min(end) {
-                entries.push((ordinal, role, content, span_start, span_end));
-            }
-        }
-    }
-    entries.sort_by_key(|(ordinal, ..)| *ordinal);
-    entries.dedup_by_key(|(ordinal, ..)| *ordinal);
-    if entries.is_empty() {
-        return format!(
-            "No messages found in range {start}-{end}. The range may be outside this session's persisted historian transcripts."
-        );
-    }
-
-    let last_ordinal = entries
-        .last()
-        .map(|(ordinal, ..)| *ordinal)
-        .unwrap_or(start);
-    let mut output = format!(
-        "Messages {start}-{last_ordinal} (verbose). Recover any one in full with ctx_expand(message=<ordinal>):"
-    );
-    for (ordinal, role, content, span_start, span_end) in entries {
-        let label = match role {
-            "U" => "U (user)",
-            "A" => "A (assistant)",
-            _ => role,
-        };
-        let mut preview = truncate_expand_preview(content, CTX_EXPAND_VERBOSE_TEXT_PREVIEW_CHARS);
-        if span_start != span_end {
-            preview = format!("[historian span {span_start}-{span_end}] {preview}");
-        }
-        let part = if let Some(tool) = preview.strip_prefix("TC: ") {
-            format!("    • tool {tool}")
-        } else {
-            format!("    • {preview}")
-        };
-        if !append_expand_piece(&mut output, "\n\n")
-            || !append_expand_line(&mut output, &format!("[{ordinal}] {label}"))
-            || !append_expand_piece(&mut output, &part)
-        {
-            break;
-        }
-    }
-    truncate_expand_output(output)
-}
-
-fn parse_expand_ordinal_span(span: &str) -> Option<(i64, i64)> {
-    let (start, end) = match span.split_once('-') {
-        Some((start, end)) => (start.parse().ok()?, end.parse().ok()?),
-        None => {
-            let ordinal = span.parse().ok()?;
-            (ordinal, ordinal)
-        }
-    };
-    (start >= 0 && end >= start).then_some((start, end))
-}
-
-fn truncate_expand_preview(value: &str, max_units: usize) -> String {
-    let value = value.trim();
-    let units = value.encode_utf16().collect::<Vec<_>>();
-    if units.len() <= max_units {
-        return value.to_string();
-    }
-    format!("{}…", String::from_utf16_lossy(&units[..max_units]))
-}
-
 fn render_notes(
     session_notes: Vec<StoredNote>,
-    smart_notes: Vec<StoredNote>,
+    conditional_notes: Vec<StoredNote>,
     session_total: usize,
     smart_total: usize,
     offset: usize,
     default_sections: bool,
 ) -> String {
-    if session_notes.is_empty() && smart_notes.is_empty() {
-        return "## Notes\n\nNo session notes or smart notes.".to_string();
+    if session_notes.is_empty() && conditional_notes.is_empty() {
+        return "## Notes\n\nNo session notes or conditional notes.".to_string();
     }
     let format_note = |note: &StoredNote| {
         let status_suffix = if note.status == "active" {
@@ -17421,7 +16781,7 @@ fn render_notes(
         let remaining = total.saturating_sub(offset.saturating_add(shown));
         (remaining > 0).then(|| {
             format!(
-                "Showing {shown} of {total} (newest first) — {remaining} older: ctx_note(action=\"read\", offset={})",
+                "Showing {shown} of {total} (newest first) — {remaining} older: eidnara_note(action=\"read\", offset={})",
                 offset.saturating_add(shown)
             )
         })
@@ -17442,21 +16802,21 @@ fn render_notes(
         }
         sections.push(section);
     }
-    if !smart_notes.is_empty() {
+    if !conditional_notes.is_empty() {
         let mut section = format!(
             "{}\n\n{}",
             if default_sections {
-                "## 🔔 Ready Smart Notes"
+                "## 🔔 Ready Conditional Notes"
             } else {
-                "## Smart Notes"
+                "## Conditional Notes"
             },
-            smart_notes
+            conditional_notes
                 .iter()
                 .map(&format_note)
                 .collect::<Vec<_>>()
                 .join("\n\n")
         );
-        if let Some(footer) = footer(smart_total, smart_notes.len()) {
+        if let Some(footer) = footer(smart_total, conditional_notes.len()) {
             section.push_str("\n\n");
             section.push_str(&footer);
         }
@@ -17464,12 +16824,12 @@ fn render_notes(
     }
     let body = sections.join("\n\n");
     let anchor_hint = if body.contains("↳ @msg ") {
-        "\n\n↳ @msg N marks the conversation tail when a note was written. To see what led to it: ctx_expand(start=N-x, end=N) (pick x for how far back to look)."
+        "\n\n↳ @msg N marks the conversation tail when a note was written."
     } else {
         ""
     };
     format!(
-        "{body}{anchor_hint}\n\nTo dismiss a stale note: ctx_note(action=\"dismiss\", note_id=N)"
+        "{body}{anchor_hint}\n\nTo dismiss a stale note: eidnara_note(action=\"dismiss\", note_id=N)"
     )
 }
 
@@ -17628,8 +16988,12 @@ fn refuse_conditioned_note_without_evaluator(
     refusal: &str,
 ) -> PreparedOutcome {
     if let Some(command_id) = command_id {
-        match store.facade_mutation_ledger_response(identity_scope, "ctx_note", action, command_id)
-        {
+        match store.facade_mutation_ledger_response(
+            identity_scope,
+            "eidnara_note",
+            action,
+            command_id,
+        ) {
             Ok(Some(stored)) => {
                 return facade_command_outcome(
                     Ok(FacadeMutationOutcome::Duplicate(stored)),
@@ -17749,8 +17113,10 @@ fn compact_status_detail(detail: &str) -> String {
     sanitize_status_text(detail, 120)
 }
 
-fn historian_status_summary(state: &memory_store::HistorianDurableState) -> String {
-    if state.state != HistorianPhase::Idle {
+fn history_summarizer_status_summary(
+    state: &memory_store::HistorySummarizerDurableState,
+) -> String {
+    if state.state != HistorySummarizerPhase::Idle {
         return format!("fire seq {} {}", state.firing_seq, state.state.as_str());
     }
     if let Some(reason) = state.last_no_fire.as_deref() {
@@ -17767,13 +17133,13 @@ fn historian_status_summary(state: &memory_store::HistorianDurableState) -> Stri
 
 fn wrapup_has_remaining_messages(
     messages: &[Arc<crate::wire::IngressMessage>],
-    last_compartment_end: Option<u64>,
+    last_history_segment_end: Option<u64>,
     protected_start: u64,
 ) -> bool {
     messages.iter().any(|message| {
         !message.ck.meta.synthetic
             && message.ordinal < protected_start
-            && last_compartment_end.is_none_or(|end| message.ordinal > end)
+            && last_history_segment_end.is_none_or(|end| message.ordinal > end)
     })
 }
 
@@ -17976,7 +17342,7 @@ fn project_slug(path: &Path) -> String {
         .to_string()
 }
 
-fn record_historian_connect_failure(
+fn record_history_summarizer_connect_failure(
     store: &MemoryStore,
     session_id: &str,
     failure_backoff_at_ms: i64,
@@ -17986,12 +17352,12 @@ fn record_historian_connect_failure(
     for attempt in 0..2 {
         let loaded = store.load(session_id)?;
         let mut meta = loaded.meta.clone();
-        if meta.historian.state == HistorianPhase::Idle {
-            meta.historian.last_failure = Some(detail.to_string());
-            meta.historian.failure_backoff_at_ms = Some(failure_backoff_at_ms);
+        if meta.history_summarizer.state == HistorySummarizerPhase::Idle {
+            meta.history_summarizer.last_failure = Some(detail.to_string());
+            meta.history_summarizer.failure_backoff_at_ms = Some(failure_backoff_at_ms);
         } else {
-            meta.historian = historian::abandon_with_detail(
-                &meta.historian,
+            meta.history_summarizer = history_summarizer::abandon_with_detail(
+                &meta.history_summarizer,
                 failure_backoff_at_ms,
                 Some(detail.to_string()),
             );
@@ -18078,23 +17444,19 @@ pub fn store_descriptor_in(dir: &Path) -> StorageDescriptor {
     }
 }
 
-fn ctx_memory_description() -> String {
+fn eidnara_memory_description() -> String {
     "Read and maintain durable project memories. Memories are addressed by object id (mem_<32hex>) taken from tool results; never use local row IDs. Create standalone facts, revise changed memories, archive them, and merge duplicates through the host commit path; revise and merge supersede their targets with one new object and return its id, and no token is passed.".to_string()
 }
 
-fn ctx_search_description() -> String {
+fn eidnara_search_description() -> String {
     "Keyword-search saved project memories, session notes, and summarized conversation history. This is literal word or phrase search, not semantic search; use it to find remembered facts or prior discussion snippets before answering.".to_string()
 }
 
-fn ctx_expand_description() -> String {
-    "Recover compacted conversation ranges. The default view serves persisted historian chunk transcripts; verbose=true separately previews each cached raw message part, including tool-output sizes, so an ordinal can be recovered in full while that bounded snapshot is available.".to_string()
-}
-
-fn ctx_note_description() -> String {
+fn eidnara_note_description() -> String {
     "Save or inspect durable session notes for future follow-ups. surface_condition is accepted and recorded, but condition evaluation arrives later on this leg.".to_string()
 }
 
-fn ctx_memory_schema() -> Value {
+fn eidnara_memory_schema() -> Value {
     let object_id = json!({ "type": "string", "pattern": "^mem_[0-9a-f]{32}$" });
     let positive_categories = json!([
         "PROJECT_RULES",
@@ -18204,7 +17566,7 @@ fn ctx_memory_schema() -> Value {
     })
 }
 
-fn ctx_search_schema() -> Value {
+fn eidnara_search_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": true,
@@ -18225,20 +17587,7 @@ fn ctx_search_schema() -> Value {
     })
 }
 
-fn ctx_expand_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": true,
-        "properties": {
-            "start": { "type": "integer", "minimum": 0, "description": "First message ordinal to expand." },
-            "end": { "type": "integer", "minimum": 0, "description": "Last message ordinal to expand, inclusive." },
-            "verbose": { "type": "boolean", "description": "With start/end: list each message separately with its ordinal [N] and per-part preview, including each tool call's output size, so one message can be recovered by ordinal." },
-            "message": { "type": "integer", "minimum": 0, "description": "Recover one message by ordinal in full from the cached raw request when available, otherwise its persisted historian chunk transcript." },
-        }
-    })
-}
-
-fn ctx_note_schema() -> Value {
+fn eidnara_note_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": true,
@@ -18248,7 +17597,7 @@ fn ctx_note_schema() -> Value {
             "note_id": { "type": "integer", "minimum": 1, "description": "Note id for update or dismiss." },
             "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25, "description": "Maximum active notes to return." },
             "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest notes in each section." },
-            "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Optional read filter. Defaults to active session notes plus ready smart notes." },
+            "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Optional read filter. Defaults to active session notes plus ready conditional notes." },
             "surface_condition": { "type": "string", "maxLength": 4096, "description": "Optional externally checkable condition to record with the note. Evaluation arrives later." },
             "memory_project": { "type": "string", "description": "Resolved project identity supplied by the host transport." },
         }
@@ -18481,10 +17830,10 @@ mod tests {
         WireMessage,
     };
     use cache_stability::CoreState;
-    use historian_producer::{ProducerOutput, RunHandle};
+    use history_summarizer_producer::{ProducerOutput, RunHandle};
     use memory_store::{
-        CacheStateSelect, HistorianChunkRange, HistorianDurableState, ModuleUsage,
-        NoteEvaluationInput, PendingAgentDrop, StoredCompartment, TagMintInput,
+        CacheStateSelect, HistorySummarizerChunkRange, HistorySummarizerDurableState, ModuleUsage,
+        NoteEvaluationInput, PendingAgentDrop, StoredHistorySegment, TagMintInput,
     };
     use tokio::sync::Notify;
 
@@ -18923,9 +18272,9 @@ mod tests {
     }
 
     #[test]
-    fn historian_boundary_construction_matches_owned_reference() {
+    fn history_summarizer_boundary_construction_matches_owned_reference() {
         let pair = injection::build_synthetic_todo_pair(
-            r#"[{"content":"historian exclusion","status":"pending","priority":"high"}]"#,
+            r#"[{"content":"history_summarizer exclusion","status":"pending","priority":"high"}]"#,
         )
         .unwrap();
         let mut empty = ck("empty", 1, "");
@@ -18967,7 +18316,7 @@ mod tests {
         }
         let (_handler, store, _dir, _project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        // Historian preparation reads original request flags alongside the transform's normalized projection.
+        // HistorySummarizer preparation reads original request flags alongside the transform's normalized projection.
         // Reserved synthetic IDs remain excluded from live projection blocks during unflagged replay.
         for replayed_unflagged in [false, true] {
             for message in &mut request.messages[6..8] {
@@ -19093,8 +18442,8 @@ mod tests {
                         ..Default::default()
                     };
                     assert_eq!(
-                        boundary::check_compartment_trigger(&actual.messages, &context),
-                        boundary::check_compartment_trigger(&reference, &context),
+                        boundary::check_history_segment_trigger(&actual.messages, &context),
+                        boundary::check_history_segment_trigger(&reference, &context),
                     );
                 }
             }
@@ -19105,12 +18454,12 @@ mod tests {
                     .filter(|block| !block.synthetic)
                     .cloned()
                     .collect::<Vec<_>>();
-                let outcome = assemble_historian_firing(
+                let outcome = assemble_history_summarizer_firing(
                     &store,
                     &request.messages,
                     &live,
                     &projection.identity_by_mid,
-                    HistorianAssemblerConfig {
+                    HistorySummarizerAssemblerConfig {
                         session_id: request.session_id.clone(),
                         project_path: "/proj".into(),
                         project_slug: "proj".into(),
@@ -19133,7 +18482,7 @@ mod tests {
                         user_memory_collection_enabled: false,
                         extraction_free: false,
                         in_emergency: true,
-                        force_keep_last_compartment: false,
+                        force_keep_last_history_segment: false,
                         fold_is_only_reclaim: false,
                         failure_backoff_at_ms: 0,
                         min_chunk_tokens: 512,
@@ -19142,12 +18491,14 @@ mod tests {
                 )
                 .unwrap();
                 if replayed_unflagged && budget == 32_000 {
-                    assert!(matches!(outcome, AssembleHistorianFiringOutcome::NoFire(
-                        historian_chunk::HistorianNoFireReason::MissingBlockIdentity { ref message_id }
-                    ) if message_id == "synthetic-call"));
+                    assert!(
+                        matches!(outcome, AssembleHistorySummarizerFiringOutcome::NoFire(
+                        history_summarizer_chunk::HistorySummarizerNoFireReason::MissingBlockIdentity { ref message_id }
+                    ) if message_id == "synthetic-call")
+                    );
                     continue;
                 }
-                let AssembleHistorianFiringOutcome::Fire(firing) = outcome else {
+                let AssembleHistorySummarizerFiringOutcome::Fire(firing) = outcome else {
                     panic!("corpus must fire: {outcome:?}")
                 };
                 let owned_snapshot = live
@@ -19207,17 +18558,17 @@ mod tests {
                 assert_eq!(firing.to_ordinal, expected_end);
                 let expected_input = if budget == 1 {
                     assert!(firing.chunk.token_estimate > budget);
-                    "\n[… tokens truncated by the daemon to fit the historian window …]"
+                    "\n[… tokens truncated by the daemon to fit the history_summarizer window …]"
                 } else {
                     &expected_text
                 };
-                let references = historian_prompt::build_reference_blocks_from_stored(
+                let references = history_summarizer_prompt::build_reference_blocks_from_stored(
                     &request.session_id,
                     1,
                     &[],
                 );
-                let expected_prompt = historian_prompt::build_compartment_agent_prompt(
-                    &historian_prompt::CompartmentPromptInputs {
+                let expected_prompt = history_summarizer_prompt::build_history_segment_agent_prompt(
+                    &history_summarizer_prompt::HistorySegmentPromptInputs {
                         seed_examples: &references.seed_examples,
                         session_references: &references.session_references,
                         project_memory: "",
@@ -19227,21 +18578,10 @@ mod tests {
                     },
                 );
                 assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
-                let expected_raw = request
-                    .messages
-                    .iter()
-                    .filter(|message| {
-                        !message.ck.meta.synthetic && (1..=expected_end).contains(&message.ordinal)
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    firing.raw_chunk_messages.as_bytes(),
-                    serde_json::to_vec(&expected_raw).unwrap()
-                );
                 let expected_digest = match budget {
-                    1 => "38304e8a6ce873573260fbc9967ed890fd10757d9cb9eb49f452b4b551bde4ae",
-                    128 => "f2e94e33234ce5ccb894fe7ca26805cecb16b2d1b775be2a585dc7c9e4876a56",
-                    _ => "aa1ff018eccefed2d25ded6fe08b537bb5cdd43b31dd7012114824a69ac96ce6",
+                    1 => "0e0eb1f520ba2500bd1fdd653c805dc72fed78e64197f569294a9eb091c5ef34",
+                    128 => "7bf6893aeb58b953a0909165a4443ab0fb1b793faba4c8e9655058f38cd5727a",
+                    _ => "bafe4494e0de9038ac1a5fd14d432282bb17584600858b0dfad885ddb3ffac5d",
                 };
                 assert_eq!(
                     format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),
@@ -19252,7 +18592,7 @@ mod tests {
     }
 
     #[test]
-    fn historian_trigger_token_reuse_matches_retokenized_production_shape() {
+    fn history_summarizer_trigger_token_reuse_matches_retokenized_production_shape() {
         let cold_request = transform_request(trigger_ingress_fixture(1_400, 24), 140_000, 200_000);
         let cold_projection = crate::wire::project_messages(&cold_request.messages).unwrap();
         let warm_request = transform_request(trigger_ingress_fixture(1_401, 24), 140_000, 200_000);
@@ -19298,7 +18638,7 @@ mod tests {
                         execute_threshold_percentage: 65.0,
                         usage_percentage: 70.0,
                         usage_input_tokens: 140_000.0,
-                        last_compartment_end_ordinal: None,
+                        last_history_segment_end_ordinal: None,
                         prior_boundary_ordinal: 0,
                         publication_floor_active: false,
                         emergency_tail_scale: None,
@@ -19306,15 +18646,15 @@ mod tests {
                         fold_is_only_reclaim: false,
                     },
                     projected_post_drop_percentage: optimized_projection,
-                    compartment_in_progress: false,
+                    history_segment_in_progress: false,
                     commit_cluster_trigger_enabled: true,
                     min_commit_clusters: 2,
                 };
                 let mut reference_context = context.clone();
                 reference_context.projected_post_drop_percentage = reference_projection;
                 assert_eq!(
-                    boundary::check_compartment_trigger(&messages, &context),
-                    boundary::check_compartment_trigger_retokenized_reference(
+                    boundary::check_history_segment_trigger(&messages, &context),
+                    boundary::check_history_segment_trigger_retokenized_reference(
                         &messages,
                         &reference_context,
                     ),
@@ -19325,7 +18665,7 @@ mod tests {
     }
 
     #[test]
-    fn historian_trigger_cache_engages_at_astro_message_count() {
+    fn history_summarizer_trigger_cache_engages_at_astro_message_count() {
         const MESSAGE_COUNT: usize = 4_667;
         let cold_request =
             transform_request(trigger_ingress_fixture(MESSAGE_COUNT, 24), 140_000, 200_000);
@@ -19355,8 +18695,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "run manually to compare production-sized historian trigger cost"]
-    fn historian_trigger_token_reuse_benchmark() {
+    #[ignore = "run manually to compare production-sized history_summarizer trigger cost"]
+    fn history_summarizer_trigger_token_reuse_benchmark() {
         let reference_cold = trigger_messages_fixture(1_400, 2_048);
         let reference_warm = trigger_messages_fixture(1_401, 2_048);
         let cold_request =
@@ -19371,7 +18711,7 @@ mod tests {
                 execute_threshold_percentage: 65.0,
                 usage_percentage: 50.0,
                 usage_input_tokens: 100_000.0,
-                last_compartment_end_ordinal: None,
+                last_history_segment_end_ordinal: None,
                 prior_boundary_ordinal: 0,
                 publication_floor_active: false,
                 emergency_tail_scale: None,
@@ -19379,7 +18719,7 @@ mod tests {
                 fold_is_only_reclaim: false,
             },
             projected_post_drop_percentage: Some(50.0),
-            compartment_in_progress: false,
+            history_segment_in_progress: false,
             commit_cluster_trigger_enabled: true,
             min_commit_clusters: 2,
         };
@@ -19405,10 +18745,12 @@ mod tests {
                 );
                 let mut reference_context = context.clone();
                 reference_context.projected_post_drop_percentage = projected;
-                std::hint::black_box(boundary::check_compartment_trigger_retokenized_reference(
-                    std::hint::black_box(&messages),
-                    std::hint::black_box(&reference_context),
-                ));
+                std::hint::black_box(
+                    boundary::check_history_segment_trigger_retokenized_reference(
+                        std::hint::black_box(&messages),
+                        std::hint::black_box(&reference_context),
+                    ),
+                );
                 samples.push(started_at.elapsed().as_secs_f64() * 1_000.0);
             }
 
@@ -19424,11 +18766,13 @@ mod tests {
             {
                 let mut cold_token_estimator =
                     |bytes: &str| cold.token_cache_snapshot.formatted_token_count(bytes);
-                std::hint::black_box(boundary::check_compartment_trigger_with_token_estimator(
-                    std::hint::black_box(&cold.messages),
-                    std::hint::black_box(&optimized_context),
-                    &mut cold_token_estimator,
-                ));
+                std::hint::black_box(
+                    boundary::check_history_segment_trigger_with_token_estimator(
+                        std::hint::black_box(&cold.messages),
+                        std::hint::black_box(&optimized_context),
+                        &mut cold_token_estimator,
+                    ),
+                );
             }
             token_cache
                 .lock()
@@ -19447,11 +18791,13 @@ mod tests {
             {
                 let mut warm_token_estimator =
                     |bytes: &str| warm.token_cache_snapshot.formatted_token_count(bytes);
-                std::hint::black_box(boundary::check_compartment_trigger_with_token_estimator(
-                    std::hint::black_box(&warm.messages),
-                    std::hint::black_box(&optimized_context),
-                    &mut warm_token_estimator,
-                ));
+                std::hint::black_box(
+                    boundary::check_history_segment_trigger_with_token_estimator(
+                        std::hint::black_box(&warm.messages),
+                        std::hint::black_box(&optimized_context),
+                        &mut warm_token_estimator,
+                    ),
+                );
             }
             warm_trigger_scan.push(trigger_started_at.elapsed().as_secs_f64() * 1_000.0);
             token_cache
@@ -19467,7 +18813,7 @@ mod tests {
         warm_boundary_build.sort_by(f64::total_cmp);
         warm_trigger_scan.sort_by(f64::total_cmp);
         eprintln!(
-            "historian-trigger messages=1400 payload_bytes=2048 before_cold_ms={:.1} \
+            "history_summarizer-trigger messages=1400 payload_bytes=2048 before_cold_ms={:.1} \
              before_warm_append_ms={:.1} after_cold_ms={:.1} after_warm_append_ms={:.1} \
              warm_boundary_ms={:.1} warm_scan_ms={:.1}",
             before_cold[1],
@@ -19563,7 +18909,7 @@ mod tests {
             execute_threshold_percentage: 65.0,
             usage_percentage: 70.0,
             usage_input_tokens: 700.0,
-            last_compartment_end_ordinal: None,
+            last_history_segment_end_ordinal: None,
             prior_boundary_ordinal: 0,
             publication_floor_active: false,
             emergency_tail_scale: None,
@@ -19573,14 +18919,14 @@ mod tests {
         let mut context = TriggerContext {
             boundary,
             projected_post_drop_percentage: None,
-            compartment_in_progress: false,
+            history_segment_in_progress: false,
             commit_cluster_trigger_enabled: false,
             min_commit_clusters: 2,
         };
-        let initial = boundary::check_compartment_trigger(&messages, &context);
+        let initial = boundary::check_history_segment_trigger(&messages, &context);
         assert!(initial.fire, "initial trigger decision: {initial:?}");
         context.projected_post_drop_percentage = Some(48.75);
-        let projected = boundary::check_compartment_trigger(&messages, &context);
+        let projected = boundary::check_history_segment_trigger(&messages, &context);
         assert!(!projected.fire, "projected trigger decision: {projected:?}");
     }
 
@@ -19737,7 +19083,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_cancels_and_joins_tracked_historian_worker() {
+    async fn shutdown_cancels_and_joins_tracked_history_summarizer_worker() {
         let handler = Handler::new();
         let observed = Arc::new(AtomicBool::new(false));
         let worker_observed = Arc::clone(&observed);
@@ -19747,7 +19093,7 @@ mod tests {
                 cancel.cancelled().await;
                 worker_observed.store(true, Ordering::SeqCst);
             })
-            .expect("historian worker admitted");
+            .expect("history_summarizer worker admitted");
 
         <Handler as CompositeComponent>::shutdown(&handler)
             .await
@@ -19791,7 +19137,7 @@ mod tests {
             }
         })
         .await
-        .expect("historian call site entered injected blocking future");
+        .expect("history_summarizer call site entered injected blocking future");
     }
 
     async fn assert_shutdown_joined_lifecycle_task(
@@ -19803,7 +19149,7 @@ mod tests {
             <Handler as CompositeComponent>::shutdown(handler),
         )
         .await
-        .expect("shutdown must join blocked historian call site")
+        .expect("shutdown must join blocked history_summarizer call site")
         .unwrap();
         assert!(state.exited.load(Ordering::SeqCst));
         assert!(handler.cancel.is_cancelled());
@@ -19812,23 +19158,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_cancels_actual_spawned_historian_start_call_site() {
+    async fn shutdown_cancels_actual_spawned_history_summarizer_start_call_site() {
         let (handler, _store, state, _dir) =
             handler_with_blocking_lifecycle(BlockingLifecycleCall::Start);
         let response = call_transform(&handler, big_messages()).await;
-        assert_eq!(response["historian"]["fired"], true);
+        assert_eq!(response["history_summarizer"]["fired"], true);
         wait_for_blocking_lifecycle(&state).await;
         assert_shutdown_joined_lifecycle_task(&handler, &state).await;
     }
 
     #[tokio::test]
-    async fn shutdown_cancels_actual_spawned_historian_reattach_call_site() {
+    async fn shutdown_cancels_actual_spawned_history_summarizer_reattach_call_site() {
         let (handler, store, state, _dir) =
             handler_with_blocking_lifecycle(BlockingLifecycleCall::Reattach);
         let messages = big_messages();
         seed_awaiting(&store, &messages);
         let response = call_transform(&handler, messages).await;
-        assert_eq!(response["historian"]["no_fire"], "reattaching");
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
         wait_for_blocking_lifecycle(&state).await;
         assert_shutdown_joined_lifecycle_task(&handler, &state).await;
         assert!(handler.reattaching_sessions.lock().unwrap().is_empty());
@@ -19886,18 +19232,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "transform",
-                "ctx_reduce",
-                "ctx_memory",
-                "ctx_expand",
-                "ctx_search",
-                "ctx_note",
+                "eidnara_reduce",
+                "eidnara_memory",
+                "eidnara_search",
+                "eidnara_note",
             ]
         );
         let by_name = tools
             .iter()
             .map(|tool| (tool.name.as_str(), tool))
             .collect::<HashMap<_, _>>();
-        for name in ["ctx_memory", "ctx_search"] {
+        for name in ["eidnara_memory", "eidnara_search"] {
             let tool = by_name
                 .get(name)
                 .unwrap_or_else(|| panic!("missing tool {name}"));
@@ -19909,11 +19254,11 @@ mod tests {
             }));
         }
         assert_eq!(
-            by_name["ctx_memory"].execution_mode,
+            by_name["eidnara_memory"].execution_mode,
             prompt_surface::ExecutionMode::Mutating
         );
         assert_eq!(
-            by_name["ctx_search"].execution_mode,
+            by_name["eidnara_search"].execution_mode,
             prompt_surface::ExecutionMode::Pure
         );
     }
@@ -20345,7 +19690,7 @@ mod tests {
         );
         assert!(enforce_request_byte_cap(fallback.as_bytes()).is_ok());
         // Oversized facade bodies reject at 1 MiB.
-        assert!(enforce_request_byte_cap(&pad("ctx_memory", "method", two_mib)).is_err());
+        assert!(enforce_request_byte_cap(&pad("eidnara_memory", "method", two_mib)).is_err());
         // Unparseable oversized bodies reject conservatively.
         assert!(enforce_request_byte_cap(&vec![b'x'; two_mib]).is_err());
         // A structured `method` is skipped, never built, and reads as absent.
@@ -22063,7 +21408,7 @@ mod tests {
             })
         }
 
-        async fn block(&self) -> HistorianProducerError {
+        async fn block(&self) -> HistorySummarizerProducerError {
             self.entered.store(true, Ordering::SeqCst);
             let cancel = self
                 .cancel
@@ -22073,7 +21418,7 @@ mod tests {
                 .expect("test cancellation installed");
             cancel.cancelled().await;
             self.exited.store(true, Ordering::SeqCst);
-            HistorianProducerError::TimedOut
+            HistorySummarizerProducerError::TimedOut
         }
     }
 
@@ -22082,13 +21427,14 @@ mod tests {
     }
 
     #[async_trait]
-    impl HistorianProducerFactory for BlockingLifecycleFactory {
+    impl HistorySummarizerProducerFactory for BlockingLifecycleFactory {
         async fn connect(
             &self,
             _project_root: &Path,
             _harness: &str,
             _credential_fingerprints: &std::collections::BTreeMap<String, String>,
-        ) -> Result<Box<dyn HistorianProducerDriver + Send>, HistorianProducerError> {
+        ) -> Result<Box<dyn HistorySummarizerProducerDriver + Send>, HistorySummarizerProducerError>
+        {
             Ok(Box::new(BlockingLifecycleProducer {
                 state: Arc::clone(&self.state),
             }))
@@ -22100,8 +21446,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl HistorianProducerDriver for BlockingLifecycleProducer {
-        async fn bind_session(&mut self, _session_id: &str) -> Result<(), HistorianProducerError> {
+    impl HistorySummarizerProducerDriver for BlockingLifecycleProducer {
+        async fn bind_session(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<(), HistorySummarizerProducerError> {
             Ok(())
         }
 
@@ -22111,7 +21460,7 @@ mod tests {
             _system: &str,
             _prompt: &str,
             _model: &str,
-        ) -> Result<RunHandle, HistorianProducerError> {
+        ) -> Result<RunHandle, HistorySummarizerProducerError> {
             if self.state.call == BlockingLifecycleCall::Start {
                 return Err(self.state.block().await);
             }
@@ -22123,22 +21472,25 @@ mod tests {
         async fn await_output(
             &mut self,
             _run_id: &str,
-        ) -> Result<ProducerOutput, HistorianProducerError> {
-            Err(HistorianProducerError::TimedOut)
+        ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
+            Err(HistorySummarizerProducerError::TimedOut)
         }
 
-        async fn status(&mut self, _run_id: &str) -> Result<RunState, HistorianProducerError> {
+        async fn status(
+            &mut self,
+            _run_id: &str,
+        ) -> Result<RunState, HistorySummarizerProducerError> {
             if self.state.call == BlockingLifecycleCall::Reattach {
                 return Err(self.state.block().await);
             }
             Ok(RunState::Active)
         }
 
-        async fn cancel(&mut self, _run_id: &str) -> Result<(), HistorianProducerError> {
+        async fn cancel(&mut self, _run_id: &str) -> Result<(), HistorySummarizerProducerError> {
             Ok(())
         }
 
-        async fn close(&mut self) -> Result<(), HistorianProducerError> {
+        async fn close(&mut self) -> Result<(), HistorySummarizerProducerError> {
             Ok(())
         }
     }
@@ -22147,15 +21499,15 @@ mod tests {
     struct ProducerState {
         connects: AtomicUsize,
         starts: AtomicUsize,
-        start_errors: Mutex<VecDeque<Result<RunHandle, HistorianProducerError>>>,
+        start_errors: Mutex<VecDeque<Result<RunHandle, HistorySummarizerProducerError>>>,
         binds: AtomicUsize,
         statuses: AtomicUsize,
         await_outputs: AtomicUsize,
         redrains: AtomicUsize,
         block_output: std::sync::atomic::AtomicBool,
         notify: Notify,
-        connect_errors: Mutex<VecDeque<HistorianProducerError>>,
-        await_results: Mutex<VecDeque<Result<ProducerOutput, HistorianProducerError>>>,
+        connect_errors: Mutex<VecDeque<HistorySummarizerProducerError>>,
+        await_results: Mutex<VecDeque<Result<ProducerOutput, HistorySummarizerProducerError>>>,
         outputs: Mutex<VecDeque<String>>,
         next_fact: Mutex<Option<String>>,
         prompts: Mutex<Vec<String>>,
@@ -22164,7 +21516,7 @@ mod tests {
         purges: Mutex<Vec<String>>,
         /// `session_events` preserves start/purge order that separate logs lose.
         session_events: Mutex<Vec<String>>,
-        purge_errors: Mutex<VecDeque<HistorianProducerError>>,
+        purge_errors: Mutex<VecDeque<HistorySummarizerProducerError>>,
         await_timeouts: Mutex<Vec<Duration>>,
         on_await_output: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         /// Runs once, on entry to the next `start`, before it is counted.
@@ -22185,13 +21537,14 @@ mod tests {
     }
 
     #[async_trait]
-    impl HistorianProducerFactory for TestProducerFactory {
+    impl HistorySummarizerProducerFactory for TestProducerFactory {
         async fn connect(
             &self,
             _project_root: &Path,
             harness: &str,
             _credential_fingerprints: &std::collections::BTreeMap<String, String>,
-        ) -> Result<Box<dyn HistorianProducerDriver + Send>, HistorianProducerError> {
+        ) -> Result<Box<dyn HistorySummarizerProducerDriver + Send>, HistorySummarizerProducerError>
+        {
             self.state.connects.fetch_add(1, Ordering::SeqCst);
             self.state
                 .harnesses
@@ -22223,8 +21576,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl HistorianProducerDriver for TestProducer {
-        async fn bind_session(&mut self, session_id: &str) -> Result<(), HistorianProducerError> {
+    impl HistorySummarizerProducerDriver for TestProducer {
+        async fn bind_session(
+            &mut self,
+            session_id: &str,
+        ) -> Result<(), HistorySummarizerProducerError> {
             self.state.binds.fetch_add(1, Ordering::SeqCst);
             self.bound_session = Some(session_id.to_string());
             Ok(())
@@ -22236,7 +21592,7 @@ mod tests {
             _system: &str,
             prompt: &str,
             _model: &str,
-        ) -> Result<RunHandle, HistorianProducerError> {
+        ) -> Result<RunHandle, HistorySummarizerProducerError> {
             if let Some(hook) = self.state.on_start.lock().expect("start hook mutex").take() {
                 hook();
             }
@@ -22268,9 +21624,9 @@ mod tests {
             let output = match self.state.next_fact.lock().expect("next fact mutex").take() {
                 Some(fact) => {
                     let (start, end) = prompt_ordinal_range(prompt).unwrap_or((1, 3));
-                    historian_output_with_fact(start, end, &fact)
+                    history_summarizer_output_with_fact(start, end, &fact)
                 }
-                None => historian_output_for_prompt(prompt),
+                None => history_summarizer_output_for_prompt(prompt),
             };
             self.state
                 .outputs
@@ -22285,7 +21641,7 @@ mod tests {
         async fn await_output(
             &mut self,
             _run_id: &str,
-        ) -> Result<ProducerOutput, HistorianProducerError> {
+        ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
             self.state.await_outputs.fetch_add(1, Ordering::SeqCst);
             if let Some(hook) = self
                 .state
@@ -22314,7 +21670,7 @@ mod tests {
                 .lock()
                 .expect("outputs mutex")
                 .pop_front()
-                .unwrap_or_else(|| historian_output(1, 3, "reattached summary"));
+                .unwrap_or_else(|| history_summarizer_output(1, 3, "reattached summary"));
             Ok(ProducerOutput {
                 text,
                 length_capped: false,
@@ -22325,7 +21681,7 @@ mod tests {
             &mut self,
             run_id: &str,
             timeout: Duration,
-        ) -> Result<ProducerOutput, HistorianProducerError> {
+        ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
             self.state
                 .await_timeouts
                 .lock()
@@ -22334,7 +21690,7 @@ mod tests {
             // The real producer gives up at `timeout`; a blocked output that outlives it is the timed-out attempt the caller then records.
             match tokio::time::timeout(timeout, self.await_output(run_id)).await {
                 Ok(result) => result,
-                Err(_) => Err(HistorianProducerError::TimedOut),
+                Err(_) => Err(HistorySummarizerProducerError::TimedOut),
             }
         }
 
@@ -22342,19 +21698,22 @@ mod tests {
             &mut self,
             run_id: &str,
             timeout: Duration,
-        ) -> Result<ProducerOutput, HistorianProducerError> {
+        ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
             self.state.redrains.fetch_add(1, Ordering::SeqCst);
             match tokio::time::timeout(timeout, self.await_output(run_id)).await {
                 Ok(result) => result,
-                Err(_) => Err(HistorianProducerError::TimedOut),
+                Err(_) => Err(HistorySummarizerProducerError::TimedOut),
             }
         }
 
-        async fn status(&mut self, run_id: &str) -> Result<RunState, HistorianProducerError> {
+        async fn status(
+            &mut self,
+            run_id: &str,
+        ) -> Result<RunState, HistorySummarizerProducerError> {
             self.state.statuses.fetch_add(1, Ordering::SeqCst);
             // The real producer routes `status` through the bound session and answers `MissingSession` otherwise.
             let Some(session) = self.bound_session.clone() else {
-                return Err(HistorianProducerError::Protocol(
+                return Err(HistorySummarizerProducerError::Protocol(
                     "status before bind_session".to_string(),
                 ));
             };
@@ -22375,15 +21734,18 @@ mod tests {
                 .unwrap_or(RunState::Active))
         }
 
-        async fn cancel(&mut self, _run_id: &str) -> Result<(), HistorianProducerError> {
+        async fn cancel(&mut self, _run_id: &str) -> Result<(), HistorySummarizerProducerError> {
             Ok(())
         }
 
-        async fn close(&mut self) -> Result<(), HistorianProducerError> {
+        async fn close(&mut self) -> Result<(), HistorySummarizerProducerError> {
             Ok(())
         }
 
-        async fn purge_session(&mut self, session_id: &str) -> Result<(), HistorianProducerError> {
+        async fn purge_session(
+            &mut self,
+            session_id: &str,
+        ) -> Result<(), HistorySummarizerProducerError> {
             self.state
                 .purges
                 .lock()
@@ -22490,8 +21852,8 @@ mod tests {
         configured.auto_search.enabled = false;
         configured.auto_search.score_threshold = 0.8;
         configured.auto_search.min_prompt_chars = 42;
-        configured.caveman.enabled = true;
-        configured.caveman.min_size = 900;
+        configured.terse_text_compression.enabled = true;
+        configured.terse_text_compression.min_size = 900;
         configured.prompt_surface_guidance_override =
             Some("## Eidnara\n\nTrusted route guidance.".to_string());
         apply_claude_code_config_controls(
@@ -22502,8 +21864,8 @@ mod tests {
         assert!(!default_request.auto_search_enabled);
         assert_eq!(default_request.auto_search_score_threshold, 0.8);
         assert_eq!(default_request.auto_search_min_prompt_chars, 42);
-        assert!(default_request.caveman_enabled);
-        assert_eq!(default_request.caveman_min_chars, 900);
+        assert!(default_request.terse_text_compression_enabled);
+        assert_eq!(default_request.terse_text_compression_min_chars, 900);
         assert_eq!(
             default_request.prompt_surface_guidance_override.as_deref(),
             Some("## Eidnara\n\nTrusted route guidance.")
@@ -22575,11 +21937,11 @@ mod tests {
             compaction_enabled: true,
             memory_enabled: true,
             auto_search: crate::config::AutoSearchConfig::default(),
-            caveman: crate::config::CavemanConfig::default(),
+            terse_text_compression: crate::config::TerseTextCompressionConfig::default(),
             auto_promote: true,
             user_memory_collection_enabled: false,
-            dreamer_review_user_memories_schedule: None,
-            historian_context_limit_tokens: 128_000,
+            memory_classifier_review_user_memories_schedule: None,
+            history_summarizer_context_limit_tokens: 128_000,
             memory_budget_tokens: 4_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,
@@ -22684,8 +22046,14 @@ mod tests {
         }
     }
 
-    fn stored_comp(seq: i64, start: i64, end: i64, end_mid: &str, p1: &str) -> StoredCompartment {
-        StoredCompartment {
+    fn stored_comp(
+        seq: i64,
+        start: i64,
+        end: i64,
+        end_mid: &str,
+        p1: &str,
+    ) -> StoredHistorySegment {
+        StoredHistorySegment {
             sequence: seq,
             start_message: start,
             end_message: end,
@@ -22864,14 +22232,6 @@ mod tests {
             .to_string()
     }
 
-    fn tool_json_array(outcome: PreparedOutcome) -> Vec<Value> {
-        let body = tool_body(outcome);
-        let text = body["content"][0]["text"]
-            .as_str()
-            .unwrap_or_else(|| panic!("tool response missing text: {body}"));
-        serde_json::from_str(text).unwrap_or_else(|error| panic!("tool text was not JSON: {error}"))
-    }
-
     fn activate_module_authority(
         store: &MemoryStore,
         context_store_uuid: &str,
@@ -22918,186 +22278,6 @@ mod tests {
 
     async fn call_transform(handler: &Handler, messages: Vec<IngressMessage>) -> Value {
         call_transform_request(handler, request(messages)).await
-    }
-
-    /// `host_mural_artifact` refuses a disabled mural, a host without vision, and an empty or
-    /// absent data URL; each refusal must leave the store empty and the messages image-free
-    /// while the transform itself still succeeds.
-    #[tokio::test(flavor = "current_thread")]
-    async fn mural_is_reached_only_through_a_host_supplied_enabled_artifact() {
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let project = project.to_str().unwrap();
-        let messages = vec![ck("tail", 1, "raw")];
-        let mut oc_request = request(messages.clone());
-        oc_request["serializer_profile"] = json!("opencode-aisdk");
-        let without = call_transform_request_on_channel(&handler, 7, oc_request.clone()).await;
-        assert_eq!(without["action"], "HARD", "{without}");
-        assert!(
-            store
-                .load_project_mural_artifact(project)
-                .unwrap()
-                .is_none()
-        );
-        let refusals = [
-            (
-                "disabled",
-                json!({
-                    "enabled": false,
-                    "supports_vision": true,
-                    "data_url": "data:image/png;base64,YQ==",
-                    "content_hash": "mural-a",
-                }),
-            ),
-            (
-                "no vision",
-                json!({
-                    "enabled": true,
-                    "supports_vision": false,
-                    "data_url": "data:image/png;base64,YQ==",
-                    "content_hash": "mural-a",
-                }),
-            ),
-            (
-                "empty data url",
-                json!({
-                    "enabled": true,
-                    "supports_vision": true,
-                    "data_url": "",
-                    "content_hash": "mural-a",
-                }),
-            ),
-            (
-                "absent data url",
-                json!({
-                    "enabled": true,
-                    "supports_vision": true,
-                    "content_hash": "mural-a",
-                }),
-            ),
-        ];
-        let mut responses = vec![without];
-        for (label, mural) in refusals {
-            oc_request["mural"] = mural;
-            let refused = call_transform_request_on_channel(&handler, 7, oc_request.clone()).await;
-            assert!(
-                matches!(refused["action"].as_str(), Some("HARD" | "SOFT" | "SOFT+")),
-                "{label}: {refused}"
-            );
-            assert!(
-                refused["messages"]
-                    .as_array()
-                    .is_some_and(|messages| !messages.is_empty()),
-                "{label}: {refused}"
-            );
-            assert!(
-                store
-                    .load_project_mural_artifact(project)
-                    .unwrap()
-                    .is_none(),
-                "{label} persisted an artifact"
-            );
-            responses.push(refused);
-        }
-        for response in &responses {
-            let serialized = serde_json::to_string(&response["messages"]).unwrap();
-            for marker in [
-                "data:image/",
-                "<memory-mural>",
-                "image/",
-                "\"type\":\"file\"",
-            ] {
-                assert!(
-                    !serialized.contains(marker),
-                    "{marker} present in {response}"
-                );
-            }
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn cc_inherits_oc_project_mural_on_a_natural_hard_without_defer_first_apply() {
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(
-            test_route(8),
-            binding(project.to_str().unwrap(), "cc-mural"),
-        );
-        let messages = vec![ck("tail", 1, "raw")];
-        let mural_a = json!({
-            "enabled": true,
-            "supports_vision": true,
-            "data_url": "data:image/png;base64,YQ==",
-            "content_hash": "mural-a",
-        });
-        let mural_b = json!({
-            "enabled": true,
-            "supports_vision": true,
-            "data_url": "data:image/png;base64,Yg==",
-            "content_hash": "mural-b",
-        });
-
-        let mut oc_request = request(messages.clone());
-        oc_request["serializer_profile"] = json!("opencode-aisdk");
-        oc_request["mural"] = mural_a;
-        let oc_first = call_transform_request_on_channel(&handler, 7, oc_request.clone()).await;
-        assert_eq!(oc_first["action"], "HARD", "{oc_first}");
-        assert_eq!(
-            store
-                .load_project_mural_artifact(project.to_str().unwrap())
-                .unwrap()
-                .unwrap()
-                .content_hash,
-            "mural-a"
-        );
-
-        let mut cc_request = request(messages);
-        cc_request["serializer_profile"] = json!("claude-code-anthropic");
-        cc_request["session_id"] = json!("cc-mural");
-        let cc_first = call_transform_request_on_channel(&handler, 8, cc_request.clone()).await;
-        assert_eq!(cc_first["action"], "HARD", "{cc_first}");
-        assert_eq!(
-            serde_json::to_vec(&oc_first["messages"][0]).unwrap(),
-            serde_json::to_vec(&cc_first["messages"][0]).unwrap(),
-            "the same project artifact must compose the same frozen m0 bytes for OC and CC"
-        );
-
-        oc_request["mural"] = mural_b;
-        let oc_deferred = call_transform_request_on_channel(&handler, 7, oc_request).await;
-        assert_eq!(oc_deferred["action"], "SOFT+", "{oc_deferred}");
-        assert_eq!(
-            store
-                .load_project_mural_artifact(project.to_str().unwrap())
-                .unwrap()
-                .unwrap()
-                .content_hash,
-            "mural-b"
-        );
-
-        let cc_deferred = call_transform_request_on_channel(&handler, 8, cc_request.clone()).await;
-        assert_eq!(cc_deferred["action"], "SOFT+", "{cc_deferred}");
-        assert_eq!(
-            serde_json::to_vec(&cc_deferred["messages"]).unwrap(),
-            serde_json::to_vec(&cc_first["messages"]).unwrap(),
-            "a newly inherited artifact must wait for CC's next natural HARD"
-        );
-
-        cc_request["render_config"] = json!("cfg1");
-        let cc_refolded = call_transform_request_on_channel(&handler, 8, cc_request).await;
-        assert_eq!(cc_refolded["action"], "HARD", "{cc_refolded}");
-        assert_eq!(
-            cc_refolded["messages"][0]["content"][1]["kind"]["source"]["url"],
-            "data:image/png;base64,Yg=="
-        );
-        assert!(
-            store
-                .load("cc-mural")
-                .unwrap()
-                .meta
-                .last_render_config
-                .contains("mural-b"),
-            "the inherited content identity must ride the HARD render fold"
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -23427,14 +22607,14 @@ mod tests {
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
         for profile in [
             "owned-llmrunner",
-            "owned-broca",
+            "owned-model_execution",
             "claude-code-anthropic",
             "opencode-aisdk",
             "pi",
         ] {
             let session_id = format!(
                 "{}serve-native-false",
-                historian::HISTORIAN_CHILD_SESSION_PREFIX
+                history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX
             );
             let mut absent = request(vec![ck("m1", 1, "hello")]);
             absent["session_id"] = json!(session_id);
@@ -26192,7 +25372,7 @@ mod tests {
             "materialize_reason",
             "boundary_id",
             "coverage_ordinal",
-            "historian",
+            "history_summarizer",
             "native_messages",
         ] {
             assert_eq!(cached[field], full[field], "full-control drift in {field}");
@@ -26234,8 +25414,8 @@ mod tests {
         let full_state = control_store.load("ses").unwrap();
         assert_eq!(cached_state.core, full_state.core, "selection/core drift");
         assert_eq!(
-            cached_state.meta.historian, full_state.meta.historian,
-            "historian boundary math drift"
+            cached_state.meta.history_summarizer, full_state.meta.history_summarizer,
+            "history_summarizer boundary math drift"
         );
 
         let mut changed_context = native_cache_request(
@@ -26313,7 +25493,7 @@ mod tests {
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
         store
-            .replace_compartments(
+            .replace_history_segments(
                 session,
                 &[
                     stored_comp(1, 1, 1, "a", "S0"),
@@ -26474,7 +25654,7 @@ mod tests {
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
         store
-            .replace_compartments(session, &[stored_comp(1, 1, 1, "covered", "SUMMARY")])
+            .replace_history_segments(session, &[stored_comp(1, 1, 1, "covered", "SUMMARY")])
             .unwrap();
         let initial = native_cache_request(
             session,
@@ -26550,7 +25730,7 @@ mod tests {
         .await;
         assert_eq!(source_response["status"], "ok", "{source_response}");
         store
-            .append_compartments(
+            .append_history_segments(
                 source,
                 &[
                     stored_comp(1, 1, 3, "prior-3", "history one through three"),
@@ -26639,7 +25819,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn unflagged_synthetic_delta_prepares_historian_and_native_output() {
+    async fn unflagged_synthetic_delta_prepares_history_summarizer_and_native_output() {
         let mut observations = Vec::new();
         for cached_prefix in [true, false] {
             let producer = Arc::new(ProducerState::default());
@@ -26756,7 +25936,7 @@ mod tests {
                 call_transform_request(&handler, serde_json::to_value(&delta).unwrap()).await;
             assert_eq!(response["status"], "ok", "{response}");
             assert_eq!(response["timings"]["projection_reused_messages"], 2);
-            assert_eq!(response["historian"]["fired"], true, "{response}");
+            assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
             eprintln!("replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn: reached");
             assert!(
                 response["native_messages"]
@@ -26767,7 +25947,7 @@ mod tests {
             let first_prompt = producer.prompts.lock().unwrap()[0].clone();
             assert_eq!(
                 format!("{:x}", Sha256::digest(first_prompt.as_bytes())),
-                "f8600b851c98346e9ccede4e9bbdf04b0c1067c3235da0d19a39156248f85776"
+                "2aa6e502a048b0729b21fc7e3368476e1fc56bcab5280860f66c89e29c5f5466"
             );
             assert_eq!(prompt_ordinal_range(&first_prompt).unwrap().0, 1);
             assert!(first_prompt.contains("message 3 "));
@@ -26841,21 +26021,21 @@ mod tests {
                 .filter(|block| !block.synthetic)
                 .cloned()
                 .collect::<Vec<_>>();
-            let chunk = crate::historian_chunk::build_historian_chunk(
+            let chunk = crate::history_summarizer_chunk::build_history_summarizer_chunk(
                 &reattached.messages,
                 &live,
                 1,
                 100_000,
                 165,
             );
-            let reference_chunk = crate::historian_chunk::build_historian_chunk(
+            let reference_chunk = crate::history_summarizer_chunk::build_history_summarizer_chunk(
                 &reference.messages,
                 &live,
                 1,
                 100_000,
                 165,
             );
-            let raw_chunk = crate::historian_chunk::build_historian_chunk(
+            let raw_chunk = crate::history_summarizer_chunk::build_history_summarizer_chunk(
                 &raw_full.messages,
                 &live,
                 1,
@@ -26882,14 +26062,14 @@ mod tests {
                 if cached_prefix { 84 } else { 0 }
             );
             assert_eq!(
-                third_response["historian"]["fired"], true,
+                third_response["history_summarizer"]["fired"], true,
                 "{third_response}"
             );
             wait_for_count(&producer.starts, 2).await;
             let third_prompt = producer.prompts.lock().unwrap()[1].clone();
             assert_eq!(
                 format!("{:x}", Sha256::digest(third_prompt.as_bytes())),
-                "3dff45d4a9291a345afccf1f2251d2a860993ac1a84b95165e7845467ed5f882"
+                "eb6233c471dc084858e31929e01d931e8542490bf4ad950365b81d02f00fef7f"
             );
             assert!(prompt_ordinal_range(&third_prompt).unwrap().0 > 1);
             assert!(!third_prompt.contains("replayed synthetic carrier sentinel"));
@@ -27220,7 +26400,10 @@ mod tests {
         assert_eq!(normal["served_from"], "transform");
         assert_eq!(normal["full_array_fingerprint"], "fp-normal");
 
-        let child_session = format!("{}child", historian::HISTORIAN_CHILD_SESSION_PREFIX);
+        let child_session = format!(
+            "{}child",
+            history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX
+        );
         let child = call_transform_request(
             &handler,
             json!({
@@ -27247,7 +26430,10 @@ mod tests {
     async fn child_passthrough_refuses_an_unexpanded_native_tail_delta() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let session = format!("{}native-child", historian::HISTORIAN_CHILD_SESSION_PREFIX);
+        let session = format!(
+            "{}native-child",
+            history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX
+        );
 
         let first = native_cache_request(
             &session,
@@ -27285,24 +26471,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn registered_dreamer_passthrough_refuses_an_unexpanded_native_tail_delta() {
+    async fn registered_memory_classifier_passthrough_refuses_an_unexpanded_native_tail_delta() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, project) = handler_with_store(producer, default_test_config());
-        let session = "native-dreamer";
+        let session = "native-memory_classifier";
         handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
-        let _registration = handler.dreamer.register_dreamer_run(session);
+        let _registration = handler
+            .memory_classifier
+            .register_memory_classifier_run(session);
 
         let first = native_cache_request(
             session,
             vec![
-                ck("dreamer-prefix", 1, "prefix"),
-                ck("dreamer-tail", 2, "before"),
+                ck("memory_classifier-prefix", 1, "prefix"),
+                ck("memory_classifier-tail", 2, "before"),
             ],
             vec![
-                native_text_message("dreamer-prefix", "user", "prefix"),
-                native_text_message("dreamer-tail", "user", "before"),
+                native_text_message("memory_classifier-prefix", "user", "prefix"),
+                native_text_message("memory_classifier-tail", "user", "before"),
             ],
-            "dreamer-fp-1",
+            "memory_classifier-fp-1",
         );
         let first =
             call_transform_request_on_channel(&handler, 7, serde_json::to_value(first).unwrap())
@@ -27312,12 +26500,16 @@ mod tests {
 
         let mut delta = native_cache_request(
             session,
-            vec![ck("dreamer-tail", 2, "after")],
-            vec![native_text_message("dreamer-tail", "user", "after")],
-            "dreamer-fp-2",
+            vec![ck("memory_classifier-tail", 2, "after")],
+            vec![native_text_message(
+                "memory_classifier-tail",
+                "user",
+                "after",
+            )],
+            "memory_classifier-fp-2",
         );
         delta.tail_delta = Some(json!({
-            "after": "dreamer-fp-1",
+            "after": "memory_classifier-fp-1",
             "replace_from": 1,
             "native_replace_from": 1,
         }));
@@ -27655,8 +26847,8 @@ mod tests {
 
     /// A steady pass reads `cache_state` through the statement cache exactly twice: the
     /// `meta` projection once before the transform, shared by the tail-delta expansion, the
-    /// projection-cache lookup, the last-response anchor, and the historian-active check;
-    /// and the full row once after the commit in `prepare_historian_fire`. The interleave
+    /// projection-cache lookup, the last-response anchor, and the history_summarizer-active check;
+    /// and the full row once after the commit in `prepare_history_summarizer_fire`. The interleave
     /// hook runs after the transform commit and before the post-commit load. Each run count
     /// is read on one handle, so the test also requires that neither handle was evicted.
     #[tokio::test(flavor = "current_thread")]
@@ -27732,23 +26924,23 @@ mod tests {
         );
     }
 
-    /// The durable historian phase decides `historian_active` when no live run is
+    /// The durable history_summarizer phase decides `history_summarizer_active` when no live run is
     /// registered: a pass with its own load reads the phase from that load, a rerun reads
-    /// it from the store, and a pass whose load failed treats the historian as idle.
+    /// it from the store, and a pass whose load failed treats the history_summarizer as idle.
     #[test]
-    fn historian_active_reads_the_durable_phase_from_the_pass_state_or_the_store() {
+    fn history_summarizer_active_reads_the_durable_phase_from_the_pass_state_or_the_store() {
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         let mut loaded = store.load("ses").unwrap();
-        loaded.meta.historian.state = HistorianPhase::Firing;
+        loaded.meta.history_summarizer.state = HistorySummarizerPhase::Firing;
         store
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
         let meta = store.load_meta("ses").unwrap();
-        assert!(handler.historian_active(&store, "ses", PassState::Loaded(&meta)));
-        assert!(handler.historian_active(&store, "ses", PassState::Reload));
-        assert!(!handler.historian_active(&store, "ses", PassState::Unavailable));
-        assert!(!handler.historian_active(&store, "never-seen", PassState::Reload));
+        assert!(handler.history_summarizer_active(&store, "ses", PassState::Loaded(&meta)));
+        assert!(handler.history_summarizer_active(&store, "ses", PassState::Reload));
+        assert!(!handler.history_summarizer_active(&store, "ses", PassState::Unavailable));
+        assert!(!handler.history_summarizer_active(&store, "never-seen", PassState::Reload));
     }
 
     /// The receive breadcrumb counts every pass whatever its outcome, and a breadcrumb
@@ -27802,25 +26994,25 @@ mod tests {
         );
     }
 
-    /// A historian that completes after the pass load leaves the live map and commits
+    /// A history_summarizer that completes after the pass load leaves the live map and commits
     /// `Idle`; the pass load's `Firing` is stale and must not veto.
     #[test]
-    fn historian_active_rereads_a_loaded_active_phase_when_no_run_is_live() {
+    fn history_summarizer_active_rereads_a_loaded_active_phase_when_no_run_is_live() {
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         let mut loaded = store.load("ses").unwrap();
-        loaded.meta.historian.state = HistorianPhase::Firing;
+        loaded.meta.history_summarizer.state = HistorySummarizerPhase::Firing;
         store
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
         let pass_meta = store.load_meta("ses").unwrap();
         let mut loaded = store.load("ses").unwrap();
-        loaded.meta.historian.state = HistorianPhase::Idle;
+        loaded.meta.history_summarizer.state = HistorySummarizerPhase::Idle;
         store
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
         assert!(
-            !handler.historian_active(&store, "ses", PassState::Loaded(&pass_meta)),
+            !handler.history_summarizer_active(&store, "ses", PassState::Loaded(&pass_meta)),
             "the completed run committed Idle after the pass load"
         );
     }
@@ -27844,15 +27036,15 @@ mod tests {
         assert_eq!(status["store_open"], true);
         assert_eq!(status["session_id"], "ses");
         assert_eq!(status["row_version"], Value::Null);
-        assert_eq!(status["historian"]["last_no_fire"], Value::Null);
+        assert_eq!(status["history_summarizer"]["last_no_fire"], Value::Null);
         assert_eq!(PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 2);
         assert_eq!(
             status["epochs"]["memory_render_epoch"],
             json!(MEMORY_RENDER_FORMAT_EPOCH)
         );
         assert_eq!(
-            status["epochs"]["compartment_render_epoch"],
-            json!(COMPARTMENT_RENDER_FORMAT_EPOCH)
+            status["epochs"]["history_segment_render_epoch"],
+            json!(HISTORY_SEGMENT_RENDER_FORMAT_EPOCH)
         );
         assert_eq!(status["epochs"]["profile_epoch"], json!(2));
         assert_eq!(
@@ -27888,11 +27080,11 @@ mod tests {
         .await;
         let full_bytes = full["bytes"].as_str().unwrap();
         let trimmed_bytes = trimmed["bytes"].as_str().unwrap();
-        assert!(full_bytes.contains("ctx_reduce"));
-        assert!(!trimmed_bytes.contains("ctx_reduce"));
+        assert!(full_bytes.contains("eidnara_reduce"));
+        assert!(!trimmed_bytes.contains("eidnara_reduce"));
         assert!(!trimmed_bytes.contains("\u{a7}")); // no tag-sigil references
-        assert!(trimmed_bytes.contains("ctx_memory"));
-        assert!(trimmed_bytes.contains("ctx_expand"));
+        assert!(trimmed_bytes.contains("eidnara_memory"));
+        assert!(!trimmed_bytes.contains("ctx_expand"));
         assert_ne!(full["content_hash"], trimmed["content_hash"]);
         // Both variants share the session's frozen date line.
         let date = full_bytes.lines().last().unwrap();
@@ -28061,7 +27253,7 @@ mod tests {
                 "render_config": "cfg",
                 "prompt_surface_config_identity": "mixed-descriptions",
                 "prompt_surface_tool_descriptions": {
-                    "ctx_search": "Known search override.",
+                    "eidnara_search": "Known search override.",
                     "ctx_typo": "Unknown override."
                 },
                 "messages": []
@@ -28080,9 +27272,9 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(manifest["tools"][3]["name"], json!("ctx_search"));
+        assert_eq!(manifest["tools"][2]["name"], json!("eidnara_search"));
         assert_eq!(
-            manifest["tools"][3]["description"],
+            manifest["tools"][2]["description"],
             json!("Known search override.")
         );
         assert!(
@@ -28109,7 +27301,7 @@ mod tests {
                 "model_key": "provider/model-a",
                 "config_identity": "config-a",
                 "preset": "light",
-                "tool_descriptions": { "ctx_search": "Search override A." },
+                "tool_descriptions": { "eidnara_search": "Search override A." },
             }),
         )
         .await;
@@ -28125,7 +27317,7 @@ mod tests {
                 "model_key": "provider/model-a",
                 "config_identity": "config-a",
                 "preset": "full",
-                "tool_descriptions": { "ctx_search": "Ignored mid-epoch override." },
+                "tool_descriptions": { "eidnara_search": "Ignored mid-epoch override." },
             }),
         )
         .await;
@@ -28143,7 +27335,7 @@ mod tests {
                 "model_key": "provider/model-a",
                 "config_identity": "config-b",
                 "preset": "full",
-                "tool_descriptions": { "ctx_search": "Search override B." },
+                "tool_descriptions": { "eidnara_search": "Search override B." },
             }),
         )
         .await;
@@ -28151,7 +27343,7 @@ mod tests {
         assert_eq!(transitioned["preset"], "full");
         assert_eq!(transitioned["preset_fallback"], false);
         assert_eq!(
-            transitioned["tools"][3]["description"],
+            transitioned["tools"][2]["description"],
             "Search override B."
         );
 
@@ -28427,7 +27619,6 @@ mod tests {
         handler: &Handler,
         channel: u16,
         instance: &str,
-        retina_handoff: bool,
         wake_owned: bool,
     ) -> (i64, String) {
         let response = call_dispatch_request_on_channel(
@@ -28440,7 +27631,6 @@ mod tests {
                 "protocol_version": "2.0",
                 "policy_version": 0,
                 "capacity": 2,
-                "retina_handoff": retina_handoff,
                 "wake_owned": wake_owned,
             }),
         )
@@ -28514,7 +27704,6 @@ mod tests {
                 "protocol_version": "2.0",
                 "policy_version": policy_version,
                 "capacity": 2,
-                "retina_handoff": false,
                 "wake_owned": false,
             })
         };
@@ -28553,7 +27742,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn smart_note_writes_require_a_live_protocol_v2_registration() {
+    async fn conditional_note_writes_require_a_live_protocol_v2_registration() {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
         let (handler, store, _dir, project) = handler_with_store_and_resolver(
             Arc::new(ProducerState::default()),
@@ -28568,12 +27757,12 @@ mod tests {
             "content": "pending without evaluator",
             "surface_condition": "when evaluated",
         });
-        let refused = call_facade(&handler, "ctx_note", conditioned.clone()).await;
-        assert!(tool_text(refused).contains("Smart-note evaluation is unavailable"));
+        let refused = call_facade(&handler, "eidnara_note", conditioned.clone()).await;
+        assert!(tool_text(refused).contains("Conditional-note evaluation is unavailable"));
 
         let plain = call_facade(
             &handler,
-            "ctx_note",
+            "eidnara_note",
             json!({"action": "write", "content": "plain note is allowed"}),
         )
         .await;
@@ -28593,17 +27782,16 @@ mod tests {
             )
             .await;
         assert!(matches!(state_sync, PreparedOutcome::Response(_)));
-        let still_refused = call_facade(&handler, "ctx_note", conditioned.clone()).await;
+        let still_refused = call_facade(&handler, "eidnara_note", conditioned.clone()).await;
         assert!(
-            tool_text(still_refused).contains("Smart-note evaluation is unavailable"),
+            tool_text(still_refused).contains("Conditional-note evaluation is unavailable"),
             "state_sync must not open the conditioned-write gate"
         );
 
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
-        let accepted = call_facade(&handler, "ctx_note", conditioned.clone()).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
+        let accepted = call_facade(&handler, "eidnara_note", conditioned.clone()).await;
         let accepted_text = tool_text(accepted);
-        assert!(accepted_text.contains("Created smart note"));
+        assert!(accepted_text.contains("Created conditional note"));
         let note_id: i64 = accepted_text
             .split('#')
             .nth(1)
@@ -28641,12 +27829,12 @@ mod tests {
         )
         .await;
         assert_eq!(unregistered["ok"], json!(true));
-        let refused_again = call_facade(&handler, "ctx_note", conditioned.clone()).await;
-        assert!(tool_text(refused_again).contains("Smart-note evaluation is unavailable"));
+        let refused_again = call_facade(&handler, "eidnara_note", conditioned.clone()).await;
+        assert!(tool_text(refused_again).contains("Conditional-note evaluation is unavailable"));
 
         let dismissed = call_facade(
             &handler,
-            "ctx_note",
+            "eidnara_note",
             json!({"action": "dismiss", "note_id": note_id}),
         )
         .await;
@@ -28654,11 +27842,11 @@ mod tests {
             !tool_is_error(dismissed),
             "dismissal must not require an evaluator"
         );
-        let read = call_facade(&handler, "ctx_note", json!({"action": "read"})).await;
+        let read = call_facade(&handler, "eidnara_note", json!({"action": "read"})).await;
         assert!(!tool_is_error(read));
 
         let (expired_generation, expired_token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+            register_note_evaluator(&handler, 7, "eval-a", false).await;
         {
             let mut registrations = handler.note_evaluator_registrations.lock().unwrap();
             for entries in registrations.values_mut() {
@@ -28667,8 +27855,8 @@ mod tests {
                 }
             }
         }
-        let ttl_refused = call_facade(&handler, "ctx_note", conditioned).await;
-        assert!(tool_text(ttl_refused).contains("Smart-note evaluation is unavailable"));
+        let ttl_refused = call_facade(&handler, "eidnara_note", conditioned).await;
+        assert!(tool_text(ttl_refused).contains("Conditional-note evaluation is unavailable"));
         let stale_heartbeat = handler
             .dispatch_value(
                 test_route(7),
@@ -28695,15 +27883,15 @@ mod tests {
         let route_root = project.to_str().unwrap().to_string();
         activate_notes_module_authority_via_finish_prepare(&store, &route_root);
 
-        register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        register_note_evaluator(&handler, 7, "eval-a", false).await;
         let conditioned = json!({
             "action": "write",
             "content": "conditioned write with a command id",
             "surface_condition": "when evaluated",
             "command_id": "cmd-conditioned-replay",
         });
-        let created = call_facade(&handler, "ctx_note", conditioned.clone()).await;
-        assert!(tool_text(created).contains("Created smart note"));
+        let created = call_facade(&handler, "eidnara_note", conditioned.clone()).await;
+        assert!(tool_text(created).contains("Created conditional note"));
 
         // The retry models a caller that lost the response and resends after the evaluator lease lapses.
         {
@@ -28714,16 +27902,16 @@ mod tests {
                 }
             }
         }
-        let replayed = call_facade(&handler, "ctx_note", conditioned).await;
+        let replayed = call_facade(&handler, "eidnara_note", conditioned).await;
         let replayed_text = tool_text(replayed);
         assert!(
-            replayed_text.contains("Created smart note"),
+            replayed_text.contains("Created conditional note"),
             "a recorded response must replay past the liveness gate: {replayed_text}"
         );
 
         let fresh = call_facade(
             &handler,
-            "ctx_note",
+            "eidnara_note",
             json!({
                 "action": "write",
                 "content": "fresh conditioned write",
@@ -28732,7 +27920,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(tool_text(fresh).contains("Smart-note evaluation is unavailable"));
+        assert!(tool_text(fresh).contains("Conditional-note evaluation is unavailable"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -28757,7 +27945,6 @@ mod tests {
                     "protocol_version": "1.0",
                     "policy_version": 0,
                     "capacity": 1,
-                    "retina_handoff": false,
                     "wake_owned": false,
                 }),
             )
@@ -28765,9 +27952,8 @@ mod tests {
         assert_eq!(error_code(v1), "protocol_unsupported");
 
         let (stale_generation, stale_token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+            register_note_evaluator(&handler, 7, "eval-a", false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
         assert!(generation > stale_generation);
 
         let mut positive_wait = note_evaluation_next_body(&token, generation, "eval-a", "acq-1");
@@ -28830,8 +28016,7 @@ mod tests {
         );
         let route_root = project.to_str().unwrap().to_string();
         let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
         assert!(handler.has_live_note_evaluator(&identity, now_ms()));
 
         handler.unbind_route(test_route(7));
@@ -28847,7 +28032,7 @@ mod tests {
         assert_eq!(error_code(stale), "registration_unknown");
         let refused = call_facade(
             &handler,
-            "ctx_note",
+            "eidnara_note",
             json!({
                 "action": "write",
                 "content": "conditioned after teardown",
@@ -28855,7 +28040,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(tool_text(refused).contains("Smart-note evaluation is unavailable"));
+        assert!(tool_text(refused).contains("Conditional-note evaluation is unavailable"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -28870,8 +28055,7 @@ mod tests {
         let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
         let condition = "when the build passes";
         let note = insert_conditioned_note(&store, &identity, &route_root, condition, None);
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
 
         let claim = call_dispatch_request(
             &handler,
@@ -28907,7 +28091,7 @@ mod tests {
             check_hash: String::new(),
             check_cron: "0 * * * *".to_string(),
         };
-        let check_hash = smart_note_check_digest(Some(condition), &artifact_body);
+        let check_hash = conditional_note_check_digest(Some(condition), &artifact_body);
         let complete_body = |completion_id: &str| {
             json!({
                 "method": "note.evaluation.complete",
@@ -28974,8 +28158,7 @@ mod tests {
         let route_root = project.to_str().unwrap().to_string();
         let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
         let note = insert_conditioned_note(&store, &identity, &route_root, "when evaluated", None);
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
 
         let claim = call_dispatch_request(
             &handler,
@@ -29082,10 +28265,8 @@ mod tests {
         let route_root = project.to_str().unwrap().to_string();
         let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
         insert_conditioned_note(&store, &identity, &route_root, "when evaluated", None);
-        let (generation_a, token_a) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
-        let (generation_b, token_b) =
-            register_note_evaluator(&handler, 7, "eval-b", false, true).await;
+        let (generation_a, token_a) = register_note_evaluator(&handler, 7, "eval-a", false).await;
+        let (generation_b, token_b) = register_note_evaluator(&handler, 7, "eval-b", true).await;
 
         let suppressed = call_dispatch_request(
             &handler,
@@ -29133,8 +28314,7 @@ mod tests {
         // Only the billable path selects an uncompiled conditioned note.
         // compile phase.
         insert_conditioned_note(&store, &identity, &route_root, "when evaluated", None);
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
 
         let mut nonbillable = note_evaluation_next_body(&token, generation, "eval-a", "acq-nb");
         nonbillable["exclude_billable"] = json!(true);
@@ -29151,55 +28331,6 @@ mod tests {
         .await;
         assert_eq!(claimed["result"], "claim");
         assert_eq!(claimed["phase"], "compile");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn note_evaluation_retina_handoff_excludes_retina_compiled_notes() {
-        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-        let route_root = project.to_str().unwrap().to_string();
-        let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
-        let note = insert_conditioned_note(
-            &store,
-            &identity,
-            &route_root,
-            "when evaluated",
-            Some("compiled"),
-        );
-        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", true, false).await;
-
-        let excluded = call_dispatch_request(
-            &handler,
-            note_evaluation_next_body(&token, generation, "eval-a", "acq-1"),
-        )
-        .await;
-        assert_eq!(excluded["result"], "no_work");
-
-        let heartbeat = call_dispatch_request(
-            &handler,
-            json!({
-                "method": "note.evaluation.heartbeat",
-                "v": 2,
-                "token": token,
-                "registration_generation": generation,
-                "evaluator_instance": "eval-a",
-                "retina_handoff": false,
-            }),
-        )
-        .await;
-        assert_eq!(heartbeat["ok"], json!(true));
-
-        let claim = call_dispatch_request(
-            &handler,
-            note_evaluation_next_body(&token, generation, "eval-a", "acq-2"),
-        )
-        .await;
-        assert_eq!(claim["result"], "claim");
-        assert_eq!(claim["note_id"], json!(note.id));
     }
 
     /// distinct `check_next_due_at` values order due selection by insertion.
@@ -29275,7 +28406,7 @@ mod tests {
         project: &str,
         instance: &str,
         slot: usize,
-    ) -> (SmartNoteSelectionCycle, SmartNoteSelectionCycle) {
+    ) -> (ConditionalNoteSelectionCycle, ConditionalNoteSelectionCycle) {
         let registrations = handler
             .note_evaluator_registrations
             .lock()
@@ -29309,8 +28440,7 @@ mod tests {
             .collect();
         let compile_note =
             insert_conditioned_note(&store, &identity, &route_root, "when evaluated", None);
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
 
         // The 11th fresh opportunity reaches compile while due work remains.
         for (i, expected) in due_notes.iter().take(10).enumerate() {
@@ -29354,8 +28484,7 @@ mod tests {
         let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
         stage_due_note(&store, &identity, &route_root, 1);
         stage_due_note(&store, &identity, &route_root, 2);
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
 
         let fresh = call_dispatch_request(
             &handler,
@@ -29367,7 +28496,7 @@ mod tests {
         let after_fresh = note_evaluator_slot_cycles(&handler, &identity, "eval-a", 0);
         assert_ne!(
             after_fresh.0,
-            SmartNoteSelectionCycle::new(SmartNoteCycleMode::Full),
+            ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Full),
             "a fresh claim advances the full cycle"
         );
 
@@ -29423,8 +28552,7 @@ mod tests {
         let route_root = project.to_str().unwrap().to_string();
         let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
         stage_due_note(&store, &identity, &route_root, 1);
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
 
         let claim = call_dispatch_request(
             &handler,
@@ -29454,10 +28582,13 @@ mod tests {
         // An empty queue is not cursor exhaustion, so the drain treats it as drained.
         assert_eq!(no_work["cycle_exhausted"], Value::Null);
         let (full, nonbillable) = note_evaluator_slot_cycles(&handler, &identity, "eval-a", 0);
-        assert_eq!(full, SmartNoteSelectionCycle::new(SmartNoteCycleMode::Full));
+        assert_eq!(
+            full,
+            ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Full)
+        );
         assert_eq!(
             nonbillable,
-            SmartNoteSelectionCycle::new(SmartNoteCycleMode::Nonbillable)
+            ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Nonbillable)
         );
 
         // Replaying an earlier no_work decision must not reset an advanced cycle.
@@ -29497,8 +28628,7 @@ mod tests {
         let due_notes: Vec<StoredNote> = (0..12)
             .map(|i| stage_due_note(&store, &identity, &route_root, i + 1))
             .collect();
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
 
         for i in 0..10 {
             let claim = call_dispatch_request(
@@ -29528,7 +28658,10 @@ mod tests {
         assert_eq!(exhausted["replayed"], json!(false));
         assert_eq!(exhausted["cycle_exhausted"], json!(true));
         let (full, _) = note_evaluator_slot_cycles(&handler, &identity, "eval-a", 0);
-        assert_eq!(full, SmartNoteSelectionCycle::new(SmartNoteCycleMode::Full));
+        assert_eq!(
+            full,
+            ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Full)
+        );
 
         // The next poll reaches work hidden by the spent cursor without another full drain.
         let recovered = call_dispatch_request(
@@ -29565,8 +28698,7 @@ mod tests {
             stage_due_note(&store, &identity, &route_root, i + 1);
         }
         // The registration helper registers capacity 2, so slot 1 is live.
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
 
         let full_claim = call_dispatch_request(
             &handler,
@@ -29583,10 +28715,13 @@ mod tests {
         )
         .await;
         let (full, nonbillable) = note_evaluator_slot_cycles(&handler, &identity, "eval-a", 0);
-        assert_ne!(full, SmartNoteSelectionCycle::new(SmartNoteCycleMode::Full));
+        assert_ne!(
+            full,
+            ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Full)
+        );
         assert_eq!(
             nonbillable,
-            SmartNoteSelectionCycle::new(SmartNoteCycleMode::Nonbillable),
+            ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Nonbillable),
             "a full claim leaves the nonbillable cycle untouched"
         );
 
@@ -29604,15 +28739,15 @@ mod tests {
         );
         assert_ne!(
             nonbillable_after,
-            SmartNoteSelectionCycle::new(SmartNoteCycleMode::Nonbillable)
+            ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Nonbillable)
         );
 
         let slot_one = note_evaluator_slot_cycles(&handler, &identity, "eval-a", 1);
         assert_eq!(
             slot_one,
             (
-                SmartNoteSelectionCycle::new(SmartNoteCycleMode::Full),
-                SmartNoteSelectionCycle::new(SmartNoteCycleMode::Nonbillable)
+                ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Full),
+                ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Nonbillable)
             ),
             "slot 1 owns its own initial cycles"
         );
@@ -29629,8 +28764,7 @@ mod tests {
         let route_root = project.to_str().unwrap().to_string();
         let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
         stage_due_note(&store, &identity, &route_root, 1);
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
 
         let claim = call_dispatch_request(
             &handler,
@@ -29640,16 +28774,16 @@ mod tests {
         assert_eq!(claim["result"], "claim");
         assert_ne!(
             note_evaluator_slot_cycles(&handler, &identity, "eval-a", 0).0,
-            SmartNoteSelectionCycle::new(SmartNoteCycleMode::Full)
+            ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Full)
         );
 
         // A replacement registration starts with the initial profile; recovering its durable claim does not charge that profile.
         // cycle.
         let (new_generation, new_token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+            register_note_evaluator(&handler, 7, "eval-a", false).await;
         let initial = (
-            SmartNoteSelectionCycle::new(SmartNoteCycleMode::Full),
-            SmartNoteSelectionCycle::new(SmartNoteCycleMode::Nonbillable),
+            ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Full),
+            ConditionalNoteSelectionCycle::new(ConditionalNoteCycleMode::Nonbillable),
         );
         assert_eq!(
             note_evaluator_slot_cycles(&handler, &identity, "eval-a", 0),
@@ -29681,8 +28815,7 @@ mod tests {
         let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
         stage_due_note(&store, &identity, &route_root, 1);
         stage_due_note(&store, &identity, &route_root, 2);
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
 
         let claim = call_dispatch_request(
             &handler,
@@ -29731,8 +28864,7 @@ mod tests {
         let checked = stage_fallback_note(&store, &identity, &route_root, Some(5_000));
         let unchecked_a = stage_fallback_note(&store, &identity, &route_root, None);
         let unchecked_b = stage_fallback_note(&store, &identity, &route_root, None);
-        let (generation, token) =
-            register_note_evaluator(&handler, 7, "eval-a", false, false).await;
+        let (generation, token) = register_note_evaluator(&handler, 7, "eval-a", false).await;
 
         // Unchecked notes come first in ID order, then the checked note.
         // False completions preserve eligibility by leaving `last_checked_at` and the in-cycle exclusion unchanged.
@@ -29768,243 +28900,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ctx_expand_and_ctx_note_facades_are_session_scoped() {
-        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-        let selected_range_identities = vec![memory_store::HistorianSelectedMessageIdentity {
-            mid: "m10".to_string(),
-            block_identities: vec![memory_store::BlockIdentity {
-                kind_tag: "text".to_string(),
-                byte_fingerprint: "m10-content".to_string(),
-            }],
-        }];
-        let meta = ModuleMeta {
-            block_identity_by_mid: selected_range_identities
-                .iter()
-                .map(|selected| (selected.mid.clone(), selected.block_identities.clone()))
-                .collect(),
-            historian: HistorianDurableState {
-                state: HistorianPhase::Publishing,
-                firing_seq: 7,
-                chunk_range: Some(HistorianChunkRange {
-                    from_ordinal: 10,
-                    to_ordinal: 12,
-                }),
-                chunk_fingerprint: "fp".to_string(),
-                selected_range_identities: selected_range_identities.clone(),
-                producer_session_id: Some("producer".to_string()),
-                producer_run_id: Some("run".to_string()),
-                producer_harness: None,
-                fired_at_ms: Some(1),
-                expected_revert_epoch: 0,
-                compartment_set_generation: memory_store::CompartmentSetGeneration::default(),
-                failure_backoff_at_ms: None,
-                last_failure: None,
-                last_no_fire: None,
-                consecutive_publish_failures: 0,
-            },
-            ..Default::default()
-        };
-        store
-            .commit("ses", None, &CoreState::empty(), &meta)
-            .unwrap();
-        store
-            .publish_historian_chunk(memory_store::HistorianPublishRequest {
-                session_id: "ses",
-                expected_row_version: Some(1),
-                expected_revert_epoch: 0,
-                predicate: &memory_store::HistorianPublishPredicate {
-                    firing_seq: 7,
-                    producer_run_id: "run".to_string(),
-                    chunk_fingerprint: "fp".to_string(),
-                    selected_range_identities,
-                    compartment_set_generation: memory_store::CompartmentSetGeneration::default(),
-                },
-                project_path: project.to_str().unwrap(),
-                compartments: &[stored_comp(1, 10, 12, "m12#0", "summary")],
-                events: &[],
-                primer_candidates: &[],
-                user_memory_candidates: &[],
-                publication_floor_ordinal: 12,
-                chunk_transcript: Some("[10] U: exact prompt text\n[11] A: exact answer\n[12] A: TC: read(src/lib.rs) → output ~42 tok"),
-                raw_chunk_messages: None,
-            })
-            .unwrap();
-
-        let state_sync = handler
-            .dispatch_value(
-                test_route(7),
-                json!({
-                    "method": "state_sync",
-                    "session_id": "ses",
-                    "shadow_generation": 0,
-                    "expected_shadow_seq": 0,
-                    "acked_watermarks": {},
-                    "note_evaluation_available": true,
-                }),
-            )
-            .await;
-        assert!(
-            matches!(state_sync, PreparedOutcome::Response(_)),
-            "{state_sync:?}"
-        );
-
-        let expanded =
-            tool_text(call_facade(&handler, "ctx_expand", json!({"start": 10, "end": 12})).await);
-        assert_eq!(
-            expanded,
-            "Messages 10-12 from persisted historian chunk transcripts:\n\n### Compartment 1 (10-12)\n[10] U: exact prompt text\n[11] A: exact answer\n[12] A: TC: read(src/lib.rs) → output ~42 tok",
-            "verbose=false must preserve the pre-verbose range bytes"
-        );
-
-        let raw_messages = vec![
-            wire_with_role("m10", 10, "user", "exact prompt text"),
-            IngressMessage {
-                mid: "m11".to_string(),
-                ordinal: 11,
-                ck: WireMessage::from_parts(
-                    "assistant",
-                    vec![
-                        WireBlock::bare(BlockKind::Text {
-                            text: "Reading it now.".to_string(),
-                        }),
-                        WireBlock::bare(BlockKind::ToolCall {
-                            id: "read:1".to_string(),
-                            name: "read".to_string(),
-                            input: json!({ "filePath": "src/lib.rs" }),
-                            provider_executed: false,
-                        }),
-                    ],
-                    None,
-                    ProviderExtras::new(),
-                    HarnessMeta::default(),
-                ),
-            },
-            IngressMessage {
-                mid: "m12".to_string(),
-                ordinal: 12,
-                ck: WireMessage::from_parts(
-                    "user",
-                    vec![WireBlock::bare(BlockKind::ToolResult {
-                        id: "read:1".to_string(),
-                        tool_name: "read".to_string(),
-                        output: ToolOutput::bare(OutputKind::Text {
-                            text: "line1\nline2\nline3".to_string(),
-                        }),
-                        provider_executed: false,
-                    })],
-                    None,
-                    ProviderExtras::new(),
-                    HarnessMeta::default(),
-                ),
-            },
-        ];
-        {
-            let mut snapshots = handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex");
-            let generation = snapshots.begin("ses");
-            snapshots.finish_ready(
-                "ses",
-                generation,
-                Arc::new(transform_request(raw_messages, 45_000, 50_000)),
-                0,
-                0,
-            );
-        }
-
-        let verbose = tool_text(
-            call_facade(
-                &handler,
-                "ctx_expand",
-                json!({"start": 10, "end": 12, "verbose": true}),
-            )
-            .await,
-        );
-        assert!(verbose.contains("[10] U (user)"));
-        assert!(verbose.contains("[11] A (assistant)"));
-        assert!(verbose.contains("[12] U (user)"));
-        assert!(verbose.contains("• tool read(src/lib.rs)"));
-        assert!(verbose.contains(&format!(
-            "• tool read → output ~{} tok",
-            tokenizer::estimate_tokens("line1\nline2\nline3")
-        )));
-        let replayed_default =
-            tool_text(call_facade(&handler, "ctx_expand", json!({"start": 10, "end": 12})).await);
-        assert_eq!(
-            replayed_default, expanded,
-            "verbose must not perturb the default renderer"
-        );
-        let giant_range = tool_text(
-            call_facade(&handler, "ctx_expand", json!({"start": 1, "end": i64::MAX})).await,
-        );
-        assert!(giant_range.contains("Messages 1-12"));
-        assert!(giant_range.len() <= CTX_EXPAND_BYTE_BUDGET);
-        let message = tool_text(call_facade(&handler, "ctx_expand", json!({"message": 11})).await);
-        assert!(message.contains("[tool: read #read:1]"));
-        assert!(message.contains("input: {\"filePath\":\"src/lib.rs\"}"));
-
-        let refused = tool_text(
-            call_facade(
-                &handler,
-                "ctx_note",
-                json!({"action": "write", "content": "remember the lattice", "surface_condition": "when tag v2 exists"}),
-            )
-            .await,
-        );
-        assert!(
-            refused.contains("Smart-note evaluation is unavailable"),
-            "a conditioned write without a live evaluator registration must fail closed"
-        );
-        let write = tool_text(
-            call_facade(
-                &handler,
-                "ctx_note",
-                json!({"action": "write", "content": "remember the lattice"}),
-            )
-            .await,
-        );
-        assert!(write.contains("Saved session note"));
-        let read = tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
-        assert!(read.contains("remember the lattice"));
-        let hits =
-            tool_json_array(call_facade(&handler, "ctx_search", json!({"query": "lattice"})).await);
-        assert!(hits.iter().any(|hit| hit["source"] == "note"));
-
-        let note_id = store
-            .search_notes_like(project.to_str().unwrap(), "ses", "lattice")
-            .unwrap()[0]
-            .id;
-        let _ = call_facade(
-            &handler,
-            "ctx_note",
-            json!({"action": "update", "note_id": note_id, "content": "remember the updated lattice"}),
-        )
-        .await;
-        let _ = call_facade(
-            &handler,
-            "ctx_note",
-            json!({"action": "dismiss", "note_id": note_id, "content": "finished"}),
-        )
-        .await;
-        let dismissed = store
-            .search_notes_like(project.to_str().unwrap(), "ses", "finished")
-            .unwrap();
-        assert_eq!(dismissed[0].status, "dismissed");
-        assert!(
-            store
-                .search_notes_like("/different/project", "ses", "lattice")
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn opencode_facade_uses_bound_session_without_session_resolver() {
         let resolver = FakeSessionResolver::with(&[]);
         let (handler, store, _dir, project) = handler_with_store_and_resolver(
@@ -30031,7 +28926,7 @@ mod tests {
 
         let note = call_facade(
             &handler,
-            "ctx_note",
+            "eidnara_note",
             json!({
                 "action": "write",
                 "content": "OpenCode route identity is durable",
@@ -30087,7 +28982,7 @@ mod tests {
             let outcome = call_facade_on_channel(
                 &handler,
                 8,
-                "ctx_note",
+                "eidnara_note",
                 json!({
                     "action": "write",
                     "content": "symlink lineage resolves",
@@ -30118,7 +29013,7 @@ mod tests {
 
         let outcome = call_facade(
             &handler,
-            "ctx_note",
+            "eidnara_note",
             json!({ "action": "write", "content": "must not be token keyed" }),
         )
         .await;
@@ -30158,7 +29053,7 @@ mod tests {
         let outcome = call_facade_on_channel(
             &handler,
             8,
-            "ctx_note",
+            "eidnara_note",
             json!({
                 "action": "write",
                 "content": "must not cross roots",
@@ -30217,7 +29112,7 @@ mod tests {
         let outcome = call_facade_on_channel(
             &handler,
             8,
-            "ctx_note",
+            "eidnara_note",
             json!({
                 "action": "write",
                 "content": "must not cross roots",
@@ -30246,7 +29141,7 @@ mod tests {
         let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
         let written = call_facade(
             &handler,
-            "ctx_note",
+            "eidnara_note",
             json!({ "action": "write", "content": "session note under authority" }),
         )
         .await;
@@ -30257,7 +29152,7 @@ mod tests {
                 .unwrap()
                 .len(),
             1,
-            "ctx_note stores session notes under the authority project"
+            "eidnara_note stores session notes under the authority project"
         );
 
         let deleted = tool_body(handler.handle_session_delete_value(
@@ -30329,7 +29224,7 @@ mod tests {
 
         let write = call_facade(
             &handler,
-            "ctx_note",
+            "eidnara_note",
             json!({
                 "action": "write",
                 "content": "crafted cross-project write",
@@ -30403,7 +29298,7 @@ mod tests {
 
         let note = call_facade(
             &handler,
-            "ctx_note",
+            "eidnara_note",
             json!({
                 "action": "write",
                 "content": "durable note proof",
@@ -30421,7 +29316,7 @@ mod tests {
         let cross_root = call_facade_on_channel(
             &handler,
             8,
-            "ctx_note",
+            "eidnara_note",
             json!({
                 "action": "write",
                 "content": "must not cross roots",
@@ -30475,7 +29370,7 @@ mod tests {
         // Without lineage the facade cannot vouch for the route and must ask the resolver.
         let note = call_facade(
             &handler,
-            "ctx_note",
+            "eidnara_note",
             json!({ "action": "write", "content": "after delete" }),
         )
         .await;
@@ -30501,7 +29396,7 @@ mod tests {
 
         let note = call_facade(
             &handler,
-            "ctx_note",
+            "eidnara_note",
             json!({
                 "action": "write",
                 "content": "Claude Code keeps resolver semantics",
@@ -30690,7 +29585,7 @@ mod tests {
         let page = tool_text(
             call_facade(
                 &handler,
-                "ctx_note",
+                "eidnara_note",
                 json!({"action": "read", "filter": "ready", "limit": 5, "offset": 100}),
             )
             .await,
@@ -30701,12 +29596,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn emergency_absent_shape_pending_suppresses_historian_fire() {
+    async fn emergency_absent_shape_pending_suppresses_history_summarizer_fire() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         store
-            .replace_compartments("ses", &[stored_comp(1, 1, 1, "m1", "S0")])
+            .replace_history_segments("ses", &[stored_comp(1, 1, 1, "m1", "S0")])
             .unwrap();
 
         let boot = call_transform_request(
@@ -30723,11 +29618,11 @@ mod tests {
         )
         .await;
         assert_eq!(raw["action"], "PASSTHROUGH");
-        assert_eq!(raw["historian"]["no_fire"], "pending_rewrite");
+        assert_eq!(raw["history_summarizer"]["no_fire"], "pending_rewrite");
         assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
         assert!(store.load("ses").unwrap().meta.pending_rewrite.is_some());
-        assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -30736,7 +29631,7 @@ mod tests {
         let (handler, store, _dir, project) = handler_with_store(producer, default_test_config());
         let key_a = "conversation:root|agent:alpha";
         let key_b = "conversation:root|agent:beta";
-        let suffix_key = "conversation:root|scope:eidnara-historian:child";
+        let suffix_key = "conversation:root|scope:eidnara-history_summarizer:child";
         handler.bind_route(test_route(8), binding(project.to_str().unwrap(), key_a));
         handler.bind_route(test_route(9), binding(project.to_str().unwrap(), key_b));
         handler.bind_route(
@@ -30745,10 +29640,10 @@ mod tests {
         );
 
         store
-            .replace_compartments(key_a, &[stored_comp(1, 1, 1, "a1", "A")])
+            .replace_history_segments(key_a, &[stored_comp(1, 1, 1, "a1", "A")])
             .unwrap();
         store
-            .replace_compartments(key_b, &[stored_comp(1, 1, 1, "b1", "B")])
+            .replace_history_segments(key_b, &[stored_comp(1, 1, 1, "b1", "B")])
             .unwrap();
 
         let a = call_transform_request_on_channel(
@@ -30803,7 +29698,9 @@ mod tests {
         .await;
         assert_eq!(suffix["action"], "HARD");
         assert!(store.load(suffix_key).unwrap().row_version.is_some());
-        assert!(!suffix_key.starts_with(historian::HISTORIAN_CHILD_SESSION_PREFIX));
+        assert!(
+            !suffix_key.starts_with(history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -30880,7 +29777,7 @@ mod tests {
         );
         let no_token = call_facade(
             &handler,
-            "ctx_search",
+            "eidnara_search",
             json!({ "query": "anything", "limit": 1 }),
         )
         .await;
@@ -30899,7 +29796,7 @@ mod tests {
         );
         let none = call_facade(
             &handler,
-            "ctx_search",
+            "eidnara_search",
             json!({ "query": "anything", "limit": 1 }),
         )
         .await;
@@ -30911,7 +29808,7 @@ mod tests {
         );
         let timeout = call_facade(
             &handler,
-            "ctx_search",
+            "eidnara_search",
             json!({ "query": "anything", "limit": 1 }),
         )
         .await;
@@ -30919,7 +29816,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn facade_flat_envelope_precedence_keeps_kind_arm_and_gates_ctx_reduce_name() {
+    async fn facade_flat_envelope_precedence_keeps_kind_arm_and_gates_eidnara_reduce_name() {
         let producer = Arc::new(ProducerState::default());
         let resolver = FakeSessionResolver::with(&[(
             "token",
@@ -30932,20 +29829,21 @@ mod tests {
         let echo = handler
             .dispatch_value(
                 test_route(7),
-                json!({ "kind": "echo", "name": "ctx_memory", "arguments": { "action": "write" } }),
+                json!({ "kind": "echo", "name": "eidnara_memory", "arguments": { "action": "write" } }),
             )
             .await;
         let echo_body = tool_body(echo);
         assert_eq!(echo_body["ok"], json!(true));
         assert_eq!(echo_body["echo"]["kind"], "echo");
 
-        let reduce = tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1-3" })).await);
+        let reduce =
+            tool_text(call_facade(&handler, "eidnara_reduce", json!({ "drop": "1-3" })).await);
         assert!(reduce.contains("Refused: no valid tags to queue"));
         assert!(reduce.contains("tags 1, 2, 3 not found"));
     }
 
     #[test]
-    fn ctx_reduce_range_parser_rejects_unbounded_and_oversized_ranges() {
+    fn eidnara_reduce_range_parser_rejects_unbounded_and_oversized_ranges() {
         assert!(parse_tag_range_string("0-18446744073709551615").is_err());
         assert!(parse_tag_range_string("5-3").is_err());
         assert_eq!(parse_tag_range_string("3-5,8").unwrap(), vec![3, 4, 5, 8]);
@@ -30969,82 +29867,8 @@ mod tests {
         assert_eq!(arguments["stray"], json!("kept"));
     }
 
-    #[test]
-    fn ctx_expand_verbose_range_separates_messages_and_previews_raw_parts() {
-        let output = "line1\nline2\nline3";
-        let messages = vec![
-            IngressMessage {
-                mid: "m10".to_string(),
-                ordinal: 10,
-                ck: WireMessage::from_parts(
-                    "assistant",
-                    vec![
-                        WireBlock::bare(BlockKind::Text {
-                            text: "x".repeat(201),
-                        }),
-                        WireBlock::bare(BlockKind::ToolCall {
-                            id: "read:1".to_string(),
-                            name: "read".to_string(),
-                            input: json!({ "filePath": "config.ts" }),
-                            provider_executed: false,
-                        }),
-                    ],
-                    None,
-                    ProviderExtras::new(),
-                    HarnessMeta::default(),
-                ),
-            },
-            IngressMessage {
-                mid: "m11".to_string(),
-                ordinal: 11,
-                ck: WireMessage::from_parts(
-                    "user",
-                    vec![WireBlock::bare(BlockKind::ToolResult {
-                        id: "read:1".to_string(),
-                        tool_name: "read".to_string(),
-                        output: ToolOutput::bare(OutputKind::Text {
-                            text: output.to_string(),
-                        }),
-                        provider_executed: false,
-                    })],
-                    None,
-                    ProviderExtras::new(),
-                    HarnessMeta::default(),
-                ),
-            },
-        ];
-
-        let messages: wire::IngressMessages = messages.into_iter().collect();
-        let rendered = render_verbose_range_expand(&messages, 10, 11);
-        assert!(rendered.text.contains("[10] A (assistant)"));
-        assert!(rendered.text.contains("[11] U (user)"));
-        assert!(
-            rendered
-                .text
-                .contains(&format!("    • {}…", "x".repeat(200)))
-        );
-        assert!(rendered.text.contains("    • tool read(config.ts)"));
-        assert!(rendered.text.contains(&format!(
-            "    • tool read → output ~{} tok",
-            tokenizer::estimate_tokens(output)
-        )));
-        assert_eq!(rendered.last_ordinal, 11);
-        assert!(!rendered.truncated);
-
-        let first = render_verbose_expand_message(&messages[0]);
-        let bounded = render_verbose_range_expand_with_budget(
-            &messages,
-            10,
-            11,
-            tokenizer::estimate_tokens(&first),
-        );
-        assert_eq!(bounded.last_ordinal, 10);
-        assert!(bounded.truncated);
-        assert!(!bounded.text.contains("[11] U (user)"));
-    }
-
     #[tokio::test(flavor = "current_thread")]
-    async fn facade_ctx_reduce_resolves_the_session_before_validating_tags() {
+    async fn facade_eidnara_reduce_resolves_the_session_before_validating_tags() {
         let producer = Arc::new(ProducerState::default());
         let resolver = FakeSessionResolver::with(&[("unresolvable", FakeResolve::None)]);
         let handler = Handler::with_producer_factory_config_resolver(
@@ -31058,7 +29882,7 @@ mod tests {
         );
 
         let response =
-            call_facade_on_channel(&handler, 8, "ctx_reduce", json!({ "drop": "1" })).await;
+            call_facade_on_channel(&handler, 8, "eidnara_reduce", json!({ "drop": "1" })).await;
         assert_eq!(error_code(response), "session_unresolved");
         assert_eq!(resolver.calls(), vec!["unresolvable"]);
         assert!(
@@ -31068,8 +29892,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn facade_ctx_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing()
-    {
+    async fn facade_eidnara_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing()
+     {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
         let (handler, store, _dir, _project) = handler_with_store_and_resolver(
             Arc::new(ProducerState::default()),
@@ -31089,7 +29913,7 @@ mod tests {
         let mixed_ack = tool_text(
             call_facade(
                 &handler,
-                "ctx_reduce",
+                "eidnara_reduce",
                 json!({ "drop": "1, 21, 99, 100", "command_id": "mixed-delivery" }),
             )
             .await,
@@ -31133,12 +29957,13 @@ mod tests {
         );
 
         let queued_ack =
-            tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1, 2, 99" })).await);
+            tool_text(call_facade(&handler, "eidnara_reduce", json!({ "drop": "1, 2, 99" })).await);
         assert!(queued_ack.contains("deferred drop §2§"));
         assert!(queued_ack.contains("tags 1 already queued"));
         assert!(queued_ack.contains("tags 99 not found"));
 
-        let refused = tool_body(call_facade(&handler, "ctx_reduce", json!({ "drop": "99" })).await);
+        let refused =
+            tool_body(call_facade(&handler, "eidnara_reduce", json!({ "drop": "99" })).await);
         assert_eq!(refused["isError"], json!(true));
         assert!(
             refused["content"][0]["text"]
@@ -31149,7 +29974,7 @@ mod tests {
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 2);
 
         let invalid =
-            tool_body(call_facade(&handler, "ctx_reduce", json!({ "drop": "3-1" })).await);
+            tool_body(call_facade(&handler, "eidnara_reduce", json!({ "drop": "3-1" })).await);
         assert_eq!(invalid["isError"], json!(true));
         assert!(
             invalid["content"][0]["text"]
@@ -31169,9 +29994,9 @@ mod tests {
             .map(|tool| (tool.name.as_str(), tool))
             .collect::<HashMap<_, _>>();
         let expected_fields = [
-            ("ctx_reduce", vec!["drop"]),
+            ("eidnara_reduce", vec!["drop"]),
             (
-                "ctx_memory",
+                "eidnara_memory",
                 vec![
                     "action",
                     "antiMemory",
@@ -31183,10 +30008,9 @@ mod tests {
                     "memory_project",
                 ],
             ),
-            ("ctx_search", vec!["query", "limit"]),
-            ("ctx_expand", vec!["start", "end", "verbose", "message"]),
+            ("eidnara_search", vec!["query", "limit"]),
             (
-                "ctx_note",
+                "eidnara_note",
                 vec![
                     "action",
                     "content",
@@ -31200,34 +30024,29 @@ mod tests {
             ),
         ];
 
-        // `ctx_reduce` is the only authorizer-pinned schema: Thalamus exact-matches its canonical closed shape and fails closed on deviations, disabling tagging.
-        // `ctx_reduce` tolerates imitated arguments only during execution unwrap, not in its advertised schema.
+        // `eidnara_reduce` is the only authorizer-pinned schema: Thalamus exact-matches its canonical closed shape and fails closed on deviations, disabling tagging.
+        // `eidnara_reduce` tolerates imitated arguments only during execution unwrap, not in its advertised schema.
         // Other `ctx_` tools accept unknown arguments.
         assert_eq!(
-            by_name["ctx_reduce"].schema,
+            by_name["eidnara_reduce"].schema,
             json!({
                 "type": "object",
                 "properties": { "drop": { "type": "string" } },
                 "required": ["drop"],
                 "additionalProperties": false
             }),
-            "ctx_reduce advertised schema must stay byte-canonical (authorizer contract)"
+            "eidnara_reduce advertised schema must stay byte-canonical (authorizer contract)"
         );
 
         assert_eq!(
-            by_name["ctx_expand"].schema["properties"]["verbose"]["type"],
-            json!("boolean"),
-            "ctx_expand must advertise verbose range previews"
-        );
-        assert_eq!(
-            by_name["ctx_memory"].schema["oneOf"]
+            by_name["eidnara_memory"].schema["oneOf"]
                 .as_array()
                 .map(Vec::len),
             Some(6),
-            "ctx_memory write arms must stay discriminated"
+            "eidnara_memory write arms must stay discriminated"
         );
         assert_eq!(
-            by_name["ctx_memory"].schema["oneOf"][5],
+            by_name["eidnara_memory"].schema["oneOf"][5],
             json!({
                 "required": ["reduced", "summary"],
                 "properties": {
@@ -31236,22 +30055,22 @@ mod tests {
                 },
                 "not": { "required": ["action"] }
             }),
-            "ctx_memory must advertise only the action-less imitated-reduced envelope"
+            "eidnara_memory must advertise only the action-less imitated-reduced envelope"
         );
         {
             // Advertised categories must equal the `oneOf` positive-arm categories plus `REJECTED_APPROACH`.
-            let ctx_memory_schema = &by_name["ctx_memory"].schema;
-            let advertised = ctx_memory_schema["properties"]["category"]["enum"]
+            let eidnara_memory_schema = &by_name["eidnara_memory"].schema;
+            let advertised = eidnara_memory_schema["properties"]["category"]["enum"]
                 .as_array()
-                .expect("ctx_memory category enum");
-            let mut expected = ctx_memory_schema["oneOf"][0]["properties"]["category"]["enum"]
+                .expect("eidnara_memory category enum");
+            let mut expected = eidnara_memory_schema["oneOf"][0]["properties"]["category"]["enum"]
                 .as_array()
-                .expect("ctx_memory create arm positive categories")
+                .expect("eidnara_memory create arm positive categories")
                 .clone();
             expected.push(json!("REJECTED_APPROACH"));
             assert_eq!(
                 advertised, &expected,
-                "ctx_memory category enum must be the positive write-arm categories plus REJECTED_APPROACH"
+                "eidnara_memory category enum must be the positive write-arm categories plus REJECTED_APPROACH"
             );
         }
 
@@ -31259,7 +30078,7 @@ mod tests {
             let tool = by_name
                 .get(name)
                 .unwrap_or_else(|| panic!("missing {name} manifest entry"));
-            if name != "ctx_reduce" {
+            if name != "eidnara_reduce" {
                 assert_ne!(
                     tool.schema.get("additionalProperties"),
                     Some(&json!(false)),
@@ -31277,13 +30096,6 @@ mod tests {
             assert!(!properties.contains_key("reduced"));
             assert!(!properties.contains_key("summary"));
         }
-    }
-
-    #[test]
-    fn expand_output_is_bounded_to_the_typescript_token_budget() {
-        let output = truncate_expand_output("x".repeat(CTX_EXPAND_BYTE_BUDGET * 2));
-        assert!(output.len() <= CTX_EXPAND_BYTE_BUDGET + 64);
-        assert!(output.contains("~15,000-token ctx_expand budget"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -31407,7 +30219,7 @@ mod tests {
             "seed_batch_index": index,
             "seed_batch_total": total,
             "seed_complete": complete,
-            "compartments": [],
+            "history_segments": [],
         });
         if complete {
             let tail = batch.as_object_mut().unwrap();
@@ -31930,7 +30742,7 @@ mod tests {
         ];
 
         for arguments in malformed {
-            let outcome = call_facade(&handler, "ctx_memory", arguments.clone()).await;
+            let outcome = call_facade(&handler, "eidnara_memory", arguments.clone()).await;
             assert!(
                 tool_is_error(outcome),
                 "malformed arguments must return a typed tool error: {arguments}"
@@ -31938,7 +30750,7 @@ mod tests {
         }
         let oversized = call_facade(
             &handler,
-            "ctx_memory",
+            "eidnara_memory",
             json!({
                 "action": "write",
                 "category": "CONSTRAINTS",
@@ -31962,7 +30774,7 @@ mod tests {
 
         let outcome = call_facade(
             &handler,
-            "ctx_memory",
+            "eidnara_memory",
             json!({
                 "action": "create",
                 "category": "REJECTED_APPROACH",
@@ -31984,7 +30796,7 @@ mod tests {
     }
 
     /// Each retired facade name answers with the same unsupported outcome an
-    /// unknown tool gets, in every request shape, and a `ctx_memory` read
+    /// unknown tool gets, in every request shape, and a `eidnara_memory` read
     /// answers with a tool error naming where memory is served from. The
     /// names are spelled in halves so this file does not contain them.
     #[tokio::test(flavor = "current_thread")]
@@ -32031,11 +30843,11 @@ mod tests {
         handler.bind_route(test_route(7), binding(project.to_str().unwrap(), "token"));
         for (action, expected) in [
             ("get", "canonical kernel state"),
-            ("list", "Unknown ctx_memory action"),
+            ("list", "Unknown eidnara_memory action"),
         ] {
             let outcome = call_facade(
                 &handler,
-                "ctx_memory",
+                "eidnara_memory",
                 json!({"action": action, "objectIds": ["mem_00000000000000000000000000000000"]}),
             )
             .await;
@@ -32110,7 +30922,7 @@ mod tests {
 
     /// A handler bound to one route with the memories authority in `MODULE`,
     /// ready to run classify commands against `store`.
-    struct DreamerHarness {
+    struct MemoryClassifierHarness {
         handler: Handler,
         store: Arc<MemoryStore>,
         _dir: tempfile::TempDir,
@@ -32118,7 +30930,7 @@ mod tests {
         route_root: String,
     }
 
-    impl DreamerHarness {
+    impl MemoryClassifierHarness {
         /// A handler over a real store and kernel, with `SEEDED_MEMORIES`
         /// verified memories in the bound project so requests have canonical
         /// rows to classify.
@@ -32126,7 +30938,7 @@ mod tests {
             let (handler, store, dir, project) =
                 handler_with_store_and_kernel(Arc::clone(producer), default_test_config()).await;
             let route_root = project.to_str().unwrap();
-            // A poisoned historian chain verifies that the classify loop does not read route config models.
+            // A poisoned history_summarizer chain verifies that the classify loop does not read route config models.
             let mut route_binding = binding_with_harness(route_root, "pi", "ses");
             route_binding.config.model_chain = vec!["test/route-only-model".to_string()];
             let scope_id = route_binding.kernel_project.scope_id();
@@ -32209,7 +31021,7 @@ mod tests {
 
         async fn classify(&self, payload: Value, command_id: &str) -> PreparedOutcome {
             self.handler
-                .handle_dreamer_run_task(
+                .handle_memory_classifier_run_task(
                     test_route(7),
                     &json!({
                         "v": 1,
@@ -32223,12 +31035,15 @@ mod tests {
                 .await
         }
 
-        fn receipt(&self, command_id: &str) -> memory_store::dreamer_ledger::DreamerReceipt {
-            let operation_key = dreamer_operation_key("ses", command_id);
+        fn receipt(
+            &self,
+            command_id: &str,
+        ) -> memory_store::memory_classifier_ledger::MemoryClassifierReceipt {
+            let operation_key = memory_classifier_operation_key("ses", command_id);
             self.store
-                .lookup_dreamer_receipt(DreamerReceiptKey {
+                .lookup_memory_classifier_receipt(MemoryClassifierReceiptKey {
                     project: "git:identity",
-                    producer: DREAMER_RECEIPT_PRODUCER,
+                    producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                     operation_key: &operation_key,
                 })
                 .unwrap()
@@ -32300,12 +31115,12 @@ mod tests {
 
     /// The kernel operation key a classify receipt commits under for this
     /// harness's project.
-    impl DreamerHarness {
+    impl MemoryClassifierHarness {
         fn kernel_operation_key(&self, command_id: &str) -> String {
             classify_kernel_operation_key(
                 &binding_with_harness(&self.route_root, "pi", "ses").kernel_project,
                 "git:identity",
-                &dreamer_operation_key("ses", command_id),
+                &memory_classifier_operation_key("ses", command_id),
             )
             .unwrap()
         }
@@ -32315,12 +31130,12 @@ mod tests {
         }
     }
 
-    async fn dreamer_classify_outcome(
+    async fn memory_classifier_classify_outcome(
         producer: &Arc<ProducerState>,
         payload: Value,
         command_id: &str,
     ) -> (Arc<ProducerState>, PreparedOutcome) {
-        let harness = DreamerHarness::start(producer).await;
+        let harness = MemoryClassifierHarness::start(producer).await;
         let outcome = harness.classify(payload, command_id).await;
         (Arc::clone(producer), outcome)
     }
@@ -32346,8 +31161,10 @@ mod tests {
     /// response without a second dispatch, the same command with other inputs is
     /// refused, and the attempt row carries the model run's identities.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_replays_from_the_receipt_and_refuses_a_changed_request() {
-        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+    async fn memory_classifier_run_task_replays_from_the_receipt_and_refuses_a_changed_request() {
+        use memory_store::memory_classifier_ledger::{
+            MemoryClassifierReceiptState, MemoryClassifierTerminalKind,
+        };
         let ids = [test_memory_id(1), test_memory_id(2)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -32358,7 +31175,7 @@ mod tests {
                 text: classify_manifest(&ids),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let first = response_of(harness.classify(payload.clone(), "replayed").await);
         assert_eq!(first["ok"], json!(true));
@@ -32382,9 +31199,9 @@ mod tests {
 
         let receipt = harness.receipt("replayed");
         match &receipt.state {
-            DreamerReceiptState::Complete {
+            MemoryClassifierReceiptState::Complete {
                 generation: 1,
-                terminal_kind: DreamerTerminalKind::Complete,
+                terminal_kind: MemoryClassifierTerminalKind::Complete,
                 result_json,
             } => assert_eq!(serde_json::from_str::<Value>(result_json).unwrap(), first),
             _ => panic!("the result must complete the receipt"),
@@ -32392,12 +31209,12 @@ mod tests {
         assert_eq!(receipt.binding.ledger_session, "ses");
         assert_eq!(receipt.binding.command_id, "replayed");
         assert_eq!(receipt.binding.database_incarnation_id, "context");
-        let operation_key = dreamer_operation_key("ses", "replayed");
+        let operation_key = memory_classifier_operation_key("ses", "replayed");
         let attempts = harness
             .store
-            .list_dreamer_attempts(DreamerReceiptKey {
+            .list_memory_classifier_attempts(MemoryClassifierReceiptKey {
                 project: "git:identity",
-                producer: DREAMER_RECEIPT_PRODUCER,
+                producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                 operation_key: &operation_key,
             })
             .unwrap();
@@ -32405,7 +31222,7 @@ mod tests {
         assert_eq!(attempts[0].model, "test/model");
         assert_eq!(
             attempts[0].terminal_kind,
-            Some(DreamerTerminalKind::Complete)
+            Some(MemoryClassifierTerminalKind::Complete)
         );
         assert_eq!(
             attempts[0].child_session,
@@ -32419,24 +31236,23 @@ mod tests {
             let mut changed = payload.clone();
             changed[field] = value;
             let conflict = harness.classify(changed, "replayed").await;
-            assert_eq!(error_code_of(&conflict), "dreamer_request_conflict");
+            assert_eq!(
+                error_code_of(&conflict),
+                "memory_classifier_request_conflict"
+            );
             assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
             assert_eq!(harness.receipt("replayed"), receipt);
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_does_not_count_connection_failures_as_dispatches() {
+    async fn memory_classifier_run_task_does_not_count_connection_failures_as_dispatches() {
         for recover in [false, true] {
             let ids = [test_memory_id(1)];
             let producer = Arc::new(ProducerState::default());
-            producer
-                .connect_errors
-                .lock()
-                .unwrap()
-                .push_back(HistorianProducerError::Protocol(
-                    "connection refused".to_string(),
-                ));
+            producer.connect_errors.lock().unwrap().push_back(
+                HistorySummarizerProducerError::Protocol("connection refused".to_string()),
+            );
             producer
                 .await_results
                 .lock()
@@ -32445,7 +31261,7 @@ mod tests {
                     text: classify_manifest(&ids),
                     length_capped: false,
                 }));
-            let harness = DreamerHarness::start(&producer).await;
+            let harness = MemoryClassifierHarness::start(&producer).await;
             let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
             if recover {
                 payload["model_chain"] = json!(["test/model", "test/fallback"]);
@@ -32456,14 +31272,14 @@ mod tests {
                 assert_eq!(response["diagnostics"]["model"], json!("test/fallback"));
                 assert_eq!(response["diagnostics"]["attempts"], json!(1));
             } else {
-                assert_eq!(error_code_of(&outcome), "dreamer_run_failed");
+                assert_eq!(error_code_of(&outcome), "memory_classifier_run_failed");
             }
-            let operation_key = dreamer_operation_key("ses", "connect-failure");
+            let operation_key = memory_classifier_operation_key("ses", "connect-failure");
             let attempts = harness
                 .store
-                .list_dreamer_attempts(DreamerReceiptKey {
+                .list_memory_classifier_attempts(MemoryClassifierReceiptKey {
                     project: "git:identity",
-                    producer: DREAMER_RECEIPT_PRODUCER,
+                    producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                     operation_key: &operation_key,
                 })
                 .unwrap();
@@ -32480,7 +31296,7 @@ mod tests {
             assert_eq!(
                 harness
                     .store
-                    .count_dreamer_attempts("git:identity", 0)
+                    .count_memory_classifier_attempts("git:identity", 0)
                     .unwrap(),
                 u64::from(recover)
             );
@@ -32490,13 +31306,13 @@ mod tests {
     /// Each model in the fallback chain is its own attempt row under one receipt:
     /// the failed first model and the completing second model both stay recorded.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_records_one_attempt_row_per_model_in_the_chain() {
-        use memory_store::dreamer_ledger::DreamerTerminalKind;
+    async fn memory_classifier_run_task_records_one_attempt_row_per_model_in_the_chain() {
+        use memory_store::memory_classifier_ledger::MemoryClassifierTerminalKind;
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         {
             let mut results = producer.await_results.lock().unwrap();
-            results.push_back(Err(HistorianProducerError::Protocol(
+            results.push_back(Err(HistorySummarizerProducerError::Protocol(
                 "first model refused".to_string(),
             )));
             results.push_back(Ok(ProducerOutput {
@@ -32504,19 +31320,19 @@ mod tests {
                 length_capped: false,
             }));
         }
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         payload["model_chain"] = json!(["test/first", "test/second"]);
         let response = response_of(harness.classify(payload, "chain").await);
         assert_eq!(response["ok"], json!(true));
         assert_eq!(response["diagnostics"]["model"], json!("test/second"));
         assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
-        let operation_key = dreamer_operation_key("ses", "chain");
+        let operation_key = memory_classifier_operation_key("ses", "chain");
         let attempts = harness
             .store
-            .list_dreamer_attempts(DreamerReceiptKey {
+            .list_memory_classifier_attempts(MemoryClassifierReceiptKey {
                 project: "git:identity",
-                producer: DREAMER_RECEIPT_PRODUCER,
+                producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                 operation_key: &operation_key,
             })
             .unwrap();
@@ -32530,14 +31346,18 @@ mod tests {
                 ))
                 .collect::<Vec<_>>(),
             vec![
-                (0, "test/first", Some(DreamerTerminalKind::Failed)),
-                (1, "test/second", Some(DreamerTerminalKind::Complete)),
+                (0, "test/first", Some(MemoryClassifierTerminalKind::Failed)),
+                (
+                    1,
+                    "test/second",
+                    Some(MemoryClassifierTerminalKind::Complete)
+                ),
             ]
         );
         assert_eq!(
             harness
                 .store
-                .count_dreamer_attempts("git:identity", 0)
+                .count_memory_classifier_attempts("git:identity", 0)
                 .unwrap(),
             2
         );
@@ -32547,34 +31367,37 @@ mod tests {
     /// paid run, so the chain stops, the attempt ends `unknown`, and the receipt
     /// stays in progress; a retry does not dispatch again.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_stops_the_chain_when_the_send_outcome_crosses_an_incarnation() {
-        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+    async fn memory_classifier_run_task_stops_the_chain_when_the_send_outcome_crosses_an_incarnation()
+     {
+        use memory_store::memory_classifier_ledger::{
+            MemoryClassifierReceiptState, MemoryClassifierTerminalKind,
+        };
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer.start_errors.lock().unwrap().push_back(Err(
-            HistorianProducerError::CrossIncarnationUnknown {
+            HistorySummarizerProducerError::CrossIncarnationUnknown {
                 daemon_changed: true,
                 identity_changed: false,
             },
         ));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         payload["model_chain"] = json!(["test/first", "test/second"]);
         let outcome = harness.classify(payload.clone(), "cross-incarnation").await;
-        assert_eq!(error_code_of(&outcome), "dreamer_outcome_unknown");
+        assert_eq!(error_code_of(&outcome), "memory_classifier_outcome_unknown");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert!(producer.purges.lock().unwrap().is_empty());
         let receipt = harness.receipt("cross-incarnation");
         assert_eq!(
             receipt.state,
-            DreamerReceiptState::InProgress { generation: 1 }
+            MemoryClassifierReceiptState::InProgress { generation: 1 }
         );
-        let operation_key = dreamer_operation_key("ses", "cross-incarnation");
+        let operation_key = memory_classifier_operation_key("ses", "cross-incarnation");
         let attempts = harness
             .store
-            .list_dreamer_attempts(DreamerReceiptKey {
+            .list_memory_classifier_attempts(MemoryClassifierReceiptKey {
                 project: "git:identity",
-                producer: DREAMER_RECEIPT_PRODUCER,
+                producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                 operation_key: &operation_key,
             })
             .unwrap();
@@ -32582,19 +31405,19 @@ mod tests {
         assert_eq!(attempts[0].model, "test/first");
         assert_eq!(
             attempts[0].terminal_kind,
-            Some(DreamerTerminalKind::Unknown)
+            Some(MemoryClassifierTerminalKind::Unknown)
         );
 
         let retried = harness.classify(payload, "cross-incarnation").await;
-        assert_eq!(error_code_of(&retried), "dreamer_outcome_unknown");
+        assert_eq!(error_code_of(&retried), "memory_classifier_outcome_unknown");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
     /// A pre-dispatch ledger failure leaves an in-progress receipt without an
     /// attempt row; a retry adopts it under the next generation and runs.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_recovers_a_receipt_stranded_before_any_dispatch() {
-        use memory_store::dreamer_ledger::DreamerReceiptState;
+    async fn memory_classifier_run_task_recovers_a_receipt_stranded_before_any_dispatch() {
+        use memory_store::memory_classifier_ledger::MemoryClassifierReceiptState;
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -32605,27 +31428,27 @@ mod tests {
                 text: classify_manifest(&ids),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         harness
             .store
             .execute_tag_sql_for_test(
-                "CREATE TRIGGER dreamer_attempt_insert_fault
-                 BEFORE INSERT ON dreamer_attempts
+                "CREATE TRIGGER memory_classifier_attempt_insert_fault
+                 BEFORE INSERT ON memory_classifier_attempts
                  BEGIN SELECT RAISE(ABORT, 'injected attempt insert fault'); END;",
             )
             .unwrap();
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let stranded = harness.classify(payload.clone(), "stranded").await;
-        assert_eq!(error_code_of(&stranded), "dreamer_ledger_failed");
+        assert_eq!(error_code_of(&stranded), "memory_classifier_ledger_failed");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
         assert_eq!(
             harness.receipt("stranded").state,
-            DreamerReceiptState::InProgress { generation: 1 }
+            MemoryClassifierReceiptState::InProgress { generation: 1 }
         );
 
         harness
             .store
-            .execute_tag_sql_for_test("DROP TRIGGER dreamer_attempt_insert_fault;")
+            .execute_tag_sql_for_test("DROP TRIGGER memory_classifier_attempt_insert_fault;")
             .unwrap();
         let recovered = response_of(harness.classify(payload.clone(), "stranded").await);
         assert_eq!(recovered["ok"], json!(true));
@@ -32633,14 +31456,14 @@ mod tests {
         let receipt = harness.receipt("stranded");
         assert!(matches!(
             receipt.state,
-            DreamerReceiptState::Complete { generation: 2, .. }
+            MemoryClassifierReceiptState::Complete { generation: 2, .. }
         ));
-        let operation_key = dreamer_operation_key("ses", "stranded");
+        let operation_key = memory_classifier_operation_key("ses", "stranded");
         let attempts = harness
             .store
-            .list_dreamer_attempts(DreamerReceiptKey {
+            .list_memory_classifier_attempts(MemoryClassifierReceiptKey {
                 project: "git:identity",
-                producer: DREAMER_RECEIPT_PRODUCER,
+                producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                 operation_key: &operation_key,
             })
             .unwrap();
@@ -32649,8 +31472,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_does_not_purge_the_child_session_once_it_is_fenced() {
-        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+    async fn memory_classifier_run_task_does_not_purge_the_child_session_once_it_is_fenced() {
+        use memory_store::memory_classifier_ledger::{
+            MemoryClassifierReceiptState, MemoryClassifierTerminalKind,
+        };
         for fence_during_start in [true, false] {
             let ids = [test_memory_id(1)];
             let producer = Arc::new(ProducerState::default());
@@ -32662,8 +31487,8 @@ mod tests {
                     text: classify_manifest(&ids),
                     length_capped: false,
                 }));
-            let harness = DreamerHarness::start(&producer).await;
-            let operation_key = dreamer_operation_key("ses", "fenced-mid-run");
+            let harness = MemoryClassifierHarness::start(&producer).await;
+            let operation_key = memory_classifier_operation_key("ses", "fenced-mid-run");
             let hook_store = Arc::clone(&harness.store);
             let hook_key = operation_key.clone();
             let hook = if fence_during_start {
@@ -32673,21 +31498,21 @@ mod tests {
             };
             *hook.lock().unwrap() = Some(Box::new(move || {
                 let transition = hook_store
-                    .take_over_dreamer_receipt(
-                        DreamerReceiptKey {
+                    .take_over_memory_classifier_receipt(
+                        MemoryClassifierReceiptKey {
                             project: "git:identity",
-                            producer: DREAMER_RECEIPT_PRODUCER,
+                            producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                             operation_key: &hook_key,
                         },
                         1,
                         now_ms(),
                     )
                     .unwrap();
-                assert_eq!(transition, DreamerTransition::Applied);
+                assert_eq!(transition, MemoryClassifierTransition::Applied);
             }));
             let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
             let outcome = harness.classify(payload, "fenced-mid-run").await;
-            assert_eq!(error_code_of(&outcome), "dreamer_ledger_fenced");
+            assert_eq!(error_code_of(&outcome), "memory_classifier_ledger_fenced");
             assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
             assert_eq!(
                 producer.await_outputs.load(Ordering::SeqCst),
@@ -32700,19 +31525,22 @@ mod tests {
             let receipt = harness.receipt("fenced-mid-run");
             assert_eq!(
                 receipt.state,
-                DreamerReceiptState::InProgress { generation: 2 }
+                MemoryClassifierReceiptState::InProgress { generation: 2 }
             );
             let attempts = harness
                 .store
-                .list_dreamer_attempts(DreamerReceiptKey {
+                .list_memory_classifier_attempts(MemoryClassifierReceiptKey {
                     project: "git:identity",
-                    producer: DREAMER_RECEIPT_PRODUCER,
+                    producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                     operation_key: &operation_key,
                 })
                 .unwrap();
             assert_eq!(attempts.len(), 1);
             assert_eq!(attempts[0].generation, 1);
-            assert_eq!(attempts[0].terminal_kind, None::<DreamerTerminalKind>);
+            assert_eq!(
+                attempts[0].terminal_kind,
+                None::<MemoryClassifierTerminalKind>
+            );
             assert_eq!(attempts[0].run_handle.is_none(), fence_during_start);
         }
     }
@@ -32721,20 +31549,22 @@ mod tests {
     /// `not_sent`: the row stays in the ledger, the chain moves on, and the
     /// dispatch count charges only the model that was actually sent.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_does_not_count_a_proven_not_sent_start_as_a_dispatch() {
-        use historian_producer::{HistorianCallFailure, HistorianSendOutcome};
-        use memory_store::dreamer_ledger::DreamerTerminalKind;
+    async fn memory_classifier_run_task_does_not_count_a_proven_not_sent_start_as_a_dispatch() {
+        use history_summarizer_producer::{
+            HistorySummarizerCallFailure, HistorySummarizerSendOutcome,
+        };
+        use memory_store::memory_classifier_ledger::MemoryClassifierTerminalKind;
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .start_errors
             .lock()
             .unwrap()
-            .push_back(Err(HistorianProducerError::Call(
-                HistorianCallFailure::untagged(
-                    HistorianSendOutcome::NotSent,
+            .push_back(Err(HistorySummarizerProducerError::Call(
+                HistorySummarizerCallFailure::untagged(
+                    HistorySummarizerSendOutcome::NotSent,
                     "cancelled",
-                    "historian firing was cancelled before it started".to_owned(),
+                    "history_summarizer firing was cancelled before it started".to_owned(),
                 ),
             )));
         producer
@@ -32745,19 +31575,19 @@ mod tests {
                 text: classify_manifest(&ids),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         payload["model_chain"] = json!(["test/first", "test/second"]);
         let response = response_of(harness.classify(payload, "not-sent").await);
         assert_eq!(response["ok"], json!(true));
         assert_eq!(response["diagnostics"]["model"], json!("test/second"));
         assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
-        let operation_key = dreamer_operation_key("ses", "not-sent");
+        let operation_key = memory_classifier_operation_key("ses", "not-sent");
         let attempts = harness
             .store
-            .list_dreamer_attempts(DreamerReceiptKey {
+            .list_memory_classifier_attempts(MemoryClassifierReceiptKey {
                 project: "git:identity",
-                producer: DREAMER_RECEIPT_PRODUCER,
+                producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                 operation_key: &operation_key,
             })
             .unwrap();
@@ -32767,14 +31597,14 @@ mod tests {
                 .map(|attempt| (attempt.model.as_str(), attempt.terminal_kind))
                 .collect::<Vec<_>>(),
             vec![
-                ("test/first", Some(DreamerTerminalKind::NotSent)),
-                ("test/second", Some(DreamerTerminalKind::Complete)),
+                ("test/first", Some(MemoryClassifierTerminalKind::NotSent)),
+                ("test/second", Some(MemoryClassifierTerminalKind::Complete)),
             ]
         );
         assert_eq!(
             harness
                 .store
-                .count_dreamer_attempts("git:identity", 0)
+                .count_memory_classifier_attempts("git:identity", 0)
                 .unwrap(),
             1
         );
@@ -32785,48 +31615,44 @@ mod tests {
     /// under an earlier run, settles the receipt as unknown, and dispatches
     /// nothing, so no later replay can report success.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_fails_closed_when_the_failure_record_cannot_be_written() {
-        use memory_store::dreamer_ledger::DreamerReceiptState;
+    async fn memory_classifier_run_task_fails_closed_when_the_failure_record_cannot_be_written() {
+        use memory_store::memory_classifier_ledger::MemoryClassifierReceiptState;
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        producer
-            .await_results
-            .lock()
-            .unwrap()
-            .push_back(Err(HistorianProducerError::Protocol(
-                "provider refused".to_string(),
-            )));
-        let harness = DreamerHarness::start(&producer).await;
+        producer.await_results.lock().unwrap().push_back(Err(
+            HistorySummarizerProducerError::Protocol("provider refused".to_string()),
+        ));
+        let harness = MemoryClassifierHarness::start(&producer).await;
         harness
             .store
             .execute_tag_sql_for_test(
-                "CREATE TRIGGER dreamer_receipt_completion_fault
-                 BEFORE UPDATE OF state ON dreamer_receipts
+                "CREATE TRIGGER memory_classifier_receipt_completion_fault
+                 BEFORE UPDATE OF state ON memory_classifier_receipts
                  BEGIN SELECT RAISE(ABORT, 'injected receipt fault'); END;",
             )
             .unwrap();
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let outcome = harness.classify(payload.clone(), "faulted").await;
-        assert_eq!(error_code_of(&outcome), "dreamer_ledger_failed");
+        assert_eq!(error_code_of(&outcome), "memory_classifier_ledger_failed");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert_eq!(
             harness.receipt("faulted").state,
-            DreamerReceiptState::InProgress { generation: 1 }
+            MemoryClassifierReceiptState::InProgress { generation: 1 }
         );
 
         harness
             .store
-            .execute_tag_sql_for_test("DROP TRIGGER dreamer_receipt_completion_fault;")
+            .execute_tag_sql_for_test("DROP TRIGGER memory_classifier_receipt_completion_fault;")
             .unwrap();
         let retried = harness.classify(payload.clone(), "faulted").await;
-        assert_eq!(error_code_of(&retried), "dreamer_outcome_unknown");
+        assert_eq!(error_code_of(&retried), "memory_classifier_outcome_unknown");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert!(
             matches!(
                 harness.receipt("faulted").state,
-                DreamerReceiptState::Complete {
+                MemoryClassifierReceiptState::Complete {
                     generation: 1,
-                    terminal_kind: DreamerTerminalKind::Unknown,
+                    terminal_kind: MemoryClassifierTerminalKind::Unknown,
                     ..
                 }
             ),
@@ -32834,15 +31660,20 @@ mod tests {
             harness.receipt("faulted").state
         );
         let replayed = harness.classify(payload, "faulted").await;
-        assert_eq!(error_code_of(&replayed), "dreamer_outcome_unknown");
+        assert_eq!(
+            error_code_of(&replayed),
+            "memory_classifier_outcome_unknown"
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
     /// A model result in hand is a known outcome, so a failed attempt terminal
     /// write still completes the receipt with it, and a retry replays it.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_keeps_a_known_result_when_only_the_attempt_record_fails() {
-        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+    async fn memory_classifier_run_task_keeps_a_known_result_when_only_the_attempt_record_fails() {
+        use memory_store::memory_classifier_ledger::{
+            MemoryClassifierReceiptState, MemoryClassifierTerminalKind,
+        };
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -32853,12 +31684,12 @@ mod tests {
                 text: classify_manifest(&ids),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         harness
             .store
             .execute_tag_sql_for_test(
-                "CREATE TRIGGER dreamer_attempt_terminal_fault
-                 BEFORE UPDATE OF terminal_kind ON dreamer_attempts
+                "CREATE TRIGGER memory_classifier_attempt_terminal_fault
+                 BEFORE UPDATE OF terminal_kind ON memory_classifier_attempts
                  BEGIN SELECT RAISE(ABORT, 'injected attempt fault'); END;",
             )
             .unwrap();
@@ -32871,12 +31702,12 @@ mod tests {
         assert_eq!(producer.purges.lock().unwrap().len(), 1);
         let receipt = harness.receipt("kept");
         match &receipt.state {
-            DreamerReceiptState::Complete {
+            MemoryClassifierReceiptState::Complete {
                 terminal_kind,
                 result_json,
                 ..
             } => {
-                assert_eq!(*terminal_kind, DreamerTerminalKind::Complete);
+                assert_eq!(*terminal_kind, MemoryClassifierTerminalKind::Complete);
                 let recorded: Value = serde_json::from_str(result_json).unwrap();
                 assert_eq!(recorded, first);
             }
@@ -32884,12 +31715,12 @@ mod tests {
         }
         // The attempt row's terminal write is the one that failed; the receipt is
         // the authority over the request's outcome.
-        let operation_key = dreamer_operation_key("ses", "kept");
+        let operation_key = memory_classifier_operation_key("ses", "kept");
         let attempts = harness
             .store
-            .list_dreamer_attempts(DreamerReceiptKey {
+            .list_memory_classifier_attempts(MemoryClassifierReceiptKey {
                 project: "git:identity",
-                producer: DREAMER_RECEIPT_PRODUCER,
+                producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                 operation_key: &operation_key,
             })
             .unwrap();
@@ -32898,7 +31729,7 @@ mod tests {
 
         harness
             .store
-            .execute_tag_sql_for_test("DROP TRIGGER dreamer_attempt_terminal_fault;")
+            .execute_tag_sql_for_test("DROP TRIGGER memory_classifier_attempt_terminal_fault;")
             .unwrap();
         let replayed = response_of(harness.classify(payload, "kept").await);
         assert_eq!(replayed, first);
@@ -32908,22 +31739,20 @@ mod tests {
     /// A chain that fails on every model completes the receipt as failed, and a
     /// retry replays the failure instead of dispatching the chain again.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_records_an_exhausted_chain_as_a_terminal_failure() {
-        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+    async fn memory_classifier_run_task_records_an_exhausted_chain_as_a_terminal_failure() {
+        use memory_store::memory_classifier_ledger::{
+            MemoryClassifierReceiptState, MemoryClassifierTerminalKind,
+        };
         let ids = [test_memory_id(1)];
-        let sensitive_text = ["password=", "dreamer-fixture"].concat();
+        let sensitive_text = ["password=", "memory_classifier-fixture"].concat();
         let producer = Arc::new(ProducerState::default());
-        producer
-            .await_results
-            .lock()
-            .unwrap()
-            .push_back(Err(HistorianProducerError::Protocol(
-                sensitive_text.clone(),
-            )));
-        let harness = DreamerHarness::start(&producer).await;
+        producer.await_results.lock().unwrap().push_back(Err(
+            HistorySummarizerProducerError::Protocol(sensitive_text.clone()),
+        ));
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let failed = harness.classify(payload.clone(), "exhausted").await;
-        assert_eq!(error_code_of(&failed), "dreamer_run_failed");
+        assert_eq!(error_code_of(&failed), "memory_classifier_run_failed");
         let PreparedOutcome::Error { message, .. } = &failed else {
             unreachable!("the outcome is an error");
         };
@@ -32932,12 +31761,12 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         let receipt = harness.receipt("exhausted");
         match &receipt.state {
-            DreamerReceiptState::Complete {
+            MemoryClassifierReceiptState::Complete {
                 terminal_kind,
                 result_json,
                 ..
             } => {
-                assert_eq!(*terminal_kind, DreamerTerminalKind::Failed);
+                assert_eq!(*terminal_kind, MemoryClassifierTerminalKind::Failed);
                 let recorded: Value = serde_json::from_str(result_json).unwrap();
                 assert_eq!(recorded["ok"], json!(false));
                 assert_eq!(recorded["message"], json!(message));
@@ -32946,7 +31775,7 @@ mod tests {
         }
 
         let replayed = harness.classify(payload, "exhausted").await;
-        assert_eq!(error_code_of(&replayed), "dreamer_run_failed");
+        assert_eq!(error_code_of(&replayed), "memory_classifier_run_failed");
         let PreparedOutcome::Error {
             message: replayed_message,
             ..
@@ -32962,8 +31791,10 @@ mod tests {
     /// error the caller sees nor the failure the receipt records carries any of
     /// the model's text; the attempt that produced it stays billable.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_rejects_out_of_domain_output_without_echoing_it() {
-        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+    async fn memory_classifier_run_task_rejects_out_of_domain_output_without_echoing_it() {
+        use memory_store::memory_classifier_ledger::{
+            MemoryClassifierReceiptState, MemoryClassifierTerminalKind,
+        };
         let id = test_memory_id(1);
         let secret = "MODEL-SECRET-SENTINEL";
         for (text, why) in [
@@ -33001,13 +31832,13 @@ mod tests {
                     text,
                     length_capped: false,
                 }));
-            let harness = DreamerHarness::start(&producer).await;
+            let harness = MemoryClassifierHarness::start(&producer).await;
             let payload = classify_payload(std::slice::from_ref(&id), TEST_CLASSIFY_TIMEOUT_MS);
             let failed = harness.classify(payload, why).await;
             let PreparedOutcome::Error { code, message } = &failed else {
                 panic!("{why}: {failed:?}");
             };
-            assert_eq!(code, "dreamer_run_failed", "{why}");
+            assert_eq!(code, "memory_classifier_run_failed", "{why}");
             assert!(!message.contains(secret), "{why}: {message}");
             assert!(!message.contains("importance=\""), "{why}: {message}");
             assert!(
@@ -33016,8 +31847,8 @@ mod tests {
             );
             let receipt = harness.receipt(why);
             match &receipt.state {
-                DreamerReceiptState::Complete {
-                    terminal_kind: DreamerTerminalKind::Failed,
+                MemoryClassifierReceiptState::Complete {
+                    terminal_kind: MemoryClassifierTerminalKind::Failed,
                     result_json,
                     ..
                 } => assert!(!result_json.contains(secret), "{why}: {result_json}"),
@@ -33029,19 +31860,22 @@ mod tests {
             assert_eq!(attempts.len(), 1, "{why}");
             assert_eq!(
                 attempts[0].terminal_kind,
-                Some(DreamerTerminalKind::Complete),
+                Some(MemoryClassifierTerminalKind::Complete),
                 "{why}"
             );
         }
     }
 
-    impl DreamerHarness {
-        fn attempts(&self, command_id: &str) -> Vec<memory_store::dreamer_ledger::DreamerAttempt> {
-            let operation_key = dreamer_operation_key("ses", command_id);
+    impl MemoryClassifierHarness {
+        fn attempts(
+            &self,
+            command_id: &str,
+        ) -> Vec<memory_store::memory_classifier_ledger::MemoryClassifierAttempt> {
+            let operation_key = memory_classifier_operation_key("ses", command_id);
             self.store
-                .list_dreamer_attempts(DreamerReceiptKey {
+                .list_memory_classifier_attempts(MemoryClassifierReceiptKey {
                     project: "git:identity",
-                    producer: DREAMER_RECEIPT_PRODUCER,
+                    producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                     operation_key: &operation_key,
                 })
                 .unwrap()
@@ -33066,7 +31900,7 @@ mod tests {
             assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
             assert_eq!(
                 self.receipt(command_id).state,
-                DreamerReceiptState::InProgress { generation: 1 }
+                MemoryClassifierReceiptState::InProgress { generation: 1 }
             );
         }
     }
@@ -33074,10 +31908,11 @@ mod tests {
     /// A restart after a dispatched attempt whose run the runtime no longer
     /// knows settles the command as unknown, terminal, with no second dispatch.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_settles_a_missing_run_after_restart_as_unknown_without_redispatch() {
+    async fn memory_classifier_run_task_settles_a_missing_run_after_restart_as_unknown_without_redispatch()
+     {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         harness
             .crash_after_dispatch(&producer, payload.clone(), "restart")
@@ -33097,7 +31932,7 @@ mod tests {
         // The retry arrives from another harness; the probe must still use the one the run was started under.
         harness.rebind_harness("opencode");
         let resumed = harness.classify(payload.clone(), "restart").await;
-        assert_eq!(error_code_of(&resumed), "dreamer_outcome_unknown");
+        assert_eq!(error_code_of(&resumed), "memory_classifier_outcome_unknown");
         assert_eq!(
             producer.starts.load(Ordering::SeqCst),
             1,
@@ -33122,19 +31957,22 @@ mod tests {
         let attempts = harness.attempts("restart");
         assert_eq!(
             attempts[0].terminal_kind,
-            Some(DreamerTerminalKind::Unknown)
+            Some(MemoryClassifierTerminalKind::Unknown)
         );
         assert!(matches!(
             harness.receipt("restart").state,
-            DreamerReceiptState::Complete {
+            MemoryClassifierReceiptState::Complete {
                 generation: 1,
-                terminal_kind: DreamerTerminalKind::Unknown,
+                terminal_kind: MemoryClassifierTerminalKind::Unknown,
                 ..
             }
         ));
         // The settled receipt replays unknown for good; the chain never runs again.
         let replayed = harness.classify(payload, "restart").await;
-        assert_eq!(error_code_of(&replayed), "dreamer_outcome_unknown");
+        assert_eq!(
+            error_code_of(&replayed),
+            "memory_classifier_outcome_unknown"
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
@@ -33142,20 +31980,20 @@ mod tests {
     /// request reports the outcome unknown and leaves the receipt open for a
     /// later retry.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_leaves_a_run_the_runtime_still_holds_open() {
+    async fn memory_classifier_run_task_leaves_a_run_the_runtime_still_holds_open() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         harness
             .crash_after_dispatch(&producer, payload.clone(), "held")
             .await;
         let resumed = harness.classify(payload, "held").await;
-        assert_eq!(error_code_of(&resumed), "dreamer_outcome_unknown");
+        assert_eq!(error_code_of(&resumed), "memory_classifier_outcome_unknown");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert_eq!(
             harness.receipt("held").state,
-            DreamerReceiptState::InProgress { generation: 1 }
+            MemoryClassifierReceiptState::InProgress { generation: 1 }
         );
         assert_eq!(harness.attempts("held")[0].terminal_kind, None);
     }
@@ -33164,10 +32002,10 @@ mod tests {
     /// otherwise hold the retry for the producer's own request timeout;
     /// `timeout_ms` does not bound the producer's request timeout.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_bounds_the_recovery_probe_by_the_request_deadline() {
+    async fn memory_classifier_run_task_bounds_the_recovery_probe_by_the_request_deadline() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         // The digest covers `timeout_ms`, so both legs carry the same 1 s budget.
         let payload = classify_payload(&ids, 1_000);
         harness
@@ -33179,12 +32017,12 @@ mod tests {
             .await
             .expect("the probe is cut off by the request deadline, not the producer's own timeout");
         producer.block_status.store(false, Ordering::SeqCst);
-        assert_eq!(error_code_of(&resumed), "dreamer_outcome_unknown");
+        assert_eq!(error_code_of(&resumed), "memory_classifier_outcome_unknown");
         assert_eq!(producer.statuses.load(Ordering::SeqCst), 1);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1, "no dispatch");
         assert_eq!(
             harness.receipt("stalled-probe").state,
-            DreamerReceiptState::InProgress { generation: 1 }
+            MemoryClassifierReceiptState::InProgress { generation: 1 }
         );
         assert_eq!(harness.attempts("stalled-probe")[0].terminal_kind, None);
     }
@@ -33193,10 +32031,10 @@ mod tests {
     /// answer was never recorded and the run cannot become active again, so a
     /// later retry replays the settled outcome without asking the runtime.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_settles_a_run_the_runtime_reports_ended_as_unknown() {
+    async fn memory_classifier_run_task_settles_a_run_the_runtime_reports_ended_as_unknown() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         harness
             .crash_after_dispatch(&producer, payload.clone(), "ended")
@@ -33207,7 +32045,7 @@ mod tests {
             .unwrap()
             .push_back(RunState::Terminal);
         let resumed = harness.classify(payload.clone(), "ended").await;
-        assert_eq!(error_code_of(&resumed), "dreamer_outcome_unknown");
+        assert_eq!(error_code_of(&resumed), "memory_classifier_outcome_unknown");
         assert_eq!(
             producer.starts.load(Ordering::SeqCst),
             1,
@@ -33216,14 +32054,14 @@ mod tests {
         assert_eq!(producer.statuses.load(Ordering::SeqCst), 1);
         assert_eq!(
             harness.attempts("ended")[0].terminal_kind,
-            Some(DreamerTerminalKind::Unknown)
+            Some(MemoryClassifierTerminalKind::Unknown)
         );
         assert!(
             matches!(
                 harness.receipt("ended").state,
-                DreamerReceiptState::Complete {
+                MemoryClassifierReceiptState::Complete {
                     generation: 1,
-                    terminal_kind: DreamerTerminalKind::Unknown,
+                    terminal_kind: MemoryClassifierTerminalKind::Unknown,
                     ..
                 }
             ),
@@ -33231,7 +32069,10 @@ mod tests {
             harness.receipt("ended").state
         );
         let replayed = harness.classify(payload, "ended").await;
-        assert_eq!(error_code_of(&replayed), "dreamer_outcome_unknown");
+        assert_eq!(
+            error_code_of(&replayed),
+            "memory_classifier_outcome_unknown"
+        );
         assert_eq!(producer.statuses.load(Ordering::SeqCst), 1);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
@@ -33241,23 +32082,23 @@ mod tests {
     /// across a restart.
     struct FixedTaskInputs(ClassifyRequest);
 
-    impl DreamerTaskInputs for FixedTaskInputs {
+    impl MemoryClassifierTaskInputs for FixedTaskInputs {
         fn classify_inputs(
             &self,
-            _project: &dreamer_scheduler::ScheduledProject,
+            _project: &memory_classifier_scheduler::ScheduledProject,
             _task: &str,
         ) -> Option<ClassifyRequest> {
             Some(self.0.clone())
         }
     }
 
-    impl DreamerHarness {
+    impl MemoryClassifierHarness {
         /// The scheduler's view of this handler.
         fn scheduler_bridge(&self) -> SchedulerBridge {
             SchedulerBridge {
                 store: Arc::clone(&self.store),
                 bindings: Arc::clone(&self.handler.bindings),
-                dreamer: Arc::clone(&self.handler.dreamer),
+                memory_classifier: Arc::clone(&self.handler.memory_classifier),
             }
         }
 
@@ -33265,8 +32106,9 @@ mod tests {
         /// session presents once its user enabled the task.
         fn schedule(&self, schedule: Option<&str>) {
             let mut route_binding = binding_with_harness(&self.route_root, "pi", "ses");
-            route_binding.config.dreamer_review_user_memories_schedule =
-                schedule.map(str::to_string);
+            route_binding
+                .config
+                .memory_classifier_review_user_memories_schedule = schedule.map(str::to_string);
             self.handler.bind_route(test_route(7), route_binding);
         }
 
@@ -33275,7 +32117,7 @@ mod tests {
                 .ok()
                 .unwrap();
             self.handler
-                .dreamer
+                .memory_classifier
                 .install_task_inputs(Arc::new(FixedTaskInputs(request)));
         }
     }
@@ -33283,13 +32125,15 @@ mod tests {
     fn scheduler_attempts(
         store: &MemoryStore,
         command_id: &str,
-    ) -> Vec<memory_store::dreamer_ledger::DreamerAttempt> {
-        let operation_key =
-            dreamer_operation_key(dreamer_scheduler::SCHEDULER_LEDGER_SESSION, command_id);
+    ) -> Vec<memory_store::memory_classifier_ledger::MemoryClassifierAttempt> {
+        let operation_key = memory_classifier_operation_key(
+            memory_classifier_scheduler::SCHEDULER_LEDGER_SESSION,
+            command_id,
+        );
         store
-            .list_dreamer_attempts(DreamerReceiptKey {
+            .list_memory_classifier_attempts(MemoryClassifierReceiptKey {
                 project: "git:identity",
-                producer: DREAMER_RECEIPT_PRODUCER,
+                producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                 operation_key: &operation_key,
             })
             .unwrap()
@@ -33298,13 +32142,15 @@ mod tests {
     fn scheduler_receipt(
         store: &MemoryStore,
         command_id: &str,
-    ) -> Option<memory_store::dreamer_ledger::DreamerReceipt> {
-        let operation_key =
-            dreamer_operation_key(dreamer_scheduler::SCHEDULER_LEDGER_SESSION, command_id);
+    ) -> Option<memory_store::memory_classifier_ledger::MemoryClassifierReceipt> {
+        let operation_key = memory_classifier_operation_key(
+            memory_classifier_scheduler::SCHEDULER_LEDGER_SESSION,
+            command_id,
+        );
         store
-            .lookup_dreamer_receipt(DreamerReceiptKey {
+            .lookup_memory_classifier_receipt(MemoryClassifierReceiptKey {
                 project: "git:identity",
-                producer: DREAMER_RECEIPT_PRODUCER,
+                producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                 operation_key: &operation_key,
             })
             .unwrap()
@@ -33314,10 +32160,10 @@ mod tests {
     /// `MODULE` puts a project on the scheduler; without one nothing is
     /// scheduled, and a task with no Rust-owned inputs leases nothing to run.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_scheduler_sees_only_user_scheduled_module_projects() {
-        use dreamer_scheduler::SchedulerHost;
+    async fn memory_classifier_scheduler_sees_only_user_scheduled_module_projects() {
+        use memory_classifier_scheduler::SchedulerHost;
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let bridge = harness.scheduler_bridge();
         assert!(
             bridge.scheduled_projects().unwrap().is_empty(),
@@ -33325,14 +32171,14 @@ mod tests {
         );
 
         // The route is bound under the configuration the loader produces from
-        // the tier files. A project tier that sets every Dreamer key, with a
+        // the tier files. A project tier that sets every MemoryClassifier key, with a
         // valid cron, is dropped with a warning per key before it reaches the
         // binding, so the bridge schedules nothing; the same schedule at the
         // user tier puts the project on the scheduler.
         let project_config = Path::new(&harness.route_root).join(".eidnara");
         std::fs::create_dir_all(&project_config).unwrap();
         let hostile = json!({
-            "dreamer": {
+            "memory_classifier": {
                 "inject_docs": true,
                 "tasks": { "review-user-memories": { "schedule": "*/15 * * * *" } }
             },
@@ -33352,8 +32198,8 @@ mod tests {
             "one warning per ignored key: {warnings:?}"
         );
         for pointer in [
-            "/dreamer/inject_docs",
-            "/dreamer/tasks/review-user-memories/schedule",
+            "/memory_classifier/inject_docs",
+            "/memory_classifier/tasks/review-user-memories/schedule",
             "/user_memories/enabled",
         ] {
             assert!(
@@ -33365,7 +32211,7 @@ mod tests {
         let from_project_tier =
             cache.effective_for_paths(&user_path, Path::new(&harness.route_root));
         assert_eq!(
-            from_project_tier.dreamer_review_user_memories_schedule,
+            from_project_tier.memory_classifier_review_user_memories_schedule,
             None
         );
         let mut route_binding = binding_with_harness(&harness.route_root, "pi", "ses");
@@ -33378,14 +32224,14 @@ mod tests {
 
         std::fs::write(
             &user_path,
-            r#"{ "dreamer": { "tasks": { "review-user-memories": { "schedule": "*/15 * * * *" } } } }"#,
+            r#"{ "memory_classifier": { "tasks": { "review-user-memories": { "schedule": "*/15 * * * *" } } } }"#,
         )
         .unwrap();
         let from_user_tier = config::ConfigCache::default()
             .effective_for_paths(&user_path, Path::new(&harness.route_root));
         assert_eq!(
             from_user_tier
-                .dreamer_review_user_memories_schedule
+                .memory_classifier_review_user_memories_schedule
                 .as_deref(),
             Some("*/15 * * * *")
         );
@@ -33404,14 +32250,14 @@ mod tests {
         let outcome = bridge
             .run_task(
                 &projects[0],
-                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                memory_classifier_scheduler::REVIEW_USER_MEMORIES_TASK,
                 "slot",
             )
             .await;
         assert!(
             matches!(
                 outcome,
-                dreamer_scheduler::TaskRunOutcome::NotRunnable { .. }
+                memory_classifier_scheduler::TaskRunOutcome::NotRunnable { .. }
             ),
             "{outcome:?}"
         );
@@ -33431,10 +32277,10 @@ mod tests {
     /// project list, because the scheduler drops the pending slot of any
     /// project missing from the list.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_scheduler_bridge_reports_a_store_failure_instead_of_no_projects() {
-        use dreamer_scheduler::SchedulerHost;
+    async fn memory_classifier_scheduler_bridge_reports_a_store_failure_instead_of_no_projects() {
+        use memory_classifier_scheduler::SchedulerHost;
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         harness.schedule(Some("*/15 * * * *"));
         let bridge = harness.scheduler_bridge();
         assert_eq!(bridge.scheduled_projects().unwrap().len(), 1);
@@ -33452,16 +32298,17 @@ mod tests {
     /// The most recently bound binding determines the root's schedule and
     /// harness. A newer binding without a schedule unschedules the project.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_scheduler_bridge_follows_the_most_recent_binding_on_a_root() {
-        use dreamer_scheduler::SchedulerHost;
+    async fn memory_classifier_scheduler_bridge_follows_the_most_recent_binding_on_a_root() {
+        use memory_classifier_scheduler::SchedulerHost;
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let bridge = harness.scheduler_bridge();
         let root = harness.route_root.clone();
         let bind = |channel: u16, harness_name: &str, schedule: Option<&str>| {
             let mut route_binding = binding_with_harness(&root, harness_name, "ses");
-            route_binding.config.dreamer_review_user_memories_schedule =
-                schedule.map(str::to_string);
+            route_binding
+                .config
+                .memory_classifier_review_user_memories_schedule = schedule.map(str::to_string);
             harness
                 .handler
                 .bind_route(test_route(channel), route_binding);
@@ -33507,10 +32354,10 @@ mod tests {
     /// Several route roots can bind to one authority project; the scheduler
     /// reports that project once, under its most recently bound root.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_scheduler_bridge_reports_a_project_once_across_its_roots() {
-        use dreamer_scheduler::SchedulerHost;
+    async fn memory_classifier_scheduler_bridge_reports_a_project_once_across_its_roots() {
+        use memory_classifier_scheduler::SchedulerHost;
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let bridge = harness.scheduler_bridge();
         harness.schedule(Some("*/15 * * * *"));
         let worktree = harness._dir.path().join("worktree");
@@ -33520,8 +32367,9 @@ mod tests {
             .bind_authority_route("context", "git:identity", worktree.to_str().unwrap())
             .unwrap();
         let mut route_binding = binding_with_harness(worktree.to_str().unwrap(), "pi", "ses-2");
-        route_binding.config.dreamer_review_user_memories_schedule =
-            Some("*/5 * * * *".to_string());
+        route_binding
+            .config
+            .memory_classifier_review_user_memories_schedule = Some("*/5 * * * *".to_string());
         harness.handler.bind_route(test_route(8), route_binding);
 
         let projects = bridge.scheduled_projects().unwrap();
@@ -33551,11 +32399,11 @@ mod tests {
     /// Both projects have equal generations, so generation checking cannot
     /// distinguish them.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_scheduler_bridge_refuses_a_root_that_moved_to_another_project() {
-        use dreamer_scheduler::SchedulerHost;
+    async fn memory_classifier_scheduler_bridge_refuses_a_root_that_moved_to_another_project() {
+        use memory_classifier_scheduler::SchedulerHost;
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         harness.schedule(Some("*/15 * * * *"));
         harness.install_task_inputs(&classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS));
         let bridge = harness.scheduler_bridge();
@@ -33583,12 +32431,12 @@ mod tests {
         let outcome = bridge
             .run_task(
                 &projects[0],
-                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                memory_classifier_scheduler::REVIEW_USER_MEMORIES_TASK,
                 "moved",
             )
             .await;
         match outcome {
-            dreamer_scheduler::TaskRunOutcome::Ran { response } => {
+            memory_classifier_scheduler::TaskRunOutcome::Ran { response } => {
                 assert_eq!(
                     response["code"],
                     json!("authority_project_mismatch"),
@@ -33602,15 +32450,17 @@ mod tests {
             0,
             "nothing dispatched"
         );
-        let operation_key =
-            dreamer_operation_key(dreamer_scheduler::SCHEDULER_LEDGER_SESSION, "moved");
+        let operation_key = memory_classifier_operation_key(
+            memory_classifier_scheduler::SCHEDULER_LEDGER_SESSION,
+            "moved",
+        );
         for project in ["git:identity", "git:other"] {
             assert!(
                 harness
                     .store
-                    .lookup_dreamer_receipt(DreamerReceiptKey {
+                    .lookup_memory_classifier_receipt(MemoryClassifierReceiptKey {
                         project,
-                        producer: DREAMER_RECEIPT_PRODUCER,
+                        producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                         operation_key: &operation_key,
                     })
                     .unwrap()
@@ -33625,8 +32475,9 @@ mod tests {
     /// scheduler keeps the slot due instead of recording the failure on the
     /// lease and moving on.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_scheduler_bridge_reports_a_store_failure_inside_the_run_as_unavailable() {
-        use dreamer_scheduler::SchedulerHost;
+    async fn memory_classifier_scheduler_bridge_reports_a_store_failure_inside_the_run_as_unavailable()
+     {
+        use memory_classifier_scheduler::SchedulerHost;
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -33637,7 +32488,7 @@ mod tests {
                 text: classify_manifest(&ids),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         harness.schedule(Some("*/15 * * * *"));
         harness.install_task_inputs(&classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS));
         let bridge = harness.scheduler_bridge();
@@ -33648,14 +32499,14 @@ mod tests {
         let outcome = bridge
             .run_task(
                 &projects[0],
-                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                memory_classifier_scheduler::REVIEW_USER_MEMORIES_TASK,
                 "unavailable",
             )
             .await;
         assert!(
             matches!(
                 &outcome,
-                dreamer_scheduler::TaskRunOutcome::StoreUnavailable { reason }
+                memory_classifier_scheduler::TaskRunOutcome::StoreUnavailable { reason }
                     if reason.starts_with("authority_lookup_failed:")
             ),
             "{outcome:?}"
@@ -33667,12 +32518,12 @@ mod tests {
         let outcome = bridge
             .run_task(
                 &projects[0],
-                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                memory_classifier_scheduler::REVIEW_USER_MEMORIES_TASK,
                 "unavailable",
             )
             .await;
         match outcome {
-            dreamer_scheduler::TaskRunOutcome::Ran { response } => {
+            memory_classifier_scheduler::TaskRunOutcome::Ran { response } => {
                 assert_eq!(response["classified"], json!(1), "{response}");
             }
             other => panic!("{other:?}"),
@@ -33682,8 +32533,8 @@ mod tests {
 
     /// A pool read against a kernel that is not ready leaves the receipt open with no attempt; the bridge reports it as `StoreUnavailable` so the slot is retained and the same command id is asked again once the kernel opens, instead of the slot advancing past an orphaned receipt.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_scheduler_bridge_retains_the_slot_while_the_kernel_is_starting() {
-        use dreamer_scheduler::SchedulerHost;
+    async fn memory_classifier_scheduler_bridge_retains_the_slot_while_the_kernel_is_starting() {
+        use memory_classifier_scheduler::SchedulerHost;
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -33691,13 +32542,13 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(classify_manifest(&ids));
-        let predecessor = DreamerHarness::start(&producer).await;
+        let predecessor = MemoryClassifierHarness::start(&producer).await;
         let kernel_root = predecessor._dir.path().join("kernel");
         predecessor
             .handler
             .kernel
             .mark_unavailable(kernel_routes::UnavailableKind::Store);
-        let harness = DreamerHarness::start_with_store(&producer, &predecessor);
+        let harness = MemoryClassifierHarness::start_with_store(&producer, &predecessor);
         assert_eq!(
             harness.handler.kernel.state(),
             kernel_routes::KernelState::Starting
@@ -33711,14 +32562,14 @@ mod tests {
         let outcome = bridge
             .run_task(
                 &projects[0],
-                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                memory_classifier_scheduler::REVIEW_USER_MEMORIES_TASK,
                 "kernel-starting",
             )
             .await;
         assert!(
             matches!(
                 &outcome,
-                dreamer_scheduler::TaskRunOutcome::StoreUnavailable { reason }
+                memory_classifier_scheduler::TaskRunOutcome::StoreUnavailable { reason }
                     if reason.starts_with("kernel_unavailable:")
             ),
             "{outcome:?}"
@@ -33728,7 +32579,7 @@ mod tests {
             scheduler_receipt(&harness.store, "kernel-starting")
                 .expect("the receipt is written before the pool read")
                 .state,
-            DreamerReceiptState::InProgress { .. }
+            MemoryClassifierReceiptState::InProgress { .. }
         ));
 
         harness
@@ -33743,12 +32594,12 @@ mod tests {
         let outcome = bridge
             .run_task(
                 &projects[0],
-                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                memory_classifier_scheduler::REVIEW_USER_MEMORIES_TASK,
                 "kernel-starting",
             )
             .await;
         match outcome {
-            dreamer_scheduler::TaskRunOutcome::Ran { response } => {
+            memory_classifier_scheduler::TaskRunOutcome::Ran { response } => {
                 assert_eq!(response["classified"], json!(1), "{response}");
             }
             other => panic!("{other:?}"),
@@ -33758,8 +32609,9 @@ mod tests {
 
     /// An authority read that fails immediately before the canonical write is recorded on the receipt as terminal under `authority_unverified`; the bridge treats that as the command's answer, not a store outage, so the slot is consumed rather than retained against a receipt that replays the same failure forever.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_scheduler_bridge_consumes_a_slot_whose_write_time_authority_read_failed() {
-        use dreamer_scheduler::SchedulerHost;
+    async fn memory_classifier_scheduler_bridge_consumes_a_slot_whose_write_time_authority_read_failed()
+     {
+        use memory_classifier_scheduler::SchedulerHost;
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -33767,7 +32619,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(classify_manifest(&ids));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         harness.schedule(Some("*/15 * * * *"));
         harness.install_task_inputs(&classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS));
         let bridge = harness.scheduler_bridge();
@@ -33781,12 +32633,12 @@ mod tests {
         let outcome = bridge
             .run_task(
                 &projects[0],
-                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                memory_classifier_scheduler::REVIEW_USER_MEMORIES_TASK,
                 "unverified",
             )
             .await;
         match &outcome {
-            dreamer_scheduler::TaskRunOutcome::Ran { response } => {
+            memory_classifier_scheduler::TaskRunOutcome::Ran { response } => {
                 assert_eq!(
                     response["code"],
                     json!("authority_unverified"),
@@ -33801,22 +32653,22 @@ mod tests {
             scheduler_receipt(&harness.store, "unverified")
                 .expect("the receipt is complete")
                 .state,
-            DreamerReceiptState::Complete {
-                terminal_kind: DreamerTerminalKind::Failed,
+            MemoryClassifierReceiptState::Complete {
+                terminal_kind: MemoryClassifierTerminalKind::Failed,
                 ..
             }
         ));
         let replay = bridge
             .run_task(
                 &projects[0],
-                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                memory_classifier_scheduler::REVIEW_USER_MEMORIES_TASK,
                 "unverified",
             )
             .await;
         assert!(
             matches!(
                 &replay,
-                dreamer_scheduler::TaskRunOutcome::Ran { response }
+                memory_classifier_scheduler::TaskRunOutcome::Ran { response }
                     if response["code"] == json!("authority_unverified")
             ),
             "{replay:?}"
@@ -33829,25 +32681,28 @@ mod tests {
     /// started, and a scheduler that restarts mid-run recovers the interrupted
     /// slot through its receipt instead of dispatching again.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_scheduled_run_writes_one_receipt_and_a_restart_adds_no_attempt() {
-        use dreamer_scheduler::{DreamerScheduler, ManualClock, TickEvent, slot_command_id};
+    async fn memory_classifier_scheduled_run_writes_one_receipt_and_a_restart_adds_no_attempt() {
+        use memory_classifier_scheduler::{
+            ManualClock, MemoryClassifierScheduler, TickEvent, slot_command_id,
+        };
         const T0: i64 = 1_767_225_600_000;
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         harness.schedule(Some("*/15 * * * *"));
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         harness.install_task_inputs(&payload);
-        let bridge: Arc<dyn dreamer_scheduler::SchedulerHost> =
+        let bridge: Arc<dyn memory_classifier_scheduler::SchedulerHost> =
             Arc::new(harness.scheduler_bridge());
         let due = T0 + 15 * 60_000;
-        let command_id = slot_command_id(dreamer_scheduler::REVIEW_USER_MEMORIES_TASK, due);
+        let command_id =
+            slot_command_id(memory_classifier_scheduler::REVIEW_USER_MEMORIES_TASK, due);
 
         // On entry to `start`, the receipt is already committed `IN_PROGRESS`.
         let (receipt_at_start, seen_at_start) = {
             let store = Arc::clone(&harness.store);
             let command_id = command_id.clone();
-            let seen: Arc<Mutex<Option<DreamerReceiptState>>> = Arc::new(Mutex::new(None));
+            let seen: Arc<Mutex<Option<MemoryClassifierReceiptState>>> = Arc::new(Mutex::new(None));
             let sink = Arc::clone(&seen);
             (
                 Box::new(move || {
@@ -33860,7 +32715,7 @@ mod tests {
         *producer.on_start.lock().unwrap() = Some(receipt_at_start);
         producer.block_output.store(true, Ordering::SeqCst);
         let clock = ManualClock::at(T0 + 1_000);
-        let mut scheduler = DreamerScheduler::new(clock.shared());
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
         assert!(scheduler.tick(bridge.as_ref()).await.is_empty());
         clock.advance(Duration::from_secs(15 * 60));
         tokio::select! {
@@ -33874,7 +32729,7 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert_eq!(
             *seen_at_start.lock().unwrap(),
-            Some(DreamerReceiptState::InProgress { generation: 1 }),
+            Some(MemoryClassifierReceiptState::InProgress { generation: 1 }),
             "the receipt precedes the dispatch"
         );
         assert!(
@@ -33887,11 +32742,11 @@ mod tests {
         let receipt = scheduler_receipt(&harness.store, &command_id).expect("receipt");
         assert_eq!(
             receipt.state,
-            DreamerReceiptState::InProgress { generation: 1 }
+            MemoryClassifierReceiptState::InProgress { generation: 1 }
         );
         assert_eq!(
             receipt.binding.ledger_session,
-            dreamer_scheduler::SCHEDULER_LEDGER_SESSION
+            memory_classifier_scheduler::SCHEDULER_LEDGER_SESSION
         );
         let attempts = scheduler_attempts(&harness.store, &command_id);
         assert_eq!(attempts.len(), 1);
@@ -33904,7 +32759,7 @@ mod tests {
         // period later, while the predecessor's lease is still live, so the
         // ledger hands it the interrupted claim and the interrupted slot is
         // what runs, through the receipt's recovery path.
-        let restarted = DreamerHarness::start_with_store(&producer, &harness);
+        let restarted = MemoryClassifierHarness::start_with_store(&producer, &harness);
         restarted.schedule(Some("*/15 * * * *"));
         restarted.install_task_inputs(&payload);
         producer
@@ -33912,10 +32767,10 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(RunState::Missing { detail: None });
-        let bridge: Arc<dyn dreamer_scheduler::SchedulerHost> =
+        let bridge: Arc<dyn memory_classifier_scheduler::SchedulerHost> =
             Arc::new(restarted.scheduler_bridge());
         let clock = ManualClock::at(due + 1);
-        let mut successor = DreamerScheduler::new(clock.shared());
+        let mut successor = MemoryClassifierScheduler::new(clock.shared());
         assert!(successor.tick(bridge.as_ref()).await.is_empty());
         clock.advance(Duration::from_secs(15 * 60));
         let events = successor.tick(bridge.as_ref()).await;
@@ -33923,14 +32778,14 @@ mod tests {
             [
                 TickEvent::Ran {
                     due_at_ms,
-                    outcome: dreamer_scheduler::TaskRunOutcome::Ran { response },
+                    outcome: memory_classifier_scheduler::TaskRunOutcome::Ran { response },
                     ..
                 },
             ] => {
                 assert_eq!(*due_at_ms, due, "the interrupted slot, not the new one");
                 assert_eq!(
                     response["code"],
-                    json!("dreamer_outcome_unknown"),
+                    json!("memory_classifier_outcome_unknown"),
                     "{response}"
                 );
             }
@@ -33946,15 +32801,15 @@ mod tests {
         assert_eq!(attempts.len(), 1);
         assert_eq!(
             attempts[0].terminal_kind,
-            Some(DreamerTerminalKind::Unknown)
+            Some(MemoryClassifierTerminalKind::Unknown)
         );
         assert!(matches!(
             scheduler_receipt(&harness.store, &command_id)
                 .unwrap()
                 .state,
-            DreamerReceiptState::Complete {
+            MemoryClassifierReceiptState::Complete {
                 generation: 1,
-                terminal_kind: DreamerTerminalKind::Unknown,
+                terminal_kind: MemoryClassifierTerminalKind::Unknown,
                 ..
             }
         ));
@@ -33963,7 +32818,7 @@ mod tests {
             scheduler_receipt(
                 &harness.store,
                 &slot_command_id(
-                    dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                    memory_classifier_scheduler::REVIEW_USER_MEMORIES_TASK,
                     due + 15 * 60_000
                 )
             )
@@ -33975,45 +32830,43 @@ mod tests {
     /// by the next generation, which dispatches exactly once under sessions a
     /// predecessor could not have used.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_takes_over_an_undispatched_receipt_and_dispatches_once() {
+    async fn memory_classifier_run_task_takes_over_an_undispatched_receipt_and_dispatches_once() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         // The predecessor's producer connection failed, so its receipt is open with no attempt row.
-        producer
-            .connect_errors
-            .lock()
-            .unwrap()
-            .push_back(HistorianProducerError::Protocol("runtime away".to_string()));
-        let harness = DreamerHarness::start(&producer).await;
+        producer.connect_errors.lock().unwrap().push_back(
+            HistorySummarizerProducerError::Protocol("runtime away".to_string()),
+        );
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         // The connect failure exhausts the one-model chain and the failure record completes the receipt, so the crash shape is written back directly: an open receipt whose only attempt row was proven never sent.
         let failed = harness.classify(payload.clone(), "takeover").await;
-        assert_eq!(error_code_of(&failed), "dreamer_run_failed");
-        let operation_key = dreamer_operation_key("ses", "takeover");
-        let key = DreamerReceiptKey {
+        assert_eq!(error_code_of(&failed), "memory_classifier_run_failed");
+        let operation_key = memory_classifier_operation_key("ses", "takeover");
+        let key = MemoryClassifierReceiptKey {
             project: "git:identity",
-            producer: DREAMER_RECEIPT_PRODUCER,
+            producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
             operation_key: &operation_key,
         };
         harness
             .store
             .execute_tag_sql_for_test(&format!(
-                "UPDATE dreamer_receipts SET state = 'in_progress', terminal_kind = NULL, result_json = NULL WHERE operation_key = '{operation_key}';
-                 INSERT INTO dreamer_attempts (project, producer, operation_key, generation, attempt_index, model,
+                "UPDATE memory_classifier_receipts SET state = 'in_progress', terminal_kind = NULL, result_json = NULL WHERE operation_key = '{operation_key}';
+                 INSERT INTO memory_classifier_attempts (project, producer, operation_key, generation, attempt_index, model,
                      prompt_template_version, system_prompt_hash, schema_version, child_session, project_root, harness,
                      dispatched_at_ms, terminal_kind, terminal_at_ms)
-                 VALUES ('git:identity', '{DREAMER_RECEIPT_PRODUCER}', '{operation_key}', 1, 0, 'test/model', 1, '{}', 1, 'never-sent', '/repo', 'pi', 1, 'not_sent', 1)",
+                 VALUES ('git:identity', '{MEMORY_CLASSIFIER_RECEIPT_PRODUCER}', '{operation_key}', 1, 0, 'test/model', 1, '{}', 1, 'never-sent', '/repo', 'pi', 1, 'not_sent', 1)",
                 "0".repeat(64)
             ))
             .unwrap();
         assert_eq!(
             harness
                 .store
-                .lookup_dreamer_receipt(key)
+                .lookup_memory_classifier_receipt(key)
                 .unwrap()
                 .unwrap()
                 .state,
-            DreamerReceiptState::InProgress { generation: 1 }
+            MemoryClassifierReceiptState::InProgress { generation: 1 }
         );
         assert_eq!(harness.attempts("takeover").len(), 1);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
@@ -34040,9 +32893,9 @@ mod tests {
         );
         assert!(matches!(
             harness.receipt("takeover").state,
-            DreamerReceiptState::Complete {
+            MemoryClassifierReceiptState::Complete {
                 generation: 2,
-                terminal_kind: DreamerTerminalKind::Complete,
+                terminal_kind: MemoryClassifierTerminalKind::Complete,
                 ..
             }
         ));
@@ -34054,34 +32907,40 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .finish_dreamer_attempt(key, 1, 0, DreamerTerminalKind::Complete, now_ms())
+                .finish_memory_classifier_attempt(
+                    key,
+                    1,
+                    0,
+                    MemoryClassifierTerminalKind::Complete,
+                    now_ms()
+                )
                 .unwrap(),
-            DreamerTransition::Fenced
+            MemoryClassifierTransition::Fenced
         );
     }
 
     /// An await that runs out of time is a cancellation after dispatch: the
     /// attempt ends `cancelled` with no further read of the run and is counted
-    /// by `count_dreamer_attempts`.
+    /// by `count_memory_classifier_attempts`.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_records_a_cancelled_attempt_as_terminal_and_billable() {
+    async fn memory_classifier_run_task_records_a_cancelled_attempt_as_terminal_and_billable() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .await_results
             .lock()
             .unwrap()
-            .push_back(Err(HistorianProducerError::TimedOut));
+            .push_back(Err(HistorySummarizerProducerError::TimedOut));
         // An answer that arrives after the deadline must not be read: the request's time is spent.
         producer
             .outputs
             .lock()
             .unwrap()
             .push_back(classify_manifest(&ids));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let outcome = harness.classify(payload.clone(), "cancelled").await;
-        assert_eq!(error_code_of(&outcome), "dreamer_run_failed");
+        assert_eq!(error_code_of(&outcome), "memory_classifier_run_failed");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert_eq!(
             producer.redrains.load(Ordering::SeqCst),
@@ -34092,19 +32951,19 @@ mod tests {
         assert_eq!(attempts.len(), 1);
         assert_eq!(
             attempts[0].terminal_kind,
-            Some(DreamerTerminalKind::Cancelled)
+            Some(MemoryClassifierTerminalKind::Cancelled)
         );
         assert_eq!(
             harness
                 .store
-                .count_dreamer_attempts("git:identity", 0)
+                .count_memory_classifier_attempts("git:identity", 0)
                 .unwrap(),
             1
         );
         assert!(matches!(
             harness.receipt("cancelled").state,
-            DreamerReceiptState::Complete {
-                terminal_kind: DreamerTerminalKind::Failed,
+            MemoryClassifierReceiptState::Complete {
+                terminal_kind: MemoryClassifierTerminalKind::Failed,
                 ..
             }
         ));
@@ -34113,7 +32972,7 @@ mod tests {
     /// A request timeout above the host ceiling is clamped to it, so no request
     /// holds a producer past one await.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_clamps_the_request_timeout_to_the_host_ceiling() {
+    async fn memory_classifier_run_task_clamps_the_request_timeout_to_the_host_ceiling() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -34121,7 +32980,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(classify_manifest(&ids));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, 7 * 24 * 60 * 60 * 1000);
         let outcome = harness.classify(payload, "clamped").await;
         assert_eq!(response_of(outcome)["ok"], json!(true));
@@ -34139,17 +32998,17 @@ mod tests {
     /// so a handshake that never completes would otherwise hold the request
     /// for as long as the connector allows, outside `timeout_ms`.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_bounds_producer_startup_by_the_request_deadline() {
+    async fn memory_classifier_run_task_bounds_producer_startup_by_the_request_deadline() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         producer.block_connect.store(true, Ordering::SeqCst);
         let request = harness.classify(classify_payload(&ids, 1_000), "stalled-connect");
         let outcome = tokio::time::timeout(Duration::from_secs(10), request)
             .await
             .expect("connect is cut off by the request deadline");
         producer.block_connect.store(false, Ordering::SeqCst);
-        assert_eq!(error_code_of(&outcome), "dreamer_run_failed");
+        assert_eq!(error_code_of(&outcome), "memory_classifier_run_failed");
         assert!(
             matches!(&outcome, PreparedOutcome::Error { message, .. } if message.contains("during producer startup")),
             "{outcome:?}"
@@ -34159,8 +33018,8 @@ mod tests {
         assert!(harness.attempts("stalled-connect").is_empty());
         assert!(matches!(
             harness.receipt("stalled-connect").state,
-            DreamerReceiptState::Complete {
-                terminal_kind: DreamerTerminalKind::Failed,
+            MemoryClassifierReceiptState::Complete {
+                terminal_kind: MemoryClassifierTerminalKind::Failed,
                 ..
             }
         ));
@@ -34169,7 +33028,7 @@ mod tests {
     /// Once a project has spent its attempt budget, a new command is refused
     /// before any receipt or dispatch, while a completed command still replays.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_refuses_a_project_whose_attempt_budget_is_exhausted() {
+    async fn memory_classifier_run_task_refuses_a_project_whose_attempt_budget_is_exhausted() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -34177,44 +33036,47 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(classify_manifest(&ids));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let first = harness.classify(payload.clone(), "within-budget").await;
         assert_eq!(response_of(first)["ok"], json!(true));
         // Fill the durable count to the budget with attempts the ledger already holds.
-        let operation_key = dreamer_operation_key("ses", "within-budget");
+        let operation_key = memory_classifier_operation_key("ses", "within-budget");
         harness
             .store
             .execute_tag_sql_for_test(&format!(
                 "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < {})
-                 INSERT INTO dreamer_attempts (project, producer, operation_key, generation, attempt_index, model,
+                 INSERT INTO memory_classifier_attempts (project, producer, operation_key, generation, attempt_index, model,
                      prompt_template_version, system_prompt_hash, schema_version, child_session, project_root, harness,
                      dispatched_at_ms, terminal_kind, terminal_at_ms)
                  SELECT project, producer, operation_key, generation, n, model, prompt_template_version,
                      system_prompt_hash, schema_version, child_session || n, project_root, harness, dispatched_at_ms,
                      'failed', dispatched_at_ms
-                 FROM dreamer_attempts, seq WHERE operation_key = '{operation_key}'",
-                DREAMER_ATTEMPT_BUDGET - 1
+                 FROM memory_classifier_attempts, seq WHERE operation_key = '{operation_key}'",
+                MEMORY_CLASSIFIER_ATTEMPT_BUDGET - 1
             ))
             .unwrap();
         assert_eq!(
             harness
                 .store
-                .count_dreamer_attempts("git:identity", 0)
+                .count_memory_classifier_attempts("git:identity", 0)
                 .unwrap(),
-            DREAMER_ATTEMPT_BUDGET
+            MEMORY_CLASSIFIER_ATTEMPT_BUDGET
         );
 
         let refused = harness.classify(payload.clone(), "over-budget").await;
-        assert_eq!(error_code_of(&refused), "dreamer_budget_exhausted");
+        assert_eq!(
+            error_code_of(&refused),
+            "memory_classifier_budget_exhausted"
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1, "no dispatch");
         assert!(
             harness
                 .store
-                .lookup_dreamer_receipt(DreamerReceiptKey {
+                .lookup_memory_classifier_receipt(MemoryClassifierReceiptKey {
                     project: "git:identity",
-                    producer: DREAMER_RECEIPT_PRODUCER,
-                    operation_key: &dreamer_operation_key("ses", "over-budget"),
+                    producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
+                    operation_key: &memory_classifier_operation_key("ses", "over-budget"),
                 })
                 .unwrap()
                 .is_none(),
@@ -34228,7 +33090,10 @@ mod tests {
         let mut changed = payload;
         changed["timeout_ms"] = json!(TEST_CLASSIFY_TIMEOUT_MS + 1);
         let conflict = harness.classify(changed, "within-budget").await;
-        assert_eq!(error_code_of(&conflict), "dreamer_request_conflict");
+        assert_eq!(
+            error_code_of(&conflict),
+            "memory_classifier_request_conflict"
+        );
         assert_eq!(producer.connects.load(Ordering::SeqCst), connects);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
@@ -34237,7 +33102,8 @@ mod tests {
     /// count is read again before each later model, so a request admitted at
     /// `budget - 1` dispatches once, then fails closed through its receipt.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_stops_the_chain_when_the_attempt_budget_is_spent_mid_chain() {
+    async fn memory_classifier_run_task_stops_the_chain_when_the_attempt_budget_is_spent_mid_chain()
+    {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -34245,46 +33111,48 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(classify_manifest(&ids));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         assert_eq!(
             response_of(harness.classify(payload.clone(), "spender").await)["ok"],
             json!(true)
         );
-        let spender_key = dreamer_operation_key("ses", "spender");
+        let spender_key = memory_classifier_operation_key("ses", "spender");
         harness
             .store
             .execute_tag_sql_for_test(&format!(
                 "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < {})
-                 INSERT INTO dreamer_attempts (project, producer, operation_key, generation, attempt_index, model,
+                 INSERT INTO memory_classifier_attempts (project, producer, operation_key, generation, attempt_index, model,
                      prompt_template_version, system_prompt_hash, schema_version, child_session, project_root, harness,
                      dispatched_at_ms, terminal_kind, terminal_at_ms)
                  SELECT project, producer, operation_key, generation, n, model, prompt_template_version,
                      system_prompt_hash, schema_version, child_session || n, project_root, harness, dispatched_at_ms,
                      'failed', dispatched_at_ms
-                 FROM dreamer_attempts, seq WHERE operation_key = '{spender_key}'",
-                DREAMER_ATTEMPT_BUDGET - 2
+                 FROM memory_classifier_attempts, seq WHERE operation_key = '{spender_key}'",
+                MEMORY_CLASSIFIER_ATTEMPT_BUDGET - 2
             ))
             .unwrap();
         assert_eq!(
             harness
                 .store
-                .count_dreamer_attempts("git:identity", 0)
+                .count_memory_classifier_attempts("git:identity", 0)
                 .unwrap(),
-            DREAMER_ATTEMPT_BUDGET - 1
+            MEMORY_CLASSIFIER_ATTEMPT_BUDGET - 1
         );
 
         // Every model in the chain would fail; only the first may be paid for.
         {
             let mut results = producer.await_results.lock().unwrap();
             for _ in 0..3 {
-                results.push_back(Err(HistorianProducerError::Protocol("refused".to_string())));
+                results.push_back(Err(HistorySummarizerProducerError::Protocol(
+                    "refused".to_string(),
+                )));
             }
         }
         let mut chain = payload;
         chain["model_chain"] = json!(["test/first", "test/second", "test/third"]);
         let outcome = harness.classify(chain.clone(), "last-admitted").await;
-        assert_eq!(error_code_of(&outcome), "dreamer_run_failed");
+        assert_eq!(error_code_of(&outcome), "memory_classifier_run_failed");
         assert!(
             matches!(&outcome, PreparedOutcome::Error { message, .. } if message.contains("budget exhausted after 1 attempt")),
             "{outcome:?}"
@@ -34300,25 +33168,25 @@ mod tests {
                 .iter()
                 .map(|attempt| (attempt.attempt_index, attempt.terminal_kind))
                 .collect::<Vec<_>>(),
-            vec![(0, Some(DreamerTerminalKind::Failed))]
+            vec![(0, Some(MemoryClassifierTerminalKind::Failed))]
         );
         assert!(matches!(
             harness.receipt("last-admitted").state,
-            DreamerReceiptState::Complete {
-                terminal_kind: DreamerTerminalKind::Failed,
+            MemoryClassifierReceiptState::Complete {
+                terminal_kind: MemoryClassifierTerminalKind::Failed,
                 ..
             }
         ));
         assert_eq!(
             harness
                 .store
-                .count_dreamer_attempts("git:identity", 0)
+                .count_memory_classifier_attempts("git:identity", 0)
                 .unwrap(),
-            DREAMER_ATTEMPT_BUDGET
+            MEMORY_CLASSIFIER_ATTEMPT_BUDGET
         );
         // The recorded failure replays; the window passing does not reopen it.
         let replayed = harness.classify(chain, "last-admitted").await;
-        assert_eq!(error_code_of(&replayed), "dreamer_run_failed");
+        assert_eq!(error_code_of(&replayed), "memory_classifier_run_failed");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
     }
 
@@ -34326,33 +33194,33 @@ mod tests {
     /// `start` returning and the handle write) cannot be disproved a dispatch,
     /// so it settles unknown without asking the runtime or dispatching again.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_settles_an_open_attempt_without_a_handle_as_unknown() {
+    async fn memory_classifier_run_task_settles_an_open_attempt_without_a_handle_as_unknown() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         harness
             .crash_after_dispatch(&producer, payload.clone(), "no-handle")
             .await;
-        let operation_key = dreamer_operation_key("ses", "no-handle");
+        let operation_key = memory_classifier_operation_key("ses", "no-handle");
         harness
             .store
             .execute_tag_sql_for_test(&format!(
-                "UPDATE dreamer_attempts SET run_handle = NULL WHERE operation_key = '{operation_key}'"
+                "UPDATE memory_classifier_attempts SET run_handle = NULL WHERE operation_key = '{operation_key}'"
             ))
             .unwrap();
         let resumed = harness.classify(payload.clone(), "no-handle").await;
-        assert_eq!(error_code_of(&resumed), "dreamer_outcome_unknown");
+        assert_eq!(error_code_of(&resumed), "memory_classifier_outcome_unknown");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert_eq!(producer.statuses.load(Ordering::SeqCst), 0);
         assert_eq!(
             harness.attempts("no-handle")[0].terminal_kind,
-            Some(DreamerTerminalKind::Unknown)
+            Some(MemoryClassifierTerminalKind::Unknown)
         );
         assert!(matches!(
             harness.receipt("no-handle").state,
-            DreamerReceiptState::Complete {
-                terminal_kind: DreamerTerminalKind::Unknown,
+            MemoryClassifierReceiptState::Complete {
+                terminal_kind: MemoryClassifierTerminalKind::Unknown,
                 ..
             }
         ));
@@ -34362,7 +33230,7 @@ mod tests {
     /// result the daemon no longer holds once it restarts: the retry finds the
     /// ended attempt, settles unknown, and never dispatches or replays success.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_does_not_replay_a_success_whose_completion_never_landed() {
+    async fn memory_classifier_run_task_does_not_replay_a_success_whose_completion_never_landed() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -34370,52 +33238,55 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(classify_manifest(&ids));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         harness
             .store
             .execute_tag_sql_for_test(
-                "CREATE TRIGGER dreamer_receipt_completion_fault
-                 BEFORE UPDATE OF state ON dreamer_receipts
+                "CREATE TRIGGER memory_classifier_receipt_completion_fault
+                 BEFORE UPDATE OF state ON memory_classifier_receipts
                  BEGIN SELECT RAISE(ABORT, 'injected receipt fault'); END;",
             )
             .unwrap();
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let outcome = harness.classify(payload.clone(), "lost-success").await;
-        assert_eq!(error_code_of(&outcome), "dreamer_ledger_failed");
+        assert_eq!(error_code_of(&outcome), "memory_classifier_ledger_failed");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         let attempts = harness.attempts("lost-success");
         assert_eq!(
             attempts[0].terminal_kind,
-            Some(DreamerTerminalKind::Complete)
+            Some(MemoryClassifierTerminalKind::Complete)
         );
         harness
             .store
-            .execute_tag_sql_for_test("DROP TRIGGER dreamer_receipt_completion_fault;")
+            .execute_tag_sql_for_test("DROP TRIGGER memory_classifier_receipt_completion_fault;")
             .unwrap();
 
         let retried = harness.classify(payload.clone(), "lost-success").await;
-        assert_eq!(error_code_of(&retried), "dreamer_outcome_unknown");
+        assert_eq!(error_code_of(&retried), "memory_classifier_outcome_unknown");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         // The ended attempt keeps its own terminal; only the receipt settles.
         assert_eq!(
             harness.attempts("lost-success")[0].terminal_kind,
-            Some(DreamerTerminalKind::Complete)
+            Some(MemoryClassifierTerminalKind::Complete)
         );
         assert!(matches!(
             harness.receipt("lost-success").state,
-            DreamerReceiptState::Complete {
-                terminal_kind: DreamerTerminalKind::Unknown,
+            MemoryClassifierReceiptState::Complete {
+                terminal_kind: MemoryClassifierTerminalKind::Unknown,
                 ..
             }
         ));
         let replayed = harness.classify(payload, "lost-success").await;
-        assert_eq!(error_code_of(&replayed), "dreamer_outcome_unknown");
+        assert_eq!(
+            error_code_of(&replayed),
+            "memory_classifier_outcome_unknown"
+        );
     }
 
     /// The chain cap is judged at parse time: a chain at the cap is accepted and
     /// one past it is refused before any producer is reached.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_enforces_the_model_chain_cap_before_dispatch() {
+    async fn memory_classifier_run_task_enforces_the_model_chain_cap_before_dispatch() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -34423,7 +33294,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(classify_manifest(&ids));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let chain = |count: usize| -> Vec<String> {
             (0..count)
                 .map(|index| format!("test/model-{index}"))
@@ -34437,10 +33308,10 @@ mod tests {
         assert!(
             harness
                 .store
-                .lookup_dreamer_receipt(DreamerReceiptKey {
+                .lookup_memory_classifier_receipt(MemoryClassifierReceiptKey {
                     project: "git:identity",
-                    producer: DREAMER_RECEIPT_PRODUCER,
-                    operation_key: &dreamer_operation_key("ses", "over-cap"),
+                    producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
+                    operation_key: &memory_classifier_operation_key("ses", "over-cap"),
                 })
                 .unwrap()
                 .is_none()
@@ -34456,7 +33327,7 @@ mod tests {
     /// whose attempt already ended still settles, and a takeover, which would
     /// dispatch, is refused.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_still_settles_open_receipts_when_the_budget_is_exhausted() {
+    async fn memory_classifier_run_task_still_settles_open_receipts_when_the_budget_is_exhausted() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -34464,84 +33335,85 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(classify_manifest(&ids));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         // A completed command supplies the rows the budget is filled from.
         assert_eq!(
             response_of(harness.classify(payload.clone(), "spender").await)["ok"],
             json!(true)
         );
-        producer
-            .await_results
-            .lock()
-            .unwrap()
-            .push_back(Err(HistorianProducerError::Protocol("refused".to_string())));
+        producer.await_results.lock().unwrap().push_back(Err(
+            HistorySummarizerProducerError::Protocol("refused".to_string()),
+        ));
         harness
             .store
             .execute_tag_sql_for_test(
-                "CREATE TRIGGER dreamer_receipt_completion_fault
-                 BEFORE UPDATE OF state ON dreamer_receipts
+                "CREATE TRIGGER memory_classifier_receipt_completion_fault
+                 BEFORE UPDATE OF state ON memory_classifier_receipts
                  BEGIN SELECT RAISE(ABORT, 'injected receipt fault'); END;",
             )
             .unwrap();
         assert_eq!(
             error_code_of(&harness.classify(payload.clone(), "stuck").await),
-            "dreamer_ledger_failed"
+            "memory_classifier_ledger_failed"
         );
         harness
             .store
-            .execute_tag_sql_for_test("DROP TRIGGER dreamer_receipt_completion_fault;")
+            .execute_tag_sql_for_test("DROP TRIGGER memory_classifier_receipt_completion_fault;")
             .unwrap();
-        let spender_key = dreamer_operation_key("ses", "spender");
+        let spender_key = memory_classifier_operation_key("ses", "spender");
         harness
             .store
             .execute_tag_sql_for_test(&format!(
                 "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < {})
-                 INSERT INTO dreamer_attempts (project, producer, operation_key, generation, attempt_index, model,
+                 INSERT INTO memory_classifier_attempts (project, producer, operation_key, generation, attempt_index, model,
                      prompt_template_version, system_prompt_hash, schema_version, child_session, project_root, harness,
                      dispatched_at_ms, terminal_kind, terminal_at_ms)
                  SELECT project, producer, operation_key, generation, n, model, prompt_template_version,
                      system_prompt_hash, schema_version, child_session || n, project_root, harness, dispatched_at_ms,
                      'failed', dispatched_at_ms
-                 FROM dreamer_attempts, seq WHERE operation_key = '{spender_key}'",
-                DREAMER_ATTEMPT_BUDGET
+                 FROM memory_classifier_attempts, seq WHERE operation_key = '{spender_key}'",
+                MEMORY_CLASSIFIER_ATTEMPT_BUDGET
             ))
             .unwrap();
         assert!(
             harness
                 .store
-                .count_dreamer_attempts("git:identity", 0)
+                .count_memory_classifier_attempts("git:identity", 0)
                 .unwrap()
-                >= DREAMER_ATTEMPT_BUDGET
+                >= MEMORY_CLASSIFIER_ATTEMPT_BUDGET
         );
 
         // The stuck command's ended attempt settles even though nothing new may dispatch.
         let settled = harness.classify(payload.clone(), "stuck").await;
-        assert_eq!(error_code_of(&settled), "dreamer_outcome_unknown");
+        assert_eq!(error_code_of(&settled), "memory_classifier_outcome_unknown");
         assert!(matches!(
             harness.receipt("stuck").state,
-            DreamerReceiptState::Complete {
-                terminal_kind: DreamerTerminalKind::Unknown,
+            MemoryClassifierReceiptState::Complete {
+                terminal_kind: MemoryClassifierTerminalKind::Unknown,
                 ..
             }
         ));
         assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
 
         // A receipt with no dispatch marker would be taken over; over budget that is refused instead.
-        let stuck_key = dreamer_operation_key("ses", "stuck");
+        let stuck_key = memory_classifier_operation_key("ses", "stuck");
         harness
             .store
             .execute_tag_sql_for_test(&format!(
-                "UPDATE dreamer_receipts SET state = 'in_progress', terminal_kind = NULL, result_json = NULL WHERE operation_key = '{stuck_key}';
-                 UPDATE dreamer_attempts SET terminal_kind = 'not_sent' WHERE operation_key = '{stuck_key}'"
+                "UPDATE memory_classifier_receipts SET state = 'in_progress', terminal_kind = NULL, result_json = NULL WHERE operation_key = '{stuck_key}';
+                 UPDATE memory_classifier_attempts SET terminal_kind = 'not_sent' WHERE operation_key = '{stuck_key}'"
             ))
             .unwrap();
         let refused = harness.classify(payload, "stuck").await;
-        assert_eq!(error_code_of(&refused), "dreamer_budget_exhausted");
+        assert_eq!(
+            error_code_of(&refused),
+            "memory_classifier_budget_exhausted"
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
         assert_eq!(
             harness.receipt("stuck").state,
-            DreamerReceiptState::InProgress { generation: 1 }
+            MemoryClassifierReceiptState::InProgress { generation: 1 }
         );
     }
 
@@ -34550,7 +33422,7 @@ mod tests {
         format!("memory:test-{seed:02x}")
     }
 
-    /// The memories every [`DreamerHarness`] seeds in the bound project.
+    /// The memories every [`MemoryClassifierHarness`] seeds in the bound project.
     const SEEDED_MEMORIES: u8 = 8;
 
     /// A classify request naming `ids` in the bound project.
@@ -34576,11 +33448,11 @@ mod tests {
 
     /// The request parser, expected-ID set, and manifest validator use the claim's public ID.
     /// A successful run writes one classification observation per memory to
-    /// canonical kernel state under the Dreamer classes this code path stands
+    /// canonical kernel state under the MemoryClassifier classes this code path stands
     /// for, in the bound project's scope, depending on the classified memory,
     /// and the reply carries the write, not the model's text.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_writes_classifications_to_canonical_state() {
+    async fn memory_classifier_run_task_writes_classifications_to_canonical_state() {
         let ids = [test_memory_id(1), test_memory_id(2)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -34595,7 +33467,7 @@ mod tests {
                 ),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         // Caller-asserted provenance literals ride along in the payload; the
         // parser does not read them, and the classes come from the code path.
         let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
@@ -34628,7 +33500,7 @@ mod tests {
             assert_eq!(row.scope_id.as_deref(), Some(scope_id.as_str()));
             assert_eq!(row.source_kind, CLASSIFY_KERNEL_PRODUCER);
             assert_eq!(row.source_class, "model_inference");
-            assert_eq!(row.taint_class, "dreamer_inference");
+            assert_eq!(row.taint_class, "memory_classifier_inference");
             assert_eq!(row.classification, scope);
             assert_eq!(
                 row.detail,
@@ -34644,7 +33516,8 @@ mod tests {
 
     /// Each commit retires reclassified memories' prior classifications, leaving one live classification per memory; a memory the later run did not name keeps its classification.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_retires_the_prior_classification_of_a_reclassified_memory() {
+    async fn memory_classifier_run_task_retires_the_prior_classification_of_a_reclassified_memory()
+    {
         let (first, second, other) = (test_memory_id(1), test_memory_id(2), test_memory_id(3));
         let producer = Arc::new(ProducerState::default());
         {
@@ -34665,7 +33538,7 @@ mod tests {
                 length_capped: false,
             }));
         }
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let all = [first.clone(), second.clone(), other.clone()];
         let response = response_of(
             harness
@@ -34758,9 +33631,9 @@ mod tests {
     /// project, so two projects whose sessions reuse a command id each write
     /// their own classifications and each replay their own.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_keys_the_kernel_write_by_project() {
+    async fn memory_classifier_run_task_keys_the_kernel_write_by_project() {
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         // A second project, bound on another route, with its own memory.
         let other_root = harness._dir.path().join("other-project");
         std::fs::create_dir_all(&other_root).unwrap();
@@ -34824,7 +33697,7 @@ mod tests {
                 }));
             let outcome = harness
                 .handler
-                .handle_dreamer_run_task(
+                .handle_memory_classifier_run_task(
                     route,
                     &json!({
                         "v": 1,
@@ -34857,9 +33730,10 @@ mod tests {
         );
     }
 
-    /// Two authority projects hold the same root in turn and reuse a session and command id. The Dreamer ledger keys receipts by project, so the second project dispatches; its kernel commit must not replay the first project's receipt, which a key built from the route digest alone would.
+    /// Two authority projects hold the same root in turn and reuse a session and command id. The MemoryClassifier ledger keys receipts by project, so the second project dispatches; its kernel commit must not replay the first project's receipt, which a key built from the route digest alone would.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_keys_the_kernel_write_by_authority_project_on_a_shared_root() {
+    async fn memory_classifier_run_task_keys_the_kernel_write_by_authority_project_on_a_shared_root()
+     {
         let memory = test_memory_id(1);
         let producer = Arc::new(ProducerState::default());
         for _ in 0..2 {
@@ -34872,7 +33746,7 @@ mod tests {
                     length_capped: false,
                 }));
         }
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(std::slice::from_ref(&memory), TEST_CLASSIFY_TIMEOUT_MS);
         let first = response_of(harness.classify(payload.clone(), "shared").await);
         assert_eq!(first["classified"], json!(1));
@@ -34895,7 +33769,7 @@ mod tests {
         let second = response_of(
             harness
                 .handler
-                .handle_dreamer_run_task(
+                .handle_memory_classifier_run_task(
                     test_route(7),
                     &json!({
                         "v": 1,
@@ -34925,7 +33799,7 @@ mod tests {
         let other_key = classify_kernel_operation_key(
             &binding_with_harness(&harness.route_root, "pi", "ses").kernel_project,
             "git:other",
-            &dreamer_operation_key("ses", "shared"),
+            &memory_classifier_operation_key("ses", "shared"),
         )
         .unwrap();
         assert_ne!(other_key, harness.kernel_operation_key("shared"));
@@ -34955,7 +33829,7 @@ mod tests {
 
     /// Two roots hold one authority project and share a session and command id. The receipt is keyed by project, so the second root would otherwise replay the first root's completed receipt before its own pool read; the digest carries the kernel scope, so the second root's request is a conflict and neither replays nor dispatches.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_does_not_replay_a_receipt_across_roots_of_one_project() {
+    async fn memory_classifier_run_task_does_not_replay_a_receipt_across_roots_of_one_project() {
         let memory = test_memory_id(1);
         let producer = Arc::new(ProducerState::default());
         producer
@@ -34966,7 +33840,7 @@ mod tests {
                 text: classify_manifest(std::slice::from_ref(&memory)),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(std::slice::from_ref(&memory), TEST_CLASSIFY_TIMEOUT_MS);
         let first = response_of(harness.classify(payload.clone(), "shared").await);
         assert_eq!(first["classified"], json!(1));
@@ -34984,7 +33858,7 @@ mod tests {
         let tip = harness.kernel_tip();
         let outcome = harness
             .handler
-            .handle_dreamer_run_task(
+            .handle_memory_classifier_run_task(
                 test_route(8),
                 &json!({
                     "v": 1,
@@ -34996,7 +33870,10 @@ mod tests {
                 }),
             )
             .await;
-        assert_eq!(error_code_of(&outcome), "dreamer_request_conflict");
+        assert_eq!(
+            error_code_of(&outcome),
+            "memory_classifier_request_conflict"
+        );
         assert_eq!(
             producer.starts.load(Ordering::SeqCst),
             1,
@@ -35015,7 +33892,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn record_classifications_names_a_reserved_scope_in_its_failure() {
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let other_root = harness._dir.path().join("reserved-project");
         std::fs::create_dir_all(&other_root).unwrap();
         let other = binding_with_harness(other_root.to_str().unwrap(), "pi", "ses").kernel_project;
@@ -35037,12 +33914,12 @@ mod tests {
             .unwrap();
         let error = harness
             .handler
-            .dreamer
+            .memory_classifier
             .record_classifications(
                 &other,
                 &ClassifyWriteIdentity {
                     authority_project: "git:identity",
-                    operation_key: &dreamer_operation_key("ses", "reserved"),
+                    operation_key: &memory_classifier_operation_key("ses", "reserved"),
                     request_digest: &"d".repeat(64),
                     cause: "ses:reserved",
                     generation: 1,
@@ -35066,9 +33943,9 @@ mod tests {
     /// A visible decision from another domain is not a memory: the request is
     /// refused the same way an absent object is, and nothing is dispatched.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_refuses_decisions_outside_the_memory_domain() {
+    async fn memory_classifier_run_task_refuses_decisions_outside_the_memory_domain() {
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let kernel = harness.handler.kernel.kernel_store().unwrap();
         let scope_id = binding_with_harness(&harness.route_root, "pi", "ses")
             .kernel_project
@@ -35096,7 +33973,7 @@ mod tests {
         assert!(harness.classifications().is_empty());
     }
 
-    fn commit_sensitive_memory(harness: &DreamerHarness, object_id: &str) {
+    fn commit_sensitive_memory(harness: &MemoryClassifierHarness, object_id: &str) {
         let kernel = harness.handler.kernel.kernel_store().unwrap();
         let scope_id = binding_with_harness(&harness.route_root, "pi", "ses")
             .kernel_project
@@ -35126,9 +34003,9 @@ mod tests {
 
     /// `ExplicitSearch` serves sensitive rows, so the pool read itself must refuse them before a producer connects, and the refusal replays from the receipt.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_refuses_a_memory_served_above_normal_sensitivity() {
+    async fn memory_classifier_run_task_refuses_a_memory_served_above_normal_sensitivity() {
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let sensitive = "memory:sensitive".to_string();
         commit_sensitive_memory(&harness, &sensitive);
         let kernel = harness.handler.kernel.kernel_store().unwrap();
@@ -35162,8 +34039,8 @@ mod tests {
         assert!(
             matches!(
                 receipt.state,
-                DreamerReceiptState::Complete {
-                    terminal_kind: DreamerTerminalKind::Failed,
+                MemoryClassifierReceiptState::Complete {
+                    terminal_kind: MemoryClassifierTerminalKind::Failed,
                     ..
                 }
             ),
@@ -35183,7 +34060,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn record_classifications_never_records_a_sensitive_or_hidden_memory_as_shareable() {
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let sensitive = "memory:sensitive".to_string();
         commit_sensitive_memory(&harness, &sensitive);
         let binding = binding_with_harness(&harness.route_root, "pi", "ses").kernel_project;
@@ -35228,12 +34105,12 @@ mod tests {
         };
         let commit = harness
             .handler
-            .dreamer
+            .memory_classifier
             .record_classifications(
                 &binding,
                 &ClassifyWriteIdentity {
                     authority_project: "git:identity",
-                    operation_key: &dreamer_operation_key("ses", "floor"),
+                    operation_key: &memory_classifier_operation_key("ses", "floor"),
                     request_digest: &"d".repeat(64),
                     cause: "ses:floor",
                     generation: 1,
@@ -35262,7 +34139,7 @@ mod tests {
 
     /// `memory_classification` and `classifies` are free-form literals: another project's row citing this memory, and another producer's row in this project, are not this project's classifications; both stay live and the commit succeeds.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_retires_only_the_classification_rows_it_wrote() {
+    async fn memory_classifier_run_task_retires_only_the_classification_rows_it_wrote() {
         let memory = test_memory_id(1);
         let producer = Arc::new(ProducerState::default());
         producer
@@ -35273,7 +34150,7 @@ mod tests {
                 text: classify_manifest(std::slice::from_ref(&memory)),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let own_scope = binding_with_harness(&harness.route_root, "pi", "ses")
             .kernel_project
             .scope_id();
@@ -35354,7 +34231,7 @@ mod tests {
         );
         assert!(
             live(&other_producer),
-            "another producer's row in this project is not a Dreamer classification"
+            "another producer's row in this project is not a MemoryClassifier classification"
         );
         let own = classification_object_id(&harness.kernel_operation_key("own-run"), &memory);
         assert!(live(&own), "this project's classification is written");
@@ -35362,7 +34239,8 @@ mod tests {
 
     /// The entry check predates the model call, which a drain can outlast; the canonical write reads authority again and a run whose project no longer holds `MODULE` writes nothing and completes its receipt failed.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_writes_nothing_when_authority_drains_during_the_model_call() {
+    async fn memory_classifier_run_task_writes_nothing_when_authority_drains_during_the_model_call()
+    {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -35373,7 +34251,7 @@ mod tests {
                 text: classify_manifest(&ids),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let store = Arc::clone(&harness.store);
         *producer.on_start.lock().unwrap() = Some(Box::new(move || {
             let draining = store
@@ -35393,8 +34271,8 @@ mod tests {
         assert!(
             matches!(
                 receipt.state,
-                DreamerReceiptState::Complete {
-                    terminal_kind: DreamerTerminalKind::Failed,
+                MemoryClassifierReceiptState::Complete {
+                    terminal_kind: MemoryClassifierTerminalKind::Failed,
                     ..
                 }
             ),
@@ -35405,9 +34283,9 @@ mod tests {
     /// A pool whose escaped rendering passes the byte bound is refused before
     /// any producer is connected, and nothing is truncated to make it fit.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_refuses_a_pool_over_the_prompt_byte_bound() {
+    async fn memory_classifier_run_task_refuses_a_pool_over_the_prompt_byte_bound() {
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let kernel = harness.handler.kernel.kernel_store().unwrap();
         let scope_id = binding_with_harness(&harness.route_root, "pi", "ses")
             .kernel_project
@@ -35437,9 +34315,9 @@ mod tests {
     /// The stored rationales carry the bytes past `MAX_READ_ROW_BYTES`, while
     /// the rendered summaries remain within the prompt bound.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_refuses_a_pool_over_the_kernel_read_budget_as_too_large() {
+    async fn memory_classifier_run_task_refuses_a_pool_over_the_kernel_read_budget_as_too_large() {
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let kernel = harness.handler.kernel.kernel_store().unwrap();
         let scope_id = binding_with_harness(&harness.route_root, "pi", "ses")
             .kernel_project
@@ -35475,7 +34353,7 @@ mod tests {
     /// parses as an id and is refused because no such kernel object exists in
     /// the project, still with no dispatch and no write.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_rejects_the_retired_request_shape() {
+    async fn memory_classifier_run_task_rejects_the_retired_request_shape() {
         let id = test_memory_id(1);
         for (payload, why) in [
             (
@@ -35508,7 +34386,7 @@ mod tests {
             ),
         ] {
             let producer = Arc::new(ProducerState::default());
-            let harness = DreamerHarness::start(&producer).await;
+            let harness = MemoryClassifierHarness::start(&producer).await;
             let outcome = harness.classify(payload.clone(), "retired-shape").await;
             let code = match outcome {
                 PreparedOutcome::Error { code, .. } => code,
@@ -35532,9 +34410,9 @@ mod tests {
     /// project's, ends the command as a recorded request failure with no
     /// dispatch, and the reply does not say which.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_refuses_objects_outside_the_bound_project() {
+    async fn memory_classifier_run_task_refuses_objects_outside_the_bound_project() {
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer).await;
+        let harness = MemoryClassifierHarness::start(&producer).await;
         let kernel = harness.handler.kernel.kernel_store().unwrap();
         // A memory in another project's scope.
         let other_scope = kernel_route_fixtures::project_scope_spec(
@@ -35595,8 +34473,8 @@ mod tests {
     /// the kernel opens. A daemon restart is exactly this window, since the
     /// memory store opens before the kernel does.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_leaves_the_receipt_open_while_the_kernel_is_starting() {
-        use memory_store::dreamer_ledger::DreamerReceiptState;
+    async fn memory_classifier_run_task_leaves_the_receipt_open_while_the_kernel_is_starting() {
+        use memory_store::memory_classifier_ledger::MemoryClassifierReceiptState;
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
@@ -35604,7 +34482,7 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(classify_manifest(&ids));
-        let predecessor = DreamerHarness::start(&producer).await;
+        let predecessor = MemoryClassifierHarness::start(&producer).await;
         let kernel_root = predecessor._dir.path().join("kernel");
         // The predecessor lets go of the kernel lease; the successor's kernel
         // has not opened yet.
@@ -35612,7 +34490,7 @@ mod tests {
             .handler
             .kernel
             .mark_unavailable(kernel_routes::UnavailableKind::Store);
-        let harness = DreamerHarness::start_with_store(&producer, &predecessor);
+        let harness = MemoryClassifierHarness::start_with_store(&producer, &predecessor);
         assert_eq!(
             harness.handler.kernel.state(),
             kernel_routes::KernelState::Starting
@@ -35624,7 +34502,7 @@ mod tests {
         assert!(
             matches!(
                 harness.receipt("kernel-starting").state,
-                DreamerReceiptState::InProgress { .. }
+                MemoryClassifierReceiptState::InProgress { .. }
             ),
             "a kernel that is not ready leaves the receipt open: {:?}",
             harness.receipt("kernel-starting").state
@@ -35654,7 +34532,7 @@ mod tests {
     /// malformed payload on a route without MODULE authority, or with a stale
     /// generation, is an `invalid_params` error that touches no ledger.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_checks_the_payload_shape_before_authority() {
+    async fn memory_classifier_run_task_checks_the_payload_shape_before_authority() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
@@ -35674,7 +34552,7 @@ mod tests {
         };
         // No memories authority at all.
         let outcome = handler
-            .handle_dreamer_run_task(test_route(7), &request(1))
+            .handle_memory_classifier_run_task(test_route(7), &request(1))
             .await;
         assert_eq!(error_code_of(&outcome), "invalid_params");
         // MODULE authority at a generation the request does not carry.
@@ -35685,17 +34563,17 @@ mod tests {
             .unwrap()
             .generation;
         let outcome = handler
-            .handle_dreamer_run_task(test_route(7), &request(generation + 1))
+            .handle_memory_classifier_run_task(test_route(7), &request(generation + 1))
             .await;
         assert_eq!(error_code_of(&outcome), "invalid_params");
         assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
-        let operation_key = dreamer_operation_key("ses", "shape-first");
+        let operation_key = memory_classifier_operation_key("ses", "shape-first");
         assert!(
             store
-                .lookup_dreamer_receipt(DreamerReceiptKey {
+                .lookup_memory_classifier_receipt(MemoryClassifierReceiptKey {
                     project: "git:identity",
-                    producer: DREAMER_RECEIPT_PRODUCER,
+                    producer: MEMORY_CLASSIFIER_RECEIPT_PRODUCER,
                     operation_key: &operation_key,
                 })
                 .unwrap()
@@ -35706,7 +34584,7 @@ mod tests {
 
     /// A manifest that names an unrequested claim advances the chain instead of ending it.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_rejects_a_manifest_naming_an_unexpected_claim() {
+    async fn memory_classifier_run_task_rejects_a_manifest_naming_an_unexpected_claim() {
         let requested = test_memory_id(1);
         let unexpected = test_memory_id(9);
         let producer = Arc::new(ProducerState::default());
@@ -35724,7 +34602,7 @@ mod tests {
             classify_payload(std::slice::from_ref(&requested), TEST_CLASSIFY_TIMEOUT_MS);
         payload["model_chain"] = json!(["test/unexpected-claim", "test/exact"]);
         let (producer, outcome) =
-            dreamer_classify_outcome(&producer, payload, "unexpected-claim").await;
+            memory_classifier_classify_outcome(&producer, payload, "unexpected-claim").await;
         let response = match outcome {
             PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("the chain must recover from an unexpected claim: {other:?}"),
@@ -35750,7 +34628,7 @@ mod tests {
     /// A payload without timeout_ms is rejected before starting a run.
     /// ceiling.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_requires_a_positive_timeout_ms() {
+    async fn memory_classifier_run_task_requires_a_positive_timeout_ms() {
         let ids = [test_memory_id(1)];
         for timeout in [None, Some(json!(0)), Some(json!(-1)), Some(json!("600000"))] {
             let producer = Arc::new(ProducerState::default());
@@ -35765,7 +34643,7 @@ mod tests {
                 Some(value) => payload["timeout_ms"] = value.clone(),
             }
             let (producer, outcome) =
-                dreamer_classify_outcome(&producer, payload, "deadline-required").await;
+                memory_classifier_classify_outcome(&producer, payload, "deadline-required").await;
             match outcome {
                 PreparedOutcome::Error { code, message } => {
                     assert_eq!(code, "invalid_params", "timeout {timeout:?}");
@@ -36163,31 +35041,31 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq, Eq)]
-    struct HistorianAdditiveRows {
-        compartment_count: usize,
-        max_compartment_seq: i64,
+    struct HistorySummarizerAdditiveRows {
+        history_segment_count: usize,
+        max_history_segment_seq: i64,
         transcript_count: usize,
         max_transcript_seq: i64,
         publication_floor_ordinal: Option<u64>,
     }
 
-    fn historian_additive_rows(
+    fn history_summarizer_additive_rows(
         store: &MemoryStore,
         session_id: &str,
         project_path: &Path,
-    ) -> HistorianAdditiveRows {
-        let compartments = store.load_compartments(session_id).unwrap();
+    ) -> HistorySummarizerAdditiveRows {
+        let history_segments = store.load_history_segments(session_id).unwrap();
         let transcripts = store
             .load_chunk_transcripts_for_range(session_id, 0, i64::MAX)
             .unwrap();
         let _ = project_path;
-        HistorianAdditiveRows {
-            compartment_count: compartments.len(),
-            max_compartment_seq: store.max_compartment_seq(session_id).unwrap(),
+        HistorySummarizerAdditiveRows {
+            history_segment_count: history_segments.len(),
+            max_history_segment_seq: store.max_history_segment_seq(session_id).unwrap(),
             transcript_count: transcripts.len(),
             max_transcript_seq: transcripts
                 .iter()
-                .map(|transcript| transcript.compartment_seq)
+                .map(|transcript| transcript.history_segment_seq)
                 .max()
                 .unwrap_or(0),
             publication_floor_ordinal: store
@@ -36213,21 +35091,21 @@ mod tests {
         }
     }
 
-    fn historian_output_for_prompt(prompt: &str) -> String {
+    fn history_summarizer_output_for_prompt(prompt: &str) -> String {
         let (start, end) = prompt_ordinal_range(prompt).unwrap_or((1, 3));
-        historian_output(start, end, "autonomous summary")
+        history_summarizer_output(start, end, "autonomous summary")
     }
 
-    fn historian_output(start: u64, end: u64, p1: &str) -> String {
+    fn history_summarizer_output(start: u64, end: u64, p1: &str) -> String {
         format!(
-            r#"<output><compartments><compartment start="{start}" end="{end}" title="autonomous arc" episode_type="feature" importance="60"><p1>{p1}</p1><p2>short summary</p2><p3>arc</p3><p4 /></compartment></compartments><meta><messages_processed>{start}-{end}</messages_processed><unprocessed_from>{}</unprocessed_from></meta></output>"#,
+            r#"<output><history_segments><history_segment start="{start}" end="{end}" title="autonomous arc" episode_type="feature" importance="60"><p1>{p1}</p1><p2>short summary</p2><p3>arc</p3><p4 /></history_segment></history_segments><meta><messages_processed>{start}-{end}</messages_processed><unprocessed_from>{}</unprocessed_from></meta></output>"#,
             end + 1
         )
     }
 
-    fn historian_output_with_fact(start: u64, end: u64, fact: &str) -> String {
+    fn history_summarizer_output_with_fact(start: u64, end: u64, fact: &str) -> String {
         format!(
-            r#"<output><compartments><compartment start="{start}" end="{end}" title="autonomous arc" episode_type="feature" importance="60"><p1>autonomous summary</p1><p2>short summary</p2><p3>arc</p3><p4 /></compartment></compartments><facts><PROJECT_RULES>* {fact}</PROJECT_RULES></facts><meta><messages_processed>{start}-{end}</messages_processed><unprocessed_from>{}</unprocessed_from></meta></output>"#,
+            r#"<output><history_segments><history_segment start="{start}" end="{end}" title="autonomous arc" episode_type="feature" importance="60"><p1>autonomous summary</p1><p2>short summary</p2><p3>arc</p3><p4 /></history_segment></history_segments><facts><PROJECT_RULES>* {fact}</PROJECT_RULES></facts><meta><messages_processed>{start}-{end}</messages_processed><unprocessed_from>{}</unprocessed_from></meta></output>"#,
             end + 1
         )
     }
@@ -36270,12 +35148,14 @@ mod tests {
     async fn wait_for_idle(store: &MemoryStore) {
         let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
         while std::time::Instant::now() < deadline {
-            if store.load("ses").unwrap().meta.historian.state == HistorianPhase::Idle {
+            if store.load("ses").unwrap().meta.history_summarizer.state
+                == HistorySummarizerPhase::Idle
+            {
                 return;
             }
             tokio::time::sleep(TEST_WAIT_POLL).await;
         }
-        panic!("historian did not return to idle");
+        panic!("history_summarizer did not return to idle");
     }
 
     /// `cache_state_scalar_runs` is one handle's lifetime run count, so a count read across
@@ -36301,19 +35181,19 @@ mod tests {
         panic!("counter did not reach {expected}");
     }
 
-    async fn wait_for_historian_state<F>(store: &MemoryStore, predicate: F)
+    async fn wait_for_history_summarizer_state<F>(store: &MemoryStore, predicate: F)
     where
-        F: Fn(&HistorianDurableState) -> bool,
+        F: Fn(&HistorySummarizerDurableState) -> bool,
     {
         let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
         while std::time::Instant::now() < deadline {
-            let state = store.load("ses").unwrap().meta.historian;
+            let state = store.load("ses").unwrap().meta.history_summarizer;
             if predicate(&state) {
                 return;
             }
             tokio::time::sleep(TEST_WAIT_POLL).await;
         }
-        panic!("historian state predicate did not become true");
+        panic!("history_summarizer state predicate did not become true");
     }
 
     fn m0_text(response: &Value) -> String {
@@ -36333,7 +35213,7 @@ mod tests {
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         store
-            .replace_compartments(
+            .replace_history_segments(
                 "ses",
                 &[
                     stored_comp(1, 1, 40, "m40", &"OLD ".repeat(200)),
@@ -36347,7 +35227,10 @@ mod tests {
         let response = call_transform_request(&handler, request).await;
         assert_eq!(response["action"], "HARD");
         let m0 = m0_text(&response);
-        assert!(m0.contains("NEW"), "newest compartment remains at P1: {m0}");
+        assert!(
+            m0.contains("NEW"),
+            "newest history_segment remains at P1: {m0}"
+        );
         assert!(
             !m0.contains("OLD"),
             "request budget must reach the HARD decay renderer: {m0}"
@@ -36358,7 +35241,7 @@ mod tests {
         ));
         let history = decay_render::extract_m0_block(&m0, "session-history").unwrap();
         assert_eq!(
-            status["compartment_tokens"],
+            status["history_segment_tokens"],
             json!(tokenizer::estimate_tokens(&history))
         );
     }
@@ -36371,7 +35254,7 @@ mod tests {
 
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
-        meta.historian.consecutive_publish_failures = 3;
+        meta.history_summarizer.consecutive_publish_failures = 3;
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
@@ -36379,8 +35262,14 @@ mod tests {
             test_route(7),
             &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
         ));
-        assert_eq!(degraded["historian"]["consecutive_publish_failures"], 3);
-        assert_eq!(degraded["historian"]["publish_health_degraded"], true);
+        assert_eq!(
+            degraded["history_summarizer"]["consecutive_publish_failures"],
+            3
+        );
+        assert_eq!(
+            degraded["history_summarizer"]["publish_health_degraded"],
+            true
+        );
         assert!(
             degraded["summary"]
                 .as_str()
@@ -36390,7 +35279,7 @@ mod tests {
 
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
-        meta.historian.consecutive_publish_failures = 0;
+        meta.history_summarizer.consecutive_publish_failures = 0;
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
@@ -36398,8 +35287,14 @@ mod tests {
             test_route(7),
             &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
         ));
-        assert_eq!(recovered["historian"]["consecutive_publish_failures"], 0);
-        assert_eq!(recovered["historian"]["publish_health_degraded"], false);
+        assert_eq!(
+            recovered["history_summarizer"]["consecutive_publish_failures"],
+            0
+        );
+        assert_eq!(
+            recovered["history_summarizer"]["publish_health_degraded"],
+            false
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -36420,7 +35315,7 @@ mod tests {
                 handler_with_store(Arc::clone(&producer), default_test_config());
 
             let first = call_transform(&handler, messages.clone()).await;
-            assert_eq!(first["historian"]["fired"], true, "{case}");
+            assert_eq!(first["history_summarizer"]["fired"], true, "{case}");
             wait_for_count(&producer.starts, 1).await;
             let prompt = producer.prompts.lock().unwrap()[0].clone();
             assert_eq!(
@@ -36429,10 +35324,10 @@ mod tests {
                 "{case}"
             );
             wait_for_idle(&store).await;
-            let compartments = store.load_compartments("ses").unwrap();
-            assert_eq!(compartments.len(), 1, "{case}");
+            let history_segments = store.load_history_segments("ses").unwrap();
+            assert_eq!(history_segments.len(), 1, "{case}");
             assert_eq!(
-                compartments[0].start_message,
+                history_segments[0].start_message,
                 i64::try_from(expected_start).unwrap(),
                 "{case}"
             );
@@ -36452,7 +35347,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn historian_prompt_composes_project_memory_from_canonical_rows() {
+    async fn history_summarizer_prompt_composes_project_memory_from_canonical_rows() {
         use kernel::{EventKind, SourceClass, TaintClass};
         use kernel_route_fixtures::{
             MEMORY_DOMAIN, admission, commit_verified_memory, intent, memory_decision_spec,
@@ -36546,14 +35441,14 @@ mod tests {
         let tip = kernel.tip().unwrap();
 
         let response = call_transform(&handler, big_messages()).await;
-        assert_eq!(response["historian"]["fired"], true, "{response}");
+        assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
         assert_eq!(
-            response["historian"]["project_memory"],
+            response["history_summarizer"]["project_memory"],
             json!({
                 "kind": "canonical",
                 "known_as_of": tip,
                 "truncated": false,
-                "revision": response["historian"]["project_memory"]["revision"],
+                "revision": response["history_summarizer"]["project_memory"]["revision"],
             }),
             "{response}"
         );
@@ -36576,14 +35471,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_withheld_historian_memory_read_is_recorded_and_differs_from_an_empty_block() {
+    async fn a_withheld_history_summarizer_memory_read_is_recorded_and_differs_from_an_empty_block()
+    {
         let withheld_producer = Arc::new(ProducerState::default());
         let (withheld_handler, _store, _dir, _project) =
             handler_with_store(Arc::clone(&withheld_producer), default_test_config());
         let withheld = call_transform(&withheld_handler, big_messages()).await;
-        assert_eq!(withheld["historian"]["fired"], true, "{withheld}");
+        assert_eq!(withheld["history_summarizer"]["fired"], true, "{withheld}");
         assert_eq!(
-            withheld["historian"]["project_memory"],
+            withheld["history_summarizer"]["project_memory"],
             json!({ "kind": "withheld", "state": "unavailable:store_starting" }),
             "{withheld}"
         );
@@ -36592,11 +35488,14 @@ mod tests {
         let (empty_handler, _store, _dir, _project) =
             handler_with_store_and_kernel(Arc::clone(&empty_producer), default_test_config()).await;
         let empty = call_transform(&empty_handler, big_messages()).await;
-        assert_eq!(empty["historian"]["fired"], true, "{empty}");
-        assert_eq!(empty["historian"]["project_memory"]["kind"], "canonical");
+        assert_eq!(empty["history_summarizer"]["fired"], true, "{empty}");
+        assert_eq!(
+            empty["history_summarizer"]["project_memory"]["kind"],
+            "canonical"
+        );
         assert_ne!(
-            withheld["historian"]["project_memory"],
-            empty["historian"]["project_memory"]
+            withheld["history_summarizer"]["project_memory"],
+            empty["history_summarizer"]["project_memory"]
         );
 
         wait_for_count(&withheld_producer.starts, 1).await;
@@ -36608,14 +35507,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn historian_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired() {
+    async fn history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired()
+     {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, project) =
             handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
         let not_fired = call_transform_request(&handler, request(vec![ck("m1", 1, "hello")])).await;
-        assert_eq!(not_fired["historian"]["fired"], false, "{not_fired}");
+        assert_eq!(
+            not_fired["history_summarizer"]["fired"], false,
+            "{not_fired}"
+        );
         assert!(
-            not_fired["historian"].get("project_memory").is_none(),
+            not_fired["history_summarizer"]
+                .get("project_memory")
+                .is_none(),
             "{not_fired}"
         );
 
@@ -36631,9 +35536,9 @@ mod tests {
             },
         );
         let fired = call_transform(&handler, big_messages()).await;
-        assert_eq!(fired["historian"]["fired"], true, "{fired}");
+        assert_eq!(fired["history_summarizer"]["fired"], true, "{fired}");
         assert!(
-            fired["historian"].get("project_memory").is_none(),
+            fired["history_summarizer"].get("project_memory").is_none(),
             "{fired}"
         );
         wait_for_count(&producer.starts, 1).await;
@@ -36645,7 +35550,7 @@ mod tests {
     async fn management_drop_alias_routes_are_rejected() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        for alias in ["ctx_reduce", "append_agent_drops"] {
+        for alias in ["eidnara_reduce", "append_agent_drops"] {
             let outcome = handler
                 .dispatch_value(
                     test_route(7),
@@ -36769,11 +35674,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn session_status_compartment_pages_are_bounded_and_contract_shaped() {
+    async fn session_status_history_segment_pages_are_bounded_and_contract_shaped() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         store
-            .append_compartments(
+            .append_history_segments(
                 "ses",
                 &(1..=55)
                     .map(|sequence| {
@@ -36795,7 +35700,7 @@ mod tests {
             .lock()
             .expect("status snapshot hook mutex") = Some(Box::new(move || {
             hook_store
-                .append_compartments(
+                .append_history_segments(
                     "ses",
                     &[stored_comp(56, 56, 56, "m56", "appended during status")],
                 )
@@ -36808,17 +35713,20 @@ mod tests {
                 "method": "session.status",
                 "v": 1,
                 "session_id": "ses",
-                "include_compartments_after_seq": -1,
+                "include_history_segments_after_seq": -1,
             }),
         ));
-        let compartments = body["compartments"].as_array().unwrap();
-        assert_eq!(body["compartment_count"], json!(compartments.len() + 5),);
-        assert_eq!(compartments.len(), 50);
-        assert_eq!(compartments[0]["sequence"], json!(1));
-        assert_eq!(compartments[49]["sequence"], json!(50));
+        let history_segments = body["history_segments"].as_array().unwrap();
+        assert_eq!(
+            body["history_segment_count"],
+            json!(history_segments.len() + 5),
+        );
+        assert_eq!(history_segments.len(), 50);
+        assert_eq!(history_segments[0]["sequence"], json!(1));
+        assert_eq!(history_segments[49]["sequence"], json!(50));
         assert_eq!(body["max_sequence"], json!(55));
-        assert!(compartments[0].get("start_date").is_none());
-        assert!(compartments[0].get("legacy").is_none());
+        assert!(history_segments[0].get("start_date").is_none());
+        assert!(history_segments[0].get("legacy").is_none());
 
         let tail = tool_body(handler.handle_session_status_value(
             test_route(7),
@@ -36826,10 +35734,10 @@ mod tests {
                 "method": "session.status",
                 "v": 1,
                 "session_id": "ses",
-                "include_compartments_after_seq": 50,
+                "include_history_segments_after_seq": 50,
             }),
         ));
-        assert_eq!(tail["compartments"].as_array().unwrap().len(), 6);
+        assert_eq!(tail["history_segments"].as_array().unwrap().len(), 6);
         assert_eq!(tail["max_sequence"], json!(56));
     }
 
@@ -36838,7 +35746,7 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         store
-            .append_compartments("ses", &[stored_comp(1, 1, 5, "m5", "seed")])
+            .append_history_segments("ses", &[stored_comp(1, 1, 5, "m5", "seed")])
             .unwrap();
         let before = store.load("ses").unwrap();
         let mut core = before.core.clone();
@@ -36863,7 +35771,7 @@ mod tests {
         .await;
         assert_eq!(first, json!({ "ok": true, "disposition": "started" }));
         let after = store.load("ses").unwrap();
-        assert!(store.load_compartments("ses").unwrap().is_empty());
+        assert!(store.load_history_segments("ses").unwrap().is_empty());
         assert!(after.core.boundary_id.is_empty());
         assert!(!after.meta.initialized);
         assert!(after.meta.coverage_ordinal.is_none());
@@ -36892,7 +35800,7 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         store
-            .append_compartments("ses", &[stored_comp(1, 1, 1, "m1", "seed")])
+            .append_history_segments("ses", &[stored_comp(1, 1, 1, "m1", "seed")])
             .unwrap();
         let first = call_transform(&handler, vec![ck("m1", 1, "hello")]).await;
         assert_eq!(first["action"], "HARD");
@@ -37089,7 +35997,7 @@ mod tests {
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta.clone();
-        meta.historian.last_failure = Some(format!("bad\0line\n{}", "x".repeat(2_000)));
+        meta.history_summarizer.last_failure = Some(format!("bad\0line\n{}", "x".repeat(2_000)));
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
@@ -37140,7 +36048,7 @@ mod tests {
     }
 
     #[test]
-    fn ctx_reduce_command_id_is_idempotent_while_drops_are_pending() {
+    fn eidnara_reduce_command_id_is_idempotent_while_drops_are_pending() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
 
@@ -37209,7 +36117,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ctx_reduce_no_targets_refuses_without_a_ledger_row() {
+    async fn eidnara_reduce_no_targets_refuses_without_a_ledger_row() {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
         let (handler, store, _dir, _project) = handler_with_store_and_resolver(
             Arc::new(ProducerState::default()),
@@ -37220,7 +36128,7 @@ mod tests {
         let acknowledgement = tool_body(
             call_facade(
                 &handler,
-                "ctx_reduce",
+                "eidnara_reduce",
                 json!({ "drop": "1", "command_id": "no-target-cmd" }),
             )
             .await,
@@ -37308,7 +36216,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ctx_reduce_command_id_survives_transform_drain() {
+    async fn eidnara_reduce_command_id_survives_transform_drain() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         mint_drop_tag(&store, "a#0");
@@ -37340,7 +36248,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ctx_reduce_command_raw_drop_string_canonicalizes_server_side() {
+    async fn eidnara_reduce_command_raw_drop_string_canonicalizes_server_side() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         store
@@ -37416,7 +36324,7 @@ mod tests {
     }
 
     #[test]
-    fn ctx_reduce_command_id_works_with_raw_drop_string() {
+    fn eidnara_reduce_command_id_works_with_raw_drop_string() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         store
@@ -37572,7 +36480,7 @@ mod tests {
             response["detail"]
                 .as_str()
                 .unwrap()
-                .contains("no historian models")
+                .contains("no history_summarizer models")
         );
         let row = store
             .load_wrapup_command("ses", "no-models")
@@ -37597,18 +36505,18 @@ mod tests {
             .lock()
             .expect("start errors mutex")
             .extend([
-                Err(HistorianProducerError::Call(
-                    historian_producer::HistorianCallFailure::untagged(
-                        historian_producer::HistorianSendOutcome::Terminal,
+                Err(HistorySummarizerProducerError::Call(
+                    history_summarizer_producer::HistorySummarizerCallFailure::untagged(
+                        history_summarizer_producer::HistorySummarizerSendOutcome::Terminal,
                         "host.unknown_module",
-                        "runner module broca is unavailable",
+                        "runner module model_execution is unavailable",
                     ),
                 )),
-                Err(HistorianProducerError::Call(
-                    historian_producer::HistorianCallFailure::untagged(
-                        historian_producer::HistorianSendOutcome::Terminal,
+                Err(HistorySummarizerProducerError::Call(
+                    history_summarizer_producer::HistorySummarizerCallFailure::untagged(
+                        history_summarizer_producer::HistorySummarizerSendOutcome::Terminal,
                         "host.unknown_module",
-                        "runner module broca is unavailable",
+                        "runner module model_execution is unavailable",
                     ),
                 )),
             ]);
@@ -37690,10 +36598,10 @@ mod tests {
             "the drain needs as many rounds as the backlog requires: {starts}"
         );
         let final_end = store
-            .load_compartments("ses")
+            .load_history_segments("ses")
             .unwrap()
             .iter()
-            .map(|compartment| compartment.end_message)
+            .map(|history_segment| history_segment.end_message)
             .max()
             .unwrap();
         assert_eq!(final_end, 60);
@@ -37742,10 +36650,10 @@ mod tests {
         assert_eq!(body["ok"], json!(true), "{body}");
         assert_eq!(body["disposition"], json!("completed"), "{body}");
         let final_end = store
-            .load_compartments("ses")
+            .load_history_segments("ses")
             .unwrap()
             .iter()
-            .map(|compartment| compartment.end_message)
+            .map(|history_segment| history_segment.end_message)
             .max()
             .unwrap();
         assert_eq!(final_end, 78, "keep=1 must keep a one-message tail: {body}");
@@ -37809,10 +36717,10 @@ mod tests {
         assert_eq!(body["ok"], json!(true), "{body}");
         assert_eq!(body["disposition"], json!("completed"), "{body}");
         let final_end = store
-            .load_compartments("ses")
+            .load_history_segments("ses")
             .unwrap()
             .iter()
-            .map(|compartment| compartment.end_message)
+            .map(|history_segment| history_segment.end_message)
             .max()
             .unwrap();
         assert_eq!(
@@ -37863,10 +36771,10 @@ mod tests {
         assert_eq!(negative_keep["ok"], json!(true), "{negative_keep}");
         assert_eq!(negative_keep["disposition"], json!("completed"));
         let final_end = _store
-            .load_compartments("ses")
+            .load_history_segments("ses")
             .unwrap()
             .iter()
-            .map(|compartment| compartment.end_message)
+            .map(|history_segment| history_segment.end_message)
             .max()
             .unwrap();
         assert_eq!(
@@ -38016,8 +36924,8 @@ mod tests {
             .connect_errors
             .lock()
             .expect("connect errors mutex")
-            .push_back(HistorianProducerError::Client(
-                historian_producer::HistorianClientFailure {
+            .push_back(HistorySummarizerProducerError::Client(
+                history_summarizer_producer::HistorySummarizerClientFailure {
                     code: "dial_failed".to_owned(),
                     message: "daemon dial failed".to_owned(),
                 },
@@ -38057,7 +36965,7 @@ mod tests {
                 .load("ses")
                 .unwrap()
                 .meta
-                .historian
+                .history_summarizer
                 .failure_backoff_at_ms
                 .is_none()
         );
@@ -38076,8 +36984,8 @@ mod tests {
             .connect_errors
             .lock()
             .expect("connect errors mutex")
-            .push_back(HistorianProducerError::Client(
-                historian_producer::HistorianClientFailure {
+            .push_back(HistorySummarizerProducerError::Client(
+                history_summarizer_producer::HistorySummarizerClientFailure {
                     code: "dial_failed".to_owned(),
                     message: "daemon dial failed".to_owned(),
                 },
@@ -38122,7 +37030,7 @@ mod tests {
                 .load("ses")
                 .unwrap()
                 .meta
-                .historian
+                .history_summarizer
                 .failure_backoff_at_ms
                 .is_some()
         );
@@ -38167,7 +37075,7 @@ mod tests {
         cache_wrapup_messages(&handler, wrapup_messages(20, 40));
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta.clone();
-        meta.historian.failure_backoff_at_ms = None;
+        meta.history_summarizer.failure_backoff_at_ms = None;
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
@@ -38185,13 +37093,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn stale_generation_is_fenced_before_historian_additive_writes() {
+    async fn stale_generation_is_fenced_before_history_summarizer_additive_writes() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         let handler = Arc::new(handler);
         cache_wrapup_messages(&handler, wrapup_messages(80, 800));
-        let before = historian_additive_rows(&store, "ses", &project);
+        let before = history_summarizer_additive_rows(&store, "ses", &project);
         let hook_handler = Arc::clone(&handler);
         let hook_producer = Arc::clone(&producer);
         *producer
@@ -38211,7 +37119,7 @@ mod tests {
                 .lock()
                 .expect("await results mutex")
                 .push_back(Ok(ProducerOutput {
-                    text: historian_output_with_fact(
+                    text: history_summarizer_output_with_fact(
                         start,
                         end,
                         "A stale snapshot must not publish this fact.",
@@ -38247,9 +37155,9 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            historian_additive_rows(&store, "ses", &project),
+            history_summarizer_additive_rows(&store, "ses", &project),
             before,
-            "the generation fence must run before compartments, transcripts, facts, or the publication floor change"
+            "the generation fence must run before history_segments, transcripts, facts, or the publication floor change"
         );
     }
 
@@ -38260,7 +37168,7 @@ mod tests {
             handler_with_store(Arc::clone(&producer), default_test_config());
         let handler = Arc::new(handler);
         cache_wrapup_messages(&handler, wrapup_messages(80, 800));
-        let before = historian_additive_rows(&store, "ses", &project);
+        let before = history_summarizer_additive_rows(&store, "ses", &project);
         let snapshots = Arc::clone(&handler.transform_snapshots);
         let observed_lock = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let observed_lock_for_hook = Arc::clone(&observed_lock);
@@ -38294,7 +37202,10 @@ mod tests {
             "{response}"
         );
         assert!(observed_lock.load(Ordering::SeqCst));
-        assert_ne!(historian_additive_rows(&store, "ses", &project), before);
+        assert_ne!(
+            history_summarizer_additive_rows(&store, "ses", &project),
+            before
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -38304,7 +37215,7 @@ mod tests {
             handler_with_store(Arc::clone(&producer), default_test_config());
         let handler = Arc::new(handler);
         cache_wrapup_messages(&handler, wrapup_messages(80, 800));
-        let before = historian_additive_rows(&store, "ses", &project);
+        let before = history_summarizer_additive_rows(&store, "ses", &project);
         let hook_handler = Arc::clone(&handler);
         let hook_producer = Arc::clone(&producer);
         *producer
@@ -38324,7 +37235,11 @@ mod tests {
                 .lock()
                 .expect("await results mutex")
                 .push_back(Ok(ProducerOutput {
-                    text: historian_output_with_fact(start, end, "Atomic cleanup race fact."),
+                    text: history_summarizer_output_with_fact(
+                        start,
+                        end,
+                        "Atomic cleanup race fact.",
+                    ),
                     length_capped: false,
                 }));
             hook_handler
@@ -38335,7 +37250,7 @@ mod tests {
         }));
         let abandon_hook_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let abandon_hook_calls_for_hook = Arc::clone(&abandon_hook_calls);
-        store.set_abandon_historian_hook(Box::new(move || {
+        store.set_abandon_history_summarizer_hook(Box::new(move || {
             abandon_hook_calls_for_hook.fetch_add(1, Ordering::SeqCst);
         }));
 
@@ -38348,15 +37263,18 @@ mod tests {
                 .await,
         );
         assert_eq!(stale["disposition"], json!("retryable"), "{stale}");
-        let state = store.load("ses").unwrap().meta.historian;
-        assert_eq!(state.state, HistorianPhase::Idle);
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::Idle);
         assert_eq!(state.failure_backoff_at_ms, None);
         assert_eq!(
             abandon_hook_calls.load(Ordering::SeqCst),
             1,
             "the in-transaction abandon hook must run before cleanup commits"
         );
-        assert_eq!(historian_additive_rows(&store, "ses", &project), before);
+        assert_eq!(
+            history_summarizer_additive_rows(&store, "ses", &project),
+            before
+        );
 
         cache_wrapup_messages(&handler, wrapup_messages(20, 40));
         let starts_before_retry = producer.starts.load(Ordering::SeqCst);
@@ -38400,7 +37318,7 @@ mod tests {
                 .lock()
                 .expect("await results mutex")
                 .push_back(Ok(ProducerOutput {
-                    text: historian_output_with_fact(start, end, "Fence race fact."),
+                    text: history_summarizer_output_with_fact(start, end, "Fence race fact."),
                     length_capped: false,
                 }));
             hook_handler
@@ -38425,7 +37343,7 @@ mod tests {
                 .load("ses")
                 .unwrap()
                 .meta
-                .historian
+                .history_summarizer
                 .failure_backoff_at_ms,
             None,
             "fence rejection must not arm the failure backoff"
@@ -38634,7 +37552,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn session_wrapup_drains_huge_chunks_past_the_old_round_cap() {
-        // This ten-message backlog requires ten producer rounds because each message is one historian chunk.
+        // This ten-message backlog requires ten producer rounds because each message is one history_summarizer chunk.
         // The request budget, not the five-round cap, bounds the drain.
         // One call must compact all ten messages and reach the keep watermark.
         let producer = Arc::new(ProducerState::default());
@@ -38654,15 +37572,15 @@ mod tests {
         assert_eq!(body["ok"], json!(true), "{body}");
         assert_eq!(body["disposition"], json!("completed"), "{body}");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 10);
-        assert_eq!(store.load_compartments("ses").unwrap().len(), 10);
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 10);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn session_wrapup_stops_on_normal_producer_failure_state() {
         let producer = Arc::new(ProducerState::default());
         producer.await_results.lock().unwrap().extend([
-            Err(HistorianProducerError::TimedOut),
-            Err(HistorianProducerError::TimedOut),
+            Err(HistorySummarizerProducerError::TimedOut),
+            Err(HistorySummarizerProducerError::TimedOut),
         ]);
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
@@ -38684,8 +37602,8 @@ mod tests {
         assert_eq!(body["disposition"], json!("retryable"));
         assert_eq!(body["reason"], json!("backoff_active"));
         assert!(body["summary"].as_str().unwrap().contains("producer"));
-        let durable = store.load("ses").unwrap().meta.historian;
-        assert_eq!(durable.state, HistorianPhase::Idle);
+        let durable = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(durable.state, HistorySummarizerPhase::Idle);
         assert!(durable.last_failure.is_some());
     }
 
@@ -38699,7 +37617,7 @@ mod tests {
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
         store
-            .replace_compartments(
+            .replace_history_segments(
                 "ses",
                 &[
                     stored_comp(1, 1, 2, "m2", "first"),
@@ -38715,7 +37633,7 @@ mod tests {
             .begin("ses");
         let before = store.load("ses").unwrap();
         let recut = store
-            .truncate_compartments_for_revert("ses", 1, before.row_version)
+            .truncate_history_segments_for_revert("ses", 1, before.row_version)
             .unwrap();
         assert_eq!(recut.revert_epoch, 1);
         assert!(matches!(
@@ -38835,7 +37753,7 @@ mod tests {
             handler_with_store(Arc::clone(&producer), default_test_config());
         let messages = big_messages();
         let transformed = call_transform(&handler, messages).await;
-        assert_eq!(transformed["historian"]["fired"], json!(true));
+        assert_eq!(transformed["history_summarizer"]["fired"], json!(true));
         wait_for_count(&producer.starts, 1).await;
         *handler
             .wrapup_operation_budget
@@ -38887,17 +37805,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn session_delete_cancels_a_live_historian_firing() {
+    async fn session_delete_cancels_a_live_history_summarizer_firing() {
         let producer = Arc::new(ProducerState::default());
         producer.block_output.store(true, Ordering::SeqCst);
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         let transformed = call_transform(&handler, big_messages()).await;
-        assert_eq!(transformed["historian"]["fired"], json!(true));
+        assert_eq!(transformed["history_summarizer"]["fired"], json!(true));
         wait_for_count(&producer.starts, 1).await;
         assert!(
             handler
-                .live_historian_sessions
+                .live_history_summarizer_sessions
                 .lock()
                 .unwrap()
                 .contains_key("ses")
@@ -38914,7 +37832,7 @@ mod tests {
         let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
         loop {
             if !handler
-                .live_historian_sessions
+                .live_history_summarizer_sessions
                 .lock()
                 .unwrap()
                 .contains_key("ses")
@@ -38923,7 +37841,7 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "session.delete must cancel the in-flight historian firing"
+                "session.delete must cancel the in-flight history_summarizer firing"
             );
             tokio::time::sleep(TEST_WAIT_POLL).await;
         }
@@ -38939,14 +37857,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn wrapup_refuses_active_historian_failure_backoff_at_entry() {
+    async fn wrapup_refuses_active_history_summarizer_failure_backoff_at_entry() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         cache_wrapup_messages(&handler, wrapup_messages(20, 40));
         seed_abandoned_idle(
             &store,
-            now_ms() + HISTORIAN_FAILURE_BACKOFF_MS,
+            now_ms() + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
             "producer failed",
         );
 
@@ -38963,7 +37881,7 @@ mod tests {
             body["summary"]
                 .as_str()
                 .unwrap()
-                .contains("historian failure backoff active for")
+                .contains("history_summarizer failure backoff active for")
         );
         assert!(
             store
@@ -38976,7 +37894,7 @@ mod tests {
 
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta.clone();
-        meta.historian.failure_backoff_at_ms = None;
+        meta.history_summarizer.failure_backoff_at_ms = None;
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
@@ -39000,7 +37918,7 @@ mod tests {
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
         store
-            .replace_compartments("ses", &[stored_comp(1, 1, 10, "m10", "covered")])
+            .replace_history_segments("ses", &[stored_comp(1, 1, 10, "m10", "covered")])
             .unwrap();
         cache_wrapup_messages(
             &handler,
@@ -39032,7 +37950,7 @@ mod tests {
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
         store
-            .replace_compartments("ses", &[stored_comp(1, 1, 10, "m10", "covered")])
+            .replace_history_segments("ses", &[stored_comp(1, 1, 10, "m10", "covered")])
             .unwrap();
         cache_wrapup_messages(
             &handler,
@@ -39065,11 +37983,11 @@ mod tests {
         let messages = big_messages();
 
         let first = call_transform(&handler, messages.clone()).await;
-        assert_eq!(first["historian"]["fired"], true);
+        assert_eq!(first["history_summarizer"]["fired"], true);
         wait_for_count(&producer.starts, 1).await;
 
         let busy = call_transform(&handler, messages).await;
-        assert_eq!(busy["historian"]["no_fire"], "busy");
+        assert_eq!(busy["history_summarizer"]["no_fire"], "busy");
         assert_eq!(producer.connects.load(Ordering::SeqCst), 1);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert_eq!(producer.binds.load(Ordering::SeqCst), 0);
@@ -39090,7 +38008,7 @@ mod tests {
         let response = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
 
         assert_eq!(response["action"], "HARD");
-        assert_eq!(response["historian"]["fired"], true);
+        assert_eq!(response["history_summarizer"]["fired"], true);
         assert!(m0_text(&response).contains("autonomous summary"));
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
@@ -39105,7 +38023,7 @@ mod tests {
 
         store.start_statement_reuse_probe();
         let first = call_transform(&handler, messages.clone()).await;
-        assert_eq!(first["historian"]["fired"], true);
+        assert_eq!(first["history_summarizer"]["fired"], true);
         wait_for_count(&producer.starts, 1).await;
 
         let scalar_runs_before = store.cache_state_scalar_runs();
@@ -39126,7 +38044,7 @@ mod tests {
         std::future::poll_fn(|cx| {
             assert!(
                 blocked.as_mut().poll(cx).is_pending(),
-                "the completed first unit must wait for the active historian"
+                "the completed first unit must wait for the active history_summarizer"
             );
             std::task::Poll::Ready(())
         })
@@ -39147,8 +38065,8 @@ mod tests {
         assert_eq!(
             store.cache_state_scalar_runs() - scalar_runs_before,
             6,
-            "the Emergency95 pass reads the floor after its first commit, the historian phase \
-             and the floor after the rerun that follows the live completion, the historian \
+            "the Emergency95 pass reads the floor after its first commit, the history_summarizer phase \
+             and the floor after the rerun that follows the live completion, the history_summarizer \
              phase and the floor after the rerun that follows the inline firing, and the final \
              floor check"
         );
@@ -39166,10 +38084,10 @@ mod tests {
 
         store.start_statement_reuse_probe();
         let first = call_transform(&handler, messages.clone()).await;
-        assert_eq!(first["historian"]["fired"], true);
+        assert_eq!(first["history_summarizer"]["fired"], true);
         wait_for_count(&producer.starts, 1).await;
 
-        // `Idle` can be published before `live_historian_sessions` releases its entry.
+        // `Idle` can be published before `live_history_summarizer_sessions` releases its entry.
         // The hook also records the foreign-write witness: the row version the transform
         // committed and the row version the publish committed after it, read from the store
         // rather than from the pass's own post-commit read.
@@ -39195,7 +38113,7 @@ mod tests {
                     let published = store_for_hook
                         .load("ses")
                         .ok()
-                        .filter(|s| s.meta.historian.state == HistorianPhase::Idle)
+                        .filter(|s| s.meta.history_summarizer.state == HistorySummarizerPhase::Idle)
                         .and_then(|s| s.row_version);
                     if let Some(published) = published {
                         *witness.lock().expect("witness mutex") =
@@ -39209,9 +38127,9 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 while handler_for_hook
-                    .live_historian_sessions
+                    .live_history_summarizer_sessions
                     .lock()
-                    .expect("live historian mutex")
+                    .expect("live history_summarizer mutex")
                     .contains_key("ses")
                 {
                     assert!(
@@ -39240,7 +38158,7 @@ mod tests {
         assert_eq!(
             store.cache_state_scalar_runs() - scalar_runs_before,
             4,
-            "the Emergency95 pass reads the floor after its first commit, the historian phase \
+            "the Emergency95 pass reads the floor after its first commit, the history_summarizer phase \
              and the floor after the rerun that follows the inline firing, and the final floor \
              check; six reads are the Busy path the hook excludes"
         );
@@ -39252,7 +38170,7 @@ mod tests {
             published > transform_committed,
             "the foreign publish committed row version {published} after the transform's \
              {transform_committed} and after the pass's pre-hook floor read, before \
-             prepare_historian_fire's load and the final floor check"
+             prepare_history_summarizer_fire's load and the final floor check"
         );
         // A second producer start is valid because eligible content still crosses the trigger bar after the first fold.
         // Eligible content still crosses the trigger bar after the first fold publishes.
@@ -39263,8 +38181,8 @@ mod tests {
     async fn handler_emergency_inline_failure_degrades_to_the_emergency_selection_output() {
         let producer = Arc::new(ProducerState::default());
         producer.await_results.lock().unwrap().extend([
-            Err(HistorianProducerError::TimedOut),
-            Err(HistorianProducerError::TimedOut),
+            Err(HistorySummarizerProducerError::TimedOut),
+            Err(HistorySummarizerProducerError::TimedOut),
         ]);
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
@@ -39297,7 +38215,7 @@ mod tests {
                 model_key: None,
                 observed_last_response_at_ms: None,
                 guidance_date: Some("Today's date: Thu Jan 01 1970".to_string()),
-                historian_active: false,
+                history_summarizer_active: false,
                 wrapup_active: false,
                 injected_reductions: Vec::new(),
             },
@@ -39311,8 +38229,8 @@ mod tests {
 
         assert_eq!(response["action"], expected_value["action"]);
         assert_eq!(response["messages"], expected_messages);
-        let state = store.load("ses").unwrap().meta.historian;
-        assert_eq!(state.state, HistorianPhase::Idle);
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::Idle);
         assert!(
             state
                 .failure_backoff_at_ms
@@ -39324,7 +38242,7 @@ mod tests {
                 .last_failure
                 .as_deref()
                 .is_some_and(|detail| detail.contains("timed out")),
-            "the durable failure detail should explain why the inline historian run degraded"
+            "the durable failure detail should explain why the inline history_summarizer run degraded"
         );
     }
 
@@ -39341,15 +38259,15 @@ mod tests {
             call_transform_with_usage(&handler, messages, 45_000, 50_000),
         )
         .await
-        .expect("<95% requests should return while the background historian run is still active");
+        .expect("<95% requests should return while the background history_summarizer run is still active");
 
-        assert_eq!(response["historian"]["fired"], true);
+        assert_eq!(response["history_summarizer"]["fired"], true);
         assert!(!m0_text(&response).contains("autonomous summary"));
         wait_for_count(&producer.starts, 1).await;
         assert!(producer.block_output.load(Ordering::SeqCst));
         assert_ne!(
-            store.load("ses").unwrap().meta.historian.state,
-            HistorianPhase::Idle
+            store.load("ses").unwrap().meta.history_summarizer.state,
+            HistorySummarizerPhase::Idle
         );
         producer.block_output.store(false, Ordering::SeqCst);
         producer.notify.notify_waiters();
@@ -39357,17 +38275,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn live_historian_session_installs_the_completion_notify_before_busy_is_visible() {
+    async fn live_history_summarizer_session_installs_the_completion_notify_before_busy_is_visible()
+    {
         let handler = Handler::new();
-        let guard = match handler.try_claim_live_historian_session("ses") {
-            LiveHistorianSessionClaim::Acquired(guard) => guard,
-            LiveHistorianSessionClaim::Busy(_) => panic!("first claim must acquire the live latch"),
+        let guard = match handler.try_claim_live_history_summarizer_session("ses") {
+            LiveHistorySummarizerSessionClaim::Acquired(guard) => guard,
+            LiveHistorySummarizerSessionClaim::Busy(_) => {
+                panic!("first claim must acquire the live latch")
+            }
         };
-        let mut completion = match handler.try_claim_live_historian_session("ses") {
-            LiveHistorianSessionClaim::Acquired(_) => {
+        let mut completion = match handler.try_claim_live_history_summarizer_session("ses") {
+            LiveHistorySummarizerSessionClaim::Acquired(_) => {
                 panic!("a second claim must observe the existing live session")
             }
-            LiveHistorianSessionClaim::Busy(completion) => completion,
+            LiveHistorySummarizerSessionClaim::Busy(completion) => completion,
         };
 
         drop(guard);
@@ -39377,13 +38298,13 @@ mod tests {
     }
 
     #[test]
-    fn stale_live_historian_cleanup_cannot_delete_the_next_run_entry() {
+    fn stale_live_history_summarizer_cleanup_cannot_delete_the_next_run_entry() {
         let sessions = Arc::new(Mutex::new(HashMap::new()));
         let old_token = Arc::new(());
         let old_completion = Arc::new(Notify::new());
         sessions.lock().unwrap().insert(
             "ses".to_string(),
-            LiveHistorianSession {
+            LiveHistorySummarizerSession {
                 token: Arc::clone(&old_token),
                 completion: Arc::clone(&old_completion),
                 cancel: CancellationToken::new(),
@@ -39401,7 +38322,7 @@ mod tests {
         let new_completion = Arc::new(Notify::new());
         sessions.lock().unwrap().insert(
             "ses".to_string(),
-            LiveHistorianSession {
+            LiveHistorySummarizerSession {
                 token: Arc::clone(&new_token),
                 completion: Arc::clone(&new_completion),
                 cancel: CancellationToken::new(),
@@ -39427,8 +38348,9 @@ mod tests {
         assert!(sessions.lock().unwrap().is_empty());
     }
 
-    fn seeded_historian_identities() -> Vec<memory_store::HistorianSelectedMessageIdentity> {
-        vec![memory_store::HistorianSelectedMessageIdentity {
+    fn seeded_history_summarizer_identities()
+    -> Vec<memory_store::HistorySummarizerSelectedMessageIdentity> {
+        vec![memory_store::HistorySummarizerSelectedMessageIdentity {
             mid: "seeded-mid".to_string(),
             block_identities: vec![memory_store::BlockIdentity {
                 kind_tag: "text".to_string(),
@@ -39450,31 +38372,33 @@ mod tests {
     ) {
         let canonical_messages = transform_request(messages.to_vec(), 1, 200_000).messages;
         let projection = crate::wire::project_messages(&canonical_messages).unwrap();
-        let chunk = historian_chunk::build_historian_chunk(
+        let chunk = history_summarizer_chunk::build_history_summarizer_chunk(
             &canonical_messages,
             &projection.blocks,
             1,
-            DEFAULT_HISTORIAN_CHUNK_TOKENS,
+            DEFAULT_HISTORY_SUMMARIZER_CHUNK_TOKENS,
             4,
         );
         let fingerprint_items: Vec<_> = chunk.snapshot.iter().map(|item| item.as_item()).collect();
-        let fingerprint = historian::compute_chunk_fingerprint(&fingerprint_items);
+        let fingerprint = history_summarizer::compute_chunk_fingerprint(&fingerprint_items);
         let selected_range_identities = canonical_messages
             .iter()
             .filter(|message| !message.ck.meta.synthetic && (1..=3).contains(&message.ordinal))
-            .map(|message| memory_store::HistorianSelectedMessageIdentity {
-                mid: message.mid.clone(),
-                block_identities: projection.identity_by_mid[&message.mid].clone(),
-            })
+            .map(
+                |message| memory_store::HistorySummarizerSelectedMessageIdentity {
+                    mid: message.mid.clone(),
+                    block_identities: projection.identity_by_mid[&message.mid].clone(),
+                },
+            )
             .collect();
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
         meta.block_identity_by_mid
             .extend(projection.identity_by_mid);
-        meta.historian = HistorianDurableState {
-            state: HistorianPhase::AwaitingProducer,
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::AwaitingProducer,
             firing_seq: 1,
-            chunk_range: Some(HistorianChunkRange {
+            chunk_range: Some(HistorySummarizerChunkRange {
                 from_ordinal: 1,
                 to_ordinal: 3,
             }),
@@ -39485,7 +38409,7 @@ mod tests {
             producer_harness: producer_harness.map(str::to_owned),
             fired_at_ms: Some(1),
             expected_revert_epoch: 0,
-            compartment_set_generation: memory_store::CompartmentSetGeneration::default(),
+            history_segment_set_generation: memory_store::HistorySegmentSetGeneration::default(),
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
@@ -39496,18 +38420,18 @@ mod tests {
             .unwrap();
     }
 
-    fn seed_historian_phase(store: &MemoryStore, phase: HistorianPhase) {
+    fn seed_history_summarizer_phase(store: &MemoryStore, phase: HistorySummarizerPhase) {
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
-        let selected_range_identities = seeded_historian_identities();
+        let selected_range_identities = seeded_history_summarizer_identities();
         for selected in &selected_range_identities {
             meta.block_identity_by_mid
                 .insert(selected.mid.clone(), selected.block_identities.clone());
         }
-        meta.historian = HistorianDurableState {
+        meta.history_summarizer = HistorySummarizerDurableState {
             state: phase,
             firing_seq: 1,
-            chunk_range: Some(HistorianChunkRange {
+            chunk_range: Some(HistorySummarizerChunkRange {
                 from_ordinal: 1,
                 to_ordinal: 3,
             }),
@@ -39518,7 +38442,7 @@ mod tests {
             producer_harness: None,
             fired_at_ms: Some(1),
             expected_revert_epoch: 0,
-            compartment_set_generation: memory_store::CompartmentSetGeneration::default(),
+            history_segment_set_generation: memory_store::HistorySegmentSetGeneration::default(),
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
@@ -39532,7 +38456,7 @@ mod tests {
     fn seed_idle(store: &MemoryStore) {
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
-        meta.historian = HistorianDurableState::default();
+        meta.history_summarizer = HistorySummarizerDurableState::default();
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
@@ -39540,53 +38464,58 @@ mod tests {
 
     fn seed_abandoned_idle(store: &MemoryStore, backoff_at_ms: i64, detail: &str) {
         let loaded = store.load("ses").unwrap();
-        let fired = match historian::fire(
-            &HistorianDurableState::default(),
+        let fired = match history_summarizer::fire(
+            &HistorySummarizerDurableState::default(),
             1,
             3,
             "seeded-fingerprint".to_string(),
             Vec::new(),
             0,
-            memory_store::CompartmentSetGeneration::default(),
+            memory_store::HistorySegmentSetGeneration::default(),
             1,
         )
         .unwrap()
         {
-            historian::FireOutcome::Fired(state) => state,
-            historian::FireOutcome::Busy(_) => unreachable!(),
+            history_summarizer::FireOutcome::Fired(state) => state,
+            history_summarizer::FireOutcome::Busy(_) => unreachable!(),
         };
         let mut meta = loaded.meta;
-        meta.historian =
-            historian::abandon_with_detail(&fired, backoff_at_ms, Some(detail.to_string()));
+        meta.history_summarizer = history_summarizer::abandon_with_detail(
+            &fired,
+            backoff_at_ms,
+            Some(detail.to_string()),
+        );
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
     }
 
-    fn expire_historian_backoff(store: &MemoryStore) {
+    fn expire_history_summarizer_backoff(store: &MemoryStore) {
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
-        meta.historian.failure_backoff_at_ms = Some(now_ms() - 1);
+        meta.history_summarizer.failure_backoff_at_ms = Some(now_ms() - 1);
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
     }
 
-    async fn assert_seeded_phase_recovers_then_refires_after_backoff(phase: HistorianPhase) {
+    async fn assert_seeded_phase_recovers_then_refires_after_backoff(
+        phase: HistorySummarizerPhase,
+    ) {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         let messages = big_messages();
-        seed_historian_phase(&store, phase.clone());
+        seed_history_summarizer_phase(&store, phase.clone());
 
         let recovering = call_transform(&handler, messages.clone()).await;
         assert_eq!(
-            recovering["historian"]["state"],
+            recovering["history_summarizer"]["state"],
             phase.as_str(),
             "{phase:?}"
         );
         assert_eq!(
-            recovering["historian"]["no_fire"], "recovering",
+            recovering["history_summarizer"]["no_fire"], "recovering",
             "{phase:?}"
         );
         wait_for_idle(&store).await;
@@ -39596,13 +38525,19 @@ mod tests {
         assert_eq!(producer.statuses.load(Ordering::SeqCst), 0, "{phase:?}");
 
         let backed_off = call_transform(&handler, messages.clone()).await;
-        assert_eq!(backed_off["historian"]["fired"], false, "{phase:?}");
-        assert_eq!(backed_off["historian"]["no_fire"], "backoff", "{phase:?}");
+        assert_eq!(
+            backed_off["history_summarizer"]["fired"], false,
+            "{phase:?}"
+        );
+        assert_eq!(
+            backed_off["history_summarizer"]["no_fire"], "backoff",
+            "{phase:?}"
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0, "{phase:?}");
 
-        expire_historian_backoff(&store);
+        expire_history_summarizer_backoff(&store);
         let fresh = call_transform(&handler, messages).await;
-        assert_eq!(fresh["historian"]["fired"], true, "{phase:?}");
+        assert_eq!(fresh["history_summarizer"]["fired"], true, "{phase:?}");
         wait_for_count(&producer.starts, 1).await;
         wait_for_idle(&store).await;
     }
@@ -39610,9 +38545,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn handler_seeded_non_idle_phases_recover_then_refire_after_backoff() {
         for phase in [
-            HistorianPhase::Publishing,
-            HistorianPhase::Firing,
-            HistorianPhase::Validating,
+            HistorySummarizerPhase::Publishing,
+            HistorySummarizerPhase::Firing,
+            HistorySummarizerPhase::Validating,
         ] {
             assert_seeded_phase_recovers_then_refires_after_backoff(phase).await;
         }
@@ -39621,11 +38556,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn stale_reattach_task_rechecks_idle_before_connecting() {
         let producer = Arc::new(ProducerState::default());
-        producer.outputs.lock().unwrap().push_back(historian_output(
-            1,
-            3,
-            "stale reattach summary",
-        ));
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(history_summarizer_output(1, 3, "stale reattach summary"));
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         let messages = big_messages();
@@ -39653,7 +38588,10 @@ mod tests {
             .unwrap();
 
         let loaded = store.load("ses").unwrap();
-        assert_eq!(loaded.meta.historian, HistorianDurableState::default());
+        assert_eq!(
+            loaded.meta.history_summarizer,
+            HistorySummarizerDurableState::default()
+        );
         assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
         assert_eq!(producer.binds.load(Ordering::SeqCst), 0);
@@ -39670,9 +38608,9 @@ mod tests {
     async fn run_reattach_generation_case(
         case: ReattachGenerationCase,
     ) -> (
-        HistorianAdditiveRows,
-        HistorianAdditiveRows,
-        HistorianDurableState,
+        HistorySummarizerAdditiveRows,
+        HistorySummarizerAdditiveRows,
+        HistorySummarizerDurableState,
         bool,
     ) {
         let producer = Arc::new(ProducerState::default());
@@ -39681,7 +38619,7 @@ mod tests {
             .outputs
             .lock()
             .unwrap()
-            .push_back(historian_output_with_fact(
+            .push_back(history_summarizer_output_with_fact(
                 1,
                 3,
                 "Reattached generation fact.",
@@ -39690,7 +38628,7 @@ mod tests {
             handler_with_store(Arc::clone(&producer), default_test_config());
         let messages = big_messages();
         seed_awaiting(&store, &messages);
-        let before = historian_additive_rows(&store, "ses", &project);
+        let before = history_summarizer_additive_rows(&store, "ses", &project);
         let hook_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hook_ran_for_hook = Arc::clone(&hook_ran);
         let snapshots = Arc::clone(&handler.transform_snapshots);
@@ -39727,14 +38665,14 @@ mod tests {
         }));
 
         let response = call_transform(&handler, messages).await;
-        assert_eq!(response["historian"]["no_fire"], "reattaching");
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
         wait_for_count(&producer.await_outputs, 1).await;
         producer.block_output.store(false, Ordering::SeqCst);
         producer.notify.notify_waiters();
         wait_for_idle(&store).await;
 
-        let after = historian_additive_rows(&store, "ses", &project);
-        let state = store.load("ses").unwrap().meta.historian;
+        let after = history_summarizer_additive_rows(&store, "ses", &project);
+        let state = store.load("ses").unwrap().meta.history_summarizer;
         (before, after, state, hook_ran.load(Ordering::SeqCst))
     }
 
@@ -39745,7 +38683,7 @@ mod tests {
                 .await;
         assert!(stale_hook_ran, "the pre-reattach interleave hook must run");
         assert_eq!(stale_after, stale_before);
-        assert_eq!(stale_state.state, HistorianPhase::Idle);
+        assert_eq!(stale_state.state, HistorySummarizerPhase::Idle);
         assert_eq!(stale_state.failure_backoff_at_ms, None);
         assert_eq!(
             stale_state.last_failure.as_deref(),
@@ -39760,14 +38698,14 @@ mod tests {
             "the same-generation control hook must run"
         );
         assert_ne!(control_after, control_before);
-        assert_eq!(control_state.state, HistorianPhase::Idle);
+        assert_eq!(control_state.state, HistorySummarizerPhase::Idle);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn handler_reattach_publishes_under_the_memories_authority_project() {
         let producer = Arc::new(ProducerState::default());
         producer.outputs.lock().unwrap().push_back(
-            r#"<output><compartments><compartment start="1" end="3" title="autonomous arc" episode_type="feature" importance="60"><p1>reattached summary</p1><p2>short summary</p2><p3>arc</p3><p4 /></compartment></compartments><primer_candidates><primer at_compartment="1">What did the reattach preserve?</primer></primer_candidates><meta><messages_processed>1-3</messages_processed><unprocessed_from>4</unprocessed_from></meta></output>"#
+            r#"<output><history_segments><history_segment start="1" end="3" title="autonomous arc" episode_type="feature" importance="60"><p1>reattached summary</p1><p2>short summary</p2><p3>arc</p3><p4 /></history_segment></history_segments><primer_candidates><primer at_history_segment="1">What did the reattach preserve?</primer></primer_candidates><meta><messages_processed>1-3</messages_processed><unprocessed_from>4</unprocessed_from></meta></output>"#
                 .to_string(),
         );
         let (handler, store, _dir, project) =
@@ -39790,7 +38728,7 @@ mod tests {
         assert_eq!(primers.len(), 1, "the reattached run publishes its primer");
         assert_eq!(
             primers[0].project_path, "git:reattach",
-            "recovered historian output must publish under the authority project, not the route root"
+            "recovered history_summarizer output must publish under the authority project, not the route root"
         );
     }
 
@@ -39802,7 +38740,7 @@ mod tests {
             .outputs
             .lock()
             .unwrap()
-            .push_back(historian_output(1, 3, "reattached summary"));
+            .push_back(history_summarizer_output(1, 3, "reattached summary"));
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         let messages = big_messages();
@@ -39824,7 +38762,7 @@ mod tests {
             .outputs
             .lock()
             .unwrap()
-            .push_back(historian_output(1, 3, "reattached again"));
+            .push_back(history_summarizer_output(1, 3, "reattached again"));
         seed_awaiting(&store, &messages);
         let _ = call_transform(&handler, messages).await;
         wait_for_count(&producer.statuses, 2).await;
@@ -39842,16 +38780,16 @@ mod tests {
         let messages = big_messages();
         seed_abandoned_idle(
             &store,
-            now_ms() + HISTORIAN_FAILURE_BACKOFF_MS,
+            now_ms() + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
             "validate rejected: stale summary",
         );
 
         let response = call_transform(&handler, messages).await;
-        assert_eq!(response["historian"]["fired"], false);
-        assert_eq!(response["historian"]["no_fire"], "backoff");
+        assert_eq!(response["history_summarizer"]["fired"], false);
+        assert_eq!(response["history_summarizer"]["no_fire"], "backoff");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
-        let state = store.load("ses").unwrap().meta.historian;
-        assert_eq!(state.state, HistorianPhase::Idle);
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::Idle);
         assert_eq!(state.last_no_fire.as_deref(), Some("backoff"));
         assert!(
             state
@@ -39862,45 +38800,48 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn status_diagnostics_surface_pending_historian_side_channel_failure() {
+    async fn status_diagnostics_surface_pending_history_summarizer_side_channel_failure() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        seed_historian_phase(&store, HistorianPhase::Publishing);
-        store.fail_next_historian_side_channel_for_test("event");
+        seed_history_summarizer_phase(&store, HistorySummarizerPhase::Publishing);
+        store.fail_next_history_summarizer_side_channel_for_test("event");
         let loaded = store.load("ses").unwrap();
-        let event = memory_store::HistorianEventCandidate {
+        let event = memory_store::HistorySummarizerEventCandidate {
             kind: "trajectory_correction".to_string(),
             fields_json: "{}".to_string(),
             ..Default::default()
         };
         store
-            .publish_historian_chunk(memory_store::HistorianPublishRequest {
+            .publish_history_summarizer_chunk(memory_store::HistorySummarizerPublishRequest {
                 session_id: "ses",
                 expected_row_version: loaded.row_version,
                 expected_revert_epoch: 0,
-                predicate: &memory_store::HistorianPublishPredicate {
+                predicate: &memory_store::HistorySummarizerPublishPredicate {
                     firing_seq: 1,
                     producer_run_id: "run-stale".to_string(),
                     chunk_fingerprint: "seeded-fingerprint".to_string(),
-                    selected_range_identities: seeded_historian_identities(),
-                    compartment_set_generation: memory_store::CompartmentSetGeneration::default(),
+                    selected_range_identities: seeded_history_summarizer_identities(),
+                    history_segment_set_generation:
+                        memory_store::HistorySegmentSetGeneration::default(),
                 },
                 project_path: "git:proj",
-                compartments: &[stored_comp(1, 10, 20, "m20", "summary")],
+                history_segments: &[stored_comp(1, 10, 20, "m20", "summary")],
                 events: std::slice::from_ref(&event),
                 primer_candidates: &[],
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                raw_chunk_messages: None,
             })
             .unwrap();
 
         let status =
             call_dispatch_request(&handler, json!({ "kind": "status", "session_id": "ses" })).await;
-        assert_eq!(status["historian"]["side_channel_pending_count"], 1);
+        assert_eq!(
+            status["history_summarizer"]["side_channel_pending_count"],
+            1
+        );
         assert!(
-            status["historian"]["side_channel_last_failure"]
+            status["history_summarizer"]["side_channel_last_failure"]
                 .as_str()
                 .is_some_and(|error| error.contains("event"))
         );
@@ -39911,12 +38852,15 @@ mod tests {
             vec![ck("m21", 21, "follow up"), ck("m22", 22, "small reply")],
         )
         .await;
-        assert_eq!(store.load_compartment_events("ses").unwrap().len(), 1);
+        assert_eq!(store.load_history_segment_events("ses").unwrap().len(), 1);
         let recovered =
             call_dispatch_request(&handler, json!({ "kind": "status", "session_id": "ses" })).await;
-        assert_eq!(recovered["historian"]["side_channel_pending_count"], 0);
         assert_eq!(
-            recovered["historian"]["side_channel_last_failure"],
+            recovered["history_summarizer"]["side_channel_pending_count"],
+            0
+        );
+        assert_eq!(
+            recovered["history_summarizer"]["side_channel_last_failure"],
             Value::Null
         );
     }
@@ -39930,10 +38874,10 @@ mod tests {
         seed_abandoned_idle(&store, now_ms() - 1, "validate rejected: stale summary");
 
         let response = call_transform(&handler, messages).await;
-        assert_eq!(response["historian"]["fired"], true);
+        assert_eq!(response["history_summarizer"]["fired"], true);
         wait_for_count(&producer.starts, 1).await;
         wait_for_idle(&store).await;
-        let state = store.load("ses").unwrap().meta.historian;
+        let state = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(state.last_failure, None);
         assert_eq!(state.failure_backoff_at_ms, None);
         assert_eq!(state.last_no_fire, None);
@@ -39946,8 +38890,8 @@ mod tests {
             .connect_errors
             .lock()
             .unwrap()
-            .push_back(HistorianProducerError::Client(
-                historian_producer::HistorianClientFailure {
+            .push_back(HistorySummarizerProducerError::Client(
+                history_summarizer_producer::HistorySummarizerClientFailure {
                     code: "dial_failed".to_owned(),
                     message: "daemon dial failed".to_owned(),
                 },
@@ -39957,17 +38901,17 @@ mod tests {
         let messages = big_messages();
 
         let first = call_transform(&handler, messages.clone()).await;
-        assert_eq!(first["historian"]["fired"], true);
+        assert_eq!(first["history_summarizer"]["fired"], true);
         wait_for_count(&producer.connects, 1).await;
-        wait_for_historian_state(&store, |state| {
+        wait_for_history_summarizer_state(&store, |state| {
             state
                 .last_failure
                 .as_deref()
                 .is_some_and(|detail| detail.contains("producer connect"))
         })
         .await;
-        let state = store.load("ses").unwrap().meta.historian;
-        assert_eq!(state.state, HistorianPhase::Idle);
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::Idle);
         assert!(
             state
                 .failure_backoff_at_ms
@@ -39983,16 +38927,16 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
 
         let backed_off = call_transform(&handler, messages.clone()).await;
-        assert_eq!(backed_off["historian"]["fired"], false);
-        assert_eq!(backed_off["historian"]["no_fire"], "backoff");
+        assert_eq!(backed_off["history_summarizer"]["fired"], false);
+        assert_eq!(backed_off["history_summarizer"]["no_fire"], "backoff");
         assert_eq!(producer.connects.load(Ordering::SeqCst), 1);
 
-        expire_historian_backoff(&store);
+        expire_history_summarizer_backoff(&store);
         let fresh = call_transform(&handler, messages).await;
-        assert_eq!(fresh["historian"]["fired"], true);
+        assert_eq!(fresh["history_summarizer"]["fired"], true);
         wait_for_count(&producer.starts, 1).await;
         wait_for_idle(&store).await;
-        let state = store.load("ses").unwrap().meta.historian;
+        let state = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(state.last_failure, None);
         assert_eq!(state.failure_backoff_at_ms, None);
     }
@@ -40011,7 +38955,7 @@ mod tests {
         let _ = call_transform(&handler, messages.clone()).await;
         let loaded = store.load("ses").unwrap();
         assert_eq!(
-            loaded.meta.historian.last_no_fire.as_deref(),
+            loaded.meta.history_summarizer.last_no_fire.as_deref(),
             Some("no_models")
         );
         let version_after_first = loaded.row_version;
@@ -40034,22 +38978,23 @@ mod tests {
         handler2.install_store_for_test(Arc::clone(&store));
         handler2.bind_route(test_route(7), binding(_project.to_str().unwrap(), "ses"));
         let fired = call_transform(&handler2, messages).await;
-        assert_eq!(fired["historian"]["fired"], true);
+        assert_eq!(fired["history_summarizer"]["fired"], true);
         // The spawned firing persists the clearing write; durable state remains `Idle` until that task runs.
         // The test must wait for the producer to start before calling `wait_for_idle`, which can return before firing begins.
         wait_for_count(&producer.starts, 1).await;
         wait_for_idle(&store).await;
         let loaded = store.load("ses").unwrap();
-        assert_eq!(loaded.meta.historian.last_no_fire, None);
+        assert_eq!(loaded.meta.history_summarizer.last_no_fire, None);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn own_producer_sessions_pass_through_untransformed() {
-        // The historian must never re-transform its own `llm-runner` run.
+        // The history_summarizer must never re-transform its own `llm-runner` run.
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
-        let session = historian::historian_producer_session_id("proj", "parent-session", 3);
+        let session =
+            history_summarizer::history_summarizer_producer_session_id("proj", "parent-session", 3);
         handler.bind_route(test_route(9), binding("/tmp/nonexistent-proj", &session));
         let messages = [ck("m1", 1, "seed block + new_messages payload")];
         let req = serde_json::json!({
@@ -40071,10 +39016,10 @@ mod tests {
         assert_eq!(v["action"], "PASSTHROUGH");
         let out_msgs = v["messages"].as_array().unwrap();
         assert_eq!(out_msgs.len(), 1, "no m0/m1 prepends, no drops");
-        // No store row was created and no historian evaluation ran for the child session.
+        // No store row was created and no history_summarizer evaluation ran for the child session.
         assert!(store.load(&session).unwrap().row_version.is_none());
         assert!(store.load_pass_trace(&session).unwrap().is_none());
-        assert!(v.get("historian").is_none());
+        assert!(v.get("history_summarizer").is_none());
     }
     #[test]
     fn module_status_emits_exact_numeric_state_sync_epoch_alongside_boolean_signal() {
@@ -40096,8 +39041,8 @@ mod tests {
             json!(MEMORY_RENDER_FORMAT_EPOCH)
         );
         assert_eq!(
-            epochs["compartment_render_epoch"],
-            json!(COMPARTMENT_RENDER_FORMAT_EPOCH)
+            epochs["history_segment_render_epoch"],
+            json!(HISTORY_SEGMENT_RENDER_FORMAT_EPOCH)
         );
         assert_eq!(
             epochs["profile_epoch"],
@@ -40126,11 +39071,11 @@ mod release_contract_tests {
     fn rust_embedding_decodes_to_the_canonical_contract_and_digest() {
         assert_eq!(
             release_contract::release_contract_sha256(),
-            "1a8f45495704a1cb36afec39c3af79ebf4b3707409c6916878615e2916fdbbf1"
+            "b63a1686c999983fab62bec9ded5d55250f9697200b6f64c85e91e8a6447bc0b"
         );
         assert_eq!(
             production_inputs::production_inputs_lock_sha256(),
-            "411970c1bf28f199dfbac59f52a8281a586732f3362acb388c4f99a9ee1bac4c"
+            "a6b2bf18777d9fba2ba7ac2b2782f248dc8a6448c20951804b65b266aff2122d"
         );
         let contract = contract();
         assert_eq!(contract["schema"], json!("eidnara.host-release/v1"));
@@ -40157,7 +39102,11 @@ mod release_contract_tests {
         module_keys.sort_unstable();
         assert_eq!(
             module_keys,
-            vec!["broca", crate::DEFAULT_MODULE_ID, "synapse"]
+            vec![
+                crate::DEFAULT_MODULE_ID,
+                "local_embeddings",
+                "model_execution"
+            ]
         );
     }
 
@@ -40169,8 +39118,8 @@ mod release_contract_tests {
             Some(release_contract::MEMORY_RENDER_EPOCH as u64)
         );
         assert_eq!(
-            epochs["compartment_render"].as_u64(),
-            Some(release_contract::COMPARTMENT_RENDER_EPOCH as u64)
+            epochs["history_segment_render"].as_u64(),
+            Some(release_contract::HISTORY_SEGMENT_RENDER_EPOCH as u64)
         );
         assert_eq!(
             epochs["profile_claude_code_anthropic"].as_u64(),
@@ -40190,8 +39139,8 @@ mod release_contract_tests {
             release_contract::MEMORY_RENDER_EPOCH
         );
         assert_eq!(
-            crate::COMPARTMENT_RENDER_FORMAT_EPOCH,
-            release_contract::COMPARTMENT_RENDER_EPOCH
+            crate::HISTORY_SEGMENT_RENDER_FORMAT_EPOCH,
+            release_contract::HISTORY_SEGMENT_RENDER_EPOCH
         );
         assert_eq!(
             crate::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC,
@@ -40212,7 +39161,7 @@ mod release_contract_tests {
         assert_eq!(linux["kernel_min"], json!("4.18"));
         assert_eq!(linux["glibc_min"], json!("2.28"));
         assert_eq!(linux["capabilities"]["procfs_self_fd_exec"], json!(true));
-        assert_eq!(linux["synapse"], json!("certified_cpu"));
+        assert_eq!(linux["local_embeddings"], json!("certified_cpu"));
         assert_eq!(supported.len(), 1);
         assert_eq!(
             contract["platforms"]["unsupported_reason"],
@@ -40465,7 +39414,7 @@ fn compaction_mode_projection_cache_reclassifies_synthetic_prefix() {
         model_key: None,
         observed_last_response_at_ms: None,
         guidance_date: None,
-        historian_active: false,
+        history_summarizer_active: false,
         wrapup_active: false,
         injected_reductions: Vec::new(),
     };

@@ -8,9 +8,9 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 //
-// Published daemons require Broca.
-// Broca verifies process identity through `/proc` before initializing.
-// Broca cannot initialize outside environments that provide `/proc`, so spawned daemons cannot publish there.
+// Published daemons require ModelExecution.
+// ModelExecution verifies process identity through `/proc` before initializing.
+// ModelExecution cannot initialize outside environments that provide `/proc`, so spawned daemons cannot publish there.
 //
 // Lifecycle path walks open every component with `O_NOFOLLOW`.
 // Each isolated data root lives under the per-user temporary directory.
@@ -43,9 +43,9 @@ const BUDGET: Duration = Duration::from_secs(30);
 /// Pinned digests of the committed release files, restated from `release_contract_tests` so the
 /// binary's metadata output is checked against an independent literal instead of the same embedded string.
 const RELEASE_CONTRACT_SHA256: &str =
-    "1a8f45495704a1cb36afec39c3af79ebf4b3707409c6916878615e2916fdbbf1";
+    "b63a1686c999983fab62bec9ded5d55250f9697200b6f64c85e91e8a6447bc0b";
 const PRODUCTION_INPUTS_LOCK_SHA256: &str =
-    "411970c1bf28f199dfbac59f52a8281a586732f3362acb388c4f99a9ee1bac4c";
+    "a6b2bf18777d9fba2ba7ac2b2782f248dc8a6448c20951804b65b266aff2122d";
 
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
@@ -648,7 +648,7 @@ async fn full_dev_mode_lifecycle_roundtrip() {
             let contract = release_contract();
             for (advertised, contract_key) in [
                 ("memory_render_epoch", "memory_render"),
-                ("compartment_render_epoch", "compartment_render"),
+                ("history_segment_render_epoch", "history_segment_render"),
                 ("profile_epoch", "profile_claude_code_anthropic"),
                 ("tagger_epoch", "tagger"),
                 ("state_sync_epoch", "state_sync"),

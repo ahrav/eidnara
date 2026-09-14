@@ -114,7 +114,7 @@ contract plus a demonstrated behaviour, not as a violated rule.
 
 A route is bound to `/Users/alice/work/acme-payments` and that project is
 authority-managed under a domain identity that is not the path. The model calls
-`ctx_note` with `action: "write"` and a `memory_project` value that disagrees, or
+`eidnara_note` with `action: "write"` and a `memory_project` value that disagrees, or
 simply writes while the route's authority binding has moved.
 
 The response is
@@ -159,7 +159,7 @@ default prompt-surface preset is `Full` (`prompt_surface.rs:112-122`), so all fi
    the vocabulary check can fail. `store.bind_authority_route` is called from
    `bind_facade_route_for_write` (`:10377-10382`), and the existing tests build
    authority state directly.
-3. Drive the mismatch both ways: a `ctx_note` write with a disagreeing
+3. Drive the mismatch both ways: a `eidnara_note` write with a disagreeing
    `memory_project` (site 1) and a write that reaches
    `enforce_facade_project_vocabulary` (site 2).
 4. For each, assert the response text does not contain the marker string.

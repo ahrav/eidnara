@@ -25,7 +25,7 @@
 | P3 | [Stage 2 parent](../../../../../commons/docs/plans/2026-09-08-0523-feat-eidnara-native-rust-cutover-plan.md), lines 33-74 | Parent authority, preservation of canonical state, and measurement ownership. |
 | P4 | [N1 ownership parent](../../../../../commons/docs/plans/2026-09-08-1614-feat-eidnara-rust-product-state-ownership-plan.md), lines 123-169 | Shared supervisor ownership and disabled RP2.1 hooks. Its earlier current-code survey is not imported as fact. |
 | P7 | [RP2.7 plan](../../../../../commons/docs/plans/2026-09-10-feat-eidnara-rp2-7-fusion-routes-plan.md), lines 79-82, 104-119 | Shared absolute deadline, request cancellation, physical ownership, and explicit dense-lane degradation. |
-| W | [Host wire contract](../../../host-wire-protocol.md), lines 434-502 | Existing four-operation Synapse contract, truncation, and process-local job semantics. |
+| W | [Host wire contract](../../../host-wire-protocol.md), lines 434-502 | Existing four-operation LocalEmbeddings contract, truncation, and process-local job semantics. |
 | C | [Existing-coverage readback](_lenses/00-existing-coverage.md) | Exact-match reuse decisions and stale reachability/check claims corrected locally. |
 | E | [Central portfolio evaluation](portfolio-evaluation.md), analyst session `ses_f7623dcccffe3Y09nW2wVoABif`, supplied through the user | Independent cross-catalog findings and their embedding dispositions. This writer verifies citations and applies refinements, not a second independent review. |
 
@@ -39,18 +39,18 @@ Existing paths have distinct classifications:
 
 | Existing path | Classification and current evidence |
 | --- | --- |
-| Synapse composition and disabled fallback | `default-production`: `crates/daemon/src/bin/eidnara_host/serve.rs:1097-1127` composes it; missing artifacts use `new(None)` at `:1043`, `:1057`. |
+| LocalEmbeddings composition and disabled fallback | `default-production`: `crates/daemon/src/bin/eidnara_host/serve.rs:1097-1127` composes it; missing artifacts use `new(None)` at `:1043`, `:1057`. |
 | Certified inference, bundle validation, and live JobTable serving | `explicit-config-only`: the selected generation must include the bundle manifest and ORT artifact (`serve.rs:1027-1065`). The macOS branch is explicitly unsupported. |
 | Claude accounting calls | `default-production`: `crates/daemon/Cargo.toml:32` and `crates/daemon/src/token_cache.rs:133` contradict the old tokenizer catalog's absent-caller premise. |
-| Dreamer scheduler loop | `default-production` after store open: `crates/daemon/src/lib.rs:3646-3660`. |
+| MemoryClassifier scheduler loop | `default-production` after store open: `crates/daemon/src/lib.rs:3646-3660`. |
 | Due review-user-memories slots | `explicit-config-only`: scheduled MODULE projects come from `lib.rs:13979-14027`. Actual scheduled model dispatch has only test-installed inputs (`lib.rs:3084-3105`, `:14041-14044`). |
-| Deterministic engine and manual-clock scenarios | `test-only`: `crates/host-runtime/tests/support/synapse.rs:40-122` and `crates/daemon/src/dreamer_scheduler.rs:422-483`. |
+| Deterministic engine and manual-clock scenarios | `test-only`: `crates/host-runtime/tests/support/local_embeddings.rs:40-122` and `crates/daemon/src/memory_classifier_scheduler.rs:422-483`. |
 
 Each new record carries its own proposed-only reachability explanation. Searches
 find no Rust `search.sqlite`, `untruncated_token_len`, `EmbedTokens`, or
 `ClaudeTokens` implementation. The current count is explicitly truncated
-(`crates/host-runtime/src/synapse/inference.rs:577-589`). The scheduler only runs
-the review-user-memories task (`crates/daemon/src/dreamer_scheduler.rs:334-371`).
+(`crates/host-runtime/src/local_embeddings/inference.rs:577-589`). The scheduler only runs
+the review-user-memories task (`crates/daemon/src/memory_classifier_scheduler.rs:334-371`).
 These observations support absence of the RP2.1 embedding path; they do not
 classify the existing host or tokenizer as test-only.
 
@@ -104,7 +104,7 @@ These are mathematical observation names, not proposed API names:
   is not current work. A remediated field matters only if that mapping uses it.
 - `Pending(K)` remains durable until a matching durable vector or an explicit
   obsolete disposition supersedes it. JobTable `ready` is not this disposition.
-- `Complete(K)` is product completion, not a Synapse descriptor status.
+- `Complete(K)` is product completion, not a LocalEmbeddings descriptor status.
 - `V(K)` is a reopened, durable vector record with K and the validated vector.
 - `L` is an approved, versioned RP2.9 limit set. It supplies input bytes/tokens,
   pending count/bytes, batch limits, per-slice work, retry attempts, recovery
@@ -115,7 +115,7 @@ These are mathematical observation names, not proposed API names:
   verified lane's token and byte caps, respectively. Approval cannot enlarge
   the model's supported window. Queries have no durable K or completion marker.
 
-No numeric RP2.1 value is approved by this catalog. Existing Synapse defaults
+No numeric RP2.1 value is approved by this catalog. Existing LocalEmbeddings defaults
 are implementation facts, not RP2.9 acceptance values. A campaign lacking L
 cannot report the bounded-liveness or resource checks as passed.
 
@@ -147,7 +147,7 @@ acceptance-situation check; unapproved RP2.9 bounds block liveness acceptance.
 Type: safety
 Reachability: test-only - this is a proposed contract; no production RP2.1
 untruncated count path exists. Backend's private count truncates at
-`crates/host-runtime/src/synapse/inference.rs:577-589`.
+`crates/host-runtime/src/local_embeddings/inference.rs:577-589`.
 Status: active
 Exercised: not yet - the exact-count API, typed units, and model-specific token
 oracle are missing.
@@ -166,7 +166,7 @@ artifact bytes available after verification; compare isolated and batch contexts
 Confidence: high - [evidence](evidence/embedding-count-authority-is-untruncated.md).
 P1 line 83 establishes the claim; bundle and inference source establish the gap.
 Existing check: The existing
-[fingerprint record](../../host-runtime/catalog.md#synapse-bundle-fingerprint-covers-every-artifact)
+[fingerprint record](../../host-runtime/catalog.md#local_embeddings-bundle-fingerprint-covers-every-artifact)
 is reused; its current checks are unaudited here. None checks the proposed count.
 Impact: Incorrect admission silently embeds a prefix or mixes token authorities.
 Open questions:
@@ -178,7 +178,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - no production RP2.1 product preflight exists. Existing
-`crates/host-runtime/src/synapse/mod.rs:344-399` checks bytes and rows, not exact
+`crates/host-runtime/src/local_embeddings/mod.rs:344-399` checks bytes and rows, not exact
 untruncated tokens.
 Status: active
 Exercised: not yet - no product path joins exact counting to the inference-call
@@ -200,20 +200,20 @@ healthy counting engine observer; take counters after startup certification.
 Confidence: high - [evidence](evidence/embedding-input-is-rejected-before-inference.md).
 P1 lines 58, 115, and 149 require preflight; current source lacks the token gate.
 Existing check: Reuse
-[wire validation](../../host-runtime/catalog.md#synapse-requests-are-validated-before-any-inference).
-`crates/host-runtime/tests/synapse_protocol.rs:642-735`, `:869-952` are
+[wire validation](../../host-runtime/catalog.md#local_embeddings-requests-are-validated-before-any-inference).
+`crates/host-runtime/tests/local_embeddings_protocol.rs:642-735`, `:869-952` are
 unaudited adjacent checks; no exact-token product check exists.
 Impact: Lost suffix evidence, wasted inference, and falsely complete vectors.
 Open questions:
 
 - RP2.9 must approve byte/token caps and the product rejection/coverage
-  disposition; it must not add a Synapse count method. (needs human input)
+  disposition; it must not add a LocalEmbeddings count method. (needs human input)
 
 ### embedding-pending-drives-one-job-table
 
 Type: safety
 Reachability: test-only - no production RP2.1 durable pending source or driver
-exists; `crates/host-runtime/src/synapse/jobs.rs:162-196` is process-local state.
+exists; `crates/host-runtime/src/local_embeddings/jobs.rs:162-196` is process-local state.
 Status: active
 Exercised: partial - the dispatcher covers durable pending admission, lost charge
 replies, capacity refusal, a recovery episode replacing a submitted episode
@@ -258,7 +258,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - no production RP2.1 completion transaction exists.
-JobTable publication at `crates/host-runtime/src/synapse/jobs.rs:502-557` has no
+JobTable publication at `crates/host-runtime/src/local_embeddings/jobs.rs:502-557` has no
 current occurrence or revision authority.
 Status: active
 Exercised: not yet - current-identity comparison and a held-completion seam are
@@ -283,8 +283,8 @@ If the mapping includes the remediated field, include operator remediation
 that changes authoritative input bytes while leaving the revision unchanged.
 Confidence: high - [evidence](evidence/embedding-completion-is-identity-fenced.md).
 P1 lines 149 and 156 require stale-result rejection and current-revision coverage.
-Existing check: `crates/host-runtime/src/synapse/protocol.rs:781-805`,
-`crates/host-runtime/src/synapse/jobs.rs:515-535`, and the late-publication test
+Existing check: `crates/host-runtime/src/local_embeddings/protocol.rs:781-805`,
+`crates/host-runtime/src/local_embeddings/jobs.rs:515-535`, and the late-publication test
 at `jobs.rs:1217` are unaudited local guards, not product identity checks.
 Impact: Stale or cross-occurrence vectors appear valid for current retrieval.
 Open questions:
@@ -299,7 +299,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - no production RP2.1 vector persistence/completion path
-exists; JobTable Ready at `crates/host-runtime/src/synapse/jobs.rs:540-550`
+exists; JobTable Ready at `crates/host-runtime/src/local_embeddings/jobs.rs:540-550`
 contains resident vectors only.
 Status: active
 Exercised: not yet - crash boundaries and reopened vector/completion observation
@@ -334,7 +334,7 @@ Open questions:
 Type: liveness
 Reachability: test-only - no production RP2.1 restart scanner exists. JobTable
 creates fresh maps and an incarnation at
-`crates/host-runtime/src/synapse/jobs.rs:323-342`.
+`crates/host-runtime/src/local_embeddings/jobs.rs:323-342`.
 Status: active
 Exercised: not yet - process-crash recovery into durable pending work is absent.
 Guarantee: Stable, eligible pending work survives process loss and reaches
@@ -352,8 +352,8 @@ state, fresh JobTable, and a bounded fault-free recovery window with finite
 backlog and declared admission opportunities.
 Confidence: medium - [evidence](evidence/embedding-restart-retries-durable-pending.md).
 P1 lines 109 and 149 require recovery; its schedule and bounds remain proposed.
-Existing check: `crates/host-runtime/tests/synapse_jobs.rs:297-334` covers route
-loss, and `crates/host-runtime/src/synapse/jobs.rs:1123` covers retained retryable
+Existing check: `crates/host-runtime/tests/local_embeddings_jobs.rs:297-334` covers route
+loss, and `crates/host-runtime/src/local_embeddings/jobs.rs:1123` covers retained retryable
 failure, both unaudited. Neither is durable process-restart recovery.
 Impact: Dense coverage stays missing forever despite a healthy restarted lane.
 Open questions:
@@ -366,7 +366,7 @@ Open questions:
 Type: liveness
 Reachability: test-only - no production RP2.1 priority admission exists. Current
 query and batch workers share FIFO CPU acquisition at
-`crates/host-runtime/src/synapse/mod.rs:682-691`, `:843-851`.
+`crates/host-runtime/src/local_embeddings/mod.rs:682-691`, `:843-851`.
 Status: active
 Exercised: not yet - a saturated product backfill workload and approved query
 service bound are missing.
@@ -385,7 +385,7 @@ available, an independently observed query arrival, and native calls completing
 within the declared service bound; stop pressure for the recovery observation.
 Confidence: medium - [evidence](evidence/embedding-backfill-preserves-query-admission.md).
 P1 line 149 requires admission preservation; FIFO source does not establish it.
-Existing check: `crates/host-runtime/tests/synapse_protocol.rs:186-233` asserts
+Existing check: `crates/host-runtime/tests/local_embeddings_protocol.rs:186-233` asserts
 mixed FIFO order, unaudited. No product query-priority check exists.
 Impact: Offline backfill consumes the useful lifetime of interactive retrieval.
 Open questions:
@@ -397,7 +397,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - no production RP2.1 identity GC exists. Existing
-`crates/host-runtime/src/synapse/jobs.rs:748-886` handles ephemeral job retention,
+`crates/host-runtime/src/local_embeddings/jobs.rs:748-886` handles ephemeral job retention,
 not durable occurrence/model references.
 Status: active
 Exercised: not yet - durable identity/reference observation and the GC race seam
@@ -418,7 +418,7 @@ an active old result holder, a selected GC candidate, and a delayed completion;
 include distinct occurrences sharing payload bytes.
 Confidence: medium - [evidence](evidence/embedding-identity-gc-preserves-live-work.md).
 P1 lines 39 and 146 assign identity GC; its durable reference rules are proposed.
-Existing check: `crates/host-runtime/src/synapse/jobs.rs:1382` protects a leased
+Existing check: `crates/host-runtime/src/local_embeddings/jobs.rs:1382` protects a leased
 result page in memory, unaudited. None checks durable identity GC.
 Impact: Cleanup deletes useful vectors, destroys retryable work, or revives stale
 coverage through a late result.
@@ -431,8 +431,8 @@ Open questions:
 
 Type: safety
 Reachability: test-only - no production RP2.1 embedding supervisor slice or
-Synapse EvalBudget bridge exists. The existing scheduler and kernel budget are
-separate paths (`crates/daemon/src/dreamer_scheduler.rs:163-220`;
+LocalEmbeddings EvalBudget bridge exists. The existing scheduler and kernel budget are
+separate paths (`crates/daemon/src/memory_classifier_scheduler.rs:163-220`;
 `crates/kernel/src/applicability/checkout.rs:146-203`).
 Status: active
 Exercised: not yet - shared-budget stage observation and embedding supervisor
@@ -455,8 +455,8 @@ observed cancellation/deadline crossing before the gate is released.
 Confidence: medium - [evidence](evidence/embedding-supervisor-shares-budget-and-joins.md).
 P2 line 53 and P7 line 81 require composition; existing ownership paths are
 source-verified but not composed for RP2.1.
-Existing check: `crates/host-runtime/tests/synapse_protocol.rs:236-309` and
-`crates/daemon/src/dreamer_scheduler.rs:1180-1254` are unaudited cancellation
+Existing check: `crates/host-runtime/tests/local_embeddings_protocol.rs:236-309` and
+`crates/daemon/src/memory_classifier_scheduler.rs:1180-1254` are unaudited cancellation
 checks. No shared embedding/SQLite/dense budget check exists.
 Impact: Deadline renewal, orphaned inference, early capacity reuse, or maintenance
 that monopolizes the daemon.

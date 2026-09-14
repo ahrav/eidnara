@@ -16,11 +16,11 @@ produces:
 | Site | Kind |
 | --- | --- |
 | `crates/host-runtime/src/harness_closure.rs` | the definitions |
-| `crates/host-runtime/src/broca/pi.rs:24`, `:49` | holds an `Arc<ValidatedHarnessClosure>` field |
-| `crates/host-runtime/src/broca/opencode.rs:23`, `:40` | holds an `Arc<ValidatedHarnessClosure>` field |
+| `crates/host-runtime/src/model_execution/pi.rs:24`, `:49` | holds an `Arc<ValidatedHarnessClosure>` field |
+| `crates/host-runtime/src/model_execution/opencode.rs:23`, `:40` | holds an `Arc<ValidatedHarnessClosure>` field |
 | `crates/daemon/src/bin/eidnara_host/serve.rs:162`, `:349` | **the only production `open` calls** |
 | `crates/host-runtime/tests/harness_closure.rs` | 10 `open` calls |
-| `crates/host-runtime/tests/broca_subprocess.rs:853` | 1 `open` call |
+| `crates/host-runtime/tests/model_execution_subprocess.rs:853` | 1 `open` call |
 | `crates/daemon/tests/release_contract_conformance.rs:14`, `:132` | manifest parsing only |
 
 So `runtime::run` never touches the store. The two production sites, verified

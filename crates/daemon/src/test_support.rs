@@ -23,7 +23,7 @@ pub fn descriptor(path: &std::path::Path) -> storage::StorageDescriptor {
     }
 }
 
-use crate::decay_render::DecayRenderCompartment;
+use crate::decay_render::DecayRenderHistorySegment;
 use crate::injection::build_synthetic_todo_pair;
 use crate::wire::{BlockKind, HarnessMeta, IngressMessage, ProviderExtras, WireBlock, WireMessage};
 
@@ -32,7 +32,7 @@ use crate::wire::{BlockKind, HarnessMeta, IngressMessage, ProviderExtras, WireBl
 pub struct InProcessFixture {
     pub session_id: String,
     pub messages: Vec<IngressMessage>,
-    pub compartments: Vec<DecayRenderCompartment>,
+    pub history_segments: Vec<DecayRenderHistorySegment>,
     pub native_messages: Vec<Value>,
     pub reductions: Vec<Value>,
 }
@@ -67,7 +67,7 @@ impl FixtureBuilder {
         StoreFixture { dir, store }
     }
 
-    /// Builds a two-message session with one compartment boundary.
+    /// Builds a two-message session with one history_segment boundary.
     pub fn session_with_boundary() -> InProcessFixture {
         let session_id = "fixture-boundary".to_string();
         let messages = vec![
@@ -77,7 +77,7 @@ impl FixtureBuilder {
         InProcessFixture {
             session_id,
             messages,
-            compartments: vec![compartment(1, 1, "Boundary", "boundary summary")],
+            history_segments: vec![history_segment(1, 1, "Boundary", "boundary summary")],
             native_messages: vec![],
             reductions: vec![],
         }
@@ -152,8 +152,8 @@ fn text_message(mid: &str, ordinal: u64, text: &str, synthetic: bool) -> Ingress
     }
 }
 
-fn compartment(start: i64, end: i64, title: &str, content: &str) -> DecayRenderCompartment {
-    DecayRenderCompartment {
+fn history_segment(start: i64, end: i64, title: &str, content: &str) -> DecayRenderHistorySegment {
+    DecayRenderHistorySegment {
         start_message: start,
         end_message: end,
         title: title.to_string(),

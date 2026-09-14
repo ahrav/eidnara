@@ -9,10 +9,10 @@ export {
     isRetryableRouteOpenCode,
 } from "./client";
 export {
-    BROCA_CREDENTIAL_NAMES,
-    BROCA_CREDENTIAL_VALUE_CAP_BYTES,
     canonicalCredentialRowEncoding,
     credentialFingerprints,
+    MODEL_EXECUTION_CREDENTIAL_NAMES,
+    MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES,
 } from "./credential-fingerprint";
 export {
     armExpiryTimer,

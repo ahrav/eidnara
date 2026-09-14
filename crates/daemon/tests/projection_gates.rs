@@ -23,7 +23,7 @@ use daemon::projection_gates::{
     EntryPoint, EvidenceEvaluator, Gate, HARNESSES, HarnessRun, HookGate, InvalidationIdentity,
     ManifestRefusal, ProjectionHook, REQUIRED_LIMITS, RuntimeManifest,
 };
-use host_runtime::synapse::SynapseLimits;
+use host_runtime::local_embeddings::LocalEmbeddingsLimits;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{ArtifactDestination, KernelStore, ProjectScope};
@@ -705,7 +705,7 @@ async fn every_entry_path_reaches_the_ledger_and_a_closed_gate_does_nothing() {
     let before = durable_work(&inspect(dir.path()));
     let gate = Arc::new(HookGate::closed());
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
 
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
@@ -713,7 +713,7 @@ async fn every_entry_path_reaches_the_ledger_and_a_closed_gate_does_nothing() {
             gate: Arc::clone(&gate),
             kernel: Arc::clone(&corpus.kernel),
             projection: Arc::clone(&projection),
-            synapse,
+            local_embeddings,
             project: ProjectScope::new(PROJECT).unwrap(),
             destination: ArtifactDestination::Remote,
         },
@@ -826,7 +826,7 @@ async fn invalidation_cancels_the_running_slice_and_keeps_admitted_work_owned() 
     let engine = TestEngine::new();
     let block = engine.block_calls();
     let _release = GateGuard(Arc::clone(&block));
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let gate = open_gate();
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
@@ -834,7 +834,7 @@ async fn invalidation_cancels_the_running_slice_and_keeps_admitted_work_owned() 
             gate: Arc::clone(&gate),
             kernel: Arc::clone(&corpus.kernel),
             projection: Arc::clone(&projection),
-            synapse: Arc::clone(&synapse),
+            local_embeddings: Arc::clone(&local_embeddings),
             project: ProjectScope::new(PROJECT).unwrap(),
             destination: ArtifactDestination::Remote,
         },
@@ -876,7 +876,10 @@ async fn invalidation_cancels_the_running_slice_and_keeps_admitted_work_owned() 
         )
         .unwrap();
     assert_eq!(state, "admitted");
-    assert_eq!(synapse.job_status(&host_job.unwrap()), Some("running"));
+    assert_eq!(
+        local_embeddings.job_status(&host_job.unwrap()),
+        Some("running")
+    );
     assert_eq!(engine.calls(), 1, "no work ran under the invalidated grant");
 
     let ledger = gate.ledger();
@@ -918,7 +921,7 @@ async fn revocation_between_jobs_is_seen_on_the_slice_thread() {
     let (projection, _rows) = corpus.bootstrap(dir.path());
     let projection = Arc::new(projection);
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let gate = open_gate();
     let (sender, mut events) = unbounded_channel();
     let mut bounds = slice_bounds(Duration::from_secs(30));
@@ -931,7 +934,7 @@ async fn revocation_between_jobs_is_seen_on_the_slice_thread() {
             gate: Arc::clone(&gate),
             kernel: Arc::clone(&corpus.kernel),
             projection: Arc::clone(&projection),
-            synapse: Arc::clone(&synapse),
+            local_embeddings: Arc::clone(&local_embeddings),
             project: ProjectScope::new(PROJECT).unwrap(),
             destination: ArtifactDestination::Remote,
         },
@@ -1005,7 +1008,7 @@ async fn revocation_before_the_pass_is_seen_before_its_first_write() {
     let (projection, _rows) = corpus.bootstrap(dir.path());
     let projection = Arc::new(projection);
     let engine = TestEngine::new();
-    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
     let gate = open_gate();
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
@@ -1013,7 +1016,7 @@ async fn revocation_before_the_pass_is_seen_before_its_first_write() {
             gate: Arc::clone(&gate),
             kernel: Arc::clone(&corpus.kernel),
             projection: Arc::clone(&projection),
-            synapse: Arc::clone(&synapse),
+            local_embeddings: Arc::clone(&local_embeddings),
             project: ProjectScope::new(PROJECT).unwrap(),
             destination: ArtifactDestination::Remote,
         },

@@ -10,7 +10,7 @@ Provenance: `/local/home/ahrav/scratch/eidnara`, `HEAD` = `76cd6f41`.
 Method contract in [../../METHOD.md](../../METHOD.md). Scope taken verbatim
 from
 [../../_lenses/scope-map-and-risk-ranking.md](../../_lenses/scope-map-and-risk-ranking.md)
-sub-part 4b: `transform.rs:1-7510`, `injection.rs`, `compartment_coverage.rs`,
+sub-part 4b: `transform.rs:1-7510`, `injection.rs`, `history_segment_coverage.rs`,
 `m0_compose.rs`, `healing.rs`, `m1_compose.rs`, `retained_size.rs`,
 `divergence.rs`.
 
@@ -81,9 +81,9 @@ Every other read is a **separate** transaction, taken after that point:
 | Read | Line |
 | --- | --- |
 | `load_cached_tags` | `:3391` |
-| `max_compartment_end_ordinal` | `:3429` |
-| `has_compartments` | `:3553`, `:4054` |
-| `load_compartments` | `:3558`, `:4072`, `:4564`, `:4643`, `:4666`, `:4900`, `:5060` |
+| `max_history_segment_end_ordinal` | `:3429` |
+| `has_history_segments` | `:3553`, `:4054` |
+| `load_history_segments` | `:3558`, `:4072`, `:4564`, `:4643`, `:4666`, `:4900`, `:5060` |
 | `load_pending_agent_drops` | `:3834` |
 | `revision_signal_for_context` (m1 digest) | `:4658`, `:5029`, `:5119` |
 
@@ -103,12 +103,12 @@ Two durable writes break that boundary by executing **before** the terminal
 commit and outside its transaction:
 
 1. `store.descend_lineage` (`:3312`) on a lineage-switch pass. It copies
-   compartments, chunk transcripts, tags, temporal marks and user hints into
+   history_segments, chunk transcripts, tags, temporal marks and user hints into
    the target session key and bumps that key's `row_version`
    (`memory-store/src/lib.rs:8177`, inserts at `:8705-8745`, `row_version` writes
    at `:8312-8331` and `:8403-8422`).
-2. `store.truncate_compartments_for_revert` (`:4646`) on the
-   reconcile-rematerialize arm. It deletes compartments past the surviving
+2. `store.truncate_history_segments_for_revert` (`:4646`) on the
+   reconcile-rematerialize arm. It deletes history_segments past the surviving
    prefix, bumps `meta.revert_epoch`, and bumps `row_version`
    (`memory-store/src/lib.rs:9015`, deletes at `:9106-9138`, `row_version` write at
    `:9139-9144`). The engine then re-points its own CAS expectation at the new
@@ -202,7 +202,7 @@ directly, outside `step`:
 - `core.reconcile_pending = true` at `transform.rs:4430`, on lineage-anchor
   validation failure.
 - `core.frozen_units.retain(..)` via `prune_covered_red_units` (`:5117`, body
-  `:6926-6947`) and `prune_covered_caveman_units` (`:5118`, body
+  `:6926-6947`) and `prune_covered_terse_text_compression_units` (`:5118`, body
   `:6385-6398`), both called **after** the Soft step has already bumped
   `core.version`.
 
@@ -224,7 +224,7 @@ different:
 - Another writer commits between this pass's **truncate** and its commit. The
   truncate is already durable. See
   `revert-truncate-commits-outside-the-terminal-cas`.
-- The process dies between the truncate and the commit. Compartments are gone
+- The process dies between the truncate and the commit. HistorySegments are gone
   and `revert_epoch` has moved, but `core.boundary_id` and
   `meta.coverage_ordinal` still describe the pre-truncate coverage.
 
@@ -238,7 +238,7 @@ different:
 3. `transform.rs:3312` — `descend_lineage`, a durable write 43 lines before
    the array-validity guards at `:3355` (`DuplicateBlockId`), `:3364`
    (`ReservedId`) and `:3371` (`OrdinalViolation`).
-4. `transform.rs:4646-4652` — `truncate_compartments_for_revert`, a durable
+4. `transform.rs:4646-4652` — `truncate_history_segments_for_revert`, a durable
    write 900 lines before the commit, whose outcome re-points
    `commit_expected` and `meta.revert_epoch`.
 5. `transform.rs:4703-4710` — a `CoverageGap` error raised *after* that
@@ -246,12 +246,12 @@ different:
 6. `memory-store/src/lib.rs:9053-9059` — the truncate's `dropped_count == 0`
    no-op arm returns the current epoch and version without a second bump.
    This is what makes a retried truncate idempotent.
-7. `transform.rs:5574` — `compartment_max_seq: is_bust_pass.then_some(..)`.
+7. `transform.rs:5574` — `history_segment_max_seq: is_bust_pass.then_some(..)`.
    `is_bust_pass` (`:4439`) is `Hard | MigrateHard | Soft` and non-subagent,
-   so a Defer commits with **no** compartment fence
+   so a Defer commits with **no** history_segment fence
    (`memory-store/src/lib.rs:7378-7387` is skipped).
 8. `transform.rs:5155-5157` — a Defer nonetheless writes
-   `meta.coverage_compartment_seq` from a read taken at `:3860`-ish, outside
+   `meta.coverage_history_segment_seq` from a read taken at `:3860`-ish, outside
    any predicate.
 9. `transform.rs:5591-5592` — the commit slices `tag_rows` by
    `[tag_mint_start .. tag_mint_start + tag_mint_count]`, the exact span
@@ -289,7 +289,7 @@ different:
 `store.commit_transform` call at the end of `apply_once`, one fenced
 transaction that atomically writes the new `core`/`meta` blobs, the pass trace,
 every speculative overlay row, and the pending-drop deletions under a
-row-version, claim-vector and (bust-only) compartment-sequence
+row-version, claim-vector and (bust-only) history_segment-sequence
 compare-and-swap.
 
 ## Candidate properties
@@ -308,6 +308,7 @@ Confidence: high — [evidence](evidence/engine-terminal-cas-is-the-sole-core-me
 Existing check: `transform.rs:20909` asserts one error path does not commit. No check covers the general obligation.
 Impact: A partial mutation that survives a rejected pass makes the next pass compute against a state no pass ever accepted, which is the wedged-cache failure the module doc's poison-resistance invariants exist to prevent.
 Open questions:
+
 - Should `apply_additive_only` be held to the same obligation as a separate record, given it is `explicit-config-only`? (needs human input)
 
 ### lineage-descent-write-precedes-the-array-validity-guards
@@ -317,13 +318,14 @@ Reachability: default-production
 Status: active
 Exercised: not yet — no test drives a malformed array through a lineage-switch pass and then asserts the target key is untouched.
 Guarantee: A `TransformError` raised by the array-validity guards leaves no durable lineage-descent effect on the target session key.
-Check: `always-or-unreached` — on a pass with `lineage_switched && !is_subagent` whose array fails `DuplicateBlockId`, `ReservedId` or `OrdinalViolation`, assert the target key's `row_version`, compartment count and tag count are unchanged. `always-or-unreached` because a lineage switch is optional per pass but the obligation is absolute when one occurs.
+Check: `always-or-unreached` — on a pass with `lineage_switched && !is_subagent` whose array fails `DuplicateBlockId`, `ReservedId` or `OrdinalViolation`, assert the target key's `row_version`, history_segment count and tag count are unchanged. `always-or-unreached` because a lineage switch is optional per pass but the obligation is absolute when one occurs.
 Fault/timing angle: The window is `:3312` (descend_lineage commits) to `:3371` (last validity guard). 59 lines, no fault injection needed: the guards are downstream of the write in straight-line code.
 Required faults and enabling state: A lineage-switch request (`lineage_switched: true`, `is_subagent: false`, well-formed `descent_edge_id`, `prior_conversation_key`, `constituents`) whose wire array also contains a duplicate flat block id, a live block whose id starts with `eidnara_`, or non-increasing non-synthetic ordinals. The plugin sets `lineage_switched` from `passInputs` (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1404`), and the array is harness-supplied, so both halves are production-reachable.
 Confidence: high — [evidence](evidence/lineage-descent-write-precedes-the-array-validity-guards.md). Read the straight-line order and confirmed `descend_lineage` commits its own fenced transaction.
 Existing check: none.
-Impact: Compartments, chunk transcripts and tags are copied into the target key and its `row_version` advanced, while the caller receives a hard error and the host serves the raw array. The copy is not idempotent-by-construction across a later retry with a valid array; it is protected only by `descend_lineage`'s own disposition logic.
+Impact: HistorySegments, chunk transcripts and tags are copied into the target key and its `row_version` advanced, while the caller receives a hard error and the host serves the raw array. The copy is not idempotent-by-construction across a later retry with a valid array; it is protected only by `descend_lineage`'s own disposition logic.
 Open questions:
+
 - Does `descend_lineage` treat a repeat of the same `edge_id` as a no-op, so a retry after fixing the array is safe? Unresolved, needs a read of `memory-store/src/lib.rs:8177-8500` at the disposition level, which is 4c/4a territory.
 
 ### revert-truncate-commits-outside-the-terminal-cas
@@ -333,13 +335,14 @@ Reachability: default-production
 Status: active
 Exercised: partial — `reconcile_rematerialize_with_unrecut_store_truncates_and_refolds_prefix` (`transform.rs:19870`) drives the truncate on a success path only. `crash_reentry_after_recut_uses_coverage_shrink_for_todo_reanchor` (`:21806`) covers re-entry after a *committed* recut, not after a failed one. Neither runs in CI.
 Guarantee: The reconcile-rematerialize truncate and the pass that ordered it either both take effect or neither does.
-Check: `always(!X)` where X is "compartments deleted and `revert_epoch` bumped while `core.boundary_id` and `meta.coverage_ordinal` still name the pre-truncate coverage". `always(!X)` and not `unreachable`, because this is a forbidden durable **state** with no dedicated detection point in the code.
+Check: `always(!X)` where X is "history_segments deleted and `revert_epoch` bumped while `core.boundary_id` and `meta.coverage_ordinal` still name the pre-truncate coverage". `always(!X)` and not `unreachable`, because this is a forbidden durable **state** with no dedicated detection point in the code.
 Fault/timing angle: The window is `:4650` (truncate returns) to `:5565` (commit). Roughly 900 lines of rendering sit inside it, including `compose_m0_for_context` (`:4676`), the CoverageGap guard at `:4703`, `build_output_with_tags` (`:5390`+) and the two output integrity guards. A process kill or any error in that span leaves the split state.
 Required faults and enabling state: `loaded.core.reconcile_pending == true` plus a minted anchor that is not available in the live array (`:4636-4645`), which is the post-revert shape. Then either a `CoverageGap` at `:4703`, an error from `compose_m0_for_context`, or a process kill. Coverage-check form: assert the independent preconditions — `reconcile_pending` observed true on entry, the truncate observed to return `dropped_count > 0`, and the pass observed to reach `:5565` — rather than the split state itself.
-Confidence: high — [evidence](evidence/revert-truncate-commits-outside-the-terminal-cas.md). Confirmed `truncate_compartments_for_revert` is its own fenced transaction that bumps `row_version` and writes `meta`.
+Confidence: high — [evidence](evidence/revert-truncate-commits-outside-the-terminal-cas.md). Confirmed `truncate_history_segments_for_revert` is its own fenced transaction that bumps `row_version` and writes `meta`.
 Existing check: `transform.rs:19870` and `:21806` cover the committed path.
-Impact: `meta.coverage_ordinal` claims coverage through an ordinal whose compartments no longer exist. The next pass's `first_uncovered_live_block` guard (`:4699`) or `resolve_boundary_state` must repair it; if the repair path itself needs the deleted compartments the session cannot fold.
+Impact: `meta.coverage_ordinal` claims coverage through an ordinal whose history_segments no longer exist. The next pass's `first_uncovered_live_block` guard (`:4699`) or `resolve_boundary_state` must repair it; if the repair path itself needs the deleted history_segments the session cannot fold.
 Open questions:
+
 - Is the next pass guaranteed to re-enter the same reconcile arm, given `reconcile_pending` was never cleared? The reasoning says yes, but no test constructs it.
 
 ### revert-epoch-bumps-at-most-once-per-logical-recut
@@ -350,12 +353,13 @@ Status: active
 Exercised: not yet — no test forces a CAS conflict after the truncate and then counts epoch bumps.
 Guarantee: One transform firing advances `meta.revert_epoch` by at most one, even when it performs up to nine `apply_once` attempts each of which re-enters the truncate arm.
 Check: `always` — across one call to `transform_with_projection_cached`, assert `revert_epoch_after - revert_epoch_before <= 1`. `always` because the bound must hold on every firing, and idempotence is the property, not the mere absence of a crash.
-Fault/timing angle: The retry loop at `:2274-2299` re-runs `apply_once` from scratch. Attempt 2 re-reads the already-truncated compartments at `:4643`, recomputes `surviving_revert_prefix_seq` (`:7275-7284`) over that shorter list, and calls the truncate again. Idempotence rests entirely on `dropped_count == 0` (`memory-store/src/lib.rs:9053`) returning the current epoch. That in turn rests on the recomputed `keep_through_seq` being no smaller than the surviving max sequence.
+Fault/timing angle: The retry loop at `:2274-2299` re-runs `apply_once` from scratch. Attempt 2 re-reads the already-truncated history_segments at `:4643`, recomputes `surviving_revert_prefix_seq` (`:7275-7284`) over that shorter list, and calls the truncate again. Idempotence rests entirely on `dropped_count == 0` (`memory-store/src/lib.rs:9053`) returning the current epoch. That in turn rests on the recomputed `keep_through_seq` being no smaller than the surviving max sequence.
 Required faults and enabling state: The reconcile-rematerialize arm plus a `CasConflict` on the terminal commit, which the `#[cfg(test)]` hook at `:5563-5564` (`run_transform_attempt_hook`) exists to inject.
-Confidence: medium — [evidence](evidence/revert-epoch-bumps-at-most-once-per-logical-recut.md). The no-op arm is verified. Whether `surviving_revert_prefix_seq` is a fixpoint after truncation is argued, not proven: it is a `take_while` over compartments whose `end_message_id` is live, and truncation removes a suffix, so the prefix length can only stay or grow. Not tested.
+Confidence: medium — [evidence](evidence/revert-epoch-bumps-at-most-once-per-logical-recut.md). The no-op arm is verified. Whether `surviving_revert_prefix_seq` is a fixpoint after truncation is argued, not proven: it is a `take_while` over history_segments whose `end_message_id` is live, and truncation removes a suffix, so the prefix length can only stay or grow. Not tested.
 Existing check: none.
 Impact: `revert_epoch` keys the serialized-output cache (`:5381`, `:421-427`). Extra bumps evict the cache repeatedly and, more seriously, an epoch that advances without an accepted pass makes the epoch a poor generation witness for anything downstream that compares it.
 Open questions:
+
 - Can a retry's `keep_through_seq` ever be *smaller* than the previous attempt's, causing a second real truncation? That needs the `live` set to be identical across attempts, which it is within one firing, so the answer is probably no. Unresolved, needs a constructed test.
 
 ### exactly-one-core-step-executes-per-pass
@@ -381,28 +385,30 @@ Status: active
 Exercised: partial — `reverted_orphan_reduction_gcd_on_surviving_prefix_reconcile_hard` (`transform.rs:25052`) covers the orphan GC that the prunes complement. No test asserts the frozen set only changes through documented mechanisms.
 Guarantee: Every durable change to `core.frozen_units` and `core.reconcile_pending` is one the cache-state machine's documented rules permit.
 Check: `always` — for each committed pass, assert the committed `core` is reproducible by replaying the pass's declared action plus the declared coverage-prune rule from `loaded.core`. `always` because the machine's invariants are what the byte-stability contract rests on.
-Fault/timing angle: The relevant ordering is that `prune_covered_red_units` (`:5117`) and `prune_covered_caveman_units` (`:5118`) run **after** `step_soft` has bumped `core.version` (cache-core `:232`), so the committed `version` does not identify the committed frozen set.
+Fault/timing angle: The relevant ordering is that `prune_covered_red_units` (`:5117`) and `prune_covered_terse_text_compression_units` (`:5118`) run **after** `step_soft` has bumped `core.version` (cache-core `:232`), so the committed `version` does not identify the committed frozen set.
 Required faults and enabling state: A coverage-extending SOFT (`m1.new_coverage.is_some()`, `:5107`) with at least one frozen `red:` or `cav:` unit whose target the advance folds below coverage. Also, separately, a lineage-anchor validation failure (`validate_lineage_anchor` at `:2484-2547`, failure handled at `:4429-4433`) which sets `reconcile_pending` directly.
 Confidence: high — [evidence](evidence/core-fields-mutated-outside-the-step-machine.md). Read both prune bodies and confirmed they `retain` on `core.frozen_units`; confirmed `:4430` assigns the field; confirmed all five `step` calls discard `StepResult`.
 Existing check: `transform.rs:25052` for the HARD-fold orphan GC.
 Impact: The out-of-repo core enforces its guards (cache-core `:227`) precisely because it is "a shared cache-stability primitive, so the guard is enforced in the core, not assumed". Direct field writes route around that reasoning, and the discarded `StepResult` means the engine never cross-checks the machine's own verdict.
 Open questions:
+
 - Is the discarded `StepResult.reconcile_pending` ever different from what the engine assumes? A cheap assertion would answer it. (needs human input on whether to propose a guard)
 
-### defer-commit-carries-no-compartment-fence
+### defer-commit-carries-no-history_segment-fence
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — `claim_vector_commit_fence_never_publishes_interleaved_stale_bytes` (`transform.rs:14185`) covers the claim-vector predicate; nothing covers the compartment predicate's absence on Defer.
-Guarantee: A committing Defer pass does not persist a compartment watermark that a concurrent publish has already invalidated.
-Check: `always` — whenever a Defer commit writes `meta.coverage_compartment_seq`, assert the value equals `MAX(sequence)` of `compartments` for that session as observed inside the commit transaction. `always` because a stale watermark is wrong every time it is written, not only under a specific interleaving.
-Fault/timing angle: `compartment_max_seq` is passed only when `is_bust_pass` (`:5574`), and `is_bust_pass` excludes Defer (`:4439`, `:4435-4438`). So the store's compartment check (`memory-store/src/lib.rs:7378-7387`) is skipped, while `:5155-5157` writes the watermark from a read taken outside any predicate. A historian publish landing in that window is not detected.
-Required faults and enabling state: A Defer pass with `compartment_seq_changed_since_meta` true and `current_m1_digest == loaded.meta.m1_revision` (`:5155-5156`), plus a compartment append committing between the m1 revision read and `:5565`. The `row_version` CAS does not help: `append_compartments` (`memory-store/src/lib.rs:9169`) does not touch `cache_state`.
-Confidence: high — [evidence](evidence/defer-commit-carries-no-compartment-fence.md). Verified `is_bust_pass` excludes Defer, verified `append_compartments` writes no `row_version`.
-Impact: `coverage_compartment_seq` is the watermark `compartment_revision_matches` (`:3913-3918`) and `compartment_seq_changed_since_meta` (`:3951`) read to decide whether new compartments need folding. A stale value recorded by a Defer can suppress the next SOFT that would have folded them.
+Exercised: not yet — `claim_vector_commit_fence_never_publishes_interleaved_stale_bytes` (`transform.rs:14185`) covers the claim-vector predicate; nothing covers the history_segment predicate's absence on Defer.
+Guarantee: A committing Defer pass does not persist a history_segment watermark that a concurrent publish has already invalidated.
+Check: `always` — whenever a Defer commit writes `meta.coverage_history_segment_seq`, assert the value equals `MAX(sequence)` of `history_segments` for that session as observed inside the commit transaction. `always` because a stale watermark is wrong every time it is written, not only under a specific interleaving.
+Fault/timing angle: `history_segment_max_seq` is passed only when `is_bust_pass` (`:5574`), and `is_bust_pass` excludes Defer (`:4439`, `:4435-4438`). So the store's history_segment check (`memory-store/src/lib.rs:7378-7387`) is skipped, while `:5155-5157` writes the watermark from a read taken outside any predicate. A history_summarizer publish landing in that window is not detected.
+Required faults and enabling state: A Defer pass with `history_segment_seq_changed_since_meta` true and `current_m1_digest == loaded.meta.m1_revision` (`:5155-5156`), plus a history_segment append committing between the m1 revision read and `:5565`. The `row_version` CAS does not help: `append_history_segments` (`memory-store/src/lib.rs:9169`) does not touch `cache_state`.
+Confidence: high — [evidence](evidence/defer-commit-carries-no-history_segment-fence.md). Verified `is_bust_pass` excludes Defer, verified `append_history_segments` writes no `row_version`.
+Impact: `coverage_history_segment_seq` is the watermark `history_segment_revision_matches` (`:3913-3918`) and `history_segment_seq_changed_since_meta` (`:3951`) read to decide whether new history_segments need folding. A stale value recorded by a Defer can suppress the next SOFT that would have folded them.
 Open questions:
-- Does any other writer append compartments concurrently with a live transform for the same session, or does the historian's publication fence serialize them? Unresolved, needs the 4a publish-fence result.
+
+- Does any other writer append history_segments concurrently with a live transform for the same session, or does the history_summarizer's publication fence serialize them? Unresolved, needs the 4a publish-fence result.
 
 ### speculative-tag-numbering-has-two-authorities
 
@@ -418,6 +424,7 @@ Confidence: medium — [evidence](evidence/speculative-tag-numbering-has-two-aut
 Existing check: `transform.rs:22514`, `:22588`.
 Impact: A rendered tag prefix that names a number the store gave to a different block breaks the tag-to-block mapping the reduction and nudge surfaces key on, and it does so in bytes already frozen into the provider prefix.
 Open questions:
+
 - Can `compute_active_overlay_decisions` emit a `block_id` that already has a tag? Unresolved, needs 4e.
 
 ### pass-firing-work-bounded-by-max-cas-retries
@@ -431,9 +438,10 @@ Check: `always` — instrument the loop at `:2274` and assert the attempt count 
 Fault/timing angle: The bound holds for the retry loop. It does **not** hold for the whole firing, because `load_cached_tags` (`:3391`, body `:7644-7697`) is an unbounded `loop` whose two exits are optimistic revalidations against `tag_cache_summary`. Nothing counts its attempts.
 Required faults and enabling state: For the retry bound, the `#[cfg(test)]` attempt hook at `:5563-5564` committing a conflicting row. For the tag-loop concern, a writer that changes the session's tag summary between the two reads at `:7657` and `:7659`, or between `:7683` and `:7684`, on every iteration.
 Confidence: high — [evidence](evidence/pass-firing-work-bounded-by-max-cas-retries.md). `MAX_CAS_RETRIES = 8` at `:82`, comparison at `:2284`, no other bounded loop in `apply_once`. The unbounded loop at `:7644` was read line by line; the body is 4e scope and is flagged, not claimed.
-Existing check: `boundary_divergence_recut_retries_after_interleaved_historian_publish` (`transform.rs:20433`) exercises one retry, not the bound.
+Existing check: `boundary_divergence_recut_retries_after_interleaved_history_summarizer_publish` (`transform.rs:20433`) exercises one retry, not the bound.
 Impact: If the tag revalidation loop can spin, one request occupies a tokio worker thread indefinitely, because `run_transform` (`lib.rs:8322`) is called inline and not under `spawn_blocking`.
 Open questions:
+
 - Is `load_cached_tags`'s loop actually livelock-reachable in production, given the default build's only other `tags` writers are `commit_transform` and `descend_lineage`? Unresolved; `mint_or_get_tags` (`memory-store/src/lib.rs:6258`) is marked as reachable only under `test` or the `test-support` feature (`:6255-6257`), so this needs the 4c concurrency result.
 
 ### synthetic-strip-precedes-every-coverage-read
@@ -456,15 +464,16 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `boundary_divergence_recut_retries_after_interleaved_historian_publish` (`transform.rs:20433`) constructs exactly this race. It does not run in CI.
+Exercised: partial — `boundary_divergence_recut_retries_after_interleaved_history_summarizer_publish` (`transform.rs:20433`) constructs exactly this race. It does not run in CI.
 Guarantee: A boundary divergence proven on attempt N is still repaired on attempt N+1, even though the reload observes a newer m1 watermark that would otherwise classify the pass as an ordinary defer.
 Check: `always` — on any firing whose attempt N set `boundary_divergence_detected`, assert the accepted pass carries `materialize_reason == "boundary_divergence_recut"` (`:4361`). `always` because forgetting proven damage is wrong on every occurrence.
 Fault/timing angle: The mechanism is `boundary_divergence_retry |= boundary_divergence_detected` at `:2289`, a sticky OR across the loop. On the retry, `:3889` skips the revalidation and `:3942` short-circuits the recut filter. Also, `boundary_divergence_pending_count` (`:3925-3939`) is reset to zero on a retry-driven recut (`:3947-3949`), so the three-pass suppression budget (`:85`) is not consumed by the retry.
-Required faults and enabling state: A divergence candidate from `detect_boundary_divergence_candidate` (`:6557-6600`), plus a historian publish committing between the detection and the terminal commit, which is what forces the `CasConflict` at `:2283`.
+Required faults and enabling state: A divergence candidate from `detect_boundary_divergence_candidate` (`:6557-6600`), plus a history_summarizer publish committing between the detection and the terminal commit, which is what forces the `CasConflict` at `:2283`.
 Confidence: high — [evidence](evidence/recut-intent-survives-the-mandatory-cas-reload.md). Traced the flag from `:2270` through `:3232`, `:3889`, `:3942`, `:3953`, `:2289`.
 Existing check: `transform.rs:20433`, and `stale_full_state_sync_cannot_rewind_a_committed_divergence_recut` (`:20841`) for the post-commit half.
 Impact: Without the sticky flag, a session with a damaged coverage row alternates between detecting the damage and being told by a fresh watermark that a publish is legitimately ahead, so the repair never fires and the served prefix stays wrong.
 Open questions:
+
 - `active_legitimate_publication_window` (`:3924`) retains prior evidence rather than incrementing, bounded by "the 3,800-second wrapup request budget documented on the context" (`:3919-3923`). Is that budget enforced anywhere reachable from the transform, or only by the wrapup handler? Unresolved, needs 4a.
 
 ### output-cache-replace-trails-the-accepted-commit
@@ -481,6 +490,7 @@ Confidence: high — [evidence](evidence/output-cache-replace-trails-the-accepte
 Existing check: `transform.rs:28884`; also the `#[cfg(test)]` drift assertion at `:5551-5577`-region (`"serialized output cache drift"`, `:5479`) which re-renders without the cache and compares canonical bytes.
 Impact: A cache holding rejected-pass entries would serve bytes no accepted pass ever produced, which is indistinguishable downstream from a byte-stability violation and would bust the provider prefix.
 Open questions:
+
 - `replace` silently drops the whole entry set when it exceeds `max_retained_bytes` (`:445-447`). Is a session whose output always exceeds the budget permanently uncached, and does anything observe that? Suggest one record in 4c's cache-validity focus rather than here.
 
 ## Contract-vs-code leads
@@ -490,7 +500,7 @@ Open questions:
    does not advance". Narrowly the claim is about `core.frozen_units` and is
    true. Read as written it is false for two paths: `descend_lineage` at
    `:3312` commits before the guards at `:3355`/`:3364`/`:3371`, and
-   `truncate_compartments_for_revert` at `:4646` commits before the
+   `truncate_history_segments_for_revert` at `:4646` commits before the
    `CoverageGap` at `:4703-4710`. In both cases the CAS does not advance
    **and** durable state has changed. Cited both sides; not resolved in favour
    of the doc.
@@ -504,7 +514,7 @@ Open questions:
    (`../commons/crates/storage/src/lib.rs:189`) plus the `row_version`
    CAS. The doc states a property; the code provides a weaker one that happens
    to be sufficient for the main path and demonstrably insufficient for the
-   compartment watermark on Defer.
+   history_segment watermark on Defer.
 
 3. **"`reconcile_pending` ... is cleared only by a HARD rematerialize, never a
    SOFT"**. Cache-core `:214-215`. Scoped to SOFT it is accurate, but the same
@@ -531,7 +541,7 @@ Open questions:
 
 - Can two transform requests for the same session id run concurrently in the
   daemon? Nothing in `lib.rs:8007-8615` appears to serialise them, and the
-  answer decides whether `defer-commit-carries-no-compartment-fence` and
+  answer decides whether `defer-commit-carries-no-history_segment-fence` and
   `speculative-tag-numbering-has-two-authorities` are theoretical or live.
   Unresolved, needs 4c's route and dispatch result.
 - Should `Exercised:` be `partial` when the only covering test is in a binary

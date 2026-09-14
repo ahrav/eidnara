@@ -8,7 +8,7 @@ import {
     sendCtxStatusMessage,
 } from "./pi-command-utils";
 
-describe("ctx-status entries", () => {
+describe("eidnara-status entries", () => {
     it("appends model-invisible entry data instead of sending a message", () => {
         const appended: Array<{ customType: string; data: unknown }> = [];
         let sent = 0;
@@ -43,7 +43,7 @@ describe("ctx-status entries", () => {
         expect(sent).toBe(0);
     });
 
-    it("registers one ctx-status entry renderer and ignores malformed data", () => {
+    it("registers one eidnara-status entry renderer and ignores malformed data", () => {
         let customType = "";
         let renderer:
             | ((entry: { data?: CtxStatusEntryData }, options: unknown, theme: unknown) => unknown)

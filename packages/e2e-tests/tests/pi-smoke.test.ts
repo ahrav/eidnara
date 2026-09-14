@@ -12,7 +12,7 @@ const PI_REQUIRED = process.env.EIDNARA_E2E_REQUIRE_PI === "1";
 /** SQLite leaves `-wal`, `-shm`, and `-journal` sidecars beside the primary file. */
 const STORAGE_FILE = /\.(db|sqlite|sqlite3)(-(wal|shm|journal))?$/;
 
-const REGISTERED_TOOLS = ["ctx_search", "ctx_memory", "ctx_note"] as const;
+const REGISTERED_TOOLS = ["eidnara_search", "eidnara_memory", "eidnara_note"] as const;
 
 function listRecursive(dir: string): string[] {
     return readdirSync(dir, { recursive: true, encoding: "utf8" }).sort();

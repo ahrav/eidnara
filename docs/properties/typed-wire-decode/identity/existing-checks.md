@@ -13,7 +13,7 @@ originals or unknown-envelope replay are retained as contract conflicts.
 
 The inspected source sizes at HEAD are: memory-store `lib.rs` 26,806 lines;
 daemon `transform.rs` 29,195; `wire.rs` 1,863; `served_json.rs` 253;
-`codec/sidecar.rs` 558; `historian.rs` 4,387; `historian_chunk.rs` 1,868;
+`codec/sidecar.rs` 558; `history_summarizer.rs` 4,387; `history_summarizer_chunk.rs` 1,868;
 `injection.rs` 838; plugin `module-wire.ts` 1,127 and its tests 1,494.
 Large files contain unrelated subsystems. Counts are physical source lines,
 not a complexity or coverage score.
@@ -112,7 +112,7 @@ Source: `crates/memory-store/src/lib.rs`.
 | --- | --- | --- | --- |
 | 16096 | `a_block_edit_leaves_its_sibling_byte_identical` | Checks edited text and an untouched unknown-envelope sentinel; legacy contract conflict. | unaudited |
 | 18208 | `commit_then_load_roundtrips_and_bumps_row_version` | Metadata/core round-trip boundary for durable identity state. | unaudited |
-| 21118 | `publish_historian_chunk_scans_transcript_and_raw_chunk_messages_before_storing` | Redacts/scans raw history before durable storage. | unaudited |
+| 21118 | `publish_history_summarizer_chunk_scans_transcript_and_raw_chunk_messages_before_storing` | Redacts/scans raw history before durable storage. | unaudited |
 | 26369 | `descent_copies_raw_chunk_messages_through_transaction_redaction` | Preserves the expected redacted copied raw row. | unaudited |
 | 26390 | `descent_refuses_raw_chunk_messages_under_a_protected_key` | Rejects protected-key raw history during copy. | unaudited |
 
@@ -125,7 +125,7 @@ Source: `crates/daemon/src/transform.rs`.
 | 14672 | `tail_identity_drift_re_adopts_atomically_and_attributes_served_divergence` | Checks permitted tail adoption and diagnostic attribution. | unaudited |
 | 14832 | `boundary_anchor_and_frozen_tail_identity_drift_still_reject` | Checks protected identity rejection. | unaudited |
 | 17917 | `completed_reasoning_first_execute_encodes_tagged_sibling_natively` | Checks native encoding of a mutated sibling beside reasoning. | unaudited |
-| 25037 | `reduction_on_one_block_keeps_sibling_caveman_payload_across_restart` | Checks sibling frozen payload across restart. | unaudited |
+| 25037 | `reduction_on_one_block_keeps_sibling_terse_text_compression_payload_across_restart` | Checks sibling frozen payload across restart. | unaudited |
 | 25815 | `covered_system_content_drift_fails_identity_guard` | Rejects covered system-content drift. | unaudited |
 | 27958 | `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` | Checks synthetic/live classification under warm-cache selection. | unaudited |
 | 28739 | `fake_compaction_anchor_fail_closes_but_sibling_date_and_overlays_are_exempt` | Distinguishes protected anchor drift from permitted sibling changes. | unaudited |
@@ -194,9 +194,9 @@ not proof that Pi emits ingress through the scoped production transform path.
 | 1441 | `deleted_tool_result_does_not_replay_the_retained_raw_entry` | Excludes a removed result on replay. | unaudited |
 | 1458 | `compaction_entry_is_boundary_signal` | Excludes compaction from ordinary content. | unaudited |
 
-## Historian and synthetic pair
+## HistorySummarizer and synthetic pair
 
-Source: `crates/daemon/src/historian.rs`.
+Source: `crates/daemon/src/history_summarizer.rs`.
 
 | Line | Test | Check semantics or message | Status |
 | --- | --- | --- | --- |
@@ -206,7 +206,7 @@ Source: `crates/daemon/src/historian.rs`.
 | 3925 | `chunk_fingerprint_uses_id_kind_and_byte_length` | Pins exact joined string and UTF-8 lengths. | unaudited |
 | 4025 | `fingerprint_mismatch_at_publish_abandons_and_releases_single_flight` | Checks publication mismatch branch. | unaudited |
 
-Source: `crates/daemon/src/historian_chunk.rs`.
+Source: `crates/daemon/src/history_summarizer_chunk.rs`.
 
 | Line | Test | Check semantics or message | Status |
 | --- | --- | --- | --- |
@@ -221,7 +221,7 @@ Source: `crates/daemon/src/historian_chunk.rs`.
 | 1678 | `pending_noise_does_not_leak_when_budget_stops_before_next_block` | Checks pending filtered input at a stop boundary. | unaudited |
 | 1711 | `separator_accounting_keeps_joined_32k_chunk_within_budget` | Checks joined byte accounting. | unaudited |
 | 1744 | `truncation_uses_marker_and_keeps_multibyte_boundaries` | Checks exact marker and valid text boundary. | unaudited |
-| 1773 | `historian_chunk_golden_fixture_matches_builder` | Compares chunk fixture with builder output. | unaudited |
+| 1773 | `history_summarizer_chunk_golden_fixture_matches_builder` | Compares chunk fixture with builder output. | unaudited |
 | 1861 | `fixture_builder_drives_boundary_chunk_assembly` | Checks boundary assembly using fixture builder. | unaudited |
 
 Source: `crates/daemon/src/injection.rs`.
@@ -248,7 +248,7 @@ Source: `crates/daemon/src/lib.rs`, with HEAD line numbers.
 | Line | Test | Check semantics or message | Status |
 | --- | --- | --- | --- |
 | 18128 | `boundary_token_cache_hash_fences_same_length_edits_and_evicts_lru` | Checks a content hash rather than length-only reuse. | unaudited |
-| 18182 | `historian_boundary_construction_matches_owned_reference` | Compares firing construction with owned reference including raw bytes. | unaudited |
+| 18182 | `history_summarizer_boundary_construction_matches_owned_reference` | Compares firing construction with owned reference including raw bytes. | unaudited |
 | 21811 | `cached_transform_response_writer_is_byte_identical_to_value_round_trip` | Compares cached response bytes with value reference. | unaudited |
 | 22177 | `serve_native_adds_opencode_messages_without_changing_wire_response` | Preserves CK response when adding native messages. | unaudited |
 | 22568 | `incremental_native_cache_replays_complex_prefix_and_encodes_only_tail` | Checks full/shared/reattached complex prefix output. | unaudited |
@@ -263,9 +263,9 @@ Source: `crates/daemon/src/lib.rs`, with HEAD line numbers.
 | 23988 | `frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits` | Supplies opaque, eviction, and same-length frontier perturbations. | unaudited |
 | 24059 | `differential_assert_rejects_frontier_inside_mutated_native_region` | Negative control for native frontier differential. | unaudited |
 | 24108 | `differential_assert_catches_corrupt_sidecar_key_derivation` | Negative control for sidecar key derivation. | unaudited |
-| 25162 | `unflagged_synthetic_delta_prepares_historian_and_native_output` | Exercises synthetic normalization at historian/native seams. | unaudited |
+| 25162 | `unflagged_synthetic_delta_prepares_history_summarizer_and_native_output` | Exercises synthetic normalization at history_summarizer/native seams. | unaudited |
 | 25557 | `native_attachment_reuses_transform_tag_baseline_and_preserves_bytes` | Checks native attachment bytes and shared tag baseline. | unaudited |
-| 28294 | `ctx_expand_and_ctx_note_facades_are_session_scoped` | Contains persisted history/facade session-scoping checks. | unaudited |
+| 28294 | `ctx_expand_and_eidnara_note_facades_are_session_scoped` | Contains persisted history/facade session-scoping checks. | unaudited |
 | 29493 | `ctx_expand_verbose_range_separates_messages_and_previews_raw_parts` | Checks expanded message formatting and raw part visibility. | unaudited |
 
 Source: `crates/daemon/src/transform.rs`.
@@ -293,10 +293,10 @@ Source: `crates/daemon/src/tail_hygiene.rs`.
 | 1148 | `measurement_is_identical_with_cold_and_warm_token_cache` | Compares cold/warm measurements. | unaudited |
 | 1217 | `hygiene_digest_and_token_key_use_kind_prefixed_content` | Checks content-domain hash and token key. | unaudited |
 | 1265 | `memo_preserves_each_derived_digest_domain` | Checks distinct measurement digest domains. | unaudited |
-| 1366 | `memo_rechecks_caveman_identity_payload_and_context` | Perturbs memo identity, payload, and context. | unaudited |
+| 1366 | `memo_rechecks_terse_text_compression_identity_payload_and_context` | Perturbs memo identity, payload, and context. | unaudited |
 | 1506 | `memo_bounds_sessions_bytes_and_refuses_over_budget_blocks` | Checks memo bounds and refusal without treating memo as durable baseline. | unaudited |
 | 1638 | `memo_over_budget_keeps_a_warm_prefix_instead_of_resetting` | Preserves warm prefix under memo pressure. | unaudited |
-| 1696 | `memo_retention_is_independent_of_caveman_payload_size` | Checks memo ownership/retention boundary. | unaudited |
+| 1696 | `memo_retention_is_independent_of_terse_text_compression_payload_size` | Checks memo ownership/retention boundary. | unaudited |
 | 1766 | `memo_namespaces_are_separate_and_the_least_recently_used_session_is_evicted` | Checks namespace separation and eviction. | unaudited |
 | 1855 | `poisoned_session_memo_recovers_cold_through_every_path` | Checks cold memo recovery paths. | unaudited |
 | 1905 | `distinct_sessions_neither_block_nor_evict_each_other_up_to_the_limit` | Checks session isolation. | unaudited |
@@ -335,7 +335,7 @@ Source: `crates/daemon/src/boundary.rs`.
 | 2655 | `adding_newer_items_never_moves_protected_start_below_anchor` | Checks protected-start monotonic constraint. | unaudited |
 | 2670 | `trigger_never_consumes_the_protected_tail` | Checks consume-through versus protection. | unaudited |
 | 2689 | `zero_based_trigger_counts_ordinal_zero_content` | Checks zero ordinal token accounting. | unaudited |
-| 2710 | `compartment_ending_at_ordinal_zero_starts_next_window_at_one` | Checks next-range ordinal arithmetic. | unaudited |
+| 2710 | `history_segment_ending_at_ordinal_zero_starts_next_window_at_one` | Checks next-range ordinal arithmetic. | unaudited |
 | 2736 | `boundary_measures_original_bytes_not_rendered_reduction_placeholders` | Checks original-token basis independently of rendered reduction. | unaudited |
 
 Source: `crates/daemon/src/selection.rs`.
@@ -367,7 +367,7 @@ Source: `crates/daemon/tests/selection_differential.rs`.
 | 2470 | `optimized_matches_frozen_reference_across_emergency_tiers` | Checks tiered selection. | unaudited |
 | 2482 | `optimized_matches_frozen_reference_on_reasoning_adjacency` | Checks adjacent reasoning. | unaudited |
 | 2494 | `optimized_matches_frozen_reference_on_duplicate_calls` | Checks duplicate calls. | unaudited |
-| 2506 | `optimized_matches_frozen_reference_across_ctx_reduce_keep_boundary` | Checks keep boundary. | unaudited |
+| 2506 | `optimized_matches_frozen_reference_across_eidnara_reduce_keep_boundary` | Checks keep boundary. | unaudited |
 | 2518 | `optimized_matches_frozen_reference_on_clamped_payloads` | Checks clamped payloads. | unaudited |
 | 2530 | `optimized_matches_frozen_reference_on_withheld_supersession` | Checks withheld outcome behavior. | unaudited |
 | 2540 | `reasoning_guard_matches_frozen_reference_on_unfiltered_decisions` | Checks reasoning guard against reference. | unaudited |
@@ -459,9 +459,9 @@ by the decode/latency catalogs; they are not evidence for canonical block bytes.
 | `crates/daemon/src/codec/sidecar.rs:442-450` | Synthetic messages cannot use positional metadata fallback. | unaudited |
 | `crates/daemon/src/codec/opencode.rs:277-278` | Debug-only bounds on incremental replacement against messages and prior order. | unaudited |
 | `crates/daemon/src/codec/opencode.rs:501-508` | Debug-only uniqueness assertion: `OpenCode serialization produced duplicate tool_use ids`. | unaudited |
-| `crates/daemon/src/historian.rs:326-334,397-419` | Fingerprint equality gate rejects mismatch, including at publish. | unaudited |
-| `crates/daemon/src/historian_chunk.rs:418-430` | Snapshot filters synthetic/system/out-of-range blocks before measuring length. | unaudited |
-| `crates/daemon/src/historian_chunk.rs:646-675` | Missing selected identity refuses firing; raw arrays exclude synthetic messages. | unaudited |
+| `crates/daemon/src/history_summarizer.rs:326-334,397-419` | Fingerprint equality gate rejects mismatch, including at publish. | unaudited |
+| `crates/daemon/src/history_summarizer_chunk.rs:418-430` | Snapshot filters synthetic/system/out-of-range blocks before measuring length. | unaudited |
+| `crates/daemon/src/history_summarizer_chunk.rs:646-675` | Missing selected identity refuses firing; raw arrays exclude synthetic messages. | unaudited |
 | `crates/daemon/src/lib.rs:16443-16461` | Missing/malformed raw rows skip; ordinal bounds and first-per-ordinal selection apply. | unaudited |
 | `crates/daemon/src/lib.rs:13306` | `expect`: OpenCode sidecar metadata serializes for its cache key. | unaudited |
 | `crates/daemon/src/lib.rs:13630,13665` | `expect`: a compatible native cache has a snapshot. | unaudited |

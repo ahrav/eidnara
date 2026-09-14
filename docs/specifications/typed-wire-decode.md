@@ -73,10 +73,10 @@ Requirement identifiers retain traceability to the settled plan.
   Both readers treat absence as the existing default. These fields, their
   defaults, and their wire names remain supported.
 - **R6:** Earlier-release `raw_chunk_messages` remain decodable. Production
-  historian fingerprints retain their `id:kind:bytes.len()` basis and remain
+  history_summarizer fingerprints retain their `id:kind:bytes.len()` basis and remain
   unchanged for unchanged plugin ingress. The plan's daemon-built tool-item
   exception is retained as an unresolved reachability claim, not a blanket
-  authorization to change historian fingerprints; see Q3.
+  authorization to change history_summarizer fingerprints; see Q3.
 - **R7:** Projection bytes and content hashes, fresh served fingerprint
   fallback, and decoded sidecar fingerprints use one canonical block-byte
   producer. Sidecar hashing excludes only `_eidnara_codec`. Equality-indexed
@@ -229,7 +229,7 @@ design, without implementing either here.
 | `ProviderExtras` | Keep nested ordered maps and `Value`; codec namespaces are inspected and other namespaces fingerprinted. |
 | `TransformRequest.native_messages` | Keep `Vec<Arc<Value>>`; codecs inspect and rewrite native envelopes and share them across turns. |
 | `TransformRequest.tail_delta` | Keep `Option<Value>`; malformed/nonobject values retain lenient full-sync fallback rather than becoming typed-decoding errors. |
-| `FlatBlock.bytes` | Keep canonical `Arc<str>`; token estimation, hygiene, historian items, and divergence consume it. |
+| `FlatBlock.bytes` | Keep canonical `Arc<str>`; token estimation, hygiene, history_summarizer items, and divergence consume it. |
 | `ServedMessage.canonical_bytes` | Keep `Arc<[u8]>`; response egress work owns its redesign. |
 | Ingress/request envelope scalars | Keep their existing typed representations. |
 
@@ -347,7 +347,7 @@ interaction with the egress plan.
    independently checks ordering, but shares serde field-selection logic and
    cannot replace a frozen field-set oracle.
 4. **Owned prefixes, mutation, and durable history.** Reuse `Arc` sharing and
-   copy-on-write checks, real stored old message rows, historian assembly, and
+   copy-on-write checks, real stored old message rows, history_summarizer assembly, and
    preserved-store/cold-cache fixtures. Observe durable served receipts,
    hygiene baselines, lineage validation, and token/fold decisions, not only
    successful deserialization. No storage schema or restart framework is added.
@@ -388,7 +388,7 @@ and restoring an envelope under a different name. None has been executed.
   excludes exactly its namespace, and equality-based receipt selection passes
   independent expectations, including signed-zero cases.
 - [ ] Old stored messages decode through actual recovery/expansion paths;
-  plugin historian items, durable identities, hygiene, lineage anchors, and
+  plugin history_summarizer items, durable identities, hygiene, lineage anchors, and
   downstream policy outcomes preserve their contracts with cold caches.
 - [ ] Original A1-A3 bodies retain outcomes and codes; added duplicate cases
   observe successful tree fallback; added unknown-field cases normalize
@@ -429,9 +429,9 @@ source of truth when the workflow is stronger.
 | Decode benchmark, both legs, U4 | `cargo bench -p daemon --locked --features bench-internals --bench hot_path -- decode` |
 | Bench list protocol, U4 | `cargo bench --workspace --locked --bench '*' -- --list`; benches excluded by their required features do not prove the hot-path target's list behavior, so verify it with `bench-internals` too |
 | Repository gate | `bun run check:repo` |
-| Dead references, U1 | `rg 'original\(\)|mark_modified|mark_fully_typed|WireMessageData|WireBlockData' crates` returns no matches; search errors are not success |
+| Dead references, U1 | `rg 'original\(\) | mark_modified | mark_fully_typed | WireMessageData | WireBlockData' crates` returns no matches; search errors are not success |
 | Full resident envelope | Continuous allocation/charge evidence through decode, projection, and owner handoff, including boundary and pressure cases |
-| Property evidence | A1/A3, A2 with the two added cases, B1, historian/identity witnesses, allocation evidence, and reconciled W1 grouping |
+| Property evidence | A1/A3, A2 with the two added cases, B1, history_summarizer/identity witnesses, allocation evidence, and reconciled W1 grouping |
 
 Also pass CI's applicable all-feature Clippy, warning-free rustdoc,
 no-default-feature checks, nextest shards, bench test mode, doctests,
@@ -504,12 +504,12 @@ the settled plan. Publishing the specification does not waive their gates.
    rows, including legacy unknown/false ingress and stamped blocks, before
    accepting U1/U2. Any new upgrade exception or schema mechanism requires
    owner approval; none is granted here.
-3. **Q3: Historian exception and byte count.** Removing
+3. **Q3: HistorySummarizer exception and byte count.** Removing
    `,"provider_executed":false` removes 26 compact bytes per tool block, or
    52 across a call/result pair, from that omission alone. The plan says 25.
-   Production historian assembly excludes the synthetic todo pair, so its
+   Production history_summarizer assembly excludes the synthetic todo pair, so its
    proposed changed chunk-item example does not establish a reachable path.
-   The historian owner must identify any eligible daemon-built item and its
+   The history_summarizer owner must identify any eligible daemon-built item and its
    exact expected fingerprint, or explicitly dispose of the example, before
    R6 acceptance. A test-only fabricated item cannot prove production reachability.
 4. **Q4: Raw-token compatibility.** Removing sorted envelope re-decodes may

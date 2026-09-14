@@ -6,7 +6,7 @@ import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
-import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
+import { getProjectEidnaraHistorySummarizerDir } from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import {
     escapeRegex,
@@ -17,13 +17,13 @@ import {
 } from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
 import {
-    type HistorianDumpMeta,
-    type HistorianDumpSummary,
+    type HistorySummarizerDumpMeta,
+    type HistorySummarizerDumpSummary,
     listDumpsInDir,
-} from "./historian-dumps";
+} from "./history_summarizer-dumps";
 import { readJsoncLenient } from "./jsonc-config";
 import {
-    getEidnaraHistorianDir,
+    getEidnaraHistorySummarizerDir,
     getEidnaraLogPath,
     getPiAgentDir,
     getPiSessionsRoot,
@@ -33,9 +33,9 @@ import {
 import { detectPiBinary, getPiVersion, isEidnaraPiPackageEntry } from "./pi-helpers";
 import { standaloneVersion } from "./semver";
 
-/** Pi-named aliases of the shared historian-dump shapes. */
-export type PiHistorianDumpMeta = HistorianDumpMeta;
-export type PiHistorianDumpSummary = HistorianDumpSummary;
+/** Pi-named aliases of the shared history_summarizer-dump shapes. */
+export type PiHistorySummarizerDumpMeta = HistorySummarizerDumpMeta;
+export type PiHistorySummarizerDumpSummary = HistorySummarizerDumpSummary;
 
 export interface PiConfigDiagnostic {
     path: string;
@@ -96,7 +96,7 @@ export interface PiDiagnosticReport {
      */
     sessionDiscovery: PiSessionDiscovery["status"];
     /** The report keeps legacy tmp-dir dumps separate from project-grouped dumps. */
-    historianDumps: PiHistorianDumpsReport;
+    history_summarizerDumps: PiHistorySummarizerDumpsReport;
 }
 
 export interface PiRecentSessionSummary {
@@ -113,20 +113,20 @@ export interface PiRecentSessionSummary {
     lastActiveAt: string;
 }
 
-export interface PiProjectHistorianBucket {
+export interface PiProjectHistorySummarizerBucket {
     directory: string;
     primarySessionId: string;
     sessionIds: string[];
     count: number;
-    recent: PiHistorianDumpSummary[];
+    recent: PiHistorySummarizerDumpSummary[];
 }
 
-export interface PiHistorianDumpsReport {
-    byProject: PiProjectHistorianBucket[];
+export interface PiHistorySummarizerDumpsReport {
+    byProject: PiProjectHistorySummarizerBucket[];
     legacyDumps: {
         dir: string;
         count: number;
-        recent: PiHistorianDumpSummary[];
+        recent: PiHistorySummarizerDumpSummary[];
     };
 }
 
@@ -534,10 +534,10 @@ export function collectPiRecentSessions(
     }
 }
 
-export function collectPiHistorianDumps(
+export function collectPiHistorySummarizerDumps(
     recentSessions: PiRecentSessionSummary[],
-): PiHistorianDumpsReport {
-    const buckets = new Map<string, PiProjectHistorianBucket>();
+): PiHistorySummarizerDumpsReport {
+    const buckets = new Map<string, PiProjectHistorySummarizerBucket>();
     for (const session of recentSessions) {
         const dir = session.directory;
         // A slug label is not a path, so no project directory is scanned for it.
@@ -549,7 +549,7 @@ export function collectPiHistorianDumps(
             }
             continue;
         }
-        const listing = listDumpsInDir(getProjectEidnaraHistorianDir(dir), 5);
+        const listing = listDumpsInDir(getProjectEidnaraHistorySummarizerDir(dir), 5);
         if (listing.count === 0) continue;
         buckets.set(dir, {
             directory: dir,
@@ -560,7 +560,7 @@ export function collectPiHistorianDumps(
         });
     }
 
-    const legacyDir = getEidnaraHistorianDir("pi");
+    const legacyDir = getEidnaraHistorySummarizerDir("pi");
     const legacyListing = listDumpsInDir(legacyDir, 5);
 
     return {
@@ -608,7 +608,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
             ? { status: "unavailable", sessions: [] }
             : collectPiRecentSessions(getPiSessionsRoot());
     const recentSessions = discovery.sessions;
-    const historianDumps = collectPiHistorianDumps(recentSessions);
+    const history_summarizerDumps = collectPiHistorySummarizerDumps(recentSessions);
 
     return {
         timestamp: new Date().toISOString(),
@@ -648,7 +648,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
         logFile,
         recentSessions,
         sessionDiscovery: discovery.status,
-        historianDumps,
+        history_summarizerDumps,
     };
 }
 
@@ -663,7 +663,7 @@ function oneLine(value: string): string {
 export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
     const configPaths = sanitizeValue(report.configPaths);
     const settings = sanitizeValue(report.settings);
-    const historianDumps = sanitizeValue(report.historianDumps);
+    const history_summarizerDumps = sanitizeValue(report.history_summarizerDumps);
 
     return [
         `- Timestamp: ${report.timestamp}`,
@@ -712,11 +712,11 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
         JSON.stringify(report.conflicts, null, 2),
         "```",
         "",
-        "### Historian dumps",
+        "### HistorySummarizer dumps",
         "(Metadata only — XML content is not included in this report.)",
-        "Dumps are stored per-project under `<project>/.eidnara/context/historian/`.",
+        "Dumps are stored per-project under `<project>/.eidnara/context/history_summarizer/`.",
         "```json",
-        JSON.stringify(historianDumps, null, 2),
+        JSON.stringify(history_summarizerDumps, null, 2),
         "```",
         "",
         "### Log file",

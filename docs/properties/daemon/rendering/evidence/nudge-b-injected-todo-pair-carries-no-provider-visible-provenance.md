@@ -11,7 +11,7 @@ three-layer trace rather than a yes or no.
 
 `HEAD` `e447c927`. All lines read back.
 
-### Layer 1: the wire, module to host. Marked.
+### Layer 1: the wire, module to host. Marked
 
 `HarnessMeta::synthetic` is a serialized field:
 
@@ -30,7 +30,7 @@ tool message with the same (`:180-183`).
 So a host reading the wire response can always tell. This is the strongest
 provenance in the system, and it stops at the host.
 
-### Layer 2: the OpenCode native encode. Marked.
+### Layer 2: the OpenCode native encode. Marked
 
 `crates/daemon/src/codec/opencode.rs:388` calls
 `render_synthetic_todo_pair(&messages[index], next)` inside the encode loop. That
@@ -57,7 +57,7 @@ Note that the generic `synthetic: true` part field is only written for user-role
 messages (`opencode.rs:993-997`, inside `if msg.meta.synthetic && msg.role ==
 "user"`), so the pair depends entirely on the todo marker.
 
-### Layer 3: the provider array. Not marked.
+### Layer 3: the provider array. Not marked
 
 The module does not build the provider array; it returns wire messages
 (`transform.rs:5691`) and optionally native OpenCode messages
@@ -80,14 +80,14 @@ with no marker at all. It has no production caller: `git grep encode_pi` outside
 import), `:208-209`, and `:249`, all inside `#[cfg(test)]`. So the pi encode path
 is not on a shipped route today, but the asymmetry is latent.
 
-### The three text overlays, for contrast. Marked, but forgeably.
+### The three text overlays, for contrast. Marked, but forgeably
 
 | Overlay | Envelope | Site |
 | --- | --- | --- |
 | Channel-1 reminder | `\n\n<system-reminder>\n...\n</system-reminder>` | `transform.rs:9859` |
 | Channel-2, OpenCode arm | `<system-reminder>\n...\n</system-reminder>` | `:9559` |
 | Channel-2, Claude Code arm | none; bare prose | `:9549-9555`, returned at `:9491` |
-| Auto-search hint | `\n\n<ctx-search-hint>\n...\n</ctx-search-hint>` | `:9111` |
+| Auto-search hint | `\n\n<eidnara-search-hint>\n...\n</eidnara-search-hint>` | `:9111` |
 | Temporal marker | `<!-- +5m -->\n` | `:8205` |
 
 All of these are plain text inside an existing block, so any ingress content can
@@ -97,7 +97,7 @@ no transport-origin field for this Claude Code shape. The decoder preserves the
 reminder as an ordinary user text block, so the narrowest safe discriminator is a
 message made entirely of balanced reminder wrappers." And
 `has_stacked_user_hint_augmentation` (`:8989-8997`) suppresses a new hint when the
-raw user prompt already contains `<ctx-search-hint>`, which only makes sense if a
+raw user prompt already contains `<eidnara-search-hint>`, which only makes sense if a
 user's own bytes can carry that string.
 
 ## Failure scenario
@@ -197,7 +197,7 @@ all, because it does not produce those bytes. That is itself the finding.
 - Conclusion: resolved for reachability. Not a live gap; recorded as latent, and
   cited in contract lead 5 of the lens file rather than as its own record.
 
-### Q: Do the `<system-reminder>` and `<ctx-search-hint>` envelopes count as provenance?
+### Q: Do the `<system-reminder>` and `<eidnara-search-hint>` envelopes count as provenance?
 
 - Sources examined: `transform.rs:9859`, `:9559`, `:9111`, `:8205`;
   `:8521-8538` and its comment at `:8525-8527`; `:8989-8997`; `:9958-9967`.

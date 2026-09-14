@@ -88,7 +88,7 @@ Add a CAS conflict on the first commit attempt so the retry loop
 one breadcrumb, not zero or two. No store seam injects the `pass_trace`
 failure at HEAD: the four `fail_next_*_for_test` seams
 (`memory-store/src/lib.rs:5900`, `:5914`, `:5921`, `:5928`) cover the side
-channel, the authority route read, and dreamer tasks only.
+channel, the authority route read, and memory_classifier tasks only.
 
 ## Investigation log
 
@@ -171,7 +171,7 @@ one value per selected row. The receive write [opts in][receive-opt-in] to
 [skipping its audit rows][audit-skip] when its one scan preserved an existing
 identity and found nothing: it substituted no byte, refused nothing, and
 carries no detection. The opt-in is per write. The completed-trace, authority,
-lineage, and compartment writes keep recording their clean scans, so the R1
+lineage, and history_segment writes keep recording their clean scans, so the R1
 parity check and the redaction receipts other tests count are unchanged. Any
 substituting, rejecting, or detecting scan keeps the receive write's rows, and
 the [receive test][receive-test] shows a clean receive leaving the audit
@@ -188,7 +188,7 @@ Linux after boot that failure is not reachable.
 The scans a pass records for the identity, `core_state`, and `meta` bytes the
 next pass replaces are owned by [one fixed pass owner][pass-owner] that the
 next pass [retires after every replay check has passed][retire]; the key is
-not per row version because other writers (historian publish, lineage descent,
+not per row version because other writers (history_summarizer publish, lineage descent,
 recomputation reset) bump `row_version` without registering an owner, and a
 key they never wrote could not be retired. Every scan for bytes that outlive
 the pass is [reassigned][overlay-owner] to a [retained owner][retained-owner]
@@ -248,7 +248,7 @@ its entry out, as the [two-writer test][two-writer-test] shows. Lineage descent 
 retirement are the latest pass's scans plus the retained scans rather than
 every pass the source ever ran. The [retirement test][retire-test] shows the
 `field_scans` and `scan_owner_copies` counts flat across six passes, flat
-again across passes after a historian publish bumped the row version, a tag
+again across passes after a history_summarizer publish bumped the row version, a tag
 mint's scans added and kept through the next pass, and the pass owner, the
 retained owner, and the publish owner each holding exactly their own copies.
 The [retained-fields test][retained-test] shows a second pass keeping the
@@ -256,7 +256,7 @@ receipts for the first pass's root, scheduler observation, interesting
 observation, and divergence while both roots, both history entries, and the
 divergence stay stored, and a third pass adding to them. The
 [conflict test][seq-conflict-test] shows a pass that loses the
-compartment-generation check retiring nothing.
+history_segment-generation check retiring nothing.
 
 The [daemon test][outcome-test] shows a rejected, a committed, and a stable
 pass counting three receives, and a fourth pass whose receive UPSERT is

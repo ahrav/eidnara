@@ -99,7 +99,7 @@ Every record is `default-production`, so no row repeats an enabling configuratio
 gate. `Client::connect` is `pub` and ungated at `client.rs:306`, and three
 production call sites outside this crate reach it
 (`crates/daemon/src/bin/eidnara-host.rs:468`, `:500`, and
-`crates/daemon/src/historian_producer.rs:693`); see the reachability
+`crates/daemon/src/history_summarizer_producer.rs:693`); see the reachability
 resolution in `catalog.md` for the full argument.
 
 ### The retirement cause

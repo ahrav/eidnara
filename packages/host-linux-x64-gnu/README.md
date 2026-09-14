@@ -26,6 +26,6 @@ payload/
 The manifest also carries the release identity, the digest of
 `release/host-release.json` (trailing newline trimmed), the digest of
 `release/production-inputs.lock.json` (full bytes), the package identity and
-target, the platform floor, and the Synapse lane. `scripts/build-host-payload.ts`
+target, the platform floor, and the LocalEmbeddings lane. `scripts/build-host-payload.ts`
 assembles the development payload from a locally built daemon and addon; the
 daemon accepts a development payload only in a debug build.

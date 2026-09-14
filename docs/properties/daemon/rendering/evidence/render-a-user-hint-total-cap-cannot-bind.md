@@ -30,7 +30,7 @@ All references read back at `HEAD` `e447c927`, in
 9090:        .take(USER_HINT_RESULT_LIMIT)
 9091:        .map(|result| {
 9092:            let fragment =
-9093:                crate::caveman::compress(&result.snippet, crate::caveman::CavemanLevel::Ultra);
+9093:                crate::terse_text_compression::compress(&result.snippet, crate::terse_text_compression::TerseTextCompressionLevel::Ultra);
 9094:            format!(
 9095:                "- {}",
 9096:                one_line_fragment(&fragment, USER_HINT_FRAGMENT_CHAR_CAP)
@@ -42,9 +42,9 @@ All references read back at `HEAD` `e447c927`, in
 9106:    } else {
 9107:        format!("Your memory may contain {} related fragments:", lines.len())
 9108:    };
-9109:    let footer = "If the fragments above seem relevant to the current request, you may run ctx_search to retrieve full context. Otherwise ignore.";
+9109:    let footer = "If the fragments above seem relevant to the current request, you may run eidnara_search to retrieve full context. Otherwise ignore.";
 9110:    let body = [header, lines.join("\n"), footer.to_string()].join("\n");
-9111:    let wrapped = format!("<ctx-search-hint>\n{body}\n</ctx-search-hint>");
+9111:    let wrapped = format!("<eidnara-search-hint>\n{body}\n</eidnara-search-hint>");
 ...
 9114:    let wrapped = truncate_hint_to_total_cap(&wrapped, USER_HINT_TOTAL_CHAR_CAP);
 9115:    debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP);
@@ -62,14 +62,14 @@ Measured in UTF-16 code units, which is what `utf16_len` (`:9064-9066`) counts:
 
 | Component | Units |
 | --- | --- |
-| `"<ctx-search-hint>\n"` | 18 |
+| `"<eidnara-search-hint>\n"` | 18 |
 | header, worst case `"Your memory may contain 3 related fragments:"` | 44 |
 | the `\n` from `[header, .., ..].join("\n")` | 1 |
 | three lines of `"- "` + 80 | 3 × 82 = 246 |
 | two `\n` from `lines.join("\n")` | 2 |
 | the second `\n` from the outer join | 1 |
 | footer | 127 |
-| `"\n</ctx-search-hint>"` | 19 |
+| `"\n</eidnara-search-hint>"` | 19 |
 | **total** | **458** |
 
 458 against a cap of 800. There is no input that raises it: `take(3)` bounds the
@@ -132,14 +132,14 @@ None. This is arithmetic over compile-time constants.
 3. Direct unit coverage of `truncate_hint_to_total_cap` with a hand-built
    oversized input, since production cannot supply one. In particular
    `limit < utf16_len(open) + utf16_len(close) + 1`, where `body_limit` saturates
-   to 0 and the function returns `"<ctx-search-hint>\n…\n</ctx-search-hint>"`.
+   to 0 and the function returns `"<eidnara-search-hint>\n…\n</eidnara-search-hint>"`.
 
 ## Investigation log
 
-### Q: Can `caveman::compress` produce a fragment longer than the cap?
+### Q: Can `terse_text_compression::compress` produce a fragment longer than the cap?
 
-- Sources examined: `crates/daemon/src/caveman.rs:1-30` (the header and
-  `CavemanLevel`), `transform.rs:9092-9097`.
+- Sources examined: `crates/daemon/src/terse_text_compression.rs:1-30` (the header and
+  `TerseTextCompressionLevel`), `transform.rs:9092-9097`.
 - Findings: irrelevant to the bound. Whatever `compress` returns is passed through
   `one_line_fragment`, which caps it at 80 UTF-16 units. `compress` is a
   shortening transform, so it cannot grow the input either, but the cap does not

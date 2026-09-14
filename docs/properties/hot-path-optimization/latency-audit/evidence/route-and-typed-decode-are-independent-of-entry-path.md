@@ -87,7 +87,7 @@ on either lane.
 
 The reference is a frozen test-only copy of HEAD's routing read, probe, and
 `Value` decode kept under `crates/daemon/tests/` on the pattern of
-`historian_truncate_differential.rs:13-58`, or a recorded corpus of expected
+`history_summarizer_truncate_differential.rs:13-58`, or a recorded corpus of expected
 route, code, and decoded request per body. The live reader cannot remain the
 oracle once the change replaces it.
 
@@ -99,7 +99,7 @@ oracle once the change replaces it.
   [`TransformRequestWire`][wirestruct],
   [§7.5.1][wire751], upstream [`Map::insert`][mapinsert].
 - Findings: Nothing in the context module states a duplicate-key rule; the
-  behavior follows from `Value` construction. Synapse rejects duplicates by
+  behavior follows from `Value` construction. LocalEmbeddings rejects duplicates by
   contract. The probe refuses duplicates over 1 MiB, so the two size classes
   already differ.
 - Missing evidence: A written rule for routed bodies.
@@ -123,7 +123,6 @@ oracle once the change replaces it.
   would hand serde the token. No differential ran.
 - Missing evidence: A differential run over the numeric corpus.
 - Conclusion: unresolved, needs a differential run.
-
 
 ## Direct-decode evidence
 
@@ -283,7 +282,7 @@ unchanged, last-wins through the tree.
 ### Focused execution, 2026-09-12
 
 `cargo test -p daemon --locked` passed 1018 tests including the six above, the
-two `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
+two `memory_classifier_run_task_bounds_*` tests failing under full-suite load on the base
 branch as well and passing in isolation;
 `cargo test -p daemon --locked --features test-support --test parse_charge_covers_typed_decode`
 passed; `cargo test -p daemon --locked --features direct-host-fixture --test direct_host`
@@ -323,7 +322,7 @@ failed at `request_observed_to_handler was 20000 ms; the decode span of 10 s
 must not be counted in it` and passes with the sample backed to the decode
 start.
 `cargo test -p daemon --locked --no-fail-fast` then passed every test but the
-two `dreamer_run_task_bounds_*` tests, which fail under full-suite load on the
+two `memory_classifier_run_task_bounds_*` tests, which fail under full-suite load on the
 base as well, and `publication_search_deadline_preserves_admission_without_recharging`,
 which fails the same way on the base commit `d42838e3` alone.
 

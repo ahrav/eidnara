@@ -13,7 +13,7 @@ channel is absent does not. All Rust references below name
 The effective threshold is clamped to `[1, 90]` after merging
 (`config.rs:750-752`). `apply_key` clamps the auto-search score to `[0.3, 0.95]`
 (`config.rs:827-831`), minimum prompt characters to `[5, 500]`
-(`config.rs:832-836`), and caveman minimum characters to `[100, 10000]`
+(`config.rs:832-836`), and terse_text_compression minimum characters to `[100, 10000]`
 (`config.rs:842-846`). None of those branches adds a range warning.
 
 The standard memory budget, its legacy fallback, and the user-profile budget
@@ -22,8 +22,8 @@ deprecation warning, not a range warning. Use the standard spelling to prevent
 that unrelated warning from satisfying a range-reporting check.
 
 `positive_usize_at` rejects zero (`config.rs:955-961`). This leaves the earlier
-effective value unchanged for minimum prompt characters, caveman minimum
-characters, and historian context limit (`config.rs:832-845`,
+effective value unchanged for minimum prompt characters, terse_text_compression minimum
+characters, and history_summarizer context limit (`config.rs:832-845`,
 `config.rs:885-889`). With only a user tier and no earlier value, the defaults
 survive. Minimum prompt characters defaults to `20` (`config.rs:35`,
 `config.rs:56-61`); zero is not clamped to five.
@@ -39,7 +39,7 @@ vector directly.
 
 Resolve a user tier containing only
 `memory.auto_search.min_prompt_chars: 0`. The effective value remains `20` and
-the warning vector is empty. Resolve a user score threshold of `0.99` or caveman
+the warning vector is empty. Resolve a user score threshold of `0.99` or terse_text_compression
 minimum of `50`; the effective values become `0.95` and `100`, respectively,
 without a key-specific range warning.
 
@@ -56,7 +56,7 @@ warning naming that leaf when the value is clamped or discarded. Do not accept
 an ignored-project-key or legacy-key deprecation warning as proof that the
 user-tier range was reported. A same-value input is a control, not a trigger.
 
-`auto_search_and_caveman_config_follow_user_then_project_tiers`
+`auto_search_and_terse_text_compression_config_follow_user_then_project_tiers`
 (`config.rs:1407-1446`) checks ordinary overrides. `project_threshold_may_only_raise`
 (`config.rs:1297-1302`) checks the upper threshold clamp but not its warning.
 Both remain `unaudited`; neither is a clamp-reporting oracle.

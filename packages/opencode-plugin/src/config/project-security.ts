@@ -18,14 +18,13 @@ import {
  */
 
 /** These hidden agents run with elevated or autonomous capability. */
-const HIDDEN_AGENT_KEYS = ["historian", "sidekick"] as const;
-/** `disable` and its legacy spelling `enabled`, which `migrateLegacyAgentEnabledInMemory` rewrites after the merge. */
-const HIDDEN_AGENT_ACTIVATION_FIELDS = ["disable", "enabled"] as const;
-const HISTORIAN_USER_ONLY_FIELDS = [
+const HIDDEN_AGENT_KEYS = ["history_summarizer", "context_researcher"] as const;
+/** Hidden-agent activation is controlled only by user config. */
+const HIDDEN_AGENT_ACTIVATION_FIELDS = ["disable"] as const;
+const HISTORY_SUMMARIZER_USER_ONLY_FIELDS = [
     "model",
     "fallback_models",
     "disallowed_tools",
-    "two_pass",
 ] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
 const AGENT_COST_CAP_FIELDS = [
@@ -46,11 +45,9 @@ const USER_ONLY_LEAF_PARENTS = [
     "storage",
     "prompt_surface",
     "pi",
-    "historian",
-    "sidekick",
-    "mural",
+    "history_summarizer",
+    "context_researcher",
     "memory",
-    "experimental",
 ] as const;
 
 /**
@@ -59,18 +56,18 @@ const USER_ONLY_LEAF_PARENTS = [
  * A repository-supplied `prompt` can reprogram a hidden agent, enabling unattended exfiltration or code execution.
  *  - `permission` — broadens the agent's per-tool permissions.
  * `tools` can enable a denied tool such as `bash` for an agent whose allow-list excludes it.
- * `system_prompt` takes precedence over Sidekick's built-in prompt, so a repository could reprogram Sidekick through `/ctx-aug` unless it is stripped.
- *                   via `/ctx-aug`.
+ * `system_prompt` takes precedence over ContextResearcher's built-in prompt, so a repository could reprogram ContextResearcher through `/eidnara-aug` unless it is stripped.
+ *                   via `/eidnara-aug`.
  *
- * Historian model selection is user-only, and project compaction thresholds can only increase, preventing cloned repositories from forcing earlier compaction or extra Historian spending.
+ * HistorySummarizer model selection is user-only, and project compaction thresholds can only increase, preventing cloned repositories from forcing earlier compaction or extra HistorySummarizer spending.
  */
 const AGENT_ESCALATION_FIELDS = ["prompt", "permission", "tools", "system_prompt"] as const;
 const PERCENTAGE_THRESHOLD_REASON =
-    "security: a repository may only raise compaction thresholds above the user's effective value; it cannot force earlier historian work or cloned-repo cost escalation.";
+    "security: a repository may only raise compaction thresholds above the user's effective value; it cannot force earlier history_summarizer work or cloned-repo cost escalation.";
 const TOKEN_THRESHOLD_REASON =
-    "security: a repository may only raise execute_threshold_tokens above the user's trusted token threshold; it cannot force earlier historian work or cloned-repo cost escalation.";
+    "security: a repository may only raise execute_threshold_tokens above the user's trusted token threshold; it cannot force earlier history_summarizer work or cloned-repo cost escalation.";
 const TOKEN_THRESHOLD_INTRODUCTION_REASON =
-    "security: a repository cannot introduce a new execute_threshold_tokens override when the user has no trusted token threshold for that key; that could force earlier historian work or cloned-repo cost escalation.";
+    "security: a repository cannot introduce a new execute_threshold_tokens override when the user has no trusted token threshold for that key; that could force earlier history_summarizer work or cloned-repo cost escalation.";
 const INVALID_THRESHOLD_REASON =
     "security: the value is not a valid threshold, so the user's trusted value is kept; an invalid project value must not fall back to the schema default below the user's setting.";
 
@@ -331,22 +328,20 @@ function bareBaseline<T extends number | undefined>(
  * Only user config may enable an externally managed trusted-group deployment.
  * `transform_mode` may come from project config, but Rust activation also requires user-tier consent.
  * A project `transform_mode` selection can opt that project's runtime into the Rust pipeline.
- * Rust activation requires user-level `transform_mode` or trusted user-level `subc` configuration.
+ * Rust activation requires user-level `transform_mode` or trusted user-level `host` configuration.
  * Rust can demand-start the managed native-host lifecycle only after user-tier consent.
- * Only user config may set `historian.model` or `historian.fallback_models` to prevent repositories from forcing compaction cost.
- * Only user config may set `historian.disallowed_tools`: the project tier merges over the user tier, so a project array would replace the user's removals and restore the historian's default tools.
- * Only user config may set `historian.two_pass` because the second editor pass adds a model call to every historian run.
+ * Only user config may set `history_summarizer.model` or `history_summarizer.fallback_models` to prevent repositories from forcing compaction cost.
+ * Only user config may set `history_summarizer.disallowed_tools`: the project tier merges over the user tier, so a project array would replace the user's removals and restore the history_summarizer's default tools.
  * Only user config may set `system_prompt_injection`: a project `enabled: true` or a replaced `skip_signatures` array would undo the user's injection opt-outs.
- * Only user config may set `commit_cluster_trigger`: a project `enabled: true` or a lower `min_clusters` would make the historian fire after fewer commits.
- * Only user config may set hidden-agent `maxSteps`, `maxTokens`, and `timeout_ms`, and top-level `historian_timeout_ms`: the project tier replaces the leaf, so a project value could raise a cost bound the user set.
- * Only user config may set `cache_ttl`: the scheduler fires the historian once the TTL has elapsed since the last response, so a project `"0"` would make it run on every pass.
+ * Only user config may set `commit_cluster_trigger`: a project `enabled: true` or a lower `min_clusters` would make the history_summarizer fire after fewer commits.
+ * Only user config may set hidden-agent `maxSteps`, `maxTokens`, and `timeout_ms`, and top-level `history_summarizer_timeout_ms`: the project tier replaces the leaf, so a project value could raise a cost bound the user set.
+ * Only user config may set `cache_ttl`: the scheduler fires the history_summarizer once the TTL has elapsed since the last response, so a project `"0"` would make it run on every pass.
  * Only user config may set top-level `enabled`: a project `true` would reactivate a plugin the user disabled, and a project `false` would switch off the user's context-window management, which the `compaction.enabled` rule already reserves for user config.
- * Only user config may set `mural.model` so repositories cannot select a provider for project memory.
  * Project config must not set `pi.subagent_extensions` because it controls extensions loaded by Pi child processes.
  * A repository may select a reviewed `prompt_surface` preset but may not set arbitrary prompt text.
  * A repository may select a reviewed `prompt_surface` preset but may not inject arbitrary guidance or tool-description text.
  * Project config must not set hidden-agent `prompt`, `permission`, or `tools`.
- * Only user config may set hidden-agent `disable` or its legacy spelling `enabled`: the project tier replaces the trusted leaf, so a project `disable: false` or `enabled: true` would reactivate an agent the user turned off, and disabling the historian would bypass the user-only `compaction.enabled` rule.
+ * Only user config may set hidden-agent `disable`: the project tier replaces the trusted leaf, so a project `disable: false` would reactivate an agent the user turned off, and disabling the history_summarizer would bypass the user-only `compaction.enabled` rule.
  * A project may add `disabled_hooks` entries but may not replace the list: a non-array value would discard the user's disabled hooks in the merge.
  * A project may not replace a block that carries user-only leaves with a non-object value: the merge would substitute the whole block for the trusted one, schema recovery would drop the invalid value, and the user's settings would fall back to defaults without any leaf ever being stripped.
  */
@@ -376,17 +371,17 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         );
     }
 
-    if ("historian_timeout_ms" in projectRaw) {
-        delete projectRaw.historian_timeout_ms;
+    if ("history_summarizer_timeout_ms" in projectRaw) {
+        delete projectRaw.history_summarizer_timeout_ms;
         warnings.push(
-            "Ignoring historian_timeout_ms from project config (security: the historian timeout is a user-level cost bound; a repository cannot raise it).",
+            "Ignoring history_summarizer_timeout_ms from project config (security: the history_summarizer timeout is a user-level cost bound; a repository cannot raise it).",
         );
     }
 
     if ("cache_ttl" in projectRaw) {
         delete projectRaw.cache_ttl;
         warnings.push(
-            "Ignoring cache_ttl from project config (security: the cache TTL is the idle interval after which the historian fires on its own; a repository cannot shorten it).",
+            "Ignoring cache_ttl from project config (security: the cache TTL is the idle interval after which the history_summarizer fires on its own; a repository cannot shorten it).",
         );
     }
 
@@ -467,7 +462,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
     if ("commit_cluster_trigger" in projectRaw) {
         delete projectRaw.commit_cluster_trigger;
         warnings.push(
-            "Ignoring commit_cluster_trigger from project config (security: only user-level config may enable the trigger or lower min_clusters; a repository cannot make the historian fire after fewer commits).",
+            "Ignoring commit_cluster_trigger from project config (security: only user-level config may enable the trigger or lower min_clusters; a repository cannot make the history_summarizer fire after fewer commits).",
         );
     }
 
@@ -503,7 +498,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         );
     }
 
-    for (const field of ["subc", "shadow_embedding"] as const) {
+    for (const field of ["host", "shadow_embedding"] as const) {
         if (field in projectRaw) {
             delete projectRaw[field];
             warnings.push(
@@ -512,42 +507,19 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         }
     }
 
-    const historian = projectRaw.historian;
-    if (isPlainObject(historian)) {
+    const history_summarizer = projectRaw.history_summarizer;
+    if (isPlainObject(history_summarizer)) {
         const removed: string[] = [];
-        for (const field of HISTORIAN_USER_ONLY_FIELDS) {
-            if (field in historian) {
-                delete historian[field];
+        for (const field of HISTORY_SUMMARIZER_USER_ONLY_FIELDS) {
+            if (field in history_summarizer) {
+                delete history_summarizer[field];
                 removed.push(field);
             }
         }
         if (removed.length > 0) {
             warnings.push(
-                `Ignoring historian.${removed.join("/")} from project config ` +
-                    "(security: historian model selection, tool restrictions, and two-pass mode are user-level only; a repository cannot force extra compaction cost or re-enable a tool the user removed).",
-            );
-        }
-    }
-
-    const mural = projectRaw.mural;
-    if (isPlainObject(mural) && "model" in mural) {
-        delete mural.model;
-        warnings.push(
-            "Ignoring mural.model from project config (security: the mural cue-compressor model is a user-level setting; a repository cannot choose where project memory is sent).",
-        );
-    }
-
-    const experimental = projectRaw.experimental;
-    if (isPlainObject(experimental) && "mural" in experimental) {
-        if (!isPlainObject(experimental.mural)) {
-            delete experimental.mural;
-            warnings.push(
-                "Ignoring experimental.mural from project config (security: a repository cannot replace a block that carries user-only settings; a non-object value would discard the user's legacy mural configuration).",
-            );
-        } else if ("model" in experimental.mural) {
-            delete experimental.mural.model;
-            warnings.push(
-                "Ignoring experimental.mural.model from project config (security: the mural cue-compressor model is a user-level setting; use user-level mural.model).",
+                `Ignoring history_summarizer.${removed.join("/")} from project config ` +
+                    "(security: history_summarizer model selection, tool restrictions, are user-level only; a repository cannot force extra compaction cost or re-enable a tool the user removed).",
             );
         }
     }
@@ -568,8 +540,6 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
                     "(security: a repository cannot reprogram or re-permission hidden agents).",
             );
         }
-        // A project `enabled: true` would replace the user's legacy `enabled: false` in the raw
-        // merge before `migrateLegacyAgentEnabledInMemory` turns it into `disable: true`.
         for (const field of HIDDEN_AGENT_ACTIVATION_FIELDS) {
             if (!(field in block)) continue;
             delete block[field];

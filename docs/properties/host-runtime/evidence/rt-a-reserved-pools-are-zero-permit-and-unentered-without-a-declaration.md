@@ -142,7 +142,7 @@ The assertion has two halves:
 2. Whenever a marker fires, the acquiring route's class is `Reserved`. This is
    the precondition form and holds on a correct implementation.
 
-`handler_contract.rs:302-320` already provides `broca_declaration` and
+`handler_contract.rs:302-320` already provides `model_execution_declaration` and
 `three_child_composite`, and `:378-388` already builds both mismatch directions,
 so only the markers are missing.
 

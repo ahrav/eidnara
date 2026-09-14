@@ -75,7 +75,7 @@ export interface PayloadManifest {
     mode: "development";
     package: { name: string; version: string; target: string };
     platform_floor: PlatformFloor;
-    synapse: string;
+    local_embeddings: string;
     launcher: string;
     files: PayloadFileEntry[];
 }
@@ -84,7 +84,7 @@ export interface ReleasePlatform {
     target: string;
     kernel_min: string;
     glibc_min: string;
-    synapse: string;
+    local_embeddings: string;
     capabilities: { procfs_self_fd_exec: boolean };
 }
 
@@ -109,7 +109,13 @@ export interface DevPayloadResult {
     addonSha256: string;
 }
 
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+type JsonValue =
+    | null
+    | boolean
+    | number
+    | string
+    | JsonValue[]
+    | { [key: string]: JsonValue };
 
 /** The daemon hashes exact manifest bytes, so canonicalJson recursively sorts object keys, preserves array order, and emits no whitespace. */
 export function canonicalJson(value: unknown): string {
@@ -144,7 +150,9 @@ function readJson(rootDir: string, relative: string): unknown {
     try {
         return JSON.parse(readFileSync(path, "utf8"));
     } catch (error) {
-        fail(`${relative} is not valid JSON: ${error instanceof Error ? error.message : error}`);
+        fail(
+            `${relative} is not valid JSON: ${error instanceof Error ? error.message : error}`,
+        );
     }
 }
 
@@ -173,7 +181,7 @@ function asContract(value: unknown): ReleaseContract {
             typeof platform.target !== "string" ||
             typeof platform.kernel_min !== "string" ||
             typeof platform.glibc_min !== "string" ||
-            typeof platform.synapse !== "string" ||
+            typeof platform.local_embeddings !== "string" ||
             !isRecord(platform.capabilities) ||
             typeof platform.capabilities.procfs_self_fd_exec !== "boolean"
         ) {
@@ -195,24 +203,36 @@ function asContract(value: unknown): ReleaseContract {
 export function loadReleaseContext(rootDir: string): ReleaseContext {
     const contract = asContract(readJson(rootDir, RELEASE_CONTRACT_PATH));
     const contractBytes = readFileSync(join(rootDir, RELEASE_CONTRACT_PATH));
-    const trimmed = contractBytes.at(-1) === 0x0a ? contractBytes.subarray(0, -1) : contractBytes;
+    const trimmed =
+        contractBytes.at(-1) === 0x0a
+            ? contractBytes.subarray(0, -1)
+            : contractBytes;
     const contractSha256 = sha256Hex(trimmed);
     const lockBytes = readFileSync(join(rootDir, PRODUCTION_INPUTS_LOCK_PATH));
     if (lockBytes.length === 0) fail(`${PRODUCTION_INPUTS_LOCK_PATH} is empty`);
     const lockSha256 = sha256Hex(lockBytes);
     if (!contract.packages.payloads.includes(PAYLOAD_TARGET.package)) {
-        fail(`${RELEASE_CONTRACT_PATH}: packages.payloads must include ${PAYLOAD_TARGET.package}`);
+        fail(
+            `${RELEASE_CONTRACT_PATH}: packages.payloads must include ${PAYLOAD_TARGET.package}`,
+        );
     }
     const packageJsonPath = `${PAYLOAD_TARGET.dir}/package.json`;
     const pkg = readJson(rootDir, packageJsonPath);
     if (!isRecord(pkg) || pkg.version !== contract.release.version) {
-        fail(`${packageJsonPath}: version must be the release version ${contract.release.version}`);
+        fail(
+            `${packageJsonPath}: version must be the release version ${contract.release.version}`,
+        );
     }
     return { contract, contractSha256, lockSha256 };
 }
 
-export function platformFloorFor(contract: ReleaseContract, target: string): PlatformFloor {
-    const platform = contract.platforms.supported.find((entry) => entry.target === target);
+export function platformFloorFor(
+    contract: ReleaseContract,
+    target: string,
+): PlatformFloor {
+    const platform = contract.platforms.supported.find(
+        (entry) => entry.target === target,
+    );
     if (platform === undefined) fail(`unknown target ${target}`);
     return {
         kernel_min: platform.kernel_min,
@@ -221,10 +241,15 @@ export function platformFloorFor(contract: ReleaseContract, target: string): Pla
     };
 }
 
-function synapseFor(contract: ReleaseContract, target: string): string {
-    const platform = contract.platforms.supported.find((entry) => entry.target === target);
+function local_embeddingsFor(
+    contract: ReleaseContract,
+    target: string,
+): string {
+    const platform = contract.platforms.supported.find(
+        (entry) => entry.target === target,
+    );
     if (platform === undefined) fail(`unknown target ${target}`);
-    return platform.synapse;
+    return platform.local_embeddings;
 }
 
 function assertExactKeys(
@@ -279,14 +304,15 @@ export function validatePayloadManifest(
             "mode",
             "package",
             "platform_floor",
-            "synapse",
+            "local_embeddings",
             "launcher",
             "files",
         ],
         "payload manifest",
     );
     const { contract } = context;
-    if (manifest.schema !== MANIFEST_SCHEMA) fail("unknown payload-manifest schema");
+    if (manifest.schema !== MANIFEST_SCHEMA)
+        fail("unknown payload-manifest schema");
     assertExactKeys(manifest.release, ["id", "version"], "release");
     if (
         manifest.release.id !== contract.release.id ||
@@ -300,14 +326,17 @@ export function validatePayloadManifest(
     if (manifest.production_inputs_lock_sha256 !== context.lockSha256) {
         fail("payload manifest cites a stale production-inputs lock digest");
     }
-    if (manifest.mode !== "development") fail("payload manifest mode must be development");
+    if (manifest.mode !== "development")
+        fail("payload manifest mode must be development");
     assertExactKeys(manifest.package, ["name", "version", "target"], "package");
     if (
         manifest.package.name !== PAYLOAD_TARGET.package ||
         manifest.package.version !== contract.release.version ||
         manifest.package.target !== PAYLOAD_TARGET.target
     ) {
-        fail(`payload manifest package identity mismatch for ${PAYLOAD_TARGET.package}`);
+        fail(
+            `payload manifest package identity mismatch for ${PAYLOAD_TARGET.package}`,
+        );
     }
     assertExactKeys(
         manifest.platform_floor,
@@ -316,10 +345,17 @@ export function validatePayloadManifest(
     );
     const floor = platformFloorFor(contract, PAYLOAD_TARGET.target);
     if (canonicalJson(manifest.platform_floor) !== canonicalJson(floor)) {
-        fail(`payload manifest platform floor drift for ${PAYLOAD_TARGET.target}`);
+        fail(
+            `payload manifest platform floor drift for ${PAYLOAD_TARGET.target}`,
+        );
     }
-    if (manifest.synapse !== synapseFor(contract, PAYLOAD_TARGET.target)) {
-        fail(`payload manifest synapse claim mismatch for ${PAYLOAD_TARGET.target}`);
+    if (
+        manifest.local_embeddings !==
+        local_embeddingsFor(contract, PAYLOAD_TARGET.target)
+    ) {
+        fail(
+            `payload manifest local_embeddings claim mismatch for ${PAYLOAD_TARGET.target}`,
+        );
     }
     if (manifest.launcher !== LAUNCHER_PATH) {
         fail(`payload manifest launcher must be ${LAUNCHER_PATH}`);
@@ -333,30 +369,39 @@ export function validatePayloadManifest(
     let addonSeen = false;
     for (const [index, entry] of files.entries()) {
         const where = `files[${index}]`;
-        assertExactKeys(entry, ["path", "type", "size", "mode", "sha256"], where);
+        assertExactKeys(
+            entry,
+            ["path", "type", "size", "mode", "sha256"],
+            where,
+        );
         assertSafePayloadPath(entry.path);
         if (previous !== undefined && previous >= entry.path) {
             fail("payload files must be strictly ascending by path");
         }
         previous = entry.path;
-        if (entry.type !== "file") fail(`${where}: only regular files are allowed`);
+        if (entry.type !== "file")
+            fail(`${where}: only regular files are allowed`);
         if (!Number.isSafeInteger(entry.size) || (entry.size as number) <= 0) {
             fail(`${where}: size must be a positive integer`);
         }
         const expectedMode = entry.path === LAUNCHER_PATH ? "755" : "644";
-        if (entry.mode !== expectedMode) fail(`${where}: mode must be ${expectedMode}`);
+        if (entry.mode !== expectedMode)
+            fail(`${where}: mode must be ${expectedMode}`);
         if (typeof entry.sha256 !== "string" || !SHA256_RE.test(entry.sha256)) {
             fail(`${where}: sha256 must be a lowercase 64-hex digest`);
         }
         if (entry.path === LAUNCHER_PATH) launcherSeen = true;
         if (entry.path === ADDON_PATH) addonSeen = true;
     }
-    if (!launcherSeen) fail(`payload manifest must list the launcher ${LAUNCHER_PATH}`);
+    if (!launcherSeen)
+        fail(`payload manifest must list the launcher ${LAUNCHER_PATH}`);
     if (!addonSeen) fail(`payload manifest must list the addon ${ADDON_PATH}`);
     return manifest as unknown as PayloadManifest;
 }
 
-function lstatIfPresent(path: string): ReturnType<typeof lstatSync> | undefined {
+function lstatIfPresent(
+    path: string,
+): ReturnType<typeof lstatSync> | undefined {
     try {
         return lstatSync(path);
     } catch {
@@ -395,20 +440,26 @@ export function verifyPayloadDir(dir: string, manifest: PayloadManifest): void {
         if (!stat.isFile()) fail(`${entry.path} is not a regular file`);
         const bytes = readFileSync(path);
         if (bytes.length !== entry.size) {
-            fail(`${entry.path}: size drift (${bytes.length} != ${entry.size})`);
+            fail(
+                `${entry.path}: size drift (${bytes.length} != ${entry.size})`,
+            );
         }
-        if (sha256Hex(bytes) !== entry.sha256) fail(`${entry.path}: digest drift`);
+        if (sha256Hex(bytes) !== entry.sha256)
+            fail(`${entry.path}: digest drift`);
         const actualMode = stat.mode & 0o777;
         const expectedMode = Number.parseInt(entry.mode, 8);
         if (actualMode !== expectedMode) {
-            fail(`${entry.path}: mode drift (${actualMode.toString(8)} != ${entry.mode})`);
+            fail(
+                `${entry.path}: mode drift (${actualMode.toString(8)} != ${entry.mode})`,
+            );
         }
     }
     const walk = (relative: string): void => {
         for (const name of readdirSync(join(dir, relative))) {
             const rel = `${relative}/${name}`;
             const stat = lstatSync(join(dir, rel));
-            if (stat.isSymbolicLink()) fail(`symlink ${rel} is rejected in a payload`);
+            if (stat.isSymbolicLink())
+                fail(`symlink ${rel} is rejected in a payload`);
             if (stat.isDirectory()) {
                 walk(rel);
             } else if (!listed.has(rel)) {
@@ -420,14 +471,19 @@ export function verifyPayloadDir(dir: string, manifest: PayloadManifest): void {
 }
 
 /** `packages/shm-native/index.ts` performs the same two probes at runtime and refuses `"debug"` and any target other than `PAYLOAD_TARGET.nativeTarget`. Callers pass an absolute path: `require` resolves a relative one against this module's directory, not the working directory. */
-export function probeAddon(addonPath: string): { profile: string; target: string } {
+export function probeAddon(addonPath: string): {
+    profile: string;
+    target: string;
+} {
     const module: unknown = createRequire(import.meta.url)(addonPath);
     if (
         !isRecord(module) ||
         typeof module.buildProfile !== "function" ||
         typeof module.buildTarget !== "function"
     ) {
-        fail(`addon ${addonPath} exports no buildProfile and buildTarget functions`);
+        fail(
+            `addon ${addonPath} exports no buildProfile and buildTarget functions`,
+        );
     }
     return {
         profile: String((module.buildProfile as () => unknown)()),
@@ -437,7 +493,8 @@ export function probeAddon(addonPath: string): { profile: string; target: string
 
 function readSourceFile(path: string, what: string): Buffer {
     // A FIFO or device would block the read; a symlink would hide the real source.
-    if (!lstatSync(path).isFile()) fail(`${what} source must be a regular file`);
+    if (!lstatSync(path).isFile())
+        fail(`${what} source must be a regular file`);
     const bytes = readFileSync(path);
     if (bytes.length === 0) fail(`${what} source is empty`);
     return bytes;
@@ -454,7 +511,9 @@ function assertGlibcLinuxX64Host(): void {
         process.arch !== "x64" ||
         typeof report?.header?.glibcVersionRuntime !== "string"
     ) {
-        fail(`a ${PAYLOAD_TARGET.target} development payload must be built on x86-64 glibc Linux`);
+        fail(
+            `a ${PAYLOAD_TARGET.target} development payload must be built on x86-64 glibc Linux`,
+        );
     }
 }
 
@@ -469,23 +528,39 @@ function defaultLauncherPath(rootDir: string): string {
 }
 
 function launcherOutput(launcherPath: string, subcommand: string): string {
-    const run = spawnSync(launcherPath, [subcommand], { encoding: "utf8", timeout: 10_000 });
+    const run = spawnSync(launcherPath, [subcommand], {
+        encoding: "utf8",
+        timeout: 10_000,
+    });
     if (run.error !== undefined || run.status !== 0) {
-        const detail = run.error?.message ?? (run.stderr.trim() || `exit ${run.status}`);
+        const detail =
+            run.error?.message ?? (run.stderr.trim() || `exit ${run.status}`);
         fail(`launcher ${launcherPath} failed \`${subcommand}\`: ${detail}`);
     }
     return run.stdout.endsWith("\n") ? run.stdout.slice(0, -1) : run.stdout;
 }
 
 /** The launcher's compiled release contract and production-inputs lock must be the ones the manifest cites; a stale or foreign executable fails here rather than at first launch. */
-function assertLauncherMatchesRelease(launcherPath: string, context: ReleaseContext): void {
+function assertLauncherMatchesRelease(
+    launcherPath: string,
+    context: ReleaseContext,
+): void {
     // `release-info` prints the contract file, whose own trailing newline `release_contract_sha256` excludes.
-    const contract = launcherOutput(launcherPath, "release-info").replace(/\n$/, "");
+    const contract = launcherOutput(launcherPath, "release-info").replace(
+        /\n$/,
+        "",
+    );
     if (sha256Hex(contract) !== context.contractSha256) {
-        fail(`launcher ${launcherPath} was built from a different ${RELEASE_CONTRACT_PATH}`);
+        fail(
+            `launcher ${launcherPath} was built from a different ${RELEASE_CONTRACT_PATH}`,
+        );
     }
-    if (launcherOutput(launcherPath, "input-lock-digest") !== context.lockSha256) {
-        fail(`launcher ${launcherPath} was built from a different ${PRODUCTION_INPUTS_LOCK_PATH}`);
+    if (
+        launcherOutput(launcherPath, "input-lock-digest") !== context.lockSha256
+    ) {
+        fail(
+            `launcher ${launcherPath} was built from a different ${PRODUCTION_INPUTS_LOCK_PATH}`,
+        );
     }
 }
 
@@ -511,9 +586,12 @@ export function buildDevPayload(
     assertGlibcLinuxX64Host();
     const context = loadReleaseContext(rootDir);
     // Absolute paths keep `readSourceFile` (working-directory relative) and `probeAddon` (`require`, module-directory relative) reading the same file.
-    const launcherPath = resolve(options.launcherPath ?? defaultLauncherPath(rootDir));
+    const launcherPath = resolve(
+        options.launcherPath ?? defaultLauncherPath(rootDir),
+    );
     const addonPath = resolve(options.addonPath ?? defaultAddonPath(rootDir));
-    if (!existsSync(launcherPath)) fail(`launcher ${launcherPath} does not exist`);
+    if (!existsSync(launcherPath))
+        fail(`launcher ${launcherPath} does not exist`);
     if (!existsSync(addonPath)) fail(`addon ${addonPath} does not exist`);
     const launcherBytes = readSourceFile(launcherPath, "launcher");
     const addonBytes = readSourceFile(addonPath, "addon");
@@ -533,10 +611,14 @@ export function buildDevPayload(
         stageFile(launcherPath, launcherDest, 0o755);
         stageFile(addonPath, addonDest, 0o644);
         // Bun's `require` dispatches to the native-addon loader only for a `.node` extension, so a native source is probed through its staged copy, the file consumers load.
-        const probePath = NATIVE_ADDON_EXTENSIONS.has(extname(addonPath)) ? addonDest : addonPath;
+        const probePath = NATIVE_ADDON_EXTENSIONS.has(extname(addonPath))
+            ? addonDest
+            : addonPath;
         const { profile, target } = probeAddon(probePath);
         if (profile !== "release") {
-            fail(`dev payload requires a release-profile addon; ${addonPath} reports ${profile}`);
+            fail(
+                `dev payload requires a release-profile addon; ${addonPath} reports ${profile}`,
+            );
         }
         if (target !== PAYLOAD_TARGET.nativeTarget) {
             fail(
@@ -567,7 +649,9 @@ export function buildDevPayload(
             sha256: addonSha256,
         },
     ];
-    const files = entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    const files = entries.sort((a, b) =>
+        a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+    );
     const candidate: PayloadManifest = {
         schema: MANIFEST_SCHEMA,
         release: {
@@ -582,8 +666,14 @@ export function buildDevPayload(
             version: context.contract.release.version,
             target: PAYLOAD_TARGET.target,
         },
-        platform_floor: platformFloorFor(context.contract, PAYLOAD_TARGET.target),
-        synapse: synapseFor(context.contract, PAYLOAD_TARGET.target),
+        platform_floor: platformFloorFor(
+            context.contract,
+            PAYLOAD_TARGET.target,
+        ),
+        local_embeddings: local_embeddingsFor(
+            context.contract,
+            PAYLOAD_TARGET.target,
+        ),
         launcher: LAUNCHER_PATH,
         files,
     };
@@ -604,7 +694,8 @@ function sameStringSet(actual: unknown, expected: readonly string[]): boolean {
     return (
         Array.isArray(actual) &&
         actual.length === expected.length &&
-        canonicalJson([...actual].sort()) === canonicalJson([...expected].sort())
+        canonicalJson([...actual].sort()) ===
+            canonicalJson([...expected].sort())
     );
 }
 
@@ -618,15 +709,23 @@ export function validatePayloadPackageDir(rootDir: string): void {
     if (pkg.name !== PAYLOAD_TARGET.package)
         fail(`${where}: name must be ${PAYLOAD_TARGET.package}`);
     if (pkg.version !== context.contract.release.version) {
-        fail(`${where}: version must be the release version ${context.contract.release.version}`);
+        fail(
+            `${where}: version must be the release version ${context.contract.release.version}`,
+        );
     }
     for (const field of ["os", "cpu", "libc"] as const) {
-        if (canonicalJson(pkg[field]) !== canonicalJson(PAYLOAD_TARGET[field])) {
-            fail(`${where}: ${field} must be ${JSON.stringify(PAYLOAD_TARGET[field])}`);
+        if (
+            canonicalJson(pkg[field]) !== canonicalJson(PAYLOAD_TARGET[field])
+        ) {
+            fail(
+                `${where}: ${field} must be ${JSON.stringify(PAYLOAD_TARGET[field])}`,
+            );
         }
     }
     if (!sameStringSet(pkg.files, PACKAGE_FILES)) {
-        fail(`${where}: files must be exactly ${JSON.stringify(PACKAGE_FILES)}`);
+        fail(
+            `${where}: files must be exactly ${JSON.stringify(PACKAGE_FILES)}`,
+        );
     }
     // Install filtering only: a payload package carries no lifecycle scripts and pulls nothing.
     for (const field of FORBIDDEN_PACKAGE_FIELDS) {
@@ -643,7 +742,9 @@ export function validatePayloadPackageDir(rootDir: string): void {
     );
     // npm packs `payload/` whether or not a manifest sits beside it, and `packages/shm-native/index.ts` refuses a package without one, so both must be present or both absent.
     if (payloadRootPresent(packageDir) && !manifestPresent) {
-        fail(`${MANIFEST_FILE_NAME} is missing but a payload directory is staged`);
+        fail(
+            `${MANIFEST_FILE_NAME} is missing but a payload directory is staged`,
+        );
     }
     if (manifestPresent) {
         const manifest = validatePayloadManifest(
@@ -684,12 +785,18 @@ function main(): void {
             usageError(`unknown argument: ${arg}`);
         }
     }
-    if (flags.size !== 1) usageError("exactly one of --dev or --check is required");
+    if (flags.size !== 1)
+        usageError("exactly one of --dev or --check is required");
     if (flags.has("--check") && Object.keys(values).length > 0) {
         usageError("--out, --launcher, and --addon apply to --dev only");
     }
-    if (values.addon !== undefined && !NATIVE_ADDON_EXTENSIONS.has(extname(values.addon))) {
-        usageError(`--addon must name a ${[...NATIVE_ADDON_EXTENSIONS].join(" or ")} file`);
+    if (
+        values.addon !== undefined &&
+        !NATIVE_ADDON_EXTENSIONS.has(extname(values.addon))
+    ) {
+        usageError(
+            `--addon must name a ${[...NATIVE_ADDON_EXTENSIONS].join(" or ")} file`,
+        );
     }
     const rootDir = join(dirname(fileURLToPath(import.meta.url)), "..");
     try {
@@ -703,7 +810,9 @@ function main(): void {
         }
         const result = buildDevPayload(rootDir, {
             outDir: values.out ?? join(rootDir, PAYLOAD_TARGET.dir),
-            ...(values.launcher === undefined ? {} : { launcherPath: values.launcher }),
+            ...(values.launcher === undefined
+                ? {}
+                : { launcherPath: values.launcher }),
             ...(values.addon === undefined ? {} : { addonPath: values.addon }),
         });
         console.log(

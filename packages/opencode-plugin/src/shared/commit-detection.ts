@@ -20,7 +20,7 @@ export const COMMIT_HASH_TEST_PATTERN = new RegExp(`\\b${HASH_HEX}\\b`, "i");
  * detectors used and pin in tests ("commit/cherry-pick/merge/rebase"). It does
  * NOT include the bare nouns "hash"/"sha" — a parity test asserts
  * "hash <hex>" alone must NOT count as a commit,
- * and those nouns only ever gated a cosmetic hash-strip in historian summaries
+ * and those nouns only ever gated a cosmetic hash-strip in history_summarizer summaries
  * (never a trigger), so unifying to the action set is behavior-preserving where
  * it matters.
  */

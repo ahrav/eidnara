@@ -2,8 +2,8 @@
 
 Every claim-bearing check for the 16 records under `## Discovered at U3` in
 [catalog.md](../catalog.md) (`:9875-10120`). Those records cover code the six
-source catalogs did not reach: `crates/host-runtime/src/broca/` (eight files,
-4,960 lines), `src/synapse/` (five files, 4,968), `src/harness_closure.rs`
+source catalogs did not reach: `crates/host-runtime/src/model_execution/` (eight files,
+4,960 lines), `src/local_embeddings/` (five files, 4,968), `src/harness_closure.rs`
 (1,146), the proof vectors in `src/auth.rs` (1,088), the header vectors in
 `src/wire.rs` (937), the data-root resolver in `src/instance.rs` (1,349), and
 the coordination locks in `src/lifecycle.rs` (2,262).
@@ -12,7 +12,7 @@ Provenance: branch `u3/16-catalog-host-runtime`, `HEAD` = `572315a`, working
 tree clean outside `docs/`. Every count here was derived at that commit by
 listing `#[test]` and `#[tokio::test]` attributes and the `fn` line each
 precedes, by reading the `harness = false` runner's name table
-(`tests/broca_subprocess.rs:76-218`), and by grepping the production half of
+(`tests/model_execution_subprocess.rs:76-218`), and by grepping the production half of
 each source file, cut at its `#[cfg(test)] mod tests` line. Every `file:line`
 below was printed and confirmed.
 
@@ -36,15 +36,15 @@ runs the same under `+stable`, and `:122` runs `--workspace --doc`. The root
 targets` builds the lib test target, every integration binary, and the
 `harness = false` binary declared at `crates/host-runtime/Cargo.toml:36-38`.
 The job runs on `ubuntu-latest` (`ci.yml:14`), so the two `#[cfg(target_os =
-"linux")]` tests in `src/synapse/inference.rs` compile and run.
+"linux")]` tests in `src/local_embeddings/inference.rs` compile and run.
 
 Three attenuations apply, and they are the whole list.
 
 | Attenuation | Sites | Effect in CI |
 | --- | --- | --- |
-| `#[ignore]` | `tests/synapse_protocol.rs:412-415` `boundary_waiters_with_maximal_texts_are_all_admitted`; `tests/harness_closure.rs:442-443` `production_closures_from_environment_materialize` | Never executed. `ci.yml` passes no `--include-ignored` (grep: zero hits) |
-| Early return when `EIDNARA_SYNAPSE_TEST_ORT_LIBRARY` is unset | `tests/synapse_bundle.rs:29-42` `ort_library()`, called at `:573`, `:645`, `:687`, `:699`, `:709`; `tests/synapse_roundtrip.rs:27-38`, called at `:121` | Six tests **pass without asserting**: `certified_bundle_loads_and_serves_expected_vectors` (`:572`), `production_bundle_from_environment_certifies_offline` (`:639`, which also needs `EIDNARA_SYNAPSE_PRODUCTION_BUNDLE` at `:640`), `wrong_but_dimension_compatible_output_fails_certification` (`:686`), `wrong_pooling_fails_certification` (`:698`), `wrong_ort_identity_disables_the_lane` (`:708`), `all_four_operations_serve_certified_vectors_over_the_wire` (`synapse_roundtrip.rs:120`). `ci.yml` sets neither variable (grep `EIDNARA`: zero hits) |
-| Wall-clock timing | `tests/synapse_jobs.rs:242` sets `retention` to 100 ms and `:266` sleeps 250 ms real time; `tests/broca_supervisor.rs` uses `start_paused` at 5 sites and `tests/synapse_protocol.rs` at 6 | Not an execution gap, recorded so a later flake triage starts in the right place |
+| `#[ignore]` | `tests/local_embeddings_protocol.rs:412-415` `boundary_waiters_with_maximal_texts_are_all_admitted`; `tests/harness_closure.rs:442-443` `production_closures_from_environment_materialize` | Never executed. `ci.yml` passes no `--include-ignored` (grep: zero hits) |
+| Early return when `EIDNARA_LOCAL_EMBEDDINGS_TEST_ORT_LIBRARY` is unset | `tests/local_embeddings_bundle.rs:29-42` `ort_library()`, called at `:573`, `:645`, `:687`, `:699`, `:709`; `tests/local_embeddings_roundtrip.rs:27-38`, called at `:121` | Six tests **pass without asserting**: `certified_bundle_loads_and_serves_expected_vectors` (`:572`), `production_bundle_from_environment_certifies_offline` (`:639`, which also needs `EIDNARA_LOCAL_EMBEDDINGS_PRODUCTION_BUNDLE` at `:640`), `wrong_but_dimension_compatible_output_fails_certification` (`:686`), `wrong_pooling_fails_certification` (`:698`), `wrong_ort_identity_disables_the_lane` (`:708`), `all_four_operations_serve_certified_vectors_over_the_wire` (`local_embeddings_roundtrip.rs:120`). `ci.yml` sets neither variable (grep `EIDNARA`: zero hits) |
+| Wall-clock timing | `tests/local_embeddings_jobs.rs:242` sets `retention` to 100 ms and `:266` sleeps 250 ms real time; `tests/model_execution_supervisor.rs` uses `start_paused` at 5 sites and `tests/local_embeddings_protocol.rs` at 6 | Not an execution gap, recorded so a later flake triage starts in the right place |
 
 The six earlier inventories state that no `host-runtime` test runs in CI, for
 example `../runtime-config/existing-checks.md:24` and
@@ -60,17 +60,17 @@ does not edit them.
 
 | Binary | Tests | Lines | Subject | Fixture |
 | --- | --- | --- | --- | --- |
-| `tests/broca_protocol.rs` | 9 | 710 | Broca request schema, bind, boundary | `ScriptedBackend` (`tests/support/broca.rs:25`), `start_broca_host` (`:170`), `raw_client` |
-| `tests/broca_subprocess.rs` | 39 | 3,176 | real harness children, env snapshot, reaping | `harness = false`; the binary re-executes itself as the child under `EIDNARA_BROCA_FIXTURE_MODE` (`:45`, `:61-72`, `:293-300`) with behaviours at `:636-657` |
-| `tests/broca_supervisor.rs` | 25 | 1,289 | dedup, permits, terminals, shutdown | `ScriptedBackend`, `std::sync::Barrier` (`:168`), `start_paused` |
-| `tests/synapse_bundle.rs` | 24 | 905 | bundle load, fingerprint, degrade | `synapse-tiny` fixture (`:20-22`), `expect_disabled_with` (`:105-115`), `ort_library()` gate |
-| `tests/synapse_jobs.rs` | 11 | 611 | job table admission and eviction | `DeterministicEngine` (`tests/support/synapse.rs:40`), `SynapseHost` (`:172`) |
-| `tests/synapse_protocol.rs` | 24 | 1,369 | request validation, waiters, replay | `DeterministicEngine` with `calls` counter (`:43`), `block_calls` gate (`:71`) |
-| `tests/synapse_roundtrip.rs` | 2 | 251 | degrade over the wire; certified vectors | `synapse-tiny`, `ort_library()` gate |
+| `tests/model_execution_protocol.rs` | 9 | 710 | ModelExecution request schema, bind, boundary | `ScriptedBackend` (`tests/support/model_execution.rs:25`), `start_model_execution_host` (`:170`), `raw_client` |
+| `tests/model_execution_subprocess.rs` | 39 | 3,176 | real harness children, env snapshot, reaping | `harness = false`; the binary re-executes itself as the child under `EIDNARA_MODEL_EXECUTION_FIXTURE_MODE` (`:45`, `:61-72`, `:293-300`) with behaviours at `:636-657` |
+| `tests/model_execution_supervisor.rs` | 25 | 1,289 | dedup, permits, terminals, shutdown | `ScriptedBackend`, `std::sync::Barrier` (`:168`), `start_paused` |
+| `tests/local_embeddings_bundle.rs` | 24 | 905 | bundle load, fingerprint, degrade | `local_embeddings-tiny` fixture (`:20-22`), `expect_disabled_with` (`:105-115`), `ort_library()` gate |
+| `tests/local_embeddings_jobs.rs` | 11 | 611 | job table admission and eviction | `DeterministicEngine` (`tests/support/local_embeddings.rs:40`), `LocalEmbeddingsHost` (`:172`) |
+| `tests/local_embeddings_protocol.rs` | 24 | 1,369 | request validation, waiters, replay | `DeterministicEngine` with `calls` counter (`:43`), `block_calls` gate (`:71`) |
+| `tests/local_embeddings_roundtrip.rs` | 2 | 251 | degrade over the wire; certified vectors | `local_embeddings-tiny`, `ort_library()` gate |
 | `tests/protocol_vectors.rs` | 15 | 765 | committed auth and header vectors | `raw_client::proof` (`tests/support/raw_client.rs:251`), `header` (`:271`), `decode_header` (`:283`) |
 | `tests/harness_closure.rs` | 16 | 699 | closure manifest, materialization | `pi-valid.json` (`tests/fixtures/harness-closures/`), `setup()` |
 
-`tests/broca_subprocess.rs` has zero `#[test]` attributes. Its 39 checks are
+`tests/model_execution_subprocess.rs` has zero `#[test]` attributes. Its 39 checks are
 plain `fn`s named in the table at `:76-218`, run under `catch_unwind` at
 `:242`, and listed for nextest at `:219-225`. `cargo test` with no filter runs
 all 39. The earlier `../runtime-config/existing-checks.md:162` recorded the zero
@@ -80,13 +80,13 @@ attribute count and stopped; this inventory counts the runner's table.
 
 | File | `mod tests` at | Tests | Selection |
 | --- | --- | --- | --- |
-| `src/broca/subprocess.rs` | `:1651` | 1 | all |
-| `src/broca/{backend,config,mod,opencode,pi,protocol,supervisor}.rs` | none | 0 | seven files, 3,279 lines, no test module |
-| `src/synapse/bundle.rs` | `:814` | 11 | all |
-| `src/synapse/inference.rs` | `:337` | 2 | all, both `#[cfg(target_os = "linux")]` |
-| `src/synapse/jobs.rs` | `:700` | 7 | all |
-| `src/synapse/mod.rs` | none | 0 | 1,064 lines, no test module |
-| `src/synapse/protocol.rs` | `:975` | 13 | all |
+| `src/model_execution/subprocess.rs` | `:1651` | 1 | all |
+| `src/model_execution/{backend,config,mod,opencode,pi,protocol,supervisor}.rs` | none | 0 | seven files, 3,279 lines, no test module |
+| `src/local_embeddings/bundle.rs` | `:814` | 11 | all |
+| `src/local_embeddings/inference.rs` | `:337` | 2 | all, both `#[cfg(target_os = "linux")]` |
+| `src/local_embeddings/jobs.rs` | `:700` | 7 | all |
+| `src/local_embeddings/mod.rs` | none | 0 | 1,064 lines, no test module |
+| `src/local_embeddings/protocol.rs` | `:975` | 13 | all |
 | `src/harness_closure.rs` | none | 0 | 1,146 lines, no test module |
 | `src/wire.rs` | `:613` | 14 | all; `:513` is a `#[cfg(test)]` helper `encode_frame`, not a module |
 | `src/auth.rs` | `:585` | 12 | all |
@@ -218,9 +218,9 @@ a check in the tree. `production_closures_from_environment_materialize`
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `credential_fingerprint_matches_the_committed_vector` | `src/broca/subprocess.rs:1660` | unaudited |
-| Named `provider_rows_exclude_ambient_credentials_and_enforce_caps` | `tests/broca_subprocess.rs:2840` | unaudited |
-| Also bears `credential_snapshot_must_match_before_backend_spawn` | `tests/broca_protocol.rs:435` | unaudited |
+| Named `credential_fingerprint_matches_the_committed_vector` | `src/model_execution/subprocess.rs:1660` | unaudited |
+| Named `provider_rows_exclude_ambient_credentials_and_enforce_caps` | `tests/model_execution_subprocess.rs:2840` | unaudited |
+| Also bears `credential_snapshot_must_match_before_backend_spawn` | `tests/model_execution_protocol.rs:435` | unaudited |
 
 The named inline test asserts the committed hex at `:1671` and a different key
 at `:1674-1679`. The derivation it pins is `subprocess.rs:186-196`. The
@@ -229,39 +229,39 @@ record's open question is confirmed at this `HEAD`: `CREDENTIAL_ROW_CAP_BYTES`
 only the definition); the per-value cap `CREDENTIAL_VALUE_CAP_BYTES` (`:48`) is
 enforced at `:161`.
 
-### synapse-bundle-fingerprint-covers-every-artifact
+### local_embeddings-bundle-fingerprint-covers-every-artifact
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `the_committed_fixture_carries_its_canonical_fingerprint` | `tests/synapse_bundle.rs:375` | unaudited |
-| Named `a_bundle_manifest_outside_the_committed_digest_does_not_load` | `tests/synapse_bundle.rs:395` | unaudited |
-| Named `one_bit_changes_to_each_artifact_disable_the_lane` | `tests/synapse_bundle.rs:282` | unaudited |
-| Also bears `a_stale_fingerprint_disables_the_lane` | `tests/synapse_bundle.rs:358` | unaudited |
-| Also bears `unlisted_extra_file_disables_the_lane` | `tests/synapse_bundle.rs:316` | unaudited |
-| Also bears `symlinked_artifact_disables_the_lane` | `tests/synapse_bundle.rs:325` | unaudited |
-| Also bears `duplicate_manifest_key_disables_the_lane` | `tests/synapse_bundle.rs:340` | unaudited |
-| Also bears `fingerprint_binds_initializer_names_to_their_hashes` | `src/synapse/bundle.rs:899` | unaudited |
-| Also bears `a_symlinked_artifact_never_opens` | `src/synapse/bundle.rs:1043` | unaudited |
+| Named `the_committed_fixture_carries_its_canonical_fingerprint` | `tests/local_embeddings_bundle.rs:375` | unaudited |
+| Named `a_bundle_manifest_outside_the_committed_digest_does_not_load` | `tests/local_embeddings_bundle.rs:395` | unaudited |
+| Named `one_bit_changes_to_each_artifact_disable_the_lane` | `tests/local_embeddings_bundle.rs:282` | unaudited |
+| Also bears `a_stale_fingerprint_disables_the_lane` | `tests/local_embeddings_bundle.rs:358` | unaudited |
+| Also bears `unlisted_extra_file_disables_the_lane` | `tests/local_embeddings_bundle.rs:316` | unaudited |
+| Also bears `symlinked_artifact_disables_the_lane` | `tests/local_embeddings_bundle.rs:325` | unaudited |
+| Also bears `duplicate_manifest_key_disables_the_lane` | `tests/local_embeddings_bundle.rs:340` | unaudited |
+| Also bears `fingerprint_binds_initializer_names_to_their_hashes` | `src/local_embeddings/bundle.rs:899` | unaudited |
+| Also bears `a_symlinked_artifact_never_opens` | `src/local_embeddings/bundle.rs:1043` | unaudited |
 
 **Contract-versus-check note.** `:375` compares the fixture manifest's stored
 `fingerprint` with the crate's own `canonical_fingerprint` (`:384-388`). The
 "generator's independent fingerprint function" the record names is
-`tests/fixtures/generate-synapse-tiny.py`, which no test executes; the
+`tests/fixtures/generate-local_embeddings-tiny.py`, which no test executes; the
 independence is exercised only when a human regenerates the fixture. `:282`
 flips the last byte of seven named artifacts (`:283-291`) and asserts `"hash
 mismatch"`; it does not enumerate the pre-image lines at
-`src/synapse/bundle.rs:577` onward, so an artifact added to the bundle but
+`src/local_embeddings/bundle.rs:577` onward, so an artifact added to the bundle but
 omitted from the pre-image is not what this test detects.
 
-### broca-identical-resends-converge-on-one-run
+### model_execution-identical-resends-converge-on-one-run
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `identical_resend_dedups_and_any_byte_difference_conflicts` | `tests/broca_supervisor.rs:126` | unaudited |
-| Named `racing_identical_sends_converge_on_one_run_and_one_backend_start` | `tests/broca_supervisor.rs:165` | unaudited |
-| Also bears `terminal_expiry_and_oldest_eviction_enforce_the_session_caps` | `tests/broca_supervisor.rs:857` | unaudited |
-| Also bears `retained_pressure_sweeps_expired_entries_and_retries_admission_once` | `tests/broca_supervisor.rs:895` | unaudited |
-| Also bears `status_and_cancel_are_scoped_to_the_bound_session` | `tests/broca_supervisor.rs:264` | unaudited |
+| Named `identical_resend_dedups_and_any_byte_difference_conflicts` | `tests/model_execution_supervisor.rs:126` | unaudited |
+| Named `racing_identical_sends_converge_on_one_run_and_one_backend_start` | `tests/model_execution_supervisor.rs:165` | unaudited |
+| Also bears `terminal_expiry_and_oldest_eviction_enforce_the_session_caps` | `tests/model_execution_supervisor.rs:857` | unaudited |
+| Also bears `retained_pressure_sweeps_expired_entries_and_retries_admission_once` | `tests/model_execution_supervisor.rs:895` | unaudited |
+| Also bears `status_and_cancel_are_scoped_to_the_bound_session` | `tests/model_execution_supervisor.rs:264` | unaudited |
 
 `:857` and `:895` construct the retained-then-evicted state the record's
 `Exercised:` gap names; neither issues a resend after it. `:126` asserts
@@ -269,164 +269,164 @@ omitted from the pre-image is not what this test detects.
 one-space body difference (`:139-145`); `:165` releases two identical sends
 through a `Barrier` (`:168-175`).
 
-### broca-permits-and-charges-return-to-baseline
+### model_execution-permits-and-charges-return-to-baseline
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `every_path_returns_permits_and_charges_to_baseline` | `tests/broca_supervisor.rs:973` | unaudited |
-| Named `host_shutdown_drains_the_supervisor_to_zero_state` | `tests/broca_supervisor.rs:1246` | unaudited |
-| Named `transport_detach_paths_leave_the_run_untouched` | `tests/broca_supervisor.rs:1099` | unaudited |
-| Also bears `subscriber_caps_enforce_per_run_and_total_without_leaking_permits` | `tests/broca_supervisor.rs:385` | unaudited |
-| Also bears `thirty_two_blocked_commands_admit_and_command_33_fails_fast` | `tests/broca_supervisor.rs:430` | unaudited |
-| Also bears `thirty_two_runs_queue_behind_eight_backends_and_run_33_fails_without_state` | `tests/broca_supervisor.rs:470` | unaudited |
-| Also bears `backend_panic_commits_one_failed_terminal` | `tests/broca_supervisor.rs:317` | unaudited |
-| Also bears `replay_overflow_commits_one_failed_terminal_and_stops_growth` | `tests/broca_supervisor.rs:928` | unaudited |
-| Also bears `shutdown_refuses_new_work_stops_backends_and_wakes_subscribers` | `tests/broca_supervisor.rs:1034` | unaudited |
-| Also bears `default_limits_and_resource_declaration_match_the_fixed_caps` | `tests/broca_supervisor.rs:95` | unaudited |
+| Named `every_path_returns_permits_and_charges_to_baseline` | `tests/model_execution_supervisor.rs:973` | unaudited |
+| Named `host_shutdown_drains_the_supervisor_to_zero_state` | `tests/model_execution_supervisor.rs:1246` | unaudited |
+| Named `transport_detach_paths_leave_the_run_untouched` | `tests/model_execution_supervisor.rs:1099` | unaudited |
+| Also bears `subscriber_caps_enforce_per_run_and_total_without_leaking_permits` | `tests/model_execution_supervisor.rs:385` | unaudited |
+| Also bears `thirty_two_blocked_commands_admit_and_command_33_fails_fast` | `tests/model_execution_supervisor.rs:430` | unaudited |
+| Also bears `thirty_two_runs_queue_behind_eight_backends_and_run_33_fails_without_state` | `tests/model_execution_supervisor.rs:470` | unaudited |
+| Also bears `backend_panic_commits_one_failed_terminal` | `tests/model_execution_supervisor.rs:317` | unaudited |
+| Also bears `replay_overflow_commits_one_failed_terminal_and_stops_growth` | `tests/model_execution_supervisor.rs:928` | unaudited |
+| Also bears `shutdown_refuses_new_work_stops_backends_and_wakes_subscribers` | `tests/model_execution_supervisor.rs:1034` | unaudited |
+| Also bears `default_limits_and_resource_declaration_match_the_fixed_caps` | `tests/model_execution_supervisor.rs:95` | unaudited |
 
 `:973`'s baseline oracle is `assert_baseline(supervisor.metrics(), &limits,
 0)` at `:1023` and again after shutdown at `:1030`. The one production guard
 on this invariant is `debug_assert!(index.runs.is_empty(), "every run is
-session-owned")` at `src/broca/supervisor.rs:641`.
+session-owned")` at `src/model_execution/supervisor.rs:641`.
 
-### broca-children-are-reaped-as-a-process-group
+### model_execution-children-are-reaped-as-a-process-group
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `cancel_reaps_group_with_sigterm_first` | `tests/broca_subprocess.rs:2519` | unaudited |
-| Named `sigkill_escalation_when_term_ignored` | `tests/broca_subprocess.rs:2553` | unaudited |
-| Named `supervisor_shutdown_reaps_group` | `tests/broca_subprocess.rs:2637` | unaudited |
-| Named `group_registry_sweep_kills_only_dead_owner_groups` | `tests/broca_subprocess.rs:3045` | unaudited |
-| Also bears `supervisor_delete_reaps_group` | `tests/broca_subprocess.rs:2608` | unaudited |
-| Also bears `timeout_reaps_leader_and_grandchild` | `tests/broca_subprocess.rs:2131` | unaudited |
-| Also bears `crash_orphaned_run_dirs_swept_only_for_dead_owners` | `tests/broca_subprocess.rs:3003` | unaudited |
-| Also bears `pi_lingering_child_drained_after_terminal` | `tests/broca_subprocess.rs:2158` | unaudited |
+| Named `cancel_reaps_group_with_sigterm_first` | `tests/model_execution_subprocess.rs:2519` | unaudited |
+| Named `sigkill_escalation_when_term_ignored` | `tests/model_execution_subprocess.rs:2553` | unaudited |
+| Named `supervisor_shutdown_reaps_group` | `tests/model_execution_subprocess.rs:2637` | unaudited |
+| Named `group_registry_sweep_kills_only_dead_owner_groups` | `tests/model_execution_subprocess.rs:3045` | unaudited |
+| Also bears `supervisor_delete_reaps_group` | `tests/model_execution_subprocess.rs:2608` | unaudited |
+| Also bears `timeout_reaps_leader_and_grandchild` | `tests/model_execution_subprocess.rs:2131` | unaudited |
+| Also bears `crash_orphaned_run_dirs_swept_only_for_dead_owners` | `tests/model_execution_subprocess.rs:3003` | unaudited |
+| Also bears `pi_lingering_child_drained_after_terminal` | `tests/model_execution_subprocess.rs:2158` | unaudited |
 
 These run real processes. The fixture child is the test binary re-executed
-with `EIDNARA_BROCA_FIXTURE_MODE` (`:45`); `grandchild_hang` (`:654-656`)
+with `EIDNARA_MODEL_EXECUTION_FIXTURE_MODE` (`:45`); `grandchild_hang` (`:654-656`)
 forks a grandchild and `hang_ignore_term` (`:653`) ignores SIGTERM. The
-production mechanisms are `process_group(0)` (`src/broca/subprocess.rs:324`),
+production mechanisms are `process_group(0)` (`src/model_execution/subprocess.rs:324`),
 `set_parent_process_death_signal(KILL)` in `pre_exec` (`:344`), and
 `kill_process_group` (`:579`, `:1521`). `:2519` asserts the grandchild saw
 SIGTERM through a marker file (`:2547-2550`) and that both pids are gone
 (`:2544-2545`).
 
-### broca-child-environment-carries-only-the-provider-row
+### model_execution-child-environment-carries-only-the-provider-row
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `env_snapshot_strips_launch_identity` | `tests/broca_subprocess.rs:2800` | unaudited |
-| Named `env_snapshot_admission_charges_per_entry_overhead` | `tests/broca_subprocess.rs:2815` | unaudited |
-| Named `provider_rows_exclude_ambient_credentials_and_enforce_caps` | `tests/broca_subprocess.rs:2840` | unaudited |
-| Named `credential_snapshot_must_match_before_backend_spawn` | `tests/broca_protocol.rs:435` | unaudited |
-| Also bears `opencode_argv_env_stdin_contract` | `tests/broca_subprocess.rs:1164` | unaudited |
-| Also bears `pi_argv_privacy_contract` | `tests/broca_subprocess.rs:1360` | unaudited |
-| Also bears `closed_dispatch_sink_prevents_spawn` | `tests/broca_subprocess.rs:1270` | unaudited |
-| Also bears `opencode_oversized_inline_config_rejected_before_spawn` | `tests/broca_subprocess.rs:1918` | unaudited |
-| Also bears `output_flood_stopped_and_redacted` | `tests/broca_subprocess.rs:2086` | unaudited |
+| Named `env_snapshot_strips_launch_identity` | `tests/model_execution_subprocess.rs:2800` | unaudited |
+| Named `env_snapshot_admission_charges_per_entry_overhead` | `tests/model_execution_subprocess.rs:2815` | unaudited |
+| Named `provider_rows_exclude_ambient_credentials_and_enforce_caps` | `tests/model_execution_subprocess.rs:2840` | unaudited |
+| Named `credential_snapshot_must_match_before_backend_spawn` | `tests/model_execution_protocol.rs:435` | unaudited |
+| Also bears `opencode_argv_env_stdin_contract` | `tests/model_execution_subprocess.rs:1164` | unaudited |
+| Also bears `pi_argv_privacy_contract` | `tests/model_execution_subprocess.rs:1360` | unaudited |
+| Also bears `closed_dispatch_sink_prevents_spawn` | `tests/model_execution_subprocess.rs:1270` | unaudited |
+| Also bears `opencode_oversized_inline_config_rejected_before_spawn` | `tests/model_execution_subprocess.rs:1918` | unaudited |
+| Also bears `output_flood_stopped_and_redacted` | `tests/model_execution_subprocess.rs:2086` | unaudited |
 
-### broca-protocol-shapes-are-closed
-
-| Check | Site | Status |
-| --- | --- | --- |
-| Named `each_valid_operation_decodes_its_exact_schema` | `tests/broca_protocol.rs:41` | unaudited |
-| Named `every_malformed_shape_is_rejected_with_schema_violation` | `tests/broca_protocol.rs:127` | unaudited |
-| Named `the_512kib_boundary_admits_exactly_and_rejects_one_byte_over` | `tests/broca_protocol.rs:323` | unaudited |
-| Named `malformed_requests_over_the_host_create_no_run_state` | `tests/broca_protocol.rs:674` | unaudited |
-| Named `harness_vocabulary_is_closed` | `tests/broca_protocol.rs:411` | unaudited |
-| Also bears `bind_requires_absolute_root_nonempty_session_and_supported_harness` | `tests/broca_protocol.rs:372` | unaudited |
-| Also bears `error_unit_stays_within_terminal_headroom_after_json_escaping` | `tests/broca_protocol.rs:344` | unaudited |
-| Also bears `five_operation_round_trip_matches_the_consumed_wire_shapes` | `tests/broca_protocol.rs:499` | unaudited |
-
-### synapse-admission-boundaries-are-exact
+### model_execution-protocol-shapes-are-closed
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `admission_count_boundary_is_exact_and_never_evicts_live_work` | `tests/synapse_jobs.rs:41` | unaudited |
-| Named `queued_byte_boundary_is_exact_and_releases_on_completion` | `tests/synapse_jobs.rs:131` | unaudited |
-| Named `completed_jobs_evict_oldest_first_under_count_pressure` | `tests/synapse_jobs.rs:181` | unaudited |
-| Named `expired_jobs_return_module_restarted` | `tests/synapse_jobs.rs:239` | unaudited |
-| Also bears `a_charged_job_transfers_shrinks_and_releases_exact_permits` | `src/synapse/jobs.rs:722` | unaudited |
-| Also bears `non_admitted_outcomes_leave_the_candidate_charge_with_the_caller` | `src/synapse/jobs.rs:765` | unaudited |
-| Also bears `failure_eviction_and_expiry_release_their_charges` | `src/synapse/jobs.rs:827` | unaudited |
-| Also bears `sweep_releases_expired_charges_without_a_request_path` | `src/synapse/jobs.rs:880` | unaudited |
-| Also bears `result_byte_boundary_keeps_accepted_job_and_rejects_oversize_before_start` | `src/synapse/jobs.rs:1004` | unaudited |
-| Also bears `bounded_query_waiters_are_fifo_and_reject_bound_plus_one` | `tests/synapse_protocol.rs:67` | unaudited |
-| Also bears `expired_waiter_releases_its_slot_without_engine_work` | `tests/synapse_protocol.rs:112` | unaudited |
-| Also bears `waiter_boundary_is_the_last_feasible_startup_configuration` | `tests/synapse_protocol.rs:388` | unaudited |
-| Ignored `boundary_waiters_with_maximal_texts_are_all_admitted` | `tests/synapse_protocol.rs:415` | unaudited, never executed |
+| Named `each_valid_operation_decodes_its_exact_schema` | `tests/model_execution_protocol.rs:41` | unaudited |
+| Named `every_malformed_shape_is_rejected_with_schema_violation` | `tests/model_execution_protocol.rs:127` | unaudited |
+| Named `the_512kib_boundary_admits_exactly_and_rejects_one_byte_over` | `tests/model_execution_protocol.rs:323` | unaudited |
+| Named `malformed_requests_over_the_host_create_no_run_state` | `tests/model_execution_protocol.rs:674` | unaudited |
+| Named `harness_vocabulary_is_closed` | `tests/model_execution_protocol.rs:411` | unaudited |
+| Also bears `bind_requires_absolute_root_nonempty_session_and_supported_harness` | `tests/model_execution_protocol.rs:372` | unaudited |
+| Also bears `error_unit_stays_within_terminal_headroom_after_json_escaping` | `tests/model_execution_protocol.rs:344` | unaudited |
+| Also bears `five_operation_round_trip_matches_the_consumed_wire_shapes` | `tests/model_execution_protocol.rs:499` | unaudited |
+
+### local_embeddings-admission-boundaries-are-exact
+
+| Check | Site | Status |
+| --- | --- | --- |
+| Named `admission_count_boundary_is_exact_and_never_evicts_live_work` | `tests/local_embeddings_jobs.rs:41` | unaudited |
+| Named `queued_byte_boundary_is_exact_and_releases_on_completion` | `tests/local_embeddings_jobs.rs:131` | unaudited |
+| Named `completed_jobs_evict_oldest_first_under_count_pressure` | `tests/local_embeddings_jobs.rs:181` | unaudited |
+| Named `expired_jobs_return_module_restarted` | `tests/local_embeddings_jobs.rs:239` | unaudited |
+| Also bears `a_charged_job_transfers_shrinks_and_releases_exact_permits` | `src/local_embeddings/jobs.rs:722` | unaudited |
+| Also bears `non_admitted_outcomes_leave_the_candidate_charge_with_the_caller` | `src/local_embeddings/jobs.rs:765` | unaudited |
+| Also bears `failure_eviction_and_expiry_release_their_charges` | `src/local_embeddings/jobs.rs:827` | unaudited |
+| Also bears `sweep_releases_expired_charges_without_a_request_path` | `src/local_embeddings/jobs.rs:880` | unaudited |
+| Also bears `result_byte_boundary_keeps_accepted_job_and_rejects_oversize_before_start` | `src/local_embeddings/jobs.rs:1004` | unaudited |
+| Also bears `bounded_query_waiters_are_fifo_and_reject_bound_plus_one` | `tests/local_embeddings_protocol.rs:67` | unaudited |
+| Also bears `expired_waiter_releases_its_slot_without_engine_work` | `tests/local_embeddings_protocol.rs:112` | unaudited |
+| Also bears `waiter_boundary_is_the_last_feasible_startup_configuration` | `tests/local_embeddings_protocol.rs:388` | unaudited |
+| Ignored `boundary_waiters_with_maximal_texts_are_all_admitted` | `tests/local_embeddings_protocol.rs:415` | unaudited, never executed |
 
 `:239` produces expiry with a real 250 ms sleep (`:266`) against a 100 ms
 retention (`:242`); it is the one timing-dependent check on this record and
 does not use the paused clock. The `#[ignore]` reason at `:412-414` is the
 eight-ring admission cap the catalog's open question cites.
 
-### synapse-degrades-to-disabled-and-keeps-the-context-routable
+### local_embeddings-degrades-to-disabled-and-keeps-the-context-routable
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `unconfigured_component_is_disabled_not_fatal` | `tests/synapse_bundle.rs:226` | unaudited |
-| Named `one_bit_changes_to_each_artifact_disable_the_lane` | `tests/synapse_bundle.rs:282` | unaudited |
-| Named `missing_artifact_disables_the_lane` | `tests/synapse_bundle.rs:307` | unaudited |
-| Named `wrong_ort_identity_disables_the_lane` | `tests/synapse_bundle.rs:708` | unaudited, **returns at `:709` in CI** |
-| Named `corrupt_bundle_degrades_synapse_and_keeps_context_routable` | `tests/synapse_roundtrip.rs:57` | unaudited |
-| Also bears `unlisted_extra_file_disables_the_lane` | `tests/synapse_bundle.rs:316` | unaudited |
-| Also bears `symlinked_artifact_disables_the_lane` | `tests/synapse_bundle.rs:325` | unaudited |
-| Also bears `duplicate_manifest_key_disables_the_lane` | `tests/synapse_bundle.rs:340` | unaudited |
-| Also bears `a_stale_fingerprint_disables_the_lane` | `tests/synapse_bundle.rs:358` | unaudited |
-| Also bears `a_recommended_batch_above_the_admission_cap_disables_the_lane` | `tests/synapse_bundle.rs:420` | unaudited |
-| Also bears `retained_result_cap_below_the_manifest_batch_bound_disables_before_ort` | `tests/synapse_bundle.rs:436` | unaudited |
-| Also bears `manifest_field_bounds_disable_the_lane` | `tests/synapse_bundle.rs:463` | unaudited |
-| Also bears `missing_pad_token_disables_the_lane` | `tests/synapse_bundle.rs:543` | unaudited |
-| Also bears `missing_bundle_directory_disables_the_lane` | `tests/synapse_bundle.rs:559` | unaudited |
-| Also bears `host_only_platform_reports_exact_synapse_unsupported_state` | `tests/synapse_bundle.rs:45` | unaudited |
-| Counter-case `incoherent_host_serving_limits_fail_startup_before_ort` | `tests/synapse_bundle.rs:451` | unaudited |
-| Also bears, ORT-gated, `wrong_but_dimension_compatible_output_fails_certification` | `tests/synapse_bundle.rs:686` | unaudited, returns at `:687` in CI |
-| Also bears, ORT-gated, `wrong_pooling_fails_certification` | `tests/synapse_bundle.rs:698` | unaudited, returns at `:699` in CI |
+| Named `unconfigured_component_is_disabled_not_fatal` | `tests/local_embeddings_bundle.rs:226` | unaudited |
+| Named `one_bit_changes_to_each_artifact_disable_the_lane` | `tests/local_embeddings_bundle.rs:282` | unaudited |
+| Named `missing_artifact_disables_the_lane` | `tests/local_embeddings_bundle.rs:307` | unaudited |
+| Named `wrong_ort_identity_disables_the_lane` | `tests/local_embeddings_bundle.rs:708` | unaudited, **returns at `:709` in CI** |
+| Named `corrupt_bundle_degrades_local_embeddings_and_keeps_context_routable` | `tests/local_embeddings_roundtrip.rs:57` | unaudited |
+| Also bears `unlisted_extra_file_disables_the_lane` | `tests/local_embeddings_bundle.rs:316` | unaudited |
+| Also bears `symlinked_artifact_disables_the_lane` | `tests/local_embeddings_bundle.rs:325` | unaudited |
+| Also bears `duplicate_manifest_key_disables_the_lane` | `tests/local_embeddings_bundle.rs:340` | unaudited |
+| Also bears `a_stale_fingerprint_disables_the_lane` | `tests/local_embeddings_bundle.rs:358` | unaudited |
+| Also bears `a_recommended_batch_above_the_admission_cap_disables_the_lane` | `tests/local_embeddings_bundle.rs:420` | unaudited |
+| Also bears `retained_result_cap_below_the_manifest_batch_bound_disables_before_ort` | `tests/local_embeddings_bundle.rs:436` | unaudited |
+| Also bears `manifest_field_bounds_disable_the_lane` | `tests/local_embeddings_bundle.rs:463` | unaudited |
+| Also bears `missing_pad_token_disables_the_lane` | `tests/local_embeddings_bundle.rs:543` | unaudited |
+| Also bears `missing_bundle_directory_disables_the_lane` | `tests/local_embeddings_bundle.rs:559` | unaudited |
+| Also bears `host_only_platform_reports_exact_local_embeddings_unsupported_state` | `tests/local_embeddings_bundle.rs:45` | unaudited |
+| Counter-case `incoherent_host_serving_limits_fail_startup_before_ort` | `tests/local_embeddings_bundle.rs:451` | unaudited |
+| Also bears, ORT-gated, `wrong_but_dimension_compatible_output_fails_certification` | `tests/local_embeddings_bundle.rs:686` | unaudited, returns at `:687` in CI |
+| Also bears, ORT-gated, `wrong_pooling_fails_certification` | `tests/local_embeddings_bundle.rs:698` | unaudited, returns at `:699` in CI |
 
 `:451` is listed because it is the boundary of the guarantee: infeasible host
 serving limits fail startup rather than disable the lane, per the comment at
 `:117`. The record's "never host-fatal" clause is scoped to artifact faults,
 and the test that shows where the scope ends belongs beside the ones that
-show where it holds. `:57` asserts `artifact_invalid` on the Synapse bind
-(`synapse_roundtrip.rs:92-93`) and a successful `context` bind and ping
+show where it holds. `:57` asserts `artifact_invalid` on the LocalEmbeddings bind
+(`local_embeddings_roundtrip.rs:92-93`) and a successful `context` bind and ping
 afterwards (`:97-114`), inside one scenario.
 
-### synapse-requests-are-validated-before-any-inference
+### local_embeddings-requests-are-validated-before-any-inference
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `embed_query_rejects_every_constraint_violation` | `tests/synapse_protocol.rs:641` | unaudited |
-| Named `embed_batch_validation_creates_no_job_and_no_inference` | `tests/synapse_protocol.rs:820` | unaudited |
-| Named `an_unknown_top_level_field_is_rejected_without_reading_its_value` | `tests/synapse_protocol.rs:1270` | unaudited |
-| Named `a_routed_depth_nine_request_is_a_schema_violation` | `tests/synapse_protocol.rs:1302` | unaudited |
-| Named `equal_replays_reuse_one_job_and_one_inference` | `tests/synapse_protocol.rs:941` | unaudited |
-| Also bears `batch_result_over_retention_cap_is_rejected_before_inference` | `tests/synapse_protocol.rs:796` | unaudited |
-| Also bears `exact_boundary_batches_are_accepted` | `tests/synapse_protocol.rs:905` | unaudited |
-| Also bears `unknown_and_foreign_jobs_are_module_restarted` | `tests/synapse_protocol.rs:1218` | unaudited |
-| Also bears `wrong_request_key_for_a_live_job_is_a_schema_violation` | `tests/synapse_protocol.rs:1237` | unaudited |
-| Also bears `a_body_above_resident_capacity_is_a_permanent_size_violation` | `tests/synapse_protocol.rs:1345` | unaudited |
-| Also bears `request_key_matches_the_javascript_golden_vectors` | `src/synapse/protocol.rs:1003` | unaudited |
-| Also bears `depth_eight_passes_and_depth_nine_fails` | `src/synapse/protocol.rs:1035` | unaudited |
-| Also bears `depth_counts_params_that_precede_method` | `src/synapse/protocol.rs:1050` | unaudited |
-| Also bears `delimiters_inside_strings_never_count_toward_depth` | `src/synapse/protocol.rs:1062` | unaudited |
-| Also bears `a_scalar_at_the_container_limit_is_one_level_deeper` | `src/synapse/protocol.rs:1078` | unaudited |
-| Also bears `the_item_after_the_bound_is_refused_before_its_fields_are_read` | `src/synapse/protocol.rs:1120` | unaudited |
-| Also bears `the_seeded_batch_path_keeps_strict_schema_behavior` | `src/synapse/protocol.rs:1157` | unaudited |
-| Also bears `an_identical_retry_replaces_a_failed_job` | `src/synapse/jobs.rs:910` | unaudited |
+| Named `embed_query_rejects_every_constraint_violation` | `tests/local_embeddings_protocol.rs:641` | unaudited |
+| Named `embed_batch_validation_creates_no_job_and_no_inference` | `tests/local_embeddings_protocol.rs:820` | unaudited |
+| Named `an_unknown_top_level_field_is_rejected_without_reading_its_value` | `tests/local_embeddings_protocol.rs:1270` | unaudited |
+| Named `a_routed_depth_nine_request_is_a_schema_violation` | `tests/local_embeddings_protocol.rs:1302` | unaudited |
+| Named `equal_replays_reuse_one_job_and_one_inference` | `tests/local_embeddings_protocol.rs:941` | unaudited |
+| Also bears `batch_result_over_retention_cap_is_rejected_before_inference` | `tests/local_embeddings_protocol.rs:796` | unaudited |
+| Also bears `exact_boundary_batches_are_accepted` | `tests/local_embeddings_protocol.rs:905` | unaudited |
+| Also bears `unknown_and_foreign_jobs_are_module_restarted` | `tests/local_embeddings_protocol.rs:1218` | unaudited |
+| Also bears `wrong_request_key_for_a_live_job_is_a_schema_violation` | `tests/local_embeddings_protocol.rs:1237` | unaudited |
+| Also bears `a_body_above_resident_capacity_is_a_permanent_size_violation` | `tests/local_embeddings_protocol.rs:1345` | unaudited |
+| Also bears `request_key_matches_the_javascript_golden_vectors` | `src/local_embeddings/protocol.rs:1003` | unaudited |
+| Also bears `depth_eight_passes_and_depth_nine_fails` | `src/local_embeddings/protocol.rs:1035` | unaudited |
+| Also bears `depth_counts_params_that_precede_method` | `src/local_embeddings/protocol.rs:1050` | unaudited |
+| Also bears `delimiters_inside_strings_never_count_toward_depth` | `src/local_embeddings/protocol.rs:1062` | unaudited |
+| Also bears `a_scalar_at_the_container_limit_is_one_level_deeper` | `src/local_embeddings/protocol.rs:1078` | unaudited |
+| Also bears `the_item_after_the_bound_is_refused_before_its_fields_are_read` | `src/local_embeddings/protocol.rs:1120` | unaudited |
+| Also bears `the_seeded_batch_path_keeps_strict_schema_behavior` | `src/local_embeddings/protocol.rs:1157` | unaudited |
+| Also bears `an_identical_retry_replaces_a_failed_job` | `src/local_embeddings/jobs.rs:910` | unaudited |
 
 The oracle for "before any inference" is `DeterministicEngine::calls`
-(`tests/support/synapse.rs:43`, incremented at `:101`). Every named check
+(`tests/support/local_embeddings.rs:43`, incremented at `:101`). Every named check
 reads it.
 
-### synapse-inference-runs-through-a-sealed-runtime-image
+### local_embeddings-inference-runs-through-a-sealed-runtime-image
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `source_replacement_cannot_change_verified_loader_bytes` | `src/synapse/inference.rs:343` | unaudited |
-| Also bears `oversized_sparse_ort_library_fails_before_reading_or_allocating_its_length` | `src/synapse/inference.rs:388` | unaudited |
-| Also bears, ORT-gated, `certified_bundle_loads_and_serves_expected_vectors` | `tests/synapse_bundle.rs:572` | unaudited, returns at `:573` in CI |
-| Also bears, ORT-gated, `all_four_operations_serve_certified_vectors_over_the_wire` | `tests/synapse_roundtrip.rs:120` | unaudited, returns at `:121` in CI |
+| Named `source_replacement_cannot_change_verified_loader_bytes` | `src/local_embeddings/inference.rs:343` | unaudited |
+| Also bears `oversized_sparse_ort_library_fails_before_reading_or_allocating_its_length` | `src/local_embeddings/inference.rs:388` | unaudited |
+| Also bears, ORT-gated, `certified_bundle_loads_and_serves_expected_vectors` | `tests/local_embeddings_bundle.rs:572` | unaudited, returns at `:573` in CI |
+| Also bears, ORT-gated, `all_four_operations_serve_certified_vectors_over_the_wire` | `tests/local_embeddings_roundtrip.rs:120` | unaudited, returns at `:121` in CI |
 
 **Contract-versus-check note.** The guarantee names the memfd
 `host-onnxruntime`. Production creates it under that name at
@@ -448,14 +448,14 @@ earlier inventory or is out of this catalog's subject.
 | `src/auth.rs:590`, `:620`, `:722`, `:770`, `:854`, `:918`, `:964`, `:1059`, `:1067` | 9 | setup-identity, `../setup-identity/existing-checks.md:81` |
 | `tests/harness_closure.rs:158`, `:185`, `:258`, `:360`, `:386`, `:499`, `:549`, `:592`, `:633`, `:685` | 10 | runtime-config's closure-store record; not the digest record |
 | `tests/harness_closure.rs:443` | 1 | `#[ignore]`, release qualification only |
-| `tests/broca_subprocess.rs`: the Pi and OpenCode transcript, alias, retry, flood, private-dir, and cleanup contracts at `:1292`, `:1506`, `:1545`, `:1599`, `:1675`, `:1781`, `:1885`, `:1960`, `:2203`, `:2242`, `:2278`, `:2337`, `:2365`, `:2405`, `:2452`, `:2491`, `:2669`, `:2702`, `:2724`, `:2898`, `:2940`, `:2978`, `:3029` | 23 | no record. Harness-behaviour contracts the U3 records do not state |
-| `tests/broca_supervisor.rs:206`, `:338`, `:515`, `:544`, `:604`, `:645`, `:685`, `:730`, `:770`, `:799` | 10 | no record. Status, replay, cancel, delete, and teardown-proof contracts |
-| `tests/synapse_bundle.rs:151`, `:639`, `:757`, `:818` | 4 | no record. `:757` and `:818` are activation-drop contracts; `:639` is doubly env-gated |
-| `tests/synapse_jobs.rs:92`, `:278`, `:317`, `:370`, `:417`, `:480`, `:540` | 7 | no record. Retry delay, route loss, cancel, deadline, error, shutdown, shape |
-| `tests/synapse_protocol.rs:186`, `:236`, `:312`, `:471`, `:512`, `:545`, `:737`, `:999`, `:1112`, `:1192` | 10 | no record. Waiter fairness, shutdown drain, pages, reservations |
-| `src/synapse/bundle.rs:819`, `:834`, `:926`, `:948`, `:970`, `:991`, `:1014`, `:1023`, `:1028` | 9 | no record. Limit feasibility and read bounds |
-| `src/synapse/jobs.rs:971` | 1 | no record. Allocation sharing |
-| `src/synapse/protocol.rs:1214`, `:1247`, `:1263`, `:1287`, `:1306`, `:1327` | 6 | no record. Reservation arithmetic; `:1263` is the `SCRATCH_RESERVED_BYTES` coupling `../runtime-config/existing-checks.md:313-320` describes |
+| `tests/model_execution_subprocess.rs`: the Pi and OpenCode transcript, alias, retry, flood, private-dir, and cleanup contracts at `:1292`, `:1506`, `:1545`, `:1599`, `:1675`, `:1781`, `:1885`, `:1960`, `:2203`, `:2242`, `:2278`, `:2337`, `:2365`, `:2405`, `:2452`, `:2491`, `:2669`, `:2702`, `:2724`, `:2898`, `:2940`, `:2978`, `:3029` | 23 | no record. Harness-behaviour contracts the U3 records do not state |
+| `tests/model_execution_supervisor.rs:206`, `:338`, `:515`, `:544`, `:604`, `:645`, `:685`, `:730`, `:770`, `:799` | 10 | no record. Status, replay, cancel, delete, and teardown-proof contracts |
+| `tests/local_embeddings_bundle.rs:151`, `:639`, `:757`, `:818` | 4 | no record. `:757` and `:818` are activation-drop contracts; `:639` is doubly env-gated |
+| `tests/local_embeddings_jobs.rs:92`, `:278`, `:317`, `:370`, `:417`, `:480`, `:540` | 7 | no record. Retry delay, route loss, cancel, deadline, error, shutdown, shape |
+| `tests/local_embeddings_protocol.rs:186`, `:236`, `:312`, `:471`, `:512`, `:545`, `:737`, `:999`, `:1112`, `:1192` | 10 | no record. Waiter fairness, shutdown drain, pages, reservations |
+| `src/local_embeddings/bundle.rs:819`, `:834`, `:926`, `:948`, `:970`, `:991`, `:1014`, `:1023`, `:1028` | 9 | no record. Limit feasibility and read bounds |
+| `src/local_embeddings/jobs.rs:971` | 1 | no record. Allocation sharing |
+| `src/local_embeddings/protocol.rs:1214`, `:1247`, `:1263`, `:1287`, `:1306`, `:1327` | 6 | no record. Reservation arithmetic; `:1263` is the `SCRATCH_RESERVED_BYTES` coupling `../runtime-config/existing-checks.md:313-320` describes |
 
 That is 109 of the 237. The remaining 128 appear in a record block above; a
 check can appear in more than one block (`one_bit_changes_to_each_artifact_
@@ -466,7 +466,7 @@ caps`), so the block rows sum to more than 127.
 
 **None found.** The eighteen source files in scope contain one fence,
 `src/wire.rs:4-14`, and it is ```` ```text ````, which `ci.yml:122` does not
-compile. No `compile_fail`, no runnable example, in any Broca, Synapse,
+compile. No `compile_fail`, no runnable example, in any ModelExecution, LocalEmbeddings,
 closure, auth, wire, instance, or lifecycle file.
 
 ## Production assertions and guards, clustered
@@ -480,42 +480,42 @@ in production code across all eighteen files. Enforcement is by returned
 
 | Cluster | Sites |
 | --- | --- |
-| Infallible serialization | `src/broca/protocol.rs:250`, `:255`, `:259`, `:264`; `src/broca/opencode.rs:105`; `src/synapse/jobs.rs:148`, `:151`; `src/synapse/protocol.rs:799`, `:843`, `:960`, `:972`; `src/lifecycle.rs:370`; `src/instance.rs:326` |
-| Lock and latch invariants | `src/synapse/mod.rs:301`, `:314`, `:336`, `:344`, `:994`, `:1046` (`"synapse state lock"`); `src/lifecycle.rs:1066`, `:1078`, `:1087` (`"latch lock"`) |
-| Validated-above contracts | `src/broca/supervisor.rs:919`; `src/synapse/bundle.rs:231`, `:242`, `:354`, `:356`; `src/synapse/jobs.rs:327`; `src/synapse/mod.rs:280`; `src/harness_closure.rs:276`, `:441`; `src/lifecycle.rs:63`, `:84` |
-| OS and library contracts | `src/broca/subprocess.rs:187`, `:191` (`"HMAC accepts any key length"`, inside the credential fingerprint), `:412`, `:413`, `:768`, `:795`; `src/broca/supervisor.rs:259`; `src/synapse/jobs.rs:249`; `src/wire.rs:403` |
+| Infallible serialization | `src/model_execution/protocol.rs:250`, `:255`, `:259`, `:264`; `src/model_execution/opencode.rs:105`; `src/local_embeddings/jobs.rs:148`, `:151`; `src/local_embeddings/protocol.rs:799`, `:843`, `:960`, `:972`; `src/lifecycle.rs:370`; `src/instance.rs:326` |
+| Lock and latch invariants | `src/local_embeddings/mod.rs:301`, `:314`, `:336`, `:344`, `:994`, `:1046` (`"local_embeddings state lock"`); `src/lifecycle.rs:1066`, `:1078`, `:1087` (`"latch lock"`) |
+| Validated-above contracts | `src/model_execution/supervisor.rs:919`; `src/local_embeddings/bundle.rs:231`, `:242`, `:354`, `:356`; `src/local_embeddings/jobs.rs:327`; `src/local_embeddings/mod.rs:280`; `src/harness_closure.rs:276`, `:441`; `src/lifecycle.rs:63`, `:84` |
+| OS and library contracts | `src/model_execution/subprocess.rs:187`, `:191` (`"HMAC accepts any key length"`, inside the credential fingerprint), `:412`, `:413`, `:768`, `:795`; `src/model_execution/supervisor.rs:259`; `src/local_embeddings/jobs.rs:249`; `src/wire.rs:403` |
 
 `subprocess.rs:187` and `:191` sit on the fingerprint path the credential
 record pins; a key-length failure there is a panic, not a rejected row. Status
 unaudited.
 
-**`debug_assert!`: 4.** `src/broca/supervisor.rs:641` (`"every run is
-session-owned"`), `src/synapse/jobs.rs:571`, `src/synapse/mod.rs:419`,
+**`debug_assert!`: 4.** `src/model_execution/supervisor.rs:641` (`"every run is
+session-owned"`), `src/local_embeddings/jobs.rs:571`, `src/local_embeddings/mod.rs:419`,
 `src/instance.rs:563`. Whether the release profile enables `debug-assertions`
 was not read; it decides whether these four exist in production.
 
-**`unreachable!`: 1.** `src/synapse/mod.rs:327`, `"ready lanes embed"`, in
+**`unreachable!`: 1.** `src/local_embeddings/mod.rs:327`, `"ready lanes embed"`, in
 the disabled-lane bind path the degrade record covers. Status unaudited.
 
-**`unsafe`: 1.** `src/broca/subprocess.rs:341`, the `pre_exec` hook the
+**`unsafe`: 1.** `src/model_execution/subprocess.rs:341`, the `pre_exec` hook the
 reaping record depends on, with its safety comment at `:339`.
 
-**`let _ =` discarded results: 20.** `src/broca/subprocess.rs` 5 (including
-`:381`, `:677`, `:682`, each `child.start_kill()`), `src/synapse/mod.rs` 5,
+**`let _ =` discarded results: 20.** `src/model_execution/subprocess.rs` 5 (including
+`:381`, `:677`, `:682`, each `child.start_kill()`), `src/local_embeddings/mod.rs` 5,
 `src/instance.rs` 3, `src/harness_closure.rs` 2, `src/lifecycle.rs` 2,
-`src/broca/mod.rs` 1, `src/synapse/protocol.rs` 1, `src/auth.rs` 1. The three
+`src/model_execution/mod.rs` 1, `src/local_embeddings/protocol.rs` 1, `src/auth.rs` 1. The three
 `start_kill` discards are on the reaping path; the comment at `:380` states
 the reason. Status unaudited.
 
 **Checked and saturating arithmetic: 31 `checked_`, 53 `saturating_`.**
-`src/synapse/bundle.rs` and `src/synapse/jobs.rs` carry 7 and 12 `checked_`;
-`src/broca/supervisor.rs` and `src/synapse/bundle.rs` carry 13 `saturating_`
+`src/local_embeddings/bundle.rs` and `src/local_embeddings/jobs.rs` carry 7 and 12 `checked_`;
+`src/model_execution/supervisor.rs` and `src/local_embeddings/bundle.rs` carry 13 `saturating_`
 each. No inventory of which saturations are load-bearing was made.
 
 **Typed rejection guards.** `HarnessClosureError` and its caps are described
-at `../runtime-config/existing-checks.md:200-206`. The Broca per-value
-credential cap is `src/broca/subprocess.rs:161`. The Synapse depth and size
-preflight lives in `src/synapse/protocol.rs` and is pinned by the inline tests
+at `../runtime-config/existing-checks.md:200-206`. The ModelExecution per-value
+credential cap is `src/model_execution/subprocess.rs:161`. The LocalEmbeddings depth and size
+preflight lives in `src/local_embeddings/protocol.rs` and is pinned by the inline tests
 at `:1035-1120`.
 
 ## Explicit "none found"
@@ -526,7 +526,7 @@ at `:1035-1120`.
   workspace, which names no `host-runtime` target.
 - No coverage instrumentation, so every placement statement is structural.
 - No snapshot or golden fixture other than the three committed vectors
-  (`pi-valid.json`, `synapse-tiny`, and the literals in
+  (`pi-valid.json`, `local_embeddings-tiny`, and the literals in
   `protocol_vectors.rs` and `auth.rs`).
 - No differential harness against the TypeScript twin the manifest-digest
   record names; the record says it lands in U7.
@@ -541,27 +541,27 @@ Six, ranked by the gap between what the code decides and what any check
 proves.
 
 1. **The ONNX Runtime path asserts nothing in CI.** Six tests return before
-   their first assertion when `EIDNARA_SYNAPSE_TEST_ORT_LIBRARY` is unset
-   (`tests/synapse_bundle.rs:573`, `:645`, `:687`, `:699`, `:709`;
-   `tests/synapse_roundtrip.rs:121`), and `ci.yml` never sets it. So the full
+   their first assertion when `EIDNARA_LOCAL_EMBEDDINGS_TEST_ORT_LIBRARY` is unset
+   (`tests/local_embeddings_bundle.rs:573`, `:645`, `:687`, `:699`, `:709`;
+   `tests/local_embeddings_roundtrip.rs:121`), and `ci.yml` never sets it. So the full
    certified load, wrong-output and wrong-pooling certification failures,
    wrong-ORT-identity disable, and the over-the-wire vector serve all pass
    green without running. The sealed-image record's one CI-executed check
-   (`src/synapse/inference.rs:343`) stages 28 bytes of fake library text
+   (`src/local_embeddings/inference.rs:343`) stages 28 bytes of fake library text
    (`:347`), which proves the memfd mechanics and nothing about loading a
    real library through it. Owned by
-   [synapse-inference-runs-through-a-sealed-runtime-image](../catalog.md#synapse-inference-runs-through-a-sealed-runtime-image)
+   [local_embeddings-inference-runs-through-a-sealed-runtime-image](../catalog.md#local_embeddings-inference-runs-through-a-sealed-runtime-image)
    and the `wrong_ort_identity_disables_the_lane` clause of
-   [synapse-degrades-to-disabled-and-keeps-the-context-routable](../catalog.md#synapse-degrades-to-disabled-and-keeps-the-context-routable).
+   [local_embeddings-degrades-to-disabled-and-keeps-the-context-routable](../catalog.md#local_embeddings-degrades-to-disabled-and-keeps-the-context-routable).
 
-2. **Seven Broca source files, 3,279 lines, have no inline test, and the
-   supervisor is one of them.** `src/broca/supervisor.rs` (1,166 lines) holds
-   the dedup index, permit accounting, and terminal state the two Broca
+2. **Seven ModelExecution source files, 3,279 lines, have no inline test, and the
+   supervisor is one of them.** `src/model_execution/supervisor.rs` (1,166 lines) holds
+   the dedup index, permit accounting, and terminal state the two ModelExecution
    supervisor records assert, and its entire coverage is
-   `tests/broca_supervisor.rs`. `src/broca/protocol.rs` (347) is covered only
-   by `tests/broca_protocol.rs`. The one inline Broca test is the fingerprint
+   `tests/model_execution_supervisor.rs`. `src/model_execution/protocol.rs` (347) is covered only
+   by `tests/model_execution_protocol.rs`. The one inline ModelExecution test is the fingerprint
    vector at `subprocess.rs:1660`. This is a structural fact rather than a
-   defect; recorded because an integration-only position means every Broca
+   defect; recorded because an integration-only position means every ModelExecution
    invariant is observed from outside the supervisor's lock.
 
 3. **The proof-construction record's two sides meet through a literal, not a
@@ -576,7 +576,7 @@ proves.
    [host-proof-construction-matches-the-committed-vectors](../catalog.md#host-proof-construction-matches-the-committed-vectors).
 
 4. **`CREDENTIAL_ROW_CAP_BYTES` is documented, exported, and read by
-   nothing.** `src/broca/subprocess.rs:49-51` documents it as the combined
+   nothing.** `src/model_execution/subprocess.rs:49-51` documents it as the combined
    admitted-set cap and ties it to a contract field; grep across `src/` and
    `tests/` returns only the definition. The record's open question is
    confirmed as a code fact at this `HEAD`. Owned by
@@ -591,14 +591,14 @@ proves.
 
 6. **Three `Exercised: partial` gaps are named by their records and have no
    test.** A resend after a terminal was retained then evicted
-   ([broca-identical-resends-converge-on-one-run](../catalog.md#broca-identical-resends-converge-on-one-run));
+   ([model_execution-identical-resends-converge-on-one-run](../catalog.md#model_execution-identical-resends-converge-on-one-run));
    a backend that never exits, covered "only through the escalation timers"
-   ([broca-permits-and-charges-return-to-baseline](../catalog.md#broca-permits-and-charges-return-to-baseline));
+   ([model_execution-permits-and-charges-return-to-baseline](../catalog.md#model_execution-permits-and-charges-return-to-baseline));
    and a fault during inference itself
-   ([synapse-degrades-to-disabled-and-keeps-the-context-routable](../catalog.md#synapse-degrades-to-disabled-and-keeps-the-context-routable)).
-   The fixtures for the first two exist (`tests/broca_supervisor.rs:857`,
-   `tests/broca_subprocess.rs:2553`); the third has `DeterministicEngine::
-   fail_next` (`tests/support/synapse.rs:67`) and no test that fails an
+   ([local_embeddings-degrades-to-disabled-and-keeps-the-context-routable](../catalog.md#local_embeddings-degrades-to-disabled-and-keeps-the-context-routable)).
+   The fixtures for the first two exist (`tests/model_execution_supervisor.rs:857`,
+   `tests/model_execution_subprocess.rs:2553`); the third has `DeterministicEngine::
+   fail_next` (`tests/support/local_embeddings.rs:67`) and no test that fails an
    inference and then asserts context routability.
 
 ## Sampling limits on this inventory
@@ -618,9 +618,9 @@ proves.
   file. `.expect(` labels were printed; `checked_` and `saturating_` sites
   were counted, not read.
 - Whether the release profile enables `debug-assertions` was not read.
-- `tests/fixtures/generate-synapse-tiny.py` was not read. Its role as the
+- `tests/fixtures/generate-local_embeddings-tiny.py` was not read. Its role as the
   fingerprint oracle is taken from the record and from the assertion message
-  at `tests/synapse_bundle.rs:387`.
+  at `tests/local_embeddings_bundle.rs:387`.
 
 ## Open questions
 
@@ -628,7 +628,7 @@ proves.
   `Exercised: partial` or `Exercised: not yet` for the clause it would have
   asserted? Six tests here pass in CI without asserting, and the records that
   name them say `partial`. (needs human input)
-- Should the two `#[ignore]` tests (`tests/synapse_protocol.rs:415`,
+- Should the two `#[ignore]` tests (`tests/local_embeddings_protocol.rs:415`,
   `tests/harness_closure.rs:443`) count toward a record's `Existing check:`?
   The admission record names the first in an open question only; no record
   names the second. (needs human input)

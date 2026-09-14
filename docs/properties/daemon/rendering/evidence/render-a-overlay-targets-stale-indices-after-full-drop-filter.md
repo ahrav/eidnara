@@ -56,7 +56,7 @@ if !drop_indexes.is_empty() {
 }
 ```
 
-3. `apply_tag_overlay_to_message(&mut rebuilt, msg, blocks, ..)` at `:12024-12031`,
+1. `apply_tag_overlay_to_message(&mut rebuilt, msg, blocks, ..)` at `:12024-12031`,
    passing the same unmodified `blocks` slice.
 
 So after step 2 removes element `k`, every element formerly at index `j > k` sits
@@ -97,7 +97,7 @@ same pass, so the cache faithfully stores the misattributed bytes.
 A pass computes tag `§7§` for tool result B and `§8§` for tool result C in the
 same message, and a third tool result A in that message is a frozen full drop.
 The served bytes carry `§7§` on C. `tags` says B is 7 and C is 8. The agent
-reads `§7§` above C's output and later calls `ctx_reduce 7`, intending to discard
+reads `§7§` above C's output and later calls `eidnara_reduce 7`, intending to discard
 what it saw. The reduction resolves to B. Content the agent wanted kept is
 dropped and content it wanted dropped stays.
 

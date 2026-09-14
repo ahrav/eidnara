@@ -200,8 +200,8 @@ Two assertions worth adding alongside, on the same fixture:
 ### Q: is `finish` already covered by an existing test through the initialization-failure arms?
 
 - Sources examined: `tests/handler_contract.rs`, `tests/lifecycle.rs`,
-  `tests/synapse_bundle.rs:923`.
-- Findings: `synapse_bundle.rs:923` asserts `Err(HostError::InitFailed(_))`, and
+  `tests/local_embeddings_bundle.rs:923`.
+- Findings: `local_embeddings_bundle.rs:923` asserts `Err(HostError::InitFailed(_))`, and
   `handler_contract.rs:332` and `:396` do the same. Those reach `finish` through
   `:789` - but only for configurations refused by the *gates* at `:693`-`:740`,
   which return before `PrePublicationCleanup` exists at `:826`. Let me be precise:

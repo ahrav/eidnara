@@ -30,7 +30,7 @@ because the worktree file is dirty. Other cited source files match HEAD.
 
 The closed inspection surface is wire-envelope serde, body routing/fallback,
 page digest/assembly, direct shared-prefix ownership, and serializer mutation
-authority. Downstream identity/historian checks and budget/allocation checks
+authority. Downstream identity/history_summarizer checks and budget/allocation checks
 stay in the canonical linked inventories. Codec and producer checks below
 cover retained payload shape and mutation effects at this boundary.
 
@@ -182,7 +182,7 @@ The [canonical latency inventory](../../hot-path-optimization/latency-audit/exis
 owns all A1/A3 charge, refusal, heap-peak, and ring-terminal checks, and B1's
 broader projection/native-cache suite. Per-check adequacy remains unaudited
 here even where historical execution receipts exist there. The identity agent
-owns projection goldens, block-basis checks, fingerprints, and historian decode.
+owns projection goldens, block-basis checks, fingerprints, and history_summarizer decode.
 No numerical accounting or identity guarantee is duplicated in this catalog.
 
 ## None found and suspiciously quiet areas

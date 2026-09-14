@@ -71,10 +71,10 @@ export interface EidnaraTuiPrefs {
         label: string;
     };
     sections: {
-        historian: boolean;
+        history_summarizer: boolean;
         memory: boolean;
         status: boolean;
-        dreamer: boolean;
+        memory_classifier: boolean;
         stats: boolean;
     };
 }
@@ -89,10 +89,10 @@ export const DEFAULT_PREFS: EidnaraTuiPrefs = {
     collapsed: null,
     header: { label: "Eidnara" },
     sections: {
-        historian: true,
+        history_summarizer: true,
         memory: true,
         status: true,
-        dreamer: true,
+        memory_classifier: true,
         stats: true,
     },
 };
@@ -132,10 +132,10 @@ export function resolveEidnaraPrefs(root: Record<string, unknown>): EidnaraTuiPr
             label: label(header.label, d.header.label, 24),
         },
         sections: {
-            historian: bool(sections.historian, d.sections.historian),
+            history_summarizer: bool(sections.history_summarizer, d.sections.history_summarizer),
             memory: bool(sections.memory, d.sections.memory),
             status: bool(sections.status, d.sections.status),
-            dreamer: bool(sections.dreamer, d.sections.dreamer),
+            memory_classifier: bool(sections.memory_classifier, d.sections.memory_classifier),
             stats: bool(sections.stats, d.sections.stats),
         },
     };

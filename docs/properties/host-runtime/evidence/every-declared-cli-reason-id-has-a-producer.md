@@ -29,7 +29,7 @@ and `:902`. `native_payload_missing` is at `:1003` and `:1024`;
 `:1309`; `not_running` at `:602`; `authentication_failed` at `:500`, `:1303`,
 `:1404` and in `crates/host-runtime/src/client.rs:383`; `shutdown_timeout` in
 `client.rs:683-722` and `:1389`; `harness_unavailable` in
-`crates/host-runtime/src/broca/mod.rs:262` and `:274`; `starting` and `stopping` are
+`crates/host-runtime/src/model_execution/mod.rs:262` and `:274`; `starting` and `stopping` are
 phase strings from `crates/host-runtime/src/lifecycle.rs:299` and `:307`.
 
 Fourteen appear in `crates/` only as their arm of `remediation_for` and nowhere
@@ -38,8 +38,8 @@ else: `unsupported_filesystem` (`:89`), `unsupported_install_layout` (`:91`),
 `publication_stale` (`:99`), `publication_missing` (`:100`),
 `unsupported_proof_version` (`:104`), `incompatible_control` (`:105`),
 `incompatible_module` (`:107`), `incompatible_epochs` (`:108`),
-`storage_starting` and `synapse_starting` (`:109`), `storage_unavailable`
-(`:112`), and `synapse_degraded` (`:113`).
+`storage_starting` and `local_embeddings_starting` (`:109`), `storage_unavailable`
+(`:112`), and `local_embeddings_degraded` (`:113`).
 
 For `unsupported_filesystem` the survey was completed outside `crates/`, and it
 corrects the catalog. A producer does exist, in TypeScript:

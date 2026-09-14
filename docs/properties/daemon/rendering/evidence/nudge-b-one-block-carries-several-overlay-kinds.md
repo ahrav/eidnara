@@ -86,15 +86,15 @@ Served bytes for a user text block carrying both:
 <!-- +12m -->
 §7§ the user's actual words
 
-<ctx-search-hint>
+<eidnara-search-hint>
 ...
-</ctx-search-hint>
+</eidnara-search-hint>
 ```
 
 That ordering has a consequence worth testing. `strip_tag_prefix` (`:8403-8405`)
 is `value.strip_prefix(&tag_prefix(tag_number)).unwrap_or(value)`, documented at
 `:8401-8402` as "the inverse of [`prepend_tag`]". Applied to the served bytes above
-it is a no-op, because the string starts with `<!-- ` and not with `§7§ `. Whether
+it is a no-op, because the string starts with `<!--` and not with `§7§`. Whether
 any caller applies it to post-temporal bytes is the question the combined state
 would answer.
 
@@ -144,11 +144,11 @@ Module defaults: `default_auto_search_enabled()` returns `true`
 
 Shipped setup path: the host sends `serializer_profile: "opencode-aisdk"`
 (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:1339` (source-catalog path, not present at HEAD)) and
-`tool_present` derived from ctx_reduce availability (`:1945`), which together
+`tool_present` derived from eidnara_reduce availability (`:1945`), which together
 satisfy `tagging_surface_active` (`crates/daemon/src/lib.rs:568-577`).
 
 So the three-overlay user-block state is default-production, given a 5-minute pause
-and a prompt that matches a compartment.
+and a prompt that matches a history_segment.
 
 ## Failure scenario
 
@@ -194,12 +194,12 @@ The check is `sometimes`, so the assertion is on the situation, not on an outcom
    appears in two or more of the four maps on an accepted pass, and a second marker
    for three or more. Per `METHOD.md`'s coverage rule the marker names must be
    constant, never constructed from the block id.
-2. **The three-overlay user block.** Seed a compartment with rare tokens. Send a
+2. **The three-overlay user block.** Seed a history_segment with rare tokens. Send a
    request whose tail is an authored user message containing two of those tokens,
    with `request_observed_at_ms` and `prev_response_completed_at_ms` set 12 minutes
    apart, on a session with tagging established so the block mints a tag. Assert
-   the served text starts with `<!-- +12m -->\n§N§ ` and ends with the
-   `</ctx-search-hint>` envelope.
+   the served text starts with `<!-- +12m -->\n§N§` and ends with the
+   `</eidnara-search-hint>` envelope.
 3. **The two-overlay tool result.** Reuse the existing Channel-1 fixture
    (`transform.rs:23551-23590`, which already produces a tagged, reminded tool
    result) and add the assertion that the served bytes carry both `§N§` and

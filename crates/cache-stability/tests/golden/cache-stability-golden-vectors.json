@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
-  "description": "Harness-neutral cache-stability golden vectors. The shared parity target for any harness that pins a render-config across turns without thrashing the provider prefix cache. See cache-stability-golden-vectors.schema.md. All boundary/render_config values are OPAQUE CONSISTENT TOKENS, never real hashes: the core only does string-equality + branch. The SOFT+ cache anchor is BOUNDARY-PRESENCE (is the boundary_id still in the live array?) + frozen-byte replacement of the covered prefix, NOT a content fingerprint over the covered prefix. schema_version 3 adds V10: a coverage-extending SOFT advances the boundary anchor (new_boundary_id on a SOFT, not just a HARD) while m0 bytes stay frozen - the two-watermark coverage model where a new compartment riding m1 extends what m0+m1 cover.",
+  "description": "Harness-neutral cache-stability golden vectors. The shared parity target for any harness that pins a render-config across turns without thrashing the provider prefix cache. See cache-stability-golden-vectors.schema.md. All boundary/render_config values are OPAQUE CONSISTENT TOKENS, never real hashes: the core only does string-equality + branch. The SOFT+ cache anchor is BOUNDARY-PRESENCE (is the boundary_id still in the live array?) + frozen-byte replacement of the covered prefix, NOT a content fingerprint over the covered prefix. schema_version 3 adds V10: a coverage-extending SOFT advances the boundary anchor (new_boundary_id on a SOFT, not just a HARD) while m0 bytes stay frozen - the two-watermark coverage model where a new history_segment riding m1 extends what m0+m1 cover.",
   "reference_impl": {
-    "cache_anchor": "On a defer pass, replay the cached frozen m0/m1 bytes AND splice the covered prefix out by BOUNDARY-ID MATCH (find the message whose id equals the compartment end message id). The covered prefix is REPLACED by the frozen <session-history> bytes; the only validity check is boundary-id presence. There is NO fingerprint over the covered prefix, so no collision surface.",
-    "historian_snapshot_NOT_the_anchor": "The raw-range fingerprint is a DIFFERENT mechanism - the historian in-flight snapshot validator (checks the runner's raw chunk matches the trigger's fire-decision view). It is deliberately length/id/ordinal-based; its same-length-edit residual is a historian content-quality edge, NEVER a stale cache. Do not cite it as the cache anchor.",
+    "cache_anchor": "On a defer pass, replay the cached frozen m0/m1 bytes AND splice the covered prefix out by BOUNDARY-ID MATCH (find the message whose id equals the history_segment end message id). The covered prefix is REPLACED by the frozen <session-history> bytes; the only validity check is boundary-id presence. There is NO fingerprint over the covered prefix, so no collision surface.",
+    "history_summarizer_snapshot_NOT_the_anchor": "The raw-range fingerprint is a DIFFERENT mechanism - the history_summarizer in-flight snapshot validator (checks the runner's raw chunk matches the trigger's fire-decision view). It is deliberately length/id/ordinal-based; its same-length-edit residual is a history_summarizer content-quality edge, NEVER a stale cache. Do not cite it as the cache anchor.",
     "byte_stability_oracle": "Bust analysis over recorded passes: a bust is a wire-segment divergence at or before the previous request's last cache_control breakpoint, with cache_control and provider nonces normalized out."
   },
   "common_asserts": [
@@ -297,8 +297,8 @@
     {
       "name": "V5-delta-rides-m1-soft-m0-frozen",
       "layer": "mechanics",
-      "provenance": "cache-invariants.test.ts B9/B10/B11 - a compartment published (or memory added/updated) after m[0] materialized surfaces as an m[1] delta on a SOFT pass; m[0] stays byte-identical; defer passes after it replay m[0] AND m[1] byte-identical.",
-      "notes": "p1 surfaces the delta: m1 re-renders (SOFT, busts at the m1 breakpoint), m0 unchanged. p2..p3 are SOFT+ and replay both regions byte-identical. m0's frozen_payload never appears in a delta after init = m0 stays frozen (the SOFT changed only m1). Pre-fix regressions: max_compartment_seq was a HARD trigger (folded the compartment INTO m0); supersede-delta keeps m0 stale-but-frozen with a <memory-updates> correction in m1. boundary_id present throughout (the delta is a render_config-independent content add, not a boundary move).",
+      "provenance": "cache-invariants.test.ts B9/B10/B11 - a history_segment published (or memory added/updated) after m[0] materialized surfaces as an m[1] delta on a SOFT pass; m[0] stays byte-identical; defer passes after it replay m[0] AND m[1] byte-identical.",
+      "notes": "p1 surfaces the delta: m1 re-renders (SOFT, busts at the m1 breakpoint), m0 unchanged. p2..p3 are SOFT+ and replay both regions byte-identical. m0's frozen_payload never appears in a delta after init = m0 stays frozen (the SOFT changed only m1). Pre-fix regressions: max_history_segment_seq was a HARD trigger (folded the history_segment INTO m0); supersede-delta keeps m0 stale-but-frozen with a <memory-updates> correction in m1. boundary_id present throughout (the delta is a render_config-independent content add, not a boundary move).",
       "render_config": {
         "system_hash": "sys0",
         "tool_set_id": "tools0",
@@ -329,7 +329,7 @@
       "passes": [
         {
           "signal": {
-            "kind": "compartment-published"
+            "kind": "history_segment-published"
           },
           "boundary_present": "b0",
           "expect_action": "SOFT",
@@ -337,7 +337,7 @@
             {
               "key": "m1",
               "kind": "synthesized-region",
-              "frozen_payload": "<new-compartments>cache-invariant chunk</new-compartments>",
+              "frozen_payload": "<new-history_segments>cache-invariant chunk</new-history_segments>",
               "durability_class": "lineage",
               "reset_rule": "survive + advance-only-merge, never reset"
             }
@@ -648,8 +648,8 @@
     {
       "name": "V10-coverage-extending-soft-advances-boundary",
       "layer": "mechanics",
-      "provenance": "The two-watermark coverage model. A newly-published compartment that EXTENDS the m0+m1 coverage rides m1 at P1 AND advances the coverage anchor on the SOFT (boundary b0->b1): the soft refresh writes the cached m1 bytes AND the last raw message id covered by m0+m1 together. This is the capability step_soft carries: apply input.new_boundary_id when Some (None = boundary unchanged).",
-      "notes": "DISTINCT from V5: V5 is a delta SOFT that does NOT extend coverage (the new_boundary_id=None path, boundary stationary at b0); V10 is the coverage-EXTENDING SOFT (new_boundary_id=Some(b1), boundary advances). p0 is the coverage-extending SOFT: m1 re-renders carrying the new compartment, the boundary ADVANCES b0->b1, and m0 frozen bytes are UNCHANGED. p1..p2 are SOFT+ at the new anchor b1, replaying both regions byte-identical. p3 is a revert BELOW b1 (boundary_present '-'): the core keeps replaying frozen bytes (SOFT+, reconcile_pending) and reconciles on the next bust. THE LOAD-BEARING ASSERT: the boundary moved on a SOFT yet m0's frozen_payload never appears in a delta (m0 bytes frozen) -- the real invariant (m0 BYTES never change on a SOFT) holds while only the coverage anchor + m1 delta move. The old 'a SOFT never touches the baseline' comment conflated 'anchor stationary' with 'bytes frozen'; only the latter is load-bearing, and it holds here.",
+      "provenance": "The two-watermark coverage model. A newly-published history_segment that EXTENDS the m0+m1 coverage rides m1 at P1 AND advances the coverage anchor on the SOFT (boundary b0->b1): the soft refresh writes the cached m1 bytes AND the last raw message id covered by m0+m1 together. This is the capability step_soft carries: apply input.new_boundary_id when Some (None = boundary unchanged).",
+      "notes": "DISTINCT from V5: V5 is a delta SOFT that does NOT extend coverage (the new_boundary_id=None path, boundary stationary at b0); V10 is the coverage-EXTENDING SOFT (new_boundary_id=Some(b1), boundary advances). p0 is the coverage-extending SOFT: m1 re-renders carrying the new history_segment, the boundary ADVANCES b0->b1, and m0 frozen bytes are UNCHANGED. p1..p2 are SOFT+ at the new anchor b1, replaying both regions byte-identical. p3 is a revert BELOW b1 (boundary_present '-'): the core keeps replaying frozen bytes (SOFT+, reconcile_pending) and reconciles on the next bust. THE LOAD-BEARING ASSERT: the boundary moved on a SOFT yet m0's frozen_payload never appears in a delta (m0 bytes frozen) -- the real invariant (m0 BYTES never change on a SOFT) holds while only the coverage anchor + m1 delta move. The old 'a SOFT never touches the baseline' comment conflated 'anchor stationary' with 'bytes frozen'; only the latter is load-bearing, and it holds here.",
       "render_config": {
         "system_hash": "sys0",
         "tool_set_id": "tools0",
@@ -680,7 +680,7 @@
       "passes": [
         {
           "signal": {
-            "kind": "compartment-published",
+            "kind": "history_segment-published",
             "extends_coverage": true
           },
           "boundary_present": "b0",
@@ -690,7 +690,7 @@
             {
               "key": "m1",
               "kind": "synthesized-region",
-              "frozen_payload": "<session-history-since>NEWCOMPARTMENT</session-history-since>",
+              "frozen_payload": "<session-history-since>NEWHISTORY_SEGMENT</session-history-since>",
               "durability_class": "lineage",
               "reset_rule": "survive + advance-only-merge, never reset"
             }
@@ -726,7 +726,7 @@
     {
       "name": "V11-never-minted-boundary-is-not-reconcile-pending",
       "layer": "mechanics",
-      "provenance": "The empty-store oscillation rule. A session with no compartment keeps boundary_id=\"\" for its whole pre-first-compartment life; the module passes the absent sentinel every pass. Without the empty-boundary carve-out, step_defer would set reconcile_pending on that vacuous boundary, so classify rule 5 (reconcile_pending && !boundary_present) would force a HARD on the very next pass -> HARD<->SOFT+ oscillation (bytes identical, so cache-neutral, but dishonest telemetry + per-pass writes).",
+      "provenance": "The empty-store oscillation rule. A session with no history_segment keeps boundary_id=\"\" for its whole pre-first-history_segment life; the module passes the absent sentinel every pass. Without the empty-boundary carve-out, step_defer would set reconcile_pending on that vacuous boundary, so classify rule 5 (reconcile_pending && !boundary_present) would force a HARD on the very next pass -> HARD<->SOFT+ oscillation (bytes identical, so cache-neutral, but dishonest telemetry + per-pass writes).",
       "notes": "THE LOAD-BEARING ASSERT: an empty boundary_id is the NEVER-MINTED sentinel, not a reverted-away boundary, so a defer pass over it reads reconcile_pending=FALSE (p0..p2). This is the exact bit the fix flips: the pre-fix core read TRUE here (spurious reconcile). REVERT SEMANTICS PRESERVED (the half that must NOT regress): p3 is a HARD that mints the first real boundary b1; p4 is then a defer with the boundary ABSENT ('-') while boundary_id is now the non-empty 'b1', and it STILL reconciles (reconcile_pending=TRUE) - proving the fix only exempted the vacuous empty-string case, leaving genuine revert detection (V8) intact. m0/m1 bytes are byte-identical across every defer either way (cache-neutral).",
       "render_config": {
         "system_hash": "sys0",
@@ -785,7 +785,7 @@
         },
         {
           "signal": {
-            "kind": "first-compartment-fold-hard"
+            "kind": "first-history_segment-fold-hard"
           },
           "boundary_present": "-",
           "expect_action": "HARD",

@@ -211,7 +211,11 @@ fn bench_m0_trim_memories(c: &mut Criterion) {
     group.finish();
 }
 
-fn request(session: &str, messages: &[IngressMessage], caveman: bool) -> TransformRequest {
+fn request(
+    session: &str,
+    messages: &[IngressMessage],
+    terse_text_compression: bool,
+) -> TransformRequest {
     // The serde path is the production wire: absent fields take the same
     // defaults every harness sender gets.
     serde_json::from_value(serde_json::json!({
@@ -220,7 +224,7 @@ fn request(session: &str, messages: &[IngressMessage], caveman: bool) -> Transfo
         "serializer_profile": "owned-llmrunner",
         "session_id": session,
         "render_config": "bench-config",
-        "caveman_enabled": caveman,
+        "terse_text_compression_enabled": terse_text_compression,
         "messages": messages,
     }))
     .expect("bench transform request")
@@ -248,7 +252,7 @@ fn producer_ctx(dir: &str) -> ProducerContext<'_> {
         model_key: None,
         observed_last_response_at_ms: None,
         guidance_date: Some("Today's date: Thu Jan 01 2026".to_string()),
-        historian_active: false,
+        history_summarizer_active: false,
         wrapup_active: false,
     }
 }
@@ -298,13 +302,13 @@ fn bench_e2e_first_hard(c: &mut Criterion) {
 /// One materializing pass through the production entry, then the measured loop
 /// repeats the same request: the repeated pass is a stable (non-committing) pass.
 /// The primed output cache is discarded, so each measured cell chooses whether it
-/// runs warm-cache (`steady_output_cache`) or cold-cache (`steady`, `steady_caveman`).
+/// runs warm-cache (`steady_output_cache`) or cold-cache (`steady`, `steady_terse_text_compression`).
 fn steady_state(
     messages: &[IngressMessage],
-    caveman: bool,
+    terse_text_compression: bool,
 ) -> (tempfile::TempDir, MemoryStore, TransformRequest) {
     let (dir, store) = fresh_store();
-    let req = request("bench-steady", messages, caveman);
+    let req = request("bench-steady", messages, terse_text_compression);
     let ctx = producer_ctx(dir.path().to_str().expect("utf8 dir"));
     let cache = bench_internals::OutputCache::default();
     transform_cached(&store, &req, &ctx, &cache).expect("materializing pass");
@@ -378,9 +382,9 @@ fn bench_e2e_steady_output_cache(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_e2e_steady_caveman(c: &mut Criterion) {
+fn bench_e2e_steady_terse_text_compression(c: &mut Criterion) {
     warm_tokenizer();
-    let mut group = c.benchmark_group("e2e/steady_caveman");
+    let mut group = c.benchmark_group("e2e/steady_terse_text_compression");
     group.sample_size(20);
     let messages = corpus::messages(ContentClass::Mixed, E2E_STEADY_COUNT, 2_048, CORPUS_SEED);
     let (dir, store, req) = steady_state(&messages, true);
@@ -388,7 +392,10 @@ fn bench_e2e_steady_caveman(c: &mut Criterion) {
     group.bench_function(format!("{E2E_STEADY_COUNT}msgs_2KiB_mixed"), |b| {
         b.iter_batched(
             bench_internals::OutputCache::default,
-            |cache| transform_cached(&store, &req, &ctx, &cache).expect("caveman steady pass"),
+            |cache| {
+                transform_cached(&store, &req, &ctx, &cache)
+                    .expect("terse_text_compression steady pass")
+            },
             criterion::BatchSize::PerIteration,
         )
     });
@@ -405,6 +412,6 @@ criterion_group!(
     bench_e2e_first_hard,
     bench_e2e_steady,
     bench_e2e_steady_output_cache,
-    bench_e2e_steady_caveman,
+    bench_e2e_steady_terse_text_compression,
 );
 criterion_main!(benches);

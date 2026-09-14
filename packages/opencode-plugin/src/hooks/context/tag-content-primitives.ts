@@ -10,7 +10,7 @@ export type MessageInfo = {
     role?: string;
     sessionID?: string;
     summary?: boolean;
-    /** syntheticHead marks one of the two m[0]/m[1] messages prepended by compartment injection. */
+    /** syntheticHead marks one of the two m[0]/m[1] messages prepended by history_segment injection. */
     syntheticHead?: boolean;
     finish?: string;
     error?: unknown;

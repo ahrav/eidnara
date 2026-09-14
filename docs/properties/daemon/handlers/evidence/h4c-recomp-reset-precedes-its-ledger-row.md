@@ -46,7 +46,7 @@ paths below.
 The `never_minted` early return writes the row and performs no reset:
 
 ```
-6058        let never_minted = !has_compartments && loaded.core.boundary_id.trim().is_empty();
+6058        let never_minted = !has_history_segments && loaded.core.boundary_id.trim().is_empty();
 6059        if never_minted {
 6060            return match store.record_recomp_command(
 6061                &session_id,
@@ -85,7 +85,7 @@ successful reset.
 
 ## Failure scenario
 
-1. A session has compartments, so `never_minted` is false at `:6058`.
+1. A session has history_segments, so `never_minted` is false at `:6058`.
 2. `session.recomp` arrives with `command_id = "recomp-7"`.
 3. `:6015` finds no row. `:6030` takes the latch.
 4. `:6077` resets the session's cache state and boundary. Durable.
@@ -117,12 +117,12 @@ This is a crash-and-retry window, not an interleaving.
 
 ## What a test must construct
 
-- A session with at least one compartment or a nonempty `boundary_id`, so the
+- A session with at least one history_segment or a nonempty `boundary_id`, so the
   `never_minted` branch is not taken. `session_recomp_resets_cache_boundary_and_replays_started`
   (`:27313`) already builds a session in this shape and can be the starting point.
 - A store seam that fails `record_recomp_command` while leaving
   `reset_session_for_recomp` working. The store already has per-call test seams of
-  this kind, for example `fail_next_historian_side_channel_for_test` used at
+  this kind, for example `fail_next_history_summarizer_side_channel_for_test` used at
   `:30041`, so the pattern exists; whether one exists for this call is unverified.
 - Coverage-check form, per METHOD.md: do not assert the double reset. Assert the
   independent preconditions that create the window, namely that

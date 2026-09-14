@@ -97,7 +97,7 @@ probe (`handler.health`, on a dedicated task per §9.3) reports whatever the
 handler chooses.
 
 The reserved class is the mitigation and it works: `tests/dispatch.rs:1074`
-(`saturated_general_capacity_cannot_consume_the_broca_reserve`) proves Broca's 96
+(`saturated_general_capacity_cannot_consume_the_model_execution_reserve`) proves ModelExecution's 96
 slots survive general saturation. But there are only two classes, so a general
 module starving the general pool starves every other general module.
 
@@ -131,7 +131,7 @@ liveness probing by default.
    and assert the parked request's pending entry is still unsettled - that is the
    `sometimes` observation.
 5. Then fill the pool and assert the next request gets `server_busy`, and that a
-   reserved-class request on a Broca route still dispatches.
+   reserved-class request on a ModelExecution route still dispatches.
 
 `tests/dispatch.rs:295` already parks a handler in a "hang" mode
 (`mode_body(json!({"mode": "hang"}))`) to occupy the only pending slot, so the

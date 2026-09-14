@@ -125,20 +125,20 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
     it("keeps only presence and length for prompt prose", () => {
         expect(
             sanitizeValue({
-                historian: { prompt: "Summarize the last sprint", model: "claude" },
-                sidekick: { system_prompt: "Be terse" },
+                history_summarizer: { prompt: "Summarize the last sprint", model: "claude" },
+                context_researcher: { system_prompt: "Be terse" },
                 prompt_surface: {
                     default: "light",
-                    tool_descriptions: { ctx_search: "Find prior notes" },
+                    tool_descriptions: { eidnara_search: "Find prior notes" },
                 },
                 system_prompt_injection: { skip_signatures: ["<!-- eidnara: skip -->", "secret"] },
             }),
         ).toEqual({
-            historian: { prompt: "<REDACTED 25 chars>", model: "claude" },
-            sidekick: { system_prompt: "<REDACTED 8 chars>" },
+            history_summarizer: { prompt: "<REDACTED 25 chars>", model: "claude" },
+            context_researcher: { system_prompt: "<REDACTED 8 chars>" },
             prompt_surface: {
                 default: "light",
-                tool_descriptions: { ctx_search: "<REDACTED 16 chars>" },
+                tool_descriptions: { eidnara_search: "<REDACTED 16 chars>" },
             },
             system_prompt_injection: {
                 skip_signatures: ["<REDACTED 22 chars>", "<REDACTED 6 chars>"],
@@ -357,7 +357,7 @@ describe("renderDiagnosticsMarkdown", () => {
             conflicts: { knownConflicts: [], otherPiExtensions: [] },
             logFile: { path: "/x/eidnara.log", exists: false, sizeKb: 0 },
             recentSessions: [],
-            historianDumps: {
+            history_summarizerDumps: {
                 byProject: [],
                 legacyDumps: { dir: "/x/legacy", count: 0, recent: [] },
             },
@@ -372,7 +372,7 @@ describe("renderDiagnosticsMarkdown", () => {
         expect(markdown).toContain("- Pi installed: true");
     });
 
-    it("includes sanitized historian dump metadata", () => {
+    it("includes sanitized history_summarizer dump metadata", () => {
         const home = process.env.HOME ?? "/home/tester";
         const report: PiDiagnosticReport = {
             timestamp: "2026-07-07T12:00:00.000Z",
@@ -398,7 +398,7 @@ describe("renderDiagnosticsMarkdown", () => {
             logFile: { path: "/x/eidnara.log", exists: false, sizeKb: 0 },
             recentSessions: [],
             sessionDiscovery: "ok",
-            historianDumps: {
+            history_summarizerDumps: {
                 byProject: [
                     {
                         directory: `${home}/private-project`,
@@ -421,7 +421,7 @@ describe("renderDiagnosticsMarkdown", () => {
 
         const markdown = renderDiagnosticsMarkdown(report);
 
-        expect(markdown).toContain("### Historian dumps");
+        expect(markdown).toContain("### HistorySummarizer dumps");
         expect(markdown).toContain('"count": 1');
         expect(markdown).toContain('"name": "dump-1.xml"');
         expect(markdown).not.toContain(home);
@@ -530,7 +530,7 @@ describe("collectDiagnostics Pi path resolution", () => {
         // without `cwd` leaves the raw slug as the label, and no project is scanned for it.
         expect(report.recentSessions.map((session) => session.sessionId)).toEqual(["root"]);
         expect(report.recentSessions.map((session) => session.directory)).toEqual(["----"]);
-        expect(report.historianDumps.byProject).toEqual([]);
+        expect(report.history_summarizerDumps.byProject).toEqual([]);
         expect(report.logFile).toEqual({ path: logDir, exists: false, sizeKb: 0 });
     });
 

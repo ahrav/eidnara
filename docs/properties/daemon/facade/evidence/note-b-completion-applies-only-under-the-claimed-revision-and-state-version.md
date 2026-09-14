@@ -21,12 +21,13 @@ worth cataloging rather than the defect the question was hunting.
        ));
    }
    ```
+
    (`lib.rs:14197-14202`)
 
    Nothing here re-evaluates `check_status`, `has_compiled_check`,
    `check_quarantined_until`, or `check_next_due_at`, which are the predicates the
    due selector required to issue the claim
-   (`crates/daemon/src/smart_note_evaluation.rs:719-725`).
+   (`crates/daemon/src/conditional_note_evaluation.rs:719-725`).
 
 2. The store supplies the fence, inside the completion transaction:
 
@@ -38,6 +39,7 @@ worth cataloging rather than the defect the question was hunting.
        return stale(tx);
    }
    ```
+
    (`crates/memory-store/src/lib.rs:13569-13573`)
 
    `stale` marks the claim terminal with kind `"stale"` and returns
@@ -50,6 +52,7 @@ worth cataloging rather than the defect the question was hunting.
    ```
    if !matches!(reduced.status.as_str(), "pending" | "ready") {
    ```
+
    (`:13594-13606`), which marks the claim `"invalid"`. So even a reducer bug
    cannot drive a note into an arbitrary status through this path.
 
@@ -82,6 +85,7 @@ worth cataloging rather than the defect the question was hunting.
                    WHERE project = ?1 AND task_kind = ?2
                      AND terminal_kind IS NULL)
    ```
+
    (`acquire_note_evaluation_with_cap`), and a slot already holding a live claim is rebound to that
    claim rather than issued a new one
    (`crates/memory-store/src/task_lease.rs:577-608`).
@@ -90,11 +94,12 @@ worth cataloging rather than the defect the question was hunting.
    is recomputed rather than trusted:
 
    ```
-   let expected = smart_note_check_digest(note.surface_condition.as_deref(), artifact);
+   let expected = conditional_note_check_digest(note.surface_condition.as_deref(), artifact);
    if expected != artifact.check_hash {
        return Err("check_hash does not match the canonical artifact digest".to_string());
    }
    ```
+
    (`lib.rs:14213-14219`), with the intent stated at `:14189-14191`: "The digest
    for compile outcomes is recomputed from the authoritative note condition rather
    than trusted from the wire." The helper delegates to
@@ -105,13 +110,13 @@ worth cataloging rather than the defect the question was hunting.
 
 The scenario is what a fence regression would cause, since the fence holds today.
 
-A smart note has `surface_condition = "the CI pipeline is green"` and a compiled
+A conditional note has `surface_condition = "the CI pipeline is green"` and a compiled
 check that greps a status file. The compile phase claims it at
 `source_revision = 4`, `state_version = 11`.
 
 1. The evaluator starts a model round trip to compile the condition. This takes
    tens of seconds.
-2. The user runs `ctx_note update` with
+2. The user runs `eidnara_note update` with
    `surface_condition = "the release branch is tagged"`.
    `update_note_cas` applies, bumps `state_version` to 12 and `source_revision`
    to 5, NULLs the whole check lifecycle (`memory-store:12849-12866`), sets
@@ -123,7 +128,7 @@ With the fence: `note.state_version` is 12 and `claim.state_version` is 11, so
 uncompiled and is recompiled against the new condition on the next compile claim.
 
 Without the fence: the digest guard still catches this particular case, because
-`smart_note_check_digest` recomputes over `note.surface_condition`, which is now
+`conditional_note_check_digest` recomputes over `note.surface_condition`, which is now
 the new text, and the wire `check_hash` was computed over the old one
 (`lib.rs:14213-14219`). So the compile phase has two guards.
 
@@ -131,7 +136,7 @@ The phase that has *only* the fence is `due`. A note claimed for `due` while
 `check_status == "compiled"`, then edited so `check_status` becomes
 `'uncompiled'` and its artifact is NULLed, would with no fence receive
 `reduce_due`'s `Met` reduction: `ready_fields` with
-`due_ready_reason(note_id, pre.manifest_json)` (`smart_note_evaluation.rs:558-565`).
+`due_ready_reason(note_id, pre.manifest_json)` (`conditional_note_evaluation.rs:558-565`).
 `pre.manifest_json` is now `None`, so `manifest_signal_or_summary` returns `None`
 (`:400`) and the reason falls back to "compiled check returned met=true"
 (`:371-372`). The note surfaces as ready, with a reason asserting a compiled check
@@ -147,11 +152,11 @@ completion time rather than by a short constant.
 
 The interleaving to construct is a facade mutation landing inside that window.
 Both participants are ordinary API calls, so no fault injection is needed. The
-two mutations to try are `ctx_note update` with a changed `surface_condition`
-(bumps all three fenced values) and `ctx_note update` with changed content only
+two mutations to try are `eidnara_note update` with a changed `surface_condition`
+(bumps all three fenced values) and `eidnara_note update` with changed content only
 (bumps `status_version` and `state_version`, and also `source_revision` because
 `compiler_edit` includes `content_changed` at `memory-store:4497`), plus
-`ctx_note dismiss` (bumps both versions and changes `status` away from
+`eidnara_note dismiss` (bumps both versions and changes `status` away from
 `'pending'`, so all three fence clauses fire).
 
 ## What a test must construct
@@ -159,8 +164,8 @@ two mutations to try are `ctx_note update` with a changed `surface_condition`
 The existing test already builds most of this, so the work is to extend it rather
 than start over.
 
-1. `smart_note_revision_matrix_normative_matches_memory_store`
-   (`smart_note_evaluation.rs:1189-1526`) opens a real store
+1. `conditional_note_revision_matrix_normative_matches_memory_store`
+   (`conditional_note_evaluation.rs:1189-1526`) opens a real store
    (`:1230-1256`), inserts a note (`:1257-1277`), stages a
    `(source_revision, state_version)` pair (`:1278-1325`), stages an artifact
    (`:1326-1337`), and stages a claim (`:1338-1360`). That is the whole fixture.
@@ -173,7 +178,7 @@ than start over.
    `Applied` and assert the projection columns changed as the reducer specifies.
    Without it the test could pass by always returning `stale`.
 4. The interleaved form, which is the one that proves the fence rather than the
-   comparison: hold a claim, call `ctx_note update` through the facade, then
+   comparison: hold a claim, call `eidnara_note update` through the facade, then
    complete. That exercises `task_lease::fence_task_claims_tx` as well as the
    comparison, and those are two independent mechanisms that both have to work.
 
@@ -182,7 +187,7 @@ than start over.
 ### Q: Is the missing direct phase-precondition re-check reachable as a defect?
 
 - Sources examined: `lib.rs:14197-14202` (the only module-side check), the four
-  selectors' predicates (`smart_note_evaluation.rs:711-806`), the store fence
+  selectors' predicates (`conditional_note_evaluation.rs:711-806`), the store fence
   (`memory-store:13569-13573`), both `task_lease::fence_task_claims_tx` call sites
   in the shared mutation helpers (`crates/memory-store/src/lib.rs:14991-15000`,
   `crates/memory-store/src/lib.rs:15072`), the candidate query's live-claim

@@ -37,7 +37,7 @@ function validResult(overrides: Record<string, unknown> = {}): Record<string, un
         readiness: {
             transport: { state: "ready", reason: "healthy" },
             storage: { state: "ready", reason: "healthy" },
-            synapse: { state: "ready", reason: "healthy" },
+            local_embeddings: { state: "ready", reason: "healthy" },
         },
         shared_memory: null,
         checks: [
@@ -49,8 +49,8 @@ function validResult(overrides: Record<string, unknown> = {}): Record<string, un
             proof: null,
             daemon: "eidnara-host/0.1.0",
             context: "0.1.0",
-            synapse: "0.1.0",
-            broca: "0.1.0",
+            local_embeddings: "0.1.0",
+            model_execution: "0.1.0",
         },
         ...overrides,
     };
@@ -84,7 +84,7 @@ describe("parseDaemonResult", () => {
     test("accepts the key set the eidnara-host binary emits, which omits readiness and shared_memory", () => {
         // Output serialized by `DaemonResult` in `crates/daemon/src/bin/eidnara-host.rs`.
         const stdout =
-            '{"schema":"eidnara.daemon/v1","command":"status","ok":false,"state":"wedged","reason":"wedged","remediation":"inspect_daemon_process","effects":null,"checks":[{"id":"lifecycle.fences","status":"fail","reason":"wedged","remediation":"inspect_daemon_process"},{"id":"lifecycle.publication","status":"fail","reason":"wedged","remediation":"inspect_daemon_process"}],"versions":{"release":"0.1.0","proof":null,"daemon":null,"context":"0.1.0","synapse":"0.1.0","broca":"0.1.0"}}';
+            '{"schema":"eidnara.daemon/v1","command":"status","ok":false,"state":"wedged","reason":"wedged","remediation":"inspect_daemon_process","effects":null,"checks":[{"id":"lifecycle.fences","status":"fail","reason":"wedged","remediation":"inspect_daemon_process"},{"id":"lifecycle.publication","status":"fail","reason":"wedged","remediation":"inspect_daemon_process"}],"versions":{"release":"0.1.0","proof":null,"daemon":null,"context":"0.1.0","local_embeddings":"0.1.0","model_execution":"0.1.0"}}';
         const parsed = parseDaemonResult(stdout);
         expect(parsed.state).toBe("wedged");
         expect(parsed.reason).toBe("wedged");
@@ -158,17 +158,17 @@ describe("parseDaemonResult", () => {
             ),
         ).toThrow(/readiness\.transport is ready with a failing reason/);
         // The converse stays legal, and must: `unsupported` with
-        // `synapse_unsupported` is a non-failing pairing for a non-ready state,
+        // `local_embeddings_unsupported` is a non-failing pairing for a non-ready state,
         // and every `starting` reason is a failing one.
         const legal = parseDaemonResult(
             withReadiness({
                 transport: { state: "ready", reason: "healthy" },
                 storage: { state: "starting", reason: "storage_starting" },
-                synapse: { state: "unsupported", reason: "synapse_unsupported" },
+                local_embeddings: { state: "unsupported", reason: "local_embeddings_unsupported" },
             }),
         );
         expect(legal.readiness?.transport?.state).toBe("ready");
-        expect(legal.readiness?.synapse?.reason).toBe("synapse_unsupported");
+        expect(legal.readiness?.local_embeddings?.reason).toBe("local_embeddings_unsupported");
     });
 
     test("kernel readiness admits its warn-class ready reasons and rejects contradictions", () => {
@@ -210,7 +210,7 @@ describe("parseDaemonResult", () => {
             ["kernel_lagging", "inspect_kernel_projector"],
             ["kernel_capacity_warn", "inspect_storage"],
             ["no_required_consumer", null],
-            ["synapse_unsupported", null],
+            ["local_embeddings_unsupported", null],
         ] as const) {
             for (const state of ["running", "stopped"] as const) {
                 expect(() =>
@@ -383,7 +383,7 @@ describe("parseDaemonResult", () => {
                     readiness: null,
                     checks: [
                         {
-                            id: "credentials.broca",
+                            id: "credentials.model_execution",
                             status: "fail",
                             reason: "harness_unavailable",
                             remediation,
@@ -497,7 +497,7 @@ describe("parseDaemonResult", () => {
                     proof: null,
                     daemon: null,
                     context: null,
-                    synapse: null,
+                    local_embeddings: null,
                 },
             }),
             non_boolean_ok: validResult({ ok: "yes" }),
@@ -699,8 +699,8 @@ describe("parseDaemonResult", () => {
                         proof,
                         daemon: "eidnara-host/0.1.0",
                         context: "0.1.0",
-                        synapse: "0.1.0",
-                        broca: "0.1.0",
+                        local_embeddings: "0.1.0",
+                        model_execution: "0.1.0",
                     },
                 }),
             );
@@ -762,8 +762,8 @@ describe("parseDaemonResult", () => {
                         proof: null,
                         daemon,
                         context: "0.1.0",
-                        synapse: "0.1.0",
-                        broca: "0.1.0",
+                        local_embeddings: "0.1.0",
+                        model_execution: "0.1.0",
                     },
                 }),
             );

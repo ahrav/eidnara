@@ -19,6 +19,7 @@ value to see what behaviour it selects and found no consumer.
        Err(outcome) => return outcome,
    };
    ```
+
    (`lib.rs:10915-10919`)
 
 2. It is stored on the registration entry (`:10964`), in a field declared at
@@ -38,6 +39,7 @@ value to see what behaviour it selects and found no consumer.
        entry.policy_version += 1;
    }
    ```
+
    where `policy_changed` is set when a heartbeat changes `retina_handoff` or
    `wake_owned` (`:11036-11044`). So the number the caller registered does not
    even survive a policy-changing heartbeat, and the value echoed at `:11050` is
@@ -47,24 +49,26 @@ value to see what behaviour it selects and found no consumer.
    compile-time constant. Three predicates read it:
 
    ```
-   && note.policy_version == SMART_NOTE_CHECK_POLICY_VERSION
+   && note.policy_version == CONDITIONAL_NOTE_CHECK_POLICY_VERSION
    ```
-   in the due selector (`crates/daemon/src/smart_note_evaluation.rs:723`) and
+
+   in the due selector (`crates/daemon/src/conditional_note_evaluation.rs:723`) and
    the liveness selector (`:773`), and
 
    ```
-   || note.policy_version != SMART_NOTE_CHECK_POLICY_VERSION
+   || note.policy_version != CONDITIONAL_NOTE_CHECK_POLICY_VERSION
    ```
+
    in the compile selector (`:749`), which is how an off-policy note gets
    recompiled.
 
-   `SMART_NOTE_CHECK_POLICY_VERSION` is `1` (`:16`, doc comment
+   `CONDITIONAL_NOTE_CHECK_POLICY_VERSION` is `1` (`:16`, doc comment
    "Compiled-check policy version; other versions force recompilation").
 
 6. The note's `policy_version` comes from the note row, defaulted to `0` when NULL
    (`lib.rs:13983`), and is written by the reducer:
-   `stored.policy_version = SMART_NOTE_CHECK_POLICY_VERSION` on a successful
-   compile (`smart_note_evaluation.rs:493`). So the whole policy-version mechanism
+   `stored.policy_version = CONDITIONAL_NOTE_CHECK_POLICY_VERSION` on a successful
+   compile (`conditional_note_evaluation.rs:493`). So the whole policy-version mechanism
    is module-internal: the module stamps its own constant on notes it compiles and
    recompiles notes stamped with anything else.
 
@@ -74,8 +78,8 @@ value to see what behaviour it selects and found no consumer.
    The module has no way to refuse it, and the note it compiles is stamped `1`
    regardless of what the evaluator actually did.
 
-8. `SMART_NOTE_CHECK_POLICY_VERSION` is also asserted equal to the frozen
-   fixture's `constants.policy_version` (`smart_note_evaluation.rs:1111`, fixture
+8. `CONDITIONAL_NOTE_CHECK_POLICY_VERSION` is also asserted equal to the frozen
+   fixture's `constants.policy_version` (`conditional_note_evaluation.rs:1111`, fixture
    value `1`), so the constant is a cross-language contract. The registration
    field is not part of that contract, which is consistent with it being unused.
 
@@ -85,18 +89,18 @@ The compiled-check policy changes: version 2 restricts the sandbox capability se
 say by removing `httpGet`, which `docs/AUDIT-KNOWN-ISSUES.md:823-830` (source-catalog path, not present at HEAD) (A50)
 records as a live capability with an accepted v1 egress risk. The module's
 constant becomes `2`, so every note compiled under version 1 is recompiled
-(`smart_note_evaluation.rs:749`). That half works.
+(`conditional_note_evaluation.rs:749`). That half works.
 
 An older evaluator, still running the version-1 sandbox, registers with
 `policy_version: 1`. The module accepts it (`lib.rs:10915-10919`), stores the `1`,
 and offers it the recompilation work. The evaluator compiles the condition under
 version-1 semantics, returns an artifact, and
-`reduce_compile` stamps `stored.policy_version = SMART_NOTE_CHECK_POLICY_VERSION`,
-which is now `2` (`smart_note_evaluation.rs:493`).
+`reduce_compile` stamps `stored.policy_version = CONDITIONAL_NOTE_CHECK_POLICY_VERSION`,
+which is now `2` (`conditional_note_evaluation.rs:493`).
 
 The note is now marked as compiled under policy 2 while its artifact was produced
 under policy 1. The selectors will never recompile it, because `note.policy_version
-== SMART_NOTE_CHECK_POLICY_VERSION` now holds. The version-1 artifact is
+== CONDITIONAL_NOTE_CHECK_POLICY_VERSION` now holds. The version-1 artifact is
 permanently accepted as version-2 compliant, and the field that could have refused
 the registration was validated and discarded.
 
@@ -109,7 +113,7 @@ handshake. It looks like agreement and carries no information.
 
 No interleaving. The dependency is a policy-version bump plus a version-skewed
 evaluator, which is exactly the deployment shape a version field exists to handle.
-Today, with `SMART_NOTE_CHECK_POLICY_VERSION` at `1` and no version 2 in
+Today, with `CONDITIONAL_NOTE_CHECK_POLICY_VERSION` at `1` and no version 2 in
 existence, the scenario is not currently constructible in the field; the field is
 inert now and the mechanism it appears to provide would be absent when first
 needed.
@@ -122,7 +126,7 @@ implementable today:
 1. Construct an `Handler`, bind two routes to the same authority project.
 2. `note.evaluation.register` on route 1 with `policy_version: 0` and on route 2
    with `policy_version: 99`.
-3. Insert several smart notes spanning `policy_version` `0` and `1` in their own
+3. Insert several conditional notes spanning `policy_version` `0` and `1` in their own
    rows.
 4. Call `note.evaluation.next` on each route with a fresh `acquisition_id`.
 5. Assert the offered note sets are identical, and that this equality is the
@@ -146,7 +150,7 @@ the echoed field is a module counter and not the caller's declaration.
   validation (`:10915-10919`), the struct field (`:2983`), the heartbeat increment
   (`:11036-11045`), the register and heartbeat response bodies (`:10970-10977`,
   `:11047-11051`), all three note-side predicates
-  (`smart_note_evaluation.rs:723`, `:749`, `:773`), the constant and its doc
+  (`conditional_note_evaluation.rs:723`, `:749`, `:773`), the constant and its doc
   comment (`:15-16`), the fixture assertion (`:1111`), the retired
   `note.evaluate` error (`lib.rs:12281`, `:13860-13863`), and
   `NOTE_EVALUATOR_PROTOCOL_VERSION` for contrast (`:2964`).

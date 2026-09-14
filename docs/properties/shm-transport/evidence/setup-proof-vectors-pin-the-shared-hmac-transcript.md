@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-U3 renamed the domain separators (`eidnara-server-v1`, `eidnara-client-v1`) and the daemon version prefix (`eidnara-host/0.1.0`), and the committed proof vectors stopped matching. Because both peers link one `compute_proof`, a symmetric transcript change would interoperate while changing what a captured proof commits to; only a vector produced outside the implementation can catch that.
+U3 renamed the domain separators (`eidnara-server-v3`, `eidnara-client-v3`) and the daemon version prefix (`eidnara-host/0.1.0`), and the committed proof vectors stopped matching. Because both peers link one `compute_proof`, a symmetric transcript change would interoperate while changing what a captured proof commits to; only a vector produced outside the implementation can catch that.
 
 ## Evidence trail
 

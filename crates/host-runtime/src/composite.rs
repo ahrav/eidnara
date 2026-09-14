@@ -6,8 +6,8 @@
 //! A route-map entry remains until the child's `route_gone` callback returns.
 //!
 //! The direct profile's primary is `context/tool_provider`.
-//! The direct profile's secondary is `synapse/management_surface`.
-//! The direct profile's tertiary is `broca/management_surface`.
+//! The direct profile's secondary is `local_embeddings/management_surface`.
+//! The direct profile's tertiary is `model_execution/management_surface`.
 //! The direct profile publishes its primary, secondary, and tertiary entries in that order.
 //! Generic component types let tests substitute deterministic children.
 

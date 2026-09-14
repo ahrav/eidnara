@@ -36,7 +36,7 @@ const MAX_LOG_BYTES = 256 * 1024;
 const STALE_PID_AGE_MS = 30 * 60 * 1_000;
 const SIGNAL_STATE_TIMEOUT_MS = 2_000;
 const SIGNAL_STATE_POLL_MS = 10;
-const EXPECTED_CATALOG = ["context", "synapse", "broca"] as const;
+const EXPECTED_CATALOG = ["context", "local_embeddings", "model_execution"] as const;
 
 interface RustE2ePidFile {
     createdAtMs: number;
@@ -59,8 +59,8 @@ export interface BackendCounters {
 
 interface ReadyRecord {
     status: "ready";
-    wire_version: 2;
-    catalog: ["context", "synapse", "broca"];
+    wire_version: 3;
+    catalog: ["context", "local_embeddings", "model_execution"];
 }
 
 type ControlCommand =
@@ -209,12 +209,12 @@ export function detectRustModePrereqs(): RustModePrereqs {
             skipReason: "direct host fixture requires Unix sockets",
         };
     }
-    // `BrocaComponent.initialize` rejects non-Linux targets because crash-ownership records and sweeps read `/proc` process identity.
+    // `ModelExecutionComponent.initialize` rejects non-Linux targets because crash-ownership records and sweeps read `/proc` process identity.
     if (process.platform !== "linux") {
         return {
             ok: false,
             skipReason:
-                "direct host fixture requires Linux: broca crash-ownership records depend on /proc process identity",
+                "direct host fixture requires Linux: model_execution crash-ownership records depend on /proc process identity",
         };
     }
     if (!existsSync(join(REPO_ROOT, "Cargo.toml"))) {
@@ -353,7 +353,7 @@ function parseReadyRecord(line: Buffer): ReadyRecord {
     if (!object || !exactKeys(object, ["catalog", "status", "wire_version"])) {
         throw new Error("fixture readiness record had unknown fields");
     }
-    if (object.status !== "ready" || object.wire_version !== 2 || !Array.isArray(object.catalog)) {
+    if (object.status !== "ready" || object.wire_version !== 3 || !Array.isArray(object.catalog)) {
         throw new Error("fixture readiness record was invalid");
     }
     if (
@@ -364,8 +364,8 @@ function parseReadyRecord(line: Buffer): ReadyRecord {
     }
     return {
         status: "ready",
-        wire_version: 2,
-        catalog: ["context", "synapse", "broca"],
+        wire_version: 3,
+        catalog: ["context", "local_embeddings", "model_execution"],
     };
 }
 
@@ -826,7 +826,7 @@ export class HermeticHostStack {
         chmodSync(fixtureConfigRoot, 0o700);
         writeFileSync(
             fixtureConfigPath,
-            JSON.stringify({ historian: { module_model: "fixture/deterministic" } }),
+            JSON.stringify({ history_summarizer: { module_model: "fixture/deterministic" } }),
             { mode: 0o600 },
         );
         chmodSync(fixtureConfigPath, 0o600);

@@ -8,8 +8,8 @@ links are pinned to it. The single-load evidence below describes the live pass.
 ## Discovery trigger
 
 One pass loads `cache_state` several times: before the transform for the
-projection-cache epoch and for `historian_active`, inside the transform for
-the snapshot, and after it inside `prepare_historian_fire`, with two more
+projection-cache epoch and for `history_summarizer_active`, inside the transform for
+the snapshot, and after it inside `prepare_history_summarizer_fire`, with two more
 loads on the Emergency95 arm. The audit proposes one load per pass or narrow
 scalar reads of `meta`. A consolidation can hand a pre-commit snapshot to a
 consumer placed after the pass's own commit, and a narrow read can decode a
@@ -24,14 +24,14 @@ defaulted or malformed field differently from the full deserialization.
   `meta.revert_epoch` with `.ok()?`, so any load error yields `None`;
   [`expand_transform_tail_delta`][epoch-read-delta] does the same at
   [`:4168-4173`][epoch-load] with the [comment][epoch-comment] that the epoch
-  must be the persisted one; [`historian_active`][active] maps a load error to
-  `false` and otherwise tests `meta.historian.state != Idle`.
+  must be the persisted one; [`history_summarizer_active`][active] maps a load error to
+  `false` and otherwise tests `meta.history_summarizer.state != Idle`.
 - Inside the transform, the lineage-switched path [loads][descent-load],
   [descends][descend] with `expected_target_row_version`, then takes the
   [snapshot][snapshot]; the revert path [truncates][truncate], sets
   `commit_expected` to the returned `row_version`, and
-  [reloads compartments][truncate-reload].
-- Post-commit: [`prepare_historian_fire`][prepare] loads at
+  [reloads history_segments][truncate-reload].
+- Post-commit: [`prepare_history_summarizer_fire`][prepare] loads at
   [`:5013`][prepare-load] and passes `loaded` to [`record_no_fire`][no-fire],
   which commits `last_no_fire` under `loaded.row_version` with `let _ =`, so a
   stale `row_version` fails the CAS silently. Its doc comment reads
@@ -44,9 +44,9 @@ defaulted or malformed field differently from the full deserialization.
 - A CAS conflict makes [`apply_once_with_estimator_and_projection`][cas-retry]
   rerun `apply_once`, which reloads.
 - Serde defaults: [`revert_epoch`][meta-epoch] and
-  [`historian`][meta-historian] carry `#[serde(default)]`, as does
-  [`HistorianDurableState::state`][hds-state];
-  [`HistorianPhase`][phase] is `snake_case` with five variants and no
+  [`history_summarizer`][meta-history_summarizer] carry `#[serde(default)]`, as does
+  [`HistorySummarizerDurableState::state`][hds-state];
+  [`HistorySummarizerPhase`][phase] is `snake_case` with five variants and no
   catch-all, so an unknown string fails serde. A `null` under a `u64` fails
   serde. A JSON path extract returns NULL for an absent key and a string for
   an unknown variant.
@@ -58,7 +58,7 @@ defaulted or malformed field differently from the full deserialization.
 ## Failure scenario
 
 A consolidation reuses the pre-transform snapshot inside
-`prepare_historian_fire`: `record_no_fire` writes under the old `row_version`,
+`prepare_history_summarizer_fire`: `record_no_fire` writes under the old `row_version`,
 the CAS fails, and the reason is never persisted. It reuses the first
 `run_transform` snapshot after an inline firing, so the floor comparison at
 `:8358-8377` compares equal values and the rerun never happens. A narrow read
@@ -76,25 +76,25 @@ duplicate names.
 
 ## What a test must construct
 
-A pass that commits and then reaches `prepare_historian_fire` with a new
+A pass that commits and then reaches `prepare_history_summarizer_fire` with a new
 no-fire reason; an Emergency95 pass with a publication landing between the
 transform and the floor check through the [hook][hook]; a CAS conflict
 injected between snapshot and commit; rows whose `meta` lacks `revert_epoch`
-or `historian`, carries an unknown `historian.state`, or holds `null` under
+or `history_summarizer`, carries an unknown `history_summarizer.state`, or holds `null` under
 `revert_epoch`; rows whose `core_state` is not valid JSON. Pair any narrow read
 with `MemoryStore::load` over those rows and assert equal values or the same
 conservative branch. The
 [state checks](../existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
 cover the no-fire CAS ([`t-no-fire`][t-no-fire]), the emergency rerun
 ([`t-emergency`][t-emergency]), and the CAS retry ([`t-cas`][t-cas]); none
-covers narrow-read equivalence or `historian_active` on durable state.
+covers narrow-read equivalence or `history_summarizer_active` on durable state.
 
 ## Investigation log
 
 ### Q: Which pre-commit loads may share one snapshot?
 
 - Sources examined: [`epoch-read`][epoch-read], [`epoch-load`][epoch-load]
-  with its [comment][epoch-comment], [`historian_active`][active], the
+  with its [comment][epoch-comment], [`history_summarizer_active`][active], the
   [snapshot][snapshot].
 - Findings: The three loads are independent reads today; merging them closes
   a window in which the epoch is read before a concurrent recut. Nothing states
@@ -104,7 +104,7 @@ covers narrow-read equivalence or `historian_active` on durable state.
 
 ### Q: Must a narrow read fail the same way on a corrupt `core_state`?
 
-- Sources examined: [`load`][load], [`historian_active`][active],
+- Sources examined: [`load`][load], [`history_summarizer_active`][active],
   [`epoch-read`][epoch-read].
 - Findings: Every consumer takes a conservative branch on any load error, and
   the full load fails on either column. A meta-only read would proceed.
@@ -125,7 +125,7 @@ covers narrow-read equivalence or `historian_active` on durable state.
 [full-select]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L4581-L4582
 [meta-select]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L4579-L4580
 [meta-epoch]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L1387-L1388
-[meta-historian]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L1503-L1504
+[meta-history_summarizer]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L1503-L1504
 [phase]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L537-L546
 [hds-state]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L579-L582
 [unique]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3291-L3372
@@ -172,7 +172,7 @@ deserialization is the largest cost of a full load. The
 full-sync and misses the cache as it did on its own failed load. The
 [last-response anchor][last-response] takes `Loaded`'s timestamp, `0` on
 `Unavailable`, and a `load_meta` read on `Reload`; the
-[historian-active check][active-live] takes `Loaded`'s phase when it is idle, idle on
+[history_summarizer-active check][active-live] takes `Loaded`'s phase when it is idle, idle on
 `Unavailable`, and the phase alone from the store on `Reload` and on a `Loaded`
 non-idle phase with no live run, since a run that completes after the pass load
 leaves the live map and commits idle. The
@@ -180,9 +180,9 @@ leaves the live map and commits idle. The
 and `Reload` on every rerun after an inline firing or a live completion, and
 the load is dropped after the first run so a rerun can name nothing else.
 The transform's own [snapshot][snapshot-live] stays its linearization point and
-a CAS conflict still reloads; `prepare_historian_fire` keeps its post-commit
+a CAS conflict still reloads; `prepare_history_summarizer_fire` keeps its post-commit
 full load because its no-fire write needs the committed `row_version`. The
-compartment state-sync gate keeps its full load as well: it writes on the
+history_segment state-sync gate keeps its full load as well: it writes on the
 strength of that read and had no hot-path motive to narrow.
 
 The pass load is timed on its own as the [`pass_state_load`][pass-timing]
@@ -190,7 +190,7 @@ pass-trace bucket. At the baseline the read sat inside the `delta_expand` and
 `projection_cache_lookup` windows; moving it ahead of both would otherwise
 shrink those buckets by the read's cost while `handler_total` kept it.
 
-The read point of the historian-active check and the last-response anchor
+The read point of the history_summarizer-active check and the last-response anchor
 moved earlier, from inside the transform closure to before the side-channel
 drain and the pass-trace write. Neither of those writes `cache_state`, so no
 in-process write is hidden; a concurrent publish landing inside that section is
@@ -212,21 +212,21 @@ functions share one parse of `meta`: the bundled SQLite keys its JSON parse
 cache on a negative auxdata slot, which every function in a statement sees. The
 Emergency95 [floor reads][floor-live] share one
 [`load_publication_floor_ordinal`][floor-accessor] closure; the wrapup epoch
-check uses [`load_revert_epoch`][epoch-accessor]; `historian_active` uses
-[`load_historian_phase`][phase-accessor] on `Reload` and on a loaded active
+check uses [`load_revert_epoch`][epoch-accessor]; `history_summarizer_active` uses
+[`load_history_summarizer_phase`][phase-accessor] on `Reload` and on a loaded active
 phase with no live run.
 
 The [differential test][scalar-test] builds rows from a serialized default
 `meta` and shows each accessor equal to the full deserialization where that
 succeeds, and failing on its own field where the full load fails: a `null`,
 negative, textual, or boolean `revert_epoch`; a boolean floor; an unknown
-`historian.state`; JSON5; malformed text; and strict JSON that is not an
+`history_summarizer.state`; JSON5; malformed text; and strict JSON that is not an
 object. It also shows `load_meta` equal
 to the full load's `meta` on every row both accept, and failing on every row
 both refuse. The recorded divergences are per-column and per-field versus
 per-row reading: a corrupt `core_state` fails only the full load, so
 `load_meta` and every scalar accessor answer on such a row; a sibling field's
-corruption fails only the full load and `load_meta`; a `historian` that is not
+corruption fails only the full load and `load_meta`; a `history_summarizer` that is not
 an object reads as an absent path, so the phase is idle where the full load
 refuses the row; and an integer above `i64::MAX`, which SQLite returns as a
 float, fails only the scalar read. A pre-transform consumer therefore proceeds
@@ -244,7 +244,7 @@ eviction of either counted handle. The counters key on the prepared statement
 text through [`CacheStateSelect`][select-probe]; the
 [counter test][counters-test] forces an eviction with a cache of one and shows
 the counter records it. At the baseline the same pass ran the full select three
-or four times. The [durable-phase test][phase-test] exercises `historian_active`
+or four times. The [durable-phase test][phase-test] exercises `history_summarizer_active`
 on each `PassState`; the [timing test][timing-test] shows the bucket present and
 non-zero on a steady pass.
 
@@ -253,7 +253,7 @@ non-zero on a steady pass.
 `cargo test -p memory-store --locked` passed with the differential test and the
 counter test; `cargo test -p daemon --locked` passed with the load-count test,
 the timing test, the durable-phase test, and the extended interleave test, the
-two `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
+two `memory_classifier_run_task_bounds_*` tests failing under full-suite load on the base
 branch as well and passing in isolation.
 
 [pass-load]: ../../../../../crates/daemon/src/lib.rs#L8129

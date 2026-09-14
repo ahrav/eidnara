@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use host_runtime::synapse::SynapseComponent;
+use host_runtime::local_embeddings::LocalEmbeddingsComponent;
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, EligibilityBinding, KernelStore, ProjectScope};
 use tokio::sync::mpsc::UnboundedSender;
@@ -29,7 +29,7 @@ pub struct Maintained {
     pub gate: Arc<HookGate>,
     pub kernel: Arc<KernelStore>,
     pub projection: Arc<SearchProjection>,
-    pub synapse: Arc<SynapseComponent>,
+    pub local_embeddings: Arc<LocalEmbeddingsComponent>,
     pub project: ProjectScope,
     pub destination: ArtifactDestination,
 }
@@ -339,7 +339,8 @@ impl EmbeddingSupervisor {
         let m = &self.maintained;
         match kind {
             SliceKind::Backfill => {
-                let mut dispatcher = EmbeddingDispatcher::new(&m.kernel, &m.projection, &m.synapse);
+                let mut dispatcher =
+                    EmbeddingDispatcher::new(&m.kernel, &m.projection, &m.local_embeddings);
                 for fault in std::mem::take(
                     &mut *self
                         .dispatch_faults
@@ -464,8 +465,9 @@ impl EmbeddingSupervisor {
             SliceKind::Sweep => {
                 // The cursor outlives the sweeper: each sweep resumes where the last one ended, so identities held at the head of the table do not consume every sweep.
                 let cursor = self.lock_sweep_cursor().take();
-                let mut sweeper = IdentitySweeper::resuming(&m.projection, &m.synapse, cursor)
-                    .cancelled_by(invalidated.clone());
+                let mut sweeper =
+                    IdentitySweeper::resuming(&m.projection, &m.local_embeddings, cursor)
+                        .cancelled_by(invalidated.clone());
                 let swept = sweeper.run_sweep(self.bounds.sweep_candidates, budget);
                 *self.lock_sweep_cursor() = sweeper.cursor().map(str::to_owned);
                 match swept {
@@ -538,7 +540,7 @@ impl EmbeddingSupervisor {
         let (mut running, mut held) = (0, 0);
         admitted.retain(|host_job_id, job| {
             // Anything the table still holds that is not a settled result counts as owned native work, and a claim the pass never settled is kept: both fail closed.
-            match self.maintained.synapse.job_status(host_job_id) {
+            match self.maintained.local_embeddings.job_status(host_job_id) {
                 None | Some("failed") => false,
                 Some("ready") if job.claim == Claim::Released => false,
                 Some("ready") => {

@@ -85,7 +85,7 @@ exists to prevent.
 `resolve_boundary_state(store, req, core, meta, live)` at `:7167-7269` takes
 `live` and additionally consults `req.messages` at `:7248-7252`, filtered on
 `!message.ck.meta.synthetic && message.ck.role != "system"`. `resolve_coverage`
-is imported from `compartment_coverage` (`:18`). `surviving_revert_prefix_seq`
+is imported from `history_segment_coverage` (`:18`). `surviving_revert_prefix_seq`
 (`:7275-7284`), `first_uncovered_live_block`, `tail_sel_items`,
 `protected_tail_floor_ordinal` and `boundary_available` (`:7156`) all take `live`
 or a value derived from it.

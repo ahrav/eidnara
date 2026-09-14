@@ -109,11 +109,11 @@ their `unaudited` status.
 | [Kernel remediation](../../../crates/kernel/src/envelope.rs), `remediate_text_inner` | Only `CanonicalDomainName` is handled; it updates `domains.name` and emits `operator_remediation` without updating source revision. Projected dependence remains unknown. |
 | [Serving decisions](../../../crates/daemon/src/kernel_routes/serving.rs), `decide`, `decide_for_tip_read` | Empty consumers mean unavailable gated reads; direct canonical tip reads have a different rule. Removing the last consumer does not imply pruning can resume. |
 | [Daemon eligibility](../../../crates/daemon/src/kernel_routes/eligibility.rs), `judge` | Policy is daemon-owned at this HEAD. The shared kernel move is proposed, not an existing authority location. |
-| [Inference](../../../crates/host-runtime/src/synapse/inference.rs), `token_count`; [JobTable](../../../crates/host-runtime/src/synapse/jobs.rs) | Existing count uses truncating inference tokenizer. JobTable is process-local, with fresh incarnation/maps on creation and resident Ready results, not durable product completion. |
+| [Inference](../../../crates/host-runtime/src/local_embeddings/inference.rs), `token_count`; [JobTable](../../../crates/host-runtime/src/local_embeddings/jobs.rs) | Existing count uses truncating inference tokenizer. JobTable is process-local, with fresh incarnation/maps on creation and resident Ready results, not durable product completion. |
 | [Generation store](../../../crates/host-runtime/src/generation.rs), `stage_and_promote`, `prune` | Reuse lifecycle ownership; host payload validity alone does not prove SQLite/journal replacement completeness. |
 | [CAS fault suite](../../../crates/kernel/tests/cas_fault_injection.rs) | Existing child barrier/kill/reap/reopen pattern covers process crash and injected errors, explicitly not power loss. Product hooks remain missing. |
 | [Kernel proof harness](../../../crates/kernel/tests/kernel_proofs/harness.rs), [model](../../../crates/kernel/tests/kernel_proofs/model.rs), [canonical digest](../../../crates/kernel/tests/support/canonical_state.rs) | Clean restart and a three-kind model are reusable, not an all-class search oracle. CrossRoot normalization cannot be copied into fixed-S equality without preserving identities and bytes. |
-| [Deterministic Synapse support](../../../crates/host-runtime/tests/support/synapse.rs), [scheduler](../../../crates/daemon/src/dreamer_scheduler.rs) | Controlled engine calls and in-crate ManualClock support narrow testing. They do not establish shared RP2.1/RP2.7 ownership. |
+| [Deterministic LocalEmbeddings support](../../../crates/host-runtime/tests/support/local_embeddings.rs), [scheduler](../../../crates/daemon/src/memory_classifier_scheduler.rs) | Controlled engine calls and in-crate ManualClock support narrow testing. They do not establish shared RP2.1/RP2.7 ownership. |
 | [Kernel lint](../../../crates/kernel/src/lib.rs), [perf allocator](../../../crates/host-runtime/examples/perf_host.rs) | Kernel forbids unsafe code. The perf example uses unsafe cumulative requested-allocation counters, not live decoded-heap high water. No permitted observer is selected. |
 | [CI](../../../.github/workflows/ci.yml), [root scripts](../../../package.json) | CI is required-check authority. Root scripts have `check:repo` but no `release:check`. The source-plan release gate remains unresolved, not waived. |
 
@@ -121,7 +121,7 @@ Legacy corrections have durable homes in
 [export reuse](export-recovery/existing-checks.md#durable-reuse-corrections),
 [projection currency](projection-coverage/existing-checks.md#legacy-catalog-currency-and-policy-limits),
 and [embedding corrections](embedding/existing-checks.md#durable-corrections-to-reused-evidence).
-Examples include live provider-tokenizer calls, production Synapse composition,
+Examples include live provider-tokenizer calls, production LocalEmbeddings composition,
 explicit-config certified inference, ignored runtime tests, last-poll-based
 retention, a host staging CLI caller, and removed claim-mirror subjects. Reuse
 the verified mechanism, not an old exercise label or stale absence assertion.

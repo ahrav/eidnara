@@ -76,7 +76,7 @@ export class PiTestHarness {
         text: string,
         options: { timeoutMs?: number; images?: unknown[] } = {},
     ): Promise<PiRunResult> {
-        // The 180s default accommodates ctx_search subprocesses on GitHub-hosted Ubuntu runners.
+        // The 180s default accommodates eidnara_search subprocesses on GitHub-hosted Ubuntu runners.
         const timeoutMs = options.timeoutMs ?? 180_000;
         const events: PiRpcEvent[] = [];
         let capturing = false;

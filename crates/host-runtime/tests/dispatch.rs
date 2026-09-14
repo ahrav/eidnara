@@ -1183,7 +1183,7 @@ async fn concurrent_requests_never_interleave_frame_bytes() {
             "settled {settled:?} of {expected:?}"
         );
         let frame: RawFrame = client.frame_within(BUDGET).await.expect("frame");
-        assert_eq!(frame.ver, 2, "a torn frame would decode a bogus version");
+        assert_eq!(frame.ver, 3, "a torn frame would decode a bogus version");
         assert!(
             expected.contains(&frame.corr),
             "unexpected correlation {}",
@@ -1201,7 +1201,7 @@ async fn concurrent_requests_never_interleave_frame_bytes() {
     host.shutdown_gracefully().await;
 }
 
-fn broca_reservation() -> ResourceDeclaration {
+fn model_execution_reservation() -> ResourceDeclaration {
     ResourceDeclaration {
         reserved_handler_tasks: 96,
         reserved_pending_requests: 96,
@@ -1213,11 +1213,12 @@ fn broca_reservation() -> ResourceDeclaration {
 
 /// The next reserved-class request is rejected while a general request dispatches.
 #[tokio::test]
-async fn saturated_broca_reserve_cannot_consume_a_general_slot() {
-    let (context, synapse, broca) = support::stub_trio();
-    let broca = broca.with_resources(broca_reservation());
+async fn saturated_model_execution_reserve_cannot_consume_a_general_slot() {
+    let (context, local_embeddings, model_execution) = support::stub_trio();
+    let model_execution = model_execution.with_resources(model_execution_reservation());
     let composite =
-        StaticComposite::new(context.clone(), synapse, broca.clone()).expect("distinct ids");
+        StaticComposite::new(context.clone(), local_embeddings, model_execution.clone())
+            .expect("distinct ids");
     let host = CompositeTestHost::start(composite, |config| {
         // Each pool has one general slot beside the 96-slot reserve.
         config.limits.max_pending_requests = 97;
@@ -1226,9 +1227,15 @@ async fn saturated_broca_reserve_cannot_consume_a_general_slot() {
     .await;
     let mut client = host.client().await;
     let (br_channel, br_epoch) = client
-        .route_open_target("management_surface", "broca", ROOT, "opencode", "s1")
+        .route_open_target(
+            "management_surface",
+            "model_execution",
+            ROOT,
+            "opencode",
+            "s1",
+        )
         .await
-        .expect("broca binds");
+        .expect("model_execution binds");
     let (context_channel, context_epoch) = client
         .route_open_target("tool_provider", "context", ROOT, "opencode", "s1")
         .await
@@ -1250,7 +1257,7 @@ async fn saturated_broca_reserve_cannot_consume_a_general_slot() {
             .expect("send reserved hang");
     }
     let deadline = tokio::time::Instant::now() + BUDGET;
-    while broca.dispatch_count() < 96 {
+    while model_execution.dispatch_count() < 96 {
         assert!(
             tokio::time::Instant::now() < deadline,
             "reserved handlers never occupied their permits"
@@ -1278,7 +1285,7 @@ async fn saturated_broca_reserve_cannot_consume_a_general_slot() {
     assert!(skipped.is_empty());
     assert_eq!(frame.error_code(), "server_busy");
     assert_eq!(
-        broca.dispatch_count(),
+        model_execution.dispatch_count(),
         96,
         "the rejected reserved request must never dispatch"
     );
@@ -1310,11 +1317,12 @@ async fn saturated_broca_reserve_cannot_consume_a_general_slot() {
 
 /// Exhausting general capacity rejects further general requests while a reserved-class request dispatches.
 #[tokio::test]
-async fn saturated_general_capacity_cannot_consume_the_broca_reserve() {
-    let (context, synapse, broca) = support::stub_trio();
-    let broca = broca.with_resources(broca_reservation());
+async fn saturated_general_capacity_cannot_consume_the_model_execution_reserve() {
+    let (context, local_embeddings, model_execution) = support::stub_trio();
+    let model_execution = model_execution.with_resources(model_execution_reservation());
     let composite =
-        StaticComposite::new(context.clone(), synapse, broca.clone()).expect("distinct ids");
+        StaticComposite::new(context.clone(), local_embeddings, model_execution.clone())
+            .expect("distinct ids");
     let host = CompositeTestHost::start(composite, |config| {
         config.limits.max_pending_requests = 97;
         config.limits.max_handler_tasks = 97;
@@ -1326,9 +1334,15 @@ async fn saturated_general_capacity_cannot_consume_the_broca_reserve() {
         .await
         .expect("context binds");
     let (br_channel, br_epoch) = client
-        .route_open_target("management_surface", "broca", ROOT, "opencode", "s1")
+        .route_open_target(
+            "management_surface",
+            "model_execution",
+            ROOT,
+            "opencode",
+            "s1",
+        )
         .await
-        .expect("broca binds");
+        .expect("model_execution binds");
 
     let holding = client.next_corr();
     client
@@ -1371,7 +1385,7 @@ async fn saturated_general_capacity_cannot_consume_the_broca_reserve() {
     assert_eq!(frame.error_code(), "server_busy");
     assert_eq!(context.dispatch_count(), 1);
 
-    // The reserved class stays available to Broca.
+    // The reserved class stays available to ModelExecution.
     let corr = client.next_corr();
     client
         .send_frame(
@@ -1390,7 +1404,7 @@ async fn saturated_general_capacity_cannot_consume_the_broca_reserve() {
         .expect("reserved terminal");
     assert!(skipped.is_empty());
     assert_eq!(frame.ty, TY_RESPONSE);
-    assert_eq!(frame.json()["served_by"], "broca");
+    assert_eq!(frame.json()["served_by"], "model_execution");
 
     host.shutdown().await.expect("graceful shutdown");
 }

@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use host_runtime::synapse::inference::validate_unit_vector;
+use host_runtime::local_embeddings::inference::validate_unit_vector;
 use kernel::{
     CurrentInputDescriptor, CurrentInputExpectation, CurrentInputGuard, EligibilityBinding,
     EligibilityVerdict, KernelError, KernelStore, StaleInput,

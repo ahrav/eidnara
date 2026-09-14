@@ -71,7 +71,7 @@ export function createPiKernelClientResolver(
         const config = resolveConfig(projectRoot);
         const isolated = isolatedTokenCaches.get(sessionId);
         if (isolated) {
-            touchIsolatedRoot(isolated, projectRoot, config.subc?.connection_file ?? "");
+            touchIsolatedRoot(isolated, projectRoot, config.host?.connection_file ?? "");
         }
         return createKernelClient({
             sessionId,

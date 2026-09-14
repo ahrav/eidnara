@@ -153,7 +153,7 @@ coverage-check rules.
 
 - Sources examined: the inline test module's function names matching page-related
   keywords (`:16001-30279`), which yielded
-  `session_status_compartment_pages_are_bounded_and_contract_shaped` (`:27246`)
+  `session_status_history_segment_pages_are_bounded_and_contract_shaped` (`:27246`)
   and `note_facade_pages_ready_notes_beyond_one_hundred_with_shared_offset_semantics`
   (`:25028`), neither of which is about transform paging; and the
   `#[cfg(test)]` discard-log hook (`:2949`) written at `:4003` and read nowhere.

@@ -47,7 +47,7 @@ import { piSystemPromptStateFor } from "../system-prompt";
 const COLORS = {
     system: "#c084fc", // Purple
     docs: "#22d3ee", // Cyan — <project-docs>
-    compartments: "#60a5fa", // Blue
+    history_segments: "#60a5fa", // Blue
     memories: "#34d399", // Green
     profile: "#a3e635", // Lime — <user-profile>
     conversation: "#f87171", // Red
@@ -76,7 +76,7 @@ interface StatusDialogDetail {
     usagePercentage: number;
     inputTokens: number;
     systemPromptTokens: number;
-    compartmentCount: number;
+    history_segmentCount: number;
     /** Rows the kernel serves this project on the `explicit_search` surface. */
     memoryCount: number;
     /** True when the read behind `memoryCount` was truncated by the daemon's per-read bounds, making the count a lower bound. */
@@ -85,9 +85,9 @@ interface StatusDialogDetail {
     memoryState: StateKey;
     memoryBlockCount: number;
     sessionNoteCount: number;
-    readySmartNoteCount: number;
+    readyConditionalNoteCount: number;
     pendingOpsCount: number;
-    historianRunning: boolean;
+    history_summarizerRunning: boolean;
     lastTransformError: string | null;
     isSubagent: boolean;
     contextLimit: number;
@@ -107,7 +107,7 @@ interface StatusDialogDetail {
     droppedTags: number;
     totalTags: number;
     activeBytes: number;
-    compartmentTokens: number;
+    history_segmentTokens: number;
     factTokens: number;
     memoryTokens: number;
     docsTokens: number;
@@ -348,13 +348,15 @@ function renderInner(s: StatusDialogDetail, theme: Theme, innerWidth: number): s
     lines.push("");
 
     lines.push(
-        `Counts: ${s.compartmentCount} compartments · ${s.memoryCount}${s.memoryTruncated ? "+" : ""} memories (${s.memoryBlockCount} injected, ${s.memoryState}) · ${
-            s.sessionNoteCount + s.readySmartNoteCount
+        `Counts: ${s.history_segmentCount} history_segments · ${s.memoryCount}${s.memoryTruncated ? "+" : ""} memories (${s.memoryBlockCount} injected, ${s.memoryState}) · ${
+            s.sessionNoteCount + s.readyConditionalNoteCount
         } notes`,
     );
     lines.push(
-        `Historian: ${
-            s.historianRunning ? theme.fg("warning", "running") : theme.fg("accent", "idle")
+        `HistorySummarizer: ${
+            s.history_summarizerRunning
+                ? theme.fg("warning", "running")
+                : theme.fg("accent", "idle")
         }`,
     );
     lines.push(`Pending drops: ${s.pendingOpsCount}`);
@@ -443,11 +445,11 @@ export function buildPiStatusDetail(
     const displayedWindowGeometry =
         windowGeometry && windowGeometry.usableSoft === contextLimit ? windowGeometry : undefined;
 
-    const compartmentCount = positiveNumber(daemonStatus?.compartment_count) ?? 0;
-    const compartmentTokens = positiveNumber(daemonStatus?.compartment_tokens) ?? 0;
+    const history_segmentCount = positiveNumber(daemonStatus?.history_segment_count) ?? 0;
+    const history_segmentTokens = positiveNumber(daemonStatus?.history_segment_tokens) ?? 0;
     const pendingOpsCount = positiveNumber(daemonStatus?.pending_drop_count) ?? 0;
-    // `wrapup_active` is the daemon's only in-flight signal, so `historianRunning` reads it.
-    const historianRunning = daemonStatus?.wrapup_active === true;
+    // `wrapup_active` is the daemon's only in-flight signal, so `history_summarizerRunning` reads it.
+    const history_summarizerRunning = daemonStatus?.wrapup_active === true;
     const tailHygiene = resolveTailHygieneStatus(daemonStatus?.tail_hygiene);
 
     let systemPromptTokens = piSystemPromptStateFor(sessionId)?.systemPromptTokens ?? 0;
@@ -477,7 +479,7 @@ export function buildPiStatusDetail(
         inputTokens,
         systemLocal: systemPromptTokens,
         toolDefsLocal: toolDefinitionTokens,
-        compartmentsLocal: compartmentTokens,
+        history_segmentsLocal: history_segmentTokens,
         factsLocal: 0,
         memoriesLocal: 0,
         docsLocal: 0,
@@ -497,7 +499,7 @@ export function buildPiStatusDetail(
             sessionId,
         },
     );
-    const historyBlockTokens = calibrated.compartmentTokens + calibrated.factTokens;
+    const historyBlockTokens = calibrated.history_segmentTokens + calibrated.factTokens;
     const historyBudgetPercentage = deps.historyBudgetPercentage ?? 0.15;
     const compressionBudget =
         contextLimit > 0
@@ -513,16 +515,16 @@ export function buildPiStatusDetail(
         usagePercentage,
         inputTokens,
         systemPromptTokens: calibrated.systemTokens,
-        compartmentCount,
+        history_segmentCount,
         // Expired anti-memories stay out of the count, matching the surface filter list and search apply.
         memoryCount: memory.rows.filter((row) => isServedMemoryDecisionRow(row, Date.now())).length,
         ...(memory.truncated === true ? { memoryTruncated: true } : {}),
         memoryState: stateKey(memory.state),
         memoryBlockCount: 0,
         sessionNoteCount: 0,
-        readySmartNoteCount: 0,
+        readyConditionalNoteCount: 0,
         pendingOpsCount,
-        historianRunning,
+        history_summarizerRunning,
         lastTransformError: null,
         isSubagent: false,
         contextLimit,
@@ -542,7 +544,7 @@ export function buildPiStatusDetail(
         droppedTags: 0,
         totalTags: 0,
         activeBytes: 0,
-        compartmentTokens: calibrated.compartmentTokens,
+        history_segmentTokens: calibrated.history_segmentTokens,
         factTokens: calibrated.factTokens,
         memoryTokens: calibrated.memoryTokens,
         docsTokens: calibrated.docsTokens,
@@ -584,12 +586,12 @@ function breakdownSegments(s: StatusDialogDetail): Array<{
             color: COLORS.system,
         });
     if (s.docsTokens > 0) segs.push({ label: "Docs", tokens: s.docsTokens, color: COLORS.docs });
-    if (s.compartmentTokens > 0)
+    if (s.history_segmentTokens > 0)
         segs.push({
-            label: "Compartments",
-            tokens: s.compartmentTokens,
-            color: COLORS.compartments,
-            detail: `(${s.compartmentCount})`,
+            label: "HistorySegments",
+            tokens: s.history_segmentTokens,
+            color: COLORS.history_segments,
+            detail: `(${s.history_segmentCount})`,
         });
     if (s.memoryTokens > 0)
         segs.push({

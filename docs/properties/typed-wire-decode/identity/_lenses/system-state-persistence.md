@@ -15,7 +15,7 @@ External lead: plan KTD2 and latency-audit B1/W5.
   Exclusion from ingress identity is not exclusion from all durable state.
 - `crates/daemon/src/lib.rs:3684-3689` initializes snapshot, output, native,
   and projection caches empty. References use `git show HEAD` for this dirty file.
-- `crates/daemon/src/historian_chunk.rs:665-675` serializes nonsynthetic raw
+- `crates/daemon/src/history_summarizer_chunk.rs:665-675` serializes nonsynthetic raw
   messages. `lib.rs:16443-16461` decodes recovered rows as `IngressMessages`.
 
 ## Contract and candidate

@@ -1,7 +1,7 @@
 //! This module performs pure rendering for project-memory and session-history prompt surfaces.
 
 use crate::canonical_memory::CanonicalMemory;
-use crate::decay_render::{DecayRenderCompartment, render_decayed_compartments};
+use crate::decay_render::{DecayRenderHistorySegment, render_decayed_history_segments};
 use std::cmp::Ordering;
 
 /// `<session-history>` is never omitted so the provider prompt-cache retains a stable breakpoint.
@@ -155,7 +155,7 @@ pub fn render_covered_system_messages_block(messages: &[String]) -> String {
 }
 
 /// `render_m0` receives blocks the caller has already chosen and token-budget-trimmed.
-/// `render_m0` does not choose which rows or history compartments fit the budget.
+/// `render_m0` does not choose which rows or history history_segments fit the budget.
 pub struct M0Inputs<'a> {
     /// Callers pass an empty string when no `<project-docs>` block exists.
     pub project_docs: &'a str,
@@ -165,7 +165,7 @@ pub struct M0Inputs<'a> {
     /// The caller orders system-role fragments by first appearance before passing them to `render_m0`.
     pub covered_system_messages: &'a [String],
     /// The caller supplies chronologically ordered, token-trimmed history; the renderer applies decay.
-    pub compartments: &'a [DecayRenderCompartment],
+    pub history_segments: &'a [DecayRenderHistorySegment],
     /// `history_budget_tokens` is measured before applying the pressure multiplier.
     pub history_budget_tokens: f64,
     /// Values below 1 use an effective multiplier of 1; larger values tighten the effective budget and increase decay.
@@ -190,7 +190,7 @@ pub fn render_m0(inputs: &M0Inputs, estimate_tokens: impl Fn(&str) -> usize) -> 
 
     let effective_budget = inputs.history_budget_tokens / inputs.decay_pressure_multiplier.max(1.0);
     let session_history =
-        render_decayed_compartments(inputs.compartments, effective_budget, estimate_tokens);
+        render_decayed_history_segments(inputs.history_segments, effective_budget, estimate_tokens);
     sections.push(if session_history.is_empty() {
         M0_EMPTY_BODY.to_string()
     } else {
@@ -205,7 +205,7 @@ pub fn render_m0(inputs: &M0Inputs, estimate_tokens: impl Fn(&str) -> usize) -> 
 /// Returns `placeholder` unchanged when every delta block is empty.
 pub fn assemble_m1(
     memory_updates: &str,
-    new_compartments: &str,
+    new_history_segments: &str,
     new_memories: &str,
     new_user_profile: &str,
     placeholder: &str,
@@ -213,7 +213,7 @@ pub fn assemble_m1(
     let mut blocks: Vec<&str> = Vec::with_capacity(4);
     for piece in [
         memory_updates,
-        new_compartments,
+        new_history_segments,
         new_memories,
         new_user_profile,
     ] {
@@ -230,21 +230,21 @@ pub fn assemble_m1(
     )
 }
 
-/// Renders non-empty compartment input at tier 1 inside `<new-compartments>`.
+/// Renders non-empty history_segment input at tier 1 inside `<new-history_segments>`.
 ///
-/// Returns an empty string when `compartments` is empty and preserves input order.
-pub fn render_new_compartments(
-    compartments: &[&crate::decay_render::DecayRenderCompartment],
+/// Returns an empty string when `history_segments` is empty and preserves input order.
+pub fn render_new_history_segments(
+    history_segments: &[&crate::decay_render::DecayRenderHistorySegment],
 ) -> String {
-    if compartments.is_empty() {
+    if history_segments.is_empty() {
         return String::new();
     }
-    let bodies: Vec<String> = compartments
+    let bodies: Vec<String> = history_segments
         .iter()
-        .map(|c| crate::decay_render::render_compartment_at_tier(c, 1))
+        .map(|c| crate::decay_render::render_history_segment_at_tier(c, 1))
         .collect();
     format!(
-        "<new-compartments>\n{}\n</new-compartments>",
+        "<new-history_segments>\n{}\n</new-history_segments>",
         bodies.join("\n\n")
     )
 }

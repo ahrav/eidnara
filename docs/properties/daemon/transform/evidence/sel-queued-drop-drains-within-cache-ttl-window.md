@@ -55,7 +55,7 @@ Two conditions defeat the time bound:
   (`transform.rs:3979-3983`), which `lib.rs:4482` returns for the first
   observation of a session in this process. See
   `sel-eligibility-reads-process-local-scheduler-state`.
-- **`ordinary_historian_veto`.** Even with `pass == Execute`, the veto
+- **`ordinary_history_summarizer_veto`.** Even with `pass == Execute`, the veto
   (`transform.rs:4098-4104`) forces `selection_class` to `PassClass::Defer`
   (`:4131-4135`) and removes the ordinary arm from
   `independent_bust_opportunity` (`:4293-4295`). The selector still runs because
@@ -83,7 +83,7 @@ that a restart resets the idle clock, extending the wait by up to one full TTL.
 ## Timing windows and dependencies
 
 Window one: the configured `cache_ttl` in milliseconds, default 300,000
-(`scheduler.rs:23`). Window two: the historian lease duration, which affects age
+(`scheduler.rs:23`). Window two: the history_summarizer lease duration, which affects age
 reclaim rather than the queue drain and which `transform.rs:601-603` does not
 bound. Window three: one pass, for the mid-tool-use deferral.
 
@@ -104,16 +104,16 @@ The pending-drop fixture pattern is at `transform.rs:23678-23690`.
 
 ## Investigation log
 
-### Q: Is the historian veto bounded for this purpose?
+### Q: Is the history_summarizer veto bounded for this purpose?
 
 - Sources examined: `transform.rs:4098-4104`, `:601-606` (the doc comments on
-  `historian_active` and `wrapup_active`), `:3919-3928` (the parallel freeze in
+  `history_summarizer_active` and `wrapup_active`), `:3919-3928` (the parallel freeze in
   the divergence counter, which cites the 3,800-second wrapup budget).
 - Findings: `wrapup_active` is documented as bounded by
-  `historian::MAX_WRAPUP_REQUEST_BUDGET`, 3,800 seconds
+  `history_summarizer::MAX_WRAPUP_REQUEST_BUDGET`, 3,800 seconds
   (`transform.rs:604-606`), and released on every terminal path.
-  `historian_active` has no stated bound at this call site.
-- Missing evidence: `historian.rs` is 4,682 lines and belongs to sub-part 4a. The
+  `history_summarizer_active` has no stated bound at this call site.
+- Missing evidence: `history_summarizer.rs` is 4,682 lines and belongs to sub-part 4a. The
   lease's maximum duration is not visible from the 4b slice.
 - Conclusion: unresolved, needs the 4a lens. Note that the veto does not block a
   queued agent drop, only age reclaim, so the drain bound in this record survives

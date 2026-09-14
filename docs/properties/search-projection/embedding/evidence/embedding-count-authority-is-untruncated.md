@@ -11,19 +11,19 @@ RP2.1 exact-count path exists at the pinned revision.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/synapse/bundle.rs:63-78` defines TokenizerRefs with
+- `crates/host-runtime/src/local_embeddings/bundle.rs:63-78` defines TokenizerRefs with
   tokenizer, config, special-token map, and tokenizer config artifacts.
 - `bundle.rs:259-278` reads their verified bytes and checks the fingerprint.
 - `bundle.rs:652-702` binds these hashes and embedding-space scalars. Model
   name is deliberately excluded; it is not interchangeable with fingerprint.
-- `crates/host-runtime/src/synapse/inference.rs:297-318` constructs FastEmbed
+- `crates/host-runtime/src/local_embeddings/inference.rs:297-318` constructs FastEmbed
   from those buffers with the manifest's maximum length.
 - `inference.rs:577-589` explicitly counts after truncation. It can certify
   reaching the model window but cannot distinguish at-limit from over-limit.
 - `crates/tokenizer/src/lib.rs:1-8`, `:30-35`, and `:58` describe a separate
   embedded Claude BPE vocabulary, with bounded-piece behavior. It cannot serve
   as the embedding model's exact count authority.
-- The [existing fingerprint record](../../../host-runtime/catalog.md#synapse-bundle-fingerprint-covers-every-artifact)
+- The [existing fingerprint record](../../../host-runtime/catalog.md#local_embeddings-bundle-fingerprint-covers-every-artifact)
   is reused, not cloned. Its tests do not establish count semantics.
 
 ## Failure scenario
@@ -68,8 +68,8 @@ Route fixture and type-boundary decisions to `/testing:test-strategy`.
 
 ### Q: What independently certifies exact model token count?
 
-- Sources examined: Tokenizer catalog, Synapse fingerprint/corpus checks, P1.
-- Findings: Claude golden IDs belong to a different vocabulary; Synapse corpus
+- Sources examined: Tokenizer catalog, LocalEmbeddings fingerprint/corpus checks, P1.
+- Findings: Claude golden IDs belong to a different vocabulary; LocalEmbeddings corpus
   expectations are vectors rather than full untruncated token sequences.
 - Missing evidence: An approved immutable sequence fixture and its special-token
   and padding contract, produced independently of the proposed counter.

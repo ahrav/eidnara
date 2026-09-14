@@ -17,7 +17,7 @@ ordering is UTF-8 byte order, which equals code-point order.
 
 At HEAD no TypeScript encoder reads the fixture (see the investigation log), so
 the question the record can answer here is narrower: does the Rust encoder emit
-one byte sequence per value, and does the Dreamer request digest follow the
+one byte sequence per value, and does the MemoryClassifier request digest follow the
 documented formula over those bytes.
 
 ## Evidence trail
@@ -38,7 +38,7 @@ The Rust side at HEAD, `crates/context-core/src/canonical_json.rs`:
   `i64::MAX` has no `as_i64` view and falls through to the `f64` path, where its
   magnitude fails the range check (`:40-41`).
 - `:128-135` hashes `<protocol>`, `\n`, then the canonical bytes; `:139-141`
-  binds the Dreamer protocol string to it.
+  binds the MemoryClassifier protocol string to it.
 - Recursion at `:88` (arrays) and `:101` (objects) means nested values encode
   through the same rules.
 
@@ -71,11 +71,11 @@ Fixture breadth at HEAD, enumerated: 5 `canonicalization` cases
 
 Live consumers at HEAD:
 
-- `crates/memory-store/src/dreamer_ledger.rs:685-688` wraps
-  `compute_dreamer_request_digest`; `crates/daemon/src/lib.rs:9579-9588`
+- `crates/memory-store/src/memory_classifier_ledger.rs:685-688` wraps
+  `compute_memory_classifier_request_digest`; `crates/daemon/src/lib.rs:9579-9588`
   digests the classify request's effect-defining inputs through it, and
-  `:9624` passes the digest into `begin_dreamer_receipt`.
-- `crates/memory-store/src/dreamer_ledger.rs:318-321` compares a stored
+  `:9624` passes the digest into `begin_memory_classifier_receipt`.
+- `crates/memory-store/src/memory_classifier_ledger.rs:318-321` compares a stored
   receipt's `request_digest` against the incoming one and reports
   `DigestConflict` on a mismatch.
 - `crates/memory-store/src/lib.rs:3206-3212` encodes a durable JSON value
@@ -91,13 +91,13 @@ whose digest is not stable across the runtimes that originally shared the
 vocabulary.
 
 Different canonical bytes mean a different SHA-256 through `protocol_digest`
-(`:128-135`) and therefore a different `compute_dreamer_request_digest`
-(`:139-141`). The consequence follows the digest's job in the Dreamer ledger.
-`run_dreamer_task` computes the digest over the request's effect-defining
+(`:128-135`) and therefore a different `compute_memory_classifier_request_digest`
+(`:139-141`). The consequence follows the digest's job in the MemoryClassifier ledger.
+`run_memory_classifier_task` computes the digest over the request's effect-defining
 inputs (`crates/daemon/src/lib.rs:9579-9588`) and hands it to
-`begin_dreamer_receipt` (`:9624`). If the same command's retry digests
-differently, `dreamer_ledger.rs:318` reports `DigestConflict` and the daemon
-returns `dreamer_request_conflict` (`lib.rs:9646-9652`) instead of replaying
+`begin_memory_classifier_receipt` (`:9624`). If the same command's retry digests
+differently, `memory_classifier_ledger.rs:318` reports `DigestConflict` and the daemon
+returns `memory_classifier_request_conflict` (`lib.rs:9646-9652`) instead of replaying
 the recorded outcome (`:9626-9628`). If two different requests digest the
 same, the second is treated as a replay of the first and reads the first's
 result. A byte change in the encoder also changes the text the durable-write
@@ -135,7 +135,7 @@ discriminating cases; the property test should widen coverage:
 4. Nested arrays and objects to depth 3 or more, since `encode_canonical_value`
    recurses at `:88` and `:101`.
 5. For every generated object, a permutation of its key insertion order, and
-   the assertion that both encode to the same bytes and the same Dreamer
+   the assertion that both encode to the same bytes and the same MemoryClassifier
    digest.
 6. The acceptance boundary: `canonical_json_encode` succeeds if and only if
    every number is finite, integral, and within `±(2^53 - 1)`.
@@ -144,7 +144,7 @@ discriminating cases; the property test should widen coverage:
    accept/reject verdicts, restricted to values Rust can represent (Rust `&str`
    cannot hold a lone surrogate).
 
-Semantics: `always`. Every Dreamer command digests through this path before
+Semantics: `always`. Every MemoryClassifier command digests through this path before
 its receipt is written, so the law must hold at every evaluation. There is no
 optional path and no situation to reach, only an input domain to cover.
 
@@ -215,13 +215,13 @@ optional path and no situation to reach, only an input domain to cover.
   twin this record was raised against and shares no vocabulary with it. The
   module header still says the encoding is "shared with the TypeScript runtime";
   that names the host repository's encoder, which this repository does not
-  carry. The Rust encoder's only consumers here are the Dreamer request digest
-  (`crates/memory-store/src/dreamer_ledger.rs:686`, called from
+  carry. The Rust encoder's only consumers here are the MemoryClassifier request digest
+  (`crates/memory-store/src/memory_classifier_ledger.rs:686`, called from
   `crates/daemon/src/lib.rs:9579`) and the durable-write redaction scan
   (`crates/memory-store/src/lib.rs:3206`), both Rust.
 - Missing evidence: none for the question as asked.
 - Conclusion: resolved with answer. The record's cross-runtime clause has no
   second runtime to compare against at HEAD, so the catalog states the record as
-  the Rust encoder's byte stability and the Dreamer digest formula, and keeps the
+  the Rust encoder's byte stability and the MemoryClassifier digest formula, and keeps the
   cross-runtime clause as an open question for the day an encoder under the
   fixture is added here.

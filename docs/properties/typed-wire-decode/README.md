@@ -110,7 +110,7 @@ Per-part evaluation files retain findings and dispositions. These are catalog
 reviews, not the owner's required five parallel reviews of every future PR.
 
 The specification preserves unresolved owner decisions on golden partitions,
-legacy durable state, historian reachability, raw-token behavior, W1 status,
+legacy durable state, history_summarizer reachability, raw-token behavior, W1 status,
 frozen witness retuning, allocation attribution, pool coverage, and neighboring
 exact-ingress expectations. A catalog entry is a claim under test, not a
 compatibility waiver. Publication approval does not mark these properties

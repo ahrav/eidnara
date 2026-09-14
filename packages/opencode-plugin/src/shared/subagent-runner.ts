@@ -1,6 +1,6 @@
 /**
  *
- * Eidnara spawns historian, dreamer, and sidekick subagents.
+ * Eidnara spawns history_summarizer, memory_classifier, and context_researcher subagents.
  * OpenCode and Pi expose different child-agent APIs.
  *
  * OpenCode creates, prompts, reads, and deletes child sessions through its SDK.
@@ -35,7 +35,7 @@ import type { HarnessId } from "./harness";
  * OpenCode passes `cwd` as `query.directory`.
  * Pi uses `cwd` as the spawn cwd.
  * `signal` lets callers cancel an in-flight run.
- * Dreamer uses `signal` to abort lease renewal when it loses the lease.
+ * MemoryClassifier uses `signal` to abort lease renewal when it loses the lease.
  */
 export interface SubagentRunOptions {
     agent: string;
@@ -50,7 +50,7 @@ export interface SubagentRunOptions {
      * Pi passes `thinkingLevel` as `--thinking <level>`.
      * Pi uses `thinkingLevel`; OpenCode uses the agent config's `variant` for thinking and reasoning.
      *
-     * `thinkingLevel` is required when the configured historian or dreamer model supports reasoning.
+     * `thinkingLevel` is required when the configured history_summarizer or memory_classifier model supports reasoning.
      * Pi's default thinking-level resolution can select a value the provider rejects.
      * Set `thinkingLevel` to `"off"` to disable thinking.
      */
@@ -58,7 +58,7 @@ export interface SubagentRunOptions {
 
     /**
      * The runner invokes `onProgress` for run milestones.
-     * Historian, dreamer, and sidekick use `onProgress` to write lifecycle entries.
+     * HistorySummarizer, memory_classifier, and context_researcher use `onProgress` to write lifecycle entries.
      * They write lifecycle entries to `eidnara.log` without writing them to stdout.
      *
      * Progress callbacks must return promptly and must not throw.
@@ -69,11 +69,11 @@ export interface SubagentRunOptions {
     /** Harness runners persist `subagent_invocations` when accounting metadata is present. */
     accountingSessionId?: string | undefined;
     accountingSubagent?:
-        | "historian"
-        | "historian_editor"
+        | "history_summarizer"
+        | "history_summarizer_editor"
         | "compressor"
-        | "dreamer"
-        | "sidekick"
+        | "memory_classifier"
+        | "context-researcher"
         | "user_memory_review"
         | "recomp"
         | undefined;

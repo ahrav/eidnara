@@ -539,13 +539,13 @@ describe("resolveEidnaraPrefs (per-key validation)", () => {
                 order: "nope",
                 rememberCollapsed: 1,
                 collapsed: true,
-                sections: { historian: false, memory: "bad" },
+                sections: { history_summarizer: false, memory: "bad" },
             },
         });
         expect(prefs.order).toBe(DEFAULT_SLOT_ORDER); // bad → default
         expect(prefs.rememberCollapsed).toBe(true); // bad → default true
         expect(prefs.collapsed).toBe(true); // valid bool preserved
-        expect(prefs.sections.historian).toBe(false); // valid bool preserved
+        expect(prefs.sections.history_summarizer).toBe(false); // valid bool preserved
         expect(prefs.sections.memory).toBe(true); // bad → default true
     });
 

@@ -283,7 +283,7 @@ describe("encodeOpenCodeMessagesToCk", () => {
                     },
                     {
                         type: "tool",
-                        name: "ctx_reduce",
+                        name: "eidnara_reduce",
                         callID: "c2",
                         state: { status: "pending" },
                     },
@@ -294,7 +294,7 @@ describe("encodeOpenCodeMessagesToCk", () => {
         const names = (encoded.ck.content as Array<{ kind: { name: string } }>).map(
             (block) => block.kind.name,
         );
-        expect(names).toEqual(["todowrite", "ctx_reduce", "tool"]);
+        expect(names).toEqual(["todowrite", "eidnara_reduce", "tool"]);
     });
 
     it("synthesizes the daemon's deterministic id for a tool part without one", () => {

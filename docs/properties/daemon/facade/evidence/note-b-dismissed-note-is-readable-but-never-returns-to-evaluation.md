@@ -20,6 +20,7 @@ what can undo it.
     WHERE id = ?4 AND project_path = ?5
       AND status = ?6 AND status_version = ?7
    ```
+
    (`crates/memory-store/src/lib.rs:4580-4596`, and the non-transaction variant at
    `:10507-10563`)
 
@@ -30,6 +31,7 @@ what can undo it.
        .map(|value| format!("{}\n\nResolution: {value}", current.content))
        .unwrap_or_else(|| current.content.clone());
    ```
+
    (`:4575-4577`)
 
    So the pre-dismissal content is a prefix of the post-dismissal content, and with
@@ -41,11 +43,11 @@ what can undo it.
    dismissal of the same note is refused rather than applied twice. The facade turns
    that `None` into an error text (`crates/daemon/src/lib.rs:11894-11900`).
 
-4. The row is readable afterwards. `ctx_note read` maps
+4. The row is readable afterwards. `eidnara_note read` maps
    `filter: "dismissed"` to `vec!["dismissed"]` (`lib.rs:11721`) and
    `filter: "all"` to a six-status list that includes it (`:11722-11729`). The
    default filter does not: `None => vec!["active", "ready"]` (`:11717`), narrowed
-   further to `vec!["active"]` for session notes and `vec!["ready"]` for smart notes
+   further to `vec!["active"]` for session notes and `vec!["ready"]` for conditional notes
    (`:11733-11742`). So a dismissed note is retrievable but only on request.
 
 5. There is no facade path back. `update` loads the note and filters the status to
@@ -55,12 +57,12 @@ what can undo it.
    update" (`:11815-11818`). The store's `update_note_cas` would refuse anyway,
    because the facade passes `&current.status` as the expected status
    (`:11841`) and the CAS compares it (`memory-store:10428-10437`). The
-   `ctx_note` action vocabulary is `write | read | update | dismiss` plus the
+   `eidnara_note` action vocabulary is `write | read | update | dismiss` plus the
    catch-all error arm (`lib.rs:11566`, `:11914`); no un-dismiss action exists.
 
 6. Evaluation can never see it again. The candidate query requires
    `status = 'pending'` (`memory-store:13293`), and `eligible` requires the same
-   (`crates/daemon/src/smart_note_evaluation.rs:705`). Nothing sets
+   (`crates/daemon/src/conditional_note_evaluation.rs:705`). Nothing sets
    `status` back to `'pending'` from `'dismissed'`: the only writers of
    `status = 'pending'` are the two inserts (`memory-store:10187`, `:4426`), the
    completion UPDATE which itself requires `status = 'pending'` in its WHERE clause
@@ -90,7 +92,7 @@ what can undo it.
 The retention half is currently sound, so the scenario is a regression in the
 fence, which is the half with a real failure mode.
 
-A smart note's condition has fired and it is `status = 'ready'`. The user dismisses
+A conditional note's condition has fired and it is `status = 'ready'`. The user dismisses
 it. Concurrently, an evaluator holds a `due`-phase claim on the same note issued
 before it became ready.
 
@@ -101,9 +103,9 @@ evaluator's `complete` returns `Conflict { kind: "stale" }` and writes nothing.
 
 Without the fence, and with the completion comparison also relaxed: the evaluator
 completes with `due met`. `reduce_due`'s `Met` arm calls `ready_fields`
-(`smart_note_evaluation.rs:558-565`), which sets
+(`conditional_note_evaluation.rs:558-565`), which sets
 `state.status = "ready"` unconditionally (`:421`). The dismissed note is
-resurrected into `ready`, and `ready` is in the default read filter for smart notes
+resurrected into `ready`, and `ready` is in the default read filter for conditional notes
 (`lib.rs:11742`), so it reappears in the model's note list with a fresh
 `ready_at` and a `ready_reason` asserting its check returned true. The user's
 dismissal is silently undone, and the `dismissed_at` and `dismissal_resolution`
@@ -120,7 +122,7 @@ update.
 
 The evaluation-exclusion assertion has a window equal to the claim's lifetime,
 which for a `due` claim is one sandbox execution and for `compile` or `fallback`
-includes a model round trip. The interleaving to construct is a `ctx_note dismiss`
+includes a model round trip. The interleaving to construct is a `eidnara_note dismiss`
 landing between a `note.evaluation.next` and its matching
 `note.evaluation.complete`. Both are ordinary API calls; no fault injection is
 required.
@@ -129,7 +131,7 @@ required.
 
 Three assertions, in increasing cost.
 
-1. Retention, no store fixture beyond a note. Write a smart note with a condition,
+1. Retention, no store fixture beyond a note. Write a conditional note with a condition,
    `dismiss` it with a resolution string, then `read` with `filter: "dismissed"`.
    Assert the note is returned, and assert the original content is a prefix of the
    returned content. Then `read` with the default filter and assert it is absent, so
@@ -140,7 +142,7 @@ Three assertions, in increasing cost.
    still `dismissed` and its `status_version` advanced exactly once across both
    attempts, which proves the refusals were refusals and not silent no-op writes.
 3. Exclusion under a live claim, needs the protocol. Register an evaluator, insert a
-   pending smart note, `note.evaluation.next` to obtain a claim, `ctx_note dismiss`,
+   pending conditional note, `note.evaluation.next` to obtain a claim, `eidnara_note dismiss`,
    then `note.evaluation.complete` with `{"phase":"due","kind":"met"}`. Assert the
    response is `{"result":"stale"}` and that the note's `status` is still
    `dismissed`, `ready_at` is NULL, and `ready_reason` is NULL. The last three are
@@ -151,9 +153,9 @@ Three assertions, in increasing cost.
 
 ### Q: Is the absence of an un-dismiss action deliberate?
 
-- Sources examined: the `ctx_note` action dispatch (`lib.rs:11566-11570` deriving
+- Sources examined: the `eidnara_note` action dispatch (`lib.rs:11566-11570` deriving
   the action, `:11605-11915` the match arms, `:11914` the catch-all), the advertised
-  schema `ctx_note_schema` (`:15790-15991` region contains the four `ctx_*`
+  schema `eidnara_note_schema` (`:15790-15991` region contains the four `ctx_*`
   schemas), the `update` status filter (`:11806-11813`), the store's
   `dismiss_note_cas` (`memory-store:10565`), and
   `docs/specs/prompt-surface/load-bearing-rules-checklist.md:1125` (source-catalog path, not present at HEAD), which describes
@@ -169,13 +171,14 @@ Three assertions, in increasing cost.
 - Missing evidence: whether the TypeScript authority offers an un-dismiss or
   restore action. If it does, the two authorities diverge on the note vocabulary,
   which would matter for the cross-language claim at
-  `smart_note_evaluation.rs:1-6`, though that claim is scoped to the evaluation
+  `conditional_note_evaluation.rs:1-6`, though that claim is scoped to the evaluation
   fixture and not to the facade vocabulary.
 - Conclusion: needs human input on whether one-way is intended. The behaviour is
   confirmed and internally coherent; the checklist's "retires" is suggestive but is
   a description, not a contract.
 
 ### Q: Does anything other than dismissal remove a note from evaluation without
+
 deleting it?
 
 - Sources examined: every writer of `notes.status` in `memory-store/src/lib.rs`
@@ -184,17 +187,17 @@ deleting it?
   completion UPDATE at `:13617`), plus the two `DELETE FROM notes` sites
   (`:8675`, `:11393`).
 - Findings: two more, both legitimate and neither a silent drop. A `met` outcome
-  moves a note to `ready` (`smart_note_evaluation.rs:421`), which removes it from
+  moves a note to `ready` (`conditional_note_evaluation.rs:421`), which removes it from
   the candidate set, and that is the success path. A compiler edit moves it back to
   `pending` and clears the check lifecycle
   (`memory-store:12849-12866`), which returns it to evaluation rather than removing it.
   The two DELETEs are session-scoped teardown (`:8675`, keyed on
-  `session_id` and `type = 'session'`, so it cannot touch a smart note) and
+  `session_id` and `type = 'session'`, so it cannot touch a conditional note) and
   store-scoped teardown (`:11393`, keyed on `context_store_uuid`), which Parts 3
   and 4c own.
 - Missing evidence: none.
 - Conclusion: resolved with answer. Dismissal is the only user-driven removal from
   evaluation, the `ready` transition is the only automatic one, and neither is
   silent. Notably the session-note DELETE at `:8675` is filtered to
-  `type = 'session'`, so a recomp cannot drop a smart note, which is worth stating
+  `type = 'session'`, so a recomp cannot drop a conditional note, which is worth stating
   because it was the most plausible candidate for an unintended drop.

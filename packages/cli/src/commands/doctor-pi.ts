@@ -14,7 +14,7 @@ import { stringify as stringifyJsonc } from "comment-json";
 
 import { writeFileAtomic } from "../lib/atomic-write";
 import { collectDiagnostics, sanitizeString } from "../lib/diagnostics-pi";
-import { describeHistorianDumps } from "../lib/historian-dumps";
+import { describeHistorySummarizerDumps } from "../lib/history_summarizer-dumps";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
 import { readLogTailLines } from "../lib/log-tail";
@@ -299,23 +299,26 @@ async function runHealthChecks(options: {
         add(results, "pass", "Pi Eidnara config loads successfully");
     }
 
-    const historianModel = loadedConfig.config.historian?.model?.trim() ?? "";
-    const historianThinkingLevel = loadedConfig.config.historian?.thinking_level;
-    if (historianModel.startsWith("github-copilot/") && !historianThinkingLevel) {
+    const history_summarizerModel = loadedConfig.config.history_summarizer?.model?.trim() ?? "";
+    const history_summarizerThinkingLevel = loadedConfig.config.history_summarizer?.thinking_level;
+    if (history_summarizerModel.startsWith("github-copilot/") && !history_summarizerThinkingLevel) {
         add(
             results,
             "warn",
-            `historian.model "${historianModel}" is a GitHub Copilot reasoning model but ` +
-                `historian.thinking_level is not set. GitHub Copilot may apply a bad ` +
+            `history_summarizer.model "${history_summarizerModel}" is a GitHub Copilot reasoning model but ` +
+                `history_summarizer.thinking_level is not set. GitHub Copilot may apply a bad ` +
                 `default reasoning_effort that it then rejects (400 error). ` +
-                `Set historian.thinking_level to "medium" (or "off" to disable thinking) ` +
+                `Set history_summarizer.thinking_level to "medium" (or "off" to disable thinking) ` +
                 `in your eidnara.jsonc.`,
         );
-    } else if (historianModel.startsWith("github-copilot/") && historianThinkingLevel) {
+    } else if (
+        history_summarizerModel.startsWith("github-copilot/") &&
+        history_summarizerThinkingLevel
+    ) {
         add(
             results,
             "pass",
-            `historian.model "${historianModel}" has thinking_level "${historianThinkingLevel}" configured`,
+            `history_summarizer.model "${history_summarizerModel}" has thinking_level "${history_summarizerThinkingLevel}" configured`,
         );
     }
 
@@ -368,7 +371,9 @@ async function runHealthChecks(options: {
     }
 
     const diagnosticsForDumps = await collectDiagnostics(options.cwd);
-    for (const line of describeHistorianDumps(diagnosticsForDumps.historianDumps)) {
+    for (const line of describeHistorySummarizerDumps(
+        diagnosticsForDumps.history_summarizerDumps,
+    )) {
         add(results, line.status, line.message);
     }
 

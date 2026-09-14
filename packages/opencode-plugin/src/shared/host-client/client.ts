@@ -1632,7 +1632,7 @@ const PROTOCOL_HOST_OPS: readonly string[] = [
     "host.status",
 ];
 /** Wire doc 7.3: an unfiltered `catalog.list` returns exactly these modules in this order. */
-const PROTOCOL_MODULE_IDS: readonly string[] = ["context", "synapse", "broca"];
+const PROTOCOL_MODULE_IDS: readonly string[] = ["context", "local_embeddings", "model_execution"];
 
 function malformedCatalog(detail: string): HostCallError {
     return new HostCallError(

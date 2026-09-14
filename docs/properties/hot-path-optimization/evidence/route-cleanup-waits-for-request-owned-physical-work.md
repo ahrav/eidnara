@@ -221,9 +221,9 @@ units through [the RequestCtx runner][unit-runner]. The original receipt belongs
 to `d6060f79`, developed over `f2c8eab0` and implementation base `96709d0e`.
 Relocation anchors now describe the formatted working tree atop `e451a2b4`.
 The first unit owns pre-transform work, commit, lineage insertion, guidance-pin
-removal, historian preparation, and ordinary settlement. Emergency95 waits run
+removal, history_summarizer preparation, and ordinary settlement. Emergency95 waits run
 on the async side, with later rerun and settlement units joined through the
-same host seam. An inline historian follow-up's rerun and settlement share one
+same host seam. An inline history_summarizer follow-up's rerun and settlement share one
 unit. The daemon adds no second route drain.
 
 The [real-host interruption tests][host-unit-tests] run `Handler::handle`, not

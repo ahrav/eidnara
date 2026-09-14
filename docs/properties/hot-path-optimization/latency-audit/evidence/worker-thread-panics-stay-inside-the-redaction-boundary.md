@@ -216,7 +216,7 @@ adds six delivery cases: `Panicked`, `RuntimeStopped`, and `RouteClosing` at
 submissions one and two. `FailingRunner` drops the selected closure without
 executing it and returns the selected error. Submission one leaves no session
 row or receive trace. Submission two follows a real Emergency95 transform and
-inline historian publication; initialized durable state and a positive publication
+inline history_summarizer publication; initialized durable state and a positive publication
 floor remain. All cases check prepared `internal_error`, exact scratch return,
 and four available unit permits. This test does not stop a runtime, race actual
 route closure, inject a worker panic, or decode a host wire error. The real-host

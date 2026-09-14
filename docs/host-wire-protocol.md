@@ -1,7 +1,7 @@
 # `host-runtime` Wire Protocol and Handshake
 
 Status: normative direct-linked static three-target profile
-Wire version: 2
+Wire version: 3
 Connection-file schema: 2
 Lifecycle-record schema: 1
 
@@ -11,18 +11,18 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** ar
 
 This document is the direct-only wire authority. `host-runtime` owns the Rust wire, authentication, discovery, control, routing, and managed-client contracts. Repository implementations and conformance tests provide executable evidence; historical published-package behavior is provenance only and cannot enable a compatibility path.
 
-Canonical version-2 literals are part of this contract. In particular, `host_ops`, `connection.json`, `EIDNARA_MODULE_ID`, `EIDNARA_LAUNCH_NONCE`, `eidnara-server-v1`, and `eidnara-client-v1` MUST NOT be renamed without a separately versioned wire or lifecycle migration.
+Canonical version-3 literals are part of this contract. In particular, `host_ops`, `connection.json`, `EIDNARA_MODULE_ID`, `EIDNARA_LAUNCH_NONCE`, `eidnara-server-v3`, and `eidnara-client-v3` MUST NOT be renamed without a separately versioned wire or lifecycle migration.
 
 ## 2. Profile, actors, and trust boundary
 
-`host-runtime` directly links one static composite handler and serves exactly three immutable modules: `context` (role `tool_provider`), `synapse` (role `management_surface`), and `broca` (role `management_surface`). The composition is fixed at startup: there is no dynamic registration, catalog mutation, plugin loading, or module supervision, and `host-runtime` is not a remote transport.
+`host-runtime` directly links one static composite handler and serves exactly three immutable modules: `context` (role `tool_provider`), `local_embeddings` (role `management_surface`), and `model_execution` (role `management_surface`). The composition is fixed at startup: there is no dynamic registration, catalog mutation, plugin loading, or module supervision, and `host-runtime` is not a remote transport.
 
 Actors:
 
 - **Host:** `host-runtime`; owns credentials, connection generations, ring setup, channels, epochs, correlations, and component lifecycle.
-- **Managed TypeScript client:** `McHostClient` and `McHostModuleTransport`; own secure discovery, authentication, mandatory ring attachment, route epochs, deadlines, cancellation, Ping/Pong, and cleanup for plugin, Synapse, wake-plane, CLI, and fixture callers.
-- **Managed Rust client:** `host_runtime::Client`; owns the same boundary for `HistorianProducer` and Rust fixtures, including typed send outcomes, streaming, checked correlation allocation, reserved control admission, and deterministic close.
-- **Handler:** the directly linked static composite; receives initialization, target-aware bind, request, route-gone, internal health, and shutdown callbacks and dispatches each to `context`, `synapse`, or `broca`.
+- **Managed TypeScript client:** `HostClient` and `HostModuleTransport`; own secure discovery, authentication, mandatory ring attachment, route epochs, deadlines, cancellation, Ping/Pong, and cleanup for plugin, LocalEmbeddings, wake-plane, CLI, and fixture callers.
+- **Managed Rust client:** `host_runtime::Client`; owns the same boundary for `HistorySummarizerProducer` and Rust fixtures, including typed send outcomes, streaming, checked correlation allocation, reserved control admission, and deterministic close.
+- **Handler:** the directly linked static composite; receives initialization, target-aware bind, request, route-gone, internal health, and shutdown callbacks and dispatches each to `context`, `local_embeddings`, or `model_execution`.
 
 The 32-byte connection key is a bearer capability. Possession grants every direct-profile operation, including host-global `host.shutdown` (Section 7.6), and permits any `BindIdentity`. Client `role`, `consumer_identity`, `project_root`, `harness`, and `session` are claims or scoping metadata; none grants authority. A key reader MUST therefore be trusted as the same local security principal as the host, and every key reader is stop-capable: a diagnostic or proxy principal that holds the bearer is not read-only, whatever its role label or mount permissions claim.
 
@@ -36,8 +36,8 @@ flowchart TB
   CF --> RC[Managed Rust clients]
   TS <-->|authenticate and receive descriptors| US[Owner-only Unix setup socket]
   RC <-->|authenticate and receive descriptors| US
-  TS <-->|v2 application frames| R[Shared-memory ring]
-  RC <-->|v2 application frames| R
+  TS <-->|v3 application frames| R[Shared-memory ring]
+  RC <-->|v3 application frames| R
   US --> H[host-runtime]
   R --> H
   H -->|initialize, bind, handle, route-gone, health| M[Linked Handler]
@@ -72,7 +72,7 @@ Clients MUST read `${dataDir}/eidnara/run/connection.json`. Host and client conf
 ```json
 {
   "schema": 2,
-  "wire_version": 2,
+  "wire_version": 3,
   "setup_socket": "/home/user/.local/share/eidnara/run/setup.sock",
   "key": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
   "daemon_id": [96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111],
@@ -83,13 +83,13 @@ Clients MUST read `${dataDir}/eidnara/run/connection.json`. Host and client conf
 
 Example bytes are deterministic and non-secret. Real key and daemon-ID bytes MUST come from the OS CSPRNG.
 
-Writers MUST include numeric `wire_version: 2`. Clients MUST reject an absent, null, string, fractional, or non-2 value before dialing the setup socket. There is no omission default and no version downgrade.
+Writers MUST include numeric `wire_version: 3`. Clients MUST reject an absent, null, string, fractional, or non-3 value before dialing the setup socket. There is no omission default and no version downgrade.
 
 A client MUST:
 
 1. open the parent and connection file without following links, then take one descriptor-anchored regular-file snapshot capped at 65,536 bytes;
 2. reject a larger file before JSON parsing;
-3. require schema 2, numeric wire version 2, a nonempty absolute `setup_socket` path, exactly 32 key bytes, exactly 16 daemon-ID bytes, a numeric PID, and a nonempty daemon version;
+3. require schema 2, numeric wire version 3, a nonempty absolute `setup_socket` path, exactly 32 key bytes, exactly 16 daemon-ID bytes, a numeric PID, and a nonempty daemon version;
 4. verify owner-only regular-file metadata before and after the read and verify the directory entry still names the same file;
 5. dial `setup_socket` as a Unix stream socket;
 6. reject a relative `setup_socket`, since the host resolves it from its own data directory and a relative path names a different socket for a client with another working directory;
@@ -184,8 +184,8 @@ Host-owned authentication uses these fixed parameters:
 | Client nonce | 32 OS-CSPRNG bytes |
 | Server nonce | 32 OS-CSPRNG bytes |
 | Proof | 32-byte HMAC-SHA256 |
-| Server domain | ASCII `eidnara-server-v1` |
-| Client domain | ASCII `eidnara-client-v1` |
+| Server domain | ASCII `eidnara-server-v3` |
+| Client domain | ASCII `eidnara-client-v3` |
 
 Only lengths and domains are constants. Both nonces MUST be freshly generated from the OS CSPRNG for every handshake attempt and MUST NOT be reused within or across connections or host incarnations. Server-nonce freshness is the replay defense: a reused server nonce would let an observer replay a previously captured `client_auth` under a replayed client nonce.
 
@@ -201,7 +201,7 @@ sequenceDiagram
   C->>H: ClientAuth {client_auth}
   Note over H: constant-time verify
   H-->>C: two ring descriptors + activation data
-  Note over C,H: validate current identity, attach, commit; v2 ring traffic enabled
+  Note over C,H: validate current identity, attach, commit; v3 ring traffic enabled
 ```
 
 Canonical JSON shapes:
@@ -211,11 +211,11 @@ Canonical JSON shapes:
 ```
 
 ```json
-{"daemon_id":[96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111],"server_nonce":[64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95],"daemon_ver":"eidnara-host/0.1.0","server_proof":[89,41,95,101,15,43,108,51,132,228,206,117,229,243,55,238,35,54,116,7,168,92,82,74,242,210,114,64,98,38,64,56]}
+{"daemon_id":[96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111],"server_nonce":[64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95],"daemon_ver":"eidnara-host/0.1.0","server_proof":[8,85,246,183,53,167,124,30,98,139,55,104,107,155,175,182,20,23,143,13,243,82,19,62,37,43,103,85,123,176,4,192]}
 ```
 
 ```json
-{"client_auth":[140,161,69,27,18,230,236,54,6,199,49,76,154,250,81,84,78,160,182,108,253,146,214,55,25,147,137,168,222,41,215,159]}
+{"client_auth":[96,31,69,109,112,178,81,45,173,45,35,155,120,185,24,14,40,8,205,217,4,190,7,244,224,111,20,3,121,200,83,101]}
 ```
 
 Those proofs use key bytes `00..1f`, client nonce `20..3f`, server nonce `40..5f`, daemon version `eidnara-host/0.1.0`, and daemon ID `60..6f`. For domain `D`, proof bytes are:
@@ -237,12 +237,12 @@ Any malformed JSON, wrong array length, oversized message, nonce-generation fail
 
 ### 6.1 Header
 
-After authentication, peers exchange a fixed 21-byte v2 header followed by `len` opaque body bytes. Integers are little-endian.
+After authentication, peers exchange a fixed 21-byte v3 header followed by `len` opaque body bytes. Integers are little-endian.
 
 | Offset | Width | Field | Constraint |
 | ---: | ---: | --- | --- |
 | 0 | 4 | `len: u32` | `0..=67,108,864` |
-| 4 | 1 | `ver: u8` | exactly 2 |
+| 4 | 1 | `ver: u8` | exactly 3 |
 | 5 | 1 | `type: u8` | `0..=11` per table below |
 | 6 | 1 | `flags: u8` | valid bit fields below |
 | 7 | 2 | `channel: u16` | 0 is control; routed channels are nonzero |
@@ -303,7 +303,7 @@ Any structurally illegal channel, epoch, correlation, body, or direction closes 
 
 ### 6.3 Reading, limits, and corruption
 
-The interoperability body maximum is exactly 64 MiB (`67,108,864` bytes). A conforming implementation MUST be able to accept one otherwise valid maximum-size frame on an admitted authenticated connection. A deployment MAY cap concurrent connections, aggregate buffered bytes, routes, pending correlations, handler tasks, queues, and diagnostics, but MUST NOT advertise v2 conformance while rejecting an otherwise valid frame solely because its declared length is at or below 64 MiB.
+The interoperability body maximum is exactly 64 MiB (`67,108,864` bytes). A conforming implementation MUST be able to accept one otherwise valid maximum-size frame on an admitted authenticated connection. A deployment MAY cap concurrent connections, aggregate buffered bytes, routes, pending correlations, handler tasks, queues, and diagnostics, but MUST NOT advertise v3 conformance while rejecting an otherwise valid frame solely because its declared length is at or below 64 MiB.
 
 Aggregate resource policy takes effect between frames, before admitting more connections/work, or after a complete frame reaches a profile/application limit. For example, `Handler` may return terminal `invalid_params` for its 1 MiB facade or 32 MiB transform limits after transport framing accepts the body. Local limits never change header bytes.
 
@@ -318,16 +318,16 @@ Writers MUST verify header `len` equals body length, reserve enough bounded ring
 The compact canonical `route.open` request defined in Section 7.2 is 167 UTF-8 bytes. Its `Request` header uses Interactive/Normal flags, control channel, epoch 0, correlation 1:
 
 ```text
-a7 00 00 00  02 00 02  00 00  00 00 00 00  01 00 00 00 00 00 00 00
+a7 00 00 00  03 00 02  00 00  00 00 00 00  01 00 00 00 00 00 00 00
 |--- len ---| ver ty fl | ch  |--- epoch --|--------- corr ----------|
 ```
 
-Hex without spacing: `a70000000200020000000000000100000000000000`.
+Hex without spacing: `a70000000300020000000000000100000000000000`.
 
 A routed 44-byte Background/Normal request on channel 7, epoch 77, correlation 2 has header:
 
 ```text
-2c00000002000407004d0000000200000000000000
+2c00000003000407004d0000000200000000000000
 ```
 
 ## 7. Control and application messages
@@ -361,7 +361,7 @@ Required compact canonical request:
 {"op":"route.open","target":{"kind":"tool_provider","module_id":"context"},"identity":{"project_root":"/workspace/project","harness":"opencode","session":"session-1"}}
 ```
 
-Optional `consumer_identity` is `{module_id, launch_nonce}`. Optional `consumer_capabilities` is an array of strings. Optional `admission_facts` is any bounded JSON value. Managed callers may include `identity.credential_fingerprints`, a provider-to-HMAC map derived from the authenticated connection bearer and the current qualified credential row. The derived key is `HMAC-SHA256(connection_key, "eidnara-broca-credential-v1")`; each value is `HMAC-SHA256(derived_key, canonical_row_encoding)` rendered as 64 lowercase hex, where canonical row encoding is the U9 length-prefixed `harness-provider-name-length-value/1` contract. Values are protocol-internal and never credentials. Absence means no claim/capability/facts; it is not a denied claim. The bearer key remains authority.
+Optional `consumer_identity` is `{module_id, launch_nonce}`. Optional `consumer_capabilities` is an array of strings. Optional `admission_facts` is any bounded JSON value. Managed callers may include `identity.credential_fingerprints`, a provider-to-HMAC map derived from the authenticated connection bearer and the current qualified credential row. The derived key is `HMAC-SHA256(connection_key, "eidnara-model-execution-credential-v3")`; each value is `HMAC-SHA256(derived_key, canonical_row_encoding)` rendered as 64 lowercase hex, where canonical row encoding is the U9 length-prefixed `harness-provider-name-length-value/1` contract. Values are protocol-internal and never credentials. Absence means no claim/capability/facts; it is not a denied claim. The bearer key remains authority.
 
 Successful response MUST retain the tag:
 
@@ -374,14 +374,14 @@ The direct profile routes exactly three static target pairs. Classification runs
 | `target.kind` | `target.module_id` | Result |
 | --- | --- | --- |
 | `tool_provider` | `context` | handler bind for the Eidnara component |
-| `management_surface` | `synapse` | handler bind for the Synapse component |
-| `management_surface` | `broca` | handler bind for the Broca component |
-| `tool_provider` | `synapse` or `broca` | terminal `target_unavailable` (known module, unsupported role); zero bind calls |
+| `management_surface` | `local_embeddings` | handler bind for the LocalEmbeddings component |
+| `management_surface` | `model_execution` | handler bind for the ModelExecution component |
+| `tool_provider` | `local_embeddings` or `model_execution` | terminal `target_unavailable` (known module, unsupported role); zero bind calls |
 | `management_surface` | `context` | terminal `target_unavailable` (known module, unsupported role); zero bind calls |
 | any recognized kind above | any other module | terminal `unknown_module`; zero bind calls |
 | any other kind (`internal_service`, model-runner kinds, unknown strings) | any module | terminal `target_unavailable`; zero bind calls |
 
-A successful classification carries the validated typed target into the handler bind, so the composite dispatches on host-validated data and never re-parses the client body. The Synapse target stays in this matrix even when its model bundle is missing or invalid: classification still succeeds, the bind is invoked, and the component rejects it with terminal `artifact_invalid` (Section 7.5.1). The Broca component serves the five-operation LLM-run management protocol consumed by `HistorianProducer` (`session.send`, `session.subscribe`, `run.status`, `run.cancel`, `session.delete`); its application protocol is specified by the Broca revision that implements it, not this section. That protocol's load-bearing properties for this profile are: run lifetime is detached from transport lifetime (waiter loss never stops a run; only `run.cancel`, `session.delete`, or host shutdown does, and each terminates and reaps the complete harness subprocess group before settling), run state is process-local and bounded (a restarted host reports old run IDs as strict `missing`), and subprocess execution is confined to the hardened OpenCode/Pi adapter trust boundary (no shell, private prompt delivery, provider-scoped child environment, bounded redacted output). Before `session.send` creates a run, Broca derives the requested provider row fingerprint from its frozen startup snapshot and incarnation bearer and constant-time compares it with the route-frozen managed caller value; missing, oversize, unsupported, or changed rows return `harness_unavailable` with the closed credential subreason and spawn no child. A Broca bind additionally requires harness `opencode` or `pi`; any other harness is rejected at bind with `invalid_identity` and no run state. Dynamic routing, provider discovery, and `internal_service` routing remain outside this document.
+A successful classification carries the validated typed target into the handler bind, so the composite dispatches on host-validated data and never re-parses the client body. The LocalEmbeddings target stays in this matrix even when its model bundle is missing or invalid: classification still succeeds, the bind is invoked, and the component rejects it with terminal `artifact_invalid` (Section 7.5.1). The ModelExecution component serves the five-operation LLM-run management protocol consumed by `HistorySummarizerProducer` (`session.send`, `session.subscribe`, `run.status`, `run.cancel`, `session.delete`); its application protocol is specified by the ModelExecution revision that implements it, not this section. That protocol's load-bearing properties for this profile are: run lifetime is detached from transport lifetime (waiter loss never stops a run; only `run.cancel`, `session.delete`, or host shutdown does, and each terminates and reaps the complete harness subprocess group before settling), run state is process-local and bounded (a restarted host reports old run IDs as strict `missing`), and subprocess execution is confined to the hardened OpenCode/Pi adapter trust boundary (no shell, private prompt delivery, provider-scoped child environment, bounded redacted output). Before `session.send` creates a run, ModelExecution derives the requested provider row fingerprint from its frozen startup snapshot and incarnation bearer and constant-time compares it with the route-frozen managed caller value; missing, oversize, unsupported, or changed rows return `harness_unavailable` with the closed credential subreason and spawn no child. A ModelExecution bind additionally requires harness `opencode` or `pi`; any other harness is rejected at bind with `invalid_identity` and no run state. Dynamic routing, provider discovery, and `internal_service` routing remain outside this document.
 
 The direct component exposes no `thalamus` resolver route. A facade request without an explicit or route-bound session returns the existing typed `session_unresolved` result locally and opens no resolver transport route. Bound OpenCode sessions retain their proven direct path.
 
@@ -397,19 +397,19 @@ Requests MAY omit `module_id` to list all entries or supply a filter. Unknown fi
 {"op":"catalog.list","generation":1,"modules":[],"host_ops":["route.open","catalog.list","host.shutdown","host.status"]}
 ```
 
-An unfiltered request MUST return exactly three entries (`context`, then `synapse`, then `broca`, in that deterministic order), and an exact-module filter MUST return that one entry, each derived without lossy rewriting from its startup manifest:
+An unfiltered request MUST return exactly three entries (`context`, then `local_embeddings`, then `model_execution`, in that deterministic order), and an exact-module filter MUST return that one entry, each derived without lossy rewriting from its startup manifest:
 
 | Response field | Required value |
 | --- | --- |
 | `op` | `catalog.list` |
 | `generation` | current catalog-state generation |
-| `modules[i].module_id` | `context`, `synapse`, or `broca` |
+| `modules[i].module_id` | `context`, `local_embeddings`, or `model_execution` |
 | `modules[i].module_version` | that manifest's exact build version |
 | `modules[i].roles` | that manifest's complete `provides` array, including tool schemas |
 | `modules[i].control_ops` | implemented module control operations only; the direct profile never includes `wake.create` |
 | `host_ops` | `route.open`, `catalog.list`, `host.shutdown`, `host.status` |
 
-The Synapse and Broca entries are immutable identity, not readiness: each stays in the catalog even when its component cannot currently serve a bind (Section 7.5.1). The direct host is final-decision unsupported for `wake.create`: an advertised `wake.create` entry is an ownership certificate for the complete scheduled-wake lifecycle (durable scheduling, agent-callable lifecycle operations, backlog adoption, and readiness withdrawal), not a readiness hint, and the direct profile owns none of it. Wake-plane probing therefore remains fail-open against this profile; only a future host that owns the complete lifecycle may advertise the capability. `generation` changes only when catalog content changes and is unrelated to connection generation.
+The LocalEmbeddings and ModelExecution entries are immutable identity, not readiness: each stays in the catalog even when its component cannot currently serve a bind (Section 7.5.1). The direct host is final-decision unsupported for `wake.create`: an advertised `wake.create` entry is an ownership certificate for the complete scheduled-wake lifecycle (durable scheduling, agent-callable lifecycle operations, backlog adoption, and readiness withdrawal), not a readiness hint, and the direct profile owns none of it. Wake-plane probing therefore remains fail-open against this profile; only a future host that owns the complete lifecycle may advertise the capability. `generation` changes only when catalog content changes and is unrelated to connection generation.
 
 ### 7.4 Operation classification
 
@@ -431,13 +431,13 @@ Errors may add an advisory retry delay:
 
 `Error` terminates only its matching correlation. It does not itself close a route or connection unless the error table below says so.
 
-### 7.5 Synapse application protocol
+### 7.5 LocalEmbeddings application protocol
 
-Routed requests on the `synapse/management_surface` route are UTF-8 JSON objects (`binary = 0`) of the shape `{"method": string, "params": object}`. Successful responses are JSON objects whose operation payload lives under a `result` object. Failures are transport `Error` terminals with the canonical `{code, message, retry_after_ms?}` body. The service implements exactly four methods (`models.list`, `embed.query`, `embed.batch`, and `embed.result`) and MUST NOT add job-management, health, cancellation, or model-management methods. Legacy field aliases (`entries`, `items`, `results`, `embedding`, `complete`, `cursor` as a response field) are TypeScript read compatibility only; the Rust host MUST NOT emit them.
+Routed requests on the `local_embeddings/management_surface` route are UTF-8 JSON objects (`binary = 0`) of the shape `{"method": string, "params": object}`. Successful responses are JSON objects whose operation payload lives under a `result` object. Failures are transport `Error` terminals with the canonical `{code, message, retry_after_ms?}` body. The service implements exactly four methods (`models.list`, `embed.query`, `embed.batch`, and `embed.result`) and MUST NOT add job-management, health, cancellation, or model-management methods. Legacy field aliases (`entries`, `items`, `results`, `embedding`, `complete`, `cursor` as a response field) are TypeScript read compatibility only; the Rust host MUST NOT emit them.
 
 #### 7.5.1 Validation, bounds, and error codes
 
-Every request body is parsed strictly: duplicate object keys, non-object roots, invalid UTF-8, unknown `method` values, wrong field types, and out-of-bound sizes are rejected before hashing or inference. Whole-body nesting is bounded at 8 levels, counted so that each open object or array is one level and a scalar or key is one more level below its container: at most 7 nested containers may hold a value, an empty 8th container is accepted, and a value nested inside 8 containers is rejected before typed decoding. So `{"a":{"b":{"c":{"d":{"e":{"f":{"g":1}}}}}}}` is valid and `{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":1}}}}}}}}` is not; no valid request needs more than 5 levels. JSON delimiters inside strings never count toward depth. `embed.batch` accepts between one and `max_batch_items` elements inclusive, and rejects the element after the maximum before decoding any of its fields. The host's resident-byte cap (`max_resident_bytes`) additionally covers Synapse request parser scratch and request-owned inputs (query text, queued batch items, retained job key and item metadata, and the id/hash copies a ready result page holds while its response is encoded) as named logical payloads; it is an accounting boundary, not an exact process-RSS claim. Those payloads draw on a reserved slice of the cap that is separate from the pool admitting inbound frames, so Synapse parse scratch and retained job inputs can never delay or fail another connection's frame admission, and the Synapse queue and retained-result limits below remain separate, independent gates. A body whose parse reservation exceeds that reserved slice can never be served by this host and is rejected as `schema_violation`, not `queue_full`, so a client does not retry a permanently unservable size.
+Every request body is parsed strictly: duplicate object keys, non-object roots, invalid UTF-8, unknown `method` values, wrong field types, and out-of-bound sizes are rejected before hashing or inference. Whole-body nesting is bounded at 8 levels, counted so that each open object or array is one level and a scalar or key is one more level below its container: at most 7 nested containers may hold a value, an empty 8th container is accepted, and a value nested inside 8 containers is rejected before typed decoding. So `{"a":{"b":{"c":{"d":{"e":{"f":{"g":1}}}}}}}` is valid and `{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":1}}}}}}}}` is not; no valid request needs more than 5 levels. JSON delimiters inside strings never count toward depth. `embed.batch` accepts between one and `max_batch_items` elements inclusive, and rejects the element after the maximum before decoding any of its fields. The host's resident-byte cap (`max_resident_bytes`) additionally covers LocalEmbeddings request parser scratch and request-owned inputs (query text, queued batch items, retained job key and item metadata, and the id/hash copies a ready result page holds while its response is encoded) as named logical payloads; it is an accounting boundary, not an exact process-RSS claim. Those payloads draw on a reserved slice of the cap that is separate from the pool admitting inbound frames, so LocalEmbeddings parse scratch and retained job inputs can never delay or fail another connection's frame admission, and the LocalEmbeddings queue and retained-result limits below remain separate, independent gates. A body whose parse reservation exceeds that reserved slice can never be served by this host and is rejected as `schema_violation`, not `queue_full`, so a client does not retry a permanently unservable size.
 
 `embed.query` admits one running query plus at most `max_waiting_queries` waiters. The default is zero, preserving immediate loss-system rejection. Once all `1 + max_waiting_queries` slots are held, the next query receives `queue_full` with `query_retry_after_ms`. Waiters are served in the order they register for the CPU permit, which bounds each waiter's wait and rules out starvation; concurrent requests have no wire-level total order, so the host does not promise that service order matches admission order. A queued query retains its decoded text charge, observes the original request deadline, and performs no engine call if its deadline expires, its route disappears, or shutdown starts before it obtains the CPU permit. A deadline that expires while the engine call is already running fails the request as `timeout`: a vector produced after the deadline is discarded rather than returned. Startup validates that all query slots, the full queued-batch byte budget, and the worst parse reservation fit together in the reserved scratch pool, and that the query slots leave at least one free general handler-task slot; an infeasible combination of configured limits fails host startup with the violated bound rather than silently disabling the lane. The scratch pool carries headroom for up to four waiters at the default text limits; a larger `max_waiting_queries` requires lowering `max_queued_request_bytes`, `max_text_bytes`, or another queue budget, and the rejection message names the candidates.
 
@@ -457,7 +457,7 @@ The application error vocabulary is closed:
 | `module_restarted` | job unknown to this host incarnation (restart, expiry, or eviction) | resubmit the same page once from cursor `null` |
 | `cancelled` | client `Cancel` (Section 9.2) or host shutdown cancellation won | caller-requested cancellation: no generic retry. Host-shutdown cancellation is evidence about one host incarnation: the TypeScript embedding client retries it as a transport-class failure within the caller's deadline so the retry can land on the restarted incarnation |
 
-The host-generic `internal_error` (Section 7.4) additionally covers response construction or task failure on a routed synapse correlation, including a batch worker that exits without publishing: that is a host task failure, not a lane fault, so the lane keeps serving and the code stays retryable.
+The host-generic `internal_error` (Section 7.4) additionally covers response construction or task failure on a routed local_embeddings correlation, including a batch worker that exits without publishing: that is a host task failure, not a lane fault, so the lane keeps serving and the code stays retryable.
 
 Every capacity is finite and host-owned; request fields can never select capacities, models, or filesystem paths. Defaults: 1 concurrent CPU inference, 64 admitted jobs, 64 MiB aggregate queued request text, 64 retained completed jobs, 64 MiB retained vector bytes, 64 items and 8 MiB total text per batch, 1 MiB text per item or query, 16 vectors or 2 MiB encoded output per result page, 15-minute completed-job retention. Query-lane admission errors advise a 50 ms retry delay through `query_retry_after_ms`; this setting is independent of the 50 ms batch job and pending-result polling cadence.
 
@@ -489,7 +489,7 @@ A wrong model, fingerprint, or epoch, or either flag not literally `false`, is t
 {"result":{"model":"tiny-test-model","fingerprint":"<hex>","table_epoch":1,"dims":8,"done":true,"vectors":[{"id":"query","content_sha256":"<hex of text>","vector":[0.1,0.2]}]}}
 ```
 
-`embed.query` is a pure computation: it creates no job, no ledger state, and no retained result, which is what permits the TypeScript client's `outcome_unknown` retry without an idempotency token. Route loss cancels only the response wait; a started native inference call is joined by the Synapse incarnation tracker, never orphaned.
+`embed.query` is a pure computation: it creates no job, no ledger state, and no retained result, which is what permits the TypeScript client's `outcome_unknown` retry without an idempotency token. Route loss cancels only the response wait; a started native inference call is joined by the LocalEmbeddings incarnation tracker, never orphaned.
 
 #### 7.5.5 `embed.batch`
 
@@ -541,13 +541,13 @@ Both languages MUST produce identical bytes: UTF-8 pass-through for non-ASCII, t
 | --- | --- |
 | target matrix and catalog (Section 7.2, 7.3) | `crates/host-runtime/tests/composite_routing.rs` |
 | reserved pending/task classes, declaration floors, and retained-byte ingress subtraction (Section 8.3) | `crates/host-runtime/tests/dispatch.rs`, `crates/host-runtime/tests/handler_contract.rs` |
-| bundle identity, offline CPU inference, degraded isolation | `crates/host-runtime/tests/synapse_bundle.rs` |
-| request validation, bounds, idempotency, cursors, restart fencing | `crates/host-runtime/tests/synapse_protocol.rs`, `crates/host-runtime/tests/synapse_jobs.rs` |
-| depth boundary (7 containers holding a value valid, 8 rejected, strings inert) | `crates/host-runtime/src/synapse/protocol.rs` (unit tests), `crates/host-runtime/tests/synapse_protocol.rs` |
-| batch item bound rejected before decoding the extra element | `crates/host-runtime/src/synapse/protocol.rs` (unit tests) |
-| resident reservation: reserved scratch pool independent of frame admission, fail-fast `queue_full`, permanent rejection above the slice, no state, exact release | `crates/host-runtime/src/config.rs` (pool-split unit test), `crates/host-runtime/src/wire.rs`, `crates/host-runtime/src/synapse/jobs.rs` (unit tests), `crates/host-runtime/tests/synapse_protocol.rs` |
-| four operations over a real authenticated route, shutdown cleanup | `crates/host-runtime/tests/synapse_roundtrip.rs` |
-| request-key golden vectors | `crates/host-runtime/src/synapse/protocol.rs` (unit tests); the matching TypeScript golden test is a Handoff item with the embedding pipeline (`pml.4`) |
+| bundle identity, offline CPU inference, degraded isolation | `crates/host-runtime/tests/local_embeddings_bundle.rs` |
+| request validation, bounds, idempotency, cursors, restart fencing | `crates/host-runtime/tests/local_embeddings_protocol.rs`, `crates/host-runtime/tests/local_embeddings_jobs.rs` |
+| depth boundary (7 containers holding a value valid, 8 rejected, strings inert) | `crates/host-runtime/src/local_embeddings/protocol.rs` (unit tests), `crates/host-runtime/tests/local_embeddings_protocol.rs` |
+| batch item bound rejected before decoding the extra element | `crates/host-runtime/src/local_embeddings/protocol.rs` (unit tests) |
+| resident reservation: reserved scratch pool independent of frame admission, fail-fast `queue_full`, permanent rejection above the slice, no state, exact release | `crates/host-runtime/src/config.rs` (pool-split unit test), `crates/host-runtime/src/wire.rs`, `crates/host-runtime/src/local_embeddings/jobs.rs` (unit tests), `crates/host-runtime/tests/local_embeddings_protocol.rs` |
+| four operations over a real authenticated route, shutdown cleanup | `crates/host-runtime/tests/local_embeddings_roundtrip.rs` |
+| request-key golden vectors | `crates/host-runtime/src/local_embeddings/protocol.rs` (unit tests); the matching TypeScript golden test is a Handoff item with the embedding pipeline (`pml.4`) |
 | durable ledger recovery, receipts, atomic application | no check in this tree: the durable recovery authority for `embed.batch` is the TypeScript ledger (Section 7.5.5), and its storage suite is a Handoff item with the embedding pipeline; no Rust suite exercises it |
 
 ### 7.6 `host.status` and `host.shutdown`
@@ -560,9 +560,9 @@ Both languages MUST produce identical bytes: UTF-8 pass-through for non-ASCII, t
 
 The response has `op:"host.status"`, `health:"ok|degraded|failing"`, and a
 sanitized `metrics.components` object. The fixed profile reports Context
-`storage_state` as `ready | starting | unavailable`, Synapse
-`synapse_state` as `ready | starting | degraded | unsupported`, and Broca
-`broca_state` as `ready | unavailable`. It reads the latest host-owned health
+`storage_state` as `ready | starting | unavailable`, LocalEmbeddings
+`local_embeddings_state` as `ready | starting | degraded | unsupported`, and ModelExecution
+`model_execution_state` as `ready | unavailable`. It reads the latest host-owned health
 snapshot and sends no routed application body. During post-publication
 activation, starting components refresh on a bounded 50 ms cadence; after
 activation settles, polling returns to the configured health interval.
@@ -575,7 +575,7 @@ this order:
 | epoch | meaning |
 | --- | --- |
 | `memory_render_epoch` | memory render format |
-| `compartment_render_epoch` | compartment render format |
+| `history_segment_render_epoch` | history_segment render format |
 | `profile_epoch` | serializer profile |
 | `tagger_epoch` | tagger feature |
 | `state_sync_epoch` | state-sync format |
@@ -644,12 +644,12 @@ Commit runs inside retained host work (the connection writer task), so cancellin
 
 ### 7.7 Mandatory ring setup
 
-Transport setup is complete before the application wire becomes active. The owner-only Unix setup socket authenticates the peer and transfers exactly two memfds plus four nonblocking eventfds, profile `host-test-ring-v1`, wire version 2, descriptor schema 3, grants, and a one-use activation token. The client validates and attaches both directions, then commits activation. Memfds carry ring metadata and application bytes. Eventfds carry coalesced data-ready and capacity-ready notifications only. The ring is the only application frame channel.
+Transport setup is complete before the application wire becomes active. The owner-only Unix setup socket authenticates the peer and transfers exactly two memfds plus four nonblocking eventfds, profile `host-test-ring-v1`, wire version 3, descriptor schema 3, grants, and a one-use activation token. The client validates and attaches both directions, then commits activation. Memfds carry ring metadata and application bytes. Eventfds carry coalesced data-ready and capacity-ready notifications only. The ring is the only application frame channel.
 
 Missing native support, malformed ancillary data, duplicate or extra descriptors, identity mismatch, token mismatch, admission failure, attachment failure, timeout, or setup-socket loss retires the connection before application traffic. Runtime ring corruption or unexpected setup-socket EOF also retires the connection. No setup or runtime failure changes transport or replays an uncertain request.
 
 ```mermaid
-stateDiagram-v2
+stateDiagram-v3
   [*] --> Authenticating
   Authenticating --> Attaching: peer proof succeeds
   Authenticating --> Failed: proof, deadline, or socket failure
@@ -699,7 +699,7 @@ sequenceDiagram
   C->>H: setup socket + three-message authentication
   H-->>C: ring descriptors, grant, activation token
   C->>C: attach both ring directions
-  C->>H: application v2 envelope traffic
+  C->>H: application v3 envelope traffic
 ```
 
 ### 8.2 Route allocation and bind
@@ -747,7 +747,7 @@ Host pending state is keyed by full request identity. Sender-side no-reuse alone
 
 Implementations MUST use finite limits for live connections, routes, pending correlations, handler tasks, queued requests, and aggregate buffered bodies. Limit exhaustion before dispatch of a routed or control request returns terminal `server_busy` for that correlation; `target_unavailable` is reserved for route admission, `route.open` failures such as channel exhaustion (Section 8.2), so each code keeps exactly one recovery rule in Section 10.2. Rejection MUST NOT silently queue without a deadline.
 
-Pending-request and handler-task capacity is split into two independent permit classes. Each component declares, immutably and before handler initialization, its reserved handler tasks, reserved unsettled (pending) requests, retained resident bytes, an upper bound on general-class handler tasks it can hold concurrently parked on internal admission, and route class; the direct profile's Broca component is the only reserved-class declarer, and `context` and `synapse` keep zero reservations and the general class, with `synapse` declaring a parked-task bound of `1 + max_waiting_queries` for its query lane. Startup checked-sums every declaration and MUST refuse to initialize unless, after subtracting the reservations, at least one general pending slot, one general handler-task slot, and one maximum-size ingress body remain, and the summed parked-task bounds leave at least one free general handler-task slot; declared retained bytes are subtracted from the frame-admission (ingress) pool alongside the resident catalog, never from the egress or scratch reserves. Every routed request draws both its pending and its task permit from the class stored on its installed route at bind time: the host never parses the application body to pick a class, saturating one class never consumes the other, and exhaustion of either class returns the same pre-dispatch `server_busy` terminal. A handler whose declarations are all zero observes the original single-pool behavior.
+Pending-request and handler-task capacity is split into two independent permit classes. Each component declares, immutably and before handler initialization, its reserved handler tasks, reserved unsettled (pending) requests, retained resident bytes, an upper bound on general-class handler tasks it can hold concurrently parked on internal admission, and route class; the direct profile's ModelExecution component is the only reserved-class declarer, and `context` and `local_embeddings` keep zero reservations and the general class, with `local_embeddings` declaring a parked-task bound of `1 + max_waiting_queries` for its query lane. Startup checked-sums every declaration and MUST refuse to initialize unless, after subtracting the reservations, at least one general pending slot, one general handler-task slot, and one maximum-size ingress body remain, and the summed parked-task bounds leave at least one free general handler-task slot; declared retained bytes are subtracted from the frame-admission (ingress) pool alongside the resident catalog, never from the egress or scratch reserves. Every routed request draws both its pending and its task permit from the class stored on its installed route at bind time: the host never parses the application body to pick a class, saturating one class never consumes the other, and exhaustion of either class returns the same pre-dispatch `server_busy` terminal. A handler whose declarations are all zero observes the original single-pool behavior.
 
 ## 9. Requests, streams, cancellation, and close
 
@@ -758,7 +758,7 @@ A routed `Request` carries exactly one correlation. Host may produce:
 - unary: one `Response` or `Error` terminal;
 - streaming: zero or more `StreamData` frames, then exactly one `StreamEnd` or `Error` terminal.
 
-All response frames MUST echo channel, epoch, and correlation. `StreamData` is nonterminal. `StreamEnd` is transport terminal; application protocols may define an earlier in-band terminal event. The managed Rust historian treats its in-band run terminal as authoritative and treats premature `StreamEnd` as failure.
+All response frames MUST echo channel, epoch, and correlation. `StreamData` is nonterminal. `StreamEnd` is transport terminal; application protocols may define an earlier in-band terminal event. The managed Rust history_summarizer treats its in-band run terminal as authoritative and treats premature `StreamEnd` as failure.
 
 Transport never parses routed application bodies. Handler `Response(Vec<u8>)` becomes `Response`; handler `Error` becomes canonical `ErrorBody`; handler `Streamed` ends with `StreamEnd` after emitted stream items.
 
@@ -843,7 +843,7 @@ Any EOF, authentication failure, framing corruption, liveness failure, or explic
 Host restart MUST close the old setup socket and generations, mint a fresh key and daemon ID, bind and publish under lock, and reject mixed-generation authentication. Reopened routes receive new connection-fenced handles. Route-only module restart uses new channels or strictly higher epochs and preserves the same connection only if host can prove route cleanup.
 
 ```mermaid
-stateDiagram-v2
+stateDiagram-v3
   [*] --> Discovering
   Discovering --> Authenticating: valid snapshot
   Authenticating --> Connected: proofs and daemon ID match
@@ -863,7 +863,7 @@ Graceful host shutdown order:
 3. drain or cancel work within finite shutdown deadline, emitting terminal `Response`, `StreamEnd`, or `Error{code:"cancelled"}` frames while generations are still live;
 4. send best-effort connection Goodbye; receiving it retires the generation client-side (Section 6.2), so it MUST follow the drain, or drain-phase terminals would arrive on a retired generation and be dropped;
 5. invoke route-gone exactly once for every handler-visible route;
-6. invoke the handler shutdown callback exactly once, after route cleanup and health-probe quiescence; the callback must not be aborted: a deadline overrun or panic marks the shutdown non-graceful, but the handler, host state, and instance lock remain owned until every native call and lifecycle callback has actually stopped. Inside that single callback the static composite drains its children in fixed order (`broca`, then `synapse`, then `context`), and a child's panic or returned shutdown error MUST NOT skip a later child's drain: failures are collected as typed, redacted diagnostics and surfaced as one deterministic non-graceful failure only after every child has drained, with the instance fence still held. On the forced path (the drain deadline already expired) the callback still runs exactly once, but residual route-gone callbacks that themselves overran their deadline may still be in flight beside it; that incarnation is already fatal;
+6. invoke the handler shutdown callback exactly once, after route cleanup and health-probe quiescence; the callback must not be aborted: a deadline overrun or panic marks the shutdown non-graceful, but the handler, host state, and instance lock remain owned until every native call and lifecycle callback has actually stopped. Inside that single callback the static composite drains its children in fixed order (`model_execution`, then `local_embeddings`, then `context`), and a child's panic or returned shutdown error MUST NOT skip a later child's drain: failures are collected as typed, redacted diagnostics and surfaced as one deterministic non-graceful failure only after every child has drained, with the instance fence still held. On the forced path (the drain deadline already expired) the callback still runs exactly once, but residual route-gone callbacks that themselves overran their deadline may still be in flight beside it; that incarnation is already fatal;
 7. drop handler only after all route-gone callbacks and the shutdown callback complete;
 8. ring mappings and setup sockets close as their owning tasks exit (no later than this step);
 9. release instance lock.
@@ -876,7 +876,7 @@ An authenticated `host.shutdown` (Section 7.6) initiates this same graceful orde
 
 ### 13.1 Startup, route, call, close
 
-1. Host locks runtime state, creates fresh credentials, initializes directly linked components, binds the owner-only setup socket, and publishes schema 2 with `wire_version: 2`.
+1. Host locks runtime state, creates fresh credentials, initializes directly linked components, binds the owner-only setup socket, and publishes schema 2 with `wire_version: 3`.
 2. Client validates one descriptor-anchored snapshot and completes all three auth messages.
 3. Client receives two memfds and four eventfds, validates both grants, attaches, and commits activation.
 4. Client sends channel-0 `route.open` correlation 1 through the ring.
@@ -896,7 +896,7 @@ A `route.open` correlation receiving `unknown_module` is complete. Managed SDK m
 
 ### 13.4 Managed Rust streaming client
 
-`HistorianProducer` uses `host_runtime::Client` to discover, authenticate, attach the ring, open separate command and subscription routes for one identity, send unary commands, and consume matching `StreamData` until its application run terminal. Transport `StreamEnd` before that event is failure. The managed reader answers Ping while the stream is pending. Every terminal path closes both route handles.
+`HistorySummarizerProducer` uses `host_runtime::Client` to discover, authenticate, attach the ring, open separate command and subscription routes for one identity, send unary commands, and consume matching `StreamData` until its application run terminal. Transport `StreamEnd` before that event is failure. The managed reader answers Ping while the stream is pending. Every terminal path closes both route handles.
 
 For `session.send`, the producer freezes exact request bytes, authenticated daemon ID, and `(project, harness, session)` identity. After `outcome_unknown`, it may reconnect and resend those bytes once only if daemon ID and identity are unchanged. Daemon or identity change preserves the typed unknown outcome and performs no resend; the durable driver applies backoff and stops that firing before another model.
 
@@ -914,7 +914,7 @@ Every scenario has one required outcome. These are review vectors; executable fi
 
 | ID | Scenario | Expected result |
 | --- | --- | --- |
-| AE1 | Fresh authenticated call | Valid version-2 file, three-message auth, fixed ring attachment, tagged route response, and matching terminal succeed |
+| AE1 | Fresh authenticated call | Valid version-3 file, three-message auth, fixed ring attachment, tagged route response, and matching terminal succeed |
 | AE2 | Malformed envelope or setup | Unsupported frame version, type, flags, oversize, truncation, invalid descriptor, identity mismatch, or attachment failure closes the generation; no application dispatch or alternate transport |
 | AE3 | Caller-supplied identity | Key holder may select identity; fields scope handler state and add no authority |
 | AE4 | Temporarily unavailable module | Each `unknown_module` terminates one correlation; policy retry uses a new correlation and never sends body early |
@@ -966,7 +966,7 @@ Every scenario has one required outcome. These are review vectors; executable fi
 | V37 | Proven zero-byte write | Result `not_sent`; policy may issue fresh RPC with new correlation |
 | V38 | Normal stream | Ordered zero-or-more StreamData then one StreamEnd/Error; duplicate terminal ignored |
 | V39 | Bad client proof | Host closes, releases handshake slot, and reads no envelope |
-| V40 | Catalog filters | Unfiltered request returns `context`, `synapse`, `broca` in order; an exact filter returns that entry; unknown filter returns empty list |
+| V40 | Catalog filters | Unfiltered request returns `context`, `local_embeddings`, `model_execution` in order; an exact filter returns that entry; unknown filter returns empty list |
 | V41 | Unsupported control op | One `unsupported_operation` terminal; connection remains usable; no handler callback |
 | V42 | Host sends structurally valid `Request` | Client closes generation without dispatching or responding |
 | V43 | Host `Ping` correlation numerically equals a pending consumer correlation | `Pong` settles only the Ping; consumer terminals settle only the consumer request; no cross-settlement |
@@ -976,8 +976,8 @@ Every scenario has one required outcome. These are review vectors; executable fi
 | V47 | `host.shutdown` under any role label, or without authentication | Every bearer-authenticated connection may stop the host; an unauthenticated socket can never reach the operation |
 | V48 | Reserved-class saturation | Every reserved pending/task permit held through blocked settlement rejects the next reserved-class request `server_busy` while a general request still dispatches and settles; saturating the general class never consumes a reserved permit |
 | V49 | Declarations exceed configured limits | A reservation that leaves zero general pending slots, zero general task slots, or less than one maximum ingress body fails startup before publication |
-| V50 | Child shutdown failure | A Broca shutdown panic or returned error still drains Synapse and Eidnara; the incarnation reports one deterministic redacted non-graceful failure |
-| V51 | Missing, null, string, fractional, or non-2 `wire_version` | Client rejects before setup-socket dial |
+| V50 | Child shutdown failure | A ModelExecution shutdown panic or returned error still drains LocalEmbeddings and Eidnara; the incarnation reports one deterministic redacted non-graceful failure |
+| V51 | Missing, null, string, fractional, or non-3 `wire_version` | Client rejects before setup-socket dial |
 | V52 | Setup socket receives an application envelope | Host retires setup; zero application dispatch |
 | V53 | Descriptor count, identity, token, or ring geometry is invalid | Client retires setup before mapping or application traffic |
 | V54 | Native addon, attachment, or ring operation fails | Connection fails terminally; no alternate transport or frame replay |
@@ -991,9 +991,9 @@ Fixtures MUST use committed literal bytes and an independent decoder/oracle; imp
 
 | Consumer | Required contract | Verification owner |
 | --- | --- | --- |
-| `McHostModuleTransport` | strict version-2 discovery, mandatory ring attachment, generation and epoch route cache, opaque bodies, close races, outcome-safe retry | direct host-client tests |
-| Synapse and wake-plane callers | managed calls, typed send outcomes, truthful catalog, and absent `wake.create` fail-open behavior | direct TypeScript caller tests |
-| `HistorianProducer` | `host_runtime::Client`, mandatory ring attachment, full route handles, streaming, Ping/Pong, same-incarnation exact-byte replay fence, and both-route cleanup | module historian and managed-client tests |
+| `HostModuleTransport` | strict version-3 discovery, mandatory ring attachment, generation and epoch route cache, opaque bodies, close races, outcome-safe retry | direct host-client tests |
+| LocalEmbeddings and wake-plane callers | managed calls, typed send outcomes, truthful catalog, and absent `wake.create` fail-open behavior | direct TypeScript caller tests |
+| `HistorySummarizerProducer` | `host_runtime::Client`, mandatory ring attachment, full route handles, streaming, Ping/Pong, same-incarnation exact-byte replay fence, and both-route cleanup | module history_summarizer and managed-client tests |
 | session resolver | local typed `session_unresolved` absence with zero resolver route attempts when no session is proven | module resolver tests |
 | `Handler` | direct `PrimaryComponent`, initialize once, bind before response, full-handle route-gone, atomics-only health, and tracked shutdown | module adapter tests |
 | direct-host fixtures | owner-only bounded Unix controls and host-owned clients; no provider process or sibling workspace | focused fixture tests |
@@ -1013,14 +1013,14 @@ Fixtures MUST use committed literal bytes and an independent decoder/oracle; imp
 
 ## 17. Scope boundaries
 
-This direct boundary owns secure connection-file primitives, version-2 wire and authentication, mandatory fixed-ring attachment, host-owned Rust and TypeScript API names, static composition, route epochs, managed-client behavior, and focused direct-host fixture proof.
+This direct boundary owns secure connection-file primitives, version-3 wire and authentication, mandatory fixed-ring attachment, host-owned Rust and TypeScript API names, static composition, route epochs, managed-client behavior, and focused direct-host fixture proof.
 
 The product daemon crate owns the production host executable and launcher, production connection-file orchestration during startup and teardown, user-facing configuration and doctor behavior, packaging, and distribution. This contract does not claim those lifecycle flows are delivered here.
 
-The Broca application protocol remains normative in its owning revision. Flow credit, dynamic module supervision, remote transport, new plugin/tool APIs, storage semantics, and handler business semantics remain outside this wire contract.
+The ModelExecution application protocol remains normative in its owning revision. Flow credit, dynamic module supervision, remote transport, new plugin/tool APIs, storage semantics, and handler business semantics remain outside this wire contract.
 
 ## 18. Provenance ledger
 
-`host-runtime` source and conformance tests are current authority. Historical package sources established the frozen numeric values, version-2 frame layout, authentication domains and proof order, schema-1 fields, and control JSON shapes.
+`host-runtime` source and conformance tests are current authority. Historical package sources established the frozen numeric values, version-3 frame layout, authentication domains and proof order, schema-1 fields, and control JSON shapes.
 
 Any disagreement with old published or private behavior is migration history, not permission to add a compatibility branch.

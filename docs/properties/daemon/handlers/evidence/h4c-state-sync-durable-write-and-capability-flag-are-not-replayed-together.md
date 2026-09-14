@@ -64,19 +64,19 @@ at `:9287` is not entered. The durable half is protected exactly as intended; th
 in-memory half has no second chance.
 
 **The positive finding alongside it, worth keeping.** The handler pre-checks the
-historian phase and the store re-checks it:
+history_summarizer phase and the store re-checks it:
 
 ```
-9194        if !compartments.is_empty() {
-9195            let historian_phase = match store.load(&binding.session) {
-9196                Ok(loaded) => loaded.meta.historian.state,
+9194        if !history_segments.is_empty() {
+9195            let history_summarizer_phase = match store.load(&binding.session) {
+9196                Ok(loaded) => loaded.meta.history_summarizer.state,
 ...
-9204            if historian_phase != HistorianPhase::Idle {
-9205                // Do not stage or adopt compartment rows while a historian owns the
+9204            if history_summarizer_phase != HistorySummarizerPhase::Idle {
+9205                // Do not stage or adopt history_segment rows while a history_summarizer owns the
 9206                // snapshot. The TS sender treats this typed rejection as retry-later,
 9207                // retaining its acknowledged sequence and watermarks instead of forcing
-9208                // a full re-seed on every active historian pass.
-9209                return historian_compartment_sync_busy_error(historian_phase);
+9208                // a full re-seed on every active history_summarizer pass.
+9209                return history_summarizer_history_segment_sync_busy_error(history_summarizer_phase);
 9210            }
 9211        }
 ```
@@ -84,8 +84,8 @@ historian phase and the store re-checks it:
 and independently:
 
 ```
-9319            Err(ModuleStateSyncError::HistorianBusy { phase }) => {
-9320                historian_compartment_sync_busy_error(phase)
+9319            Err(ModuleStateSyncError::HistorySummarizerBusy { phase }) => {
+9320                history_summarizer_history_segment_sync_busy_error(phase)
 9321            }
 ```
 
@@ -220,7 +220,7 @@ transient window. If it only sends the field on a full seed, the divergence pers
 - Conclusion: resolved with answer. The flag is in-memory only, so the two effects
   are in different durability classes and cannot be made atomic without moving one.
 
-### Q: Is the historian pre-check at `:9195` a TOCTOU defect?
+### Q: Is the history_summarizer pre-check at `:9195` a TOCTOU defect?
 
 - Sources examined: `:9194-9211` for the pre-check, `:9319-9321` for the store's
   own rejection, Part 3's

@@ -1,10 +1,10 @@
 use std::ffi::OsString;
 
-use host_runtime::broca::subprocess::{
+use host_runtime::harness_closure::{ClosureManifest, manifest_digest};
+use host_runtime::model_execution::subprocess::{
     CREDENTIAL_FINGERPRINT_CANONICALIZATION, CREDENTIAL_FINGERPRINT_DOMAIN,
     CREDENTIAL_VALUE_CAP_BYTES, EnvSnapshot,
 };
-use host_runtime::harness_closure::{ClosureManifest, manifest_digest};
 
 fn release_file(name: &str) -> serde_json::Value {
     let path = format!("{}/../../release/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -93,7 +93,7 @@ fn provider_credential_matrix_matches_the_published_doc() {
         );
         for (provider, row) in providers {
             assert_eq!(
-                host_runtime::broca::subprocess::canonical_provider(harness, provider),
+                host_runtime::model_execution::subprocess::canonical_provider(harness, provider),
                 Ok(provider.as_str()),
                 "canonical provider {provider} must be accepted for {harness}"
             );
@@ -127,7 +127,7 @@ fn provider_credential_matrix_matches_the_published_doc() {
         for (alias, spec) in aliases {
             let canonical = spec["canonical"].as_str().expect("alias canonical name");
             assert_eq!(
-                host_runtime::broca::subprocess::canonical_provider(harness, alias),
+                host_runtime::model_execution::subprocess::canonical_provider(harness, alias),
                 Ok(canonical),
                 "published {harness} alias {alias} must canonicalize identically at runtime"
             );
@@ -135,13 +135,17 @@ fn provider_credential_matrix_matches_the_published_doc() {
     }
     for harness in ["opencode", "pi"] {
         assert!(
-            host_runtime::broca::subprocess::canonical_provider(harness, "bedrock").is_err(),
+            host_runtime::model_execution::subprocess::canonical_provider(harness, "bedrock")
+                .is_err(),
             "unpublished provider must stay rejected for {harness}"
         );
     }
     assert!(
-        host_runtime::broca::subprocess::canonical_provider("opencode", "google-antigravity")
-            .is_err(),
+        host_runtime::model_execution::subprocess::canonical_provider(
+            "opencode",
+            "google-antigravity"
+        )
+        .is_err(),
         "Pi-only aliases must stay rejected for opencode"
     );
 }

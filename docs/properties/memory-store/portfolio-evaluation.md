@@ -48,7 +48,7 @@ available today with no new infrastructure — in-crate tests already reach
 `NOT NULL`, and `UNIQUE` constraints. One caveat recorded in the map:
 `commit_state_import` validates *before* its insert loop
 (`lib.rs:7172-7174`), so in that closure the error must come from a constraint,
-not from `validate_state_import_compartments`. F2 now unblocks zero records.
+not from `validate_state_import_history_segments`. F2 now unblocks zero records.
 
 `post-migration-open-repair-is-resumable-and-effect-idempotent` was routed to F1,
 a kill after the first batch commits. Verified that `repair_note_artifacts_v51`
@@ -261,10 +261,10 @@ Per crash-dependent record, the seam now required:
 | post-migration-open-repair-is-resumable-and-effect-idempotent | None. Committed-prefix fixtures replace the kill |
 | intent-staged-replay-produces-one-context-effect | No crash seam. A persisted `staged` row is the post-crash state. F10 remains and is now the only blocker |
 
-The surviving seams at HEAD, for the record: `abandon_historian_hook`
+The surviving seams at HEAD, for the record: `abandon_history_summarizer_hook`
 (`lib.rs:9246-9254`, inside the fenced abandon transaction after the predicate
-read and before the meta write), `before_max_compartment_end_read_hook`
-(`:5283`), `historian_side_channel_fail_once` (`:9666-9678`, before any write),
+read and before the meta write), `before_max_history_segment_end_read_hook`
+(`:5283`), `history_summarizer_side_channel_fail_once` (`:9666-9678`, before any write),
 `tag_number_query_count`, and `authority_seed_transaction_count`.
 
 ## Gaps queued for a follow-up pass
@@ -332,7 +332,7 @@ preference.
    and B cover the open path and three transaction primitives, Groups C and D the
    claim mirror and intent ledger, Groups E through G a few thousand lines of
    pure functions. Large regions of production `lib.rs` have no record at all —
-   the historian publish and outbox machinery (`:9194-9798`), the note-evaluation
+   the history_summarizer publish and outbox machinery (`:9194-9798`), the note-evaluation
    claim lifecycle (`:13160-13707`), the drop-seed and strip-seed materializers
    (`:4636-4808`), and most of the DTO and state layer. G4's absence is one
    symptom of this. *Judgment required:* state the selection principle. If it is

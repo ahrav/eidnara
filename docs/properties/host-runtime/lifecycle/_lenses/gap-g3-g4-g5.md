@@ -6,7 +6,7 @@ the corrections are stated where the prompt's numbers were approximate.
 
 Scope of this pass: normal configured liveness (`connection.rs`, `config.rs`),
 canonical manifest evolution (`generation.rs`), and the Darwin exchange plus the
-portable rename fallback (`generation.rs`, `the source repository `ci.yml` workflow`).
+portable rename fallback (`generation.rs`, `the source repository`ci.yml`workflow`).
 
 ## Line-reference corrections
 
@@ -65,6 +65,7 @@ within `pong_deadline` of write completion, and the next Ping is issued no
 earlier than one `ping_interval` after the previous tick.
 
 ### O3. `sent` is re-anchored at write completion, so queueing delay is not
+
 charged to the peer
 
 The insert at `:1403-1411` sets `sent: Instant::now()` and `written_at: None`.
@@ -80,6 +81,7 @@ would otherwise have its answer rejected before it was even written". So the
 design intent is explicit, and no test constructs the parked-arrival state.
 
 ### O4. The host writer has no control lane, so a Ping really does queue behind
+
 application bytes
 
 `frame_channel.rs:761` shows `FrameSender` holding a single
@@ -95,6 +97,7 @@ construction at the queue level. What is true is O3: the deadline is anchored at
 completion, so queueing delay does not count against the peer.
 
 ### O5. The sharpest finding in this pass: Ping admission timeout retires the
+
 generation regardless of `invalidate_on_missed`
 
 `liveness_loop` sends the Ping through `gen.writer.send(...)` at
@@ -119,7 +122,7 @@ the generation token is cancelled. `liveness_loop` then sees `sent.is_err()` at
 `:1457` and returns, but the retirement has already happened inside the sender.
 
 This bypasses the documented safety valve. `config.rs:236-238` states that
-`invalidate_on_missed` "stays `false` until the raw Rust historian client can
+`invalidate_on_missed` "stays `false` until the raw Rust history_summarizer client can
 answer Ping ...; enabling it before then would kill healthy long-running awaits
 (protocol §9.3)". With `invalidate_on_missed: false` the missed-Pong retirement
 at `:1376` is disabled, but the admission retirement at
@@ -274,7 +277,7 @@ states the mapping: Linux `renameat2(RENAME_EXCHANGE)`, macOS
 `renameatx_np(RENAME_SWAP)`. Those are different kernel calls with independently
 documented behaviour, reached through one Rust expression.
 
-CI's macOS job (`the source repository `ci.yml` workflow:126-184`, matrix at `:132`) runs on
+CI's macOS job (`the source repository`ci.yml`workflow:126-184`, matrix at `:132`) runs on
 macOS exactly four host-runtime steps:
 
 - `:156` `cargo build -p host-runtime` (build only, no test binaries)
@@ -392,28 +395,29 @@ for a fixed small `k`, and assert `gen.token` is not cancelled and exactly `k`
 Pings were written; (b) with `invalidate_on_missed: true`, answer nothing,
 advance to `write_completion + pong_deadline`, and assert `gen.token` is
 cancelled; and assert it is *not* cancelled at `write_completion + pong_deadline
-- 1ns`. `always` because the two directions are the dual outcomes of one
+
+- 1ns`.`always` because the two directions are the dual outcomes of one
 predicate, `expired` at `connection.rs:1370-1375`, and both must hold at every
 evaluation of the loop.
 Fault/timing angle: the bound is stated in the units the code bounds, so this is
 a finite check rather than an unbounded "eventually". The wake is the minimum of
-the next tick and the earliest `probe.sent + pong_deadline`
-(`connection.rs:1355-1364`); expiry is `>= pong_deadline` from `probe.sent`
-(`:1370-1373`); the tick re-arms at `now + ping_interval` (`:1399`).
+the next tick and the earliest`probe.sent + pong_deadline`
+(`connection.rs:1355-1364`); expiry is`>= pong_deadline` from `probe.sent`
+(`:1370-1373`); the tick re-arms at`now + ping_interval`(`:1399`).
 `config.rs:370-382` rejects a zero value for either, so both bounds are strictly
 positive in any accepted configuration. The subtle part is which instant
 `probe.sent` holds: the insert at `:1403-1411` records the enqueue instant with
-`written_at: None`, and the write-completion hook at `:1421-1447` overwrites it
-with `completed_at`. Probes with `written_at: None` are excluded from both the
+`written_at: None`, and the write-completion hook at`:1421-1447` overwrites it
+with `completed_at`. Probes with`written_at: None`are excluded from both the
 deadline wake (`:1358`) and the expiry scan (`:1372`), so queueing delay neither
 expires a probe nor arms one. Both halves need paused time; wall-clock sleeps
 cannot distinguish the boundary from scheduler noise.
-Required faults and enabling state: a configured `LivenessPolicy`, which no
+Required faults and enabling state: a configured`LivenessPolicy`, which no
 shipped configuration supplies. For (a) a cooperative peer, which the in-crate
-duplex harness at `connection.rs:1480` onward already provides. For (b) a peer
+duplex harness at`connection.rs:1480` onward already provides. For (b) a peer
 that reads but never sends a Pong, plus `invalidate_on_missed: true`. Paused
 tokio time for both. No adversary and no concurrency campaign.
-Confidence: high - [evidence](../../evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md). Every bound was read at HEAD and the two `sent` anchors were
+Confidence: high - [evidence](../../evidence/a-timely-pong-sustains-the-generation-within-a-bounded-round.md). Every bound was read at HEAD and the two`sent` anchors were
 traced through both writers of the field.
 Existing check: partial. `tests/client.rs:97-145` covers direction (a) with an
 indirect oracle, and is the only place in the crate where a full client answers a
@@ -496,6 +500,7 @@ egress backpressure. The failure looks like a transport reset to both sides, and
 per `authentication-and-capacity-rejections-are-observable` there is no channel
 to report it.
 Open questions:
+
 - Is retiring on Ping admission timeout intended? The admission timeout is a
   general frame-channel policy and the Ping is an ordinary caller of it, so this
   reads as an unnoticed interaction rather than a decision. If it is intended,
@@ -602,6 +607,7 @@ every retained generation carrying the moved field, refusing payloads that are
 byte-for-byte intact. That is the forward-compatibility break the `Option` on
 `source_payload_manifest_sha256` was introduced to prevent.
 Open questions:
+
 - Should the canonical encoding be decoupled from declaration order, for example
   by an explicit field-order list or a canonical-JSON serializer, so the contract
   is stated once rather than implied by the struct? The current design makes an
@@ -647,7 +653,7 @@ read at HEAD; the claim that no macOS lifecycle or generation test executes is
 derived from the four host-runtime steps in that job rather than asserted.
 Existing check: partial, Linux only. `generation.rs:1689`
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives the
-branch. CI's macOS job (`the source repository `ci.yml` workflow:126-184`) runs only
+branch. CI's macOS job (`the source repository`ci.yml`workflow:126-184`) runs only
 `cargo build -p host-runtime` (`:156`), `--test shm_soak` (`:178`), one filtered
 `--lib shm_provider` test (`:179-181`), and `--doc` (`:182-183`). No `generation`
 or `lifecycle` test body runs on macOS; the step comment at `:171-174` says the
@@ -657,6 +663,7 @@ and it is immediately followed by a deletion. If macOS `RENAME_SWAP` behaves
 differently on APFS than `RENAME_EXCHANGE` on ext4, the failure mode is deleting
 a retained generation, on a platform whose lifecycle code the suite never runs.
 Open questions:
+
 - Is macOS a supported deployment target for the lifecycle store, or only a
   development platform? The cfg arm and the CI build say it is supported enough
   to compile; the test selection says it is not exercised. That decision sets
@@ -713,6 +720,7 @@ enforced by the kernel on Linux and by a prose argument on macOS. A defect here
 destroys a retained generation, which is the outcome the protection check exists
 to prevent.
 Open questions:
+
 - Does anything outside the trust model have write access to the generations
   directory in a real deployment? The lock argument is sound if and only if the
   answer is no, and the store's validation path assumes the answer is yes.

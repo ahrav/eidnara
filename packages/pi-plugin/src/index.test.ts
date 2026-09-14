@@ -15,13 +15,13 @@ describe("Pi config load logging", () => {
             __test.logPiConfigLoad({
                 dir: "/tmp/project-a",
                 loadedFromPaths: ["/tmp/project-a/.eidnara/eidnara.jsonc"],
-                warnings: ["Ignoring historian.model from project config"],
+                warnings: ["Ignoring history_summarizer.model from project config"],
                 dedupe: true,
             });
             __test.logPiConfigLoad({
                 dir: "/tmp/project-a",
                 loadedFromPaths: ["/tmp/project-a/.eidnara/eidnara.jsonc"],
-                warnings: ["Ignoring historian.model from project config"],
+                warnings: ["Ignoring history_summarizer.model from project config"],
                 dedupe: true,
             });
             __test.logPiConfigLoad({
@@ -42,7 +42,7 @@ describe("Pi config load logging", () => {
             ).toHaveLength(1);
             expect(
                 messages.filter((message) =>
-                    message.includes("Ignoring historian.model from project config"),
+                    message.includes("Ignoring history_summarizer.model from project config"),
                 ),
             ).toHaveLength(1);
             expect(

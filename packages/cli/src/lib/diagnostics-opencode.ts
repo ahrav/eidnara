@@ -16,7 +16,10 @@ import {
     projectConfigDisabled,
     projectOpenCodeConfigPaths,
 } from "@eidnara/opencode/shared/conflict-detector";
-import { getDataDir, getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
+import {
+    getDataDir,
+    getProjectEidnaraHistorySummarizerDir,
+} from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { resolveOpenCodeDatabaseCandidates } from "@eidnara/opencode/shared/opencode-database-path";
 import {
@@ -28,18 +31,21 @@ import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { parse as parseJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { compactionEnabledFor } from "./eidnara-modes";
-import { type HistorianDumpSummary, listDumpsInDir } from "./historian-dumps";
+import { type HistorySummarizerDumpSummary, listDumpsInDir } from "./history_summarizer-dumps";
 import { codeFenceFor } from "./issue-body";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
 import {
     type ConfigPaths,
     detectConfigPaths,
-    getEidnaraHistorianDir,
+    getEidnaraHistorySummarizerDir,
     getEidnaraLogPath,
 } from "./paths";
 
-export type { HistorianDumpMeta, HistorianDumpSummary } from "./historian-dumps";
+export type {
+    HistorySummarizerDumpMeta,
+    HistorySummarizerDumpSummary,
+} from "./history_summarizer-dumps";
 
 const OPENCODE_PLUGIN_NAME = "@eidnara/opencode";
 
@@ -119,7 +125,7 @@ export interface DiagnosticReport {
      * `recentSessions` supplies session choices for the `--issue` picker.
      *
      * `recentSessions` is populated only when Bun provides `bun:sqlite` and OpenCode's database exists.
-     * On Node-only runs, `recentSessions` is empty and diagnostics use the tmp-directory historian listing.
+     * On Node-only runs, `recentSessions` is empty and diagnostics use the tmp-directory history_summarizer listing.
      */
     recentSessions: RecentSessionSummary[];
     /**
@@ -129,20 +135,20 @@ export interface DiagnosticReport {
      */
     sessionDiscovery: "ok" | "unavailable";
     /**
-     * `historianDumps` groups historian dumps by project directory.
+     * `history_summarizerDumps` groups history_summarizer dumps by project directory.
      * `legacyDumps` contains dumps from the harness-scoped tmp directory.
      */
-    historianDumps: HistorianDumpsReport;
+    history_summarizerDumps: HistorySummarizerDumpsReport;
 }
 
 /**
- * Each bucket groups historian dumps for one project directory represented in `recentSessions`.
+ * Each bucket groups history_summarizer dumps for one project directory represented in `recentSessions`.
  *
- * A bucket exists only for a project directory containing at least one dump under `<directory>/.eidnara/context/historian/`.
+ * A bucket exists only for a project directory containing at least one dump under `<directory>/.eidnara/context/history_summarizer/`.
  * Sessions that share a project directory use the same bucket.
  * Empty buckets are omitted.
  */
-export interface ProjectHistorianBucket {
+export interface ProjectHistorySummarizerBucket {
     /** `directory` identifies the project represented by this bucket. */
     directory: string;
     /** `mostRecentSession` supplies the picker label for this project. */
@@ -152,19 +158,19 @@ export interface ProjectHistorianBucket {
     /** `dumpCount` is the total number of dumps in this directory. */
     count: number;
     /** recent contains at most five newest dumps with parsed metadata. */
-    recent: HistorianDumpSummary[];
+    recent: HistorySummarizerDumpSummary[];
 }
 
-export interface HistorianDumpsReport {
+export interface HistorySummarizerDumpsReport {
     /** byProject orders project buckets by latest activity. */
-    byProject: ProjectHistorianBucket[];
+    byProject: ProjectHistorySummarizerBucket[];
     /**
-     * `legacyDumps` includes dumps under `${tmpdir}/opencode/eidnara/historian/`.
+     * `legacyDumps` includes dumps under `${tmpdir}/opencode/eidnara/history_summarizer/`.
      */
     legacyDumps: {
         dir: string;
         count: number;
-        recent: HistorianDumpSummary[];
+        recent: HistorySummarizerDumpSummary[];
     };
 }
 
@@ -304,11 +310,11 @@ export function readProjectOpenCodeConfigs(cwd: string): ProjectOpenCodeConfigRe
 /**
  *
  */
-export function collectHistorianDumps(
+export function collectHistorySummarizerDumps(
     recentSessions: RecentSessionSummary[],
-): DiagnosticReport["historianDumps"] {
+): DiagnosticReport["history_summarizerDumps"] {
     // The query processes sessions in descending time order; the first session for a directory becomes that bucket's primarySessionId.
-    const buckets = new Map<string, ProjectHistorianBucket>();
+    const buckets = new Map<string, ProjectHistorySummarizerBucket>();
     for (const session of recentSessions) {
         const dir = session.directory;
         if (!dir) continue;
@@ -320,8 +326,8 @@ export function collectHistorianDumps(
             }
             continue;
         }
-        const projectHistorianDir = getProjectEidnaraHistorianDir(dir);
-        const listing = listDumpsInDir(projectHistorianDir, 5);
+        const projectHistorySummarizerDir = getProjectEidnaraHistorySummarizerDir(dir);
+        const listing = listDumpsInDir(projectHistorySummarizerDir, 5);
         if (listing.count === 0) continue;
         buckets.set(dir, {
             directory: dir,
@@ -332,7 +338,7 @@ export function collectHistorianDumps(
         });
     }
 
-    const legacyDir = getEidnaraHistorianDir("opencode");
+    const legacyDir = getEidnaraHistorySummarizerDir("opencode");
     const legacyListing = listDumpsInDir(legacyDir, 5);
 
     return {
@@ -347,7 +353,7 @@ export function collectHistorianDumps(
 
 /**
  *
- * The list limits historian-dump lookups to existing OpenCode sessions.
+ * The list limits history_summarizer-dump lookups to existing OpenCode sessions.
  * The session list groups project directories and powers the `--issue` flow's session picker.
  *
  */
@@ -564,7 +570,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         },
         recentSessions,
         sessionDiscovery: discovery.status,
-        historianDumps: collectHistorianDumps(recentSessions),
+        history_summarizerDumps: collectHistorySummarizerDumps(recentSessions),
     };
 }
 
@@ -599,15 +605,15 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
             : [];
 
     // `parseError` is a raw filesystem or parser message and can name the full local path.
-    const sanitizeDumps = (dumps: HistorianDumpSummary[]) =>
+    const sanitizeDumps = (dumps: HistorySummarizerDumpSummary[]) =>
         dumps.map((dump) => ({
             ...dump,
             name: sanitizeString(dump.name),
             ...(dump.parseError ? { parseError: sanitizeDiagnosticText(dump.parseError) } : {}),
         }));
 
-    const historianDumps = {
-        byProject: report.historianDumps.byProject.map((bucket) => ({
+    const history_summarizerDumps = {
+        byProject: report.history_summarizerDumps.byProject.map((bucket) => ({
             directory: sanitizeString(bucket.directory),
             primarySessionId: bucket.primarySessionId,
             sessionIds: bucket.sessionIds,
@@ -615,9 +621,9 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
             recent: sanitizeDumps(bucket.recent),
         })),
         legacyDumps: {
-            dir: sanitizeString(report.historianDumps.legacyDumps.dir),
-            count: report.historianDumps.legacyDumps.count,
-            recent: sanitizeDumps(report.historianDumps.legacyDumps.recent),
+            dir: sanitizeString(report.history_summarizerDumps.legacyDumps.dir),
+            count: report.history_summarizerDumps.legacyDumps.count,
+            recent: sanitizeDumps(report.history_summarizerDumps.legacyDumps.recent),
         },
     };
 
@@ -642,13 +648,13 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         2,
     );
     const recentSessionsJson = JSON.stringify(recentSessions, null, 2);
-    const historianDumpsJson = JSON.stringify(historianDumps, null, 2);
+    const history_summarizerDumpsJson = JSON.stringify(history_summarizerDumps, null, 2);
     const fence = codeFenceFor(
         configPathsJson,
         userFlagsJson,
         projectFlagsJson,
         recentSessionsJson,
-        historianDumpsJson,
+        history_summarizerDumpsJson,
     );
 
     return [
@@ -710,11 +716,11 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
             ? "_No recent OpenCode sessions found (or OpenCode DB unavailable on this runtime)._"
             : [`${fence}json`, recentSessionsJson, fence].join("\n"),
         "",
-        "### Historian dumps",
+        "### HistorySummarizer dumps",
         "(Metadata only — XML content is not included in this report.)",
-        "Dumps are stored per-project under `<project>/.eidnara/context/historian/`.",
+        "Dumps are stored per-project under `<project>/.eidnara/context/history_summarizer/`.",
         `${fence}json`,
-        historianDumpsJson,
+        history_summarizerDumpsJson,
         fence,
         "",
         "### Log file",

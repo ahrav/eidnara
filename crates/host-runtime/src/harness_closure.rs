@@ -1,4 +1,4 @@
-//! Managed Broca harnesses use immutable, content-addressed runtime closures.
+//! Managed ModelExecution harnesses use immutable, content-addressed runtime closures.
 //!
 //! A closure preserves the qualified package layout under `files/`.
 //! The canonical manifest commits every launch root, dependency edge, extension position, source identity, file mode, size, and hash.

@@ -179,7 +179,7 @@ function warnTokenizerFallback(cause: "load" | "encode", error: unknown): void {
             ? "ai-tokenizer is unavailable"
             : "ai-tokenizer failed to encode and is disabled";
     console.warn(
-        `[eidnara] ${event}; using approximate character-based token counts for this process. Token budgets, persisted per-message counts, and protected-tail/compartment boundaries may be less accurate until restart:`,
+        `[eidnara] ${event}; using approximate character-based token counts for this process. Token budgets, persisted per-message counts, and protected-tail/history_segment boundaries may be less accurate until restart:`,
         reason,
     );
 }

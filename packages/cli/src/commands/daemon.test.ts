@@ -32,8 +32,8 @@ function result(
             proof: "2",
             daemon: "eidnara-host/0.1.0",
             context: "0.1.0",
-            synapse: "0.1.0",
-            broca: "0.1.0",
+            local_embeddings: "0.1.0",
+            model_execution: "0.1.0",
         },
         ...overrides,
     };
@@ -236,7 +236,7 @@ describe("daemon command contract", () => {
                 readiness: {
                     transport: { state: "ready", reason: "healthy" },
                     storage: { state: "ready", reason: "healthy" },
-                    synapse: { state: "ready", reason: "healthy" },
+                    local_embeddings: { state: "ready", reason: "healthy" },
                 },
             }),
         );
@@ -293,8 +293,8 @@ describe("daemon command contract", () => {
                     proof: "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
                     daemon: `${root}/daemon`,
                     context: `eidnara-host/0.1.0 (payload ${root}/eidnara/bin)`,
-                    synapse: null,
-                    broca: null,
+                    local_embeddings: null,
+                    model_execution: null,
                 },
             }),
         );
@@ -318,8 +318,8 @@ describe("daemon command contract", () => {
                     proof: "2",
                     daemon: `eidnara-host/0.1.0\u001b[2K\u001b[1;31m\nforged: line${"x".repeat(4096)}`,
                     context: null,
-                    synapse: null,
-                    broca: null,
+                    local_embeddings: null,
+                    model_execution: null,
                 },
             }),
         );
@@ -346,8 +346,8 @@ describe("daemon command contract", () => {
                     proof: 10n as unknown as string,
                     daemon: "eidnara-host/0.1.0",
                     context: null,
-                    synapse: null,
-                    broca: null,
+                    local_embeddings: null,
+                    model_execution: null,
                 },
             }),
         );

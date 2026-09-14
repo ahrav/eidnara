@@ -43,8 +43,8 @@ function probeResultJson(ok: boolean): string {
             proof: null,
             daemon: null,
             context: null,
-            synapse: null,
-            broca: null,
+            local_embeddings: null,
+            model_execution: null,
         },
     });
 }
@@ -64,8 +64,8 @@ function successfulResultJson(command: "start" | "stop"): string {
             proof: command === "start" ? "current" : null,
             daemon: "eidnara-host/0.1.0",
             context: null,
-            synapse: null,
-            broca: null,
+            local_embeddings: null,
+            model_execution: null,
         },
     });
 }

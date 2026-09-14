@@ -9,7 +9,7 @@ const CARGO_EVIDENCE_LINE =
  * Bun prints `(pass)`/`(fail)` verdicts, `error: expect(...)` assertions with their diff, a custom assertion message as `error: <message>`, and the summary counts.
  * A custom message is kept only when a drill declares it in `ASSERTION_MESSAGES`; every other `error:` line is exception text and is dropped.
  */
-const ASSERTION_MESSAGES = ["queued ctx_reduce drop must be pending before the bust"] as const;
+const ASSERTION_MESSAGES = ["queued eidnara_reduce drop must be pending before the bust"] as const;
 
 function escapeRegExp(text: string): string {
     return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

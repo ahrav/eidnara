@@ -32,15 +32,15 @@ The effective threshold is clamped to `[1, 90]` after the merge.
 
 The predicates at `:682-692` require a higher threshold or a gate transition
 from open to closed. The schedule is user-only (`:667`), so a project cannot
-reopen the gate through `dreamer.tasks.review-user-memories.schedule`.
-`dreamer.inject_docs` is also user-only (`:669`), in agreement with the
+reopen the gate through `memory_classifier.tasks.review-user-memories.schedule`.
+`memory_classifier.inject_docs` is also user-only (`:669`), in agreement with the
 catalog's configuration-table row. `smart_drops` and `temporal_awareness` are
 project-allowed (`:680-681`); a project may override either boolean direction,
 not only its default value.
 
 The twelve privileged keys are named at `:627-640`. Their budget keys are
 `memory.injection_budget_tokens`, its `memory.budget_tokens` alias,
-`memory.user_profile_budget_tokens`, and `historian.context_limit_tokens`. The
+`memory.user_profile_budget_tokens`, and `history_summarizer.context_limit_tokens`. The
 `const` assertion at `:696-708` forbids `ProjectAllowed` for a privileged key.
 It does not enforce
 the complete policy: changing a user-only key to raise-only, or changing an
@@ -55,7 +55,7 @@ its `apply_key` arm intentionally does nothing (`:921-923`).
 
 ## Failure scenario
 
-A regression classifies `dreamer.inject_docs` as project-allowed and removes
+A regression classifies `memory_classifier.inject_docs` as project-allowed and removes
 its privileged mark. A project setting it to `true` then overrides a user
 setting it to `false`. The documented user-only rule must fail even if an
 implementation-derived permission list accepts the change. This is a regression
@@ -81,7 +81,7 @@ Existing checks remain `unaudited`:
 
 - `config.rs:1297-1302`, `:1317-1350`, and `:1353-1387` assert specific
   threshold and budget outcomes with literal expectations.
-- `:1407-1446` asserts auto-search and caveman project overrides.
+- `:1407-1446` asserts auto-search and terse_text_compression project overrides.
 - `:1458-1480` asserts docs-injection rejection and a temporal override;
   `:1916-1931` asserts that project config cannot turn user docs injection off.
 - `:1637-1666` asserts that project flags and schedules cannot open a closed

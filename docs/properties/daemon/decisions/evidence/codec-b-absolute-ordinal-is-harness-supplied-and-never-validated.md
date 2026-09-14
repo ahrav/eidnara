@@ -180,7 +180,7 @@ that removed the memo would silently destabilise every ordinal-keyed piece of Ru
 state with no Rust-side detection.
 
 Depends on `codec-b-harness-decoders-accept-every-input-with-no-rejection-channel`
-for the framing. Consumers are in 4a (historian chunking) and 4b (boundary
+for the framing. Consumers are in 4a (history_summarizer chunking) and 4b (boundary
 selection), so the consequence assessment belongs to them; this record establishes
 the ingress contract and identifies the disagreement.
 

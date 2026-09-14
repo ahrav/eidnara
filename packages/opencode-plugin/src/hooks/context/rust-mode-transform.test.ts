@@ -273,8 +273,8 @@ describe("Rust mode transform request", () => {
             nativeMessages: [{ info: { id: "m-1" } }],
             passInputs: {
                 history_budget_tokens: 42_000,
-                caveman_enabled: true,
-                caveman_min_chars: 240,
+                terse_text_compression_enabled: true,
+                terse_text_compression_min_chars: 240,
             },
             modelKey: "anthropic/opus",
             providerId: "anthropic",
@@ -295,8 +295,8 @@ describe("Rust mode transform request", () => {
             full_array_fingerprint: "fp",
             prompt_surface_preset: "full",
             history_budget_tokens: 42_000,
-            caveman_enabled: true,
-            caveman_min_chars: 240,
+            terse_text_compression_enabled: true,
+            terse_text_compression_min_chars: 240,
             messages: [{ mid: "m-1" }],
         });
         for (const absent of ["pass_inputs", "mural", "detected_context_limit", "tail_delta"]) {
@@ -419,7 +419,7 @@ describe("Rust mode transform request", () => {
             default: "full",
             models: { "openai/gpt-5.6-sol": "light" },
             guidance_override_path: "trusted-guidance.md",
-            tool_descriptions: { ctx_search: "Search the project memory index." },
+            tool_descriptions: { eidnara_search: "Search the project memory index." },
         };
         deps.promptSurfaceRuntime = {
             resolveRegistration: () => ({
@@ -448,7 +448,7 @@ describe("Rust mode transform request", () => {
             prompt_surface_model_key: "openai/gpt-5.6-sol",
             prompt_surface_config_identity: promptSurfaceConfigIdentity(deps.promptSurface),
             prompt_surface_tool_descriptions: {
-                ctx_search: "Search the project memory index.",
+                eidnara_search: "Search the project memory index.",
             },
             prompt_surface_guidance_override: "## Eidnara\n\nTrusted user guidance.",
         });
@@ -476,8 +476,8 @@ describe("Rust mode transform request", () => {
         expect(bodies[0]?.todo_tool_present).toBe(false);
     });
 
-    it("seeds the ctx_reduce verdict from the live message array before the first user row persists", async () => {
-        const sessionId = `rust-ctx-reduce-from-messages-${Date.now()}`;
+    it("seeds the eidnara_reduce verdict from the live message array before the first user row persists", async () => {
+        const sessionId = `rust-eidnara-reduce-from-messages-${Date.now()}`;
         installAvailabilityDb(sessionId);
         installRawRows(sessionId, rawRows(1));
         const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
@@ -486,7 +486,7 @@ describe("Rust mode transform request", () => {
         });
         const messages = makeMessages(sessionId);
         (messages[0]!.info as { tools?: Record<string, boolean> }).tools = {
-            ctx_reduce: true,
+            eidnara_reduce: true,
         };
 
         await transform.run(sessionId, { messages: messages as unknown[] });

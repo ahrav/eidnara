@@ -3,14 +3,14 @@
 ## Invalidated
 
 The subject of this record is gone. Commit `3b817ad8` (this repository) moved
-the transform and the historian onto canonical kernel rows through
+the transform and the history_summarizer onto canonical kernel rows through
 `crates/daemon/src/canonical_memory.rs` and deleted `claim_snapshot_for_context`,
-the double-read vector fence, `historian_claim_block`, `MirroredClaimMemory`,
+the double-read vector fence, `history_summarizer_claim_block`, `MirroredClaimMemory`,
 `ClaimLaneWire`, and the commit-time vector check in `commit_transform`. The
 replacement property is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog.
 
-Verified at HEAD: `rg 'ClaimLaneWire|claim_snapshot_for_context|historian_claim_block|MirroredClaimMemory' crates/`
+Verified at HEAD: `rg 'ClaimLaneWire|claim_snapshot_for_context|history_summarizer_claim_block|MirroredClaimMemory' crates/`
 returns no match, and `snapshot_vector_from_connection`
 (`crates/memory-store/src/claim_mirror.rs:806-840`) has exactly one caller,
 `replace_claim_mirror_snapshot` (`claim_mirror.rs:980`), which compares an
@@ -28,7 +28,7 @@ convention the shm-transport catalog uses for its invalidated records.
 
 Two production consumers guard the same non-atomic read of the same mirror tables,
 and they compare different things. `crates/daemon/src/transform.rs:2008`
-compares canonical snapshot vectors; `crates/daemon/src/historian_chunk.rs:605`
+compares canonical snapshot vectors; `crates/daemon/src/history_summarizer_chunk.rs:605`
 compares the whole `ClaimMirrorState`. Both are protecting the same window for the
 same reason, so one of them is wrong about what the fence needs.
 
@@ -79,13 +79,13 @@ everything (`:816-848`).
 
 That makes `transform.rs:2008` correct **by consequence**, not by construction.
 Neither `transform.rs` nor `claim_mirror.rs` records the dependency.
-`historian_chunk.rs:605` independently chose `before != after` on the full
+`history_summarizer_chunk.rs:605` independently chose `before != after` on the full
 `ClaimMirrorState`, which does not depend on the coupling at all.
 
 **Reachability.** `claim_snapshot_for_context` is production code in
 `transform.rs`; the `#[cfg(test)]` items in that file begin far below
 (`transform.rs:13585` onward is inside a test module, and the mirror calls at
-`:14114`, `:14150`, `:14199` are test-module calls). `historian_chunk.rs:563-608`
+`:14114`, `:14150`, `:14199` are test-module calls). `history_summarizer_chunk.rs:563-608`
 is likewise production. The atomic third path, `lib.rs:7368-7377`, re-reads the
 vector via `claim_mirror::snapshot_vector_from_connection` (`claim_mirror.rs:647-681`)
 inside the same `with_conn_fenced` transaction as the CAS and turns a mismatch into
@@ -112,7 +112,7 @@ After that change, this interleaving is undetected by transform:
 
 Transform returns `(vector, claims)` where the vector describes generation 7 and
 the claims describe a state after generation 7's checkpoint moved. The caller
-believes it holds a consistent pair. `historian_chunk.rs:605` would have caught it
+believes it holds a consistent pair. `history_summarizer_chunk.rs:605` would have caught it
 because `acked_effect_id` differs, so the two surfaces would disagree about
 whether the mirror is usable — and the one that goes quiet is the one that was
 right.
@@ -130,7 +130,7 @@ at `lib.rs:7368-7377`, so a stale-but-equal vector would pass the CAS fence too.
   record fails, this one fails silently.
 - Dependency: `acked_effect_id` written only for touched projects
   (`claim_mirror.rs:1064-1096`).
-- Not a dependency: `historian_chunk.rs` and `lib.rs:7368-7377` are unaffected.
+- Not a dependency: `history_summarizer_chunk.rs` and `lib.rs:7368-7377` are unaffected.
 
 ## What a test must construct
 
@@ -157,13 +157,13 @@ require an implementation that already has the defect.
 
 ## Investigation log
 
-### Q: Which read fence is correct, transform's or historian's?
+### Q: Which read fence is correct, transform's or history_summarizer's?
 
-- Sources examined: `transform.rs:1978-2011`, `historian_chunk.rs:563-608`,
+- Sources examined: `transform.rs:1978-2011`, `history_summarizer_chunk.rs:563-608`,
   `claim_mirror.rs:963-990`, `:1064-1096`, `:800-805`, `:816-848`,
   `context-core/src/claim_operation.rs:330-337`.
 - Findings: the two are equivalent in effect today. Transform's is weaker in
-  principle and sufficient only because of the generation coupling. Historian's is
+  principle and sufficient only because of the generation coupling. HistorySummarizer's is
   unconditionally sufficient and will bail out in strictly more cases, though I
   found no case where it bails out and transform's would not, precisely because of
   the coupling.

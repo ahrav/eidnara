@@ -12,7 +12,7 @@
       "hard": 45000,
       "p95": 20000
     },
-    "linux_synapse_certification_post_publication": {
+    "linux_local_embeddings_certification_post_publication": {
       "hard": 90000,
       "p95": 45000
     },
@@ -218,7 +218,7 @@
     "id": "eidnara-host-release",
     "version": "0.1.0"
   },
-  "release_contract_sha256": "1a8f45495704a1cb36afec39c3af79ebf4b3707409c6916878615e2916fdbbf1",
+  "release_contract_sha256": "b63a1686c999983fab62bec9ded5d55250f9697200b6f64c85e91e8a6447bc0b",
   "rust_runtime": {
     "fastembed": "6.0.0",
     "ort": "2.0.0-rc.13",

@@ -37,9 +37,9 @@ async function waitFor<T>(read: () => Promise<T>, predicate: (value: T) => boole
     }
 }
 
-function brocaCall(client: HostClient, prompt: string): Promise<Record<string, unknown>> {
+function model_executionCall(client: HostClient, prompt: string): Promise<Record<string, unknown>> {
     return client.call<Record<string, unknown>>(
-        "broca",
+        "model_execution",
         "session.send",
         {
             prompt,
@@ -107,14 +107,14 @@ describe("direct host fixture contract", () => {
         const valid = Buffer.from(
             JSON.stringify({
                 status: "ready",
-                wire_version: 2,
-                catalog: ["context", "synapse", "broca"],
+                wire_version: 3,
+                catalog: ["context", "local_embeddings", "model_execution"],
             }),
         );
         expect(__hermeticHostTest.parseReadyRecord(valid).status).toBe("ready");
         expect(() =>
             __hermeticHostTest.parseReadyRecord(
-                Buffer.from('{"status":"ready","wire_version":2,"catalog":[],"key":"secret"}'),
+                Buffer.from('{"status":"ready","wire_version":3,"catalog":[],"key":"secret"}'),
             ),
         ).toThrow();
         expect(() =>
@@ -145,7 +145,7 @@ describe("direct host fixture contract", () => {
         const fixtureBin = join(root, "early-ready-fixture.sh");
         writeFileSync(
             fixtureBin,
-            `#!/bin/sh\nprintf '%s\\n' '{"status":"ready","wire_version":2,"catalog":["context","synapse","broca"]}'\nsleep 1\nmkdir -p "$2/eidnara/run"\n: > "$2/direct-host-control.sock"\n: > "$2/eidnara/run/connection.json"\nsleep 60\n`,
+            `#!/bin/sh\nprintf '%s\\n' '{"status":"ready","wire_version":3,"catalog":["context","local_embeddings","model_execution"]}'\nsleep 1\nmkdir -p "$2/eidnara/run"\n: > "$2/direct-host-control.sock"\n: > "$2/eidnara/run/connection.json"\nsleep 60\n`,
             { mode: 0o700 },
         );
 
@@ -262,7 +262,7 @@ describe("direct host fixture contract", () => {
                         targetKind: "management_surface",
                     });
                     try {
-                        expect((await brocaCall(client, prompt)).run_id).toBeString();
+                        expect((await model_executionCall(client, prompt)).run_id).toBeString();
                     } finally {
                         await client.closeAsync();
                     }
@@ -332,7 +332,7 @@ describe("direct host fixture contract", () => {
                 identity: { project_root: root, harness: "opencode", session: "sigterm" },
                 targetKind: "management_surface",
             });
-            await brocaCall(client, "sigterm sentinel request");
+            await model_executionCall(client, "sigterm sentinel request");
             await waitFor(
                 () => stack.backendCounters(),
                 (counters) => counters.blocked >= 1,

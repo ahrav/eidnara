@@ -27,18 +27,18 @@ readback and the subsequent edits are not an independent re-review.
 
 | Existing record | Decision | Reason |
 | --- | --- | --- |
-| [synapse-bundle-fingerprint-covers-every-artifact](../../../host-runtime/catalog.md#synapse-bundle-fingerprint-covers-every-artifact) | Reuse exactly. | Hash participation and verified bundle loading already have an owner. The new count record adds untruncated counting from those same bytes. |
-| [synapse-requests-are-validated-before-any-inference](../../../host-runtime/catalog.md#synapse-requests-are-validated-before-any-inference) | Reuse existing clauses. | Wire constraints, byte limits, hashes, and retained-key replay already belong here. RP2.1 adds exact token rejection on the product path. |
-| [synapse-admission-boundaries-are-exact](../../../host-runtime/catalog.md#synapse-admission-boundaries-are-exact) | Reuse, with refreshed evidence. | JobTable count, bytes, retention, and result leases are existing mechanisms. Durable discovery and query priority are additions. |
-| [synapse-degrades-to-disabled-and-keeps-the-context-routable](../../../host-runtime/catalog.md#synapse-degrades-to-disabled-and-keeps-the-context-routable) | Reuse exactly within its scope. | Optional-lane failure is not a reason to duplicate a host degradation record. Dense coverage remains a separate product concern. |
-| [synapse-inference-runs-through-a-sealed-runtime-image](../../../host-runtime/catalog.md#synapse-inference-runs-through-a-sealed-runtime-image) | Reuse exactly. | Runtime-image certification is not a new embedding-driver property. |
-| [tokenizer-encoding-matches-the-independent-oracle](../../../tokenizer/catalog.md#tokenizer-encoding-matches-the-independent-oracle) and the six sibling tokenizer records | Reuse for Claude accounting only. | The embedded Claude BPE vocabulary is not the Synapse model tokenizer. Its golden fixtures cannot certify EmbedTokens. |
-| [scheduled-dreamer-slot-runs-once-through-lease-and-receipt](../../../daemon/handlers/catalog.md#scheduled-dreamer-slot-runs-once-through-lease-and-receipt) | Reuse the scheduled-task contract. | It covers the review-user-memories task, not durable embedding work. Reuse supervisor ownership without importing billable-attempt semantics into pure inference. |
+| [local_embeddings-bundle-fingerprint-covers-every-artifact](../../../host-runtime/catalog.md#local_embeddings-bundle-fingerprint-covers-every-artifact) | Reuse exactly. | Hash participation and verified bundle loading already have an owner. The new count record adds untruncated counting from those same bytes. |
+| [local_embeddings-requests-are-validated-before-any-inference](../../../host-runtime/catalog.md#local_embeddings-requests-are-validated-before-any-inference) | Reuse existing clauses. | Wire constraints, byte limits, hashes, and retained-key replay already belong here. RP2.1 adds exact token rejection on the product path. |
+| [local_embeddings-admission-boundaries-are-exact](../../../host-runtime/catalog.md#local_embeddings-admission-boundaries-are-exact) | Reuse, with refreshed evidence. | JobTable count, bytes, retention, and result leases are existing mechanisms. Durable discovery and query priority are additions. |
+| [local_embeddings-degrades-to-disabled-and-keeps-the-context-routable](../../../host-runtime/catalog.md#local_embeddings-degrades-to-disabled-and-keeps-the-context-routable) | Reuse exactly within its scope. | Optional-lane failure is not a reason to duplicate a host degradation record. Dense coverage remains a separate product concern. |
+| [local_embeddings-inference-runs-through-a-sealed-runtime-image](../../../host-runtime/catalog.md#local_embeddings-inference-runs-through-a-sealed-runtime-image) | Reuse exactly. | Runtime-image certification is not a new embedding-driver property. |
+| [tokenizer-encoding-matches-the-independent-oracle](../../../tokenizer/catalog.md#tokenizer-encoding-matches-the-independent-oracle) and the six sibling tokenizer records | Reuse for Claude accounting only. | The embedded Claude BPE vocabulary is not the LocalEmbeddings model tokenizer. Its golden fixtures cannot certify EmbedTokens. |
+| [scheduled-memory_classifier-slot-runs-once-through-lease-and-receipt](../../../daemon/handlers/catalog.md#scheduled-memory_classifier-slot-runs-once-through-lease-and-receipt) | Reuse the scheduled-task contract. | It covers the review-user-memories task, not durable embedding work. Reuse supervisor ownership without importing billable-attempt semantics into pure inference. |
 
 ## Harness fit
 
 The existing deterministic engine records calls and input text and can park or
-fail a call (`crates/host-runtime/tests/support/synapse.rs:40-122`). It provides
+fail a call (`crates/host-runtime/tests/support/local_embeddings.rs:40-122`). It provides
 an inference boundary, not a tokenizer oracle or a durable completion oracle.
 The verified bundle and independent token fixtures are needed for counting.
 A reopened projection and an externally retained dispatch trace are needed for
@@ -57,17 +57,17 @@ The additions cover those gaps and do not clone the existing guarantees.
 The tokenizer catalog's no-production-caller statement is stale:
 `crates/daemon/Cargo.toml:32` depends on it and
 `crates/daemon/src/token_cache.rs:133` calls it in production code.
-The host catalog's test-only Synapse composition statement is also stale:
-`crates/daemon/src/bin/eidnara_host/serve.rs:1097-1127` composes Synapse.
+The host catalog's test-only LocalEmbeddings composition statement is also stale:
+`crates/daemon/src/bin/eidnara_host/serve.rs:1097-1127` composes LocalEmbeddings.
 Ready inference still requires a selected generation with certified artifacts
 (`serve.rs:1027-1065`). That path is explicit-config-only; composition and the
 disabled fallback are default-production.
 
 The old admission record describes oldest-completion eviction. Current
-`crates/host-runtime/src/synapse/jobs.rs:156-158` prefers last poll time, then
+`crates/host-runtime/src/local_embeddings/jobs.rs:156-158` prefers last poll time, then
 completion time. Do not copy the older ordering assertion into a new record.
 Current ORT integration checks are explicitly ignored, for example
-`crates/host-runtime/tests/synapse_bundle.rs:579-581`; the old inventory's
+`crates/host-runtime/tests/local_embeddings_bundle.rs:579-581`; the old inventory's
 environment-missing early-return description is not current exercise evidence.
 
 ## Wildcard for the existing set

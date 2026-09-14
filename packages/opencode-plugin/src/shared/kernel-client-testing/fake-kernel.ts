@@ -190,7 +190,7 @@ const TAINT_RANK: Record<string, number> = {
     repo_untrusted_text: 3,
     tool_untrusted_output: 3,
     assistant_inference: 4,
-    dreamer_inference: 4,
+    memory_classifier_inference: 4,
     personal: 5,
     unclassifiable: 5,
 };
@@ -199,7 +199,7 @@ const TAINT_RANK: Record<string, number> = {
 const DERIVED_CLASSES: Record<string, { source: string; taint: string }> = {
     assistant: { source: "model_inference", taint: "assistant_inference" },
     model: { source: "model_inference", taint: "assistant_inference" },
-    dreamer: { source: "model_inference", taint: "dreamer_inference" },
+    memory_classifier: { source: "model_inference", taint: "memory_classifier_inference" },
     user: { source: "model_inference", taint: "user_inferred" },
 };
 
@@ -207,7 +207,7 @@ const DERIVED_CLASSES: Record<string, { source: string; taint: string }> = {
 const MODEL_INFERENCE_TAINTS: ReadonlySet<string> = new Set([
     "user_inferred",
     "assistant_inference",
-    "dreamer_inference",
+    "memory_classifier_inference",
     "personal",
     "unclassifiable",
 ]);
@@ -309,7 +309,7 @@ export class FakeKernel {
             object_kind: "decision",
             domain_id: input.domain_id ?? "memory",
             source_kind: input.source_kind ?? "assistant",
-            source_id: input.source_id ?? "ctx_memory",
+            source_id: input.source_id ?? "eidnara_memory",
             source_revision: input.source_revision ?? 1,
             created_commit_seq: seq,
             invalidated_commit_seq: null,

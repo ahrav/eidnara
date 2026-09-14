@@ -79,7 +79,7 @@ async fn discovery_validates_the_publication_the_way_a_client_must() {
     let info = host_runtime::read_connection_file(host.publication_path())
         .expect("host-owned discovery accepts publication");
     assert_eq!(info.schema, 2);
-    assert_eq!(info.wire_version, 2);
+    assert_eq!(info.wire_version, 3);
     assert!(!info.setup_socket.is_empty());
     assert_eq!(info.key.len(), 32);
     assert_eq!(info.daemon_id.len(), 16);
@@ -296,7 +296,7 @@ async fn a_planted_symlink_at_the_record_name_is_replaced_not_followed() {
 /// `forbid(unsafe_code)` cannot be overridden within the crate.
 #[test]
 fn exactly_one_unsafe_escape_hatch_exists_in_the_crate() {
-    const BLESSED: &str = "broca/subprocess.rs";
+    const BLESSED: &str = "model_execution/subprocess.rs";
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut sites = Vec::new();
 

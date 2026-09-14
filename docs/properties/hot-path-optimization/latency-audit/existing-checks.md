@@ -52,14 +52,14 @@ performance gain is claimed.
 | Check | Scoped assertion | Status |
 | --- | --- | --- |
 | [`aborted_waiter_preserves_commit_bookkeeping_and_worker_charges`][u-abort] | W11 observes commit and waiter abort before lineage insertion. W8 checks later lineage and guidance-pin settlement, reopened core state, and fresh guidance on the next HARD pass. | unaudited |
-| [`emergency_cancellation_between_units_preserves_commit_and_releases_scratch`][u-emergency] | A commit survives cancellation during the live historian wait. No unit permit spans that wait; a later cancelled unit releases retained scratch. | unaudited |
+| [`emergency_cancellation_between_units_preserves_commit_and_releases_scratch`][u-emergency] | A commit survives cancellation during the live history_summarizer wait. No unit permit spans that wait; a later cancelled unit releases retained scratch. | unaudited |
 | [`route_close_keeps_binding_and_scratch_until_transform_finishes`][u-host-close] | E1/E3 observe a real host close while the committed transform is held, then cleanup and exact scratch reacquisition only after completion. Ingress availability equals baseline minus held body bytes at the gate and returns exactly to baseline after route-gone. | unaudited |
 | [`request_cancel_waits_for_committed_transform_and_releases_scratch`][u-host-cancel] | A server Error is published after completion with all permits available and ingress restored to baseline. Explicit client cancel discards its pending receiver locally; this check does not decode the cancelled code. | unaudited |
 | [`transform_panic_is_redacted_and_maps_to_wire_internal_error`][u-panic] and [`transform_panic_child`][u-child] | W12's transform arm checks the actual host path, post-commit panic, fixed diagnostic, no canary, terminal `host.internal_error`, exact ingress baseline, returned scratch, and cleanup. The ignored child runs from the parent. | unaudited |
 | [`synthetic_unit_failures_map_to_internal_error_and_release_resources`][u-failure] | Six cases deliver the three BlockingWorkFailed variants at submissions one and two. The failed closure is dropped without running. Submission-two cases follow a real Emergency95 transform and inline publication. The checks cover internal_error mapping, exact scratch return, unit permits, and durable state, not actual runtime-stop or route-closing races. | unaudited |
 | [`spent_meter_cannot_reenter_admitted_body`][u-spent-admission] | Reentry after charge transfer refuses before the already-admitted shortcut, makes no new reserve call, and releases the exact pool capacity when owners drop. | unaudited |
-| [`handler_emergency_inline_drive_folds_in_the_same_response`][u-inline] | Inline success returns the historian summary in the same HARD response. | unaudited |
-| [`handler_emergency_busy_waits_for_the_active_run_and_then_refolds`][u-busy] | A completed first unit still waits for the active historian, then returns its summary. This Busy path requires six scalar reads, distinct from the four-read post-publish hook witness. | unaudited |
+| [`handler_emergency_inline_drive_folds_in_the_same_response`][u-inline] | Inline success returns the history_summarizer summary in the same HARD response. | unaudited |
+| [`handler_emergency_busy_waits_for_the_active_run_and_then_refolds`][u-busy] | A completed first unit still waits for the active history_summarizer, then returns its summary. This Busy path requires six scalar reads, distinct from the four-read post-publish hook witness. | unaudited |
 | [`handler_emergency_refolds_when_active_run_publishes_before_live_wait_capture`][u-foreign] | C5 records ordered transform/publish versions independently of the pass read, returns the published summary, and observes exactly four scalar reads. | unaudited |
 | [`handler_emergency_inline_failure_degrades_to_the_emergency_selection_output`][u-failed] | Inline failure preserves the emergency selection output against the direct transform comparison. | unaudited |
 
@@ -148,7 +148,7 @@ not the handler.
 | [`warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live`][t-collapsed] | A replayed pair without the flag yields no duplicate tool-use id and reuses the cache. | unaudited |
 | [synthetic_ingress_matches_flagged_reference][synthetic-reference] | Fresh, pending and lineage cases preserve canonical bytes, digests/projection state, native bytes and tag rows against typed-flagged input. Complete boundary diagnostics and chunk inputs agree with the same original handler request. A carrier-targeted overlay cannot mutate the synthetic message; a live control does take its tag. | unaudited |
 | [handler_delta_normalization_matches_full_when_reserved_todo_starts_at_frontier][synthetic-delta-parity] | Full and delta requests agree on projection and native bytes after expanding the native response delta. | unaudited |
-| [unflagged_synthetic_delta_prepares_historian_and_native_output][synthetic-delta-witness] | A prior HARD pass freezes the pair; an unflagged suffix reaches the situation marker with a prepared firing and native serving. A third delta reuses the pair in its cached prefix. Captured producer prompts and native bytes match a typed-flag baseline reconstruction; boundary/chunk checks retain the difference from full raw ingress. | unaudited |
+| [unflagged_synthetic_delta_prepares_history_summarizer_and_native_output][synthetic-delta-witness] | A prior HARD pass freezes the pair; an unflagged suffix reaches the situation marker with a prepared firing and native serving. A third delta reuses the pair in its cached prefix. Captured producer prompts and native bytes match a typed-flag baseline reconstruction; boundary/chunk checks retain the difference from full raw ingress. | unaudited |
 | [lineage_rebase_preserves_unflagged_synthetic_head][synthetic-lineage-rebase] | A non-subagent descent replay rebases a synthetic head from ordinal 1 to 11 without consuming a live ordinal. Projection marks, served bytes and fingerprints equal the typed-flag reference. | unaudited |
 | [tag_overlay_guard_uses_the_pass_local_synthetic_view][synthetic-overlay-guard] | `apply_tag_overlay_to_message` takes its synthetic flag from the pass-local view. A normalized carrier rendered from the raw ingress clone keeps its bytes under a carrier-targeted overlay; a live control takes its tag. | unaudited |
 | [`parked_p2_fingerprint_reuse_and_tag_frontier_match_baseline`][t-parked] | Reused `content_hash` fingerprints and `canonical_bytes` equal a full rehash for this text fixture, not universally for equal values with different serialized bytes. | unaudited |
@@ -168,7 +168,7 @@ not the handler.
 | [`frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits`][t-vacuity] | Same-length edits and repeats are not vacuously reused. | unaudited |
 | [`duplicate_tool_use_assert_covers_incremental_native_suffix`][t-dup] | Tool-use ids are unique across the cached prefix and encoded suffix. | unaudited |
 | [`incremental_sidecar_carries_pins_across_three_generations`][t-sidecar] | Full and incremental order, metadata, and pins agree across three generations and repeated IDs. Sparse-prefix cases preserve order and missing metadata. | unaudited |
-| [`selection_input_shares_projected_wire_value`][selection-sharing] | Selection and historian inputs equal and point to the projected wire input; cloning selection preserves that pointer. | unaudited |
+| [`selection_input_shares_projected_wire_value`][selection-sharing] | Selection and history_summarizer inputs equal and point to the projected wire input; cloning selection preserves that pointer. | unaudited |
 | [`tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint`][t-tagcold] | Cold and cached passes serve equal bytes and equal durable rows across five passes. | unaudited |
 | [`poisoned_tag_baseline_refills_after_direct_sql_update`][t-poison] | A generation change refills the baseline. | unaudited |
 | [`tag_baseline_cache_keeps_interleaved_sessions_isolated`][t-interleave] | Two sessions do not share rows. | unaudited |
@@ -182,10 +182,10 @@ not the handler.
 | [`parity_golden_matches_ts_reference_across_full_corpus`][t-hyg-golden] | U and T match the TypeScript golden within tokenizer tolerance; the band matches exactly. Cold/warm full results equal the Rust characterization digest. Its pre-memo provenance is agent-witnessed and transcript-only, not independently reexecuted or artifact-hash verified. | unaudited |
 | [`hygiene_digest_and_token_key_use_kind_prefixed_content`][t-hyg-key] | A poisoned projection-digest token entry is not reused. The independent text-prefixed digest is the reported hash and token key. | unaudited |
 | [`memo_preserves_each_derived_digest_domain`][t-hyg-domains] | Independent text, input, output, file, and excluded digest formulas match cold and warm memo entries and differ from projection hashes. | unaudited |
-| [`memo_rechecks_caveman_identity_payload_and_context`][t-hyg-invalidates] | Same-ID content edits, caveman identity/payload and first-duplicate selection, tags, protection, coverage, reduction, role, and synthetic status preserve fresh-measurement equality. | unaudited |
+| [`memo_rechecks_terse_text_compression_identity_payload_and_context`][t-hyg-invalidates] | Same-ID content edits, terse_text_compression identity/payload and first-duplicate selection, tags, protection, coverage, reduction, role, and synthetic status preserve fresh-measurement equality. | unaudited |
 | [`memo_bounds_sessions_bytes_and_refuses_over_budget_blocks`][t-hyg-bounds] | Interleaving, removal, oversize session IDs, over-budget multiblock walks, and empty projections preserve complete results. Prune, reinsert, replacement, and refusal preserve recomputed counters under the production capacity-to-bucket model, not an allocator measurement; refused blocks are counted. | unaudited |
 | [`memo_over_budget_keeps_a_warm_prefix_instead_of_resetting`][t-hyg-prefix] | A projection larger than the budget admits the projection prefix; every later walk hits exactly that prefix and retains the same keys under budget. | unaudited |
-| [`memo_retention_is_independent_of_caveman_payload_size`][t-hyg-payload] | A 16-byte and a 2 MiB caveman payload memoize with identical retained bytes. | unaudited |
+| [`memo_retention_is_independent_of_terse_text_compression_payload_size`][t-hyg-payload] | A 16-byte and a 2 MiB terse_text_compression payload memoize with identical retained bytes. | unaudited |
 | [`memo_namespaces_are_separate_and_the_least_recently_used_session_is_evicted`][t-hyg-table] | Namespace A/B/A keeps three separate warm memos; namespace and ID-only removal drop only their matches; a seventeenth session evicts the least recently used one while a recently touched one survives. | unaudited |
 | [`poisoned_session_memo_recovers_cold_through_every_path`][t-hyg-poison] | A panic with torn accounting is recovered by use, namespace removal, ID-only removal, and reset; results equal uncached measurement and the table stays under its bound. | unaudited |
 | [`distinct_sessions_neither_block_nor_evict_each_other_up_to_the_limit`][t-hyg-overlap] | Sixteen distinct sessions reach a channel barrier while all hold their memo locks; each stays resident and warm afterwards. | unaudited |
@@ -265,11 +265,11 @@ not performance measurements or a full-workspace gate.
 | [`pass_trace_upserts_counts_and_caps_errors`][t-upserts] | Upsert counters, a 256-entry scheduler ring, a 2000-character error cap. | unaudited |
 | [`scheduler_trace_records_every_pass_and_preserves_variable_arm_state`][t-sched] | One scheduler observation per accepted pass. | unaudited |
 | [`pass_trace_refuses_a_new_secret_session_and_keeps_tracing_a_stored_one`][t-secret] | Trace writes refuse a new secret session and tolerate a stored one. | unaudited |
-| [`historian_side_channel_outbox_recovers_after_restart`][t-restart] | A failed row is redelivered once after reopen; the pending count drops to 0. | unaudited |
-| [`historian_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults-sc] | One failed kind leaves other kinds delivered; a retry with `now_ms = i64::MAX` succeeds. | unaudited |
-| [`status_diagnostics_surface_pending_historian_side_channel_failure`][t-status-sc] | A failed `event` delivery leaves one pending row visible to `status`; a transform pass 1100 ms later drains it and clears the failure. | unaudited |
-| [`publish_historian_chunk_cas_conflict_leaves_no_transcript_row`][t-publish-cas] | The CAS loser enqueues no outbox rows. | unaudited |
-| [`truncate_compartments_for_revert_removes_anchored_events_and_crossing_ranges`][t-truncate] | Revert deletes outbox rows for the session. | unaudited |
+| [`history_summarizer_side_channel_outbox_recovers_after_restart`][t-restart] | A failed row is redelivered once after reopen; the pending count drops to 0. | unaudited |
+| [`history_summarizer_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults-sc] | One failed kind leaves other kinds delivered; a retry with `now_ms = i64::MAX` succeeds. | unaudited |
+| [`status_diagnostics_surface_pending_history_summarizer_side_channel_failure`][t-status-sc] | A failed `event` delivery leaves one pending row visible to `status`; a transform pass 1100 ms later drains it and clears the failure. | unaudited |
+| [`publish_history_summarizer_chunk_cas_conflict_leaves_no_transcript_row`][t-publish-cas] | The CAS loser enqueues no outbox rows. | unaudited |
+| [`truncate_history_segments_for_revert_removes_anchored_events_and_crossing_ranges`][t-truncate] | Revert deletes outbox rows for the session. | unaudited |
 | [`duplicate_json_object_names_are_refused`][t-dup-json] | Duplicate names are refused at top level and nested; the message omits the value. | unaudited |
 | [`a_key_directed_substitution_records_its_own_detection`][t-keydir] | A protected-key substitution records a synthetic detection. | unaudited |
 | [`a_protected_key_holding_a_container_is_refused`][t-container] | A protected key with a container value refuses. | unaudited |
@@ -284,8 +284,8 @@ not performance measurements or a full-workspace gate.
 | [`single_pass_preparation_reports_change_and_validates_unwalked_keys`][t-single-pass] | Clean input returns byte-identical with `changed` false; a substitution sets `changed` and records one detection; a secret-bearing key under an integrity- or identity-named container is refused. | unaudited |
 | [`a_refusal_after_a_substitution_leaves_its_detection_in_the_callers_vector`][t-refusal-order] | The `keyed` store fixture, serialized and prepared directly, is refused with one detection in the caller's vector, so the store test's receipt count discriminates. | unaudited |
 | [`cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nested_key`][t-meta-bytes] | Through `commit`: clean `meta` is stored as its serialization; a nested map value secret is substituted and recorded on the `meta` scan; a nested map key secret, preceded in walk order by a substituted value, is refused with no row and no added receipt. | unaudited |
-| [`settled_pass_scan_audit_rows_are_retired_while_overlay_scans_remain`][t-retire] | Audit row counts stay flat across six passes, and again across passes after a historian publish bumped the row version; a tag mint's scans are added and kept; the pass owner, the retained owner, and the publish owner each hold exactly their own copies. | unaudited |
-| [`a_compartment_generation_conflict_keeps_the_live_pass_scan_audit_rows`][t-seq-conflict] | A pass that loses the compartment-generation check retires nothing; the live pass's rows and owner copies are unchanged. | unaudited |
+| [`settled_pass_scan_audit_rows_are_retired_while_overlay_scans_remain`][t-retire] | Audit row counts stay flat across six passes, and again across passes after a history_summarizer publish bumped the row version; a tag mint's scans are added and kept; the pass owner, the retained owner, and the publish owner each hold exactly their own copies. | unaudited |
+| [`a_history_segment_generation_conflict_keeps_the_live_pass_scan_audit_rows`][t-seq-conflict] | A pass that loses the history_segment-generation check retires nothing; the live pass's rows and owner copies are unchanged. | unaudited |
 | [`the_first_receive_for_a_new_session_records_its_identity_receipt`][t-first-receive] | A receive for a session absent from `pass_trace` and `cache_state` records one zero-finding scan and one owner copy; the next receive records nothing. | unaudited |
 | [`a_clean_pass_trace_receive_records_no_scan_audit_rows`][t-receive] | A clean receive records no audit row; a detected identity on a known session still does. | unaudited |
 | [`retained_pass_fields_keep_their_scan_receipts_across_the_next_pass`][t-retained-pass] | A second pass keeps the first pass's receipts for its root, scheduler observation, interesting observation, and divergence while both roots, both history entries, and the divergence stay stored; the replaced `meta` keeps one live receipt; a third pass adds to the retained receipts. | unaudited |
@@ -300,8 +300,8 @@ not performance measurements or a full-workspace gate.
 | [`reassigning_a_scan_range_leaves_later_scans_under_the_default_owner`][t-reassign] | Reassigning a scan range to another owner leaves the write's default owner list alone, so a scan prepared afterwards carries only the default owner. | unaudited |
 | [`a_crash_between_delivery_and_retirement_redelivers_once_under_concurrent_drainers`][t-side-channel-crash] | An injected failure between insert and retirement rolls both back; rows read by a second drainer before the first retired them deliver nothing a second time; the outbox ends empty rather than marked; the C6 marker is recorded per kind. | unaudited |
 | [`pass_trace_counts_every_outcome_and_a_failed_receive_does_not_veto_the_commit`][t-outcome] | Rejected, committed, and stable passes count three receives; a receive whose UPSERT fails inside its own transaction leaves the commit intact. | unaudited |
-| [`historian_active_reads_the_durable_phase_from_the_pass_state_or_the_store`][t-phase] | `historian_active` reads the phase from the pass load, from the store on a rerun, and treats a failed load as idle. | unaudited |
-| [`historian_active_rereads_a_loaded_active_phase_when_no_run_is_live`][t-phase-reread] | A loaded non-idle phase with no live run is re-read from the store; a run that committed idle after the pass load does not report active. | unaudited |
+| [`history_summarizer_active_reads_the_durable_phase_from_the_pass_state_or_the_store`][t-phase] | `history_summarizer_active` reads the phase from the pass load, from the store on a rerun, and treats a failed load as idle. | unaudited |
+| [`history_summarizer_active_rereads_a_loaded_active_phase_when_no_run_is_live`][t-phase-reread] | A loaded non-idle phase with no live run is re-read from the store; a run that committed idle after the pass load does not report active. | unaudited |
 
 None found: `first_divergence`
 NULL after a rejected pass; `receive_count` after an Emergency95 rerun that
@@ -330,13 +330,13 @@ not whether the focused tests ran.
 | [rust-mode-transform.test.ts:447][permission-agent] | An agent `deny` rule through the SDK yields `todo_tool_present: false`; `app.agents` is called once. | unaudited |
 | [rust-mode-transform.test.ts:473][permission-empty-timeout] | A hung `app.agents()` with an empty cache yields `todo_tool_present: false` after about 2 s. | unaudited |
 | [hook-handlers.test.ts:126][permission-capture-timeout] | A hung permission read suppresses capture within the 2 s deadline. | unaudited |
-| [ctx-reduce-availability.test.ts:241][permission-evaluator] | `permissionDisabled` last-match semantics, session overlay after agent rules, wildcard escaping, and distinct active-agent inputs. | unaudited |
+| [eidnara-reduce-availability.test.ts:241][permission-evaluator] | `permissionDisabled` last-match semantics, session overlay after agent rules, wildcard escaping, and distinct active-agent inputs. | unaudited |
 | [hook.test.ts:167][permission-witness] | Rejection and fake-time timeout after a stored deny reach the constant P5 marker for transform and capture; outcome checks require false wire verdicts and no capture. The marker establishes reachability, not a distinct fallback outcome. | unaudited |
 | [hook.test.ts:255][permission-hit] | Transform and capture share fresh hits without another SDK permission read; missing-client cases suppress both. | unaudited |
 | [hook.test.ts:302][permission-lifecycle] | Session update, native compaction, and flush invalidate every agent for one session; deletion clears entries; another session stays fresh. An overlapping capture allow cannot clear a newer transform deny. | unaudited |
 | [hook.test.ts:425][permission-overlap] | Real transform and capture hooks share one fill. Empty host agents normalize to absence: the agent-list API is not called, session allow/deny rules decide, and undefined or empty capture reuses the same key. | unaudited |
-| [ctx-reduce-availability.test.ts:347][permission-lifetime] | Identity isolation, shared pending reads and timeout, 30 s read-start expiry at lookup and settlement, empty/allow/deny failures, missing named agents, malformed/error SDK payloads, invalidation fencing, and settled/pending LRU eviction. | unaudited |
-| [ctx-reduce-availability.test.ts:29-125][tavaildb] | DB-derived frozen verdicts: fail-open freeze, tie by id, malformed JSON row. | unaudited |
+| [eidnara-reduce-availability.test.ts:347][permission-lifetime] | Identity isolation, shared pending reads and timeout, 30 s read-start expiry at lookup and settlement, empty/allow/deny failures, missing named agents, malformed/error SDK payloads, invalidation fencing, and settled/pending LRU eviction. | unaudited |
+| [eidnara-reduce-availability.test.ts:29-125][tavaildb] | DB-derived frozen verdicts: fail-open freeze, tie by id, malformed JSON row. | unaudited |
 | [Frozen differential and example states][tmidturn] | Every valid example compares against the frozen base before and after rollback-scoped second-session rows. The reference file is hash-pinned; its shared primitives are live on both sides. Malformed/dynamic values and tuple sentinels remain covered. Approved inconsistent associations have both old-false/new-true and old-true/new-false checks. Equality applies to static snapshots only. | unaudited |
 | [Native cache contract][session-db-cache] | Both adapters exercise native retirement after eviction, oversized SQL/binds, throwing execution, close, and replacement without GC. Real time/part reads grow from 801 to 870 IDs across 70 remainders with mid-turn reads between them: all five statements stay warm on one connection, with zero closes. Timestamp maps, ordered message/part outputs and frozen input lists are checked. Binding limits, arrays, named binds and partless users remain covered; finalizer failure still closes the database, and 128-query pressure leaves at most 64 live natives. | unaudited |
 | [Transform hook witness][session-db-hook] | Four real transform calls send `mid_turn` values false, false, true after a committed edit, then false after same-path replacement. | unaudited |
@@ -391,12 +391,12 @@ attachment; that mechanism is unavailable on the tested Bun and Node runtimes.
 [permission-agent]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L447
 [permission-empty-timeout]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L473
 [permission-capture-timeout]: ../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.test.ts#L126
-[permission-evaluator]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L241
+[permission-evaluator]: ../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.test.ts#L241
 [permission-witness]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L167
 [permission-hit]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L255
 [permission-lifecycle]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L302
 [permission-overlap]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L425
-[permission-lifetime]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L347
+[permission-lifetime]: ../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.test.ts#L347
 
 Stage logging and event line counts are exercised by the real transform/event
 fixture in `logger.test.ts`. The two empty-cache hung-read tests assert
@@ -499,16 +499,16 @@ delta in any fault table.
 | [`windows_start_on_line_boundaries_and_overlap_when_lines_are_short`][t-windows] | Redaction window placement and overlap. | unaudited |
 | [`scanner_is_the_only_redaction_path`][t-only-path] | No redaction path bypasses the scanner. | unaudited |
 | [`chunk_fingerprint_uses_id_kind_and_byte_length`][t-chunk-fp] | The length-only literal `id:kind:len`, empty input, explicit UTF-8 lengths distinct from UTF-16 units, and unescaped delimiters. | unaudited |
-| [`historian_boundary_construction_matches_owned_reference`][t-boundary-construction] | Owned boundary reference versus borrowed IDs/shared bytes; length-only snapshots versus copied strings; exact frozen transcript, prompt, and raw-message bytes; empty, non-ASCII, tool, system, synthetic, excluded-tail, and oversized inputs. Unflagged reserved synthetic messages with no projected identity preserve the no-fire result. A matching frozen-size entry and pending drop check exact percentages against the owned reference, an independent formula, and a no-entry control. | unaudited |
-| [`unflagged_synthetic_delta_prepares_historian_and_native_output`][t-firing-capture] | Scripted producer captures actual handler prompts on cached-prefix and reconstructed-prefix lanes. Full prompts compare across lanes and their SHA-256 values are pinned to the construction baseline. | unaudited |
+| [`history_summarizer_boundary_construction_matches_owned_reference`][t-boundary-construction] | Owned boundary reference versus borrowed IDs/shared bytes; length-only snapshots versus copied strings; exact frozen transcript, prompt, and raw-message bytes; empty, non-ASCII, tool, system, synthetic, excluded-tail, and oversized inputs. Unflagged reserved synthetic messages with no projected identity preserve the no-fire result. A matching frozen-size entry and pending drop check exact percentages against the owned reference, an independent formula, and a no-entry control. | unaudited |
+| [`unflagged_synthetic_delta_prepares_history_summarizer_and_native_output`][t-firing-capture] | Scripted producer captures actual handler prompts on cached-prefix and reconstructed-prefix lanes. Full prompts compare across lanes and their SHA-256 values are pinned to the construction baseline. | unaudited |
 | [`optimized_matches_frozen_reference_at_production_windows`][diff-prod] | Truncation bytes equal the frozen reference at production windows (24 cases, budget 1..32_001). | unaudited |
 | [`exact_token_budget_returns_original_input`][diff-exact] | Input at budget returns unchanged. | unaudited |
 | [`optimized_matches_frozen_reference`][diff-small] | Small-window byte equality. | unaudited |
-| [`historian_chunk_golden_fixture_matches_builder`][t-golden] | Chunk output and every truncation case from `testdata/historian-chunk-golden.json`; each truncation input must exceed its budget before exact output comparison. | unaudited |
+| [`history_summarizer_chunk_golden_fixture_matches_builder`][t-golden] | Chunk output and every truncation case from `testdata/history_summarizer-chunk-golden.json`; each truncation input must exceed its budget before exact output comparison. | unaudited |
 | [`truncation_uses_marker_and_keeps_multibyte_boundaries`][t-marker] | Marker suffix, budget, scalar-boundary prefix. | unaudited |
 | [`star_prefixed_day_fields_are_unrestricted_like_vixie_cron`][t-vixie] | Vixie `*`-prefix semantics. | unaudited |
 | [`next_occurrence_survives_extreme_instants`][t-extreme] | `None` at `i64` extremes. | unaudited |
-| [`smart_note_evaluation_golden_matches_production_behaviour`][t-golden-cron] | Reduction and due-time golden with a fixture timezone. | unaudited |
+| [`conditional_note_evaluation_golden_matches_production_behaviour`][t-golden-cron] | Reduction and due-time golden with a fixture timezone. | unaudited |
 | [`a_task_runs_only_once_its_cron_instant_has_passed`][t-sched-cron] | A `*/15 * * * *` project runs at its instant and not before; the same instant does not run twice. | unaudited |
 | [`mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`][t-mtime] | A same mtime hides an edit; a new mtime reloads. | unaudited |
 | [`project_threshold_may_only_raise`][t-raise] | The `ProjectRaiseOnly` threshold. | unaudited |
@@ -683,7 +683,7 @@ not a claim that no related check exists anywhere in the repository.
 [tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L540
 [t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249
 [tinplace]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1449
-[tavaildb]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L29-L125
+[tavaildb]: ../../../../packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.test.ts#L29-L125
 [tmidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L57-L892
 [tismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L1138-L1169
 [tdbpath]: https://github.com/ahrav/eidnara/blob/9132344/packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L953-L1021
@@ -763,18 +763,18 @@ not a claim that no related check exists anywhere in the repository.
 [t-pinned]: ../../../../crates/secret-scanner/src/evaluator.rs#L1660
 [t-windows]: ../../../../crates/context-core/src/redaction.rs#L827
 [t-only-path]: ../../../../crates/context-core/src/redaction.rs#L857
-[t-chunk-fp]: ../../../../crates/daemon/src/historian.rs#L3925
+[t-chunk-fp]: ../../../../crates/daemon/src/history_summarizer.rs#L3925
 [t-boundary-construction]: ../../../../crates/daemon/src/lib.rs#L18499
 [t-firing-capture]: ../../../../crates/daemon/src/lib.rs#L25527
-[diff-prod]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L103
-[diff-exact]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L118
-[diff-small]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L134
-[t-golden]: ../../../../crates/daemon/src/historian_chunk.rs#L1773
-[t-marker]: ../../../../crates/daemon/src/historian_chunk.rs#L1744
-[t-vixie]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L1585
-[t-extreme]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L1571
-[t-golden-cron]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L1126
-[t-sched-cron]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L721
+[diff-prod]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L103
+[diff-exact]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L118
+[diff-small]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L134
+[t-golden]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L1773
+[t-marker]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L1744
+[t-vixie]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1585
+[t-extreme]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1571
+[t-golden-cron]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L1126
+[t-sched-cron]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L721
 [t-mtime]: ../../../../crates/daemon/src/config.rs#L2118
 [t-raise]: ../../../../crates/daemon/src/config.rs#L1314
 [t-gate]: ../../../../crates/daemon/src/config.rs#L1650

@@ -166,7 +166,7 @@ const StatusDialog = props => {
   const COLORS = {
     system: "#c084fc",
     docs: "#22d3ee",
-    compartments: "#60a5fa",
+    history_segments: "#60a5fa",
     facts: "#fbbf24",
     memories: "#34d399",
     profile: "#a3e635",
@@ -188,11 +188,11 @@ const StatusDialog = props => {
       tokens: d.docsTokens,
       color: COLORS.docs
     });
-    if (!compactionOff() && d.compartmentTokens > 0) segs.push({
-      label: "Compartments",
-      tokens: d.compartmentTokens,
-      color: COLORS.compartments,
-      detail: `(${d.compartmentCount})`
+    if (!compactionOff() && d.history_segmentTokens > 0) segs.push({
+      label: "HistorySegments",
+      tokens: d.history_segmentTokens,
+      color: COLORS.history_segments,
+      detail: `(${d.history_segmentCount})`
     });
     if (d.factTokens > 0) segs.push({
       label: "Facts",
@@ -440,7 +440,7 @@ const StatusDialog = props => {
                 get t() {
                   return t();
                 },
-                l: "Compartments",
+                l: "HistorySegments",
                 get v() {
                   return `${p.processedMessages}/${p.totalMessages} embedded`;
                 },
@@ -451,9 +451,9 @@ const StatusDialog = props => {
                 get t() {
                   return t();
                 },
-                l: "Compartments",
+                l: "HistorySegments",
                 get v() {
-                  return `${p.compartmentsCreated} (${p.passCount} pass${p.passCount === 1 ? "" : "es"})`;
+                  return `${p.history_segmentsCreated} (${p.passCount} pass${p.passCount === 1 ? "" : "es"})`;
                 },
                 get fg() {
                   return t().textMuted;
@@ -543,14 +543,14 @@ const StatusDialog = props => {
           }
         })), null);
         _$insert(_el$44, (() => {
-          var _c$0 = _$memo(() => s().readySmartNoteCount > 0);
+          var _c$0 = _$memo(() => s().readyConditionalNoteCount > 0);
           return () => _c$0() && _$createComponent(R, {
             get t() {
               return t();
             },
-            l: "Smart Notes",
+            l: "Conditional Notes",
             get v() {
-              return `${s().readySmartNoteCount} ready`;
+              return `${s().readyConditionalNoteCount} ready`;
             },
             get fg() {
               return t().accent;
@@ -558,14 +558,14 @@ const StatusDialog = props => {
           });
         })(), null);
         _$insert(_el$44, (() => {
-          var _c$1 = _$memo(() => !!s().lastDreamerRunAt);
+          var _c$1 = _$memo(() => !!s().lastMemoryClassifierRunAt);
           return () => _c$1() && _$createComponent(R, {
             get t() {
               return t();
             },
-            l: "Dreamer",
+            l: "MemoryClassifier",
             get v() {
-              return `last ${relTime(s().lastDreamerRunAt)}`;
+              return `last ${relTime(s().lastMemoryClassifierRunAt)}`;
             },
             get fg() {
               return t().textMuted;
@@ -831,9 +831,9 @@ const StatusDialog = props => {
             get t() {
               return t();
             },
-            l: "Compartments",
+            l: "HistorySegments",
             get v() {
-              return String(s().compartmentCount);
+              return String(s().history_segmentCount);
             }
           });
         })(), null);
@@ -859,14 +859,14 @@ const StatusDialog = props => {
           });
         })(), null);
         _$insert(_el$64, (() => {
-          var _c$14 = _$memo(() => !!s().lastDreamerRunAt);
+          var _c$14 = _$memo(() => !!s().lastMemoryClassifierRunAt);
           return () => _c$14() && _$createComponent(R, {
             get t() {
               return t();
             },
-            l: "Dreamer",
+            l: "MemoryClassifier",
             get v() {
-              return `last ${relTime(s().lastDreamerRunAt)}`;
+              return `last ${relTime(s().lastMemoryClassifierRunAt)}`;
             },
             get fg() {
               return t().textMuted;
@@ -1298,7 +1298,7 @@ const tui = async (api, _options, meta) => {
       return true;
     }
     if (action === "wrapup-progress-kick") {
-      // The wrapup handler starts the fast progress poll after `/ctx-wrapup` because it emits no message events for the sidebar poll to observe.
+      // The wrapup handler starts the fast progress poll after `/eidnara-wrapup` because it emits no message events for the sidebar poll to observe.
       // The start toast arrives through the ignored-message notification path.
       if (!stillActive()) return false;
       kickRecompProgressRefresh();

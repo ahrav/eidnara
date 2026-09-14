@@ -1,7 +1,7 @@
 /**
  *
  * `injectCompactionMarker` injects compaction boundaries into OpenCode's SQLite database.
- * `filterCompacted` stops at the historian boundary after injection.
+ * `filterCompacted` stops at the history_summarizer boundary after injection.
  *
  *
  * A marker contains a `compaction` part on its boundary user message, tagged with an `eidnara` key.
@@ -325,9 +325,9 @@ export interface CompactionMarkerState {
 
 export interface InjectCompactionMarkerArgs {
     sessionId: string;
-    /** The field stores the raw ordinal of the last compartmentalized message. */
+    /** The field stores the raw ordinal of the last history_segmentalized message. */
     endOrdinal: number;
-    /** The field stores the OpenCode message ID of the last compartmentalized message. */
+    /** The field stores the OpenCode message ID of the last history_segmentalized message. */
     endMessageId: string;
     summaryText: string;
     directory: string;

@@ -4,7 +4,7 @@ Scope: about 9,000 lines. `crates/daemon/src/lib.rs:10042-11917` and
 `:11919-16001` are the facade regions, which include the claim intent ledger
 handlers at `:10082-10182` and the `note.evaluation.*` protocol at
 `:10880-11481`; `crates/daemon/src/dispatch.rs` (whole) is response assembly;
-`crates/daemon/src/smart_note_evaluation.rs` (1,851 lines, of which 951-1851
+`crates/daemon/src/conditional_note_evaluation.rs` (1,851 lines, of which 951-1851
 is the inline test module) is the note reducer and its selectors; and
 `src/memory_tool.rs` and `src/project_docs.rs` are read in full as facade
 dependencies. `lib.rs:16001-30517` was read as evidence for existing checks
@@ -48,14 +48,14 @@ registration, because a claim is the only thing `complete` will apply
 (`memory-store:13569-13573`), and registration requires `MODULE` notes authority on
 the bound route (`:3908-3936`). The shipped registrant is the plugin's bridge
 (`packages/plugin/src/hooks/eidnara/hook.ts:1015-1213` (source-catalog path, not present at HEAD), registering at
-`:1210`), which returns early unless `dreamerRunnable` (`:1024`) and unless the
-`evaluate-smart-notes` schedule is non-empty (`:1029`); the schema does not
-default the `dreamer` block
+`:1210`), which returns early unless `memory_classifierRunnable` (`:1024`) and unless the
+`evaluate-conditional-notes` schedule is non-empty (`:1029`); the schema does not
+default the `memory_classifier` block
 (`packages/plugin/src/config/schema/eidnara.ts:707` (source-catalog path, not present at HEAD)), but the shipped setup
 wizard writes it unconditionally
 (`packages/cli/src/commands/setup-opencode.ts:262-278` (source-catalog path, not present at HEAD)) and defaults the prompt
 to yes (`:449`), leaving `tasks` unset so the non-empty `"0 3 * * *"` schema
-default applies. A hand-authored config with no `dreamer` block leaves the
+default applies. A hand-authored config with no `memory_classifier` block leaves the
 subsystem dormant, and the module fails closed rather than open in that case,
 refusing conditioned writes at `:11618-11626`. The only feature-gated tests in
 the part are the eight `drive-fault` cases.
@@ -94,13 +94,14 @@ the part are the eight `drive-fault` cases.
 - The six claim commands (`claim.intent.stage`, `claim.intent.inspect`,
   `claim.intent.ack`, `claim.effects.apply`, `claim.mirror.replace`,
   `claim.mirror.apply`), their handlers, `claim_route_root`,
-  `claim_mirror_error`, the `memory_tool` claim adapters, and the `ctx_memory`
+  `claim_mirror_error`, the `memory_tool` claim adapters, and the `eidnara_memory`
   facade's mirror reads are gone from `crates/daemon` at `0c09d2bf`'s
-  successor. `handle_facade_value` routes the five `ctx_*` names only; a claim
+  successor. `handle_facade_value` routes only `eidnara_memory`,
+  `eidnara_search`, `eidnara_reduce`, and `eidnara_note`; a claim
   command name falls to `unrecognized_request_error` like any unknown tool
   (`facade_envelope_not_supported`), which
   `retired_claim_facade_names_are_unsupported` (`lib.rs`, `mod tests`)
-  asserts. `ctx_memory` advertises and delegates the five actions the host
+  asserts. `eidnara_memory` advertises and delegates the five actions the host
   memory tool serves: `get` answers a tool error naming canonical kernel state
   as where memory is served from, and `create`, `revise`, `archive`, and
   `merge` answer a tool error naming the kernel commit path. `list` and
@@ -108,6 +109,16 @@ the part are the eight `drive-fault` cases.
   any other unserved name. The four records in Group C and
   Group D whose subject was a claim handler carry `Status: invalidated`; prose
   below that treats those handlers as live describes the source tree.
+
+- The `ctx_expand` facade is removed; `handle_ctx_expand_facade` and
+  `ctx_expand_schema` are absent from the current daemon source. Their map rows,
+  check inventory, and queued
+  coverage work below are historical, not current facade obligations.
+- `retina_handoff` is absent from the current source. The combined policy record
+  `note-b-wake-owned-and-retina-handoff-are-project-wide-not-per-registration`
+  is invalidated as authored. `wake_owned` remains; this invalidation does not
+  establish that the surviving policy is correct. Its scope needs a separate
+  review. Historical record fields and evidence are retained; no tests were run.
 
 ## Facade map
 
@@ -147,20 +158,20 @@ resident charge. Everything past that is per-surface.
 
 The precedence is `method`/`kind` first, unconditionally. A body carrying both a
 `kind` and a facade `name` routes on `kind` and the `name` is ignored, which
-`facade_flat_envelope_precedence_keeps_kind_arm_and_gates_ctx_reduce_name`
-(`:25299-25323`) asserts with `{kind:"echo", name:"ctx_memory"}`.
+`facade_flat_envelope_precedence_keeps_kind_arm_and_gates_eidnara_reduce_name`
+(`:25299-25323`) asserts with `{kind:"echo", name:"eidnara_memory"}`.
 
 ### The facade envelope routes eleven names, not two
 
 At HEAD the envelope routes five names: the six claim commands below are gone
 (see Provenance). The rest of this section describes the source tree.
 
-`handle_facade_value` (`:10042-10060`) routes `ctx_memory`, `ctx_search`,
-`ctx_expand`, `ctx_reduce`, `ctx_note`, and six claim commands
+`handle_facade_value` (`:10042-10060`) routes `eidnara_memory`, `eidnara_search`,
+`ctx_expand`, `eidnara_reduce`, `eidnara_note`, and six claim commands
 (`claim.intent.stage`, `claim.intent.inspect`, `claim.intent.ack`,
 `claim.effects.apply`, `claim.mirror.replace`, `claim.mirror.apply`). Anything
 else falls to `unrecognized_request_error` (`:10058`). The doc comment on
-`unrecognized_request_error` (`:12344-12351`) says "Only ctx_memory and ctx_search
+`unrecognized_request_error` (`:12344-12351`) says "Only eidnara_memory and eidnara_search
 are accepted on that surface", which is stale and is the only prose statement of
 the admitted name set.
 
@@ -168,11 +179,11 @@ the admitted name set.
 
 | Handler | Route/scope gate | Argument decode | Field validation |
 | --- | --- | --- | --- |
-| `handle_ctx_reduce_facade` `:10482-10588` | `resolve_facade_scope` AFTER parsing `drop` (`:10493`, `:10501`) | `facade_arguments(request, &["drop"])` `:10487` | `parse_tag_range_string` `:10493`; nothing else |
-| `handle_ctx_memory_facade` `:10590-10697` | `resolve_facade_scope` `:10601`; `dreamer_run_registered` for `list` `:10626` | `facade_arguments(request, &["action"])` `:10595` | claim-id shape `:10656-10661`; 1..=20 count `:10651`; `limit` clamp `:10667` |
-| `handle_ctx_search_facade` `:10699-10759` | `resolve_facade_scope` `:10715` | `facade_arguments(request, &["query"])` `:10704` | non-empty `query` `:10708`; `MAX_QUERY_BYTES` `:10711`; `limit` clamp `:10714` |
+| `handle_eidnara_reduce_facade` `:10482-10588` | `resolve_facade_scope` AFTER parsing `drop` (`:10493`, `:10501`) | `facade_arguments(request, &["drop"])` `:10487` | `parse_tag_range_string` `:10493`; nothing else |
+| `handle_eidnara_memory_facade` `:10590-10697` | `resolve_facade_scope` `:10601`; `memory_classifier_run_registered` for `list` `:10626` | `facade_arguments(request, &["action"])` `:10595` | claim-id shape `:10656-10661`; 1..=20 count `:10651`; `limit` clamp `:10667` |
+| `handle_eidnara_search_facade` `:10699-10759` | `resolve_facade_scope` `:10715` | `facade_arguments(request, &["query"])` `:10704` | non-empty `query` `:10708`; `MAX_QUERY_BYTES` `:10711`; `limit` clamp `:10714` |
 | `handle_ctx_expand_facade` `:10761-10878` | `resolve_facade_scope` `:10770` | `facade_arguments(request, &["message","start"])` `:10766` | ordinal signs and order `:10823`; span and row caps `:10840-10847` |
-| `handle_ctx_note_facade` `:11547-11916` | `resolve_facade_scope` `:11568`; vocabulary recheck for mutations `:11584-11591` | `facade_arguments(request, &["action","content"])` `:11552` | five string caps `:11556-11563`; `filter` enum `:11730`; `command_id` `:11592-11599` |
+| `handle_eidnara_note_facade` `:11547-11916` | `resolve_facade_scope` `:11568`; vocabulary recheck for mutations `:11584-11591` | `facade_arguments(request, &["action","content"])` `:11552` | five string caps `:11556-11563`; `filter` enum `:11730`; `command_id` `:11592-11599` |
 | `handle_claim_intent_stage` `:10082-10113` | `claim_route_root` `:10083`, and the root is PASSED to the store at `:10100` | typed `serde_json::from_value` `:10090` | protocol and encoding version in `memory_tool` `:115-121` |
 | `handle_claim_intent_inspect` `:10115-10151` | `claim_route_root` called and DISCARDED `:10120-10122` | typed `from_value` `:10127` | protocol version and `limit` 1..=10000 (`memory_tool.rs:140-145`) |
 | `handle_claim_intent_ack` `:10153-10182` | `claim_route_root` called and DISCARDED `:10154-10156` | typed `from_value` `:10160` | protocol version (`memory_tool.rs:166`) |
@@ -231,7 +242,7 @@ There is no single response envelope. Three families:
 `Duplicate` envelope (`:15303`). `stage_claim_intent` and
 `acknowledge_claim_intent` return `replayed` from the store outcome
 (`memory_tool.rs:131`, `:177`). `claim.mirror.apply` returns `replayed`
-(`:10331`). `ctx_reduce` returns nothing of the kind, and neither does
+(`:10331`). `eidnara_reduce` returns nothing of the kind, and neither does
 `claim.effects.apply`.
 
 ## Note lifecycle map
@@ -246,7 +257,7 @@ evaluated: the candidate query is
 (`:13292-13297`).
 
 `apply_note_evaluation_outcome` (`:14193-14277`) lifts the stored row into
-`SmartNoteLifecycleState` (`:14213-14243`), runs the reducer (`:14244`), and
+`ConditionalNoteLifecycleState` (`:14213-14243`), runs the reducer (`:14244`), and
 writes every reduced field back through `NoteEvalReducedState` (`:14247-14276`).
 Nothing is discarded and nothing is derived at read time: the whole decision is
 materialized into columns. Two fields are set outside the reducer,
@@ -256,8 +267,8 @@ only when the outcome carried an artifact and otherwise preserved
 
 | Transition | Entry point | Durable writes |
 | --- | --- | --- |
-| create, plain | `ctx_note` write with no condition (`:11679-11711`) | `type='session'`, `status='active'` (`memory-store:10152-10157`) |
-| create, conditioned | `ctx_note` write with condition (`:11629-11677`) | `type='smart'`, `status='pending'`, condition, compile hints (`memory-store:10192-10199`) |
+| create, plain | `eidnara_note` write with no condition (`:11679-11711`) | `type='session'`, `status='active'` (`memory-store:10152-10157`) |
+| create, conditioned | `eidnara_note` write with condition (`:11629-11677`) | `type='smart'`, `status='pending'`, condition, compile hints (`memory-store:10192-10199`) |
 | update | `update_note_cas` (`:11837-11871`, store `:10409-10505`) | content and/or condition, `status_version + 1`, `state_version + 1`; on a compiler edit also `source_revision + 1`, `status='pending'`, and the entire check lifecycle NULLed (`memory-store:12844-12871`) |
 | supersede | none | there is no supersession relation between notes; a re-authored condition is an in-place update, not a new row |
 | evaluate | `note.evaluation.complete` (`:11334-11405`) | the 20 reduced projection fields plus the two compile-provenance fields |
@@ -273,24 +284,24 @@ outcome across an edit or a dismissal.
 
 ## Evaluation decision map
 
-Selection reads `SmartNoteSelectionSnapshot`
-(`smart_note_evaluation.rs:682-702`): 11 fields, deliberately excluding the
+Selection reads `ConditionalNoteSelectionSnapshot`
+(`conditional_note_evaluation.rs:682-702`): 11 fields, deliberately excluding the
 artifact body ("Only artifact PRESENCE affects selection", `:690-692`), built from
-the store's narrow candidate projection by `smart_note_selection_snapshot`
+the store's narrow candidate projection by `conditional_note_selection_snapshot`
 (`:13963-13985`), which defaults a NULL `check_status` to `"uncompiled"` and a
 NULL `policy_version` to `0`, so an unmigrated row lands in the compile phase
 rather than being silently skipped. Reduction reads the full
-`SmartNoteLifecycleState`, the phase-scoped outcome, `note_id`, `now`, and a
+`ConditionalNoteLifecycleState`, the phase-scoped outcome, `note_id`, `now`, and a
 timezone. Selection returns `Option<(note_id, phase_name, successor_cycle)>`
-(`:900-949`); reduction returns `SmartNoteReduction` (`:347-352`), the complete
+(`:900-949`); reduction returns `ConditionalNoteReduction` (`:347-352`), the complete
 next state plus a `surfaced` boolean.
 
 | Phase | Selector | Eligibility | Order key |
 | --- | --- | --- | --- |
-| due | `get_due_compiled_smart_note_checks` `:711-731` | pending, compiled, has artifact, on-policy, unquarantined, `check_next_due_at <= now` | `(check_next_due_at, id)` `:728` |
-| compile | `get_smart_notes_needing_compilation` `:735-755` | pending, due, and (`uncompiled` or `failing` or no artifact or off-policy) | `(created_at, id)` `:752` |
-| liveness | `get_stale_compiled_smart_notes` `:759-783` | pending, compiled, on-policy, false for at least 7 days, last liveness at least 24h ago | `(check_false_since_at, id)` `:780` |
-| fallback | `get_fallback_smart_notes` `:788-806` | pending and `check_status == "fallback"` - **no time predicate at all** | `(last_checked_at.is_some(), last_checked_at, id)` `:797-803` |
+| due | `get_due_compiled_conditional_note_checks` `:711-731` | pending, compiled, has artifact, on-policy, unquarantined, `check_next_due_at <= now` | `(check_next_due_at, id)` `:728` |
+| compile | `get_conditional_notes_needing_compilation` `:735-755` | pending, due, and (`uncompiled` or `failing` or no artifact or off-policy) | `(created_at, id)` `:752` |
+| liveness | `get_stale_compiled_conditional_notes` `:759-783` | pending, compiled, on-policy, false for at least 7 days, last liveness at least 24h ago | `(check_false_since_at, id)` `:780` |
+| fallback | `get_fallback_conditional_notes` `:788-806` | pending and `check_status == "fallback"` - **no time predicate at all** | `(last_checked_at.is_some(), last_checked_at, id)` `:797-803` |
 
 `eligible` (`:704-707`) additionally drops a note whose `compile_status` is
 already `"compiled"` when the caller set `retina_handoff`. Backoff coverage is
@@ -327,13 +338,13 @@ below one entry point (`:11963`):
 - **An open map clone that rejects nothing.** `facade_arguments` (`:14419-14435`)
   serves all five `ctx_*` tools and never walks a key. The advertised schemas
   match that openness deliberately, with `additionalProperties: true` at
-  `:15846` (`ctx_memory`), `:15929` (`ctx_search`), `:15950` (`ctx_expand`), and
-  `:15963` (`ctx_note`).
+  `:15846` (`eidnara_memory`), `:15929` (`eidnara_search`), `:15950` (`ctx_expand`), and
+  `:15963` (`eidnara_note`).
 
 One narrowing is applied here rather than left implicit (D13). An earlier version
 of this section said the inline test at `:25636-25641` asserts that the silent
 acceptance is intentional. Read at `HEAD`, that assertion is
-`if name != "ctx_reduce" { assert_ne!(tool.schema.get("additionalProperties"), Some(&json!(false)), "{name} must preserve compatibility arguments") }`,
+`if name != "eidnara_reduce" { assert_ne!(tool.schema.get("additionalProperties"), Some(&json!(false)), "{name} must preserve compatibility arguments") }`,
 which is a statement about the advertised manifest's `additionalProperties`
 value. It proves **advertised openness**: the schema must not be closed. It does
 not prove that a handler ignores an unknown key, that the ignoring is silent, or
@@ -350,15 +361,15 @@ does read is a **typo**; nothing advertises tolerance for it, no test pins it, a
 the correct diagnostic is one that names it.
 
 **Six error paths present as success, and one of them has a test.** The tested one
-is `ctx_reduce`, covered in this crate by
-`facade_ctx_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing`
-(`:25445-25474`), which drives `ctx_reduce` through the facade and asserts at
+is `eidnara_reduce`, covered in this crate by
+`facade_eidnara_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing`
+(`:25445-25474`), which drives `eidnara_reduce` through the facade and asserts at
 `:25474` that `load_pending_agent_drops` is empty after the acknowledgement.
 (Corrected this revision: an earlier version credited `claim.effects.apply`, which
 has no test on either side of the language boundary, and left the actually-tested
 path looking uncovered.) The other five are `claim.effects.apply`, which never
 calls `self.store()` and returns `ackedEffectId` (`:10184-10255`); two
-`handle_ctx_note_facade` arms that return `Ok(facade_text_response(..., true))`
+`handle_eidnara_note_facade` arms that return `Ok(facade_text_response(..., true))`
 from inside the ledger closure, the note CAS conflict (`:11865-11870`) and
 dismiss-not-found (`:11902-11907`); and the two `handle_ctx_expand_facade`
 unrecoverable-content answers at `:10804-10809` and `:10832-10838`, which
@@ -414,7 +425,7 @@ state, no clock read, and no map iteration, with every ordering an explicit
 seed (`:262-274`). The production call site passes a process-local timezone at
 `:14244`, and that is a **call-site portability question rather than a purity
 violation** (D12), because the reducer's own contract explicitly includes the
-timezone: `smart_note_evaluation.rs:8-10` reads "Pure functions throughout:
+timezone: `conditional_note_evaluation.rs:8-10` reads "Pure functions throughout:
 callers supply the pre-state, a phase-scoped outcome, the transition clock, and a
 timezone (cron matching is a wall-clock concept; production passes the
 machine-local zone)". An earlier draft quoted that sentence up to "and a timezone"
@@ -450,7 +461,7 @@ check, and "partial" in an `Exercised:` line means a test exists on a developer'
 machine. Two consequences are load-bearing for individual records: no inline test
 in `lib.rs:16001-30517` mentions `claim_intent` or `claim_effects`, so the four
 claim-command facade handlers at `:10082-10255` have zero module-side coverage;
-and `smart_note_evaluation.rs` contains zero `tracing`, `log`, `warn!`, `debug!`,
+and `conditional_note_evaluation.rs` contains zero `tracing`, `log`, `warn!`, `debug!`,
 or metric calls, as does the whole note-evaluation protocol at `:10880-11560`, so
 the only production assertion anywhere in the path is a `debug_assert!` at
 `:11251-11254` that is compiled out of a release build.
@@ -474,7 +485,7 @@ One change accounts for the count:
 
 The other twelve edit fields rather than counts. **Five of them fix oracles that
 passed while the defect they were written for was present**, which is the highest
-value class this method produces: **D5** on the `ctx_reduce` bound, which collapsed
+value class this method produces: **D5** on the `eidnara_reduce` bound, which collapsed
 to `0 <= 0 <= reported` on exactly the permanent-gap case it existed for; **D2** on
 the byte-cap equivalence, which quantified over 40 MiB bodies the cap is right to
 refuse; **D9** on the fallback backoff, which demanded a durable delay after a
@@ -524,7 +535,7 @@ so.
 | [facade-a-reduced-summary-envelope-is-an-unvalidated-argument-source](#facade-a-reduced-summary-envelope-is-an-unvalidated-argument-source) | safety | medium |
 | [facade-a-measured-length-must-equal-written-body-or-nothing-is-terminal](#facade-a-measured-length-must-equal-written-body-or-nothing-is-terminal) | safety | high |
 | [facade-a-facade-error-text-carries-absolute-route-paths-to-the-model](#facade-a-facade-error-text-carries-absolute-route-paths-to-the-model) | safety | high |
-| [facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes](#facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes) | safety | high |
+| [facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes](#facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes) | safety | high |
 | [facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect](#facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect) | safety | high |
 | [facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed](#facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed) | safety | high |
 | [facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity](#facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity) | safety | high |
@@ -597,18 +608,18 @@ Reachability: default-production
 Status: active
 Exercised: not yet - corrected this disposition (D13). An earlier version said `lib.rs:25632-25641` asserts the open acceptance is intentional and scored the runtime consequence `partial` on that basis. That assertion is about the advertised manifest's `additionalProperties` value, not about runtime behaviour, so nothing exercises what happens to an unknown key at runtime.
 Guarantee: An argument key that **resembles no key any `ctx_*` handler reads** - a compatibility key - never changes the handler's behaviour and never produces a caller-visible diagnostic.
-Check: `always` - for every `ctx_*` call, assert that adding an argument key outside the handler's read set **and at edit distance greater than one from every key in that read set, ignoring case and separators**, produces an identical response to the call without it. Compare at the level that is stable rather than byte for byte on two sequential mutating calls: either drive the two calls against two independently cloned stores seeded to the same state, or compare the argument maps `facade_arguments` returns. A `command_id` must be absent from both calls or differ between them. `always` rather than `unreachable` because the acceptance is a state of the returned value, not a forbidden code point. Two corrections are folded in here. The edit-distance exclusion is D4: without it this check and `facade-a-misspelled-surface-condition-silently-writes-a-plain-note` contradict on a `ctx_note` write carrying `surfaceCondition`, one passing only if the response is unchanged and the other only if it is changed. The comparison level is D3: the store mints identifiers into the response text (`format!("Saved session note #{}.", note.id)` at `:11704`, insert at `:11690-11702`), so two sequential writes differ by construction, and a shared `command_id` makes the second response structurally one field larger because `facade_command_outcome`'s `Duplicate` arm inserts `"replayed": true` (`:15303`).
+Check: `always` - for every `ctx_*` call, assert that adding an argument key outside the handler's read set **and at edit distance greater than one from every key in that read set, ignoring case and separators**, produces an identical response to the call without it. Compare at the level that is stable rather than byte for byte on two sequential mutating calls: either drive the two calls against two independently cloned stores seeded to the same state, or compare the argument maps `facade_arguments` returns. A `command_id` must be absent from both calls or differ between them. `always` rather than `unreachable` because the acceptance is a state of the returned value, not a forbidden code point. Two corrections are folded in here. The edit-distance exclusion is D4: without it this check and `facade-a-misspelled-surface-condition-silently-writes-a-plain-note` contradict on a `eidnara_note` write carrying `surfaceCondition`, one passing only if the response is unchanged and the other only if it is changed. The comparison level is D3: the store mints identifiers into the response text (`format!("Saved session note #{}.", note.id)` at `:11704`, insert at `:11690-11702`), so two sequential writes differ by construction, and a shared `command_id` makes the second response structurally one field larger because `facade_command_outcome`'s `Duplicate` arm inserts `"replayed": true` (`:15303`).
 Fault/timing angle: none.
 Required faults and enabling state: none. Any facade call with a spare key, plus two cloned stores if the tool under test mutates.
 Confidence: high - [evidence](evidence/facade-a-open-tool-schemas-accept-unknown-argument-keys-without-diagnostic.md).
 Verified `facade_arguments` clones the map with no key walk (`:14419-14435`) and
 verified all four advertised schemas set `additionalProperties: true`
 (`:15846`, `:15929`, `:15950`, `:15963`).
-Existing check: `lib.rs:25632-25641`, status `unaudited`. Its actual form is `assert_ne!(tool.schema.get("additionalProperties"), Some(&json!(false)), "{name} must preserve compatibility arguments")` guarded by `if name != "ctx_reduce"`, so it asserts **advertised openness** of the manifest and nothing about the handler's runtime treatment of an unknown key. Does not run in CI.
+Existing check: `lib.rs:25632-25641`, status `unaudited`. Its actual form is `assert_ne!(tool.schema.get("additionalProperties"), Some(&json!(false)), "{name} must preserve compatibility arguments")` guarded by `if name != "eidnara_reduce"`, so it asserts **advertised openness** of the manifest and nothing about the handler's runtime treatment of an unknown key. Does not run in CI.
 Impact: silent acceptance of a compatibility key is the advertised posture, so the risk is not the acceptance but the absence of any signal: a caller cannot distinguish "the module honoured my field" from "the module never looked at it". What is genuinely unpinned is the runtime behaviour itself, because the only existing assertion is about the manifest.
 Open questions:
 
-- `ctx_reduce`'s advertised schema is closed (`prompt_surface.rs:197-204`) yet
+- `eidnara_reduce`'s advertised schema is closed (`prompt_surface.rs:197-204`) yet
   the handler accepts `command_id` and the `reduced`/`summary` envelope, none
   of which the schema permits. Which side is the contract? (needs human input)
 
@@ -618,10 +629,10 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: not yet - no test writes a note with a near-miss condition key.
-Guarantee: A `ctx_note` write carrying a key within one edit, one case change, or one separator change of `surface_condition` - a typo rather than a compatibility key - either records the condition, or refuses, or answers with a diagnostic naming the unread key. It never reports plain-note success silently.
-Check: `always` - assert that for every `ctx_note` write whose arguments contain any key differing from `surface_condition` only by case, separator, or a single edit, the response is not a plain `isError: false` "Saved session note #N." **and that the response names the unread key**. `always` because it must hold on every write evaluated. The diagnostic clause is a correction applied this disposition (D4): stating which diagnostic this record expects, against the sibling record's expectation of none for a compatibility key, is what keeps the two disjoint on the same input.
+Guarantee: A `eidnara_note` write carrying a key within one edit, one case change, or one separator change of `surface_condition` - a typo rather than a compatibility key - either records the condition, or refuses, or answers with a diagnostic naming the unread key. It never reports plain-note success silently.
+Check: `always` - assert that for every `eidnara_note` write whose arguments contain any key differing from `surface_condition` only by case, separator, or a single edit, the response is not a plain `isError: false` "Saved session note #N." **and that the response names the unread key**. `always` because it must hold on every write evaluated. The diagnostic clause is a correction applied this disposition (D4): stating which diagnostic this record expects, against the sibling record's expectation of none for a compatibility key, is what keeps the two disjoint on the same input.
 Fault/timing angle: none, but the enabling state matters: with no live evaluator, the correctly spelled key refuses, so the misspelling converts a refusal into a success.
-Required faults and enabling state: a `ctx_note` write carrying `surfaceCondition` (or similar) and non-empty `content`, with `has_live_note_evaluator(project, now)` false.
+Required faults and enabling state: a `eidnara_note` write carrying `surfaceCondition` (or similar) and non-empty `content`, with `has_live_note_evaluator(project, now)` false.
 Confidence: high - [evidence](evidence/facade-a-misspelled-surface-condition-silently-writes-a-plain-note.md).
 Traced `string_arg` returning `None` (`:11615`), the gate skipped (`:11618`),
 the plain branch taken (`:11679-11711`), and the response text at `:11704`.
@@ -730,7 +741,7 @@ substring matching an absolute path prefix of the bound
 `always` because it must hold on every response evaluated.
 Fault/timing angle: none.
 Required faults and enabling state: a route whose authority-managed project
-differs from its `route_project_root`, then any `ctx_note` mutation or a
+differs from its `route_project_root`, then any `eidnara_note` mutation or a
 `memory_project` argument that disagrees.
 Confidence: high - [evidence](evidence/facade-a-facade-error-text-carries-absolute-route-paths-to-the-model.md).
 Verified `resolve_facade_scope` formats `route_project_root` into a returned
@@ -758,7 +769,7 @@ Open questions:
 
 Three records on handlers that answer `isError: false` without touching durable
 state. The two on `claim.effects.apply` are invalidated at HEAD: the handler is
-gone from `crates/daemon` (see Provenance). `ctx_reduce` says so in a comment (`:10585-10586`) and is the one of the
+gone from `crates/daemon` (see Provenance). `eidnara_reduce` says so in a comment (`:10585-10586`) and is the one of the
 part's six success-shaped paths with a test. `claim.effects.apply` never calls
 `self.store()` at all, and the producer treats its `ackedEffectId` as authority to
 advance a durable checkpoint permanently. That second handler carries two
@@ -769,7 +780,7 @@ does not exist. Presenting them together produced a `Partial` verdict a reader
 would read as "half the work is done" when one obligation is free and a different
 one is impossible.
 
-### facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes
+### facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes
 
 Type: safety
 Reachability: default-production
@@ -777,20 +788,20 @@ Status: active
 Exercised: partial - `lib.rs:25445-25500` asserts the no-write behaviour and
 the later delivery, so the behaviour is pinned; nothing asserts the
 caller-visible ambiguity.
-Guarantee: A `ctx_reduce` response discloses that it is an acknowledgement rather than a delivery, so a caller reading it cannot conclude that any drop was queued.
-Check: `always` - for every `ctx_reduce` response reporting at least one tag as queued or deferred, assert the response carries a field distinguishing accepted-pending-delivery from queued, and that a caller reading only that field never concludes an effect landed while `load_pending_agent_drops` for that session is empty. Separately assert that no `ctx_reduce` response claims a tag number `parse_tag_range_string` did not accept. `always` because the disclosure obligation attaches to every response. This replaces an effect-accounting bound applied this disposition (D5), and the reason is worth keeping: the earlier check asserted `acknowledged_queued <= observed_pending_drops <= ctx_reduce_reported_queued`, citing METHOD.md's rule for paths where a delivering message can be lost. The rule is right and the quantity is wrong. `handle_ctx_reduce_facade` performs only reads and answers `mcp_text_result(format!("Queued: {}.", ...), false)` at `:10587`, so `observed_pending_drops` is 0, and in the scenario the `Fault/timing angle` names, where the observer never fires, `acknowledged_queued` is 0 as well. The assertion collapses to `0 <= 0 <= reported`, which holds for every reported count: the precise case the record exists to catch satisfies it most comfortably. Effect accounting is a screen on a path that *attempts* an effect, and this handler attempts none, so both bounds are zero and the screen constrains nothing.
-Fault/timing angle: the window between the `ctx_reduce` acknowledgement
+Guarantee: A `eidnara_reduce` response discloses that it is an acknowledgement rather than a delivery, so a caller reading it cannot conclude that any drop was queued.
+Check: `always` - for every `eidnara_reduce` response reporting at least one tag as queued or deferred, assert the response carries a field distinguishing accepted-pending-delivery from queued, and that a caller reading only that field never concludes an effect landed while `load_pending_agent_drops` for that session is empty. Separately assert that no `eidnara_reduce` response claims a tag number `parse_tag_range_string` did not accept. `always` because the disclosure obligation attaches to every response. This replaces an effect-accounting bound applied this disposition (D5), and the reason is worth keeping: the earlier check asserted `acknowledged_queued <= observed_pending_drops <= eidnara_reduce_reported_queued`, citing METHOD.md's rule for paths where a delivering message can be lost. The rule is right and the quantity is wrong. `handle_eidnara_reduce_facade` performs only reads and answers `mcp_text_result(format!("Queued: {}.", ...), false)` at `:10587`, so `observed_pending_drops` is 0, and in the scenario the `Fault/timing angle` names, where the observer never fires, `acknowledged_queued` is 0 as well. The assertion collapses to `0 <= 0 <= reported`, which holds for every reported count: the precise case the record exists to catch satisfies it most comfortably. Effect accounting is a screen on a path that *attempts* an effect, and this handler attempts none, so both bounds are zero and the screen constrains nothing.
+Fault/timing angle: the window between the `eidnara_reduce` acknowledgement
 (`:10587`) and the observer's `agent_drops.append`. If the response observer
 never fires, the gap is permanent and the caller has no signal.
-Required faults and enabling state: a `ctx_reduce` call with at least one
+Required faults and enabling state: a `eidnara_reduce` call with at least one
 queueable tag, followed by a dropped or never-issued `agent_drops.append`.
-Confidence: high - [evidence](evidence/facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes.md).
+Confidence: high - [evidence](evidence/facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes.md).
 Verified the handler performs only reads (`load_tags_for_session` `:10513`,
 `load_pending_agent_drops` `:10517`), verified the response is
 `isError: false` (`:10587`), and verified the existing test asserts
 `load_pending_agent_drops` is empty after the acknowledgement (`:25474`).
 Existing check: `lib.rs:25445-25500`
-(`facade_ctx_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing`),
+(`facade_eidnara_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing`),
 status `unaudited`. Does not run in CI.
 Impact: the model is told "Queued: drop 1; deferred drop 21" and cannot tell
 whether the drop will ever happen. `command_id`, which the test supplies and
@@ -1065,7 +1076,7 @@ ledger is consulted on every mutation carrying a `command_id`.
 Fault/timing angle: the concurrent-update window that produces
 `NoteCasOutcome::Conflict`. The conflict is by definition transient, and the
 memoization makes it permanent for that `command_id`.
-Required faults and enabling state: a `ctx_note` `update` with a `command_id`
+Required faults and enabling state: a `eidnara_note` `update` with a `command_id`
 that loses a note CAS race, or a `dismiss` for a note id that is momentarily
 absent, followed by a retry with the same `command_id`.
 Confidence: high - [evidence](evidence/facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes.md).
@@ -1077,8 +1088,8 @@ later same-key call returns `Duplicate(response)` before running the closure
 (`:5006-5019`); verified `facade_command_outcome` then adds
 `"replayed": true` alongside the stored `content`/`isError` (`lib.rs:15298-15305`).
 Existing check: none for the error-bearing case. The ledger's happy path is
-covered by `ctx_reduce`-adjacent tests at `lib.rs:27555` and `:27668`, which
-exercise `agent_drops.append`, not `ctx_note`.
+covered by `eidnara_reduce`-adjacent tests at `lib.rs:27555` and `:27668`, which
+exercise `agent_drops.append`, not `eidnara_note`.
 Impact: the conflict text tells the caller to "retry with a fresh read", and
 the retry returns the same conflict text forever unless the caller mints a new
 `command_id`. The `replayed` marker is a sibling of `content`, so a model
@@ -1107,7 +1118,7 @@ test is that a real second call with the same `command_id` and a committed
 first attempt occurred.
 Fault/timing angle: the replay window is exactly what the ledger exists for: a
 response lost after commit, a module restart, or a client retry.
-Required faults and enabling state: a `ctx_note` mutation carrying a
+Required faults and enabling state: a `eidnara_note` mutation carrying a
 `command_id` that commits, then the same `command_id` re-sent. The ledger
 retains only the newest 512 commands per identity scope
 (`memory-store/src/lib.rs:5042-5046`), so the retry must land inside that horizon.
@@ -1123,7 +1134,7 @@ Impact: without this situation, the three records that depend on ledger replay
 semantics
 ([facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes](#facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes),
 and the replay-distinguishability claims behind
-[facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes](#facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes))
+[facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes](#facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes))
 pass vacuously.
 Open questions: None.
 
@@ -1149,15 +1160,15 @@ Guarantee: A durable schedule field a note persists is a function of the note an
 Check: `always` - for a fixed `(pre, outcome, note_id, now)`, assert the persisted `check_next_due_at` is byte-identical across two evaluations whose only difference is the evaluating **process's** timezone. `always` because the persistence obligation applies to every reduction whose result is written. Note the level: the assertion is on what `apply_note_evaluation_outcome` (`:14193-14277`) writes, not on what `reduce_*` returns for two explicitly supplied zones, because the latter is documented behaviour and passes.
 Fault/timing angle: none. The trigger is environmental, not temporal: a fleet of
 mixed-timezone hosts, a laptop that changes zone, or a tzdata upgrade.
-Required faults and enabling state: a smart note with a non-trivial `check_cron` (any cron that is not effectively-never), a `compiled_false` or `due false` outcome, and **two module processes** whose `chrono::Local` resolves differently. The two-process requirement is the whole cost of this record and cannot be avoided by varying the reducer's own argument.
-Confidence: high - [evidence](evidence/note-b-reducer-reads-process-local-timezone-for-durable-schedule.md). Verified the `chrono::Local` argument at `lib.rs:14244`, the timezone's path into the schedule at `smart_note_evaluation.rs:246` and `:439`, and the fixture's pinned `America/Los_Angeles` consumed at `:1104-1108`. One quotation correction applied this disposition (D12): the purity claim at `smart_note_evaluation.rs:8-10` reads in full "Pure functions throughout: callers supply the pre-state, a phase-scoped outcome, the transition clock, and a timezone (cron matching is a wall-clock concept; production passes the machine-local zone)". An earlier version of this record stopped at "and a timezone", which turned a documented design into an alleged impurity. The slug is now imprecise, since the record is not about the reducer reading anything; it is retained deliberately so the evidence link resolves.
-Existing check: `smart_note_evaluation_golden_matches_production_behaviour`
-(`smart_note_evaluation.rs:1100-1188`) covers the schedule arithmetic under one
+Required faults and enabling state: a conditional note with a non-trivial `check_cron` (any cron that is not effectively-never), a `compiled_false` or `due false` outcome, and **two module processes** whose `chrono::Local` resolves differently. The two-process requirement is the whole cost of this record and cannot be avoided by varying the reducer's own argument.
+Confidence: high - [evidence](evidence/note-b-reducer-reads-process-local-timezone-for-durable-schedule.md). Verified the `chrono::Local` argument at `lib.rs:14244`, the timezone's path into the schedule at `conditional_note_evaluation.rs:246` and `:439`, and the fixture's pinned `America/Los_Angeles` consumed at `:1104-1108`. One quotation correction applied this disposition (D12): the purity claim at `conditional_note_evaluation.rs:8-10` reads in full "Pure functions throughout: callers supply the pre-state, a phase-scoped outcome, the transition clock, and a timezone (cron matching is a wall-clock concept; production passes the machine-local zone)". An earlier version of this record stopped at "and a timezone", which turned a documented design into an alleged impurity. The slug is now imprecise, since the record is not about the reducer reading anything; it is retained deliberately so the evidence link resolves.
+Existing check: `conditional_note_evaluation_golden_matches_production_behaviour`
+(`conditional_note_evaluation.rs:1100-1188`) covers the schedule arithmetic under one
 fixed zone. It cannot see this. Status `unaudited`. Not run in CI.
 Impact: two hosts evaluating the same note write different durable
 `check_next_due_at` values, so a note's next check time depends on which host
 last touched it. The cross-language golden claim at
-`smart_note_evaluation.rs:1-6` is scoped to one zone and does not cover it.
+`conditional_note_evaluation.rs:1-6` is scoped to one zone and does not cover it.
 Open questions:
 
 - Is host-local wall-clock cron intended to be the durable contract, meaning the
@@ -1172,11 +1183,11 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - the normative cycle traces
-(`smart_note_evaluation.rs:1764-1851`) fix one candidate order and assert the
+(`conditional_note_evaluation.rs:1764-1851`) fix one candidate order and assert the
 selected sequence; no test permutes the input.
 Guarantee: The note and phase selected for a given cycle depend only on the
 candidate set's contents, never on the order in which candidates are presented.
-Check: `always` - assert that `select_smart_note_evaluation_cycle` returns the
+Check: `always` - assert that `select_conditional_note_evaluation_cycle` returns the
 same `(note_id, phase)` for a candidate slice and for every permutation of that
 slice. `always` because the store's row order is an implementation detail that
 must never change a decision.
@@ -1185,12 +1196,12 @@ Required faults and enabling state: at least two notes eligible for the same
 phase whose primary sort key ties, so the `id` tiebreak is the only thing
 deciding.
 Confidence: high - [evidence](evidence/note-b-selection-is-invariant-under-candidate-permutation.md).
-Read all four `sort_by_key` calls (`smart_note_evaluation.rs:728`, `:752`,
+Read all four `sort_by_key` calls (`conditional_note_evaluation.rs:728`, `:752`,
 `:780`, `:797-803`) and confirmed each ends in `note.id`; confirmed the store
 feeds `ORDER BY id` (`memory-store:13296`); confirmed no `HashMap` or `HashSet`
 iteration anywhere in the module.
 Existing check: `cycle_selection_prefers_due_then_compile_then_liveness_then_fallback`
-(`smart_note_evaluation.rs:1577-1716`) and the normative trace replay
+(`conditional_note_evaluation.rs:1577-1716`) and the normative trace replay
 (`:1764-1851`). Both fix one order. Status `unaudited`. Not run in CI.
 Impact: if a tiebreak were ever dropped, the acquisition decision would depend
 on SQLite's row order, and the boot-ephemeral cursor plus the durable
@@ -1203,8 +1214,8 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `smart_note_revision_matrix_normative_matches_memory_store`
-(`smart_note_evaluation.rs:1189-1526`) drives a revision and state-version
+Exercised: partial - `conditional_note_revision_matrix_normative_matches_memory_store`
+(`conditional_note_evaluation.rs:1189-1526`) drives a revision and state-version
 matrix against the real store.
 Guarantee: An evaluation outcome is applied only to the exact note revision the
 claim was issued against, so a note edited or dismissed mid-evaluation cannot
@@ -1217,7 +1228,7 @@ write. `always` because it is the fence every other phase-precondition
 guarantee rests on.
 Fault/timing angle: the window is between the claim and the completion, which
 spans a sandbox execution and, for compile and fallback, a model round trip. The
-interleaving to construct is a `ctx_note update` or `dismiss` inside that
+interleaving to construct is a `eidnara_note update` or `dismiss` inside that
 window.
 Required faults and enabling state: an outstanding claim on a note, plus a
 concurrent facade mutation of that note. No injected fault is needed.
@@ -1229,9 +1240,9 @@ Read the fence at `memory-store:13569-13573`, the `stale` terminal it produces
 `crates/memory-store/src/lib.rs:15072`). Confirmed the module side asserts only
 the phase name (`lib.rs:14197-14202`), so the store fence is the sole protection for the
 phase's eligibility predicate.
-Existing check: `smart_note_revision_matrix_normative_matches_memory_store`
-(`smart_note_evaluation.rs:1189-1526`), replaying
-`testdata/smart-note-evaluation-normative.json`. Status `unaudited`. Not run in
+Existing check: `conditional_note_revision_matrix_normative_matches_memory_store`
+(`conditional_note_evaluation.rs:1189-1526`), replaying
+`testdata/conditional-note-evaluation-normative.json`. Status `unaudited`. Not run in
 CI.
 Impact: if the fence regressed, a `due met` outcome computed against the old
 condition would set `status = "ready"` and a host-derived `ready_reason` on a
@@ -1273,7 +1284,7 @@ Required faults and enabling state: a compiled note whose check returns
 `compilation_failed`.
 Confidence: high - [evidence](evidence/note-b-check-failure-count-carries-across-compile-and-check-phases.md).
 Traced `reduce_check_failure` incrementing the shared column
-(`smart_note_evaluation.rs:525-531`), the `failing` status feeding the compile
+(`conditional_note_evaluation.rs:525-531`), the `failing` status feeding the compile
 selector (`:747`), and `reduce_compile` reading `pre.check_failure_count + 1`
 against `MAX_COMPILATION_FAILURES` (`:455-462`). Confirmed the only reset is a
 *successful* compile (`:486`).
@@ -1282,7 +1293,7 @@ from a fresh pre-state, never across a phase change.
 Impact: a note that reached `failing` gets one recompile attempt instead of
 three, so a single transient compiler failure retires it to the read-only
 fallback evaluator. Fallback never returns a note to `compiled`
-(`smart_note_evaluation.rs:630-658`), so the demotion is permanent until the
+(`conditional_note_evaluation.rs:630-658`), so the demotion is permanent until the
 condition is re-authored.
 Open questions:
 
@@ -1297,18 +1308,18 @@ Reachability: default-production
 Status: active
 Exercised: not yet - no test polls a project whose only eligible note is in fallback and returns `False` from that fallback check. (Scoped this disposition, D9.)
 Guarantee: Every phase completion that consumes a billable model call **and leaves the note re-selectable** writes a durable delay before that note can consume another.
-Check: `always` - assert that after any `fallback` completion **whose outcome is `False`** the note's durable state advances at least one field that its own selector reads as a time gate. `always` because it must hold on every such completion evaluated. The restriction to the `False` arm is a correction applied this disposition (D9): `reduce_fallback` has two arms (`smart_note_evaluation.rs:636-657`), and the `Met` arm (`:637-646`) calls `ready_fields` and returns `surfaced: true`, so the note becomes `ready` and the candidate query, which selects only `status = 'pending'` (`memory-store:13293`), never offers it again. A completion that cannot recur needs no backoff, so quantifying over both arms asserts a requirement the code is right not to satisfy and the check would fail on correct behaviour. The record's own `Confidence` line had already scoped its evidence to the `False` arm; only the check over-quantified.
+Check: `always` - assert that after any `fallback` completion **whose outcome is `False`** the note's durable state advances at least one field that its own selector reads as a time gate. `always` because it must hold on every such completion evaluated. The restriction to the `False` arm is a correction applied this disposition (D9): `reduce_fallback` has two arms (`conditional_note_evaluation.rs:636-657`), and the `Met` arm (`:637-646`) calls `ready_fields` and returns `surfaced: true`, so the note becomes `ready` and the candidate query, which selects only `status = 'pending'` (`memory-store:13293`), never offers it again. A completion that cannot recur needs no backoff, so quantifying over both arms asserts a requirement the code is right not to satisfy and the check would fail on correct behaviour. The record's own `Confidence` line had already scoped its evidence to the `False` arm; only the check over-quantified.
 Fault/timing angle: the window is the cycle reset. A spent cursor answers
 `no_work`, the store commits it fresh, the module resets the cursor
 (`lib.rs:11258-11265`), and the next poll re-selects the same note.
-Required faults and enabling state: one smart note with `check_status == "fallback"` **whose fallback evaluations return `False`**, and an evaluator that polls `note.evaluation.next` in a loop. No fault is required.
+Required faults and enabling state: one conditional note with `check_status == "fallback"` **whose fallback evaluations return `False`**, and an evaluator that polls `note.evaluation.next` in a loop. No fault is required.
 Confidence: high - [evidence](evidence/note-b-fallback-phase-writes-no-durable-backoff.md).
 Confirmed `reduce_fallback`'s `False` arm writes only `last_checked_at`,
-`updated_at`, and `check_status` (`smart_note_evaluation.rs:647-656`);
-confirmed `get_fallback_smart_notes` has no `check_next_due_at` or
+`updated_at`, and `check_status` (`conditional_note_evaluation.rs:647-656`);
+confirmed `get_fallback_conditional_notes` has no `check_next_due_at` or
 `check_quarantined_until` predicate (`:795`); confirmed the store adds no
 per-note cooldown (`memory-store:13291-13301`); confirmed the fallback claim's cost
-from the comment at `smart_note_evaluation.rs:818-821`.
+from the comment at `conditional_note_evaluation.rs:818-821`.
 Existing check: none. `MAX_FALLBACK_PER_RUN` (`:30`) bounds one cycle, not the
 poll rate, and `attempted_fallback` (`:874`) is boot-ephemeral and reset with
 the cycle.
@@ -1320,7 +1331,7 @@ Open questions:
 
 - Does the shipped evaluator worker impose its own inter-poll delay that bounds
   this in practice? The worker lives at
-  `packages/plugin/src/features/eidnara/smart-notes/evaluator-worker.ts` (source-catalog path, not present at HEAD)
+  `packages/plugin/src/features/eidnara/conditional-notes/evaluator-worker.ts` (source-catalog path, not present at HEAD)
   and was not read in this pass. Unresolved, needs the worker's drain loop.
 
 ### note-b-liveness-network-failure-burns-the-window-with-no-durable-record
@@ -1336,15 +1347,15 @@ Check: `always` - assert that after a `liveness network_failed` completion
 either `check_last_liveness_at` is unchanged or some other durable field records
 the failure. `always` because it must hold on every liveness network failure
 evaluated.
-Fault/timing angle: the 24-hour `SMART_NOTE_CHECK_LIVENESS_RECHECK_MS` spacing
-(`smart_note_evaluation.rs:26`) is what makes the consumed window expensive; the
+Fault/timing angle: the 24-hour `CONDITIONAL_NOTE_CHECK_LIVENESS_RECHECK_MS` spacing
+(`conditional_note_evaluation.rs:26`) is what makes the consumed window expensive; the
 next attempt is blocked for a day.
 Required faults and enabling state: a compiled note false for at least 7 days
 and outside the 24-hour spacing, claimed for `liveness`, whose sandbox check
 cannot reach the network.
 Confidence: high - [evidence](evidence/note-b-liveness-network-failure-burns-the-window-with-no-durable-record.md).
 Confirmed `reduce_liveness` stamps `check_last_liveness_at = now` before
-matching (`smart_note_evaluation.rs:591-593`) and that the `NetworkFailed` arm
+matching (`conditional_note_evaluation.rs:591-593`) and that the `NetworkFailed` arm
 returns that state unmodified (`:623-626`); contrasted with `reduce_due`'s
 `NetworkFailed`, which routes through `reduce_check_failure` and writes a
 counter and a quarantine (`:577-580`, `:536-547`); confirmed the spacing
@@ -1380,13 +1391,13 @@ Reachability: default-production
 Status: active
 Exercised: not yet - no test writes a large pending set and measures a poll.
 Guarantee: The work an acquisition poll performs grows no faster than linearly in the pending set, and until a per-poll candidate ceiling is chosen that relation is the only bound there is.
-Check: `always`, stated as an explicit scaling relation rather than against a constant: seed N and 2N pending notes into two identically prepared projects, poll each, and assert the number of rows the candidate query returns and the number of `SmartNoteSelectionSnapshot` values built are N and 2N respectively. `always` because it must hold on every poll evaluated. This replaces a check against "a declared constant" applied this disposition (D8): **there is no such constant.** The candidate query ends `ORDER BY id` with no `LIMIT` (`memory-store:13291-13301`), neither `insert_note` (`:10130-10164`) nor `insert_project_note` (`:10166-10200`) counts rows, and no reaper deletes notes by age or volume, so no finite workload could refute the earlier form. The scaling relation is refutable in both directions: a superlinear result refutes it, and so does a fix that makes growth sublinear, at which point the record should be restated against whatever bound the fix introduced.
+Check: `always`, stated as an explicit scaling relation rather than against a constant: seed N and 2N pending notes into two identically prepared projects, poll each, and assert the number of rows the candidate query returns and the number of `ConditionalNoteSelectionSnapshot` values built are N and 2N respectively. `always` because it must hold on every poll evaluated. This replaces a check against "a declared constant" applied this disposition (D8): **there is no such constant.** The candidate query ends `ORDER BY id` with no `LIMIT` (`memory-store:13291-13301`), neither `insert_note` (`:10130-10164`) nor `insert_project_note` (`:10166-10200`) counts rows, and no reaper deletes notes by age or volume, so no finite workload could refute the earlier form. The scaling relation is refutable in both directions: a superlinear result refutes it, and so does a fix that makes growth sublinear, at which point the record should be restated against whatever bound the fix introduced.
 Fault/timing angle: none. The growth is caller-driven and monotone.
-Required faults and enabling state: a model or client that repeatedly calls `ctx_note` with a `surface_condition`, and no evaluator draining them, so each write lands as `status = 'pending'` and stays there. Two seeded sets at two sizes and two polls, per the scaling form of the check.
+Required faults and enabling state: a model or client that repeatedly calls `eidnara_note` with a `surface_condition`, and no evaluator draining them, so each write lands as `status = 'pending'` and stays there. Two seeded sets at two sizes and two polls, per the scaling form of the check.
 Confidence: high - [evidence](evidence/note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll.md).
 Confirmed no count cap in `insert_note` (`memory-store:10130-10164`) or
 `insert_project_note` (`:10166-10200`); confirmed the candidate query has no
-`LIMIT` (`:13291-13301`); confirmed `smart_note_selection_snapshot` clones three
+`LIMIT` (`:13291-13301`); confirmed `conditional_note_selection_snapshot` clones three
 `String`s per note per poll (`lib.rs:13963-13985`); confirmed no reaper deletes
 notes by age or volume, in contrast with the ledger reaper at
 `crates/memory-store/src/task_lease.rs:332-418`.
@@ -1395,12 +1406,12 @@ bounds one note at 64 KiB, and `NOTE_EVAL_LEDGER_CAP` (`memory-store:2946`) boun
 in-flight claims. Neither bounds the pending note count.
 Impact: per-poll cost is linear in the pending set with no ceiling, and the
 pending set has no eviction. The snapshot's own doc comment
-(`smart_note_evaluation.rs:690-692`) shows the per-poll cost was considered and
+(`conditional_note_evaluation.rs:690-692`) shows the per-poll cost was considered and
 optimized, which makes the absent count cap the residual gap rather than an
 oversight of the whole shape.
 Open questions:
 
-- Is there a cap or reaper elsewhere, for instance in a dreamer maintenance
+- Is there a cap or reaper elsewhere, for instance in a memory_classifier maintenance
   task outside this crate? I searched `memory-store` and `daemon` and found
   none. Unresolved, needs a sweep of the plugin's maintenance tasks.
 - What per-poll candidate ceiling should the product choose? Picking one and
@@ -1412,9 +1423,11 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
-Exercised: partial - the protocol tests register a single evaluator; none
-registers two with conflicting policy.
+Status: invalidated
+Exercised: not yet - the combined policy check cannot be constructed after
+`retina_handoff` removal. Historical coverage: the protocol tests register a
+single evaluator; none registers two with conflicting policy. No tests were
+rerun; the remaining fields describe the source-catalog mechanism.
 Guarantee: An evaluator's acquisition decisions are governed by the policy that
 evaluator registered, not by another registration's policy.
 Check: `always` - with two live registrations for one project whose
@@ -1437,7 +1450,7 @@ Existing check: none.
 Impact: one evaluator setting `wake_owned` vetoes every other evaluator's
 acquisitions for that project (`lib.rs:11166-11172`), and one setting
 `retina_handoff` narrows every other evaluator's eligibility filter through
-`eligible` (`smart_note_evaluation.rs:704-707`). The hook comment at
+`eligible` (`conditional_note_evaluation.rs:704-707`). The hook comment at
 `packages/plugin/src/hooks/eidnara/hook.ts:1030-1033` (source-catalog path, not present at HEAD) shows two worktrees
 sharing one project identity is an anticipated configuration.
 Open questions:
@@ -1466,7 +1479,7 @@ Grepped every `policy_version` occurrence in `lib.rs:10880-11500`: the field is
 validated at `:10916-10919`, stored at `:10964`, bumped at `:11045`, and echoed
 at `:11050`, and read nowhere else. Selection compares the *note's*
 `policy_version` against the module constant
-(`smart_note_evaluation.rs:723`, `:749`, `:773`).
+(`conditional_note_evaluation.rs:723`, `:749`, `:773`).
 Existing check: none.
 Impact: an evaluator running an older or newer compiled-check policy is admitted
 and offered notes regardless, and the module has no way to refuse a mismatched
@@ -1487,7 +1500,7 @@ Open questions:
 ## Group H: observability and retirement
 
 Three records on what an operator can learn and what a user can undo. Note
-evaluation emits nothing: `smart_note_evaluation.rs` and the whole protocol range
+evaluation emits nothing: `conditional_note_evaluation.rs` and the whole protocol range
 `:10880-11560` contain zero `tracing`, `log`, `warn!`, `debug!`, or metric calls,
 and the only assertion is a `debug_assert!` at `:11251-11254` that release builds
 drop. So a starved note and a legitimately-not-due note are indistinguishable from
@@ -1509,13 +1522,13 @@ non-empty candidate set, assert at least one durable or emitted signal names the
 excluding cause. `always` because it must hold on every such decision
 evaluated.
 Fault/timing angle: none.
-Required faults and enabling state: a non-empty pending smart-note set in which
+Required faults and enabling state: a non-empty pending conditional-note set in which
 every note is excluded by a phase predicate, a quarantine, a
 `check_next_due_at` in the future, or the `attempted_fallback` list, plus one
 `note.evaluation.next` poll.
 Confidence: high - [evidence](evidence/note-b-excluded-note-is-not-reportable-by-any-surface.md).
 Verified zero `tracing`, `log`, `warn!`, `debug!`, `info!`, `error!`, or
-`trace!` calls in `smart_note_evaluation.rs` (whole-file grep, count 0) and in
+`trace!` calls in `conditional_note_evaluation.rs` (whole-file grep, count 0) and in
 `lib.rs:10880-11560` (range scan, no matches). Confirmed the only signals a
 caller receives are `result: "no_work"`, `replayed`, and the optional
 `cycle_exhausted` flag (`lib.rs:14017-14031`), none of which names a note or a
@@ -1540,19 +1553,19 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - no test dismisses a smart note and then reads it back with
+Exercised: not yet - no test dismisses a conditional note and then reads it back with
 `filter: "dismissed"`.
 Guarantee: Dismissal is a retrievable retirement, not a destruction: the content
 survives and is readable, and the note is permanently removed from evaluation.
 Check: `always` - assert that after a successful dismissal the row still exists
 with its pre-dismissal content as a prefix of its current content, that a
-`ctx_note read` with `filter: "dismissed"` returns it, and that no facade action
+`eidnara_note read` with `filter: "dismissed"` returns it, and that no facade action
 returns it to `pending`, `ready`, or `active`. `always` because both halves must
 hold on every dismissal evaluated.
 Fault/timing angle: none for the read half. For the evaluation half the window
 is a live claim at dismissal time, which `task_lease::fence_task_claims_tx` must
 close.
-Required faults and enabling state: a smart note in `pending` or `ready`, a `ctx_note dismiss`, then a `ctx_note read` with `filter: "dismissed"` and a `ctx_note update` on the same id. The oracle needs **four calls**, not three: the create is not setup, because it is the call that establishes the pre-dismissal content the read half asserts is a prefix of the post-dismissal content, so without it the first conjunct has no baseline. (Corrected this disposition, D1.)
+Required faults and enabling state: a conditional note in `pending` or `ready`, a `eidnara_note dismiss`, then a `eidnara_note read` with `filter: "dismissed"` and a `eidnara_note update` on the same id. The oracle needs **four calls**, not three: the create is not setup, because it is the call that establishes the pre-dismissal content the read half asserts is a prefix of the post-dismissal content, so without it the first conjunct has no baseline. (Corrected this disposition, D1.)
 Confidence: high - [evidence](evidence/note-b-dismissed-note-is-readable-but-never-returns-to-evaluation.md).
 Confirmed `dismiss_note` UPDATEs and never DELETEs, and appends rather than
 replaces the resolution (`memory-store:4574-4596`); confirmed the dismissed status
@@ -1582,7 +1595,7 @@ Type: reachability
 Reachability: default-production
 Status: active
 Exercised: partial - the normative cycle traces
-(`smart_note_evaluation.rs:1764-1851`) drive cursor exhaustion in the pure
+(`conditional_note_evaluation.rs:1764-1851`) drive cursor exhaustion in the pure
 selector; nothing drives it through the store and the response.
 Guarantee: A campaign reaches the state where an acquisition returns no work
 because the fair-selection cursor is spent while real work remains, and the
@@ -1593,7 +1606,7 @@ moment of the poll and reset immediately afterwards
 (`lib.rs:11258-11265`), so a campaign that polls once per drain never sees it.
 Required faults and enabling state: a `Full`-mode slot cursor advanced past at
 least one phase (so `phase_index > 0`, permanently skipping earlier phases for
-this cycle, documented at `smart_note_evaluation.rs:864-868`), with work newly
+this cycle, documented at `conditional_note_evaluation.rs:864-868`), with work newly
 eligible in a skipped phase, or the fallback quota spent with fallback notes
 remaining. Then one more `note.evaluation.next` on that slot.
 Confidence: high - [evidence](evidence/note-b-cursor-exhausted-no-work-occurs-in-a-campaign.md).
@@ -1601,9 +1614,9 @@ Traced the flag's computation from a *fresh* cycle (`lib.rs:11220-11229`), the
 store persisting `"no_work_exhausted"` versus `"no_work"`
 (`memory-store:13314-13328`), the replay decoding it back
 (`memory-store:13300-13310`), and the response field (`lib.rs:14023-14030`).
-Existing check: `smart_note_cycle_traces_normative_matches_selection_policy`
-(`smart_note_evaluation.rs:1764-1851`) replaying
-`testdata/smart-note-evaluation-normative.json`. It covers the pure selector's
+Existing check: `conditional_note_cycle_traces_normative_matches_selection_policy`
+(`conditional_note_evaluation.rs:1764-1851`) replaying
+`testdata/conditional-note-evaluation-normative.json`. It covers the pure selector's
 exhaustion, not the durable classification or the response. Status `unaudited`.
 Not run in CI.
 Impact: without this state in a campaign, the `cycle_exhausted` plumbing is
@@ -1674,11 +1687,11 @@ these records has an executing check.
   mints ids into the text (`:11704`) and a shared `command_id` adds a `replayed`
   field (`:15303`). Compare at the parser level or against two cloned stores.
 - **An acknowledgement that is not an effect.**
-  [facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes](#facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes),
+  [facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes](#facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes),
   [facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect](#facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect),
   [facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed](#facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed).
   Three records, one shape, three very different costs, and the cost spread is why
-  the third exists. `ctx_reduce` and the claim-effects module half are each one
+  the third exists. `eidnara_reduce` and the claim-effects module half are each one
   call plus a store read; the composition needs a cross-language process pair that
   does not exist. Hypothesis: the module-local claim-effects record *does not*
   dominate the composition record, and that is the finding D11 made legible: a

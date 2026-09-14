@@ -14,15 +14,15 @@ across a replay.
 
 1. All four phase selectors sort explicitly and all four end the key with the
    note id:
-   - `get_due_compiled_smart_note_checks`:
+   - `get_due_compiled_conditional_note_checks`:
      `sort_by_key(|note| (note.check_next_due_at.unwrap_or(0), note.id))`
-     (`crates/daemon/src/smart_note_evaluation.rs:728`).
-   - `get_smart_notes_needing_compilation`:
+     (`crates/daemon/src/conditional_note_evaluation.rs:728`).
+   - `get_conditional_notes_needing_compilation`:
      `sort_by_key(|note| (note.created_at, note.id))` (`:752`).
-   - `get_stale_compiled_smart_notes`:
+   - `get_stale_compiled_conditional_notes`:
      `sort_by_key(|note| (note.check_false_since_at.unwrap_or(0), note.id))`
      (`:780`).
-   - `get_fallback_smart_notes`:
+   - `get_fallback_conditional_notes`:
      `sort_by_key(|note| (note.last_checked_at.is_some(),
      note.last_checked_at.unwrap_or(0), note.id))` (`:797-803`).
 2. `unwrap_or(0)` makes the `Option` keys total rather than leaving `None`
@@ -42,9 +42,9 @@ across a replay.
    `ORDER BY id` on the candidate query (`memory-store:13296`). So even the
    pre-sort order is deterministic, which means the sorts are defence in depth
    rather than the sole guarantee.
-6. `select_smart_note_evaluation_cycle` (`smart_note_evaluation.rs:900-949`)
+6. `select_conditional_note_evaluation_cycle` (`conditional_note_evaluation.rs:900-949`)
    introduces one more ordering decision, the fallback exclusion:
-   `get_fallback_smart_notes(notes, notes.len(), retina_handoff).into_iter()
+   `get_fallback_conditional_notes(notes, notes.len(), retina_handoff).into_iter()
    .find(|note| !cycle.attempted_fallback.contains(&note.id))` (`:932-937`).
    `find` on an already-sorted `Vec` picks the first non-excluded note in sort
    order, so the exclusion does not reintroduce order dependence.
@@ -58,11 +58,11 @@ across a replay.
 ## Failure scenario
 
 The property holds today, so the scenario is what a regression would cause. Drop
-the `note.id` tiebreak from `get_due_compiled_smart_note_checks`, leaving
+the `note.id` tiebreak from `get_due_compiled_conditional_note_checks`, leaving
 `sort_by_key(|note| note.check_next_due_at.unwrap_or(0))`. Two notes share a
-`check_next_due_at`, which is common because `next_smart_note_check_due_at`
+`check_next_due_at`, which is common because `next_conditional_note_check_due_at`
 clamps to the ceiling (`:255`) and many notes with no usable cron land on
-`SMART_NOTE_CHECK_DEFAULT_INTERVAL_MS` plus jitter drawn from a 121-second
+`CONDITIONAL_NOTE_CHECK_DEFAULT_INTERVAL_MS` plus jitter drawn from a 121-second
 window.
 
 A poll selects one of them. The store commits the claim with that note id and
@@ -89,10 +89,10 @@ same millisecond, since both writes take `now_ms` from the same facade call's
 
 ## What a test must construct
 
-1. Build a `Vec<SmartNoteSelectionSnapshot>` of at least three notes eligible for
+1. Build a `Vec<ConditionalNoteSelectionSnapshot>` of at least three notes eligible for
    one phase, with the primary sort key equal across all of them and distinct
    ids.
-2. Call `select_smart_note_evaluation_cycle` on the slice and record the
+2. Call `select_conditional_note_evaluation_cycle` on the slice and record the
    returned `(note_id, phase)`.
 3. For every permutation of the slice (three notes gives six permutations; a
    property test can sample from a larger set), call again with a freshly
@@ -119,10 +119,11 @@ permutation, assert equality of the selection. No store, no clock, no faults.
 - Conclusion: resolved with answer. Stability is not load-bearing.
 
 ### Q: Could the store's `ORDER BY id` ever be dropped, and would the sorts
+
 still cover it?
 
 - Sources examined: `memory-store:13291-13301` (the candidate query),
-  `lib.rs:13963-13985` (`smart_note_selection_snapshot`, which maps rows to
+  `lib.rs:13963-13985` (`conditional_note_selection_snapshot`, which maps rows to
   snapshots in iteration order), `lib.rs:11203-11207` (the closure that builds
   the snapshot `Vec`).
 - Findings: yes, the sorts cover it. The snapshot `Vec` preserves whatever order

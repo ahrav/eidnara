@@ -85,7 +85,7 @@ purpose, and `crates/host-runtime/tests/support/perf_measurement.rs:426` defines
 `crates/daemon/src/m0_compose.rs:13`,
 `crates/daemon/src/classify.rs:176`, `crates/memory-store/src/lib.rs`) and
 `CoreState` (`crates/daemon/src/tail_hygiene.rs:6`,
-`crates/daemon/src/historian.rs:1828`,
+`crates/daemon/src/history_summarizer.rs:1828`,
 `crates/daemon/tests/boundary_counter_durability.rs:6`). So the label is
 `test-only`, and stating it as `default-production` would be exactly the
 unverified blanket claim the method contract warns about.

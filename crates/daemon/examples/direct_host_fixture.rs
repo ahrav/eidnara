@@ -18,14 +18,16 @@ mod unix {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use host_runtime::broca::BrocaComponent;
-    use host_runtime::broca::backend::{
+    use host_runtime::local_embeddings::embed_tokens::EmbedTokens;
+    use host_runtime::local_embeddings::inference::InferenceError;
+    use host_runtime::local_embeddings::{
+        EmbeddingEngine, LaneInfo, LocalEmbeddingsComponent, LocalEmbeddingsLimits,
+    };
+    use host_runtime::model_execution::ModelExecutionComponent;
+    use host_runtime::model_execution::backend::{
         BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ErrorClass,
         EventSink, FinishReason, LlmExecutionBackend,
     };
-    use host_runtime::synapse::embed_tokens::EmbedTokens;
-    use host_runtime::synapse::inference::InferenceError;
-    use host_runtime::synapse::{EmbeddingEngine, LaneInfo, SynapseComponent, SynapseLimits};
     use host_runtime::{CancellationToken, HostConfig, HostInit, StaticComposite};
     use serde::{Deserialize, Serialize};
     use sha2::Digest;
@@ -38,8 +40,8 @@ mod unix {
     const READY_TIMEOUT: Duration = Duration::from_secs(30);
     const CATALOG: [&str; 3] = [
         daemon::DEFAULT_MODULE_ID,
-        host_runtime::synapse::SYNAPSE_MODULE_ID,
-        host_runtime::broca::BROCA_MODULE_ID,
+        host_runtime::local_embeddings::LOCAL_EMBEDDINGS_MODULE_ID,
+        host_runtime::model_execution::MODEL_EXECUTION_MODULE_ID,
     ];
 
     #[derive(Debug, Clone, Copy)]
@@ -305,9 +307,9 @@ mod unix {
         }
     }
 
-    fn synapse_component() -> SynapseComponent {
-        let limits = SynapseLimits::default();
-        SynapseComponent::ready_with_engine(
+    fn local_embeddings_component() -> LocalEmbeddingsComponent {
+        let limits = LocalEmbeddingsLimits::default();
+        LocalEmbeddingsComponent::ready_with_engine(
             LaneInfo {
                 model: "direct-host-fixture".to_owned(),
                 fingerprint: "a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234"
@@ -324,7 +326,7 @@ mod unix {
             Arc::new(DeterministicEngine),
             limits,
         )
-        .expect("fixture Synapse limits are valid")
+        .expect("fixture LocalEmbeddings limits are valid")
     }
 
     #[derive(Deserialize)]
@@ -658,7 +660,7 @@ mod unix {
             if own_incarnation_is_running(root)
                 && let Ok(info) = host_runtime::read_connection_file(publication)
             {
-                if info.wire_version != 2 {
+                if info.wire_version != 3 {
                     return Err("fixture published an unsupported wire version".into());
                 }
                 return Ok(());
@@ -716,13 +718,15 @@ mod unix {
 
         let publication =
             host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
-        let synapse = synapse_component();
+        let local_embeddings = local_embeddings_component();
         let composite = StaticComposite::new(
             daemon::Handler::new_with_connection_file(Some(publication.clone())),
-            synapse,
-            BrocaComponent::new(
+            local_embeddings,
+            ModelExecutionComponent::new(
                 backend,
-                host_runtime::broca::subprocess::group_registry::StateRoot::resolve(Some(&root))?,
+                host_runtime::model_execution::subprocess::group_registry::StateRoot::resolve(
+                    Some(&root),
+                )?,
             ),
         )?;
         let config = HostConfig {
@@ -758,7 +762,7 @@ mod unix {
         if ready.is_ok() {
             let record = serde_json::json!({
                 "status": "ready",
-                "wire_version": 2,
+                "wire_version": 3,
                 "catalog": CATALOG,
             });
             let mut stdout = io::stdout().lock();

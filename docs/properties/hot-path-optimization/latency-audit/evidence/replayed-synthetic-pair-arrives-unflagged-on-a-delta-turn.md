@@ -7,10 +7,10 @@ links are pinned to it. The executed witness below supplements that history.
 
 ## Discovery trigger
 
-B2's outside clause states that the historian, the projection-cache charge,
+B2's outside clause states that the history_summarizer, the projection-cache charge,
 and the native attach read the un-normalized request while the pass reads the
 normalized clone. Those two views differ for a downstream observer only when
-the normalization actually produced a clone, a historian firing was prepared
+the normalization actually produced a clone, a history_summarizer firing was prepared
 on that pass, and the request arrived on the lane where the two views
 disagree. The existing replayed-pair test uses a full array with no firing, so
 B2 can pass without the divergent observer ever being reached.
@@ -24,7 +24,7 @@ B2 can pass without the divergent observer ever being reached.
   object with `after`; it reattaches the prefix through
   [`reattach_messages_prefix`][reattach-call] from the projection cache and
   deep-copies the native prefix ([`:4228-4231`][native-deep]).
-- [`prepare_historian_fire`][historian-fire] is called with `&parsed` on the
+- [`prepare_history_summarizer_fire`][history_summarizer-fire] is called with `&parsed` on the
   Emergency95 arm ([`:8245-8247`][prepare-a]) and on the ordinary arm
   ([`:8336-8338`][prepare-b]); it returns `no_models` without firing when
   [`cfg.model_chain.is_empty()`][no-models], and [`model_chain`][cfg-models]
@@ -44,11 +44,11 @@ B2 can pass without the divergent observer ever being reached.
 
 ## Failure scenario
 
-Not a violation; a coverage gap. On a full-array turn the historian's message
+Not a violation; a coverage gap. On a full-array turn the history_summarizer's message
 filter keeps the replayed pair as a zero-block `BoundaryMsg`; on a delta turn
 the rebuilt prefix already carries the flag and the filter drops it. Without a
 delta-turn pass that both clones and prepares a firing, no test distinguishes
-a design that widens the normalized view to the historian from the HEAD
+a design that widens the normalized view to the history_summarizer from the HEAD
 design.
 
 ## Timing windows and dependencies
@@ -62,7 +62,7 @@ prepared firing (configured `model_chain`), and `serve_native` on.
 A prior bust pass that freezes a todo pair; a harness replay of the pair
 without the `synthetic` marker, as the existing test constructs; a `tail_delta`
 body so [`expand_transform_tail_delta`][expand] reattaches the prefix; a
-configured `model_chain` so [`prepare_historian_fire`][historian-fire] passes
+configured `model_chain` so [`prepare_history_summarizer_fire`][history_summarizer-fire] passes
 the `no_models` gate; the `OpencodeAiSdk` profile with `serve_native` on. The
 marker records the four preconditions at the pass and asserts them; it does
 not assert observer agreement, which is B2's check. No existing check covers
@@ -92,7 +92,7 @@ a shared-view design as well.
 [expand]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4151-L4245
 [reattach-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4188-L4190
 [native-deep]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4228-L4231
-[historian-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4994
+[history_summarizer-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4994
 [no-models]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5189-L5196
 [native-profile]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L7946-L7947
 [prepare-a]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8245-L8247
@@ -109,7 +109,7 @@ a shared-view design as well.
 Implementation base: `bf6b9d5fad969fa29da852a1dd9f1de569732197`.
 Execution date: 2026-09-11.
 
-[`unflagged_synthetic_delta_prepares_historian_and_native_output`][witness]
+[`unflagged_synthetic_delta_prepares_history_summarizer_and_native_output`][witness]
 uses the handler entry, fixture memory store and existing scripted producer.
 It establishes these independent conditions on one delta pass:
 
@@ -121,20 +121,20 @@ It establishes these independent conditions on one delta pass:
    frozen pair's call ID. Eighty ordinary messages precede the pair, placing
    its ordinals 83 and 84 in the protected tail.
 5. The profile is `opencode-aisdk`, `serve_native` is true, and the handler
-   reports `historian.fired == true` on that pass.
+   reports `history_summarizer.fired == true` on that pass.
 
 After those assertions the test emits the constant marker
 `replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn: reached`.
 It also checks nonempty native output, waits for the producer to start, then
-releases the scripted output block and waits for the historian to become idle.
+releases the scripted output block and waits for the history_summarizer to become idle.
 Observer equivalence is checked separately by the
 [B2 reference and delta comparisons](synthetic-normalization-is-scoped-to-the-pass.md#pass-local-view-evidence).
 
 ### Characterization and limitations
 
-`cargo test -p daemon --lib --locked unflagged_synthetic_delta_prepares_historian_and_native_output -- --nocapture`
+`cargo test -p daemon --lib --locked unflagged_synthetic_delta_prepares_history_summarizer_and_native_output -- --nocapture`
 passed before the production refactor (1 test); its marker was reached and
-the historian completed. The post-refactor `synthetic` filter passed all 20
+the history_summarizer completed. The post-refactor `synthetic` filter passed all 20
 matching tests, including this witness.
 
 Fixture development first omitted the authored tool result and hit the
@@ -150,10 +150,11 @@ Test adequacy remains unaudited. No benchmark or measurement campaign ran;
 parent measurement and whole-repository landing gates remain separate.
 
 [witness]: ../../../../../crates/daemon/src/lib.rs#L23724
+
 ## Third-turn prefix and production-prompt checks
 
 The [witness][witness] also sends a third delta after the second turn's
-historian completes. The third turn reuses all 84 prefix messages, including
+history_summarizer completes. The third turn reuses all 84 prefix messages, including
 the replay at ordinals 83 and 84. It asserts that expansion uses the projection
 cache rather than snapshot fallback and restores both normalized flags.
 

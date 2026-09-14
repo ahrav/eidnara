@@ -14,7 +14,7 @@ describe("contract vocabulary", () => {
             "cli.reasons.non_failing",
             "cli.readiness_states.transport",
             "cli.readiness_states.storage",
-            "cli.readiness_states.synapse",
+            "cli.readiness_states.local_embeddings",
             "cli.readiness_states.kernel",
             "harness_unavailable.reasons_by_precedence",
             "install_layouts",

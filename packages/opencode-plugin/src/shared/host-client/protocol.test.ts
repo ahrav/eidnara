@@ -23,8 +23,8 @@ import {
 } from "./protocol";
 import { AdmissionClass, Priority } from "./types";
 
-const ROUTE_OPEN_HEADER_HEX = "a70000000200020000000000000100000000000000";
-const ROUTED_REQUEST_HEADER_HEX = "2c00000002000407004d0000000200000000000000";
+const ROUTE_OPEN_HEADER_HEX = "a70000000300020000000000000100000000000000";
+const ROUTED_REQUEST_HEADER_HEX = "2c00000003000407004d0000000200000000000000";
 /** The wire doc Section 7.2 compact canonical `route.open` request body. */
 const ROUTE_OPEN_CANONICAL_BODY =
     '{"op":"route.open","target":{"kind":"tool_provider","module_id":"context"},"identity":{"project_root":"/workspace/project","harness":"opencode","session":"session-1"}}';
@@ -106,7 +106,7 @@ describe("committed wire-doc Section 6.4 vectors", () => {
         for (const vector of vectors) {
             const header = decodeHex(vector.hex);
             expect(header.len).toBe(vector.len);
-            expect(header.ver).toBe(2);
+            expect(header.ver).toBe(3);
             expect(header.ty).toBe(FrameType.Request);
             expect(flagsBinary(header.flags)).toBe(false);
             expect(flagsPriority(header.flags)).toBe(vector.priority);
@@ -183,7 +183,7 @@ describe("structural rejections before body handling", () => {
         // Every row mutates one field of an otherwise valid routed StreamData header.
         const rows: { name: string; mutate: (bytes: Uint8Array) => void; code: DecodeErrorCode }[] =
             [
-                ...[0, 1, 3, 255].map((ver) => ({
+                ...[0, 1, 2, 255].map((ver) => ({
                     name: `version ${ver}`,
                     mutate: (bytes: Uint8Array) => {
                         bytes[4] = ver;

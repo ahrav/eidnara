@@ -6,7 +6,7 @@ The module header claims purity in strong terms: "Pure functions throughout:
 callers supply the pre-state, a phase-scoped outcome, the transition clock, and a
 timezone (cron matching is a wall-clock concept; production passes the
 machine-local zone)"
-(`crates/daemon/src/smart_note_evaluation.rs:8-10`). The parenthetical names
+(`crates/daemon/src/conditional_note_evaluation.rs:8-10`). The parenthetical names
 the production timezone source without naming its consequence, so I traced where
 the timezone comes from at the one production call site.
 
@@ -14,13 +14,13 @@ the timezone comes from at the one production call site.
 
 1. `crates/daemon/src/lib.rs:14244` is the only production call to the
    reducer:
-   `reduce_smart_note_evaluation(&pre, outcome, note.id, now, &chrono::Local)`.
+   `reduce_conditional_note_evaluation(&pre, outcome, note.id, now, &chrono::Local)`.
    `chrono::Local` resolves the process's timezone, which on Linux comes from
    `TZ` or `/etc/localtime` and from the system tzdata.
 2. The timezone reaches the durable schedule through two paths.
-   `reduce_compile` passes it to `next_smart_note_check_due_at`
-   (`smart_note_evaluation.rs:472-478`), and `false_fields` passes it on every
-   false outcome (`:439`). `next_smart_note_check_due_at` uses it at `:246` to
+   `reduce_compile` passes it to `next_conditional_note_check_due_at`
+   (`conditional_note_evaluation.rs:472-478`), and `false_fields` passes it on every
+   false outcome (`:439`). `next_conditional_note_check_due_at` uses it at `:246` to
    compute the next cron occurrence.
 3. `next_occurrence` (`:184-210`) reads civil fields off each candidate instant
    in the supplied zone: `civil.minute()`, `civil.hour()`, `civil.month()`,
@@ -32,17 +32,17 @@ the timezone comes from at the one production call site.
    `lib.rs:14268`, and the store writes it in the completion transaction
    (`crates/memory-store/src/lib.rs:13617` is the guarded UPDATE).
 5. The jitter compounds the divergence rather than masking it.
-   `deterministic_jitter_ms` (`smart_note_evaluation.rs:262-274`) is seeded on
+   `deterministic_jitter_ms` (`conditional_note_evaluation.rs:262-274`) is seeded on
    `{note_id}:{hash}`, so the seed is zone-independent, but its magnitude is
    `min(60s, floor(interval * 0.1))` where `interval` is the clamped
    zone-dependent delta (`:263`). Two zones producing different deltas therefore
    also produce different jitter bounds.
-6. The frozen fixture cannot see this. `testdata/smart-note-evaluation-golden.json`
+6. The frozen fixture cannot see this. `testdata/conditional-note-evaluation-golden.json`
    carries `provenance.timezone = "America/Los_Angeles"`, and the test parses
    that field into a `chrono_tz::Tz` and passes it explicitly
-   (`smart_note_evaluation.rs:1102-1108`). The test never uses `chrono::Local`.
-7. The clamps do bound the blast radius. `next_smart_note_check_due_at` clamps
-   the raw delta to `[SMART_NOTE_CHECK_FLOOR_MS, SMART_NOTE_CHECK_CEILING_MS]`
+   (`conditional_note_evaluation.rs:1102-1108`). The test never uses `chrono::Local`.
+7. The clamps do bound the blast radius. `next_conditional_note_check_due_at` clamps
+   the raw delta to `[CONDITIONAL_NOTE_CHECK_FLOOR_MS, CONDITIONAL_NOTE_CHECK_CEILING_MS]`
    at `:253`, and clamps again after jitter at `:255`. Those constants are 5
    minutes and 24 hours (`:18`, `:20`). So the divergence is bounded by one day,
    not unbounded.
@@ -60,7 +60,7 @@ note carries `check_cron = "0 3 * * *"`.
 
 Both hosts persist their own answer to `check_next_due_at` for the same note and
 the same outcome. The due-phase selector orders on that column
-(`smart_note_evaluation.rs:728`), so which note a poll selects first depends on
+(`conditional_note_evaluation.rs:728`), so which note a poll selects first depends on
 which host last evaluated each note. Nothing detects the inconsistency, because
 each write is individually valid.
 
@@ -72,19 +72,19 @@ deployment.
 
 No interleaving is required. The dependency is environmental: two processes whose
 `chrono::Local` differ, or one process whose zone changes between two
-evaluations of the same note. The clamp at `smart_note_evaluation.rs:253` and
+evaluations of the same note. The clamp at `conditional_note_evaluation.rs:253` and
 `:255` bounds the divergence to the 5-minute-to-24-hour band, so the worst case
 is a note checked up to a day earlier or later than the other host intended.
 
 A cron that is `*` in every field, or absent, or invalid, produces
-`SMART_NOTE_CHECK_DEFAULT_INTERVAL_MS` (`:251`) and is zone-independent. So the
+`CONDITIONAL_NOTE_CHECK_DEFAULT_INTERVAL_MS` (`:251`) and is zone-independent. So the
 property only bites for a cron that pins an hour, a day, a month, or a weekday.
 
 ## What a test must construct
 
-1. Build a `SmartNoteLifecycleState` with `check_cron = Some("0 3 * * *")` and a
+1. Build a `ConditionalNoteLifecycleState` with `check_cron = Some("0 3 * * *")` and a
    fixed `check_hash`.
-2. Call `reduce_smart_note_evaluation` twice with identical `(pre, outcome,
+2. Call `reduce_conditional_note_evaluation` twice with identical `(pre, outcome,
    note_id, now)` and two different `chrono_tz::Tz` values, for instance
    `America/Los_Angeles` and `UTC`, chosen so the pinned hour falls on opposite
    sides of the clamp.
@@ -104,7 +104,7 @@ production form is the one that needs a design decision.
 
 ### Q: Is host-local wall-clock cron intended to be the contract?
 
-- Sources examined: `smart_note_evaluation.rs:8-10` (the purity and timezone
+- Sources examined: `conditional_note_evaluation.rs:8-10` (the purity and timezone
   claim), `:180-183` (`next_occurrence`'s doc comment, which says "First instant
   strictly after `after_ms` whose LOCAL civil time in `tz` matches `cron`" and
   that "DST transitions are handled by construction"), `lib.rs:14244` (the
@@ -121,7 +121,7 @@ production form is the one that needs a design decision.
   implementations agree per host and the cross-language fixture claim holds, and
   the finding is purely about cross-host consistency. If the TypeScript side
   pins a zone, the two authorities disagree per host too. I did not read
-  `packages/plugin/src/features/eidnara/smart-notes/schedule.ts` (source-catalog path, not present at HEAD) in this
+  `packages/plugin/src/features/eidnara/conditional-notes/schedule.ts` (source-catalog path, not present at HEAD) in this
   pass.
 - Conclusion: needs human input. The mechanism is confirmed; whether it is a
   defect depends on a design intent that is not written down. The narrower
@@ -131,7 +131,7 @@ production form is the one that needs a design decision.
 ### Q: Can `chrono::Local` fail or shift mid-process?
 
 - Sources examined: `next_occurrence`'s `.single()?` at
-  `smart_note_evaluation.rs:199` and its comment at `:196-198`.
+  `conditional_note_evaluation.rs:199` and its comment at `:196-198`.
 - Findings: the comment states the reasoning: "An in-range instant maps to
   exactly one civil time; an instant beyond chrono's representable date range
   maps to none, which ends the search as 'no occurrence' instead of panicking."

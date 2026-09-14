@@ -9,7 +9,7 @@ Every proposed guarantee below is a claim under test.
 
 Separate current identity, durable vector bytes, and product completion.
 JobTable only checks local item count and dimension at publication
-(`crates/host-runtime/src/synapse/jobs.rs:502-535`). This yields
+(`crates/host-runtime/src/local_embeddings/jobs.rs:502-535`). This yields
 `embedding-completion-is-identity-fenced` and
 `embedding-complete-requires-durable-vector`. One does not imply the other.
 
@@ -31,7 +31,7 @@ process crash (`jobs.rs:323-342`, `:597-606`).
 
 ## Protocol contracts
 
-Reuse `synapse-requests-are-validated-before-any-inference` for current wire
+Reuse `local_embeddings-requests-are-validated-before-any-inference` for current wire
 validation. Add product exact-token rejection and single-artifact counting.
 `docs/host-wire-protocol.md:472` documents silent truncation; RP2.1 does not
 authorize a new wire method. The recovery-ledger wording at `:502` also needs
@@ -44,7 +44,7 @@ tokenizer copies are different resource owners. Product admission must respect
 approved pending limits; existing JobTable limits remain their own authority.
 `embedding-backfill-preserves-query-admission` adds the query-priority claim.
 `embedding-supervisor-shares-budget-and-joins` covers bounded slices and cleanup.
-Existing FIFO (`crates/host-runtime/src/synapse/mod.rs:206-225`) is not priority.
+Existing FIFO (`crates/host-runtime/src/local_embeddings/mod.rs:206-225`) is not priority.
 
 ## Security boundaries
 
@@ -57,7 +57,7 @@ eligibility at retrieval boundaries belong to RP2.7 and projection owners.
 ## Distributed coordination
 
 Not applicable to consensus or fleet ownership: one daemon and a process-local
-Synapse component are the examined topology. Restart incarnation fencing is
+LocalEmbeddings component are the examined topology. Restart incarnation fencing is
 applicable and is retained. No second leader, distributed lease, or routing
 plane is inferred from the word "durable".
 
@@ -66,13 +66,13 @@ plane is inferred from the word "durable".
 Missing tokenizer identity means no submission. Shutdown stops new admission,
 retains ownership of started work, and leaves unfinished durable work retryable.
 Existing component shutdown joins the tracker and synchronous CPU holder
-(`crates/host-runtime/src/synapse/mod.rs:1148-1161`). Reuse that ownership rather
+(`crates/host-runtime/src/local_embeddings/mod.rs:1148-1161`). Reuse that ownership rather
 than equating receiver cancellation with native completion.
 
 ## Idempotency and replay
 
 Reuse canonical request-key calculation and retained-key deduplication
-(`crates/host-runtime/src/synapse/protocol.rs:923-947`; `jobs.rs:407-428`).
+(`crates/host-runtime/src/local_embeddings/protocol.rs:923-947`; `jobs.rs:407-428`).
 Replay after restart may repeat pure inference. It must not create duplicate
 durable completion or erase another occurrence. Count attempts separately from
 committed identities; do not demand one lifetime inference per pending row.
@@ -80,7 +80,7 @@ committed identities; do not demand one lifetime inference per pending row.
 ## Version compatibility
 
 The fingerprint binds tokenizer hashes, dimensions, and table epoch, but omits
-model name (`crates/host-runtime/src/synapse/bundle.rs:652-702`). Completion must
+model name (`crates/host-runtime/src/local_embeddings/bundle.rs:652-702`). Completion must
 therefore compare model explicitly as the plan requires. Same byte payloads do
 not collapse occurrence identity. Bound versions and identity transitions are
 inputs to campaigns, not constants invented by this catalog.

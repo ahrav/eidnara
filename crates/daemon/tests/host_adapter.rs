@@ -62,8 +62,8 @@ async fn host_lifecycle_uses_full_route_handles() {
         daemon::MEMORY_RENDER_FORMAT_EPOCH
     );
     assert_eq!(
-        epochs["compartment_render_epoch"],
-        daemon::COMPARTMENT_RENDER_FORMAT_EPOCH
+        epochs["history_segment_render_epoch"],
+        daemon::HISTORY_SEGMENT_RENDER_FORMAT_EPOCH
     );
     assert_eq!(
         epochs["profile_epoch"],
@@ -154,7 +154,7 @@ fn adapter_source_has_one_prepared_outcome_and_tracked_spawn_boundary() {
 
     assert!(!production.contains("HandlerOutcome"));
     assert!(!production.contains("ModuleHandler"));
-    let removed_client_api = ["subc", "client", "rs"].join("_") + "::";
+    let removed_client_api = ["host", "client", "rs"].join("_") + "::";
     assert!(!production.contains(&removed_client_api));
     assert!(!production.contains("tokio::spawn("));
     assert!(production.contains("spawn_module_task"));

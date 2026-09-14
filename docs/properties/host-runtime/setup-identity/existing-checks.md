@@ -6,9 +6,9 @@ Every claim-bearing check for the authenticated setup socket and peer identity:
 Assembled from lens B's claim register and check inventory, with every count and
 every headline reference re-derived at `HEAD` during synthesis.
 
-Provenance: code read from `the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`. Workflow references
-are against `the source repository `ci.yml` workflow` at that commit.
+Provenance: code read from `the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`,`HEAD` = `e447c927`. Workflow references
+are against`the source repository `ci.yml` workflow` at that commit.
 
 **Every status below is `unaudited`.** An existing check never removes a property
 from the catalog. Test adequacy belongs to `/testing:invariant-test-review` and
@@ -371,7 +371,7 @@ not exist, and neither does `auth.ts`. Listing the directory returns 22 entries 
 neither name is among them. `git show --stat ed487e11` shows both deleted, at 365
 and 314 lines, by the commit that made the ring transport mandatory. A
 repository-wide search for `auth.test.ts` returns nothing outside `node_modules`.
-A search for `eidnara-server-v1` in TypeScript returns two hits and neither is a
+A search for `eidnara-server-v3` in TypeScript returns two hits and neither is a
 handshake implementation: `packages/plugin/scripts/host-client-boundary.test.ts:221`
 uses the string as a forbidden-name fixture, and
 `packages/plugin/dist/shared/host-client/auth.d.ts:24-25` is an untracked build

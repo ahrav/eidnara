@@ -77,7 +77,7 @@ describe("per-variant binding gate", () => {
         const bindings = catalogBindings(committedCatalog());
         expect(Object.keys(bindings).sort()).toEqual([
             "var-parity-a1-pure-defer-stability",
-            "var-parity-a3-ctx-reduce-survival",
+            "var-parity-a3-eidnara-reduce-survival",
         ]);
         for (const binding of Object.values(bindings)) {
             expect(binding).toContain(`${module}#drive`);

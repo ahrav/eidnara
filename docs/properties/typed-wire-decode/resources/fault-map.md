@@ -46,8 +46,8 @@ Each of the twelve names below is unchanged, constant, and globally prefixed.
 Evaluate an independent `sometimes(preconditions_m)` for each, with its own
 predicate, occurrence floor of one, and result. Their conjunction is only a
 completion rollup. No single aggregate `sometimes` replaces those checks.
-For rows naming subcases, retain per-subcase receipts and require all subcases;
-one favorable subcase cannot certify the row. Missing rows mean incomplete.
+For rows naming hostases, retain per-hostase receipts and require all hostases;
+one favorable hostase cannot certify the row. Missing rows mean incomplete.
 
 | Constant marker | Independent qualifying preconditions |
 | --- | --- |

@@ -109,7 +109,7 @@ describe("calibrateBuckets", () => {
             inputTokens: 0,
             systemLocal: 1000,
             toolDefsLocal: 500,
-            compartmentsLocal: 100,
+            history_segmentsLocal: 100,
             factsLocal: 0,
             memoriesLocal: 0,
             docsLocal: 0,
@@ -120,7 +120,7 @@ describe("calibrateBuckets", () => {
         });
         expect(out.systemTokens).toBe(0);
         expect(out.toolDefinitionTokens).toBe(0);
-        expect(out.compartmentTokens).toBe(0);
+        expect(out.history_segmentTokens).toBe(0);
         expect(out.conversationTokens).toBe(0);
         expect(out.toolCallTokens).toBe(0);
     });
@@ -130,7 +130,7 @@ describe("calibrateBuckets", () => {
             inputTokens: 100_000,
             systemLocal: 16_000,
             toolDefsLocal: 21_000,
-            compartmentsLocal: 80_000,
+            history_segmentsLocal: 80_000,
             factsLocal: 50,
             memoriesLocal: 0,
             docsLocal: 0,
@@ -142,7 +142,7 @@ describe("calibrateBuckets", () => {
         const sum =
             out.systemTokens +
             out.toolDefinitionTokens +
-            out.compartmentTokens +
+            out.history_segmentTokens +
             out.factTokens +
             out.memoryTokens +
             out.conversationTokens +
@@ -156,7 +156,7 @@ describe("calibrateBuckets", () => {
             inputTokens: 50_000,
             systemLocal: 10_000,
             toolDefsLocal: 0,
-            compartmentsLocal: 0,
+            history_segmentsLocal: 0,
             factsLocal: 0,
             memoriesLocal: 0,
             docsLocal: 0,
@@ -175,7 +175,7 @@ describe("calibrateBuckets", () => {
             inputTokens: 10_000,
             systemLocal: 1_000,
             toolDefsLocal: 500,
-            compartmentsLocal: 1_000,
+            history_segmentsLocal: 1_000,
             factsLocal: 500,
             memoriesLocal: 0,
             docsLocal: 0,
@@ -188,7 +188,7 @@ describe("calibrateBuckets", () => {
         expect(out.systemTokens).toBe(1_000);
         expect(out.toolDefinitionTokens).toBe(500);
         // Verbatim buckets equal local input exactly.
-        expect(out.compartmentTokens).toBe(1_000);
+        expect(out.history_segmentTokens).toBe(1_000);
         expect(out.factTokens).toBe(500);
         expect(out.memoryTokens).toBe(0);
         // Residual buckets absorb the remainder in proportion to their local counts.
@@ -199,7 +199,7 @@ describe("calibrateBuckets", () => {
         const sum =
             out.systemTokens +
             out.toolDefinitionTokens +
-            out.compartmentTokens +
+            out.history_segmentTokens +
             out.factTokens +
             out.memoryTokens +
             out.conversationTokens +
@@ -213,7 +213,7 @@ describe("calibrateBuckets", () => {
             inputTokens: 50_000,
             systemLocal: 16_000,
             toolDefsLocal: 21_000,
-            compartmentsLocal: 0,
+            history_segmentsLocal: 0,
             factsLocal: 0,
             memoriesLocal: 0,
             docsLocal: 0,
@@ -224,7 +224,7 @@ describe("calibrateBuckets", () => {
         });
         expect(out.systemTokens).toBe(16_000);
         expect(out.toolDefinitionTokens).toBe(21_000);
-        expect(out.compartmentTokens).toBe(0);
+        expect(out.history_segmentTokens).toBe(0);
         expect(out.factTokens).toBe(0);
         expect(out.memoryTokens).toBe(0);
         expect(out.conversationTokens).toBe(13_000);
@@ -239,7 +239,7 @@ describe("calibrateBuckets", () => {
             inputTokens: 1_000,
             systemLocal: 800,
             toolDefsLocal: 800,
-            compartmentsLocal: 100,
+            history_segmentsLocal: 100,
             factsLocal: 0,
             memoriesLocal: 0,
             docsLocal: 0,
@@ -251,7 +251,7 @@ describe("calibrateBuckets", () => {
         const sum =
             out.systemTokens +
             out.toolDefinitionTokens +
-            out.compartmentTokens +
+            out.history_segmentTokens +
             out.factTokens +
             out.memoryTokens +
             out.conversationTokens +
@@ -266,7 +266,7 @@ describe("calibrateBuckets", () => {
             inputTokens: 2,
             systemLocal: 1,
             toolDefsLocal: 1,
-            compartmentsLocal: 2,
+            history_segmentsLocal: 2,
             factsLocal: 2,
             memoriesLocal: 0,
             docsLocal: 0,
@@ -278,7 +278,7 @@ describe("calibrateBuckets", () => {
         const sum =
             out.systemTokens +
             out.toolDefinitionTokens +
-            out.compartmentTokens +
+            out.history_segmentTokens +
             out.factTokens +
             out.memoryTokens +
             out.conversationTokens +
@@ -288,7 +288,7 @@ describe("calibrateBuckets", () => {
         for (const v of [
             out.systemTokens,
             out.toolDefinitionTokens,
-            out.compartmentTokens,
+            out.history_segmentTokens,
             out.factTokens,
             out.memoryTokens,
             out.conversationTokens,
@@ -305,7 +305,7 @@ describe("calibrateBuckets", () => {
             inputTokens: 1_000,
             systemLocal: 500,
             toolDefsLocal: 500,
-            compartmentsLocal: 500,
+            history_segmentsLocal: 500,
             factsLocal: 0,
             memoriesLocal: 0,
             docsLocal: 0,
@@ -317,7 +317,7 @@ describe("calibrateBuckets", () => {
         const sum =
             out.systemTokens +
             out.toolDefinitionTokens +
-            out.compartmentTokens +
+            out.history_segmentTokens +
             out.factTokens +
             out.memoryTokens +
             out.conversationTokens +
@@ -329,15 +329,15 @@ describe("calibrateBuckets", () => {
         expect(out.toolCallTokens).toBe(0);
         expect(out.systemTokens).toBeGreaterThanOrEqual(0);
         expect(out.toolDefinitionTokens).toBeGreaterThanOrEqual(0);
-        expect(out.compartmentTokens).toBeGreaterThanOrEqual(0);
+        expect(out.history_segmentTokens).toBeGreaterThanOrEqual(0);
     });
 
-    it("real-world Opus 4.7 example: verbatim history matches /ctx-status, residual absorbs drift", () => {
+    it("real-world Opus 4.7 example: verbatim history matches /eidnara-status, residual absorbs drift", () => {
         const out = calibrateBuckets({
             inputTokens: 378_000,
             systemLocal: 16_500,
             toolDefsLocal: 21_400,
-            compartmentsLocal: 89_000,
+            history_segmentsLocal: 89_000,
             factsLocal: 50,
             memoriesLocal: 8_000,
             docsLocal: 0,
@@ -350,7 +350,7 @@ describe("calibrateBuckets", () => {
         expect(out.systemTokens).toBe(Math.round(16_500 * 1.51));
         expect(out.toolDefinitionTokens).toBe(Math.round(21_400 * 1.57));
         // Verbatim buckets retain exact local counts without scaling.
-        expect(out.compartmentTokens).toBe(89_000);
+        expect(out.history_segmentTokens).toBe(89_000);
         expect(out.factTokens).toBe(50);
         expect(out.memoryTokens).toBe(8_000);
         // conversationTokens and toolCallTokens absorb the residual.
@@ -359,7 +359,7 @@ describe("calibrateBuckets", () => {
         const sum =
             out.systemTokens +
             out.toolDefinitionTokens +
-            out.compartmentTokens +
+            out.history_segmentTokens +
             out.factTokens +
             out.memoryTokens +
             out.conversationTokens +
@@ -373,7 +373,7 @@ describe("calibrateBuckets", () => {
             inputTokens: 200_000,
             systemLocal: 5_000,
             toolDefsLocal: 5_000,
-            compartmentsLocal: 60_000,
+            history_segmentsLocal: 60_000,
             factsLocal: 0,
             memoriesLocal: 10_000,
             conversationLocal: 40_000,
@@ -392,7 +392,7 @@ describe("calibrateBuckets", () => {
         const sum =
             withDocs.systemTokens +
             withDocs.toolDefinitionTokens +
-            withDocs.compartmentTokens +
+            withDocs.history_segmentTokens +
             withDocs.factTokens +
             withDocs.memoryTokens +
             withDocs.docsTokens +

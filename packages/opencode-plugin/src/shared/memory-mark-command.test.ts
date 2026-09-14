@@ -129,7 +129,7 @@ describe("runMemoryMarkCommand", () => {
             ].join("\n"),
         );
         expect(formatMemoryMarkOutcome(outcome, args("mark_stale", "mem_verified"))).toContain(
-            "/ctx-memory-mark mark_stale mem_verified --yes",
+            "/eidnara-memory-mark mark_stale mem_verified --yes",
         );
     });
 

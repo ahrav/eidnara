@@ -17,7 +17,7 @@ This is a working-tree supplement, not part of the source baseline commit.
 | Retained resources | The [current ledger][ledger] distinguishes pending/task counts, ingress/parse bytes, and staging/decode guards. | Future queued/running/result mapping and numerical capacity remain owner gates. |
 | Maintenance and unwind | [Guarded scopes][scopes] coexist with maintenance and panic restoration. | A setup-elision plan must identify all authority invalidations. |
 | External commit | The [snapshot test][snapshot] commits on a second SQLite connection. | Batching cannot force independent calls into one old snapshot. |
-| History pressure | [The renderer][history] accepts ordered compartments and an estimator. | A character estimator does not establish production BPE decisions. |
+| History pressure | [The renderer][history] accepts ordered history_segments and an estimator. | A character estimator does not establish production BPE decisions. |
 | Wrapped retry pressure | [The outer retry][outer] retains a wrapper even for an empty body. | H4 separately witnesses the initial 105% trigger and requires a boundary matrix. |
 | Preparation refusal | [The preparer][prepare] rejects detected identities and size violations. | Input refusal and output expansion must be distinguished. |
 
@@ -84,7 +84,6 @@ policy, M5 allocation acceptance, and final external scope remain owner gates.
 [fold]: ../../../crates/kernel/src/admission.rs#L3234-L3297
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L784-L1034
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1242-L1324
-[reservations]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L513-L550
 [scopes]: ../../../crates/storage/src/lib.rs#L1210-L1292
 [snapshot]: ../../../crates/storage/src/lib.rs#L5749-L5786
 [history]: ../../../crates/daemon/src/decay_render.rs#L296-L338

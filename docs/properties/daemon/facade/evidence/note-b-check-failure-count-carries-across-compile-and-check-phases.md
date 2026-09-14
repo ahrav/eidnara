@@ -2,9 +2,9 @@
 
 ## Discovery trigger
 
-`SmartNoteLifecycleState` carries two failure counters,
+`ConditionalNoteLifecycleState` carries two failure counters,
 `check_failure_count` and `check_network_failure_count`
-(`crates/daemon/src/smart_note_evaluation.rs:294-295`), but the file declares
+(`crates/daemon/src/conditional_note_evaluation.rs:294-295`), but the file declares
 three failure thresholds: `MAX_COMPILATION_FAILURES` (`:36`),
 `MAX_FAILURES_BEFORE_REAUTHOR` (`:38`), and the backoff exponent clamp
 (`:357`). Two thresholds reading one counter is the shape that produces a
@@ -24,7 +24,8 @@ cross-phase carryover, so I traced which reducer writes which.
        "compiled".to_string()
    };
    ```
-   (`smart_note_evaluation.rs:525-531`)
+
+   (`conditional_note_evaluation.rs:525-531`)
 
 2. `reduce_compile`'s `CompilationFailed` arm increments the *same* field and
    escalates on a *different* threshold:
@@ -39,12 +40,13 @@ cross-phase carryover, so I traced which reducer writes which.
        "uncompiled".to_string()
    };
    ```
+
    (`:455-462`)
 
 3. The two phases are chained by the compile selector, which admits a `failing`
    note: `note.check_status == "uncompiled" || note.check_status == "failing"
    || !note.has_compiled_check || note.policy_version !=
-   SMART_NOTE_CHECK_POLICY_VERSION` (`:746-749`). So a note that
+   CONDITIONAL_NOTE_CHECK_POLICY_VERSION` (`:746-749`). So a note that
    `reduce_check_failure` pushed to `failing` is exactly the note the compile
    phase will pick up next.
 4. The only reset is a *successful* compile: `stored.check_failure_count = 0` at
@@ -54,8 +56,8 @@ cross-phase carryover, so I traced which reducer writes which.
    phase, so it cannot reach `false_fields` until it recompiles.
 5. Both thresholds are 3, confirmed against the frozen fixture's constants block:
    `max_compilation_failures: 3` and `max_failures_before_reauthor: 3` in
-   `testdata/smart-note-evaluation-golden.json`, asserted equal to the Rust
-   constants at `smart_note_evaluation.rs:1120-1122`. So the numbers agree
+   `testdata/conditional-note-evaluation-golden.json`, asserted equal to the Rust
+   constants at `conditional_note_evaluation.rs:1120-1122`. So the numbers agree
    across languages; the sharing of one column is what carries.
 6. The demotion is terminal in practice. `reduce_fallback` (`:630-658`) can set
    `status = "ready"` on `Met` but never restores `check_status` to `compiled`;
@@ -107,11 +109,11 @@ on its first check failure, because reaching the due phase requires
 
 The cheap oracle is entirely pure. No store, no clock, no faults.
 
-1. Build a `SmartNoteLifecycleState` with `check_status = "failing"` and
+1. Build a `ConditionalNoteLifecycleState` with `check_status = "failing"` and
    `check_failure_count = 3`, representing a note that exhausted its check
    allowance. Every other field can be a default.
 2. Reduce with
-   `SmartNoteEvaluationOutcome::Compile(CompileOutcome::CompilationFailed)`.
+   `ConditionalNoteEvaluationOutcome::Compile(CompileOutcome::CompilationFailed)`.
 3. Assert `next.check_status == "uncompiled"`, that is, that the note retains a
    compile allowance. It will be `"fallback"`.
 
@@ -133,10 +135,10 @@ which the pure form does not.
 
 ### Q: Is the shared column intentional?
 
-- Sources examined: the two reducer arms (`smart_note_evaluation.rs:455-462`,
+- Sources examined: the two reducer arms (`conditional_note_evaluation.rs:455-462`,
   `:525-531`), the two constants and their doc comments (`:35-38`), the field
   declarations (`:294-295`), the fixture constants block, the module header
-  (`:1-10`), and `docs/AUDIT-KNOWN-ISSUES.md` (source-catalog path, not present at HEAD) searched for a smart-note failure
+  (`:1-10`), and `docs/AUDIT-KNOWN-ISSUES.md` (source-catalog path, not present at HEAD) searched for a conditional-note failure
   counter entry.
 - Findings: the doc comments describe the two thresholds in phase-specific terms.
   `:35` says "Consecutive compilation failures before a note enters fallback" and
@@ -155,7 +157,7 @@ which the pure form does not.
   pass, and the golden fixture cannot answer it because its transition cases each
   start from a fresh pre-state and never cross a phase boundary (23 cases, all
   single-transition, read from
-  `testdata/smart-note-evaluation-golden.json`).
+  `testdata/conditional-note-evaluation-golden.json`).
 - Conclusion: needs human input on intent. The mechanism is confirmed and the
   doc-comment wording is evidence that the comments at least are wrong, since
   "consecutive compilation failures" is not what the code counts. Reading
@@ -165,11 +167,11 @@ which the pure form does not.
 ### Q: Can a note escape `fallback` at all?
 
 - Sources examined: `reduce_fallback` (`:630-658`), the compile selector's
-  predicates (`:743-750`), `get_fallback_smart_notes` (`:788-806`), and
+  predicates (`:743-750`), `get_fallback_conditional_notes` (`:788-806`), and
   `NOTE_CAS_UPDATE_SQL` (`memory-store:12844-12871`).
 - Findings: two exits. The compile selector admits a fallback note through
   `!note.has_compiled_check` (`:748`), because a note demoted to fallback never
-  received an artifact, so it can be recompiled. And a `ctx_note update` with a
+  received an artifact, so it can be recompiled. And a `eidnara_note update` with a
   compiler edit resets `check_status` to `'uncompiled'` and
   `check_failure_count` to 0 (`memory-store:12860`, `:12862`), which is the clean
   escape and the one the "needs reauthoring" status name points at.

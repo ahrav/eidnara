@@ -1,21 +1,23 @@
 import { describe, expect, test } from "bun:test";
 import hostRelease from "../../../../../release/host-release.json";
 import {
-    BROCA_CREDENTIAL_VALUE_CAP_BYTES,
     canonicalCredentialRowEncoding,
     credentialFingerprints,
+    MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES,
 } from "./credential-fingerprint";
 
-describe("Broca credential fingerprints", () => {
+describe("ModelExecution credential fingerprints", () => {
     test("derives its domain, canonicalization, and value cap from the release contract", () => {
-        expect(hostRelease.credential_fingerprint.domain).toBe("eidnara-broca-credential-v1");
+        expect(hostRelease.credential_fingerprint.domain).toBe(
+            "eidnara-model-execution-credential-v3",
+        );
         expect(hostRelease.credential_fingerprint.canonicalization).toBe(
             "harness-provider-name-length-value/1",
         );
-        expect(BROCA_CREDENTIAL_VALUE_CAP_BYTES).toBe(
+        expect(MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES).toBe(
             hostRelease.harness_unavailable.value_cap_bytes,
         );
-        expect(BROCA_CREDENTIAL_VALUE_CAP_BYTES).toBe(16 * 1024);
+        expect(MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES).toBe(16 * 1024);
     });
 
     test("pins the domain-derived cross-language row vector", () => {
@@ -32,7 +34,7 @@ describe("Broca credential fingerprints", () => {
                 ANTHROPIC_API_KEY: "secret",
             }),
         ).toEqual({
-            anthropic: "ecac831b94bb1d9e972ee993f7798c9ff7c6133b545e489ac1a3f60448127e80",
+            anthropic: "77389364c8f8671636364d5f19b4788f6f2e990442798beb9338a99eae27e854",
         });
     });
 
@@ -59,7 +61,7 @@ describe("Broca credential fingerprints", () => {
         // The host qualifies rows per provider, so one oversize value must not hide the
         // fingerprints of the other providers.
         const key = new Uint8Array(32);
-        const oversize = "x".repeat(BROCA_CREDENTIAL_VALUE_CAP_BYTES + 1);
+        const oversize = "x".repeat(MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES + 1);
         const fingerprints = credentialFingerprints(key, "pi", {
             ANTHROPIC_API_KEY: "direct",
             GEMINI_API_KEY: oversize,
@@ -69,7 +71,7 @@ describe("Broca credential fingerprints", () => {
         expect(credentialFingerprints(key, "pi", { ANTHROPIC_API_KEY: oversize })).toEqual({});
 
         const atCap = credentialFingerprints(key, "pi", {
-            ANTHROPIC_API_KEY: "x".repeat(BROCA_CREDENTIAL_VALUE_CAP_BYTES),
+            ANTHROPIC_API_KEY: "x".repeat(MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES),
         });
         expect(Object.keys(atCap)).toEqual(["anthropic"]);
     });

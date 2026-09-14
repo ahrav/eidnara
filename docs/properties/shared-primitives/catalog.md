@@ -565,7 +565,7 @@ Fault/timing angle: A hard bust from any cause must drain deferred work; a bust 
 Required faults and enabling state: At least one unit queued through a `SoftPlus` pass before the `Hard` pass, and a rendered baseline that does not itself include the queued unit.
 Confidence: high - [evidence](evidence/hard-bust-drains-deferred-work.md). `step_hard` (`crates/cache-stability/src/lib.rs:294-323`) appends `pending_changes` into the rendered set before `apply_units` and clears `reconcile_pending` only when it minted or the anchor is present; `hard_drains_pending_changes_into_the_bust` (`crates/cache-stability/src/lib.rs:503-536`) asserts the drain, the mint, and the cleared flag, and `hard_without_mint_on_absent_boundary_keeps_reconcile_pending` (`crates/cache-stability/src/lib.rs:775-814`) asserts the flag stays set when nothing reanchors.
 Existing check: `hard_drains_pending_changes_into_the_bust`, `hard_prefers_rendered_units_over_deferred_copies_of_the_same_key`, `hard_drops_frozen_keys_the_render_no_longer_produces`, `hard_without_mint_on_absent_boundary_keeps_reconcile_pending`, golden vectors with `queued` units; audited at U2.
-Impact: A dropped compartment reappears in the cached prefix or never leaves it, so the rendered context and the recorded state disagree.
+Impact: A dropped history_segment reappears in the cached prefix or never leaves it, so the rendered context and the recorded state disagree.
 Open questions: None.
 
 ### never-minted-boundary-is-not-reconcile-pending

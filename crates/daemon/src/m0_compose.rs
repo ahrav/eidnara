@@ -1,5 +1,5 @@
 //! This module reads a session's durable state.
-//! The durable state includes compartments, the user profile, and project docs; the caller supplies the pass's canonical memory rows.
+//! The durable state includes history_segments, the user profile, and project docs; the caller supplies the pass's canonical memory rows.
 //! This module composes frozen m0 bytes and watermarks that HARD persists.
 //!
 //! This module produces bytes but does not classify HARD versus SOFT.
@@ -10,24 +10,20 @@
 use std::collections::HashSet;
 
 use memory_store::{MemoryStore, MemoryStoreError};
-use sha2::{Digest, Sha256};
 
 use crate::canonical_memory::CanonicalMemory;
-use crate::compartment_coverage::{CoverageError, resolve_coverage};
-use crate::decay_render::{DecayRenderCompartment, extract_m0_block};
+use crate::decay_render::{DecayRenderHistorySegment, extract_m0_block};
+use crate::history_segment_coverage::{CoverageError, resolve_coverage};
 use crate::memory_render::{
     M0Inputs, is_positive_memory_category, render_m0, render_memory_block, render_memory_line,
 };
 use crate::project_docs::read_project_docs_canonical;
 
-pub(crate) const MEMORY_MURAL_BLOCK: &str =
-    "<memory-mural>\nThe project memory mural image follows.\n</memory-mural>";
-
 #[derive(thiserror::Error, Debug)]
 pub enum M0ComposeError {
     #[error("store: {0}")]
     Store(MemoryStoreError),
-    /// The stored compartment ranges overlap or otherwise fail strict ordering.
+    /// The stored history_segment ranges overlap or otherwise fail strict ordering.
     #[error("{0}")]
     CoverageGap(CoverageError),
 }
@@ -40,43 +36,21 @@ impl From<MemoryStoreError> for M0ComposeError {
 /// Frozen m0 bytes and watermarks persisted atomically by a HARD pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M0Composition {
-    /// `m0_bytes` contains docs, the profile, decayed compartments, and memories.
+    /// `m0_bytes` contains docs, the profile, decayed history_segments, and memories.
     pub m0_bytes: String,
-    /// `mural` follows the m0 text block on the OpenCode wire.
-    pub mural: Option<M0MuralBlock>,
     /// `boundary_id` anchors cache reverts at the last covered raw message.
-    /// `boundary_id` is empty when no compartments are summarized, leaving the live array as the tail.
+    /// `boundary_id` is empty when no history_segments are summarized, leaving the live array as the tail.
     pub boundary_id: String,
     /// `coverage_ordinal` marks m0's tail-trim point.
-    /// `coverage_ordinal` is `None` when no compartments exist.
+    /// `coverage_ordinal` is `None` when no history_segments exist.
     pub coverage_ordinal: Option<u64>,
     /// `first_covered_ordinal` is the first covered ordinal; the caller rejects live items below it to prevent trimming an uncovered leading gap.
     pub first_covered_ordinal: Option<u64>,
-    /// `folded_compartment_seq` advances only on a HARD.
-    pub folded_compartment_seq: i64,
+    /// `folded_history_segment_seq` advances only on a HARD.
+    pub folded_history_segment_seq: i64,
     /// `docs_hash` records the project-docs version included in m0; it does not trigger HARD.
     /// The next natural HARD re-reads current docs.
     pub docs_hash: String,
-}
-
-/// Capability-gated mural input supplied by the host.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct M0MuralInput {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub supports_vision: bool,
-    #[serde(default)]
-    pub data_url: Option<String>,
-    #[serde(default, alias = "content_epoch")]
-    pub content_hash: Option<String>,
-}
-
-/// Mural payload appended to the composed OpenCode context.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct M0MuralBlock {
-    pub data_url: String,
-    pub content_hash: String,
 }
 
 /// Frozen inputs for one deterministic m0 composition.
@@ -88,7 +62,7 @@ pub struct M0ComposeInputs<'a> {
     pub project_directory: &'a str,
     pub now_ms: i64,
     /// `history_budget_tokens` limits frozen rendering.
-    /// The renderer produces estimator-independent output when all compartments fit.
+    /// The renderer produces estimator-independent output when all history_segments fit.
     pub history_budget_tokens: f64,
     /// System-role content covered by the current fold.
     pub covered_system_messages: &'a [String],
@@ -99,30 +73,6 @@ pub struct M0ComposeInputs<'a> {
     pub inject_docs: bool,
     /// `temporal_awareness` gates temporal heading dates at render time, including rows persisted by a prior pass.
     pub temporal_awareness: bool,
-    /// The host resolves and capability-gates OpenCode-only image bytes before passing them here.
-    pub mural: Option<&'a M0MuralInput>,
-}
-
-pub(crate) fn resolved_mural(input: Option<&M0MuralInput>) -> Option<M0MuralBlock> {
-    let input = input?;
-    if !input.enabled || !input.supports_vision {
-        return None;
-    }
-    let data_url = input
-        .data_url
-        .as_deref()
-        .filter(|value| !value.is_empty())?
-        .to_string();
-    let content_hash = input
-        .content_hash
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{:x}", Sha256::digest(data_url.as_bytes())));
-    Some(M0MuralBlock {
-        data_url,
-        content_hash,
-    })
 }
 
 /// Keeps the memories whose rendered lines fit `budget_tokens`, in the supplied
@@ -192,7 +142,7 @@ fn render_m0_with_decay_pressure_retry(
                 project_docs: inputs.project_docs,
                 user_profile: inputs.user_profile,
                 covered_system_messages: inputs.covered_system_messages,
-                compartments: inputs.compartments,
+                history_segments: inputs.history_segments,
                 history_budget_tokens: inputs.history_budget_tokens,
                 decay_pressure_multiplier,
             },
@@ -224,9 +174,9 @@ pub fn compose_m0(
     memories: &[CanonicalMemory],
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> Result<M0Composition, M0ComposeError> {
-    let compartments = store.load_compartments(inputs.session_id)?;
-    let coverage = resolve_coverage(&compartments).map_err(M0ComposeError::CoverageGap)?;
-    let (boundary_id, coverage_ordinal, first_covered_ordinal, folded_compartment_seq) =
+    let history_segments = store.load_history_segments(inputs.session_id)?;
+    let coverage = resolve_coverage(&history_segments).map_err(M0ComposeError::CoverageGap)?;
+    let (boundary_id, coverage_ordinal, first_covered_ordinal, folded_history_segment_seq) =
         match &coverage {
             Some(c) => (
                 c.boundary_id.clone(),
@@ -255,10 +205,10 @@ pub fn compose_m0(
         crate::project_docs::ProjectDocs::default()
     };
 
-    let decay_compartments: Vec<DecayRenderCompartment> = compartments
+    let decay_history_segments: Vec<DecayRenderHistorySegment> = history_segments
         .iter()
-        .map(|compartment| {
-            let mut rendered = DecayRenderCompartment::from(compartment);
+        .map(|history_segment| {
+            let mut rendered = DecayRenderHistorySegment::from(history_segment);
             if !inputs.temporal_awareness {
                 rendered.start_date = None;
                 rendered.end_date = None;
@@ -266,13 +216,12 @@ pub fn compose_m0(
             rendered
         })
         .collect();
-    let mural = resolved_mural(inputs.mural);
     let mut m0_bytes = render_m0_with_decay_pressure_retry(
         &M0Inputs {
             project_docs: &docs.rendered_block,
             user_profile: &user_profile,
             covered_system_messages: inputs.covered_system_messages,
-            compartments: &decay_compartments,
+            history_segments: &decay_history_segments,
             history_budget_tokens: inputs.history_budget_tokens,
             decay_pressure_multiplier: 1.0,
         },
@@ -283,18 +232,13 @@ pub fn compose_m0(
         m0_bytes.push_str("\n\n");
         m0_bytes.push_str(&project_memory);
     }
-    if mural.is_some() {
-        m0_bytes.push_str("\n\n");
-        m0_bytes.push_str(MEMORY_MURAL_BLOCK);
-    }
 
     Ok(M0Composition {
         m0_bytes,
-        mural,
         boundary_id,
         coverage_ordinal,
         first_covered_ordinal,
-        folded_compartment_seq,
+        folded_history_segment_seq,
         docs_hash: docs.canonical_hash,
     })
 }

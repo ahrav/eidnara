@@ -2,12 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { getEidnaraBuiltinCommands } from "./commands";
 
 const EXPECTED_KEYS = [
-    "ctx-status",
-    "ctx-recomp",
-    "ctx-wrapup",
-    "ctx-flush",
-    "ctx-aug",
-    "ctx-memory-mark",
+    "eidnara-status",
+    "eidnara-recomp",
+    "eidnara-wrapup",
+    "eidnara-flush",
+    "eidnara-aug",
+    "eidnara-memory-mark",
 ];
 const UNAVAILABLE = "Unavailable when compaction.enabled is false";
 
@@ -27,11 +27,11 @@ describe("getEidnaraBuiltinCommands", () => {
 
     it("marks only the compacted-history commands unavailable when compaction is off", () => {
         const commands = getEidnaraBuiltinCommands(false);
-        for (const key of ["ctx-recomp", "ctx-wrapup", "ctx-flush"]) {
+        for (const key of ["eidnara-recomp", "eidnara-wrapup", "eidnara-flush"]) {
             expect(commands[key]?.description).toContain(UNAVAILABLE);
             expect(commands[key]?.description).toContain(`/${key}`);
         }
-        for (const key of ["ctx-status", "ctx-aug", "ctx-memory-mark"]) {
+        for (const key of ["eidnara-status", "eidnara-aug", "eidnara-memory-mark"]) {
             expect(commands[key]?.description).not.toContain(UNAVAILABLE);
         }
     });
@@ -42,8 +42,8 @@ describe("getEidnaraBuiltinCommands", () => {
         }
     });
 
-    it("does not advertise a message range for /ctx-recomp", () => {
-        const description = getEidnaraBuiltinCommands(true)["ctx-recomp"]?.description ?? "";
+    it("does not advertise a message range for /eidnara-recomp", () => {
+        const description = getEidnaraBuiltinCommands(true)["eidnara-recomp"]?.description ?? "";
         expect(description).not.toContain("<start>-<end>");
         expect(description).not.toMatch(/range/i);
     });

@@ -7,8 +7,8 @@ mechanically holds those claims. Claim sources are doc comments in
 vocabulary those files mint; and `docs/host-wire-protocol.md` (936 lines),
 which Section 1 makes the normative contract.
 
-Provenance: code read from `the `host` source checkout, `HEAD` =
-`e447c927`, branch `feat/shared-memory-release-gate-audit`. Every line
+Provenance: code read from `the`host` source checkout, `HEAD` =
+`e447c927`, branch`feat/shared-memory-release-gate-audit`. Every line
 reference below was printed at that commit before being written. Method
 contract in [../../METHOD.md](../../../METHOD.md).
 
@@ -169,11 +169,11 @@ admission classes):
 /// then unreachable because every route is general-class.
 ```
 
-Broca declares the opposite. `broca/mod.rs:164-177` returns a
+ModelExecution declares the opposite. `model_execution/mod.rs:164-177` returns a
 `ResourceDeclaration` with `route_class: RouteClass::Reserved` and
 `reserved_handler_tasks: config::RESERVED_HANDLER_TASKS`,
 `reserved_pending_requests: config::RESERVED_PENDING_REQUESTS`, both `96`
-(`broca/config.rs:185`, `:188`). The comment at `:169-170` states the intent
+(`model_execution/config.rs:185`, `:188`). The comment at `:169-170` states the intent
 plainly: "Constants rather than limits so a test-shrunken supervisor still
 declares the product contract."
 
@@ -323,7 +323,7 @@ CI names none of them.**
 | `tests/protocol_vectors.rs` | 15 | 762 | **unnamed** |
 | `tests/handler_contract.rs` | 12 | 672 | **unnamed** |
 | `tests/routing.rs` | 12 | 640 | **unnamed** |
-| `tests/broca_protocol.rs` | 9 | 713 | **unnamed** |
+| `tests/model_execution_protocol.rs` | 9 | 713 | **unnamed** |
 | **Total** | **84** | 4,993 | **0 named** |
 
 The four binaries CI does name are `client` (`ci.yml:132`, `:179`, `:187`),
@@ -340,7 +340,7 @@ repository settings and is not verifiable from this tree, carried forward
 unresolved from
 `part-2-rescope/scope-map-and-risk-ranking.md:750-752` (a source-tree artifact that was not migrated into this repository).
 
-One inventory note for a later pass: `tests/broca_subprocess.rs` is 3,220 lines
+One inventory note for a later pass: `tests/model_execution_subprocess.rs` is 3,220 lines
 and a grep for `#[test]` or `#[tokio::test]` returns **zero**, so it is either
 a shared-helper binary or uses a macro-generated form. Not resolved here.
 
@@ -526,6 +526,6 @@ coverage. 121 claim-bearing checks reach this sub-part and the `control.rs` and
   input, or only from a registry bug? Establishing either way needs a state
   reachability argument over `Slot`/`Occupant` that this pass did not attempt.
   (unresolved, needs a registry state model)
-- Is `tests/broca_subprocess.rs` (3,220 lines, zero `#[test]` attributes) a
+- Is `tests/model_execution_subprocess.rs` (3,220 lines, zero `#[test]` attributes) a
   test binary or a shared helper? It affects the integration count above.
   (unresolved, needs a read of the file)

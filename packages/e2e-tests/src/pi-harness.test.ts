@@ -14,7 +14,7 @@ describe("finalAssistantText", () => {
                         role: "assistant",
                         content: [
                             { type: "text", text: "pi " },
-                            { type: "toolCall", name: "ctx_search" },
+                            { type: "toolCall", name: "eidnara_search" },
                             { type: "text", text: "smoke ok" },
                         ],
                     },

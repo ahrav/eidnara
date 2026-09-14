@@ -227,7 +227,7 @@ that the serialized-output cache records what was built rather than what was
 served, since every `record_output_item` call precedes
 `enforce_unique_tool_use_ids`; the two need a joint reading of the cache's
 contract rather than a fix on one side. 4d owns `parse_tag_range_string`
-(`lib.rs:15165-15210`) and `handle_ctx_reduce_facade` (`:10482-10588`), which
+(`lib.rs:15165-15210`) and `handle_eidnara_reduce_facade` (`:10482-10588`), which
 decide whether
 [render-a-channel2-derived-tag-numbers-name-no-durable-row](#render-a-channel2-derived-tag-numbers-name-no-durable-row)
 is a no-op or a misattributed reduction; lens A left that open for 4d. And 4f owns

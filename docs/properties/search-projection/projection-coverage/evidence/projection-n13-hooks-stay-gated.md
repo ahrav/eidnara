@@ -43,8 +43,8 @@ message indexing or embedding work before source coverage or accepted limits
 exist. Checking only a public method name misses a startup sweep that bypasses
 the gate. An unsupported harness can also be treated as capable by configuration.
 
-A competing explanation is an unrelated enabled task: Dreamer scheduling and
-the lower-level Synapse runtime already exist. Their existence is not a gate
+A competing explanation is an unrelated enabled task: MemoryClassifier scheduling and
+the lower-level LocalEmbeddings runtime already exist. Their existence is not a gate
 violation. The oracle is scoped to the frozen N1.3 product-hook inventory,
 not every model call or every maintenance action in the process.
 
@@ -76,7 +76,7 @@ cancellation promise. The negative admission check remains required throughout.
    not one generic failed activation standing in for the whole matrix.
 
 Current tests provide adjacent source evidence and remain unaudited. They do
-not partially exercise the proposed evidence gate. Reuse the existing Dreamer
+not partially exercise the proposed evidence gate. Reuse the existing MemoryClassifier
 scheduler record rather than duplicating lease/receipt rules.
 
 ## Investigation log
@@ -101,6 +101,6 @@ scheduler record rather than duplicating lease/receipt rules.
 [keys]: ../../../../../crates/daemon/src/config.rs#L532-L624
 [facade]: ../../../../../crates/daemon/src/lib.rs#L10278-L10290
 [routes]: ../../../../../crates/daemon/src/lib.rs#L32962-L33002
-[scheduler]: ../../../../../crates/daemon/src/dreamer_scheduler.rs#L25-L36
+[scheduler]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L25-L36
 [bridge]: ../../../../../crates/daemon/src/lib.rs#L14055-L14120
 [acceptance]: ../catalog.md#projection-acceptance-situations-witnessed

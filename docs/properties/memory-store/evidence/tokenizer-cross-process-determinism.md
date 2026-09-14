@@ -82,7 +82,7 @@ The count feeds budget fitting. `crates/daemon/src/tail_hygiene.rs:85` calls
 `tokenizer::estimate_tokens(content)`, and the m0 composer uses it repeatedly
 (`crates/daemon/src/m0_compose.rs:191`, `:202`, `:204`, `:221`, `:223`,
 `:245`, `:257`) to decide what fits. A different count changes a fit decision,
-which changes which claims or compartments are included, which changes the
+which changes which claims or history_segments are included, which changes the
 rendered m0 bytes.
 
 Changed m0 bytes on resume is exactly the failure the cache-stability core exists

@@ -25,12 +25,12 @@ Where it is read in the selection region:
   answer whether a block is protected, and `:1284-1285` counts the supersession
   arcs it withholds.
 - `protected_cutoff = age_basis_tag.saturating_sub(req.protected_tags as u64)`
-  (`transform.rs:6318`), the caveman exclusion window.
+  (`transform.rs:6318`), the terse_text_compression exclusion window.
 - `protected_tags: req.protected_tags` in the hygiene inputs (`:5534`).
 - `protected_tag_cutoff(active_tags, protected_tags)` (`:9514`), the Channel-2
   nudge cutoff.
 
-So it gates reduction, caveman compression, and the nudge surface. It is
+So it gates reduction, terse_text_compression compression, and the nudge surface. It is
 safety-relevant in the plain sense: raising it is how a user says "do not touch my
 recent work".
 
@@ -64,8 +64,8 @@ leg" (`:181-182`). It then sets five fields:
 request.auto_search_enabled = config.auto_search.enabled;              // :183
 request.auto_search_score_threshold = config.auto_search.score_threshold; // :184
 request.auto_search_min_prompt_chars = config.auto_search.min_prompt_chars; // :185
-request.caveman_enabled = config.caveman.enabled;                      // :186
-request.caveman_min_chars = config.caveman.min_size;                   // :187
+request.terse_text_compression_enabled = config.terse_text_compression.enabled;                      // :186
+request.terse_text_compression_min_chars = config.terse_text_compression.min_size;                   // :187
 ```
 
 plus the guidance override at `:190-192`. It does not set `protected_tags` and does
@@ -129,10 +129,10 @@ selection region used equals the configured one. The assertion needs a reader:
 
 The existing tests are close but stop short.
 `lib.rs:18123-18170` has three `apply_claude_code_config_controls` cases;
-`:18142-18155` sets `configured.caveman.enabled = true` and
-`configured.caveman.min_size = 900` and asserts
-`default_request.caveman_enabled` and
-`default_request.caveman_min_chars == 900`. Adding two lines asserting
+`:18142-18155` sets `configured.terse_text_compression.enabled = true` and
+`configured.terse_text_compression.min_size = 900` and asserts
+`default_request.terse_text_compression_enabled` and
+`default_request.terse_text_compression_min_chars == 900`. Adding two lines asserting
 `protected_tags` and `clear_reasoning_age` would be the minimal regression test,
 and it would fail today.
 
@@ -168,7 +168,7 @@ and it would fail today.
 - Findings: `smart_drops` is in the config (`config.rs:114` region) and reaches
   the selector through `ctx.smart_drops` (`lib.rs:8303`, consumed at
   `transform.rs:4255-4257`), so that one is wired. `auto_search_*`,
-  `caveman_enabled`, and `caveman_min_chars` are in the config and are copied on
+  `terse_text_compression_enabled`, and `terse_text_compression_min_chars` are in the config and are copied on
   the Claude Code leg. `protected_tags` and `clear_reasoning_age` are the two that
   are not.
 - Missing evidence: `tool_present` and `todo_tool_present` are host verdicts by

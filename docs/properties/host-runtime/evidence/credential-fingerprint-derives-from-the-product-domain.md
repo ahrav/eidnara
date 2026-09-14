@@ -3,7 +3,7 @@
 ## Discovery trigger
 
 The key-derivation domain separator was renamed at U3 to
-`eidnara-broca-credential-v1`, so the committed fingerprint vector was
+`eidnara-model-execution-credential-v3`, so the committed fingerprint vector was
 regenerated once. A fingerprint is the client's proof that it holds the same
 provider credential row the host captured at startup, without sending the
 credential. Two failures matter: a fingerprint that is a function of the row
@@ -17,8 +17,8 @@ the verifier that consumes it, and to the vector tests.
 All references are at `572315a`.
 
 Constants. `CREDENTIAL_VALUE_CAP_BYTES` is 16 KiB
-(`broca/subprocess.rs:48`), `CREDENTIAL_ROW_CAP_BYTES` is 64 KiB (`:51`),
-`CREDENTIAL_FINGERPRINT_DOMAIN` is `eidnara-broca-credential-v1` (`:53`),
+(`model_execution/subprocess.rs:48`), `CREDENTIAL_ROW_CAP_BYTES` is 64 KiB (`:51`),
+`CREDENTIAL_FINGERPRINT_DOMAIN` is `eidnara-model-execution-credential-v3` (`:53`),
 and `CREDENTIAL_FINGERPRINT_CANONICALIZATION` is
 `harness-provider-name-length-value/1` (`:56`).
 
@@ -44,9 +44,9 @@ layout: with key `00..1f`, harness `opencode`, provider `anthropic`, and row
 `36:harness-provider-name-length-value/18:opencode9:anthropic17:ANTHROPIC_API_KEY1:66:secret`
 and the digest is `ecac831b...7e80`.
 
-Consumer. `CredentialVerifier::verify` (`broca/mod.rs:44-69`) recomputes the
+Consumer. `CredentialVerifier::verify` (`model_execution/mod.rs:44-69`) recomputes the
 fingerprint with the connection key installed at `:130-132` and compares it
-to the presented value in constant time (`:64`). `BrocaComponent::handle`
+to the presented value in constant time (`:64`). `ModelExecutionComponent::handle`
 runs it for `session.send` after the harness-availability check and before
 `supervisor.send` (`:223-236`), returning `harness_unavailable` with the
 error's subreason on mismatch. The verifier exists only when the component is
@@ -57,12 +57,12 @@ built with `new_with_credentials` (`:82-91`); `new` (`:73-79`) leaves it
 Existing checks, verified:
 
 - `credential_fingerprint_matches_the_committed_vector`
-  (`broca/subprocess.rs:1660-1680`) asserts the crate's output over the
+  (`model_execution/subprocess.rs:1660-1680`) asserts the crate's output over the
   documented inputs equals the literal (`:1667-1672`) and that a zero key
   over the same row does not produce it (`:1673-1679`). It runs under
   `cargo test --workspace --all-targets` (`.github/workflows/ci.yml:118`).
 - `provider_rows_exclude_ambient_credentials_and_enforce_caps`
-  (`tests/broca_subprocess.rs:2840-2893`) asserts that ambient `AWS_*`,
+  (`tests/model_execution_subprocess.rs:2840-2893`) asserts that ambient `AWS_*`,
   proxy, `PATH`, and `LD_PRELOAD` variables are excluded from the row
   (`:2851-2856`), that the Pi alias selects the canonical row (`:2857-2862`),
   that a custom provider is `provider_unsupported` (`:2863-2869`), that a
@@ -71,7 +71,7 @@ Existing checks, verified:
   `harness = false` (`Cargo.toml:36-38`); its runner registers the function
   by name at `:194-195`.
 - `credential_snapshot_must_match_before_backend_spawn`
-  (`tests/broca_protocol.rs:435-496`) drives a real host built with
+  (`tests/model_execution_protocol.rs:435-496`) drives a real host built with
   `new_with_credentials`, sends with a wrong fingerprint and asserts
   `harness_unavailable` with zero backend starts (`:455-457`), then computes
   the correct fingerprint from the host's key and asserts the send is
@@ -84,7 +84,7 @@ Existing checks, verified:
    whose fingerprint scheme is `HMAC(connection_key, row)` without a product
    domain, and replays the fingerprint here under the same credential.
 2. If the derivation here used the same scheme, the replay would verify.
-3. As written, the derived key folds `eidnara-broca-credential-v1`, so the
+3. As written, the derived key folds `eidnara-model-execution-credential-v3`, so the
    same connection key and row yield a different fingerprint per product.
    Within one product, the connection key is per-incarnation
    (`instance.rs:257-258`), so a captured fingerprint is bound to one
@@ -97,7 +97,7 @@ the credential.
 ## Timing windows and dependencies
 
 None on the derivation. The verifier's key is a `OnceLock` set through
-`install_connection_key` (`broca/mod.rs:130-132`); a `session.send` before
+`install_connection_key` (`model_execution/mod.rs:130-132`); a `session.send` before
 the key is installed fails with `credential_snapshot_mismatch` (`:50`)
 rather than skipping the check. The row is read from the startup
 `EnvSnapshot`, so a credential rotated in the process environment after
@@ -107,7 +107,7 @@ start does not change the expected fingerprint.
 
 The record's check is covered by the two vector tests, the host-level test,
 and `credential_fingerprint_matches_the_documented_derivation_across_rows`
-(the test module of `broca/subprocess.rs`). That campaign writes the
+(the test module of `model_execution/subprocess.rs`). That campaign writes the
 documented derivation independently of `credential_fingerprint` and compares
 the two over three connection keys, eight harness-and-provider pairs
 including both Pi aliases (`openai-codex`, `google-antigravity`) that
@@ -144,8 +144,8 @@ The remaining gaps:
 
 ### Q: Was the committed vector produced independently of the crate?
 
-- Sources examined: `broca/subprocess.rs:167-201`, `:1660-1683`;
-  `tests/broca_subprocess.rs:2884-2892`; a Python HMAC over the layout
+- Sources examined: `model_execution/subprocess.rs:167-201`, `:1660-1683`;
+  `tests/model_execution_subprocess.rs:2884-2892`; a Python HMAC over the layout
   described above.
 - Findings: the evidence summary at U3 states the vector came from a Python
   implementation of the documented derivation. The audit re-derived it from
@@ -161,16 +161,16 @@ The remaining gaps:
 
 ### Q: Is the fingerprint check reachable in default production?
 
-- Sources examined: `broca/mod.rs:73-91`, `:223-236`; a grep for
-  `BrocaComponent::new_with_credentials` across `crates`.
+- Sources examined: `model_execution/mod.rs:73-91`, `:223-236`; a grep for
+  `ModelExecutionComponent::new_with_credentials` across `crates`.
 - Findings: the only callers of `new_with_credentials` are in
-  `tests/broca_protocol.rs:443`. Every other construction uses `new`, which
+  `tests/model_execution_protocol.rs:443`. Every other construction uses `new`, which
   sets `credential_verifier` to `None`, and `handle` then skips the
   fingerprint check. `provider_row` itself runs on every spawn
-  (`broca/opencode.rs:116`, `broca/pi.rs:215`), so the row selection and
+  (`model_execution/opencode.rs:116`, `model_execution/pi.rs:215`), so the row selection and
   caps are default-production; the fingerprint comparison is not exercised
   by any non-test constructor in this tree.
-- Missing evidence: the daemon that composes `BrocaComponent` with a
+- Missing evidence: the daemon that composes `ModelExecutionComponent` with a
   captured `EnvSnapshot`, scheduled for U4 (`docs/properties/README.md:52`).
 - Conclusion: resolved with a correction to the record. The record's
   reachability line says every credential row is fingerprinted before a

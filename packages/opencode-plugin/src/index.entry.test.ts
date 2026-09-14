@@ -25,7 +25,7 @@ const BUILD_EXTERNALS = [
 ];
 
 /** A bundled input under `src/features` or `src/hooks` matching `NOT_PORTED` is residue from a subsystem this package does not contain; the same pattern lives in `testing/module-graph.test.ts`. */
-const NOT_PORTED = /\/(memory|dreamer|storage[^/]*|search[^/]*|embedding[^/]*)(\/|\.ts$)/;
+const NOT_PORTED = /\/(memory|memory_classifier|storage[^/]*|search[^/]*|embedding[^/]*)(\/|\.ts$)/;
 
 const EXPECTED_HOOKS = [
     "tool",
@@ -39,7 +39,12 @@ const EXPECTED_HOOKS = [
     "config",
 ].sort();
 
-const EXPECTED_TOOLS = ["ctx_reduce", "ctx_search", "ctx_note", "ctx_memory"].sort();
+const EXPECTED_TOOLS = [
+    "eidnara_reduce",
+    "eidnara_search",
+    "eidnara_note",
+    "eidnara_memory",
+].sort();
 
 interface BuiltEntry {
     outfile: string;
@@ -119,12 +124,12 @@ describe("plugin entry bundle", () => {
         projectDirectory = mkdtempSync(join(tmpdir(), "eidnara-entry-project-"));
         configHome = mkdtempSync(join(tmpdir(), "eidnara-entry-config-"));
         dataHome = mkdtempSync(join(tmpdir(), "eidnara-entry-data-"));
-        for (const key of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "EIDNARA_BROCA_CHILD"]) {
+        for (const key of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "EIDNARA_MODEL_EXECUTION_CHILD"]) {
             savedEnv[key] = process.env[key];
         }
         process.env.XDG_CONFIG_HOME = configHome;
         process.env.XDG_DATA_HOME = dataHome;
-        delete process.env.EIDNARA_BROCA_CHILD;
+        delete process.env.EIDNARA_MODEL_EXECUTION_CHILD;
         built = buildEntry(outdir);
     }, 60_000);
 
@@ -146,7 +151,7 @@ describe("plugin entry bundle", () => {
         expect(residue).toEqual([]);
     });
 
-    test("the bundle carries no claim.* or dreamer.* operation literal", () => {
+    test("the bundle carries no claim.* or memory_classifier.* operation literal", () => {
         const text = readFileSync(built.outfile, "utf8");
         expect(text.length).toBeGreaterThan(0);
         expect(text).not.toMatch(OPERATION_LITERAL);

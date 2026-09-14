@@ -45,8 +45,8 @@ evidence.
 | `shared-primitives` | the lease property catalog in the shared-crate source repository at `89abb40` plus discovery for cache stability, storage types, non-lease storage | U2 |
 | `host-runtime`, `shm-transport`, `tokenizer` | the host source repository's catalogs `part-1-*`, `part-2a` through `part-2f` | U3 |
 | `memory-store`, `daemon` | `part-3-store-core` (as `memory-store/`), `part-4a` through `part-4f` (as `daemon/<area>/`), and the `part-4-module` scope lens, all in the host source repository at `eb6da6109` | U4 |
-| `authority-transition`, `lkg`, `retrieval`, `dreamer`, `embeddings`, `git-ingestion` | `part-5a-storage`, `part-5c-transform-ts`, discovery | U5 |
-| `cli`, `historian-ts` | `part-5d-cli`, `part-5b-historian-ts` | U7 |
+| `authority-transition`, `lkg`, `retrieval`, `memory_classifier`, `embeddings`, `git-ingestion` | `part-5a-storage`, `part-5c-transform-ts`, discovery | U5 |
+| `cli`, `history_summarizer-ts` | `part-5d-cli`, `part-5b-history_summarizer-ts` | U7 |
 | `search-projection` | the RP2.1 specification ([#347](https://github.com/ahrav/eidnara/issues/347)) and its companion catalogs for embedding, export and recovery, and projection coverage, authored against Eidnara `913234433` | RP2.1 P1 |
 | `hot-path-optimization` | the hot-path latency specification ([#350](https://github.com/ahrav/eidnara/issues/350)), whose parent supplement was published under the superseded [#351](https://github.com/ahrav/eidnara/issues/351); the parent supplement and its `latency-audit/` area are authored against Eidnara `913234433` | HP1 M0 |
 | `opencode-plugin/transform-edit-responses` | the Transform Edit Responses specification ([#525](https://github.com/ahrav/eidnara/issues/525)); the client execution records TE17 to TE24, TE26, TE27, and TE30 are authored against the #533 change, with `baseline.md` holding the pre-533 benchmark baseline | TE U3 |

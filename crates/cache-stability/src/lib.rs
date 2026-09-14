@@ -237,7 +237,7 @@ impl CoreState {
         // (the empty baseline re-materializes byte-identical) but dishonest state.
         // "" is RESERVED as the no-boundary sentinel: a HARD that mints Some("") is
         // legitimately declaring "still no boundary" (fresh store), and the first
-        // real compartment mints a non-empty id, exiting the vacuous state.
+        // real history_segment mints a non-empty id, exiting the vacuous state.
         self.reconcile_pending = !boundary_match && !self.boundary_id.is_empty();
 
         StepResult {
@@ -253,7 +253,7 @@ impl CoreState {
     ///
     /// `boundary_id` is the COVERAGE anchor (the last raw item any summary covers, m0 OR the
     /// delta). A SOFT MAY advance it when `new_boundary_id` is `Some` — used when the volatile
-    /// delta now summarizes content past the prior anchor (e.g. a new compartment rides the
+    /// delta now summarizes content past the prior anchor (e.g. a new history_segment rides the
     /// delta and extends coverage over raw tail items). The m0 frozen bytes are NEVER mutated
     /// on a SOFT; only the coverage anchor moves, so the byte-stability invariant holds. `None`
     /// leaves the boundary unchanged (the common case: a delta that rides within existing
@@ -564,12 +564,12 @@ mod tests {
         );
         let m0_before = state.frozen_units[0].frozen_payload.clone();
 
-        // A SOFT whose delta now summarizes a new compartment that extends coverage past b0 to
-        // b1 (the m1-takes-a-compartment case): re-render m1 AND advance the coverage anchor.
+        // A SOFT whose delta now summarizes a new history_segment that extends coverage past b0 to
+        // b1 (the m1-takes-a-history_segment case): re-render m1 AND advance the coverage anchor.
         let mut soft = PassInput::new(Action::Soft, "b0");
         soft.rendered_units = vec![unit(
             "m1",
-            "<compartment>C1</compartment>",
+            "<history_segment>C1</history_segment>",
             DurabilityClass::Lineage,
         )];
         soft.new_boundary_id = Some("b1".into());
@@ -649,7 +649,7 @@ mod tests {
         let mut soft = PassInput::new(Action::Soft, "-");
         soft.rendered_units = vec![unit(
             "m1",
-            "<compartment>C1</compartment>",
+            "<history_segment>C1</history_segment>",
             DurabilityClass::Lineage,
         )];
         soft.new_boundary_id = Some("b1".into());

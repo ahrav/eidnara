@@ -6,13 +6,13 @@ Every claim-bearing check for runtime assembly and the configuration contract:
 binaries that carry this sub-part's claims, and the CI steps that reach any of
 them.
 
-Provenance: system `the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927`. Counts come from
+Provenance: system `the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`,`HEAD` = `e447c927`. Counts come from
 lens B, which derived each by extracting the production half of each file and
 grepping it so no test-module hit is included. This synthesis re-derived the file
-lengths with `wc -l`, the `#[cfg(test)]` boundaries by grep, the `ci.yml` hit
+lengths with`wc -l`, the`#[cfg(test)]` boundaries by grep, the `ci.yml`hit
 list by grep, and four load-bearing line references by printing them
-(`config.rs:294`, `runtime.rs:876`, `:1130`, `:1223`, plus `serve.rs:593`).
+(`config.rs:294`,`runtime.rs:876`,`:1130`,`:1223`, plus`serve.rs:593`).
 
 **Every status below is `unaudited`.** An existing check never removes a property
 from the catalog. Test adequacy belongs to `/testing:invariant-test-review`;
@@ -85,7 +85,7 @@ them.**
 
 | Binary | Tests | Lines | Subject | CI status |
 | --- | --- | --- | --- | --- |
-| `tests/synapse_bundle.rs` | 24 | 936 | limit feasibility, named by `config.rs:63` | **unnamed** |
+| `tests/local_embeddings_bundle.rs` | 24 | 936 | limit feasibility, named by `config.rs:63` | **unnamed** |
 | `tests/harness_closure.rs` | 15 | 647 | the only exercise of `HarnessClosureStore` | **unnamed** |
 | `tests/ipc_budget_topology.rs` | 9 | 296 | byte-pool separation | **unnamed** |
 | `tests/activation.rs` | 4 | 412 | the activation path the fast-probe records depend on | **unnamed** |
@@ -117,7 +117,7 @@ which is why the two facts sit together:
 **`tests/harness_closure.rs` deserves separate emphasis.** It is the **only**
 place in the repository that constructs a `HarnessClosureStore` for test
 purposes, at 11 sites (`:159`, `:182`, `:253`, `:277`, `:325`, `:414`, `:447`,
-`:462`, `:477`, `:497`, plus `tests/broca_subprocess.rs:853`), each with
+`:462`, `:477`, `:497`, plus `tests/model_execution_subprocess.rs:853`), each with
 `.expect("store")`. So a 1,122-line module with zero in-crate tests and zero
 doctests has exactly one test binary, and CI does not run it.
 
@@ -249,7 +249,7 @@ unimplemented, and both are catalog findings:
 | # | Claim | Source | Contradicted by |
 | --- | --- | --- | --- |
 | 4 | Every operation owns exactly one deadline; stages within it share the same budget | `config.rs:196-197`, protocol `:731` | `runtime.rs:1223`'s `saturating_mul(2)`, armed after the absolute deadline at `:1148` already expired |
-| 13 | Reserved-class pools are zero-permit when no module declares a reservation, and then unreachable because every route is general-class | `runtime.rs:117-119` | `broca/mod.rs:164-177`, which declares `RouteClass::Reserved` with 96/96 counts (`broca/config.rs:185`, `:188`) |
+| 13 | Reserved-class pools are zero-permit when no module declares a reservation, and then unreachable because every route is general-class | `runtime.rs:117-119` | `model_execution/mod.rs:164-177`, which declares `RouteClass::Reserved` with 96/96 counts (`model_execution/config.rs:185`, `:188`) |
 | 17 | Health probes run at `health_interval` | `config.rs:216-217` | `runtime.rs:1130`, a hardcoded 50 ms selected whenever a handler-authored string says `starting` |
 
 Row 15 is a third case of the same kind, and it is contradicted by the same code
@@ -273,7 +273,7 @@ the file most likely to hold a stale reference, since it is the module manifest
 the refactor edited, and it is clean: it declares `ring_transport` and
 `setup_socket` as `#[doc(hidden)] pub mod` (`:20-21`, `:34-35`) and no longer
 names any deleted module, and its `unsafe_code` comment (`:3-7`) describes the
-Broca `pre_exec` hook, which exists.
+ModelExecution `pre_exec` hook, which exists.
 
 **Two residuals of the opposite shape, recorded so a later pass does not miscount
 them as stale.** Neither describes removed work. **One was recorded here as a
@@ -312,13 +312,13 @@ Six, each held by discipline rather than by a build step.
    reservation must coexist") and `:23-24` sums the three constants. The in-crate
    test at `:520` is the only thing that checks the sum, and it never runs in CI.
    Nothing relates it to the consumer at `runtime.rs:896`.
-3. **`SCRATCH_RESERVED_BYTES`' sizing rationale names Synapse limits it cannot
-   see.** `config.rs:45-55` sizes the pool for "Synapse's worst parse reservation,
+3. **`SCRATCH_RESERVED_BYTES`' sizing rationale names LocalEmbeddings limits it cannot
+   see.** `config.rs:45-55` sizes the pool for "LocalEmbeddings's worst parse reservation,
    full queued-batch budget, one admitted maximum query,
-   `SYNAPSE_WAITER_HEADROOM_BYTES`, per-item/envelope headroom, and
-   `RETAINED_METADATA_RESERVED_BYTES`", and `:63` says `tests/synapse_bundle.rs`
+   `LOCAL_EMBEDDINGS_WAITER_HEADROOM_BYTES`, per-item/envelope headroom, and
+   `RETAINED_METADATA_RESERVED_BYTES`", and `:63` says `tests/local_embeddings_bundle.rs`
    "pins the resulting feasible boundary". That binary is not named in CI, so the
-   coupling between this constant and Synapse's own limits is held by an ungated
+   coupling between this constant and LocalEmbeddings's own limits is held by an ungated
    test plus prose.
 4. **The 50 ms activation probe interval is a bare literal.** `runtime.rs:1130` is
    `Duration::from_millis(50)` with no named constant and no entry in
@@ -449,7 +449,7 @@ Stated so a later pass knows what was and was not looked at.
   `../part-2-rescope/scope-map-and-risk-ranking.md:750-752`.
 - The four integration binaries were counted and their subjects identified; only
   the `tests/lifecycle.rs` and `tests/handler_contract.rs` sites named by catalog
-  records were read. `tests/synapse_bundle.rs`'s 24 tests and
+  records were read. `tests/local_embeddings_bundle.rs`'s 24 tests and
   `tests/ipc_budget_topology.rs`'s 9 were not read, so this inventory establishes
   only their counts, subjects, and CI status.
 - `harness_closure.rs` was read for its guard and cap structure, not line by line.

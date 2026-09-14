@@ -162,16 +162,16 @@ fn tail_suppression_below_sample_floor() {
 }
 
 #[test]
-fn synapse_ledgers_reconcile_exactly() {
+fn local_embeddings_ledgers_reconcile_exactly() {
     use perf_measurement::{
-        AttemptDisposition, AttemptRecord, LogicalDisposition, LogicalRecord, SynapseMethod,
-        validate_synapse_ledgers,
+        AttemptDisposition, AttemptRecord, LocalEmbeddingsMethod, LogicalDisposition,
+        LogicalRecord, validate_local_embeddings_ledgers,
     };
     let attempts = vec![
         AttemptRecord {
             logical_id: 7,
             attempt_id: 1,
-            method: SynapseMethod::Batch,
+            method: LocalEmbeddingsMethod::Batch,
             disposition: AttemptDisposition::Success,
             code: None,
             retry_after_ms: None,
@@ -183,7 +183,7 @@ fn synapse_ledgers_reconcile_exactly() {
         AttemptRecord {
             logical_id: 7,
             attempt_id: 2,
-            method: SynapseMethod::Result,
+            method: LocalEmbeddingsMethod::Result,
             disposition: AttemptDisposition::Poll,
             code: None,
             retry_after_ms: Some(50),
@@ -205,7 +205,7 @@ fn synapse_ledgers_reconcile_exactly() {
         polls: 1,
         window: WindowClass::Measured,
     }];
-    let ledger = validate_synapse_ledgers(&logical, &attempts);
+    let ledger = validate_local_embeddings_ledgers(&logical, &attempts);
     assert!(ledger.valid, "{:?}", ledger.errors);
     assert_eq!(ledger.offered, 1);
     assert_eq!(ledger.completed, 1);
@@ -215,7 +215,7 @@ fn synapse_ledgers_reconcile_exactly() {
 
     let mut broken = logical;
     broken[0].attempts = 1;
-    let ledger = validate_synapse_ledgers(&broken, &attempts);
+    let ledger = validate_local_embeddings_ledgers(&broken, &attempts);
     assert!(!ledger.valid);
     assert!(ledger.errors[0].contains("records 1 attempts"));
 }
@@ -290,13 +290,13 @@ fn seeds_yield_distinct_and_dispersed_first_draws() {
 #[test]
 fn ledger_rejects_duplicate_and_orphan_records() {
     use perf_measurement::{
-        AttemptDisposition, AttemptRecord, LogicalDisposition, LogicalRecord, SynapseMethod,
-        validate_synapse_ledgers,
+        AttemptDisposition, AttemptRecord, LocalEmbeddingsMethod, LogicalDisposition,
+        LogicalRecord, validate_local_embeddings_ledgers,
     };
     let attempt = |logical_id, attempt_id| AttemptRecord {
         logical_id,
         attempt_id,
-        method: SynapseMethod::Query,
+        method: LocalEmbeddingsMethod::Query,
         disposition: AttemptDisposition::Success,
         code: None,
         retry_after_ms: None,
@@ -318,7 +318,7 @@ fn ledger_rejects_duplicate_and_orphan_records() {
         window: WindowClass::Measured,
     };
 
-    let duplicated_logical = validate_synapse_ledgers(
+    let duplicated_logical = validate_local_embeddings_ledgers(
         &[logical(1, 1), logical(1, 1)],
         &[attempt(1, 1), attempt(1, 2)],
     );
@@ -331,7 +331,7 @@ fn ledger_rejects_duplicate_and_orphan_records() {
     );
 
     let duplicated_attempt =
-        validate_synapse_ledgers(&[logical(1, 2)], &[attempt(1, 1), attempt(1, 1)]);
+        validate_local_embeddings_ledgers(&[logical(1, 2)], &[attempt(1, 1), attempt(1, 1)]);
     assert!(!duplicated_attempt.valid);
     assert!(
         duplicated_attempt
@@ -340,7 +340,8 @@ fn ledger_rejects_duplicate_and_orphan_records() {
             .any(|error| error.contains("duplicate attempt_id 1"))
     );
 
-    let orphan = validate_synapse_ledgers(&[logical(1, 1)], &[attempt(1, 1), attempt(9, 2)]);
+    let orphan =
+        validate_local_embeddings_ledgers(&[logical(1, 1)], &[attempt(1, 1), attempt(9, 2)]);
     assert!(!orphan.valid);
     assert!(
         orphan
@@ -349,7 +350,7 @@ fn ledger_rejects_duplicate_and_orphan_records() {
             .any(|error| error.contains("unknown logical_id 9"))
     );
 
-    let miscounted = validate_synapse_ledgers(&[logical(1, 3)], &[attempt(1, 1)]);
+    let miscounted = validate_local_embeddings_ledgers(&[logical(1, 3)], &[attempt(1, 1)]);
     assert!(!miscounted.valid);
     assert!(
         miscounted
@@ -362,13 +363,13 @@ fn ledger_rejects_duplicate_and_orphan_records() {
 #[test]
 fn overload_and_closed_singleton_ledgers_keep_expected_amplification() {
     use perf_measurement::{
-        AttemptDisposition, AttemptRecord, LogicalDisposition, LogicalRecord, SynapseMethod,
-        validate_synapse_ledgers,
+        AttemptDisposition, AttemptRecord, LocalEmbeddingsMethod, LogicalDisposition,
+        LogicalRecord, validate_local_embeddings_ledgers,
     };
     let attempt = |logical_id, attempt_id, disposition| AttemptRecord {
         logical_id,
         attempt_id,
-        method: SynapseMethod::Query,
+        method: LocalEmbeddingsMethod::Query,
         disposition,
         code: (disposition == AttemptDisposition::RetryableRejection)
             .then(|| "queue_full".to_owned()),
@@ -392,14 +393,14 @@ fn overload_and_closed_singleton_ledgers_keep_expected_amplification() {
         window: WindowClass::Measured,
     };
 
-    let singleton = validate_synapse_ledgers(
+    let singleton = validate_local_embeddings_ledgers(
         &[logical(1, LogicalDisposition::Completed, 1)],
         &[attempt(1, 1, AttemptDisposition::Success)],
     );
     assert!(singleton.valid);
     assert_eq!(singleton.amplification, 1.0, "closed concurrency 1 has A=1");
 
-    let overload = validate_synapse_ledgers(
+    let overload = validate_local_embeddings_ledgers(
         &[
             logical(1, LogicalDisposition::Completed, 1),
             logical(2, LogicalDisposition::Rejected, 4),
@@ -424,20 +425,20 @@ fn overload_and_closed_singleton_ledgers_keep_expected_amplification() {
 
 #[test]
 fn variant_policy_keeps_control_arms_isolated_from_landed_hints() {
-    use perf_measurement::SynapseVariant;
+    use perf_measurement::LocalEmbeddingsVariant;
     let mut baseline_rng = perf_measurement::DeterministicRng::new(1);
     assert_eq!(
-        SynapseVariant::Baseline.query_retry_delay_ms(Some(7), &mut baseline_rng),
+        LocalEmbeddingsVariant::Baseline.query_retry_delay_ms(Some(7), &mut baseline_rng),
         100.0
     );
-    assert_eq!(SynapseVariant::Baseline.query_attempt_limit(), None);
-    assert!(!SynapseVariant::Baseline.fast_polls());
+    assert_eq!(LocalEmbeddingsVariant::Baseline.query_attempt_limit(), None);
+    assert!(!LocalEmbeddingsVariant::Baseline.fast_polls());
 
     for variant in [
-        SynapseVariant::HygieneOnly,
-        SynapseVariant::A,
-        SynapseVariant::C,
-        SynapseVariant::APlusC,
+        LocalEmbeddingsVariant::HygieneOnly,
+        LocalEmbeddingsVariant::A,
+        LocalEmbeddingsVariant::C,
+        LocalEmbeddingsVariant::APlusC,
     ] {
         let mut rng = perf_measurement::DeterministicRng::new(9);
         let delay = variant.query_retry_delay_ms(Some(7), &mut rng);
@@ -451,36 +452,36 @@ fn variant_policy_keeps_control_arms_isolated_from_landed_hints() {
 
     {
         let mut rng = perf_measurement::DeterministicRng::new(9);
-        let delay = SynapseVariant::B.query_retry_delay_ms(Some(7), &mut rng);
+        let delay = LocalEmbeddingsVariant::B.query_retry_delay_ms(Some(7), &mut rng);
         assert!((7.0..21.0).contains(&delay));
-        assert!(SynapseVariant::B.uses_served_query_hint());
+        assert!(LocalEmbeddingsVariant::B.uses_served_query_hint());
     }
-    assert!(SynapseVariant::A.needs_waiting_queries());
-    assert!(SynapseVariant::APlusC.needs_waiting_queries());
-    assert!(SynapseVariant::C.fast_polls());
-    assert!(SynapseVariant::APlusC.fast_polls());
+    assert!(LocalEmbeddingsVariant::A.needs_waiting_queries());
+    assert!(LocalEmbeddingsVariant::APlusC.needs_waiting_queries());
+    assert!(LocalEmbeddingsVariant::C.fast_polls());
+    assert!(LocalEmbeddingsVariant::APlusC.fast_polls());
 
     let mut poll_rng = perf_measurement::DeterministicRng::new(17);
     assert_eq!(
-        SynapseVariant::Baseline.initial_pending_delay_ms(&mut poll_rng),
+        LocalEmbeddingsVariant::Baseline.initial_pending_delay_ms(&mut poll_rng),
         None,
         "baseline has no fast-first ladder seed"
     );
     let mut control_ladder = 0.0;
     assert_eq!(
-        SynapseVariant::HygieneOnly.pending_poll_delay_ms(&mut control_ladder, 73),
+        LocalEmbeddingsVariant::HygieneOnly.pending_poll_delay_ms(&mut control_ladder, 73),
         73.0,
         "control polling stays at the served constant"
     );
-    let mut fast_ladder = SynapseVariant::C
+    let mut fast_ladder = LocalEmbeddingsVariant::C
         .initial_pending_delay_ms(&mut poll_rng)
         .expect("C has fast-first polling");
     assert!((1.0..2.0).contains(&fast_ladder));
     // The first pending reply uses the fast-first seed; the 10 ms floor applies from the second pending reply onward.
-    let first_pending = SynapseVariant::C.pending_poll_delay_ms(&mut fast_ladder, 73);
+    let first_pending = LocalEmbeddingsVariant::C.pending_poll_delay_ms(&mut fast_ladder, 73);
     assert!((1.0..2.0).contains(&first_pending));
     assert_eq!(
-        SynapseVariant::C.pending_poll_delay_ms(&mut fast_ladder, 73),
+        LocalEmbeddingsVariant::C.pending_poll_delay_ms(&mut fast_ladder, 73),
         10.0
     );
 }
@@ -489,7 +490,7 @@ fn variant_policy_keeps_control_arms_isolated_from_landed_hints() {
 fn the_hold_window_marks_warmup_and_censors_unsettled_requests() {
     use perf_measurement::{
         AttemptDisposition, AttemptRecord, HoldWindow, IN_FLIGHT_AT_WINDOW_END_CODE,
-        LogicalDisposition, LogicalRecord, SynapseMethod,
+        LocalEmbeddingsMethod, LogicalDisposition, LogicalRecord,
     };
 
     // For a 10-second hold beginning at 1 s, warmup covers [1 s, 2 s) and the window closes at 11 s.
@@ -512,7 +513,7 @@ fn the_hold_window_marks_warmup_and_censors_unsettled_requests() {
     let attempt_row = |logical_id| AttemptRecord {
         logical_id,
         attempt_id: logical_id,
-        method: SynapseMethod::Query,
+        method: LocalEmbeddingsMethod::Query,
         disposition: AttemptDisposition::Success,
         code: None,
         retry_after_ms: None,
@@ -591,20 +592,20 @@ fn the_hold_window_marks_warmup_and_censors_unsettled_requests() {
 #[test]
 fn attempts_follow_their_request_so_the_per_request_ledger_reconciles() {
     use perf_measurement::{
-        AttemptDisposition, AttemptRecord, HoldWindow, LogicalDisposition, LogicalRecord,
-        SynapseMethod, validate_synapse_ledgers,
+        AttemptDisposition, AttemptRecord, HoldWindow, LocalEmbeddingsMethod, LogicalDisposition,
+        LogicalRecord, validate_local_embeddings_ledgers,
     };
 
     let window = HoldWindow::new(0, 10);
     // `embed.result` always uses polling; no other method does.
-    // `validate_synapse_ledgers` rejects poll methods other than `embed.result`.
+    // `validate_local_embeddings_ledgers` rejects poll methods other than `embed.result`.
     let attempt = |logical_id, attempt_id, send_ns: u64, disposition| AttemptRecord {
         logical_id,
         attempt_id,
         method: if disposition == AttemptDisposition::Poll {
-            SynapseMethod::Result
+            LocalEmbeddingsMethod::Result
         } else {
-            SynapseMethod::Batch
+            LocalEmbeddingsMethod::Batch
         },
         disposition,
         code: None,
@@ -674,7 +675,7 @@ fn attempts_follow_their_request_so_the_per_request_ledger_reconciles() {
     // The validator rejects a logical record whose recorded attempt count differs from its owned attempts.
     let (logical_estimates, _) = perf_measurement::partition_measured(&logical, |r| r.window);
     let (attempt_estimates, _) = perf_measurement::partition_measured(&attempts, |a| a.window);
-    let ledger = validate_synapse_ledgers(&logical_estimates, &attempt_estimates);
+    let ledger = validate_local_embeddings_ledgers(&logical_estimates, &attempt_estimates);
     assert!(ledger.valid, "{:?}", ledger.errors);
     assert_eq!(ledger.offered, 1);
     assert_eq!(ledger.attempts, 3);
@@ -686,7 +687,7 @@ fn attempts_follow_their_request_so_the_per_request_ledger_reconciles() {
         .filter(|a| a.actual_send_ns < window.end_ns)
         .cloned()
         .collect();
-    let broken = validate_synapse_ledgers(&logical_estimates, &truncated);
+    let broken = validate_local_embeddings_ledgers(&logical_estimates, &truncated);
     assert!(!broken.valid);
     assert!(
         broken
@@ -701,8 +702,8 @@ fn attempts_follow_their_request_so_the_per_request_ledger_reconciles() {
 #[test]
 fn a_result_attempt_recorded_as_a_success_is_rejected() {
     use perf_measurement::{
-        AttemptDisposition, AttemptRecord, LogicalDisposition, LogicalRecord, SynapseMethod,
-        validate_synapse_ledgers,
+        AttemptDisposition, AttemptRecord, LocalEmbeddingsMethod, LogicalDisposition,
+        LogicalRecord, validate_local_embeddings_ledgers,
     };
 
     // An `embed.result` row recorded as a success increments `successes` instead of `polls`, so totals can reconcile while poll counts diverge.
@@ -733,11 +734,15 @@ fn a_result_attempt_recorded_as_a_success_is_rejected() {
         window: WindowClass::Measured,
     };
     let attempts = vec![
-        attempt(1, SynapseMethod::Batch, AttemptDisposition::Success),
-        attempt(2, SynapseMethod::Result, AttemptDisposition::Success),
+        attempt(1, LocalEmbeddingsMethod::Batch, AttemptDisposition::Success),
+        attempt(
+            2,
+            LocalEmbeddingsMethod::Result,
+            AttemptDisposition::Success,
+        ),
     ];
 
-    let ledger = validate_synapse_ledgers(&logical, &attempts);
+    let ledger = validate_local_embeddings_ledgers(&logical, &attempts);
     // The validator checks poll counts independently because total attempt counts can reconcile when `embed.result` rows are recorded as successes.
     assert_eq!(ledger.attempts, 2);
     assert_eq!(ledger.polls, 0);
@@ -753,10 +758,10 @@ fn a_result_attempt_recorded_as_a_success_is_rejected() {
 
     // A non-poll method cannot use Poll disposition.
     let mislabelled = vec![
-        attempt(1, SynapseMethod::Batch, AttemptDisposition::Success),
-        attempt(2, SynapseMethod::Query, AttemptDisposition::Poll),
+        attempt(1, LocalEmbeddingsMethod::Batch, AttemptDisposition::Success),
+        attempt(2, LocalEmbeddingsMethod::Query, AttemptDisposition::Poll),
     ];
-    let ledger = validate_synapse_ledgers(&logical, &mislabelled);
+    let ledger = validate_local_embeddings_ledgers(&logical, &mislabelled);
     assert!(!ledger.valid);
     assert!(
         ledger
@@ -769,8 +774,8 @@ fn a_result_attempt_recorded_as_a_success_is_rejected() {
 #[test]
 fn an_orphan_attempt_cannot_enter_the_measured_set() {
     use perf_measurement::{
-        AttemptDisposition, AttemptRecord, HoldWindow, LogicalDisposition, LogicalRecord,
-        SynapseMethod,
+        AttemptDisposition, AttemptRecord, HoldWindow, LocalEmbeddingsMethod, LogicalDisposition,
+        LogicalRecord,
     };
 
     let window = HoldWindow::new(0, 10);
@@ -789,7 +794,7 @@ fn an_orphan_attempt_cannot_enter_the_measured_set() {
     let attempt = |logical_id, attempt_id| AttemptRecord {
         logical_id,
         attempt_id,
-        method: SynapseMethod::Query,
+        method: LocalEmbeddingsMethod::Query,
         disposition: AttemptDisposition::Success,
         code: None,
         retry_after_ms: None,
@@ -815,14 +820,14 @@ fn an_orphan_attempt_cannot_enter_the_measured_set() {
 #[test]
 fn outcome_unknown_attempts_are_neither_admitted_nor_rejected() {
     use perf_measurement::{
-        ATTEMPT_TIMEOUT_CODE, AttemptDisposition, AttemptRecord, LogicalDisposition, LogicalRecord,
-        SynapseMethod, validate_synapse_ledgers,
+        ATTEMPT_TIMEOUT_CODE, AttemptDisposition, AttemptRecord, LocalEmbeddingsMethod,
+        LogicalDisposition, LogicalRecord, validate_local_embeddings_ledgers,
     };
 
     let attempt = |attempt_id, disposition, code: Option<&str>| AttemptRecord {
         logical_id: 1,
         attempt_id,
-        method: SynapseMethod::Query,
+        method: LocalEmbeddingsMethod::Query,
         disposition,
         code: code.map(str::to_owned),
         retry_after_ms: None,
@@ -843,7 +848,7 @@ fn outcome_unknown_attempts_are_neither_admitted_nor_rejected() {
         polls: 0,
         window: WindowClass::Measured,
     }];
-    let ledger = validate_synapse_ledgers(
+    let ledger = validate_local_embeddings_ledgers(
         &logical,
         &[
             // A served call has wire evidence that the host admitted it.
@@ -878,8 +883,8 @@ fn outcome_unknown_attempts_are_neither_admitted_nor_rejected() {
 #[test]
 fn an_error_outside_the_client_vocabulary_is_not_a_success() {
     use perf_measurement::{
-        AttemptDisposition, AttemptRecord, LogicalDisposition, LogicalRecord, SynapseMethod,
-        validate_synapse_ledgers,
+        AttemptDisposition, AttemptRecord, LocalEmbeddingsMethod, LogicalDisposition,
+        LogicalRecord, validate_local_embeddings_ledgers,
     };
 
     let logical = vec![LogicalRecord {
@@ -894,12 +899,12 @@ fn an_error_outside_the_client_vocabulary_is_not_a_success() {
         polls: 0,
         window: WindowClass::Measured,
     }];
-    let ledger = validate_synapse_ledgers(
+    let ledger = validate_local_embeddings_ledgers(
         &logical,
         &[AttemptRecord {
             logical_id: 1,
             attempt_id: 1,
-            method: SynapseMethod::Query,
+            method: LocalEmbeddingsMethod::Query,
             disposition: AttemptDisposition::Failure,
             code: Some("schema_violation".to_owned()),
             retry_after_ms: None,
@@ -927,8 +932,8 @@ fn an_error_outside_the_client_vocabulary_is_not_a_success() {
 #[test]
 fn a_misattributed_poll_count_is_rejected_even_when_attempts_balance() {
     use perf_measurement::{
-        AttemptDisposition, AttemptRecord, LogicalDisposition, LogicalRecord, SynapseMethod,
-        validate_synapse_ledgers,
+        AttemptDisposition, AttemptRecord, LocalEmbeddingsMethod, LogicalDisposition,
+        LogicalRecord, validate_local_embeddings_ledgers,
     };
 
     let attempt = |attempt_id, method, disposition| AttemptRecord {
@@ -957,11 +962,11 @@ fn a_misattributed_poll_count_is_rejected_even_when_attempts_balance() {
         polls: 0,
         window: WindowClass::Measured,
     }];
-    let ledger = validate_synapse_ledgers(
+    let ledger = validate_local_embeddings_ledgers(
         &logical,
         &[
-            attempt(1, SynapseMethod::Batch, AttemptDisposition::Success),
-            attempt(2, SynapseMethod::Result, AttemptDisposition::Poll),
+            attempt(1, LocalEmbeddingsMethod::Batch, AttemptDisposition::Success),
+            attempt(2, LocalEmbeddingsMethod::Result, AttemptDisposition::Poll),
         ],
     );
 
@@ -978,16 +983,16 @@ fn a_misattributed_poll_count_is_rejected_even_when_attempts_balance() {
         ledger.errors
     );
 
-    // With `polls: 1`, `validate_synapse_ledgers` accepts the ledger.
+    // With `polls: 1`, `validate_local_embeddings_ledgers` accepts the ledger.
     let corrected = vec![LogicalRecord {
         polls: 1,
         ..logical[0].clone()
     }];
-    let ledger = validate_synapse_ledgers(
+    let ledger = validate_local_embeddings_ledgers(
         &corrected,
         &[
-            attempt(1, SynapseMethod::Batch, AttemptDisposition::Success),
-            attempt(2, SynapseMethod::Result, AttemptDisposition::Poll),
+            attempt(1, LocalEmbeddingsMethod::Batch, AttemptDisposition::Success),
+            attempt(2, LocalEmbeddingsMethod::Result, AttemptDisposition::Poll),
         ],
     );
     assert!(ledger.valid, "{:?}", ledger.errors);

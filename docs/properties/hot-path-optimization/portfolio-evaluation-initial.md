@@ -47,7 +47,7 @@ mostly use `always`.
 - **S1, UNCERTAIN.** `always` matches current-authority preservation. Results,
   refusals, effects, and post-call connection state can be asserted, but the
   differential baseline is not identified and the read-only and restoration
-  subcases are not stated precisely (`catalog.md:239-258`). Findings 1 and 4
+  hostases are not stated precisely (`catalog.md:239-258`). Findings 1 and 4
   address this.
 - **S2, VERIFIED with one bridge refinement.** `always` matches snapshot and
   transaction-boundary preservation. The read sequence and durable effect sets

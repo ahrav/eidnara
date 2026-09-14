@@ -10,16 +10,16 @@ Reachability is test-only because no production RP2.1 restart driver exists.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/synapse/jobs.rs:323-342` creates a fresh incarnation
+- `crates/host-runtime/src/local_embeddings/jobs.rs:323-342` creates a fresh incarnation
   nonce and empty maps on construction.
 - `jobs.rs:349-356` rejects job IDs from another incarnation.
 - `jobs.rs:597-606` reports Restarted for unknown or expired/evicted jobs too;
   the outcome cannot identify which loss caused it.
 - `jobs.rs:407-458` permits identical retryable failures to be replaced after
   a successful fresh admission, while other retained jobs are reused.
-- `crates/host-runtime/tests/synapse_jobs.rs:297-334` preserves local work across
+- `crates/host-runtime/tests/local_embeddings_jobs.rs:297-334` preserves local work across
   route loss. That does not construct loss of the host process.
-- `crates/host-runtime/src/synapse/jobs.rs:1123` checks retained retry behavior,
+- `crates/host-runtime/src/local_embeddings/jobs.rs:1123` checks retained retry behavior,
   not reconstruction from a durable store.
 - `docs/host-wire-protocol.md:502` describes a TypeScript recovery ledger.
   P1 moves product recovery to durable search pending; the wording needs review.

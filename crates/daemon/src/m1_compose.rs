@@ -4,14 +4,14 @@ use std::time::Instant;
 
 use memory_store::{MemoryStore, MemoryStoreError, ModuleMeta, NoteDelivery, StoredNote};
 
-use crate::compartment_coverage::{CoverageError, partition_by_folded_seq, resolve_coverage};
-use crate::decay_render::DecayRenderCompartment;
+use crate::decay_render::DecayRenderHistorySegment;
+use crate::history_segment_coverage::{CoverageError, partition_by_folded_seq, resolve_coverage};
 use crate::m0_compose::trim_user_profile_to_budget;
 use crate::memory_render::{
-    M1_PLACEHOLDER, assemble_m1, render_new_compartments, render_user_profile_block,
+    M1_PLACEHOLDER, assemble_m1, render_new_history_segments, render_user_profile_block,
 };
 
-/// Failure to read composition state, or a compartment range that overlaps or fails to advance.
+/// Failure to read composition state, or a history_segment range that overlaps or fails to advance.
 #[derive(thiserror::Error, Debug)]
 pub enum M1ComposeError {
     #[error("store: {0}")]
@@ -34,7 +34,7 @@ impl From<MemoryStoreError> for M1ComposeError {
 pub struct M1RevisionSignal {
     pub revision: u64,
     pub external_revision: u64,
-    pub max_compartment_seq: i64,
+    pub max_history_segment_seq: i64,
     pub note_status_version: i64,
     pub user_profile_version: u64,
 }
@@ -52,7 +52,7 @@ pub struct M1RevisionReadTimings {
 /// Computes nonzero in-session and external revision hashes.
 ///
 /// The in-session hash covers the project-memory revision when memory is
-/// enabled, maximum compartment sequence, note status version, and user profile
+/// enabled, maximum history_segment sequence, note status version, and user profile
 /// version. The external hash covers only the optional project-memory revision.
 /// Store failures return [`MemoryStoreError`]. Elapsed read time, when
 /// requested, is accumulated in milliseconds.
@@ -74,7 +74,7 @@ pub fn m1_revision_signal_timed(
     let mut in_session = DefaultHasher::new();
     "eidnara-m1-claim-in-session-v1".hash(&mut in_session);
     memory_revision.hash(&mut in_session);
-    snapshot.max_compartment_seq.hash(&mut in_session);
+    snapshot.max_history_segment_seq.hash(&mut in_session);
     snapshot.note_status_version.hash(&mut in_session);
     user_profile_version.hash(&mut in_session);
     let mut external = DefaultHasher::new();
@@ -83,7 +83,7 @@ pub fn m1_revision_signal_timed(
     Ok(M1RevisionSignal {
         revision: in_session.finish() | 1,
         external_revision: external.finish() | 1,
-        max_compartment_seq: snapshot.max_compartment_seq,
+        max_history_segment_seq: snapshot.max_history_segment_seq,
         note_status_version: snapshot.note_status_version,
         user_profile_version,
     })
@@ -151,9 +151,9 @@ fn render_note_delta(notes: &[StoredNote]) -> String {
     lines.join("\n")
 }
 
-/// Composes new compartments, a changed user profile, and newly claimed notes.
+/// Composes new history_segments, a changed user profile, and newly claimed notes.
 ///
-/// Compartment order follows the store result. A compartment whose `start_message` does not advance past the previous `end_message` returns [`M1ComposeError::CoverageGap`], while sparse ordinal gaps are permitted; store reads and note claims return [`M1ComposeError::Store`].
+/// HistorySegment order follows the store result. A history_segment whose `start_message` does not advance past the previous `end_message` returns [`M1ComposeError::CoverageGap`], while sparse ordinal gaps are permitted; store reads and note claims return [`M1ComposeError::Store`].
 /// User profile budget units are tokens. Profile trimming receives 25 percent of that budget, clamped to at least one token.
 #[allow(clippy::too_many_arguments)]
 pub fn compose_m1(
@@ -167,13 +167,14 @@ pub fn compose_m1(
     temporal_awareness: bool,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> Result<M1Composition, M1ComposeError> {
-    let compartments = store.load_compartments(session_id)?;
-    let coverage = resolve_coverage(&compartments).map_err(M1ComposeError::CoverageGap)?;
-    let (_, new_compartments) = partition_by_folded_seq(&compartments, meta.folded_compartment_seq);
-    let rendered_compartments = new_compartments
+    let history_segments = store.load_history_segments(session_id)?;
+    let coverage = resolve_coverage(&history_segments).map_err(M1ComposeError::CoverageGap)?;
+    let (_, new_history_segments) =
+        partition_by_folded_seq(&history_segments, meta.folded_history_segment_seq);
+    let rendered_history_segments = new_history_segments
         .iter()
-        .map(|compartment| {
-            let mut rendered = DecayRenderCompartment::from(*compartment);
+        .map(|history_segment| {
+            let mut rendered = DecayRenderHistorySegment::from(*history_segment);
             if !temporal_awareness {
                 rendered.start_date = None;
                 rendered.end_date = None;
@@ -181,8 +182,8 @@ pub fn compose_m1(
             rendered
         })
         .collect::<Vec<_>>();
-    let compartment_refs = rendered_compartments.iter().collect::<Vec<_>>();
-    let new_compartments_block = render_new_compartments(&compartment_refs);
+    let history_segment_refs = rendered_history_segments.iter().collect::<Vec<_>>();
+    let new_history_segments_block = render_new_history_segments(&history_segment_refs);
     let new_coverage = match coverage {
         Some(coverage) if Some(coverage.coverage_end_ordinal) > meta.coverage_ordinal => {
             Some((coverage.boundary_id, coverage.coverage_end_ordinal))
@@ -222,7 +223,7 @@ pub fn compose_m1(
     Ok(M1Composition {
         body: assemble_m1(
             "",
-            &new_compartments_block,
+            &new_history_segments_block,
             "",
             &profile_and_notes,
             M1_PLACEHOLDER,

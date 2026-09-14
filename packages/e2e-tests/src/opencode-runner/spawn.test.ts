@@ -343,10 +343,10 @@ describe("opencode child lifecycle", () => {
 
             const user = JSON.parse(readFileSync(userEidnaraConfigPath(env), "utf8")) as {
                 transform_mode?: string;
-                subc?: { connection_file?: string };
+                host?: { connection_file?: string };
             };
             expect(user.transform_mode).toBe("rust");
-            expect(user.subc?.connection_file).toBe(connectionFile);
+            expect(user.host?.connection_file).toBe(connectionFile);
 
             const project = JSON.parse(
                 readFileSync(join(env.workdir, ".eidnara", "eidnara.jsonc"), "utf8"),
@@ -382,10 +382,10 @@ describe("opencode child lifecycle", () => {
         ).toThrow(/refusing to bind the unauthenticated serve API/);
     });
 
-    it("withholds parent OpenCode control variables and the Broca-child guard from the child", () => {
+    it("withholds parent OpenCode control variables and the ModelExecution-child guard from the child", () => {
         const { isInheritableEnvKey } = __spawnOpencodeTest;
         for (const key of [
-            "EIDNARA_BROCA_CHILD",
+            "EIDNARA_MODEL_EXECUTION_CHILD",
             "OPENCODE_DB",
             "OPENCODE_CONFIG",
             "OPENCODE_CONFIG_CONTENT",

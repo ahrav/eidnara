@@ -39,19 +39,19 @@ const ZERO_SNAPSHOT: SidebarSnapshot = {
     inputTokens: 0,
     contextLimit: 0,
     systemPromptTokens: 0,
-    compartmentCount: 0,
+    history_segmentCount: 0,
     memoryCount: 0,
     memoryBlockCount: 0,
     pendingOpsCount: 0,
-    historianRunning: false,
-    compartmentInProgress: false,
+    history_summarizerRunning: false,
+    history_segmentInProgress: false,
     sessionNoteCount: 0,
-    readySmartNoteCount: 0,
+    readyConditionalNoteCount: 0,
     cacheTtl: "5m",
     lastTransformError: null,
-    lastDreamerRunAt: null,
+    lastMemoryClassifierRunAt: null,
     projectIdentity: null,
-    compartmentTokens: 0,
+    history_segmentTokens: 0,
     factTokens: 0,
     memoryTokens: 0,
     docsTokens: 0,
@@ -180,7 +180,10 @@ afterEach(() => {
 describe("createEventHandler — session.created", () => {
     it("tracks an eidnara- titled child in both sets, a plain child as a subagent only, and a root session in neither", async () => {
         const { deps, handle } = buildHarness();
-        await handle("session.created", sessionCreated("child-1", "parent-1", "eidnara-sidekick"));
+        await handle(
+            "session.created",
+            sessionCreated("child-1", "parent-1", "eidnara-context_researcher"),
+        );
         await handle("session.created", sessionCreated("child-2", "parent-1", "Research task"));
         await handle("session.created", sessionCreated("root-1", "", "eidnara-root"));
 
@@ -355,14 +358,14 @@ describe("createEventHandler — message.removed", () => {
         await handle("message.removed", { sessionID: SESSION, messageID: "msg-other" });
         expect(deps.contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(1_000);
         expect(
-            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, compartmentInProgress: true })
+            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, history_segmentInProgress: true })
                 .inputTokens,
         ).toBe(1_000);
 
         await handle("message.removed", { sessionID: SESSION, messageID: "msg-1" });
         expect(deps.contextUsageMap.has(SESSION)).toBe(false);
         expect(
-            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, compartmentInProgress: true })
+            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, history_segmentInProgress: true })
                 .inputTokens,
         ).toBe(0);
     });
@@ -521,7 +524,7 @@ describe("createEventHandler — session.compacted", () => {
 
         expect(deps.contextUsageMap.has(SESSION)).toBe(false);
         expect(
-            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, compartmentInProgress: true })
+            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, history_segmentInProgress: true })
                 .inputTokens,
         ).toBe(0);
     });

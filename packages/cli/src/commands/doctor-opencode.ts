@@ -601,11 +601,13 @@ export async function runDoctor(
 
     // Dumps are grouped by project so users can identify each project's dumps.
     const diagnostics = await collectDiagnostics(cwd);
-    const dumpBuckets = diagnostics.historianDumps.byProject;
+    const dumpBuckets = diagnostics.history_summarizerDumps.byProject;
     if (dumpBuckets.length > 0) {
         const totalCount = dumpBuckets.reduce((sum, b) => sum + b.count, 0);
         const sessionCount = dumpBuckets.length;
-        warn(`Historian debug dumps: ${totalCount} file(s) across ${sessionCount} project(s)`);
+        warn(
+            `HistorySummarizer debug dumps: ${totalCount} file(s) across ${sessionCount} project(s)`,
+        );
         for (const bucket of dumpBuckets) {
             log.info(`  [${bucket.directory}] ${bucket.count} file(s)`);
             for (const dump of bucket.recent.slice(0, 3)) {
@@ -618,9 +620,11 @@ export async function runDoctor(
             }
         }
     }
-    const legacy = diagnostics.historianDumps.legacyDumps;
+    const legacy = diagnostics.history_summarizerDumps.legacyDumps;
     if (legacy.count > 0) {
-        log.info(`Legacy historian dumps (pre-v0.18.x): ${legacy.count} file(s) in ${legacy.dir}`);
+        log.info(
+            `Legacy history_summarizer dumps (pre-v0.18.x): ${legacy.count} file(s) in ${legacy.dir}`,
+        );
     }
 
     if (paths.omoConfig) {

@@ -4,7 +4,7 @@ import {
     analyzePasses,
     buildSegments,
     findBusts,
-    isHistorianRequest,
+    isHistorySummarizerRequest,
     isInternalAgentRequest,
     mainAgentRequests,
 } from "./cache-analysis";
@@ -124,13 +124,13 @@ describe("cache-bust oracle", () => {
         });
     });
 
-    describe("#given the stale-ctx_reduce regression shape", () => {
+    describe("#given the stale-eidnara_reduce regression shape", () => {
         describe("#when a mid-prefix message is removed and the tail shifts up", () => {
             it("#then the oracle flags a BUST at the vanished position", () => {
                 const withReduce = turn(
                     [
                         { role: "user", content: "keep me 0" },
-                        { role: "assistant", content: "CTX_REDUCE_TOOL_USE_BLOCK" },
+                        { role: "assistant", content: "EIDNARA_REDUCE_TOOL_USE_BLOCK" },
                         { role: "user", content: "keep me 2" },
                         { role: "assistant", content: "keep me 3" },
                     ],
@@ -287,7 +287,7 @@ describe("cache-bust oracle", () => {
         describe("#when some requests lack the Eidnara system block", () => {
             it("#then only Eidnara-carrying requests are kept", () => {
                 const carrying = turn([{ role: "user", content: "a" }], "b");
-                const subagent = { body: { system: "You are Historian", messages: [] } };
+                const subagent = { body: { system: "You are HistorySummarizer", messages: [] } };
                 const filtered = mainAgentRequests([carrying, subagent]);
                 expect(filtered).toHaveLength(1);
                 expect(filtered[0]).toBe(carrying);
@@ -301,8 +301,8 @@ describe("cache-bust oracle", () => {
                 "You are a title generator. You output ONLY a thread title.",
                 "Summarize what was done in this conversation. Write like a pull request description.",
                 "You are an anchored context summarization assistant for coding sessions.",
-                "You are Historian — the hippocampus of a long-running coding agent.",
-                "You are Sidekick, a focused memory-retrieval subagent for an AI coding assistant.",
+                "You are HistorySummarizer — the hippocampus of a long-running coding agent.",
+                "You are ContextResearcher, a focused memory-retrieval subagent for an AI coding assistant.",
             ];
             for (const signature of signatures) {
                 expect(
@@ -344,32 +344,34 @@ describe("cache-bust oracle", () => {
     });
 });
 
-describe("isHistorianRequest", () => {
+describe("isHistorySummarizerRequest", () => {
     // Derived from the production classifier so the fixture cannot drift
-    // from the opener the historian actually sends.
+    // from the opener the history_summarizer actually sends.
     const marker = EIDNARA_INTERNAL_AGENT_SIGNATURES.find((signature) =>
         signature.includes("hippocampus"),
     );
-    if (!marker) throw new Error("historian signature missing from production classifier");
+    if (!marker) throw new Error("history_summarizer signature missing from production classifier");
 
     it("detects the marker in string, block-array, and object system prompts, or a chunk envelope in messages", () => {
-        expect(isHistorianRequest({ system: `${marker} rest of prompt` })).toBe(true);
-        expect(isHistorianRequest({ system: [{ type: "text", text: marker }] })).toBe(true);
-        expect(isHistorianRequest({ system: { type: "text", text: marker } })).toBe(true);
-        // Union semantics: some historian requests carry the marker only in
+        expect(isHistorySummarizerRequest({ system: `${marker} rest of prompt` })).toBe(true);
+        expect(isHistorySummarizerRequest({ system: [{ type: "text", text: marker }] })).toBe(true);
+        expect(isHistorySummarizerRequest({ system: { type: "text", text: marker } })).toBe(true);
+        // Union semantics: some history_summarizer requests carry the marker only in
         // the messages payload; a system-only predicate calls them main-agent.
         expect(
-            isHistorianRequest({
+            isHistorySummarizerRequest({
                 system: "unrelated",
                 messages: [{ role: "user", content: "<new_messages>…</new_messages>" }],
             }),
         ).toBe(true);
     });
 
-    it("classifies absent and ordinary system prompts as not historian", () => {
-        expect(isHistorianRequest({ messages: [{ role: "user", content: "hi" }] })).toBe(false);
+    it("classifies absent and ordinary system prompts as not history_summarizer", () => {
+        expect(isHistorySummarizerRequest({ messages: [{ role: "user", content: "hi" }] })).toBe(
+            false,
+        );
         expect(
-            isHistorianRequest({
+            isHistorySummarizerRequest({
                 system: "You are a helpful coding assistant",
                 messages: [{ role: "user", content: "hello" }],
             }),

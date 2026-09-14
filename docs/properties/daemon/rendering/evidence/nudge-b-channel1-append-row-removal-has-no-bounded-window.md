@@ -63,7 +63,7 @@ from a thousand, and here it cannot distinguish either from zero.
 
 This is a fact about the schema and is recorded as one. It is not a recommendation:
 the parent record's second open question, which asks whether the reaper should key
-on the overlay frontier, on tag retirement or on compartment coverage, remains a
+on the overlay frontier, on tag retirement or on history_segment coverage, remains a
 design decision and is inherited here as this record's first open question.
 
 ### Why passes is nonetheless the natural unit
@@ -172,7 +172,7 @@ avoided entirely by the seeding helper.
   second investigation question, which reached the same three candidates.
 - Findings: three answers exist and they do not agree. Passes is the unit the
   module's own removability test is evaluated in. Milliseconds via `fired_at_ms` is
-  the unit the schema already stores. Compartment coverage is the semantically
+  the unit the schema already stores. HistorySegment coverage is the semantically
   correct key and is the one the row type cannot express. A record cannot choose
   between them, because the choice determines whether the row type changes.
 - Missing evidence: none needed for the observation; what is missing is a decision.

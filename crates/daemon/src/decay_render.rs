@@ -1,8 +1,8 @@
-//! The renderer produces m0/m1 markdown-heading history from chronological compartments.
+//! The renderer produces m0/m1 markdown-heading history from chronological history_segments.
 //!
 //! The renderer computes budget pressure once per pass before selecting tiers from age and importance.
-//! P5 omits the compartment as archived.
-//! The budget guard demotes compartments oldest-first until rendered tokens fit the hard budget.
+//! P5 omits the history_segment as archived.
+//! The budget guard demotes history_segments oldest-first until rendered tokens fit the hard budget.
 //!
 //! The renderer lives in the daemon because it produces bytes; `context-core` holds the pure decision math.
 //!
@@ -10,7 +10,7 @@
 //! When the budget guard does not run, `estimate_tokens` does not affect the output.
 
 use context_core::decay::{Tier, compute_budget_pressure, rendered_tier};
-use memory_store::StoredCompartment;
+use memory_store::StoredHistorySegment;
 
 /// Default hard budget measured by the caller's token estimator.
 pub const DEFAULT_HISTORY_BUDGET_TOKENS: u32 = 60_000;
@@ -19,7 +19,7 @@ pub const DEFAULT_HISTORY_BUDGET_TOKENS: u32 = 60_000;
 /// `legacy = Some(1)` identifies a pre-v2 row that renders from flat `content`.
 /// A legacy row renders from flat `content`; absent `importance` defaults to 50.
 #[derive(Debug, Clone, Default)]
-pub struct DecayRenderCompartment {
+pub struct DecayRenderHistorySegment {
     pub start_message: i64,
     pub end_message: i64,
     pub title: String,
@@ -34,10 +34,10 @@ pub struct DecayRenderCompartment {
     pub legacy: Option<i32>,
 }
 
-impl From<&StoredCompartment> for DecayRenderCompartment {
+impl From<&StoredHistorySegment> for DecayRenderHistorySegment {
     /// An empty `p1` identifies a non-tiered row; an empty `p4` on a row with non-empty `p1` produces a title-only row.
-    fn from(c: &StoredCompartment) -> Self {
-        DecayRenderCompartment {
+    fn from(c: &StoredHistorySegment) -> Self {
+        DecayRenderHistorySegment {
             start_message: c.start_message,
             end_message: c.end_message,
             title: c.title.clone(),
@@ -58,16 +58,16 @@ impl From<&StoredCompartment> for DecayRenderCompartment {
 ///
 /// `history_budget_tokens` and `estimate_tokens` must use the same token unit. Positive budgets
 /// enable oldest-first guard demotion; nonpositive budgets skip that guard.
-pub fn render_stored_compartments(
-    compartments: &[StoredCompartment],
+pub fn render_stored_history_segments(
+    history_segments: &[StoredHistorySegment],
     history_budget_tokens: f64,
     estimate_tokens: impl Fn(&str) -> usize,
 ) -> String {
-    let mapped: Vec<DecayRenderCompartment> = compartments
+    let mapped: Vec<DecayRenderHistorySegment> = history_segments
         .iter()
-        .map(DecayRenderCompartment::from)
+        .map(DecayRenderHistorySegment::from)
         .collect();
-    render_decayed_compartments(&mapped, history_budget_tokens, estimate_tokens)
+    render_decayed_history_segments(&mapped, history_budget_tokens, estimate_tokens)
 }
 
 fn escape_xml_content(s: &str) -> String {
@@ -94,7 +94,7 @@ fn format_date_range(start_date: Option<&str>, end_date: Option<&str>) -> String
     format!("{start_date}→{end_date}")
 }
 
-fn sanitize_compartment_title(title: &str) -> String {
+fn sanitize_history_segment_title(title: &str) -> String {
     // The renderer collapses controls and Unicode line and paragraph separators in titles to prevent multiline-heading forgery.
     let mut single_line = String::with_capacity(title.len());
     let mut replacing_control_run = false;
@@ -112,7 +112,7 @@ fn sanitize_compartment_title(title: &str) -> String {
     escape_xml_content(&single_line)
 }
 
-fn compartment_heading(c: &DecayRenderCompartment) -> String {
+fn history_segment_heading(c: &DecayRenderHistorySegment) -> String {
     let date_range = format_date_range(c.start_date.as_deref(), c.end_date.as_deref());
     let date_segment = if date_range.is_empty() {
         String::new()
@@ -123,12 +123,12 @@ fn compartment_heading(c: &DecayRenderCompartment) -> String {
         "## {}-{}{date_segment} · {}",
         c.start_message,
         c.end_message,
-        sanitize_compartment_title(&c.title)
+        sanitize_history_segment_title(&c.title)
     )
 }
 
-fn guard_compartment_body(body: &str) -> String {
-    // The renderer indents heading-like body lines so only an unindented `## ` line can start a compartment.
+fn guard_history_segment_body(body: &str) -> String {
+    // The renderer indents heading-like body lines so only an unindented `## ` line can start a history_segment.
     let guarded = body.replace("\n## ", "\n ## ");
     if guarded.starts_with("## ") {
         format!(" {guarded}")
@@ -137,12 +137,12 @@ fn guard_compartment_body(body: &str) -> String {
     }
 }
 
-fn is_tiered_row(c: &DecayRenderCompartment) -> bool {
+fn is_tiered_row(c: &DecayRenderHistorySegment) -> bool {
     c.p1.as_deref().is_some_and(|p| !p.is_empty())
 }
 
 /// The renderer uses the requested tier, then the densest populated denser tier, then flat content.
-fn tier_body(c: &DecayRenderCompartment, tier: u8) -> String {
+fn tier_body(c: &DecayRenderHistorySegment, tier: u8) -> String {
     let tiers = [
         c.p1.as_deref(),
         c.p2.as_deref(),
@@ -183,8 +183,8 @@ fn legacy_body_for_tier(content: &str, tier: u8) -> String {
     }
 }
 
-/// Legacy compartments start at P3 if the body has a `U:` line, else P4.
-fn legacy_tier(c: &DecayRenderCompartment) -> u8 {
+/// Legacy history_segments start at P3 if the body has a `U:` line, else P4.
+fn legacy_tier(c: &DecayRenderHistorySegment) -> u8 {
     if c.content.lines().any(|l| l.starts_with("U:")) {
         3
     } else {
@@ -192,19 +192,19 @@ fn legacy_tier(c: &DecayRenderCompartment) -> u8 {
     }
 }
 
-/// Renders one compartment at an explicit tier without applying decay or a token budget.
+/// Renders one history_segment at an explicit tier without applying decay or a token budget.
 ///
 /// Tiers 1 through 4 select progressively sparser output: a tiered row renders `p1` through `p4` and falls back to the nearest lower tier that is present, while a legacy or non-tiered row renders the heading alone at tier 4.
 /// Tier 5 and larger archive the row and return an empty string.
-pub fn render_compartment_at_tier(c: &DecayRenderCompartment, tier: u8) -> String {
-    render_one_compartment(c, tier)
+pub fn render_history_segment_at_tier(c: &DecayRenderHistorySegment, tier: u8) -> String {
+    render_one_history_segment(c, tier)
 }
 
-fn render_one_compartment(c: &DecayRenderCompartment, tier: u8) -> String {
+fn render_one_history_segment(c: &DecayRenderHistorySegment, tier: u8) -> String {
     if tier >= 5 {
         return String::new(); // archived
     }
-    let heading = compartment_heading(c);
+    let heading = history_segment_heading(c);
 
     // Rows without a non-empty `p1` use flat `content` so P1–P3 can render their body.
     if c.legacy == Some(1) || !is_tiered_row(c) {
@@ -212,7 +212,8 @@ fn render_one_compartment(c: &DecayRenderCompartment, tier: u8) -> String {
         if tier >= 4 || flat.is_empty() {
             return heading;
         }
-        let body = guard_compartment_body(&escape_xml_content(&legacy_body_for_tier(flat, tier)));
+        let body =
+            guard_history_segment_body(&escape_xml_content(&legacy_body_for_tier(flat, tier)));
         return format!("{heading}\n{body}");
     }
 
@@ -222,12 +223,12 @@ fn render_one_compartment(c: &DecayRenderCompartment, tier: u8) -> String {
     }
     format!(
         "{heading}\n{}",
-        guard_compartment_body(&escape_xml_content(&body))
+        guard_history_segment_body(&escape_xml_content(&body))
     )
 }
 
-/// `render_decayed_compartments` computes pressure from non-legacy compartments.
-/// The decay curve indexes non-legacy compartments from newest, with index 1 as newest.
+/// `render_decayed_history_segments` computes pressure from non-legacy history_segments.
+/// The decay curve indexes non-legacy history_segments from newest, with index 1 as newest.
 /// Legacy rows use deterministic truncation and do not contribute to pressure.
 /// Excluding legacy rows prevents their cost from demoting v2 paraphrases.
 /// The renderer indexes tier bodies by a 1-based ordinal; P5 is the archive tier.
@@ -241,8 +242,8 @@ fn tier_ordinal(tier: Tier) -> u8 {
     }
 }
 
-fn compute_tiers(compartments: &[DecayRenderCompartment], history_budget: f64) -> Vec<u8> {
-    let v2_indices: Vec<usize> = compartments
+fn compute_tiers(history_segments: &[DecayRenderHistorySegment], history_budget: f64) -> Vec<u8> {
+    let v2_indices: Vec<usize> = history_segments
         .iter()
         .enumerate()
         .filter(|(_, c)| c.legacy != Some(1))
@@ -257,7 +258,7 @@ fn compute_tiers(compartments: &[DecayRenderCompartment], history_budget: f64) -
     for (v2_ordinal, &original_index) in v2_indices.iter().enumerate() {
         let curve_index = (v2_total - v2_ordinal) as u32;
         curve_index_by_original.insert(original_index, curve_index);
-        importances_newest_first[curve_index as usize - 1] = compartments[original_index]
+        importances_newest_first[curve_index as usize - 1] = history_segments[original_index]
             .importance
             .unwrap_or(50)
             .clamp(1, 100);
@@ -268,7 +269,7 @@ fn compute_tiers(compartments: &[DecayRenderCompartment], history_budget: f64) -
         1.0
     };
 
-    compartments
+    history_segments
         .iter()
         .enumerate()
         .map(|(i, c)| {
@@ -286,28 +287,28 @@ fn compute_tiers(compartments: &[DecayRenderCompartment], history_budget: f64) -
         .collect()
 }
 
-/// Renders a decayed compartment-history body without a `<session-history>` wrapper.
+/// Renders a decayed history_segment-history body without a `<session-history>` wrapper.
 ///
 /// Input order must be chronological from oldest to newest because curve indexing and guard
 /// demotion depend on position. The renderer never emits session facts. `history_budget_tokens`
 /// and `estimate_tokens` must use the same token unit. For a positive budget, the guard demotes
 /// oldest rows first until output fits or every row reaches tier 5. Nonpositive budgets disable
 /// the guard.
-pub fn render_decayed_compartments(
-    compartments: &[DecayRenderCompartment],
+pub fn render_decayed_history_segments(
+    history_segments: &[DecayRenderHistorySegment],
     history_budget_tokens: f64,
     estimate_tokens: impl Fn(&str) -> usize,
 ) -> String {
-    if compartments.is_empty() {
+    if history_segments.is_empty() {
         return String::new();
     }
-    let mut tiers = compute_tiers(compartments, history_budget_tokens);
+    let mut tiers = compute_tiers(history_segments, history_budget_tokens);
 
-    // Each demotion changes one tier, so rerender only that compartment.
-    let mut rendered: Vec<String> = compartments
+    // Each demotion changes one tier, so rerender only that history_segment.
+    let mut rendered: Vec<String> = history_segments
         .iter()
         .zip(&tiers)
-        .map(|(c, t)| render_one_compartment(c, *t))
+        .map(|(c, t)| render_one_history_segment(c, *t))
         .collect();
     let join_body = |rendered: &[String]| -> String {
         let parts: Vec<&str> = rendered
@@ -321,7 +322,7 @@ pub fn render_decayed_compartments(
     let mut body = join_body(&rendered);
     // Budget guard: the curve already targets the budget, but estimate drift or a very
     // tight budget can overshoot. Demote oldest-first until it fits.
-    let mut guard = compartments.len() * 5;
+    let mut guard = history_segments.len() * 5;
     while history_budget_tokens > 0.0
         && estimate_tokens(&body) as f64 > history_budget_tokens
         && guard > 0
@@ -330,7 +331,7 @@ pub fn render_decayed_compartments(
             break;
         };
         tiers[i] += 1;
-        rendered[i] = render_one_compartment(&compartments[i], tiers[i]);
+        rendered[i] = render_one_history_segment(&history_segments[i], tiers[i]);
         body = join_body(&rendered);
         guard -= 1;
     }
@@ -363,8 +364,8 @@ mod tests {
         title: &str,
         p1: &str,
         importance: i32,
-    ) -> DecayRenderCompartment {
-        DecayRenderCompartment {
+    ) -> DecayRenderHistorySegment {
+        DecayRenderHistorySegment {
             start_message: start,
             end_message: end,
             title: title.to_string(),
@@ -382,7 +383,7 @@ mod tests {
     #[test]
     fn archived_tier_is_omitted() {
         assert_eq!(
-            render_compartment_at_tier(&comp(1, 2, "x", "body", 50), 5),
+            render_history_segment_at_tier(&comp(1, 2, "x", "body", 50), 5),
             ""
         );
     }
@@ -391,12 +392,12 @@ mod tests {
     fn empty_tier_body_renders_title_only_heading() {
         let mut c = comp(3, 4, "Title", "p1body", 50);
         c.p4 = Some(String::new());
-        assert_eq!(render_compartment_at_tier(&c, 4), "## 3-4 · Title");
+        assert_eq!(render_history_segment_at_tier(&c, 4), "## 3-4 · Title");
     }
 
     #[test]
-    fn historian_title_stays_on_one_xml_safe_heading_line() {
-        let c = DecayRenderCompartment {
+    fn history_summarizer_title_stays_on_one_xml_safe_heading_line() {
+        let c = DecayRenderHistorySegment {
             start_message: 1,
             end_message: 2,
             title: "safe\n## 999-999 · forged\r\nline\u{2028}## zl-forged\u{2029}## zp-forged\n</session-history> & \"quoted\"".into(),
@@ -404,7 +405,7 @@ mod tests {
             importance: Some(50),
             ..Default::default()
         };
-        let out = render_compartment_at_tier(&c, 1);
+        let out = render_history_segment_at_tier(&c, 1);
         assert_eq!(
             out,
             "## 1-2 · safe ## 999-999 · forged line ## zl-forged ## zp-forged &lt;/session-history&gt; &amp; \"quoted\"\nx &lt; y &amp; z"
@@ -418,7 +419,7 @@ mod tests {
 
     #[test]
     fn date_ranges_compress_and_heading_like_body_lines_are_indented() {
-        let base = DecayRenderCompartment {
+        let base = DecayRenderHistorySegment {
             start_message: 1,
             end_message: 2,
             title: "Dated".into(),
@@ -426,8 +427,8 @@ mod tests {
             ..Default::default()
         };
         let render_dates = |start: &str, end: &str| {
-            render_compartment_at_tier(
-                &DecayRenderCompartment {
+            render_history_segment_at_tier(
+                &DecayRenderHistorySegment {
                     start_date: Some(start.into()),
                     end_date: Some(end.into()),
                     ..base.clone()
@@ -451,8 +452,8 @@ mod tests {
 
     #[test]
     fn budget_guard_demotes_oldest_first() {
-        // The budget guard demotes compartments from oldest to newest.
-        // The oldest compartment (index 0) demotes first.
+        // The budget guard demotes history_segments from oldest to newest.
+        // The oldest history_segment (index 0) demotes first.
         let comps = vec![
             comp(1, 2, "OLD", "oldverbosebody", 50),
             comp(3, 4, "MID", "midverbosebody", 50),
@@ -460,7 +461,7 @@ mod tests {
         ];
         let chars = |s: &str| s.chars().count();
         // The 80-character budget forces demotion until the output fits.
-        let out = render_decayed_compartments(&comps, 80.0, chars);
+        let out = render_decayed_history_segments(&comps, 80.0, chars);
         assert!(
             chars(&out) as f64 <= 80.0 || out.is_empty(),
             "fits budget: {}",
@@ -470,8 +471,8 @@ mod tests {
     }
 
     #[test]
-    fn stored_compartment_projects_and_renders() {
-        let stored = StoredCompartment {
+    fn stored_history_segment_projects_and_renders() {
+        let stored = StoredHistorySegment {
             sequence: 1,
             start_message: 1,
             end_message: 9,
@@ -485,10 +486,10 @@ mod tests {
             legacy: 0,
             ..Default::default()
         };
-        let out = render_stored_compartments(std::slice::from_ref(&stored), 60_000.0, no_guard);
+        let out = render_stored_history_segments(std::slice::from_ref(&stored), 60_000.0, no_guard);
         assert_eq!(out, "## 1-9 · 2026-01-02→03 · Stored\nP1 full");
         // An empty `p1` makes a stored row non-tiered, so it renders flat content.
-        let legacy_ish = StoredCompartment {
+        let legacy_ish = StoredHistorySegment {
             sequence: 1,
             title: "Flat".into(),
             content: "flat".into(),
@@ -497,10 +498,10 @@ mod tests {
             ..Default::default()
         };
         let out2 =
-            render_stored_compartments(std::slice::from_ref(&legacy_ish), 60_000.0, no_guard);
+            render_stored_history_segments(std::slice::from_ref(&legacy_ish), 60_000.0, no_guard);
         assert_eq!(out2, "## 0-0 · Flat\nflat");
 
-        let partial = DecayRenderCompartment {
+        let partial = DecayRenderHistorySegment {
             start_message: 1,
             end_message: 2,
             title: "Partial".into(),
@@ -509,7 +510,7 @@ mod tests {
             legacy: Some(1),
             ..Default::default()
         };
-        let partial_out = render_compartment_at_tier(&partial, 1);
+        let partial_out = render_history_segment_at_tier(&partial, 1);
         assert_eq!(partial_out, "## 1-2 · Partial\nflat");
     }
 
@@ -545,7 +546,7 @@ mod tests {
     }
     #[derive(Deserialize)]
     struct RenderCase {
-        compartments: Vec<RawComp>,
+        history_segments: Vec<RawComp>,
         budget: f64,
         body: String,
     }
@@ -561,10 +562,10 @@ mod tests {
         assert!(!golden.cases.is_empty(), "empty render golden");
 
         for (n, case) in golden.cases.iter().enumerate() {
-            let comps: Vec<DecayRenderCompartment> = case
-                .compartments
+            let comps: Vec<DecayRenderHistorySegment> = case
+                .history_segments
                 .iter()
-                .map(|r| DecayRenderCompartment {
+                .map(|r| DecayRenderHistorySegment {
                     start_message: r.start,
                     end_message: r.end,
                     title: r.title.clone(),
@@ -579,7 +580,7 @@ mod tests {
                     legacy: r.legacy,
                 })
                 .collect();
-            let got = render_decayed_compartments(&comps, case.budget, no_guard);
+            let got = render_decayed_history_segments(&comps, case.budget, no_guard);
             assert_eq!(got, case.body, "render mismatch in case {n}");
         }
     }
@@ -588,7 +589,7 @@ mod tests {
     fn redacted_store_shape_matches_ts_at_real_history_budgets() {
         #[derive(Deserialize)]
         struct ShapeFixture {
-            compartments: Vec<RawComp>,
+            history_segments: Vec<RawComp>,
         }
         #[derive(Deserialize)]
         struct DifferentialCase {
@@ -609,14 +610,14 @@ mod tests {
             serde_json::from_str(include_str!("../testdata/decay-store-shape.json"))
                 .expect("parse redacted store shape");
         assert_eq!(
-            shape.compartments.len(),
+            shape.history_segments.len(),
             388,
             "fixture must preserve the store shape"
         );
-        let compartments: Vec<DecayRenderCompartment> = shape
-            .compartments
+        let history_segments: Vec<DecayRenderHistorySegment> = shape
+            .history_segments
             .iter()
-            .map(|raw| DecayRenderCompartment {
+            .map(|raw| DecayRenderHistorySegment {
                 start_message: raw.start,
                 end_message: raw.end,
                 title: raw.title.clone(),
@@ -638,8 +639,11 @@ mod tests {
 
         let mut previous_cost = None;
         for case in &differential.cases {
-            let body =
-                render_decayed_compartments(&compartments, case.budget, tokenizer::estimate_tokens);
+            let body = render_decayed_history_segments(
+                &history_segments,
+                case.budget,
+                tokenizer::estimate_tokens,
+            );
             let rust_cost = tokenizer::estimate_tokens(&body);
             assert_eq!(
                 rust_cost, case.ts_cost,
@@ -677,10 +681,10 @@ mod tests {
                 body.split("\n\n").collect::<Vec<_>>()
             };
             let mut tier_counts = [0usize; 5];
-            for compartment in &compartments {
+            for history_segment in &history_segments {
                 let heading = format!(
                     "## {}-{}",
-                    compartment.start_message, compartment.end_message
+                    history_segment.start_message, history_segment.end_message
                 );
                 let section = sections
                     .iter()
@@ -688,7 +692,7 @@ mod tests {
                     .copied();
                 let mut selected = 5usize;
                 for tier in 1..=5u8 {
-                    if render_compartment_at_tier(compartment, tier).as_str()
+                    if render_history_segment_at_tier(history_segment, tier).as_str()
                         == section.unwrap_or("")
                     {
                         selected = tier as usize;
@@ -713,10 +717,10 @@ mod tests {
 
         let mut fired = 0;
         for (n, case) in golden.cases.iter().enumerate() {
-            let comps: Vec<DecayRenderCompartment> = case
-                .compartments
+            let comps: Vec<DecayRenderHistorySegment> = case
+                .history_segments
                 .iter()
-                .map(|r| DecayRenderCompartment {
+                .map(|r| DecayRenderHistorySegment {
                     start_message: r.start,
                     end_message: r.end,
                     title: r.title.clone(),
@@ -731,13 +735,14 @@ mod tests {
                     legacy: r.legacy,
                 })
                 .collect();
-            let got = render_decayed_compartments(&comps, case.budget, tokenizer::estimate_tokens);
+            let got =
+                render_decayed_history_segments(&comps, case.budget, tokenizer::estimate_tokens);
             assert_eq!(
                 got, case.body,
                 "tight render mismatch in case {n} (budget {})",
                 case.budget
             );
-            // The guard stops when the output fits, every compartment reaches tier 5, or `guard` reaches zero.
+            // The guard stops when the output fits, every history_segment reaches tier 5, or `guard` reaches zero.
             // A curve output that already fits does not exercise the guard.
             if tokenizer::estimate_tokens(&got) as f64 <= case.budget || got.is_empty() {
                 fired += 1;

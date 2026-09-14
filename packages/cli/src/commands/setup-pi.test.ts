@@ -254,7 +254,7 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => settingsPath,
             },
         };
-        // The confirmations are configurePi=false and sidekickEnabled=false.
+        // The confirmations are configurePi=false and context_researcherEnabled=false.
         const prompts = new MockPrompts({ confirms: [false, false] });
 
         const code = await runSetup({ prompts, env });
@@ -262,9 +262,9 @@ describe("runSetup", () => {
         expect(code).toBe(0);
         expect(readFileSync(settingsPath, "utf-8")).toBe(malformed);
         const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
-            historian?: { model?: string };
+            history_summarizer?: { model?: string };
         };
-        expect(config.historian?.model).toBe("anthropic/claude-haiku-4-5");
+        expect(config.history_summarizer?.model).toBe("anthropic/claude-haiku-4-5");
         expect(prompts.messages.join("\n")).toContain("Skipped Pi package registration.");
     });
 
@@ -280,8 +280,8 @@ describe("runSetup", () => {
             [
                 "{",
                 "  // top-level note",
-                '  "historian": {',
-                "    // inside historian",
+                '  "history_summarizer": {',
+                "    // inside history_summarizer",
                 '    "model": "anthropic/claude-sonnet-4-6"',
                 "  },",
                 "  /* compaction stays off */",
@@ -301,7 +301,7 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
-        // The confirmations are configurePi=true and sidekickEnabled=false.
+        // The confirmations are configurePi=true and context_researcherEnabled=false.
         const prompts = new MockPrompts({ confirms: [true, false] });
 
         const code = await runSetup({ prompts, env });
@@ -309,13 +309,13 @@ describe("runSetup", () => {
         expect(code).toBe(0);
         const written = readFileSync(configPath, "utf-8");
         expect(written).toContain("// top-level note");
-        expect(written).toContain("// inside historian");
+        expect(written).toContain("// inside history_summarizer");
         expect(written).toContain("/* compaction stays off */");
         const config = parseJsonc(written) as {
-            historian?: { model?: string };
+            history_summarizer?: { model?: string };
             compaction?: { enabled?: boolean };
         };
-        expect(config.historian?.model).toBe("anthropic/claude-haiku-4-5");
+        expect(config.history_summarizer?.model).toBe("anthropic/claude-haiku-4-5");
         expect(config.compaction?.enabled).toBe(false);
     });
 
@@ -413,7 +413,7 @@ describe("runSetup", () => {
                     throw new Error("plugin undo failed");
                 },
             };
-            // The confirmations are configureHost=true and sidekickEnabled=false.
+            // The confirmations are configureHost=true and context_researcherEnabled=false.
             const prompts = new MockPrompts({ confirms: [true, false] });
 
             const code = await runSetup({ prompts, env, host });
@@ -751,7 +751,7 @@ describe("runSetup", () => {
         }
     });
 
-    it("persists historian and sidekick thinking levels for GitHub Copilot models", async () => {
+    it("persists history_summarizer and context_researcher thinking levels for GitHub Copilot models", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
         setConfigEnv(root, agentDir);
@@ -769,23 +769,23 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
-        // The confirmations are configurePi=true and sidekickEnabled=true.
+        // The confirmations are configurePi=true and context_researcherEnabled=true.
         const prompts = new MockPrompts({ confirms: [true, true] });
 
         const code = await runSetup({ prompts, env });
 
         expect(code).toBe(0);
         const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
-            historian?: { model?: string; thinking_level?: string };
-            sidekick?: { model?: string; thinking_level?: string; disable?: boolean };
+            history_summarizer?: { model?: string; thinking_level?: string };
+            context_researcher?: { model?: string; thinking_level?: string; disable?: boolean };
         };
-        expect(config.historian?.model).toBe("github-copilot/gpt-5.4");
-        expect(config.historian?.thinking_level).toBe("medium");
-        expect(config.sidekick?.model).toBe("github-copilot/gpt-5.4");
-        expect(config.sidekick?.thinking_level).toBe("medium");
-        expect(config.sidekick?.disable).toBeUndefined();
+        expect(config.history_summarizer?.model).toBe("github-copilot/gpt-5.4");
+        expect(config.history_summarizer?.thinking_level).toBe("medium");
+        expect(config.context_researcher?.model).toBe("github-copilot/gpt-5.4");
+        expect(config.context_researcher?.thinking_level).toBe("medium");
+        expect(config.context_researcher?.disable).toBeUndefined();
         expect(prompts.messages.join("\n")).toContain(
-            "Sidekick: github-copilot/gpt-5.4 (thinking: medium)",
+            "ContextResearcher: github-copilot/gpt-5.4 (thinking: medium)",
         );
     });
 
@@ -816,10 +816,10 @@ describe("runSetup", () => {
         expect(existsSync(join(configDir, "eidnara.jsonc"))).toBe(false);
         const config = parseJsonc(readFileSync(join(configDir, "eidnara.json"), "utf-8")) as {
             language?: string;
-            historian?: { model?: string };
+            history_summarizer?: { model?: string };
         };
         expect(config.language).toBe("de");
-        expect(config.historian?.model).toBe("anthropic/claude-haiku-4-5");
+        expect(config.history_summarizer?.model).toBe("anthropic/claude-haiku-4-5");
     });
 
     it("round-trips mixed string and object package entries when adding Eidnara", () => {
@@ -866,7 +866,7 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
-        // MockPrompts consumes confirmations as configurePi=true and sidekickEnabled=false.
+        // MockPrompts consumes confirmations as configurePi=true and context_researcherEnabled=false.
         const prompts = new MockPrompts({ confirms: [true, false] });
 
         const code = await runSetup({ prompts, env });
@@ -884,15 +884,15 @@ describe("runSetup", () => {
         expect(settings.packages).toContain("npm:@eidnara/pi");
 
         const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
-            historian?: { model?: string; thinking_level?: string };
-            sidekick?: { enabled?: boolean; disable?: boolean };
+            history_summarizer?: { model?: string; thinking_level?: string };
+            context_researcher?: { enabled?: boolean; disable?: boolean };
         };
         // The picker shows the full model list sorted alphabetically.
-        // The mock selects "anthropic/claude-haiku-4-5" for the historian.
-        expect(config.historian?.model).toBe("anthropic/claude-haiku-4-5");
-        expect(config.historian?.thinking_level).toBeUndefined();
-        expect(config.sidekick?.disable).toBe(true);
-        expect(config.sidekick).not.toHaveProperty("enabled");
+        // The mock selects "anthropic/claude-haiku-4-5" for the history_summarizer.
+        expect(config.history_summarizer?.model).toBe("anthropic/claude-haiku-4-5");
+        expect(config.history_summarizer?.thinking_level).toBeUndefined();
+        expect(config.context_researcher?.disable).toBe(true);
+        expect(config.context_researcher).not.toHaveProperty("enabled");
     });
 
     it("refuses a malformed target during a dry run, matching a real run", async () => {
@@ -1009,7 +1009,7 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
-        // The confirmations are continue-anyway=true, configurePi=true, and sidekickEnabled=false.
+        // The confirmations are continue-anyway=true, configurePi=true, and context_researcherEnabled=false.
         const prompts = new MockPrompts({ confirms: [true, true, false] });
 
         const code = await runSetup({ prompts, env });

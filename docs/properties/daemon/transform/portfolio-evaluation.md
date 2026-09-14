@@ -47,7 +47,7 @@ resolved a contradiction inside one record rather than dividing it in two.
 Semantics distribution **19 `always`, 1 `always-or-unreached`, 3 `sometimes`, 0
 `reachable`, 1 `unreachable`**, against 21/1/2/0/0 before. `always(!X)` is counted
 as `always`, following Part 4a's convention. Two records moved: the tag-hydration
-record from `always` to `sometimes` (R2, R9) and the caveman record from `always`
+record from `always` to `sometimes` (R2, R9) and the terse_text_compression record from `always`
 to `unreachable` (R6).
 
 Types **19 safety, 4 liveness, 1 reachability**, against 21/3/0 before. The part
@@ -99,7 +99,7 @@ state is observable today from a crafted request with no new seam:
   `OrdinalViolation` (`:3367-3372`) can each reject the same pass. Verified by
   reading the straight-line order: nothing between `:3312` and `:3372` is
   conditional on a fault.
-- `store.truncate_compartments_for_revert` (`:4646`) commits, re-points the pass's
+- `store.truncate_history_segments_for_revert` (`:4646`) commits, re-points the pass's
   own CAS expectation (`:4651`) and adopts the new epoch (`:4652`), and the
   `CoverageGap` at `:4704` sits downstream of it.
 
@@ -267,10 +267,10 @@ carries the qualification explicitly to stop a reader reading a contradiction.
 
 ### R6. A record that promised the opposite of what the code does
 
-Applied in `catalog.md` on `sel-caveman-deeper-tier-growth-panics-in-production`,
+Applied in `catalog.md` on `sel-terse_text_compression-deeper-tier-growth-panics-in-production`,
 with matching changes in `fault-map.md`'s map row and anti-pattern list.
 
-The guarantee read: "Deepening a caveman tier never produces a longer payload than
+The guarantee read: "Deepening a terse_text_compression tier never produces a longer payload than
 the tier already frozen for that block, **and if it could, the pass does not
 panic**." The implementation panics. `transform.rs:6366-6369` is
 `assert!(compressed.len() <= existing.frozen_payload.len(), ...)`, a bare
@@ -291,9 +291,9 @@ forbidden states with no detection point. The type moves to `reachability`
 accordingly, giving the part its first reachability record.
 
 The change also makes the record consistent with guidance the fault map already
-carried. That file forbids a `sometimes(caveman_payload_grew)` marker because it
+carried. That file forbids a `sometimes(terse_text_compression_payload_grew)` marker because it
 can only fire by crashing the pass, and directs coverage at the equal-length arm
-via `transform_caveman_deeper_tier_tied_on_length`. An `unreachable` check needs
+via `transform_terse_text_compression_deeper_tier_tied_on_length`. An `unreachable` check needs
 no witness of the forbidden state, so the record and the marker guidance now agree
 instead of pulling against each other. Whether the assertion should be a panic at
 all remains in the fault map's product-decision list, untouched.
@@ -365,7 +365,7 @@ inputs agree) and folds the singleton into the configuration group while keeping
 its distinctness in the preamble.
 
 The map is trimmed from ten clusters to the three that genuinely cross a group
-boundary: the lease-freeze cluster (groups 3 and 2), the caveman config-gated pair
+boundary: the lease-freeze cluster (groups 3 and 2), the terse_text_compression config-gated pair
 (4 and 2), and the enforced-by-convention cluster (4 and 2). Without that trim the
 collapse would have moved the duplication rather than removed it. The clusters that
 were dropped are named in the map with the reason, so their omission is not read as
@@ -389,7 +389,7 @@ preference, and each was verified for this disposition.
 | G3 | **`m0_compose.rs`, `m1_compose.rs` and `retained_size.rs` carry determinism and accounting claims across 845 lines with zero tests and zero records.** Verified: 403, 230 and 212 lines, and no `#[test]` or `#[tokio::test]` attribute in any of the three. `existing-checks.md` records this as quiet area 4; the catalog has no record. Between them these files own m0 bytes, m1 bytes and every retention accounting number in the sub-part, and `m0_compose.rs:6-9` states the purity claim the frozen-m0 cache depends on while `m1_compose.rs` has neither tests nor doc comments and is the producer for the m1 digest-completeness claim stated 279 lines away at `transform.rs:509-512`. |
 | G4 | **The documented lower bound on `execute_threshold_percentage` is not captured.** `CONFIGURATION.md:167` (source-catalog path, not present at HEAD) documents the key as `number` (20-90). `config.rs:568-570` enforces `clamp(1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE)` where the constant is `90.0` (`config.rs:28`), so the documented lower bound of 20 is enforced as 1. Verified both sides. `existing-checks.md` names it inside quiet area 10 as one of four documentation-versus-config divergences; no record covers it, and it is the one of the four where the code silently accepts a value the documentation forbids rather than silently ignoring a key. |
 | G5 | **The store transform transaction's partial-failure atomicity has no property.** `memory-store/src/lib.rs:7259` documents `commit_transform` as committing "accepted cache state and its speculative overlays in one CAS transaction", and the body writes ten groups across `:7390-7597`. `fault-map.md` already records that no catalog record depends on fault class T3, a fault landing between two of those groups, and its leverage ranking puts T3 last precisely because nothing needs it. That is the finding rather than the excuse: the sub-part's whole-or-nothing claim covers ten write groups and no property tests it at the partial-commit level. `transform_cas_conflict_leaves_every_overlay_table_empty` (`:14562`) tests outcome-level rejection, which is a different obligation. |
-| G6 | **Reachability records are near-absent from a subsystem with a live panic path.** Before this disposition the part had zero; after R6 it has exactly one, and the gap is narrower than the evaluator stated but not closed. Four panicking sites are in production code (`existing-checks.md`, production-assertions cluster) and three can fire in a release build: the caveman `assert!` at `:6366-6369`, now covered; the two projection `assert_eq!` behind an environment variable, which are G2; and the `unreachable!` at `:3068`, which is G1. So the residual gap is precisely G1 plus G2, and it is recorded separately because the framing matters: a subsystem whose invariants live in guard clusters returning `Result` needs reachability records for the few places that panic instead, and until G1 and G2 land the part reasons about two of its three release-live panics without a property. |
+| G6 | **Reachability records are near-absent from a subsystem with a live panic path.** Before this disposition the part had zero; after R6 it has exactly one, and the gap is narrower than the evaluator stated but not closed. Four panicking sites are in production code (`existing-checks.md`, production-assertions cluster) and three can fire in a release build: the terse_text_compression `assert!` at `:6366-6369`, now covered; the two projection `assert_eq!` behind an environment variable, which are G2; and the `unreachable!` at `:3068`, which is G1. So the residual gap is precisely G1 plus G2, and it is recorded separately because the framing matters: a subsystem whose invariants live in guard clusters returning `Result` needs reachability records for the few places that panic instead, and until G1 and G2 land the part reasons about two of its three release-live panics without a property. |
 
 ## Biases requiring human judgment
 
@@ -439,7 +439,7 @@ preference, and each was verified for this disposition.
    single coverage note in `existing-checks.md` and stop restating it. **This
    refrain risk is not local to Part 4b.** Part 4a recorded the same observation as
    its queued gap G5, with the difference that 4a at least has an in-crate
-   TypeScript-oracle golden (`historian_validate.rs:1384`) and 4b has no
+   TypeScript-oracle golden (`history_summarizer_validate.rs:1384`) and 4b has no
    counterpart. Two parts have now independently produced the same unresolved
    finding and neither has produced a property, which suggests the decision belongs
    above the part level, as a single cross-part call rather than as a paragraph
@@ -452,7 +452,7 @@ applying all ten refinements the honest answer is still not ready, but the reaso
 has changed and the portfolio is materially more trustworthy than it was.
 
 What improved concretely. Four records that contradicted themselves or their cited
-code no longer do: the caveman record no longer promises graceful handling of a
+code no longer do: the terse_text_compression record no longer promises graceful handling of a
 case that panics, the eligibility record no longer inverts the scheduler's
 behaviour, the protected-tags record no longer guarantees more than it checks, and
 the tag-hydration record is no longer a static source claim wearing a runtime
@@ -496,7 +496,7 @@ but one is misnamed: `sel-cas-retry-budget-bounded-tag-hydration-unbounded.md`
 still carries the pre-R2 slug and the pre-R9 static framing, and the renamed record
 links to it deliberately so no link breaks. Two evidence files need a follow-up
 pass before the mechanical check is clean: that one needs a rename and a rewrite,
-and `sel-caveman-deeper-tier-growth-panics-in-production.md` still argues the
+and `sel-terse_text_compression-deeper-tier-growth-panics-in-production.md` still argues the
 `always` size-relation framing that R6 replaced with an `unreachable` panic edge.
 The affected records say so at their `Confidence:` lines. This disposition was
 scoped to the three artifacts and explicitly forbidden from touching `evidence/`.

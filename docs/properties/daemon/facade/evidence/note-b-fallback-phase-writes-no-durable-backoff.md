@@ -20,7 +20,8 @@ belongs to a phase whose own comment says it costs a model call.
        ...
    }
    ```
-   (`crates/daemon/src/smart_note_evaluation.rs:647-656`)
+
+   (`crates/daemon/src/conditional_note_evaluation.rs:647-656`)
 
    No `check_next_due_at`, no `check_quarantined_until`, no counter.
 
@@ -29,6 +30,7 @@ belongs to a phase whose own comment says it costs a model call.
    ```
    .filter(|note| eligible(note, retina_handoff) && note.check_status == "fallback")
    ```
+
    (`:795`)
 
    Compare the due selector, which requires
@@ -44,7 +46,7 @@ belongs to a phase whose own comment says it costs a model call.
    `:544-545`, which writes both the due time and a quarantine. Fallback is the
    only arm with nothing.
 
-4. The cost is stated in the file. `SmartNoteCycleMode::Nonbillable`'s doc
+4. The cost is stated in the file. `ConditionalNoteCycleMode::Nonbillable`'s doc
    comment says the nonbillable drain exposes "sandbox-only due and liveness
    (10/10). Compile and fallback claims launch LLM prompts and belong to the
    scheduled full-budget drain" (`:818-821`), and the same reasoning is repeated
@@ -52,7 +54,7 @@ belongs to a phase whose own comment says it costs a model call.
    claim is a billable model call by the module's own account.
 
 5. The only rate limit is in-memory and self-clearing.
-   `SmartNoteSelectionCycle::attempted_fallback` is a `Vec<i64>`
+   `ConditionalNoteSelectionCycle::attempted_fallback` is a `Vec<i64>`
    (`:874`) whose own doc comment explains the need: "A false or abandoned
    fallback note stays eligible in the store, so without this exclusion the
    deterministic ordering would hand the same note back before later fallback
@@ -60,10 +62,10 @@ belongs to a phase whose own comment says it costs a model call.
    problem and a per-cycle solution to it.
 
 6. The cycle resets on every fresh `no_work`.
-   `*slot_cycle = SmartNoteSelectionCycle::new(mode)` at `lib.rs:11265`, taken
+   `*slot_cycle = ConditionalNoteSelectionCycle::new(mode)` at `lib.rs:11265`, taken
    whenever the store commits a `NoteEvalAcquireOutcome::NoWork { replayed:
-   false, .. }`. `SmartNoteSelectionCycle::new` sets `attempted_fallback:
-   Vec::new()` (`smart_note_evaluation.rs:883`). The registration's
+   false, .. }`. `ConditionalNoteSelectionCycle::new` sets `attempted_fallback:
+   Vec::new()` (`conditional_note_evaluation.rs:883`). The registration's
    `slot_cycles` are also described as boot-ephemeral and disappearing with the
    registration entry (`lib.rs:2987-2991`), so a lease expiry, an unregister, a
    route teardown, or a process restart clears them too.
@@ -76,7 +78,7 @@ belongs to a phase whose own comment says it costs a model call.
    claim-then-complete loop never approaches because each claim terminates before
    the next.
 
-8. `MAX_FALLBACK_PER_RUN` is 3 (`smart_note_evaluation.rs:30`) and bounds one
+8. `MAX_FALLBACK_PER_RUN` is 3 (`conditional_note_evaluation.rs:30`) and bounds one
    cycle, not the poll rate.
 
 ## Failure scenario
@@ -90,7 +92,7 @@ normal state after a single check was demoted. An evaluator polls in a loop.
 2. The evaluator completes with `fallback false`. The note's durable state gains
    a new `last_checked_at` and nothing that gates it.
 3. Poll 2. The fallback branch runs
-   `get_fallback_smart_notes(...).into_iter().find(|note|
+   `get_fallback_conditional_notes(...).into_iter().find(|note|
    !cycle.attempted_fallback.contains(&note.id))` (`:932-937`) and finds nothing,
    because the only fallback note is excluded. The loop ends, selection returns
    `None` (`:948`).
@@ -128,18 +130,18 @@ period.
 
 The structural oracle is pure and cheap:
 
-1. Build a `SmartNoteLifecycleState` with `check_status = "fallback"`.
+1. Build a `ConditionalNoteLifecycleState` with `check_status = "fallback"`.
 2. Reduce with
-   `SmartNoteEvaluationOutcome::Fallback(FallbackOutcome::False)`.
+   `ConditionalNoteEvaluationOutcome::Fallback(FallbackOutcome::False)`.
 3. Assert that at least one of `next.check_next_due_at` or
    `next.check_quarantined_until` advanced past `now`. Neither will have.
 
 The behavioural oracle needs the store, because the reset is in the handler:
 
-1. Open a store, register an evaluator, insert one smart note, and drive it to
+1. Open a store, register an evaluator, insert one conditional note, and drive it to
    `check_status = "fallback"` (three compile failures, or stage the column
    directly as the existing revision-matrix test does at
-   `smart_note_evaluation.rs:1278-1337`).
+   `conditional_note_evaluation.rs:1278-1337`).
 2. Loop: `note.evaluation.next`, then `complete` with `fallback false` if a claim
    came back.
 3. Run the loop with a *frozen* clock, so no backoff anywhere could explain the
@@ -159,7 +161,7 @@ isolates the missing gate.
   v2.0 restricts to exactly 0, rejecting anything else with
   `positive_wait_unsupported` at `:11140-11145`), the bridge construction at
   `packages/plugin/src/hooks/eidnara/hook.ts:1015-1213` (source-catalog path, not present at HEAD), and the file list
-  of `packages/plugin/src/features/eidnara/smart-notes/`, which contains
+  of `packages/plugin/src/features/eidnara/conditional-notes/`, which contains
   `evaluator-worker.ts`.
 - Findings: the module cannot impose a wait. `wait_ms` must be 0, so the module
   answers immediately and every pacing decision belongs to the client. The
@@ -178,7 +180,7 @@ isolates the missing gate.
 
 ### Q: Is the absent gate deliberate, on the reading that fallback is cheap?
 
-- Sources examined: `smart_note_evaluation.rs:818-821` and
+- Sources examined: `conditional_note_evaluation.rs:818-821` and
   `lib.rs:11209-11212` (both state fallback claims launch LLM prompts),
   `:785-787` (the fallback rotation's stated purpose), `:871-873`
   (`attempted_fallback`'s stated purpose).

@@ -82,7 +82,7 @@ struct MeasuredPart {
 
 struct MemoEntry {
     projection_hash: [u8; 32],
-    caveman: Option<[u8; 32]>,
+    terse_text_compression: Option<[u8; 32]>,
     excluded: bool,
     text_role: bool,
     measured: MeasuredPart,
@@ -95,7 +95,7 @@ impl MemoEntry {
 }
 
 /// Length prefixes prevent ambiguous concatenation of adjacent fields.
-fn caveman_fingerprint(unit: &FrozenUnit) -> [u8; 32] {
+fn terse_text_compression_fingerprint(unit: &FrozenUnit) -> [u8; 32] {
     let mut hasher = Sha256::new();
     for field in [
         unit.key.as_str(),
@@ -163,7 +163,7 @@ impl TailHygieneMemo {
         &self,
         key: &str,
         block: &FlatBlock,
-        caveman: Option<[u8; 32]>,
+        terse_text_compression: Option<[u8; 32]>,
         excluded: bool,
     ) -> Option<MeasuredPart> {
         let measured = self
@@ -171,7 +171,7 @@ impl TailHygieneMemo {
             .get(key)
             .filter(|entry| {
                 entry.projection_hash == block.content_hash
-                    && entry.caveman == caveman
+                    && entry.terse_text_compression == terse_text_compression
                     && entry.excluded == excluded
                     && entry.text_role == is_text_role(block)
             })
@@ -191,7 +191,7 @@ impl TailHygieneMemo {
         &mut self,
         key: &str,
         block: &FlatBlock,
-        caveman: Option<[u8; 32]>,
+        terse_text_compression: Option<[u8; 32]>,
         excluded: bool,
         measured: &MeasuredPart,
     ) {
@@ -201,7 +201,7 @@ impl TailHygieneMemo {
         let key = key.to_string();
         let entry = MemoEntry {
             projection_hash: block.content_hash,
-            caveman,
+            terse_text_compression,
             excluded,
             text_role: is_text_role(block),
             measured: measured.clone(),
@@ -769,7 +769,7 @@ fn red_targets(core: &CoreState) -> HashSet<&str> {
         .collect()
 }
 
-fn caveman_units(core: &CoreState) -> HashMap<&str, &FrozenUnit> {
+fn terse_text_compression_units(core: &CoreState) -> HashMap<&str, &FrozenUnit> {
     let mut units = HashMap::new();
     for unit in &core.frozen_units {
         if let Some(id) = unit.key.strip_prefix(CAV_KEY_PREFIX) {
@@ -852,7 +852,7 @@ pub(crate) fn measure_tail_hygiene<'a>(
         })
         .collect::<HashSet<_>>();
 
-    let caveman_units = caveman_units(core);
+    let terse_text_compression_units = terse_text_compression_units(core);
     let mut parts = Vec::with_capacity(projection.blocks.len());
     let mut u = 0i64;
     let mut t = 0i64;
@@ -866,8 +866,9 @@ pub(crate) fn measure_tail_hygiene<'a>(
                 .as_deref()
                 .is_some_and(|arc| reduced_arcs.contains(arc) || sentinel_arcs.contains(arc))
             || red_targets.contains(block.id.as_str());
-        let caveman = caveman_units.get(block.id.as_str()).copied();
-        let caveman_fingerprint = caveman.map(caveman_fingerprint);
+        let terse_text_compression = terse_text_compression_units.get(block.id.as_str()).copied();
+        let terse_text_compression_fingerprint =
+            terse_text_compression.map(terse_text_compression_fingerprint);
 
         let tag_number = block_tag_number(block, &tags_by_block, &tags_by_arc);
         let protected = block_is_protected(
@@ -877,7 +878,8 @@ pub(crate) fn measure_tail_hygiene<'a>(
             protected_block_ids,
             &protected_arc_ids,
         );
-        let measured = if let Some(measured) = memo.get(&key, block, caveman_fingerprint, excluded)
+        let measured = if let Some(measured) =
+            memo.get(&key, block, terse_text_compression_fingerprint, excluded)
         {
             measured
         } else {
@@ -886,8 +888,8 @@ pub(crate) fn measure_tail_hygiene<'a>(
             } else {
                 match block.wire.kind() {
                     memory_store::BlockKind::Text { text } if is_text_role(block) => {
-                        let content =
-                            caveman.map_or(text.as_str(), |unit| unit.frozen_payload.as_str());
+                        let content = terse_text_compression
+                            .map_or(text.as_str(), |unit| unit.frozen_payload.as_str());
                         let content = strip_channel1_reminder_spans(content);
                         if content.is_empty() || is_drop_sentinel(content) {
                             excluded_part(content)
@@ -934,7 +936,13 @@ pub(crate) fn measure_tail_hygiene<'a>(
                     memory_store::BlockKind::Text { .. } => excluded_part(&block.bytes),
                 }
             };
-            memo.insert(&key, block, caveman_fingerprint, excluded, &measured);
+            memo.insert(
+                &key,
+                block,
+                terse_text_compression_fingerprint,
+                excluded,
+                &measured,
+            );
             measured
         };
         let active = measured.kind != TailHygienePartKind::Excluded;
@@ -1363,7 +1371,7 @@ mod tests {
     }
 
     #[test]
-    fn memo_rechecks_caveman_identity_payload_and_context() {
+    fn memo_rechecks_terse_text_compression_identity_payload_and_context() {
         let mut projection = project_messages(&[text("m", 1, "original text")]).unwrap();
         let mut core = CoreState::empty();
         let mut memo = TailHygieneMemo::default();
@@ -1374,8 +1382,8 @@ mod tests {
         for change in [
             "original",
             "same-id-edit",
-            "caveman",
-            "duplicate-caveman",
+            "terse_text_compression",
+            "duplicate-terse_text_compression",
             "unit-kind",
             "unit-reset",
             "unit-durability",
@@ -1400,15 +1408,15 @@ mod tests {
                 "same-id-edit" => {
                     projection = project_messages(&[text("m", 1, "modified text")]).unwrap()
                 }
-                "caveman" => core.frozen_units.push(FrozenUnit {
+                "terse_text_compression" => core.frozen_units.push(FrozenUnit {
                     key: "cav:m#0".into(),
-                    kind: "caveman".into(),
+                    kind: "terse_text_compression".into(),
                     frozen_payload: "compact".into(),
                     durability_class: cache_stability::DurabilityClass::Lineage,
                     reset_rule: String::new(),
                 }),
                 "unit-kind" => core.frozen_units[0].kind = "alternate".into(),
-                "duplicate-caveman" => {
+                "duplicate-terse_text_compression" => {
                     let mut duplicate = core.frozen_units[0].clone();
                     duplicate.frozen_payload = "ignored duplicate payload".into();
                     core.frozen_units.push(duplicate);
@@ -1693,13 +1701,13 @@ mod tests {
     }
 
     #[test]
-    fn memo_retention_is_independent_of_caveman_payload_size() {
+    fn memo_retention_is_independent_of_terse_text_compression_payload_size() {
         let projection = project_messages(&[text("m", 1, "source")]).unwrap();
         let retained_with = |payload_len: usize| {
             let mut core = CoreState::empty();
             core.frozen_units.push(FrozenUnit {
                 key: "cav:m#0".into(),
-                kind: "caveman".into(),
+                kind: "terse_text_compression".into(),
                 frozen_payload: "x".repeat(payload_len),
                 durability_class: cache_stability::DurabilityClass::Lineage,
                 reset_rule: String::new(),
@@ -1717,7 +1725,7 @@ mod tests {
         assert_eq!(
             retained_with(16),
             retained_with(2 * MEMO_SESSION_BYTES),
-            "the memo must not retain caveman payload bytes"
+            "the memo must not retain terse_text_compression payload bytes"
         );
     }
 
@@ -2382,7 +2390,7 @@ mod tests {
         // projection golden.
         assert_eq!(
             format!("{:x}", frozen.finalize()),
-            "e389d854cae0657e21c2fe9f18461430b449ae749b675670828c47668feb0404"
+            "9e452c8910bdbc75db4a6fc9f7920659d921a48092f7ea59fcea355315503f3d"
         );
     }
 

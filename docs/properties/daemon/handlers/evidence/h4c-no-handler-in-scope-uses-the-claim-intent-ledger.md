@@ -58,7 +58,7 @@ The second protection is the one no handler in this lens has.
 handler table back as a list:
 
 - `command_id` alone: `session.recomp` (`:6005-6010`, read back at `:6015`),
-  `agent_drops.append` (`:5783`), `dreamer.run_task` (`:9626-9631`, read back at
+  `agent_drops.append` (`:5783`), `memory_classifier.run_task` (`:9626-9631`, read back at
   `:9819`).
 - `import_id` alone: `state_import` (`:5639`, preflighted at `:5678`).
 - A generation or sequence fence, not an operation identity: `authority.prepare`
@@ -96,7 +96,7 @@ identity conflict, as `crates/memory-store/src/lib.rs:11049-11051` does for clai
 intents.
 
 The same shape applies to `agent_drops.append`, whose duplicate verdict at
-`:5875-5877` is likewise key-only, and to `dreamer.run_task`, whose replay at
+`:5875-5877` is likewise key-only, and to `memory_classifier.run_task`, whose replay at
 `:9819-9820` returns the recorded response without comparing the current request
 against what produced it.
 
@@ -104,7 +104,7 @@ Whether this is a live risk depends on who mints these ids. If each `command_id`
 is derived from the request content by a trusted sender, key collision with a
 differing body cannot occur. Nothing in the handlers enforces that, and
 `command_id` is validated only for length: 1..=128 bytes for recomp (`:6008`),
-1..=256 for the dreamer (`:9629`).
+1..=256 for the memory_classifier (`:9629`).
 
 ## Timing windows and dependencies
 
@@ -153,7 +153,7 @@ structural rather than behavioural.
   entry, is at `:10042-10060` per the region map, and 4d's range starts at 10042. The
   claim intent arms are inside `handle_facade_value`'s dispatch at `:10048-10050`. So
   the split is clean and intentional, with the boundary falling between
-  `handle_dreamer_run_task`'s closing brace at `:10040` and the facade entry at
+  `handle_memory_classifier_run_task`'s closing brace at `:10040` and the facade entry at
   `:10042`.
 - Missing evidence: none.
 - Conclusion: resolved with answer. Outside 4c, inside 4d, by one line of separation.
@@ -172,7 +172,7 @@ structural rather than behavioural.
   other batches in the same in-memory staged attempt, which is what
   `state_import_digest_mismatch` at `:1486` reports. The durable duplicate check at
   `:5678` takes `(session_id, import_id)` and no digest. So a resend of a *completed*
-  import under the same `import_id` with different compartments would hit the
+  import under the same `import_id` with different history_segments would hit the
   preflight and be reported as a duplicate without its body being examined.
 - Missing evidence: `preflight_state_import`'s body, which is Part 3's scope.
 - Conclusion: unresolved on the store side, resolved on the module side. The module

@@ -14,7 +14,7 @@ request validation, and replay. These have different implemented boundaries.
   [203-240][tiers] uses tiers 1 through 5 and emits nothing at tier 5.
 - [tokenizer/lib.rs:123-149][tokenizer] counts encoded tokens and defines zero
   tokens for empty input. At representable `H` and `5H`, at most `4H` demotions
-  reach all-tier-5 output for `H` compartments, without requiring monotonic cost.
+  reach all-tier-5 output for `H` history_segments, without requiring monotonic cost.
 - [m0_compose.rs:178-215][outer] counts the wrapped history slice, retries above
   105% at most three times, and can return a still-over-budget render.
 - [daemon/lib.rs:8247-8250][validation] resolves request budgets separately.

@@ -20,7 +20,7 @@ All references read back at `HEAD` `e447c927`, in
 
 ```
 9093:            let fragment =
-9093:                crate::caveman::compress(&result.snippet, crate::caveman::CavemanLevel::Ultra);
+9093:                crate::terse_text_compression::compress(&result.snippet, crate::terse_text_compression::TerseTextCompressionLevel::Ultra);
 9094:            format!(
 9095:                "- {}",
 9096:                one_line_fragment(&fragment, USER_HINT_FRAGMENT_CHAR_CAP)
@@ -59,7 +59,7 @@ Three guarantees, all verifiable on the same observed render:
    output.
 2. **The envelope survives.** The wrapper is applied after the lines are built
    (`:9111`), so a truncated fragment is still inside a balanced
-   `<ctx-search-hint>` element. The `…` lands inside a list item, not at an element
+   `<eidnara-search-hint>` element. The `…` lands inside a list item, not at an element
    boundary.
 3. **The line bound holds.** Each line is `"- "` plus at most `limit` units, so at
    most 82 UTF-16 units.
@@ -90,8 +90,8 @@ From `maybe_decide_live_user_hint` (`:8776-8800`) and its caller:
 | at least one lexical search result over threshold | `:8811-8817`, `run_user_hint_lexical_search` (`:8843-8964`) |
 | at least one result whose Ultra-compressed snippet exceeds 80 UTF-16 units | the state this record wants |
 
-The last one is the ordinary case rather than a corner: `caveman::compress`
-shortens text but has no length cap, and a memory or compartment snippet is
+The last one is the ordinary case rather than a corner: `terse_text_compression::compress`
+shortens text but has no length cap, and a memory or history_segment snippet is
 typically a sentence or more.
 
 ## Failure scenario
@@ -124,7 +124,7 @@ than the one that decided it.
    hint row for its block.
 3. Drive a second pass if necessary, because of the pending-deferral rule above,
    until the hint appears in the served array.
-4. On that served render, assert all four things at once: a `<ctx-search-hint>`
+4. On that served render, assert all four things at once: a `<eidnara-search-hint>`
    block exists; at least one of its lines ends in `…`; the element's open and
    close tags are balanced; every line is at most
    `USER_HINT_FRAGMENT_CHAR_CAP + 2` UTF-16 units; and the message's text is valid

@@ -29,12 +29,12 @@ have left a reader with a claim that is still partly wrong.
 Provenance for this pass. `HEAD` is `e447c927` ("refactor(shm): trim final review
 leftovers"), which is what the three artifacts already state, and the working tree
 is clean apart from the four artifacts this disposition writes. Every `lib.rs`,
-`memory-store/src/lib.rs`, `dispatch.rs`, `smart_note_evaluation.rs`, and
+`memory-store/src/lib.rs`, `dispatch.rs`, `conditional_note_evaluation.rs`, and
 `packages/plugin` reference below was read back individually at that commit. Six
 references outside the artifacts' existing citations were established for this
 disposition and are load-bearing: `enforce_request_byte_cap` at `lib.rs:14375-14390`
 including its 32 MiB refusal arm at `:14382-14388`; the full text of
-`smart_note_evaluation.rs:8-10` including the parenthetical the catalog had truncated
+`conditional_note_evaluation.rs:8-10` including the parenthetical the catalog had truncated
 away; `reduce_fallback`'s two arms at `:636-657`; the inline `deliver` closure at
 `module-state-sync.test.ts:1405-1415`; `class DeterministicClaimMirrorFacade` opening
 at `module-state-sync.test.ts:1444`; and `decodeClaimEffectDeliveryResponse` at
@@ -167,7 +167,7 @@ the responses byte for byte. On a read-only tool that works. On a mutating tool 
 cannot, for two independent reasons that both had to be checked because either alone
 would sink it.
 
-First, the store mints identifiers. `ctx_note`'s plain-write arm calls `insert_note`
+First, the store mints identifiers. `eidnara_note`'s plain-write arm calls `insert_note`
 inside the ledger closure and formats the returned id into the response text:
 `format!("Saved session note #{}.", note.id)` at `lib.rs:11704`, with the insert at
 `:11690-11702`. Two sequential writes therefore differ in the response body by
@@ -204,7 +204,7 @@ asserted a byte-identical response. The misspelled-condition record guaranteed t
 conditioned write "never reports plain-note success", and its check asserted the
 response is *not* the plain success text. Both are about a key the handler does not
 read. One says silence is correct and asserts it. The other says silence is the
-defect and asserts against it. Run together on a `ctx_note` write carrying
+defect and asserts against it. Run together on a `eidnara_note` write carrying
 `surfaceCondition`, they contradict: the first passes only if the response is
 unchanged, the second passes only if it is changed.
 
@@ -220,20 +220,20 @@ demands a diagnostic that names the unread key, and both records state which
 diagnostic they expect so a later reader cannot re-merge them. The coverage marker
 `FACADE_OPEN_SCHEMA_TOOL_RECEIVED_AN_UNKNOWN_KEY` gained the same exclusion, so it
 stays disjoint from
-`CTX_NOTE_WRITE_CARRIED_A_CONDITION_KEY_THE_HANDLER_DID_NOT_READ`.
+`EIDNARA_NOTE_WRITE_CARRIED_A_CONDITION_KEY_THE_HANDLER_DID_NOT_READ`.
 
-### D5. The `ctx_reduce` oracle passed the harmful case
+### D5. The `eidnara_reduce` oracle passed the harmful case
 
 Applied in `catalog.md` on
-`facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes`: `Guarantee` and `Check`.
+`facade-a-eidnara-reduce-acknowledges-a-queue-it-never-writes`: `Guarantee` and `Check`.
 In `fault-map.md`: that record's map row.
 
 This is the sharpest of the five oracle findings, because the failed oracle was
 derived from a METHOD.md rule and therefore looked principled. The check asserted
-`acknowledged_queued <= observed_pending_drops <= ctx_reduce_reported_queued`, citing
+`acknowledged_queued <= observed_pending_drops <= eidnara_reduce_reported_queued`, citing
 the effect-accounting rule for paths where a delivering message can be lost.
 
-The rule is right and the quantity is wrong. `handle_ctx_reduce_facade` performs only
+The rule is right and the quantity is wrong. `handle_eidnara_reduce_facade` performs only
 reads and answers `mcp_text_result(format!("Queued: {}.", ...), false)` at
 `lib.rs:10587`, under a comment at `:10585-10586` stating that the acknowledgement
 "deliberately does not mutate" durable tag state. So `observed_pending_drops` is 0.
@@ -291,7 +291,7 @@ missing check, because it will be marked done when the runnable half passes.
 The runtime half is kept verbatim and is a good oracle: the field is validated at
 `lib.rs:10916-10919`, stored at `:10964`, bumped at `:11045`, echoed at `:11050`, and
 read nowhere else, while selection compares the *note's* version
-(`smart_note_evaluation.rs:723`, `:749`, `:773`), so changing the registered value
+(`conditional_note_evaluation.rs:723`, `:749`, `:773`), so changing the registered value
 changes nothing observable. The documentation judgment became an open question marked
 as needing human input, alongside the record's existing question about whether the
 field is reserved or vestigial. Both now sit where METHOD.md puts decisions, and the
@@ -302,7 +302,7 @@ field is reserved or vestigial. Both now sit where METHOD.md puts decisions, and
 Applied in `catalog.md` on
 `note-b-pending-candidate-set-is-unbounded-and-fully-materialized-per-poll`:
 `Guarantee`, `Check`, and a new open question. In `fault-map.md`: that record's map
-row, leverage item 6, the `SMART_NOTE_PENDING_SET_EXCEEDED_ITS_POLL_MATERIALIZATION_THRESHOLD`
+row, leverage item 6, the `CONDITIONAL_NOTE_PENDING_SET_EXCEEDED_ITS_POLL_MATERIALIZATION_THRESHOLD`
 marker row, one new marker row, and a new product-decision bullet.
 
 The check asserted that the rows returned and the snapshots built per poll "are both
@@ -330,14 +330,14 @@ rather than one.
 
 Applied in `catalog.md` on `note-b-fallback-phase-writes-no-durable-backoff`:
 `Exercised`, `Guarantee`, `Check`, `Required faults`. In `fault-map.md`: that
-record's map row and the `SMART_NOTE_FALLBACK_COMPLETION_WROTE_NO_DUE_TIME` marker
+record's map row and the `CONDITIONAL_NOTE_FALLBACK_COMPLETION_WROTE_NO_DUE_TIME` marker
 row.
 
 The check demanded that "after any `fallback` completion" the note's durable state
 advance at least one field its own selector reads as a time gate. `reduce_fallback`
-has two arms (`smart_note_evaluation.rs:636-657`). The `False` arm (`:647-656`)
+has two arms (`conditional_note_evaluation.rs:636-657`). The `False` arm (`:647-656`)
 writes `last_checked_at`, `updated_at` and `check_status`, none of which
-`get_fallback_smart_notes` reads as a gate, and leaves the note in `pending` — so it
+`get_fallback_conditional_notes` reads as a gate, and leaves the note in `pending` — so it
 is re-selectable and the record's spin scenario follows. The `Met` arm (`:637-646`)
 calls `ready_fields` and returns `surfaced: true`, so the note becomes `ready`, and
 the candidate query selects only `status = 'pending'` (`memory-store:13293`), so it is
@@ -440,7 +440,7 @@ relationship map's purity cluster. In `fault-map.md`: that record's map row, lev
 item 5, and leverage item 7.
 
 The record claimed the reducer's documented purity was broken by one argument at the
-call site, quoting `smart_note_evaluation.rs:8-10` as "Pure functions throughout:
+call site, quoting `conditional_note_evaluation.rs:8-10` as "Pure functions throughout:
 callers supply the pre-state, a phase-scoped outcome, the transition clock, and a
 timezone". Read at `HEAD`, that quote stops one clause early. The sentence continues:
 "(cron matching is a wall-clock concept; production passes the machine-local zone)".
@@ -476,8 +476,8 @@ Applied in `catalog.md`: the "Facade validation is not uniform" section, and the
 
 The catalog said "The silent acceptance is asserted to be intentional rather than
 accidental: the inline test at `lib.rs:25636-25641` asserts that every advertised
-tool except `ctx_reduce` 'must preserve compatibility arguments'." Read at `HEAD`,
-`:25636-25641` is `if name != "ctx_reduce" { assert_ne!(tool.schema.get("additionalProperties"), Some(&json!(false)), "{name} must preserve compatibility arguments") }`.
+tool except `eidnara_reduce` 'must preserve compatibility arguments'." Read at `HEAD`,
+`:25636-25641` is `if name != "eidnara_reduce" { assert_ne!(tool.schema.get("additionalProperties"), Some(&json!(false)), "{name} must preserve compatibility arguments") }`.
 It is an assertion about the advertised manifest's `additionalProperties` value. It
 proves **advertised openness**: the schema must not be closed. It does not prove that
 the handler ignores an unknown key, that the ignoring is silent, or that a call with a
@@ -491,7 +491,7 @@ entire basis for `Exercised: partial` on the runtime consequence, and it is also
 what made the silence look pinned enough to guarantee — which is how the polarity
 contradiction D4 fixed survived review in the first place.
 
-### Factual correction: the tested success-shaped path is `ctx_reduce`
+### Factual correction: the tested success-shaped path is `eidnara_reduce`
 
 Applied in `catalog.md`, in the "Six error paths present as success, and one of them
 has a test" section. Noted in `existing-checks.md` at the end of that section's
@@ -501,9 +501,9 @@ The catalog said "Only the second of the six has any test at all, and it is on t
 other side of a language boundary." Both halves are wrong. The second of the six is
 `claim.effects.apply`, which has no test on either side of the boundary — that is
 D10's whole subject and `existing-checks.md`'s own table says so. The tested path is
-the **first**, `ctx_reduce`, covered in this crate by
-`facade_ctx_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing`
-(`lib.rs:25445-25474`), which drives `ctx_reduce` through the facade and asserts at
+the **first**, `eidnara_reduce`, covered in this crate by
+`facade_eidnara_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing`
+(`lib.rs:25445-25474`), which drives `eidnara_reduce` through the facade and asserts at
 `:25474` that `load_pending_agent_drops` is empty after the acknowledgement.
 
 Recorded here as more than a typo because it inverted the section's headline claim in
@@ -519,7 +519,7 @@ preference, and each was verified for this disposition.
 
 | # | Gap | Evidence |
 | --- | --- | --- |
-| G1 | **The two `ctx_expand` success-shaped failures and the health-versus-error decoupling are prose-only, with no record between them.** All three artifacts describe them and none catalogs them. `handle_ctx_expand_facade` answers two distinct unrecoverable-content cases with `mcp_text_result(..., false)`: `Ok(None)` on a single-message expand returns "Message {message} is no longer recoverable from persisted chunk transcripts" (`lib.rs:10804-10809`), and a range whose `last_compacted_ordinal < start` returns "No compacted compartments found in range {start}-{end}" (`:10832-10838`). Both are `isError: false` on the one tool whose entire purpose is recovering content the agent already lost, and the second's text is repeated in the range renderer (`:14638`, `:14717`, `:15000`). Separately, `health()` (`:12003-12046`) can report `HealthStatus::Ok` while every facade call fails, because `DispatchHealth::report` degrades only on staleness (`dispatch.rs:403-407`, `:418-421`) and the facade takes no dispatch ticket at all, unlike the wedge detector at `lib.rs:7993`. `existing-checks.md` lists all three in its six-row success-shaped table and `fault-map.md` supplies markers for them (`EXPAND_ANSWERED_AN_UNRECOVERABLE_REQUEST_WITH_IS_ERROR_FALSE`, `MODULE_HEALTH_REPORTED_OK_WHILE_A_FACADE_CALL_FAILED`), so the analysis is done and the records were never written. Both are F2-cheap: an out-of-range ordinal and a session with no compacted compartments. |
+| G1 | **The two `ctx_expand` success-shaped failures and the health-versus-error decoupling are prose-only, with no record between them.** All three artifacts describe them and none catalogs them. `handle_ctx_expand_facade` answers two distinct unrecoverable-content cases with `mcp_text_result(..., false)`: `Ok(None)` on a single-message expand returns "Message {message} is no longer recoverable from persisted chunk transcripts" (`lib.rs:10804-10809`), and a range whose `last_compacted_ordinal < start` returns "No compacted history_segments found in range {start}-{end}" (`:10832-10838`). Both are `isError: false` on the one tool whose entire purpose is recovering content the agent already lost, and the second's text is repeated in the range renderer (`:14638`, `:14717`, `:15000`). Separately, `health()` (`:12003-12046`) can report `HealthStatus::Ok` while every facade call fails, because `DispatchHealth::report` degrades only on staleness (`dispatch.rs:403-407`, `:418-421`) and the facade takes no dispatch ticket at all, unlike the wedge detector at `lib.rs:7993`. `existing-checks.md` lists all three in its six-row success-shaped table and `fault-map.md` supplies markers for them (`EXPAND_ANSWERED_AN_UNRECOVERABLE_REQUEST_WITH_IS_ERROR_FALSE`, `MODULE_HEALTH_REPORTED_OK_WHILE_A_FACADE_CALL_FAILED`), so the analysis is done and the records were never written. Both are F2-cheap: an out-of-range ordinal and a session with no compacted history_segments. |
 | G2 | **The response wire cap has production enforcement and boundary tests but no catalog record.** `checked_body_len` (`dispatch.rs:330-346`) sums segment lengths with `checked_add`, returns `LengthOverflow` on wrap (`:335-337`), and returns `BodyTooLarge { len, max }` when the total exceeds `MAX_WIRE_BODY_BYTES` (`:339-344`); `finish_count` (`:359-370`) applies the same two outcomes to the incremental JSON counter, with `measure_json` (`:352-357`) documented at `:348-351` as enforcing the cap "as bytes are produced, so an over-cap body fails during counting rather than after a full encode". Two integration tests pin the boundary exactly: `exactly_at_wire_cap_succeeds_without_destination_allocation` (`tests/prepared_output.rs:133-145`) asserts a body of exactly `MAX_WIRE_BODY_BYTES` measures and writes, and `cap_plus_one_and_arithmetic_overflow_fail_before_write` (`:147-179`) asserts cap-plus-one yields `BodyTooLarge` with `len == MAX_WIRE_BODY_BYTES + 1` and that a `usize::MAX` segment yields `LengthOverflow`, both from `measure()` before any write. The catalog has a record on measured-length-equals-written-body and none on the cap itself, so the inclusive boundary, the fail-during-counting property, and the overflow arm are unclaimed. This is the part's best-defended untracked behaviour, which makes it a cheap record rather than a cheap test. |
 
 ## Biases requiring human judgment
@@ -531,7 +531,7 @@ preference, and each was verified for this disposition.
    that anything must happen. That is a systematic shape rather than a coincidence,
    and the subject has an obvious progress obligation that no record states: the
    acquisition loop is a bounded-quota fair-selection cursor
-   (`FULL_CYCLE_PROFILE` at `smart_note_evaluation.rs:843-848`, the cursor at
+   (`FULL_CYCLE_PROFILE` at `conditional_note_evaluation.rs:843-848`, the cursor at
    `:854-886`, its documented contract at `:895-899`), and the module resets it on a
    fresh `no_work` (`lib.rs:11258-11265`) precisely so that work hidden by a spent
    cursor becomes reachable on the next poll. The comment at `:11245-11249` names the
@@ -590,7 +590,7 @@ direction: the portfolio's oracles are now mostly capable of failing, and what
 remains is missing coverage plus three decisions nobody has made.
 
 What improved concretely, and it is more than the count suggests. **Five checks that
-could not detect their own record's defect now can.** The `ctx_reduce` bound no
+could not detect their own record's defect now can.** The `eidnara_reduce` bound no
 longer collapses to `0 <= 0 <= reported` on exactly the permanent-gap case it was
 written for. The byte-cap equivalence no longer quantifies over 40 MiB bodies that
 the cap is right to refuse. The fallback backoff check no longer demands a durable
@@ -662,7 +662,7 @@ The sideways failure recurs three times. `fault-map.md`'s compliance review had
 already written D6's marker refinement as advice, and it sat unapplied (D6). The
 fallback record's `Confidence` line already cited the `False` arm specifically while
 its `Check` quantified over both arms (D9). And `existing-checks.md`'s
-success-shaped table already recorded correctly that `ctx_reduce` is the tested path,
+success-shaped table already recorded correctly that `eidnara_reduce` is the tested path,
 while `catalog.md` two files away credited `claim.effects.apply` instead. In each
 case the correct information was already inside the artifact set and the record that
 needed it did not use it. Part 4c's proposed guard, a cross-reference pass grepping
@@ -671,7 +671,7 @@ caught all three.
 
 The new lesson concerns **quoting**. Two of the thirteen refinements exist because a
 citation was truncated or paraphrased at exactly the point where the remaining text
-changed the conclusion. D12's record quoted `smart_note_evaluation.rs:8-10` up to
+changed the conclusion. D12's record quoted `conditional_note_evaluation.rs:8-10` up to
 "and a timezone" and stopped one clause before "(cron matching is a wall-clock
 concept; production passes the machine-local zone)", which converted a documented
 design into an alleged impurity and shaped a record, a relationship-map cluster, a
@@ -693,7 +693,7 @@ inputs the implementation is right to treat differently (D2, D9). And an
 (D8). To Part 4c's promoted question — *given this record's own Fault/timing angle,
 can this check fail?* — this part adds a second: *on the exact scenario in the
 record's Impact line, substitute the values and evaluate the check by hand.* For the
-`ctx_reduce` bound that takes one line and yields `0 <= 0 <= 21`.
+`eidnara_reduce` bound that takes one line and yields `0 <= 0 <= 21`.
 
 ## Re-evaluation trigger
 

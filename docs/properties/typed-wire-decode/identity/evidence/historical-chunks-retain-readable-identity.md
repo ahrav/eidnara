@@ -11,18 +11,18 @@ Lenses: state/persistence, failure recovery, versioning, resource boundaries.
 
 ## Evidence trail
 
-1. `crates/daemon/src/historian_chunk.rs:665-675` serializes in-range
+1. `crates/daemon/src/history_summarizer_chunk.rs:665-675` serializes in-range
    nonsynthetic ingress messages as a raw message array.
-2. `crates/daemon/src/historian.rs:484` passes that string to store publication.
+2. `crates/daemon/src/history_summarizer.rs:484` passes that string to store publication.
 3. `crates/memory-store/src/lib.rs:11298-11321` scans/prepares raw history;
    lines 12012-12020 decompress stored bytes into `raw_messages_json`.
 4. `crates/daemon/src/lib.rs:16443-16461`, read with `git show HEAD`, decodes
    rows as `IngressMessages`, skips decode errors, keeps in-range ordinals,
    and keeps the first message at each ordinal.
-5. `crates/daemon/src/historian_chunk.rs:418-430` builds snapshot items only
+5. `crates/daemon/src/history_summarizer_chunk.rs:418-430` builds snapshot items only
    from nonsynthetic, nonsystem blocks within the selected ordinal range.
    Each item gets `block.bytes.len()`, not rendered transcript length.
-6. `crates/daemon/src/historian.rs:140-157` joins `id:kind:byte_len` items.
+6. `crates/daemon/src/history_summarizer.rs:140-157` joins `id:kind:byte_len` items.
    It is a literal fingerprint string, not a cryptographic content hash.
 7. Lines 326-334 reject mismatches. Same-length content drift is outside this
    string's detection ability; selected-range identities cover another domain.
@@ -43,7 +43,7 @@ not the secret-bearing pre-storage request.
 
 History is optional in ordinary operation, hence `always-or-unreached`.
 The companion campaign must supply history and cannot claim an optional skip.
-Reachability is default-production through durable expansion and historian
+Reachability is default-production through durable expansion and history_summarizer
 assembly. A cross-binary in-flight recovery run remains missing evidence.
 
 ## What a test must construct
@@ -61,7 +61,7 @@ assembly. A cross-binary in-flight recovery run remains missing evidence.
 
 ### Q: Does production change one todo chunk item's length by 25 bytes?
 
-- Sources examined: `historian_chunk.rs:418-430,665-675`, synthetic constructors,
+- Sources examined: `history_summarizer_chunk.rs:418-430,665-675`, synthetic constructors,
   and `compute_chunk_fingerprint`.
 - Findings: production snapshot selection excludes synthetic blocks. A
   manually supplied synthetic item can change, but it is test-only. When the

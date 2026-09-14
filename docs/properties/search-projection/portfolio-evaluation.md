@@ -60,7 +60,7 @@ is not an implicit exemption.
 
 **B4:** Older catalogs supply leads and reusable invariants, not inherited
 exercise or reachability claims. Current production Claude tokenizer use and
-Synapse composition contradict older absence claims. Certified inference is
+LocalEmbeddings composition contradict older absence claims. Certified inference is
 explicit-config-only; the certified-runtime test's ignored annotation is not a
 pass. Job eviction considers last poll with completion fallback. Host generation
 staging has a CLI caller. Deleted mirror/effect subjects do not become current

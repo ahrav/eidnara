@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-/// `dreamer.run_task` accepts only `CLASSIFY_TASK`.
+/// `memory_classifier.run_task` accepts only `CLASSIFY_TASK`.
 pub const CLASSIFY_TASK: &str = "classify";
 /// One request classifies at most this many memories: the kernel's targeted
 /// read cap, and a pool a model can score in one pass.
@@ -49,9 +49,9 @@ pub const CLASSIFY_SCHEMA_VERSION: u32 = 2;
 pub fn classify_request_timeout(timeout_ms: u64) -> Duration {
     Duration::from_millis(timeout_ms).min(CLASSIFY_MAX_REQUEST_TIMEOUT)
 }
-/// Dispatched attempts one project may accumulate within `DREAMER_ATTEMPT_BUDGET_WINDOW` before requests are refused.
-pub const DREAMER_ATTEMPT_BUDGET: u64 = 200;
-pub const DREAMER_ATTEMPT_BUDGET_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+/// Dispatched attempts one project may accumulate within `MEMORY_CLASSIFIER_ATTEMPT_BUDGET_WINDOW` before requests are refused.
+pub const MEMORY_CLASSIFIER_ATTEMPT_BUDGET: u64 = 200;
+pub const MEMORY_CLASSIFIER_ATTEMPT_BUDGET_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 /// This is deliberately a zero-tool system role. Rust supplies the pool and
 /// retains the parser because accepting a caller-selected role would reopen the
 /// producer trust boundary.
@@ -309,7 +309,10 @@ pub fn attempt_child_session_id(
     hasher.update([0]);
     hasher.update(model.as_bytes());
     let digest = hasher.finalize();
-    format!("eidnara-dreamer:classify:{}", hex_prefix(&digest, 16))
+    format!(
+        "eidnara-memory_classifier:classify:{}",
+        hex_prefix(&digest, 16)
+    )
 }
 
 fn hex_prefix(bytes: &[u8], count: usize) -> String {
@@ -651,7 +654,7 @@ mod tests {
             base,
             attempt_child_session_id("project", "ses", "other", 1, 0, "prov/model-a")
         );
-        assert!(base.starts_with("eidnara-dreamer:classify:"));
+        assert!(base.starts_with("eidnara-memory_classifier:classify:"));
     }
 
     /// The module that owns the classify task names no retired identity.

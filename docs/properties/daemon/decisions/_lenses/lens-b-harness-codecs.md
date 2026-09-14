@@ -277,6 +277,7 @@ Confidence: high — [evidence](../evidence/codec-b-harness-decoders-accept-ever
 Existing check: partial and indirect. `codec/mod.rs:78-89` and `:201-212` assert decode determinism (`decoded == decoded_again`) over the goldens, which pins purity but not totality. `codec/opencode.rs:1322-2186` (17 tests) and `codec/pi.rs:1078-1499` (14 tests) all use well-formed fixtures. Status `unaudited`. CI runs only `cargo test -p daemon --test lifecycle_cli` (`.github/workflows/ci.yml:172`), so none of these execute in CI.
 Impact: the failure mode is not a crash, it is a fabricated message. A harness that ships a malformed element gets a zero-block `"user"` message that occupies an ordinal, enters the sidecar, participates in boundary selection, and is re-encoded from its retained raw. Nothing downstream can tell it apart from an authentic empty user turn. Part 1's equivalent record could say "the property holds at HEAD and is under-evidenced rather than violated"; this one cannot, because the property as stated is violated by design.
 Open questions:
+
 - Should a harness codec have a rejection or warning channel at all, or is total coercion the deliberate contract on the grounds that the harness is trusted? Nothing in either file states a position. (needs human input)
 
 ### codec-b-incremental-sidecar-slice-panics-behind-a-debug-assert
@@ -293,6 +294,7 @@ Confidence: high — [evidence](../evidence/codec-b-incremental-sidecar-slice-pa
 Existing check: none for the bound. `lib.rs:12452-12453` and `:12457-12459` define `CorruptSidecarForTest` and `CorruptFrontierForTest` modes, and `:12531-12541` deliberately perturbs the projection prefix by `+1` under `cfg(test)` and then re-clamps with `prefix <= projection.message_count()` at `:12543`. That machinery proves the authors thought about a corrupted prefix on the projection path and built a test hook for it; no equivalent hook exists for the sidecar slice. Status `unaudited`.
 Impact: a panic inside the transform on the default production path. This is the same shape as Part 1's observation that "narrowing `GRANT_BYTES` turns `ring.rs:430` into an unconditional panic on every call, and no property currently forbids either" (`part-1-shm-transport/catalog.md:1322-1324`): the reasoning that keeps the call safe lives only in the callers, and nothing in the tree records that the callee depends on it.
 Open questions:
+
 - Should the function clamp with `messages.len().min(replace_from)` and fall back to a full decode, matching the documented policy at `wire.rs:369-372` that "malformed or out-of-range local metadata falls back to a full projection rather than trusting a partial result"? The projection path already does this; the sidecar path does not. (needs human input)
 
 ### codec-b-pi-decoder-drops-unrecognised-entry-types-without-a-record
@@ -309,6 +311,7 @@ Confidence: high — [evidence](../evidence/codec-b-pi-decoder-drops-unrecognise
 Existing check: none. `codec/pi.rs:1078-1499` has 14 tests; `codec/pi.rs:1479-1483` asserts `encode_pi(...).is_empty()` for an empty-content message, which is the encoder half of a different drop. Status `unaudited`.
 Impact: two consequences, one recoverable and one not. Recoverable: `encode_pi` cannot reproduce the entry, so a decode-then-encode round trip silently truncates the session file. Unrecoverable in the same pass: every later entry's ordinal shifts down by one, so a persisted boundary ordinal or tag keyed to an ordinal now names a different message. Because Pi has no `absolute_ordinal` input (record ten), there is no way for the harness to pin the numbering against this.
 Open questions:
+
 - Is the three-type opaque allow-list at `:681-686` a closed set by design, or a list that was meant to grow and did not? `codec/opencode.rs:194-204` suggests the crate's default answer is "preserve unknown shapes". (needs human input)
 - Does the TypeScript Pi plugin drop the same entries before the Rust codec sees them? `packages/pi-plugin/PARITY.md:107-116` says Pi "rebuilds `AgentMessage[]` from JSONL every pass", which implies a shaping layer upstream. Unresolved, needs the TypeScript transcript adapter, which is outside 4f scope.
 
@@ -326,6 +329,7 @@ Confidence: high — [evidence](../evidence/codec-b-opencode-hides-four-part-typ
 Existing check: partial, and it covers the type by accident rather than by design. `codec/mod.rs:59-76` lists `patch` as a required coverage class and the golden supplies one, so the round trip pins it. `codec/mod.rs:216-252` `codec_conformance_removes_leading_native_blocks_without_reindex_drift` exercises `remove_unretained_native_parts` but on a message with no immune parts. Status `unaudited`.
 Impact: correct today, and fragile in one specific direction. Because these four types are invisible to the wire view, the transform's byte accounting, tag numbering, and boundary selection never see them, while the provider does. If any of the four ever carries content large enough to matter to the context budget, the module's measurement of the array is wrong by exactly that amount and no existing check would notice.
 Open questions:
+
 - Are all four types genuinely content-free for provider purposes? `patch` is the one that plausibly carries bytes. Unresolved, needs the OpenCode part-schema, which is not vendored (observation 20 records that the SDK serializer is absent from the test closure).
 
 ### codec-b-round-trip-identity-is-claimed-in-one-direction-on-one-case-per-harness
@@ -342,6 +346,7 @@ Confidence: high — [evidence](../evidence/codec-b-round-trip-identity-is-claim
 Existing check: `codec/mod.rs:54-90` and `:177-213`, plus determinism assertions at `:81`, `:87`, `:204`, `:210`. Genuine oracles, not tautologies: they compare against an independently captured input array (`generated_from` names a real `opencode.db` and real Pi JSONL session files), which is materially stronger than the round-trip assertion Part 1 found at `harness.rs:112-116` and characterised as "a tautology over accepted inputs" (`part-1-shm-transport/catalog.md:1360-1361`). The weakness here is breadth and oracle fidelity, not vacuity. Status `unaudited`.
 Impact: one case per harness with a self-declared placeholder oracle is the entire evidence base for the property the whole encoder design rests on. The specific gap that matters is that the retained-raw path makes identity nearly automatic for unmutated input, so the test's pass carries much less information than its name implies.
 Open questions:
+
 - Should the exception set be declared in code rather than reconstructed in the test's own helpers (`codec/mod.rs:273-288`)? Today the encoder's compaction policy and the test's stripping helper are two independent statements of one rule.
 - Can the `projection_oracle` TODO be discharged without vendoring the harness SDKs? If not, the goldens' status is permanent and should say so.
 
@@ -359,6 +364,7 @@ Confidence: high — [evidence](../evidence/codec-b-declared-missing-capture-cla
 Existing check: the mechanism is the check, and it is the thing being reported. `codec/mod.rs:267-270`'s message, "codec golden neither covers nor records missing classes", is honest about what it enforces: it is a bookkeeping gate, not a coverage gate. Status `unaudited`.
 Impact: `subtask` decoding is on the default production path and untested; a `subtask` part currently becomes an opaque block via `:171-181`, and if that arm were deleted the part would fall to `:194-204` and still become an opaque block, so the golden would not move. Pi's redacted-thinking arm is the one with a behavioural difference to lose: `:199-211` produces `BlockKind::RedactedReasoning` while the non-redacted branch at `:212-217` produces `BlockKind::Reasoning` with a signature, and the two round-trip through different encoder arms (`:543-548` versus `:536-542`).
 Open questions:
+
 - Is `missing_capture_classes` intended as a temporary ledger with an owner and a date, or as a permanent waiver? Nothing in `codec/mod.rs` or either golden says. (needs human input)
 
 ### codec-b-wire-level-tool-use-uniqueness-guard-has-no-release-behaviour
@@ -375,6 +381,7 @@ Confidence: high — [evidence](../evidence/codec-b-wire-level-tool-use-uniquene
 Existing check: partial and at the wrong layer. `transform.rs:21509` and `:21522` exercise `enforce_unique_tool_use_ids` including its heal path. Nothing exercises `assert_unique_tool_use_ids`. Status `unaudited`.
 Impact: a provider request containing two `tool_use` blocks with one id, which Anthropic-shaped providers reject outright, so the failure mode is a hard request error rather than a degraded reply. The debug build catches it and the shipped build does not, which is the inverse of what a wire-level invariant wants. The guard is also applied inside `encode_opencode_impl` rather than in the chunk API, so `lib.rs:12949`'s direct call to `encode_opencode_chunks_with_transition_state` on the incremental native path has no uniqueness check in any build profile.
 Open questions:
+
 - Should the wire-level guard adopt the wire-level heal branch, or should the wire-level heal be removed in favour of failing loud in both? The two layers currently encode two different answers to the same question. (needs human input)
 - The scope map (`part-4-module/_lenses/scope-map-and-risk-ranking.md:603`) describes `enforce_unique_tool_use_ids` as one of two "fail-loud production checks". At `HEAD` it is a `debug_assert!` plus a release heal, so it is fail-loud in debug and fail-quiet-and-repair in release. 4e owns that function; flagged here as a lead only.
 
@@ -392,6 +399,7 @@ Confidence: high — [evidence](../evidence/codec-b-pi-encoder-can-return-a-shor
 Existing check: `codec/pi.rs:1469-1484`, which pins the cleared-content drop. Status `unaudited`.
 Impact: today, none, because there is no production caller. The record exists because the function is a public export (`codec/mod.rs:10`, `lib.rs:12`) whose contract differs from its OpenCode twin in a way a future caller would not expect, and because 4e's lens item 18 already notes the Pi encode path is off-route, which makes this the moment to write the contract down rather than after it is wired up.
 Open questions:
+
 - Should `encode_pi` adopt the `EncodedOpencodeChunk` shape so index mapping is explicit? Unresolved, needs a decision about whether the Pi leg is being wired up at all.
 
 ### codec-b-decoder-output-can-violate-the-projector-precondition
@@ -408,6 +416,7 @@ Confidence: high — [evidence](../evidence/codec-b-decoder-output-can-violate-t
 Existing check: partial and one-sided. `wire.rs:1122` and `:1149` cover the projector's rejection with hand-built inputs. Nothing covers the mid rejection at all, and no test composes a decoder with the projector. Status `unaudited`.
 Impact: a single harness-supplied id containing one `#` character fails every transform pass for that session until the message leaves the window. The rejection is correct and fail-closed; the defect is that it is detected two layers away from the layer that could have normalised it, and the error names a reserved character the harness never agreed to avoid.
 Open questions:
+
 - Should the decoders normalise or reject `#` in a mid, so the failure is attributable to one message rather than the whole array? `wire.rs:369-372` documents the fallback-to-full-projection policy for out-of-range metadata; nothing analogous exists for a malformed mid.
 - Is `#` reserved because `block_id` is `format!("{mid}#{index}")` (`wire.rs:513-515`)? If so the reservation is stricter than its own parser needs: `split_block_id` (`:517-521`) uses `rsplit_once('#')`, which round-trips a mid containing `#` correctly. So either the rejection defends a consumer other than `split_block_id`, or it is belt-and-braces. Unresolved; needs the set of `block_id` consumers, several of which are in 4b and 4c scope.
 
@@ -425,6 +434,7 @@ Confidence: high — [evidence](../evidence/codec-b-absolute-ordinal-is-harness-
 Existing check: none for the invariant, in either language. `codec/opencode.rs:246-281`'s incremental path and `lib.rs:12550-12563`'s prefix validation both reason about positions, not ordinals. Status `unaudited`.
 Impact: this record answers the open question Lens A left for this lens (`_lenses/lens-a-decision-units-and-config.md:589-593`), and the answer is that max-as-count is wrong, not merely fragile: the producer's ordinal space is session-global by design and permits duplicates by design, so `boundary.rs:687-691` disagrees with the ingress contract for every windowed session rather than only for a contrived one. Whether the resulting chunk estimate is materially wrong is 4a's and 4b's call, since `ChunkBuilder::finish` is theirs; the decoder's contribution is that it faithfully passes through a space one consumer was not written for.
 Open questions:
+
 - Should `boundary.rs:687-691` take `ordered.len()` instead of `max()`, or does it genuinely want the highest ordinal for a different reason? Needs the `ChunkBuilder::finish` contract, which is 4a and 4b scope.
 - Why does Pi have no `absolute_ordinal` equivalent, given that `codec-b-pi-decoder-drops-unrecognised-entry-types-without-a-record` makes its positional numbering unstable? Unresolved.
 - Can an incremental suffix ever lack explicit ordinals? `decode_opencode_sidecar_incremental` passes `replace_from` (an array index) as `provisional_base` at `:260`, while the producer's base is a canonical count, so the two bases are in different spaces. `module-state-sync.test.ts:779` asserts some message has no `absolute_ordinal`, so I could not conclude the fallback is unreachable.
@@ -443,6 +453,7 @@ Confidence: high — [evidence](../evidence/codec-b-provenance-recovery-on-decod
 Existing check: `codec/mod.rs:128-175` for the all-synthetic path, and `codec/mod.rs:290-298` `fixture_builder_drives_synthetic_todo_wire_shape`, which asserts `message["meta"]["synthetic"] == true` on the native fixtures. Neither covers a mixed message. Status `unaudited`.
 Impact: the module's own writes can come back classified as user-authored. `meta.synthetic` gates `meta_for_ck`'s positional fallback (`codec/sidecar.rs:324-328`), so a misclassified module-authored message becomes eligible to inherit a native envelope by position, which is the failure `codec/mod.rs:128-175` exists to prevent for the other direction. Pi's hardcoded `false` means the Pi leg has no provenance at all in either direction; combined with 4e's finding this leaves synthetic content indistinguishable from authentic content for that harness at every layer.
 Open questions:
+
 - Is all-parts-synthetic the intended rule, or should any synthetic part mark the message? The `!parts.is_empty()` guard suggests the author considered degenerate cases, which makes the mixed case look unconsidered rather than decided. (needs human input)
 - Should `codec/pi.rs:99` read a marker at all, given 4e's finding that the Pi encoder writes none? The two halves are consistent with each other and jointly inconsistent with the OpenCode leg.
 
@@ -460,6 +471,7 @@ Confidence: high — [evidence](../evidence/codec-b-block-identity-stamp-is-call
 Existing check: none in `codec/sidecar.rs`. `codec/opencode.rs:1515-1582` and `codec/pi.rs:1436-1443` exercise alignment after a block deletion and an encode replay, which covers the honest path. Status `unaudited`.
 Impact: two shapes. The forged stamp lets a wire caller point a block at a native part it did not come from, and `alignment_candidate`'s early return means the kind check that would otherwise catch the mismatch is skipped, so the encoder can write a text block's content into a reasoning part. The fingerprint collision is contained today because the stamp disambiguates duplicates, which makes the stamp the sole load-bearing disambiguator for a case the fingerprint cannot handle: if the stamp were ever dropped from the pass-through path, duplicate-content blocks would align by the `:225-227` positional fallback instead, silently.
 Open questions:
+
 - Should the stamp carry a per-decode nonce so a stamp from a prior pass or a foreign caller is distinguishable? The comment at `:243-247` says the stamps "survive reductions, overlays, and deletion compaction", which is the property that makes them useful and also the reason they cannot be validated by age.
 - Which of the three serialization-failure policies is normative? `:155` maps a failure to `Value::Null`, `:293` maps it to empty bytes, and `wire.rs:585-589` maps it to `WireError::UnsupportedBlock`. The first two collapse every failing block onto one hash, which `block_is_unchanged` would then read as "unchanged".
 
@@ -502,7 +514,7 @@ Each lead cites both sides. Leads that became records are not repeated.
 4. **`packages/pi-plugin/PARITY.md:172-175` says the `pi-msg-<index>` id scheme
    was migrated away; `codec/pi.rs:714` still mints it.** The parity document
    describes `pi_stable_id_scheme` (migration v25) as "a one-time forced-execute
-   cutover that re-keys persisted tag/drop/caveman/placeholder state from
+   cutover that re-keys persisted tag/drop/terse_text_compression/placeholder state from
    `pi-msg-<index>` ids to real `SessionEntry` ids". The Rust decoder's
    last-resort stable key is `format!("pi-msg-{entry_index}-{}", ...)`. The Rust
    form appends a content hash so it is not byte-identical to the migrated-away
@@ -576,7 +588,7 @@ Each lead cites both sides. Leads that became records are not repeated.
 - Is there a third harness codec? No, and the reason is worth recording: the
   harness-codec axis and the serializer-profile axis are orthogonal and of
   different sizes. `healing.rs:10-28` defines five `SerializerProfile` variants
-  (`OwnedLlmRunner`, `OwnedBroca`, `ClaudeCodeAnthropic`, `OpencodeAiSdk`, `Pi`,
+  (`OwnedLlmRunner`, `OwnedModelExecution`, `ClaudeCodeAnthropic`, `OpencodeAiSdk`, `Pi`,
   with wire ids at `:31-39`), while `codec/` holds two harness codecs. So
   `SerializerProfile::Pi` is selectable (`lib.rs:19151` enumerates its wire id in
   a test, and `transform.rs:2752` and `:3377` parse the request field) even though

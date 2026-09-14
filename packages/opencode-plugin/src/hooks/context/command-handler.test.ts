@@ -92,18 +92,18 @@ async function expectSentinel(promise: Promise<unknown>, command: string): Promi
 const STATUS_RESPONSE = {
     ok: true,
     summary:
-        "session ses-status (last active 3m ago): 4 compartments, coverage ordinal 17, boundary present, 2 pending drops, 1 tag, pending m1 delta false, last historian: published, publish failures: 0, surface active",
+        "session ses-status (last active 3m ago): 4 history_segments, coverage ordinal 17, boundary present, 2 pending drops, 1 tag, pending m1 delta false, last history_summarizer: published, publish failures: 0, surface active",
     usage: { current_total_input_tokens: 42_000, context_limit_tokens: 100_000 },
     boundary_present: true,
     coverage_ordinal: 17,
-    compartment_count: 4,
+    history_segment_count: 4,
     pending_drop_count: 2,
     tag_count: 1,
     pending_m1_delta: false,
     pending_m1_age_ms: null,
     wrapup_active: false,
     wrapup_rounds: null,
-    historian: { consecutive_publish_failures: 0, publish_health_degraded: false },
+    history_summarizer: { consecutive_publish_failures: 0, publish_health_degraded: false },
     pass_trace: {
         receive_count: 12,
         reject_count: 0,
@@ -140,7 +140,7 @@ describe("createEidnaraCommandHandler", () => {
         });
     }
 
-    for (const command of ["ctx-wrapup", "ctx-recomp", "ctx-flush"] as const) {
+    for (const command of ["eidnara-wrapup", "eidnara-recomp", "eidnara-flush"] as const) {
         it(`refuses /${command} without a daemon call when compaction is off`, async () => {
             const onFlush = mock(() => {});
             const { run, calls, sendNotification } = setup(undefined, {
@@ -160,7 +160,12 @@ describe("createEidnaraCommandHandler", () => {
         });
     }
 
-    for (const command of ["ctx-status", "ctx-flush", "ctx-recomp", "ctx-wrapup"] as const) {
+    for (const command of [
+        "eidnara-status",
+        "eidnara-flush",
+        "eidnara-recomp",
+        "eidnara-wrapup",
+    ] as const) {
         it(`does not send /${command} to the daemon when route resolution loses to deletion`, async () => {
             let deleted = false;
             const resolveProjectRoot = mock(async () => {
@@ -182,14 +187,14 @@ describe("createEidnaraCommandHandler", () => {
         });
     }
 
-    describe("ctx-flush", () => {
+    describe("eidnara-flush", () => {
         it("sends session.flush, reports the armed wording, and calls onFlush", async () => {
             const onFlush = mock(() => {});
             const { run, calls, sendNotification } = setup(() => ({ ok: true, armed: true }), {
                 onFlush,
             });
 
-            await expectSentinel(run("ctx-flush", "ses-flush"), "ctx-flush");
+            await expectSentinel(run("eidnara-flush", "ses-flush"), "eidnara-flush");
 
             expect(calls).toEqual([
                 {
@@ -211,7 +216,7 @@ describe("createEidnaraCommandHandler", () => {
         it("reports the not-armed wording and unwraps a `result` envelope", async () => {
             const { run, texts } = setup(() => ({ result: { armed: false } }));
 
-            await expectSentinel(run("ctx-flush", "ses-flush-empty"), "ctx-flush");
+            await expectSentinel(run("eidnara-flush", "ses-flush-empty"), "eidnara-flush");
 
             expect(texts()).toEqual(["No pending operations to flush."]);
         });
@@ -225,7 +230,7 @@ describe("createEidnaraCommandHandler", () => {
                 { onFlush },
             );
 
-            await expectSentinel(run("ctx-flush", "ses-flush-fail"), "ctx-flush");
+            await expectSentinel(run("eidnara-flush", "ses-flush-fail"), "eidnara-flush");
 
             expect(onFlush).toHaveBeenCalledWith("ses-flush-fail");
             expect(texts()).toEqual(["Error: Failed to flush context operations. socket closed"]);
@@ -235,7 +240,7 @@ describe("createEidnaraCommandHandler", () => {
             const received = connectTui("ses-flush-tui");
             const { run, sendNotification } = setup(() => ({ armed: true }));
 
-            await expectSentinel(run("ctx-flush", "ses-flush-tui"), "ctx-flush");
+            await expectSentinel(run("eidnara-flush", "ses-flush-tui"), "eidnara-flush");
 
             expect(sendNotification).not.toHaveBeenCalled();
             expect(received.map((n) => [n.type, n.payload])).toEqual([
@@ -250,12 +255,12 @@ describe("createEidnaraCommandHandler", () => {
         });
     });
 
-    describe("ctx-status", () => {
+    describe("eidnara-status", () => {
         it("routes the daemon call by the session's resolved directory", async () => {
             const resolveProjectRoot = mock(async (sessionId: string) => `/repos/${sessionId}`);
             const { run, calls } = setup(() => STATUS_RESPONSE, { resolveProjectRoot });
 
-            await expectSentinel(run("ctx-status", "ses-routed"), "ctx-status");
+            await expectSentinel(run("eidnara-status", "ses-routed"), "eidnara-status");
 
             expect(resolveProjectRoot).toHaveBeenCalledWith("ses-routed");
             expect(calls.map((call) => [call.method, call.projectRoot])).toEqual([
@@ -266,7 +271,7 @@ describe("createEidnaraCommandHandler", () => {
         it("sends session.status and renders the daemon text", async () => {
             const { run, calls, texts } = setup(() => STATUS_RESPONSE);
 
-            await expectSentinel(run("ctx-status", "ses-status"), "ctx-status");
+            await expectSentinel(run("eidnara-status", "ses-status"), "eidnara-status");
 
             expect(calls).toEqual([
                 {
@@ -282,11 +287,11 @@ describe("createEidnaraCommandHandler", () => {
             expect(text).toContain("- Usage: 42,000 / 100,000 tokens");
             expect(text).toContain("- Boundary: present");
             expect(text).toContain("- Coverage ordinal: 17");
-            expect(text).toContain("- Compartments: 4");
+            expect(text).toContain("- HistorySegments: 4");
             expect(text).toContain("- Pending: 2 drops, 1 tag, m1 delta none");
             expect(text).toContain("- Wrapup: idle");
             expect(text).toContain(
-                "- Historian publish health: ok (0 consecutive publish failures)",
+                "- HistorySummarizer publish health: ok (0 consecutive publish failures)",
             );
             expect(text).toContain("- Passes: 12 received, 0 rejected");
             expect(text).toContain(`- Daemon: ${STATUS_RESPONSE.summary}`);
@@ -301,7 +306,10 @@ describe("createEidnaraCommandHandler", () => {
                 pending_m1_age_ms: 42_500,
                 wrapup_active: true,
                 wrapup_rounds: 3,
-                historian: { consecutive_publish_failures: 4, publish_health_degraded: true },
+                history_summarizer: {
+                    consecutive_publish_failures: 4,
+                    publish_health_degraded: true,
+                },
                 pass_trace: {
                     receive_count: 20,
                     reject_count: 2,
@@ -309,13 +317,13 @@ describe("createEidnaraCommandHandler", () => {
                 },
             }));
 
-            await expectSentinel(run("ctx-status", "ses-status-degraded"), "ctx-status");
+            await expectSentinel(run("eidnara-status", "ses-status-degraded"), "eidnara-status");
 
             const [text] = texts();
             expect(text).toContain("- Pending: 2 drops, 1 tag, m1 delta pending (43s)");
             expect(text).toContain("- Wrapup: running (3 rounds complete)");
             expect(text).toContain(
-                "- Historian publish health: degraded (4 consecutive publish failures)",
+                "- HistorySummarizer publish health: degraded (4 consecutive publish failures)",
             );
             expect(text).toContain(
                 "- Passes: 20 received, 2 rejected; last reject: snapshot stale ",
@@ -328,16 +336,16 @@ describe("createEidnaraCommandHandler", () => {
             const { run, texts } = setup(() => ({
                 ok: true,
                 usage: { current_total_input_tokens: 10, context_limit_tokens: 100 },
-                compartment_count: 0,
+                history_segment_count: 0,
             }));
 
-            await expectSentinel(run("ctx-status", "ses-status-minimal"), "ctx-status");
+            await expectSentinel(run("eidnara-status", "ses-status-minimal"), "eidnara-status");
 
             const [text] = texts();
             expect(text).toContain("- Pending: 0 drops, 0 tags, m1 delta none");
             expect(text).toContain("- Wrapup: idle");
             expect(text).toContain(
-                "- Historian publish health: ok (0 consecutive publish failures)",
+                "- HistorySummarizer publish health: ok (0 consecutive publish failures)",
             );
             expect(text).not.toContain("- Passes:");
             expect(text).not.toContain("- Daemon:");
@@ -349,7 +357,7 @@ describe("createEidnaraCommandHandler", () => {
                 tail_hygiene: { u: 250, t: 1_000, evaluable: true },
             }));
 
-            await expectSentinel(run("ctx-status", "ses-status-hygiene"), "ctx-status");
+            await expectSentinel(run("eidnara-status", "ses-status-hygiene"), "eidnara-status");
 
             const [text] = texts();
             expect(text).toContain("### Tail Hygiene");
@@ -364,7 +372,7 @@ describe("createEidnaraCommandHandler", () => {
                 { compactionOff: true },
             );
 
-            await expectSentinel(run("ctx-status", "ses-status-off"), "ctx-status");
+            await expectSentinel(run("eidnara-status", "ses-status-off"), "eidnara-status");
 
             const [text] = texts();
             expect(text).toContain("**Compaction:** disabled (compaction.enabled: false)");
@@ -375,7 +383,7 @@ describe("createEidnaraCommandHandler", () => {
             const received = connectTui("ses-status-tui");
             const { run, calls, sendNotification } = setup(() => STATUS_RESPONSE);
 
-            await expectSentinel(run("ctx-status", "ses-status-tui"), "ctx-status");
+            await expectSentinel(run("eidnara-status", "ses-status-tui"), "eidnara-status");
 
             expect(calls.map((call) => call.method)).toEqual(["session.status"]);
             expect(sendNotification).not.toHaveBeenCalled();
@@ -386,13 +394,13 @@ describe("createEidnaraCommandHandler", () => {
             const { run, sendNotification } = setup(() => STATUS_RESPONSE);
 
             await expectSentinel(
-                run("ctx-status", "ses-stable-model", "", {
+                run("eidnara-status", "ses-stable-model", "", {
                     agent: "oracle",
                     variant: "fast",
                     providerId: "anthropic",
                     modelId: "claude-sonnet-4-6",
                 }),
-                "ctx-status",
+                "eidnara-status",
             );
 
             expect(sendNotification).toHaveBeenCalledWith(
@@ -403,11 +411,11 @@ describe("createEidnaraCommandHandler", () => {
         });
     });
 
-    describe("ctx-recomp", () => {
+    describe("eidnara-recomp", () => {
         it("sends session.recomp with a minted command id and maps `started`", async () => {
             const { run, calls, texts } = setup(() => ({ ok: true, disposition: "started" }));
 
-            await expectSentinel(run("ctx-recomp", "ses-recomp"), "ctx-recomp");
+            await expectSentinel(run("eidnara-recomp", "ses-recomp"), "eidnara-recomp");
 
             expect(calls).toHaveLength(1);
             expect(calls[0]?.method).toBe("session.recomp");
@@ -417,7 +425,7 @@ describe("createEidnaraCommandHandler", () => {
                 session_id: "ses-recomp",
             });
             expect(calls[0]?.body.command_id).toMatch(/^opencode-recomp-/);
-            expect(texts().join("\n")).toContain("Historian recomp started");
+            expect(texts().join("\n")).toContain("HistorySummarizer recomp started");
         });
 
         it("maps `already_in_progress`, `nothing_to_do`, failures, and thrown calls", async () => {
@@ -437,7 +445,7 @@ describe("createEidnaraCommandHandler", () => {
             ];
             for (const [respond, expected] of cases) {
                 const { run, texts } = setup(respond);
-                await expectSentinel(run("ctx-recomp", "ses-recomp-map"), "ctx-recomp");
+                await expectSentinel(run("eidnara-recomp", "ses-recomp-map"), "eidnara-recomp");
                 expect(texts().join("\n")).toContain(expected);
             }
         });
@@ -445,7 +453,10 @@ describe("createEidnaraCommandHandler", () => {
         it("refuses a message range without a daemon call", async () => {
             const { run, calls, texts } = setup();
 
-            await expectSentinel(run("ctx-recomp", "ses-recomp-range", "1-11322"), "ctx-recomp");
+            await expectSentinel(
+                run("eidnara-recomp", "ses-recomp-range", "1-11322"),
+                "eidnara-recomp",
+            );
 
             expect(calls).toHaveLength(0);
             const [text] = texts();
@@ -458,16 +469,19 @@ describe("createEidnaraCommandHandler", () => {
         it("rejects malformed arguments without a daemon call", async () => {
             const { run, calls, texts } = setup();
 
-            await expectSentinel(run("ctx-recomp", "ses-recomp-bad", "--upgrade"), "ctx-recomp");
+            await expectSentinel(
+                run("eidnara-recomp", "ses-recomp-bad", "--upgrade"),
+                "eidnara-recomp",
+            );
 
             expect(calls).toHaveLength(0);
             const [text] = texts();
             expect(text).toContain("## Eidnara Recomp — Invalid Arguments");
-            expect(text).toContain("Invalid /ctx-recomp arguments: `--upgrade`");
+            expect(text).toContain("Invalid /eidnara-recomp arguments: `--upgrade`");
         });
     });
 
-    describe("ctx-wrapup", () => {
+    describe("eidnara-wrapup", () => {
         it("parses messagesToKeep and sends session.wrapup under the wrapup budget", async () => {
             const { run, calls, texts } = setup(() => ({
                 disposition: "completed",
@@ -475,7 +489,7 @@ describe("createEidnaraCommandHandler", () => {
                 summary: "Wrapped up.",
             }));
 
-            await expectSentinel(run("ctx-wrapup", "ses-wrapup", "250"), "ctx-wrapup");
+            await expectSentinel(run("eidnara-wrapup", "ses-wrapup", "250"), "eidnara-wrapup");
 
             expect(calls).toHaveLength(1);
             expect(calls[0]?.method).toBe("session.wrapup");
@@ -506,11 +520,11 @@ describe("createEidnaraCommandHandler", () => {
 
             await expectSentinel(
                 handler["command.execute.before"](
-                    { command: "ctx-wrapup", sessionID: "ses-wrapup-progress", arguments: "" },
+                    { command: "eidnara-wrapup", sessionID: "ses-wrapup-progress", arguments: "" },
                     { parts: [{ type: "text", text: "" }] },
                     {},
                 ),
-                "ctx-wrapup",
+                "eidnara-wrapup",
             );
 
             expect(moduleCall).toHaveBeenCalledTimes(1);
@@ -519,7 +533,7 @@ describe("createEidnaraCommandHandler", () => {
         it("defaults messagesToKeep to 20", async () => {
             const { run, calls, texts } = setup(() => ({ disposition: "nothing_to_compact" }));
 
-            await expectSentinel(run("ctx-wrapup", "ses-wrapup-default"), "ctx-wrapup");
+            await expectSentinel(run("eidnara-wrapup", "ses-wrapup-default"), "eidnara-wrapup");
 
             expect(calls[0]?.body.keep).toBe(20);
             expect(texts().join("\n")).toContain("Nothing to compact.");
@@ -535,7 +549,7 @@ describe("createEidnaraCommandHandler", () => {
                     () => ({ ok: false, disposition: "retryable", summary: "budget expired" }),
                     [
                         "## Eidnara Wrapup — Partial",
-                        "budget expired Run /ctx-wrapup again to continue.",
+                        "budget expired Run /eidnara-wrapup again to continue.",
                     ],
                 ],
                 [
@@ -551,7 +565,7 @@ describe("createEidnaraCommandHandler", () => {
             ];
             for (const [respond, expected] of cases) {
                 const { run, texts } = setup(respond);
-                await expectSentinel(run("ctx-wrapup", "ses-wrapup-map"), "ctx-wrapup");
+                await expectSentinel(run("eidnara-wrapup", "ses-wrapup-map"), "eidnara-wrapup");
                 const text = texts().join("\n");
                 for (const fragment of expected) expect(text).toContain(fragment);
                 if (text.includes("— Partial")) expect(text).not.toContain("— Failed");
@@ -561,7 +575,7 @@ describe("createEidnaraCommandHandler", () => {
         it("rejects a non-positive keep count without a daemon call", async () => {
             const { run, calls, texts } = setup();
 
-            await expectSentinel(run("ctx-wrapup", "ses-wrapup-bad", "0"), "ctx-wrapup");
+            await expectSentinel(run("eidnara-wrapup", "ses-wrapup-bad", "0"), "eidnara-wrapup");
 
             expect(calls).toHaveLength(0);
             expect(texts()).toEqual([
@@ -573,12 +587,12 @@ describe("createEidnaraCommandHandler", () => {
             const isSubagentSession = mock((sessionId: string) => sessionId === "ses-child");
             const { run, calls, texts } = setup(undefined, { isSubagentSession });
 
-            await expectSentinel(run("ctx-wrapup", "ses-child", "50"), "ctx-wrapup");
+            await expectSentinel(run("eidnara-wrapup", "ses-child", "50"), "eidnara-wrapup");
 
             expect(isSubagentSession).toHaveBeenCalledWith("ses-child");
             expect(calls).toHaveLength(0);
             expect(texts()).toEqual([
-                "## Eidnara Wrapup — Skipped\n\n/ctx-wrapup is only available in primary sessions.",
+                "## Eidnara Wrapup — Skipped\n\n/eidnara-wrapup is only available in primary sessions.",
             ]);
         });
 
@@ -589,7 +603,10 @@ describe("createEidnaraCommandHandler", () => {
             });
             const { run, calls } = setup(undefined, { isSubagentSession });
 
-            await expectSentinel(run("ctx-wrapup", "ses-restored-child", "50"), "ctx-wrapup");
+            await expectSentinel(
+                run("eidnara-wrapup", "ses-restored-child", "50"),
+                "eidnara-wrapup",
+            );
 
             expect(calls).toHaveLength(0);
         });
@@ -602,13 +619,13 @@ describe("createEidnaraCommandHandler", () => {
                 summary: "Wrapped up.",
             }));
 
-            await expectSentinel(run("ctx-wrapup", "ses-wrapup-tui"), "ctx-wrapup");
+            await expectSentinel(run("eidnara-wrapup", "ses-wrapup-tui"), "eidnara-wrapup");
 
             expect(sendNotification.mock.calls.at(-1)?.[2]).toEqual({ forcePersist: false });
         });
     });
 
-    describe("ctx-memory-mark", () => {
+    describe("eidnara-memory-mark", () => {
         function kernelResolver(kernel: FakeKernel) {
             const transport = new FakeKernelTransport(kernel);
             return ({ sessionId, projectRoot }: { sessionId: string; projectRoot: string }) =>
@@ -628,8 +645,8 @@ describe("createEidnaraCommandHandler", () => {
             });
 
             await expectSentinel(
-                run("ctx-memory-mark", "ses-mark", "mark_stale mem_rule"),
-                "ctx-memory-mark",
+                run("eidnara-memory-mark", "ses-mark", "mark_stale mem_rule"),
+                "eidnara-memory-mark",
             );
 
             expect(texts().join("\n")).toContain("Applied");
@@ -651,16 +668,18 @@ describe("createEidnaraCommandHandler", () => {
             });
 
             await expectSentinel(
-                run("ctx-memory-mark", "ses-mark", "quarantine mem_verified"),
-                "ctx-memory-mark",
+                run("eidnara-memory-mark", "ses-mark", "quarantine mem_verified"),
+                "eidnara-memory-mark",
             );
             expect(texts().join("\n")).toContain("Confirmation Needed");
-            expect(texts().join("\n")).toContain("/ctx-memory-mark quarantine mem_verified --yes");
+            expect(texts().join("\n")).toContain(
+                "/eidnara-memory-mark quarantine mem_verified --yes",
+            );
             expect(kernel.receipts.size).toBe(0);
 
             await expectSentinel(
-                run("ctx-memory-mark", "ses-mark", "quarantine mem_verified --yes"),
-                "ctx-memory-mark",
+                run("eidnara-memory-mark", "ses-mark", "quarantine mem_verified --yes"),
+                "eidnara-memory-mark",
             );
             expect(texts().at(-1)).toContain("Applied");
             expect(kernel.objects.get("mem_verified")?.disposition).toBe("quarantined");
@@ -682,35 +701,38 @@ describe("createEidnaraCommandHandler", () => {
             });
 
             await expectSentinel(
-                run("ctx-memory-mark", "ses-mark", `explicit_reject ${objectId}`),
-                "ctx-memory-mark",
+                run("eidnara-memory-mark", "ses-mark", `explicit_reject ${objectId}`),
+                "eidnara-memory-mark",
             );
             const reply = texts().at(-1) ?? "";
             expect(reply).toContain("explicit_search: visible -> hidden");
             expect(reply.slice(0, TUI_TOAST_MAX_CHARS)).toContain(
-                `/ctx-memory-mark explicit_reject ${objectId} --yes`,
+                `/eidnara-memory-mark explicit_reject ${objectId} --yes`,
             );
             expect(kernel.receipts.size).toBe(0);
         });
 
         it("reports usage for malformed arguments and disabled when no kernel client is wired", async () => {
             const { run, texts } = setup();
-            await expectSentinel(run("ctx-memory-mark", "ses-mark", "stale"), "ctx-memory-mark");
+            await expectSentinel(
+                run("eidnara-memory-mark", "ses-mark", "stale"),
+                "eidnara-memory-mark",
+            );
             expect(texts().at(-1)).toContain("Invalid Arguments");
 
             await expectSentinel(
-                run("ctx-memory-mark", "ses-mark", "mark_stale mem_rule"),
-                "ctx-memory-mark",
+                run("eidnara-memory-mark", "ses-mark", "mark_stale mem_rule"),
+                "eidnara-memory-mark",
             );
             expect(texts().at(-1)).toContain("disabled");
         });
     });
 
-    describe("ctx-aug", () => {
-        it("runs sidekick in a child session and sends the augmented prompt", async () => {
-            const sidekickClient = {
+    describe("eidnara-aug", () => {
+        it("runs context_researcher in a child session and sends the augmented prompt", async () => {
+            const context_researcherClient = {
                 session: {
-                    create: mock(async () => ({ data: { id: "sidekick-child" } })),
+                    create: mock(async () => ({ data: { id: "context_researcher-child" } })),
                     prompt: mock(async () => undefined),
                     promptAsync: mock(async () => undefined),
                     messages: mock(async () => ({
@@ -725,32 +747,32 @@ describe("createEidnaraCommandHandler", () => {
                 },
             };
             const { run, calls, sendNotification } = setup(undefined, {
-                sidekick: {
+                context_researcher: {
                     config: { timeout_ms: 5_000 },
                     projectPath: "/repo/project",
                     resolveSessionDirectory: () => "/repo/project",
-                    client: sidekickClient as never,
+                    client: context_researcherClient as never,
                 },
             });
 
             await expectSentinel(
-                run("ctx-aug", "ses-aug", "Implement sidekick migration", {
+                run("eidnara-aug", "ses-aug", "Implement context_researcher migration", {
                     agent: "plan",
                     variant: "thinking",
                     providerId: "anthropic",
                     modelId: "claude-opus-4-8",
                 }),
-                "ctx-aug",
+                "eidnara-aug",
             );
 
             expect(calls).toHaveLength(0);
             expect(sendNotification).toHaveBeenCalledWith(
                 "ses-aug",
-                "🔍 Preparing augmentation… this may take 2-10s depending on your sidekick provider.",
+                "🔍 Preparing augmentation… this may take 2-10s depending on your context_researcher provider.",
                 {},
             );
-            expect(sidekickClient.session.create).toHaveBeenCalledTimes(1);
-            expect(sidekickClient.session.promptAsync).toHaveBeenCalledWith({
+            expect(context_researcherClient.session.create).toHaveBeenCalledTimes(1);
+            expect(context_researcherClient.session.promptAsync).toHaveBeenCalledWith({
                 path: { id: "ses-aug" },
                 signal: expect.any(AbortSignal),
                 body: {
@@ -760,25 +782,25 @@ describe("createEidnaraCommandHandler", () => {
                     parts: [
                         {
                             type: "text",
-                            text: "Implement sidekick migration\n\n<sidekick-augmentation>\nUse Bun for commands\n</sidekick-augmentation>",
+                            text: "Implement context_researcher migration\n\n<context_researcher-augmentation>\nUse Bun for commands\n</context_researcher-augmentation>",
                         },
                     ],
                 },
             });
         });
 
-        it("reports when sidekick is not configured", async () => {
+        it("reports when context_researcher is not configured", async () => {
             const { run, texts } = setup();
 
-            await expectSentinel(run("ctx-aug", "ses-aug-missing", "Help"), "ctx-aug");
+            await expectSentinel(run("eidnara-aug", "ses-aug-missing", "Help"), "eidnara-aug");
 
-            expect(texts().join("\n")).toContain("Sidekick is not configured");
+            expect(texts().join("\n")).toContain("ContextResearcher is not configured");
         });
 
         it("tells the user when the augmented prompt cannot be sent", async () => {
-            const sidekickClient = {
+            const context_researcherClient = {
                 session: {
-                    create: mock(async () => ({ data: { id: "sidekick-child" } })),
+                    create: mock(async () => ({ data: { id: "context_researcher-child" } })),
                     prompt: mock(async () => undefined),
                     promptAsync: mock(async () => {
                         throw new Error("session is busy");
@@ -795,18 +817,21 @@ describe("createEidnaraCommandHandler", () => {
                 },
             };
             const { run, texts, sendNotification } = setup(undefined, {
-                sidekick: {
+                context_researcher: {
                     config: { timeout_ms: 5_000 },
                     projectPath: "/repo/project",
                     resolveSessionDirectory: () => "/repo/project",
-                    client: sidekickClient as never,
+                    client: context_researcherClient as never,
                 },
             });
 
-            await expectSentinel(run("ctx-aug", "ses-aug-lost", "Ship the migration"), "ctx-aug");
+            await expectSentinel(
+                run("eidnara-aug", "ses-aug-lost", "Ship the migration"),
+                "eidnara-aug",
+            );
 
-            expect(sidekickClient.session.promptAsync).toHaveBeenCalledTimes(1);
-            const failure = texts().find((text) => text.startsWith("## /ctx-aug — Failed"));
+            expect(context_researcherClient.session.promptAsync).toHaveBeenCalledTimes(1);
+            const failure = texts().find((text) => text.startsWith("## /eidnara-aug — Failed"));
             expect(failure).toBeDefined();
             expect(failure).toContain("session is busy");
             expect(failure).toContain("Ship the migration");
@@ -814,9 +839,9 @@ describe("createEidnaraCommandHandler", () => {
         });
 
         it("reports an unconfirmed delivery instead of a lost prompt when the send times out", async () => {
-            const sidekickClient = {
+            const context_researcherClient = {
                 session: {
-                    create: mock(async () => ({ data: { id: "sidekick-child" } })),
+                    create: mock(async () => ({ data: { id: "context_researcher-child" } })),
                     prompt: mock(async () => undefined),
                     promptAsync: mock(() => new Promise<never>(() => {})),
                     messages: mock(async () => ({
@@ -831,30 +856,30 @@ describe("createEidnaraCommandHandler", () => {
                 },
             };
             const { run, texts, sendNotification } = setup(undefined, {
-                sidekick: {
+                context_researcher: {
                     config: { timeout_ms: 5_000 },
                     projectPath: "/repo/project",
                     resolveSessionDirectory: () => "/repo/project",
-                    client: sidekickClient as never,
+                    client: context_researcherClient as never,
                 },
             });
             __ignoredNotificationTest.setSendTimeoutMs(20);
             try {
                 await expectSentinel(
-                    run("ctx-aug", "ses-aug-slow", "Ship the migration"),
-                    "ctx-aug",
+                    run("eidnara-aug", "ses-aug-slow", "Ship the migration"),
+                    "eidnara-aug",
                 );
             } finally {
                 __ignoredNotificationTest.reset();
             }
 
             const notice = texts().find((text) =>
-                text.startsWith("## /ctx-aug — Delivery unconfirmed"),
+                text.startsWith("## /eidnara-aug — Delivery unconfirmed"),
             );
             expect(notice).toBeDefined();
             expect(notice).toContain("may still arrive");
             expect(notice).toContain("Ship the migration");
-            expect(texts().some((text) => text.startsWith("## /ctx-aug — Failed"))).toBe(false);
+            expect(texts().some((text) => text.startsWith("## /eidnara-aug — Failed"))).toBe(false);
             expect(sendNotification.mock.calls.at(-1)?.[2]).toEqual({ forcePersist: true });
         });
     });
@@ -867,11 +892,11 @@ describe("createEidnaraCommandHandler", () => {
         });
 
         await expectSentinel(
-            run("ctx-flush", "ses-notify").catch((error) => {
+            run("eidnara-flush", "ses-notify").catch((error) => {
                 order.push("sentinel");
                 throw error;
             }),
-            "ctx-flush",
+            "eidnara-flush",
         );
 
         expect(order).toEqual(["notify", "sentinel"]);
@@ -888,7 +913,7 @@ describe("createEidnaraCommandHandler", () => {
             throw new Error("TUI socket gone");
         });
 
-        await expectSentinel(run("ctx-flush", "ses-notify-fail"), "ctx-flush");
+        await expectSentinel(run("eidnara-flush", "ses-notify-fail"), "eidnara-flush");
 
         expect(sendNotification).toHaveBeenCalledTimes(1);
     });

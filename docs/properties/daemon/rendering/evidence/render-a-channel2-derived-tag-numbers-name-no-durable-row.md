@@ -102,7 +102,7 @@ An OpenCode session accumulates 60k tokens of unreduced tool output with no
 durable tags — the state the fallback comment describes. Channel-2 pressure is
 due, so a host reminder is emitted saying `~60k tokens of tool output remain
 unreduced ... oldest reclaimable: §1§ tool · §2§ tool.` The agent calls
-`ctx_reduce` with `1-2`. The reduce surface resolves tag numbers against
+`eidnara_reduce` with `1-2`. The reduce surface resolves tag numbers against
 `tags`, where either nothing exists — so the call no-ops and the agent has been
 sent on an errand it cannot complete, and will be nudged again — or rows exist
 whose numbers happen to collide with `1` and `2` and point at entirely different
@@ -111,7 +111,7 @@ blocks, in which case content the agent never saw is reduced.
 ## Timing windows and dependencies
 
 No temporal window. The dependency is a cross-part one: the impact turns on what
-`ctx_reduce` does with an unresolvable tag number, which is `lib.rs`'s facade
+`eidnara_reduce` does with an unresolvable tag number, which is `lib.rs`'s facade
 surface and sub-part 4d's scope.
 
 ## What a test must construct
@@ -130,10 +130,10 @@ surface and sub-part 4d's scope.
 
 ## Investigation log
 
-### Q: Does `ctx_reduce` reject an unresolvable tag number?
+### Q: Does `eidnara_reduce` reject an unresolvable tag number?
 
 - Sources examined: identified `parse_tag_range_string` at
-  `crates/daemon/src/lib.rs:15165-15210` and `handle_ctx_reduce_facade` at
+  `crates/daemon/src/lib.rs:15165-15210` and `handle_eidnara_reduce_facade` at
   `:10482-10588` from the Part 4 region map; did not read them, because both are
   sub-part 4d's assigned scope and this pass must not re-derive another part's
   material.

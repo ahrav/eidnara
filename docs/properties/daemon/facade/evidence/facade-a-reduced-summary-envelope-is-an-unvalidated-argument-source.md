@@ -79,15 +79,15 @@ string parses to.
 The scenario depends on whether the module can receive an un-unwrapped envelope,
 which is the open question below. Assuming it can:
 
-A model reproduces a reduced `ctx_memory` call it saw in its own context and
-emits `{"name":"ctx_memory","arguments":{"reduced":true,"summary":"{\"action\":\"get\",\"publicClaimIds\":[...]}"}}`.
-`facade_arguments` unwraps, `handle_ctx_memory_facade` reads `action` from the
+A model reproduces a reduced `eidnara_memory` call it saw in its own context and
+emits `{"name":"eidnara_memory","arguments":{"reduced":true,"summary":"{\"action\":\"get\",\"publicClaimIds\":[...]}"}}`.
+`facade_arguments` unwraps, `handle_eidnara_memory_facade` reads `action` from the
 unwrapped map, and the call proceeds as though the model had emitted the inner
 object directly.
 
-For `ctx_memory` the mutation actions are refused unconditionally
+For `eidnara_memory` the mutation actions are refused unconditionally
 (`:10692-10694`, "claim mutations require the host claim-operation commit
-path"), so the reachable damage through that tool is a read. `ctx_note` is the
+path"), so the reachable damage through that tool is a read. `eidnara_note` is the
 mutating tool with an unwrap path: its primary set is `["action", "content"]`, so
 an envelope carrying neither plus `reduced: true` and a `summary` encoding
 `{"action":"write","content":"..."}` writes a durable note whose arguments came

@@ -5,9 +5,9 @@ describe("extractRecentErrors", () => {
     it("matches the documented sessionLog error shapes", () => {
         const log = [
             "2026-05-20 12:00:00 [INFO] transform completed in 42ms",
-            "2026-05-20 12:00:01 [INFO] historian: 12 compartments published; 0 failed", // telemetry, NOT an error
+            "2026-05-20 12:00:01 [INFO] history_summarizer: 12 history_segments published; 0 failed", // telemetry, NOT an error
             "2026-05-20 12:00:02 transform failed: SQLITE_BUSY",
-            "2026-05-20 12:00:03 historian prompt failed: connection refused",
+            "2026-05-20 12:00:03 history_summarizer prompt failed: connection refused",
             "2026-05-20 12:00:04 Error: Connection reset",
             "2026-05-20 12:00:05 TypeError: cannot read property 'foo' of undefined",
             "2026-05-20 12:00:06 EMERGENCY: aborting session ses_abc",
@@ -20,7 +20,7 @@ describe("extractRecentErrors", () => {
         // `extractRecentErrors` excludes `0 failed` telemetry.
         expect(matches).toContain("2026-05-20 12:00:02 transform failed: SQLITE_BUSY");
         expect(matches).toContain(
-            "2026-05-20 12:00:03 historian prompt failed: connection refused",
+            "2026-05-20 12:00:03 history_summarizer prompt failed: connection refused",
         );
         expect(matches).toContain("2026-05-20 12:00:04 Error: Connection reset");
         expect(matches).toContain(
@@ -29,7 +29,7 @@ describe("extractRecentErrors", () => {
         expect(matches).toContain("2026-05-20 12:00:06 EMERGENCY: aborting session ses_abc");
         expect(matches).toContain("2026-05-20 12:00:08 caught exception during cleanup");
         expect(matches).not.toContain(
-            "2026-05-20 12:00:01 [INFO] historian: 12 compartments published; 0 failed",
+            "2026-05-20 12:00:01 [INFO] history_summarizer: 12 history_segments published; 0 failed",
         );
         expect(matches).not.toContain("2026-05-20 12:00:07 some other info line");
     });
@@ -39,7 +39,7 @@ describe("extractRecentErrors", () => {
             "    at SomeFn (file:///foo.ts:42:5)",
             "    at file:///baz.ts:7:1",
             "    at async runCommand (file:///x.ts:1:2)",
-            "    at new Historian (file:///y.ts:3:4)",
+            "    at new HistorySummarizer (file:///y.ts:3:4)",
             "    at Server.emit [as emit] (node:events:1:2)",
             "    at async Promise.all (index 0)",
             "    at Array.map (<anonymous>)",
@@ -56,10 +56,10 @@ describe("extractRecentErrors", () => {
         const log = [
             "[2026-05-20T12:00:00.000Z] ses_abc failed to send notification: ECONNREFUSED",
             "[2026-05-20T12:00:01.000Z] ses_abc rust transform failed; serving the input unchanged: boom",
-            "[2026-05-20T12:00:02.000Z] historian cleanup failed (wrapup) for ses_abc",
+            "[2026-05-20T12:00:02.000Z] history_summarizer cleanup failed (wrapup) for ses_abc",
             "[2026-05-20T12:00:03.000Z] apply failed=true",
-            "[2026-05-20T12:00:04.000Z] historian: 12 compartments published; 0 failed",
-            "[2026-05-20T12:00:05.000Z] historian: 3 published, 0  failed",
+            "[2026-05-20T12:00:04.000Z] history_summarizer: 12 history_segments published; 0 failed",
+            "[2026-05-20T12:00:05.000Z] history_summarizer: 3 published, 0  failed",
             "[2026-05-20T12:00:06.000Z] totals: 4 failed; 2 ok",
             "[2026-05-20T12:00:07.000Z] (0 failed)",
         ].join("\n");
@@ -69,15 +69,15 @@ describe("extractRecentErrors", () => {
         expect(matches).toEqual([
             "[2026-05-20T12:00:00.000Z] ses_abc failed to send notification: ECONNREFUSED",
             "[2026-05-20T12:00:01.000Z] ses_abc rust transform failed; serving the input unchanged: boom",
-            "[2026-05-20T12:00:02.000Z] historian cleanup failed (wrapup) for ses_abc",
+            "[2026-05-20T12:00:02.000Z] history_summarizer cleanup failed (wrapup) for ses_abc",
             "[2026-05-20T12:00:03.000Z] apply failed=true",
         ]);
     });
 
     it("matches failures whose subject ends in a digit", () => {
         const lines = [
-            "[historian] openai/gpt-5 failed: timeout; 1 fallback(s) left",
-            "[historian] openai/gpt-5 failed",
+            "[history_summarizer] openai/gpt-5 failed: timeout; 1 fallback(s) left",
+            "[history_summarizer] openai/gpt-5 failed",
             "attempt 2 failed: connection reset",
             "job-2026-05-20 failed: quota",
             "ses_abc123 failed: SQLITE_BUSY",

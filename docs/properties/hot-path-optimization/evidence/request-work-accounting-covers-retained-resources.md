@@ -102,7 +102,7 @@ remain unaudited.
 | --- | --- |
 | Ingress bytes | `RequestCtx.body` remains on the async side. Units own decoded values, not the input buffer. The read-only test observer measures the held body charge and its pool's availability without retaining the charge. Raw input can release when the handler aborts while decoded scratch remains with the worker. |
 | Decode scratch | The meter retains charges during semaphore admission. After admission, `ResidentMeter::take_charges` transfers them once into `PassIntake.held`, then `PassEnv._held`. The environment drops request fields before the hold. Transfer permanently disables further charging by that meter, including after restart or release. |
-| Transform unit count | Four semaphore permits bound submitted units across the daemon. Abortable acquisition precedes snapshot `begin` and submission on both unit-backed lanes. Unpaged typed ticket acceptance follows the permit; paged staging already accepts before the Apply arm reaches it. Read preflight remains before the permit. The closure owns its permit. No unit permit crosses an Emergency95 historian await. Before the unit wait, [`admit_pass`][admit-pass] takes one of `TRANSFORM_ADMISSION_PERMITS` (four units plus twelve waiters) without waiting and refuses the next pass as `queue_full`; the handler holds that permit until it returns, and [`Handler::resources`][hold-bound] declares the same count as `general_task_hold_bound`. |
+| Transform unit count | Four semaphore permits bound submitted units across the daemon. Abortable acquisition precedes snapshot `begin` and submission on both unit-backed lanes. Unpaged typed ticket acceptance follows the permit; paged staging already accepts before the Apply arm reaches it. Read preflight remains before the permit. The closure owns its permit. No unit permit crosses an Emergency95 history_summarizer await. Before the unit wait, [`admit_pass`][admit-pass] takes one of `TRANSFORM_ADMISSION_PERMITS` (four units plus twelve waiters) without waiting and refuses the next pass as `queue_full`; the handler holds that permit until it returns, and [`Handler::resources`][hold-bound] declares the same count as `general_task_hold_bound`. |
 | Emergency continuation and pending rerun result | Both use `PassContinuation`. Its last field, `env`, retains the environment and its scratch charges until the preceding pass and action fields drop. An aborted waiter cannot leave a queued continuation retaining pass data without its environment. |
 | Paged apply | A shared `PageApplyGuard` keeps `Applying`, staged bytes, and the pending upload count until completion or the final owner's drop. `finish_apply` and guard drop share `release_applying`, which checks the transform identity before releasing. |
 | Shared-memory accounting | The host's existing accounting is unchanged. Before/after status equality is a regression observation, not a per-allocation ingress or scratch ledger. |
@@ -141,7 +141,7 @@ entire scratch pool and refuse one additional byte, proving exact return for
 the tested pool rather than merely an empty counter.
 
 `emergency_cancellation_between_units_preserves_commit_and_releases_scratch`
-observes all four permits available while the live historian is awaited, but
+observes all four permits available while the live history_summarizer is awaited, but
 scratch still held. The next unit sees cancellation and releases it. The two
 [meter transfer tests][meter-tests] separately test one-time release and spent
 meter refusal. [Real-host tests][host-tests] repeat scratch reacquisition after
@@ -161,7 +161,7 @@ cancellation schedule, so E2 remains partial.
 [`synthetic_unit_failures_map_to_internal_error_and_release_resources`][failed-unit-test]
 checks all three `BlockingWorkFailed` variants at submissions one and two.
 The fake runner drops the failed submission's closure without executing it.
-Submission-two cases first run a real Emergency95 transform and inline historian
+Submission-two cases first run a real Emergency95 transform and inline history_summarizer
 publication, then inject the error delivery. Every case returns `internal_error`,
 all four unit permits, and exact scratch capacity. These are synthetic delivery
 tests, not actual runtime-stop or route-closing races.

@@ -76,7 +76,7 @@ retirement has already happened.
 
 **This bypasses `invalidate_on_missed`.** `config.rs:236-238`:
 
-> `invalidate_on_missed` stays `false` until the raw Rust historian client can
+> `invalidate_on_missed` stays `false` until the raw Rust history_summarizer client can
 > answer Ping (the source module-host work); enabling it before then would kill healthy
 > long-running awaits (protocol §9.3).
 

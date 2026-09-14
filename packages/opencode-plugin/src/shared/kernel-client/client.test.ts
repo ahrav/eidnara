@@ -158,7 +158,11 @@ const spec: DecisionSpecInput = {
     source_revision: 1,
 };
 
-const intent = { actor: "assistant", operationId: "session-1\u001fcall-1", cause: "ctx_memory" };
+const intent = {
+    actor: "assistant",
+    operationId: "session-1\u001fcall-1",
+    cause: "eidnara_memory",
+};
 
 describe("KernelClient gating", () => {
     test("disabled returns before any transport work", async () => {

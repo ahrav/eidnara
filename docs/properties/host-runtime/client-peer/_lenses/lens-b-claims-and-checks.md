@@ -11,8 +11,8 @@ Scope: `crates/host-runtime/src/client.rs` (3,998 lines), re-derived with `wc -l
 `HEAD`. Production is `1-2264`; `#[cfg(test)] mod tests` runs `2266-3998`, which
 is 1,733 lines, 43 percent of the file.
 
-Provenance. Code read from `the `host` source checkout, branch
-`feat/shared-memory-release-gate-audit`, `HEAD` = `e447c927` ("refactor(shm):
+Provenance. Code read from `the`host` source checkout, branch
+`feat/shared-memory-release-gate-audit`,`HEAD` = `e447c927` ("refactor(shm):
 trim final review leftovers"). Both facts confirmed with `git branch
 --show-current` and `git log -1`, matching the re-scope map
 (`../../part-2-rescope/scope-map-and-risk-ranking.md:7-9`). Every line reference
@@ -58,7 +58,7 @@ synthesis pass does not inherit them.
 Lens A's other doc citations were spot-checked and hold: `:256` (`Push`
 reserved), `:269` (role-invalid enumeration), `:280` (`Cancel` disposition),
 `:654` (correlation allocation), `:656` (ingress watermark), `:658` (finite
-limits), `:808` (`HistorianProducer` as a `host_runtime::Client` consumer). The
+limits), `:808` (`HistorySummarizerProducer` as a `host_runtime::Client` consumer). The
 deadline table lens A cites as `:736-743` has its header at `:735`, its separator
 at `:736`, and its seven data rows at `:737-743`.
 
@@ -633,7 +633,7 @@ branch."
 was deleted either. `git diff` of `ed487e11` shows no removed reconnect
 function. So this is a contract gap, carried by sibling lead L4, not a
 deleted-mechanism finding. Recovery lives in
-`crates/daemon/src/historian_producer.rs:699`.
+`crates/daemon/src/history_summarizer_producer.rs:699`.
 
 ## Conventionally-enforced-only claims
 
@@ -688,7 +688,7 @@ spanning `:2328` to `:3993`. None of them runs in CI.** The reason is
 structural, not an omission: every `-p host-runtime` invocation in `ci.yml` carries a
 `--test <name>` filter, which selects one integration binary and excludes the lib
 target. Re-derived here rather than copied: `grep -n 'host-runtime'
-the source repository `ci.yml` workflow` returns `:87`, `:132`, `:133`, `:134`, `:168`, `:169`,
+the source repository`ci.yml`workflow` returns `:87`, `:132`, `:133`, `:134`, `:168`, `:169`,
 `:178`, `:187`, `:190`, `:211`, `:361`, `:442`, `:461`, and none is an
 unfiltered or `--lib` run.
 
@@ -752,7 +752,7 @@ client is the fixture rather than the subject.** Counts by `grep -c`:
 `:133`), `host_roundtrip.rs` 3 (unnamed), `activation.rs` 2 (unnamed),
 `composite_routing.rs` 1 (unnamed), `protocol_vectors.rs` 1 (unnamed),
 `shm_soak.rs` 1 (partial, `:134-135` names one `--exact` test). Plus the shared
-harness `tests/support/mod.rs` and `tests/support/synapse.rs`. So 8 of the 24
+harness `tests/support/mod.rs` and `tests/support/local_embeddings.rs`. So 8 of the 24
 integration binaries touch `client.rs` at all, and 4 of those 8 are named in CI.
 
 ### Doctests
@@ -911,7 +911,7 @@ Ranked by the gap between what the code decides and what any check proves.
    at two (`:341`, `:342`), `dial_failed` (`:350`),
    `authentication_failed` (`:363`), and `setup_failed` at three (`:369`,
    `:372`, `:375`). The post-setup retirement recheck at `:425-430` - whose
-   comment at `:418-424` explicitly notes "the historian does not reconnect on
+   comment at `:418-424` explicitly notes "the history_summarizer does not reconnect on
    that path, so a daemon reload race would abort the run instead of
    establishing a replacement" - is the most consequential of them. Only the
    success path is tested, by `authenticates_attaches_ring_routes_unary_and_closes`
@@ -963,7 +963,7 @@ Ranked by the gap between what the code decides and what any check proves.
   from sibling lead L2. (needs human input)
 - Does the document's `Recovering` state (`:762-764`) describe the client
   library's obligation or the consumer's? Recovery lives in
-  `crates/daemon/src/historian_producer.rs:699`, outside 2d. Carried forward
+  `crates/daemon/src/history_summarizer_producer.rs:699`, outside 2d. Carried forward
   from sibling lead L4. (unresolved, needs a daemon pass)
 - Should the deleted-mechanism findings be documentation corrections or property
   records? Items 3 and 4 of that section (`:724`, `:852`) name "byte evidence"

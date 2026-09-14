@@ -86,7 +86,7 @@ treats both as force-or-emergency but the two are distinguished downstream by
 `pass_class_for` (`:803-808`) and by the emergency-scale logic in `boundary.rs`. So
 collapsing them would change which passes bypass mid-turn deferral.
 
-`boundary.rs:814-816`, inside `check_compartment_trigger_with_index`:
+`boundary.rs:814-816`, inside `check_history_segment_trigger_with_index`:
 
 ```
 let force_materialization_percentage =
@@ -105,7 +105,7 @@ same band to decide whether the live-prompt floor applies:
 if ctx.emergency_tail_scale.is_none() && usage_percentage < force_materialization_percentage {
 ```
 
-`boundary.rs:977-980`, inside `has_runnable_compartment_window`, uses it to choose
+`boundary.rs:977-980`, inside `has_runnable_history_segment_window`, uses it to choose
 between the force-eligibility rule and the ordinary one.
 
 **The existing check.** `scheduler.rs:1238`

@@ -16,7 +16,7 @@ CREATE TABLE cache_state (
             meta         TEXT NOT NULL
         , last_activity_at INTEGER NOT NULL DEFAULT 0);
 
-CREATE TABLE compartments (
+CREATE TABLE history_segments (
             session_id        TEXT NOT NULL,
             sequence          INTEGER NOT NULL,
             start_message     INTEGER NOT NULL,
@@ -92,16 +92,16 @@ CREATE TABLE pass_trace (
 
 CREATE TABLE chunk_transcripts (
             session_id          TEXT NOT NULL,
-            compartment_seq     INTEGER NOT NULL,
+            history_segment_seq     INTEGER NOT NULL,
             start_ordinal       INTEGER NOT NULL,
             end_ordinal         INTEGER NOT NULL,
             transcript_deflate  BLOB NOT NULL,
-            created_at_ms       INTEGER NOT NULL, raw_messages_deflate BLOB NULL,
-            PRIMARY KEY (session_id, compartment_seq)
+            created_at_ms       INTEGER NOT NULL,
+            PRIMARY KEY (session_id, history_segment_seq)
         );
 
 CREATE INDEX idx_chunk_transcripts_session_range
-            ON chunk_transcripts(session_id, start_ordinal, end_ordinal, compartment_seq);
+            ON chunk_transcripts(session_id, start_ordinal, end_ordinal, history_segment_seq);
 
 CREATE TABLE tags (
             session_id     TEXT NOT NULL,
@@ -215,7 +215,7 @@ CREATE TABLE authority (
             step_seed          INTEGER NOT NULL DEFAULT 0,
             step_memories      INTEGER NOT NULL DEFAULT 0,
             step_notes         INTEGER NOT NULL DEFAULT 0,
-            step_compartments  INTEGER NOT NULL DEFAULT 0,
+            step_history_segments  INTEGER NOT NULL DEFAULT 0,
             step_reconcile     INTEGER NOT NULL DEFAULT 0,
             step_verify        INTEGER NOT NULL DEFAULT 0,
             step_flip          INTEGER NOT NULL DEFAULT 0,
@@ -336,7 +336,7 @@ CREATE TABLE authority_route_bindings (
 CREATE INDEX idx_authority_route_bindings_authority
             ON authority_route_bindings(context_store_uuid, project);
 
-CREATE TABLE dreamer_receipts (
+CREATE TABLE memory_classifier_receipts (
             project TEXT NOT NULL CHECK (length(project) > 0),
             producer TEXT NOT NULL CHECK (length(producer) BETWEEN 1 AND 256),
             operation_key TEXT NOT NULL CHECK (length(operation_key) BETWEEN 1 AND 256),
@@ -359,7 +359,7 @@ CREATE TABLE dreamer_receipts (
             )
         );
 
-CREATE TABLE dreamer_attempts (
+CREATE TABLE memory_classifier_attempts (
             project TEXT NOT NULL,
             producer TEXT NOT NULL,
             operation_key TEXT NOT NULL,
@@ -379,12 +379,12 @@ CREATE TABLE dreamer_attempts (
             session_released_at_ms INTEGER,
             PRIMARY KEY (project, producer, operation_key, generation, attempt_index),
             FOREIGN KEY (project, producer, operation_key)
-                REFERENCES dreamer_receipts(project, producer, operation_key),
+                REFERENCES memory_classifier_receipts(project, producer, operation_key),
             CHECK ((terminal_kind IS NULL) = (terminal_at_ms IS NULL))
         );
 
-CREATE INDEX idx_dreamer_attempts_project_dispatched
-            ON dreamer_attempts(project, dispatched_at_ms);
+CREATE INDEX idx_memory_classifier_attempts_project_dispatched
+            ON memory_classifier_attempts(project, dispatched_at_ms);
 
 CREATE TABLE transform_session_roots (
             session_id  TEXT NOT NULL,
@@ -441,19 +441,19 @@ CREATE TRIGGER notes_facade_authority_delete
           )
         BEGIN SELECT RAISE(ABORT, 'authority_draining'); END;
 
-CREATE TABLE compartment_events (
+CREATE TABLE history_segment_events (
             id                    INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id            TEXT NOT NULL,
-            compartment_id        INTEGER,
-            at_compartment        INTEGER,
+            history_segment_id        INTEGER,
+            at_history_segment        INTEGER,
             kind                  TEXT NOT NULL,
             fields_json           TEXT NOT NULL DEFAULT '{}',
             created_at             INTEGER NOT NULL DEFAULT 0,
             harness                TEXT NOT NULL DEFAULT 'module'
         );
 
-CREATE INDEX idx_compartment_events_session
-            ON compartment_events(session_id, id);
+CREATE INDEX idx_history_segment_events_session
+            ON history_segment_events(session_id, id);
 
 CREATE TABLE primer_candidates (
             id                       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -462,8 +462,8 @@ CREATE TABLE primer_candidates (
             session_id               TEXT NOT NULL,
             question                 TEXT NOT NULL,
             normalized_question      TEXT NOT NULL,
-            source_compartment_start INTEGER,
-            source_compartment_end   INTEGER,
+            source_history_segment_start INTEGER,
+            source_history_segment_end   INTEGER,
             source_start_message_id  TEXT NOT NULL DEFAULT '',
             source_end_message_id    TEXT NOT NULL DEFAULT '',
             source_message_time      INTEGER NOT NULL DEFAULT 0,
@@ -478,15 +478,15 @@ CREATE TABLE user_memory_candidates (
             id                       INTEGER PRIMARY KEY AUTOINCREMENT,
             content                  TEXT NOT NULL,
             session_id               TEXT NOT NULL,
-            source_compartment_start INTEGER,
-            source_compartment_end   INTEGER,
+            source_history_segment_start INTEGER,
+            source_history_segment_end   INTEGER,
             created_at               INTEGER NOT NULL DEFAULT 0
         );
 
 CREATE INDEX idx_user_memory_candidates_session
             ON user_memory_candidates(session_id, created_at, id);
 
-CREATE TABLE historian_side_channel_outbox (
+CREATE TABLE history_summarizer_side_channel_outbox (
             session_id          TEXT NOT NULL,
             firing_seq         INTEGER NOT NULL,
             kind               TEXT NOT NULL
@@ -504,8 +504,8 @@ CREATE TABLE historian_side_channel_outbox (
             PRIMARY KEY (session_id, firing_seq, kind, source_start, source_end, item_index)
         );
 
-CREATE INDEX idx_historian_side_channel_outbox_due
-            ON historian_side_channel_outbox(
+CREATE INDEX idx_history_summarizer_side_channel_outbox_due
+            ON history_summarizer_side_channel_outbox(
                 session_id, kind, delivered_at_ms, next_attempt_at_ms, firing_seq, item_index
             );
 
@@ -522,14 +522,14 @@ CREATE TABLE facade_mutation_ledger (
 CREATE INDEX idx_facade_mutation_ledger_scope_newest
             ON facade_mutation_ledger(identity_scope, created_at_ms DESC, tool, action, command_id);
 
-CREATE INDEX idx_compartments_session_end_message
-            ON compartments(session_id, end_message);
+CREATE INDEX idx_history_segments_session_end_message
+            ON history_segments(session_id, end_message);
 
 CREATE INDEX idx_notes_project_status_updated
             ON notes(project_path, status, updated_at_ms DESC, id DESC);
 
-CREATE INDEX idx_historian_side_channel_outbox_order
-            ON historian_side_channel_outbox(
+CREATE INDEX idx_history_summarizer_side_channel_outbox_order
+            ON history_summarizer_side_channel_outbox(
                 session_id, kind, delivered_at_ms,
                 firing_seq, source_start, source_end, item_index, next_attempt_at_ms
             );
@@ -589,12 +589,6 @@ CREATE TRIGGER tags_cache_generation_update AFTER UPDATE ON tags BEGIN
                 max_tag_number = excluded.max_tag_number;
         END;
 
-CREATE TABLE project_mural_artifacts (
-            project_path TEXT PRIMARY KEY NOT NULL,
-            data_url BLOB NOT NULL,
-            content_hash TEXT NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
 
 CREATE TRIGGER notes_feed_insert AFTER INSERT ON notes BEGIN
             INSERT INTO changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)

@@ -5,7 +5,7 @@ The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
 
 ## Discovery trigger
 
-The historian fire decision merges the user and project config tiers on every
+The history_summarizer fire decision merges the user and project config tiers on every
 pass, with a deep clone of the result and an unconditional read of the
 guidance override file. A cache of the merged result is the obvious change.
 The wildcard pass asked what staleness contract the current code gives and
@@ -34,8 +34,8 @@ privilege rules that a project tier must never bypass.
   project values per key class; [`ProjectRaiseOnly`][raise-only] applies a
   project value only when it tightens the user value.
 - Per-pass callers: [`maybe_spawn_reattach`][call-reattach],
-  [`prepare_historian_fire`][call-fire] after the state load, pending-rewrite,
-  and live-historian early returns ([`:5084-5120`][fire-early]), and the
+  [`prepare_history_summarizer_fire`][call-fire] after the state load, pending-rewrite,
+  and live-history_summarizer early returns ([`:5084-5120`][fire-early]), and the
   wrapup path at [`:5439`][call-wrapup]. [`bind`][call-bind] freezes a copy
   into `SessionBinding`, whose doc at [`:230-234`][binding-doc] says config
   can change while the route stays open.
@@ -70,9 +70,9 @@ next pass; bind two project roots and alternate them; assert the bound
 mtime cache and three privilege tests; none covers override staleness or two
 roots sharing one cache.
 
-Use passes that reach the `prepare_historian_fire` call at `lib.rs:5051`:
+Use passes that reach the `prepare_history_summarizer_fire` call at `lib.rs:5051`:
 not a subagent pass (`:8234`), state load succeeds, no `pending_rewrite`, and
-no live historian completion pending (`:5013-5051`); the check is on each
+no live history_summarizer completion pending (`:5013-5051`); the check is on each
 call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 `:4557-4560`) bypass the cache and cannot exercise this record.
 
@@ -89,12 +89,12 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 - Missing evidence: A decision on the warning surface.
 - Conclusion: needs human input.
 
-### Q: Should the historian read the bind-frozen config instead?
+### Q: Should the history_summarizer read the bind-frozen config instead?
 
 - Sources examined: [`:5122`][call-fire], [`:11902-11903`][call-bind],
   [`:230-234`][binding-doc].
 - Findings: The binding doc freezes the fallback history budget because
-  config can change while the route stays open; the historian deliberately
+  config can change while the route stays open; the history_summarizer deliberately
   reads a fresh merge per pass. Switching it to the frozen copy removes the
   per-pass cost and the one-pass edit latency together.
 - Missing evidence: A specification decision.
