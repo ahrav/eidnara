@@ -90,7 +90,7 @@ impl SearchSelection {
     /// Joins the owned supervisor before reconciling its released local prefix and ordinary deregistration.
     /// A supervisor that already stopped on its own joins like one this disable cancelled.
     /// Cancellation or an expired wait retains the supervisor and join handle; its tracked task owns the reader.
-    /// An empty selection, a recorded deregistration, or one the kernel already holds completes without consuming a cleanup episode.
+    /// An empty selection, a recorded deregistration, or one the kernel already holds completes without consuming a cleanup episode; a recorded deregistration still spends one budgeted kernel read to confirm the consumer is absent.
     /// Filesystem calls require healthy dependencies; a deadline cannot interrupt a blocked syscall.
     pub async fn reconcile_disabled(
         &mut self,
@@ -109,13 +109,13 @@ impl SearchSelection {
         if let Some(owner) = &self.maintenance {
             owner.supervisor.request_shutdown();
         }
-        // A validated record with `deregistered` names its consumer; a kernel that holds that consumer again was restored from before the disable, and the marker does not outrank it. A completed replay owes no budget, so this read is bounded by the store alone.
+        // A validated record with `deregistered` names its consumer; a kernel that holds that consumer again was restored from before the disable, and the marker does not outrank it. The read waits for a reader only within the caller's budget.
         let registered_again = |disabled: &DisabledIntent| -> Result<bool, BuildError> {
             let Some(handoff) = disabled.handoff.as_deref() else {
                 return Ok(false);
             };
             Ok(kernel
-                .outbox_consumer_checkpoint(&handoff.consumer.consumer_id)?
+                .outbox_consumer_checkpoint_within_budget(budget, &handoff.consumer.consumer_id)?
                 .is_some())
         };
         if self.maintenance.is_none() && self.selected.load().is_none() {
@@ -199,24 +199,26 @@ impl SearchSelection {
         if kernel.database_incarnation_id_within_budget(budget)? != handoff.kernel_incarnation_id {
             return Err(ProjectionError::IdentityMismatch.into());
         }
+        // The history this attempt observed the consumer in; a validated family narrows it to the one its prefix was read from.
+        let mut history = kernel
+            .capture_commit_read_target_within_budget(budget)?
+            .incarnation;
         let checkpoint = kernel.outbox_consumer_checkpoint_within_budget(budget, &consumer)?;
         // A restore keeps the durable identity but can renumber history; a prefix read under one incarnation is acknowledged and deregistered only under the same one.
-        let settled = |disabled: &DisabledIntent, history: Option<CommitReadIncarnation>| {
+        let settled = |disabled: &DisabledIntent, history: CommitReadIncarnation| {
             self.cleanup_admission(gate, spec, budget, disabled)?;
             if lifecycle.read() != ControlState::Disabled(disabled.clone()) {
                 return Err(IntentRefusal::Disabled.into());
             }
-            if let Some(history) = history
-                && kernel
-                    .capture_commit_read_target_within_budget(budget)?
-                    .incarnation
-                    != history
+            if kernel
+                .capture_commit_read_target_within_budget(budget)?
+                .incarnation
+                != history
             {
                 return Err(ProjectionError::IdentityMismatch.into());
             }
             Ok::<(), BuildError>(())
         };
-        let mut history = None;
         if checkpoint.is_some() {
             // Only outstanding local work consumes an episode; a consumer the kernel already deregistered leaves nothing to retry but the receipt replay.
             let mut next = disabled.clone();
@@ -250,7 +252,7 @@ impl SearchSelection {
             }
             self.validate_family(&family, kernel, budget)?;
             let incarnation = family.incarnation;
-            history = Some(incarnation);
+            history = incarnation;
             if family.certificate.retiring.is_some() {
                 self.retire_bound(
                     &family,
@@ -321,9 +323,7 @@ impl SearchSelection {
                 cause: "disabled consumer deregistration".to_owned(),
             },
             |envelope| {
-                if let Some(history) = history {
-                    kernel.require_incarnation(history)?;
-                }
+                kernel.require_incarnation(history)?;
                 envelope.deregister_outbox_consumer(
                     &intent.consumer.consumer_id,
                     super::super::wall_ms().map_err(|_| kernel::KernelError::InvalidInput)?,

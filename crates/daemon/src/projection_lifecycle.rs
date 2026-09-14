@@ -427,8 +427,11 @@ impl ProjectionLifecycle {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(ControlState::Absent);
             }
-            // The directory was entered, so this is the record's own mode; nothing repairs it.
+            // A directory without its owner's search bit opens but refuses its entries; `open` repairs that. Otherwise this is the record's own mode, which nothing repairs.
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                if metadata.mode() & 0o100 == 0 {
+                    return Err(Unreadable("directory not searchable".to_owned()));
+                }
                 return Ok(ControlState::Unavailable("record not readable".to_owned()));
             }
             Err(error) => return Err(Unreadable(error.kind().to_string())),

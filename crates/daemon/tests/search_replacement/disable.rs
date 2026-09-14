@@ -1085,8 +1085,9 @@ async fn disable_process_cuts_and_lost_ack_reconcile_twice_without_reenable() {
                     &corpus.kernel,
                     &gate,
                     &spec(root.path()),
+                    // A completed replay consumes no episode; it still confirms with one budgeted kernel read that the consumer is absent.
                     &budget(if reopen == 1 {
-                        Duration::ZERO
+                        Duration::from_secs(5)
                     } else {
                         Duration::from_secs(20)
                     }),
@@ -1432,6 +1433,128 @@ async fn selecting_a_replacement_is_refused_while_maintenance_is_bound() {
         .unwrap();
 }
 
+/// The receipt-only retry validated no family. A kernel restored before its deregistration commit holds the consumer without this operation's receipt, so the commit must be fenced to the history the retry observed, not run against the restored one.
+#[tokio::test]
+async fn a_restore_before_the_retry_deregistration_is_refused_without_a_validated_family() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(backup.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let saved = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup.path().to_path_buf(),
+            deadline: std::time::Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let checkpoint = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    assert!(checkpoint.is_some());
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let done = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(done.deregistered);
+    // The cut after `Deregistered`: the kernel holds the receipt, the record does not.
+    let path = root.path().join("search-lifecycle/intent.json");
+    let mut cut: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    cut["deregistered"] = serde_json::Value::Bool(false);
+    std::fs::write(&path, serde_json::to_vec(&cut).unwrap()).unwrap();
+    let mut selection = selector(root.path());
+    let result = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate_for(root.path()),
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| {
+                if event == DisableEvent::BeforeDeregister {
+                    corpus.kernel.restore(&saved.destination_path).unwrap();
+                }
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Mutation(
+                retrieval::ProjectionError::IdentityMismatch
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(!disabled(root.path()).deregistered);
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        checkpoint
+    );
+}
+
+/// The completion check waits for a kernel reader only as long as the caller's budget allows; a held pool returns `Deadline` at that bound, not when the holder lets go.
+#[tokio::test]
+async fn a_completed_replay_stops_waiting_for_a_kernel_reader_at_its_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let done = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(done.deregistered);
+    let held = Arc::new(std::sync::Barrier::new(2));
+    let holder = {
+        let kernel = Arc::clone(&corpus.kernel);
+        let held = Arc::clone(&held);
+        std::thread::spawn(move || kernel.hold_readers_for_test(&held, Duration::from_secs(3)))
+    };
+    held.wait();
+    let started = std::time::Instant::now();
+    let result = selector(root.path())
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate_for(root.path()),
+            &spec(root.path()),
+            &budget(Duration::from_millis(200)),
+            &mut |_| {},
+        )
+        .await;
+    let waited = started.elapsed();
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Kernel(kernel::KernelError::Deadline))
+        ),
+        "{result:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(2),
+        "the completion check waited {waited:?} for the holder instead of its budget"
+    );
+    holder.join().unwrap();
+    assert_eq!(disabled(root.path()), done);
+}
+
 /// A slice held inside a projection write past the grace is reported once, not once more for the tracked task that pins the reader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn grace_expiry_counts_only_the_held_slice_for_pinned_maintenance() {
@@ -1510,7 +1633,8 @@ fn an_unreadable_record_denies_per_call_without_latching_the_gate() {
     let directory = root.path().join("search-lifecycle");
     let mut modes = vec![0o750];
     if rustix::process::geteuid().as_raw() != 0 {
-        modes.push(0o000);
+        // Without the search bit the directory opens but its record does not; `open` repairs that too.
+        modes.extend([0o600, 0o000]);
     }
     for mode in modes {
         let grant = gate
