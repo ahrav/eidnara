@@ -224,7 +224,7 @@ pub fn is_known_tool_id(tool_id: &str) -> bool {
 
 pub fn warn_ignored_unknown_tool_description(tool_id: &str) {
     eprintln!(
-        "daemon: config warning: prompt_surface.tool_descriptions.{tool_id} is not a known ctx_* tool ID; the override was ignored."
+        "daemon: config warning: prompt_surface.tool_descriptions.{tool_id} is not a known eidnara_* tool ID; the override was ignored."
     );
 }
 

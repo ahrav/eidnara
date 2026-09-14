@@ -649,7 +649,7 @@ Transport setup is complete before the application wire becomes active. The owne
 Missing native support, malformed ancillary data, duplicate or extra descriptors, identity mismatch, token mismatch, admission failure, attachment failure, timeout, or setup-socket loss retires the connection before application traffic. Runtime ring corruption or unexpected setup-socket EOF also retires the connection. No setup or runtime failure changes transport or replays an uncertain request.
 
 ```mermaid
-stateDiagram-v3
+stateDiagram-v2
   [*] --> Authenticating
   Authenticating --> Attaching: peer proof succeeds
   Authenticating --> Failed: proof, deadline, or socket failure
@@ -843,7 +843,7 @@ Any EOF, authentication failure, framing corruption, liveness failure, or explic
 Host restart MUST close the old setup socket and generations, mint a fresh key and daemon ID, bind and publish under lock, and reject mixed-generation authentication. Reopened routes receive new connection-fenced handles. Route-only module restart uses new channels or strictly higher epochs and preserves the same connection only if host can prove route cleanup.
 
 ```mermaid
-stateDiagram-v3
+stateDiagram-v2
   [*] --> Discovering
   Discovering --> Authenticating: valid snapshot
   Authenticating --> Connected: proofs and daemon ID match

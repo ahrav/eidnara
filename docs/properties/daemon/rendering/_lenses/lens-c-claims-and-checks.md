@@ -277,7 +277,7 @@ Nine, each stated somewhere and mechanically checked nowhere.
 9. **The unknown-tool-override warning is stderr-only.**
    `warn_ignored_unknown_tool_description` (`prompt_surface.rs:150-153`) emits
    `"daemon: config warning: prompt_surface.tool_descriptions.{tool_id} is not
-   a known ctx_* tool ID; the override was ignored."` and returns nothing. A
+   a known eidnara_* tool ID; the override was ignored."` and returns nothing. A
    silently ignored description override is not visible in any response field.
 
 ## Existing-check inventory
