@@ -80,3 +80,7 @@ and `wire.rs:407-408` projects them without a test-only gate.
 - Missing evidence: the replacement decoder and end-to-end projection comparison.
 - Conclusion: unresolved, needs `/testing:test-strategy`; existing checks go
   to `/testing:invariant-test-review`. No test ran during discovery.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`; replay envelopes removed. `wire_golden_projects_to_flat_blocks` passes against the golden frozen at `85accd89` without regeneration: zero plugin-shaped byte or hash drift after the serde change.

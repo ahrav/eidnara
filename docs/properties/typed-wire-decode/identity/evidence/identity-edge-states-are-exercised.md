@@ -89,3 +89,17 @@ Do not set a marker because an assertion passed or because a branch name ran.
   and threshold-sensitive seams identified by the completed fresh evaluation.
 - Conclusion: unresolved implementation evidence goes to `/testing:test-strategy`.
   The four-lens evaluation is complete as supplied; no rerun is claimed.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`; replay envelopes removed. Markers constructed by the executed tests: typed-only false flags, explicit-false ingress, signed zeros, positional mismatch, repeated candidates, two provider namespaces, changed stamps (transform.rs and sidecar.rs tests), unknown-envelope normalization on decode, and a copy-on-write edit with an untouched sibling. Not constructed: a durable hygiene or lineage anchor reload under the owned model.
+
+A persisted old-row replay is constructed by
+`replay_basis_identity_rows_re_adopt_once_under_the_typed_basis` (transform.rs):
+a `ModuleMeta` row without `block_identity_basis` carrying a covered
+`block_identity_by_mid` vector hashed from replayed ingress bytes (unknown block
+key, `provider_executed: false`) is re-adopted to the typed vector and stamped
+`typed` instead of returning `IdentityDrift`; a vector whose `kind_tag` values
+differ still rejects, and the stamped row rejects covered drift.
+`module_meta_basis_stamp_defaults_split_stored_rows_from_built_metas`
+(memory-store lib.rs) pins the stamp's serde defaults.

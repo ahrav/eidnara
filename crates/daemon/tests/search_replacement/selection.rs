@@ -296,6 +296,13 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
         "UPDATE occurrences SET created_commit_seq=created_commit_seq-1",
         "UPDATE embedding_jobs SET stop_reason='stopped' WHERE state='pending'",
         "UPDATE embedding_jobs SET state='admitted' WHERE state='pending'",
+        "UPDATE embedding_jobs SET state='admitted',host_job_id='host' WHERE state='pending'",
+        "UPDATE embedding_jobs SET episode_id='episode',episode_allowance=0,episode_deadline=9223372036854775807 WHERE state='pending'",
+        "UPDATE embedding_jobs SET attempts=1,episode_id='episode',episode_allowance=1,episode_deadline=9223372036854775807 WHERE state='pending'",
+        "UPDATE embedding_jobs SET attempts=0,episode_id='episode',episode_allowance=1,episode_deadline=0 WHERE state='pending'",
+        "UPDATE embedding_jobs SET attempts=1 WHERE state='pending'",
+        "UPDATE embedding_jobs SET episode_id='bogus',episode_allowance=1,episode_deadline=9223372036854775807 WHERE state='pending'",
+        "UPDATE embedding_jobs SET episode_id=job_id||'/1',episode_allowance=2,episode_deadline=9223372036854775806,next_attempt_at=9223372036854775807 WHERE state='pending'",
         "UPDATE embedding_jobs SET job_id='wrong-job'",
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -345,6 +352,18 @@ fn tampered_certificate_intent_never_becomes_available_after_reopen() {
             serde_json::json!("other-incarnation"),
         ),
         ("recovery_target", serde_json::json!({"commit_seq": 999})),
+        (
+            "episodes",
+            serde_json::json!({"allowance": 0, "consumed": 0, "deadline": i64::MAX}),
+        ),
+        (
+            "episodes",
+            serde_json::json!({"allowance": 1, "consumed": 2, "deadline": i64::MAX}),
+        ),
+        (
+            "episodes",
+            serde_json::json!({"allowance": 1, "consumed": 0, "deadline": -1}),
+        ),
     ] {
         let root = tempfile::tempdir().unwrap();
         let corpus = Corpus::open(root.path());
@@ -941,12 +960,18 @@ fn concurrent_queries_observe_one_family_for_rows_checkpoint_and_job_set() {
     std::thread::scope(|scope| {
         for _ in 0..8 {
             scope.spawn(|| {
-                let pinned = selection.pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)));
-                let seen = pinned.as_ref().ok().map(observe);
+                // Nothing before the barriers may panic, or the other parties wait forever.
+                let seen = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let pinned = selection
+                        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                        .unwrap();
+                    (observe(&pinned), pinned)
+                }));
                 ready.wait();
                 published.wait();
-                let pinned = pinned.unwrap();
-                assert_eq!(seen.unwrap(), before);
+                let (seen, pinned) =
+                    seen.unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+                assert_eq!(seen, before);
                 for _ in 0..20 {
                     assert_eq!(observe(&pinned), before);
                     let current = selection
@@ -976,7 +1001,9 @@ fn umask_child() {
         .unwrap()
         .build(&budget(Duration::from_secs(30)), &mut |_| {})
         .unwrap();
-    // Only family creation runs under the umask; the builder's storage layer is not under test.
+    // Only family creation runs under the umask, and only the owner execute bit is masked: a
+    // mask on owner file bits fails first in the storage crate's lease files, which `select`
+    // also creates and which are not under test here.
     rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o100));
     let selection = selector(&root);
     selection.select(candidate, &mut |_| Ok(())).unwrap();
@@ -984,6 +1011,21 @@ fn umask_child() {
         .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
         .unwrap();
     assert_eq!(observe(&pinned).rows.len(), 1);
+    let home = root.join("search-families").join(pinned.digest());
+    for (path, mode) in [
+        (home.clone(), 0o700),
+        (home.join("search"), 0o700),
+        (home.join("bootstrap.json"), 0o600),
+        (home.join("search").join("search.sqlite"), 0o600),
+    ] {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().mode() & 0o777,
+            mode,
+            "{}",
+            path.display()
+        );
+    }
 }
 
 #[test]
@@ -995,6 +1037,61 @@ fn a_umask_that_masks_owner_bits_does_not_break_family_creation() {
         .status()
         .unwrap();
     assert!(status.success(), "{status}");
+}
+
+#[test]
+fn selection_accepts_an_owner_owned_nonwritable_standard_data_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let config = spec(root.path());
+    record(root.path(), &gate, None, &config.identity);
+    let candidate = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, config)
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let selection = selector(root.path());
+    selection.select(candidate, &mut |_| Ok(())).unwrap();
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_ok()
+    );
+}
+
+#[test]
+fn selection_refuses_to_reuse_a_family_with_residual_entries() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    corpus.publish("late", "new bytes");
+    let candidate = next_candidate(root.path(), &corpus, &gate);
+    let home = root
+        .path()
+        .join("search-families")
+        .join(&candidate.staged().digest);
+    std::fs::create_dir_all(home.join("search")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(home.join("search"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let residual = home.join("search/notes");
+    std::fs::write(&residual, b"foreign").unwrap();
+    let error = selection.select(candidate, &mut |_| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            error.error,
+            BuildError::Invalid("family directory not empty")
+        ),
+        "{error:?}"
+    );
+    assert!(residual.is_file());
 }
 
 #[test]
@@ -1149,6 +1246,25 @@ fn preparation_failure_retains_candidate_and_retries_only_its_owned_partial_fami
 }
 
 #[test]
+fn partial_recovery_refuses_a_family_with_residual_entries() {
+    let root = tempfile::tempdir().unwrap();
+    let witness = kill_child_at(root.path(), "select-copy")["WITNESS"].clone();
+    let gate = open_gate();
+    let selection = selector(root.path());
+    let home = root
+        .path()
+        .join("search-families")
+        .join(witness["new"].as_str().unwrap());
+    let residual = home.join("search/notes");
+    std::fs::write(&residual, b"foreign").unwrap();
+    assert!(matches!(
+        selection.recover_partial(&gate),
+        Err(BuildError::Invalid("family directory not empty"))
+    ));
+    assert!(residual.is_file());
+}
+
+#[test]
 fn preparation_process_cuts_recover_using_the_durable_certificate_twice() {
     for cut in ["select-copy", "select-metadata", "select-metadata-prefix"] {
         let root = tempfile::tempdir().unwrap();
@@ -1263,6 +1379,425 @@ fn same_manager_reopen_reuses_live_pins_and_quarantines_corruption() {
     assert!(
         selection
             .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn same_manager_reopen_scans_the_cached_family_pages() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    // A dangling foreign key in a table no semantic check reads: only the page scan finds it.
+    let db = root
+        .path()
+        .join("search-families")
+        .join(old.digest())
+        .join("search")
+        .join("search.sqlite");
+    let raw = rusqlite::Connection::open(db).unwrap();
+    raw.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         INSERT INTO embedding_recovery_authorizations(job_id,authorization_ref) VALUES('ghost','op:9');",
+    )
+    .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn reopen_rejects_an_exhausted_budget_before_waiting_for_the_lifecycle_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let _held =
+        host_runtime::LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+    assert!(matches!(
+        selection.reopen(&corpus.kernel, &gate, &budget(Duration::ZERO)),
+        Err(BuildError::Expired)
+    ));
+}
+
+#[test]
+fn reopen_admits_the_hook_named_by_the_certificate_transition() {
+    use daemon::projection_gates::ProjectionHook;
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let config = spec(root.path());
+    let request = LifecycleRequest {
+        transition: Transition::AuthorizedRecovery,
+        cause: Cause::DisabledRecovery,
+        authorization_ref: Some("operator:recovery".to_owned()),
+        ..request(None, &config.identity)
+    };
+    ProjectionLifecycle::open(root.path())
+        .unwrap()
+        .record(&gate, &request, now())
+        .unwrap();
+    let candidate = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, config)
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .unwrap();
+    let selection = selector(root.path());
+    selection.select(candidate, &mut |_| Ok(())).unwrap();
+    // Bootstrap stays enabled while the recovery hook the certificate names is disabled.
+    let mut evaluator = support::projection_gate::passing_evaluator(
+        &spec(root.path()).identity,
+        0,
+        &ProjectionHook::ALL,
+    );
+    evaluator
+        .manifest
+        .enabled
+        .insert(ProjectionHook::EmbeddingBackfill, false);
+    gate.install(evaluator);
+    assert!(matches!(
+        selection.pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10))),
+        Err(BuildError::Denied(_))
+    ));
+    assert!(matches!(
+        selection.reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10))),
+        Err(BuildError::Denied(_))
+    ));
+    // Released first, or a fresh selector fails on the held lease before it reaches the gate.
+    drop(selection);
+    assert!(matches!(
+        selector(root.path()).reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10))),
+        Err(BuildError::Denied(_))
+    ));
+}
+
+#[test]
+fn same_manager_retries_a_transient_generation_read_failure_with_an_old_reader_alive() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let manifest = GenerationStore::open(Some(root.path()))
+        .unwrap()
+        .root()
+        .join(host_runtime::generation::GENERATIONS_DIR_NAME)
+        .join(old.digest())
+        .join(host_runtime::generation::GENERATION_MANIFEST_NAME);
+    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600)).unwrap();
+    selection
+        .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    assert!(
+        old.read(&budget(Duration::from_secs(10)), |_| Ok(()))
+            .is_ok()
+    );
+}
+
+#[test]
+fn same_manager_reopen_revalidates_the_retained_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let store = GenerationStore::open(Some(root.path())).unwrap();
+    let manifest = store
+        .root()
+        .join(host_runtime::generation::GENERATIONS_DIR_NAME)
+        .join(old.digest())
+        .join(host_runtime::generation::GENERATION_MANIFEST_NAME);
+    std::fs::write(manifest, b"{}").unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn same_manager_reopen_revalidates_the_durable_certificate() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let certificate = root
+        .path()
+        .join("search-families")
+        .join(old.digest())
+        .join("bootstrap.json");
+    let bytes = std::fs::read(&certificate).unwrap();
+    std::fs::write(&certificate, &bytes[..bytes.len() / 2]).unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    std::fs::remove_file(&certificate).unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn same_manager_retries_a_transient_certificate_read_failure_with_an_old_reader_alive() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let certificate = root
+        .path()
+        .join("search-families")
+        .join(old.digest())
+        .join("bootstrap.json");
+    std::fs::set_permissions(&certificate, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    std::fs::set_permissions(&certificate, std::fs::Permissions::from_mode(0o600)).unwrap();
+    selection
+        .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    assert!(
+        old.read(&budget(Duration::from_secs(10)), |_| Ok(()))
+            .is_ok()
+    );
+}
+
+#[test]
+fn same_manager_reopen_withdraws_when_the_durable_certificate_is_missing() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let certificate = root
+        .path()
+        .join("search-families")
+        .join(old.digest())
+        .join("bootstrap.json");
+    std::fs::remove_file(certificate).unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        old.read(&budget(Duration::from_secs(10)), |_| Ok(()))
+            .is_ok(),
+        "certificate loss withdraws selection without damaging the open database"
+    );
+}
+
+#[test]
+fn sweep_retains_a_dangling_symlink_under_a_family_name() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let link = root.path().join("search-families").join("c".repeat(64));
+    std::os::unix::fs::symlink(root.path().join("missing"), &link).unwrap();
+    let report = selection.sweep().unwrap();
+    assert_eq!((report.removed, report.retained), (0, 1));
+    assert!(std::fs::symlink_metadata(&link).is_ok());
+}
+
+#[test]
+fn observation_timestamps_that_disagree_with_the_registry_are_refused_on_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let raw = Connection::open(root.path().join("kernel/kernel.sqlite")).unwrap();
+    raw.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         UPDATE observations SET created_commit_seq=created_commit_seq+1
+         WHERE object_id GLOB 'srcdesc:*';",
+    )
+    .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn evidence_binding_corruption_is_refused_on_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("first", "one");
+    corpus.publish("second", "two");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let raw = Connection::open(root.path().join("kernel/kernel.sqlite")).unwrap();
+    raw.execute(
+        "UPDATE observations SET evidence_id=(SELECT min(evidence_id) FROM evidence_meta)
+         WHERE object_id GLOB 'srcdesc:*'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn registry_source_id_must_match_descriptor_lineage_on_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let raw = Connection::open(root.path().join("kernel/kernel.sqlite")).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER object_registry_append_only_update;
+         UPDATE object_registry SET source_id='other-lineage'
+         WHERE object_id GLOB 'srcdesc:*';",
+    )
+    .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn registry_and_observation_sensitivity_must_match_on_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let raw = Connection::open(root.path().join("kernel/kernel.sqlite")).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER object_registry_append_only_update;
+         UPDATE object_registry SET sensitivity_class='restricted'
+         WHERE object_id GLOB 'srcdesc:*';",
+    )
+    .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn a_registry_revision_that_disagrees_with_its_descriptor_is_refused_on_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    // Readable corruption of the registry row alone: the descriptor payload still decodes.
+    Connection::open(root.path().join("kernel/kernel.sqlite"))
+        .unwrap()
+        .execute_batch(
+            "DROP TRIGGER object_registry_append_only_update;
+             UPDATE object_registry SET source_revision=source_revision+1 WHERE object_id GLOB 'srcdesc:*';",
+        )
+        .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
             .is_err()
     );
 }
@@ -1522,13 +2057,23 @@ fn sweep_reclaims_unreferenced_families_and_retains_selected_protected_and_lease
     );
 
     drop(old);
-    // A residual entry keeps the directory on disk, so the sweep must report it retained.
-    let stray = family(&old_digest).join("stray");
-    std::fs::write(&stray, b"residual").unwrap();
-    let report = selection.sweep().unwrap();
-    assert_eq!((report.removed, report.retained), (0, 1));
-    assert!(family(&old_digest).is_dir());
-    std::fs::remove_file(&stray).unwrap();
+    // A residual entry keeps the directory on disk, so the sweep must report it retained; a
+    // foreign `.lease` file is residual too, not a storage sidecar to unlink.
+    for stray in [
+        family(&old_digest).join("search").join("notes.lease"),
+        family(&old_digest).join("stray"),
+    ] {
+        std::fs::write(&stray, b"residual").unwrap();
+        let report = selection.sweep().unwrap();
+        assert_eq!(
+            (report.removed, report.retained),
+            (0, 1),
+            "{}",
+            stray.display()
+        );
+        assert!(stray.is_file());
+        std::fs::remove_file(&stray).unwrap();
+    }
     let report = selection.sweep().unwrap();
     assert_eq!((report.removed, report.retained), (1, 0));
     assert!(!family(&old_digest).exists());

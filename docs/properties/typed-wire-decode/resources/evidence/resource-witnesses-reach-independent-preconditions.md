@@ -100,3 +100,26 @@ rollup, not an aggregate `sometimes` that could mask a missing situation.
 - Missing evidence: Candidate campaign receipts for the twelve resource checks.
 - Conclusion: resolved on semantics. Retain names, make checks independent,
   and keep the measurement receipt with EG1. No runtime liveness claim is added.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Markers constructed by the executed tests, each with its own precondition
+observed independently of the safety verdict: direct success on the frozen
+corpora (`whole_request_decode_fits_its_resident_charge`), tree conversion of
+text-heavy bodies (`parse_charge_covers_text_heavy_peaks_on_both_lanes`),
+fallback after a typed prefix fails at a late duplicate key
+(`parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback`, which
+asserts the walk accepted and the typed decode refused), escaped scratch (the
+escaped variants), pool shortfall with a held pool
+(`a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall`
+in `crates/daemon/src/lib.rs`, where a backed `TestPool` holds bytes for a
+distinct owner, the refusal records the shortfall, and the same body decodes
+after the holder drops; `a_held_pool_stops_the_direct_lane_walk_before_it_unescapes_a_large_string`
+and `a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unescaped`
+prove refusal ordering against a drained or unbacked reserve, not an
+independent owner),
+boundary neighbours (`text_heavy_admission_ceiling_witnesses`), live
+projection with shared shells (`decode_and_projection_fit_the_declared_pool`),
+and isolated allocation scope (`message_decode_stays_within_the_allocation_budget`).
+Not constructed here: a late typed error other than a duplicate key, a shared
+owner surviving cache eviction, and concurrent holders.

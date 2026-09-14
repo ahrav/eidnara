@@ -91,3 +91,19 @@ Canonical bytes remain retained after the wire representation becomes typed.
   charges; remove only original-envelope ownership. Candidate compliance is
   unmeasured. Independent finding 8 does not authorize a new transfer or
   global deduplication policy.
+
+## Typed-wire U1 execution, 2026-09-13
+
+`WireMessage` and `WireBlock` in `crates/memory-store/src/lib.rs` derive their
+serde implementations and hold no `Value` outside the typed payload fields;
+`source_has_no_envelope_tree_or_replay_entry` in
+`crates/daemon/tests/typed_wire_decode_allocations.rs` checks the struct
+definitions, the absence of handwritten serde and the `*Data` mirrors, and the
+absence of `original()`, `mark_modified`, `mark_fully_typed`, `WireMessageData`,
+and `WireBlockData` anywhere under `crates/`. `retained_size.rs` dropped the two
+original-envelope terms; `decoded_envelope_charges_only_typed_fields` shows a
+decoded message or block with unknown envelope fields charging the same bytes as
+one built from parts, and the independent ledgers in `wire.rs:1024-1060` and
+`transform.rs` (served retained bytes) no longer add an envelope tree. Existing
+alias and cross-holder rules are unchanged. Not run: an eviction sequence with a
+surviving owner under the new model.

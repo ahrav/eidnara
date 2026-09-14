@@ -149,6 +149,14 @@ impl LifecycleIntent {
             self.cause,
         )
         .map_err(|refusal| refusal.to_string())?;
+        // `record` admits only a positive allowance and a deadline at or after `recorded_at`,
+        // and `consume_episode` never passes the allowance, so other accounting is corruption.
+        if self.episodes.allowance == 0
+            || self.episodes.consumed > self.episodes.allowance
+            || self.episodes.deadline < self.recorded_at
+        {
+            return Err("impossible episode accounting".to_owned());
+        }
         if !self
             .replacement_capture
             .as_deref()

@@ -384,7 +384,7 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
             Some(corpus.tip())
         );
         drop(release);
-        let done = selection
+        let error = selection
             .reconcile_disabled(
                 &corpus.kernel,
                 &gate,
@@ -393,15 +393,32 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
                 &mut |_| {},
             )
             .await
-            .unwrap();
-        assert!(done.deregistered);
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            BuildError::Projection(
+                daemon::search_projection::SearchProjectionError::Projection(
+                    retrieval::ProjectionError::CorruptRow
+                )
+            )
+        ));
+        let retained = disabled(root.path());
+        assert_eq!(retained.through, None);
+        assert!(!retained.deregistered);
+        assert_eq!(retained.episodes.unwrap().consumed, 1);
         assert_eq!((engine.calls(), engine.completed()), (1, 1));
-        assert!(weak.upgrade().is_none());
-        rustix::fs::flock(
-            &seed_directory,
-            rustix::fs::FlockOperation::NonBlockingLockExclusive,
-        )
-        .unwrap();
+        assert!(weak.upgrade().is_some());
+        assert!(
+            rustix::fs::flock(
+                &seed_directory,
+                rustix::fs::FlockOperation::NonBlockingLockExclusive
+            )
+            .is_err()
+        );
+        assert_eq!(
+            corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+            Some(corpus.tip())
+        );
         assert_eq!(admissions(&selection, &corpus, &gate), (0, 0));
         assert!(synapse.embed_blocking(&["probe"]).is_ok());
     }

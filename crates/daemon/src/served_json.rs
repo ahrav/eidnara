@@ -128,6 +128,15 @@ pub(crate) fn canonical_block_bytes(block: &memory_store::WireBlock) -> serde_js
     String::from_utf8(bytes).map_err(|error| serde_json::Error::custom(error.to_string()))
 }
 
+/// Encodes a block array in canonical form for prompt text that embeds a message's
+/// complete content.
+pub(crate) fn canonical_blocks_text(
+    blocks: &[memory_store::WireBlock],
+) -> serde_json::Result<String> {
+    let bytes = encode(&blocks)?;
+    String::from_utf8(bytes).map_err(|error| serde_json::Error::custom(error.to_string()))
+}
+
 #[cfg(feature = "test-support")]
 pub fn canonical_block_bytes_for_test(block: &memory_store::WireBlock) -> String {
     canonical_block_bytes(block).expect("CK wire blocks must always serialize")

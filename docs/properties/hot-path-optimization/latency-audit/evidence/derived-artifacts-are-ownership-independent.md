@@ -551,7 +551,7 @@ latency.
 [canonical-encoder]: ../../../../../crates/daemon/src/served_json.rs#L112-L164
 [canonical-identity]: ../../../../../crates/daemon/src/wire.rs#L885
 [canonical-helper]: ../../../../../crates/daemon/src/wire.rs#L871-L880
-[canonical-allocations]: ../../../../../crates/daemon/tests/served_json_passthrough_allocations.rs#L68
+[canonical-allocations]: ../../../../../crates/daemon/tests/served_json_shell_allocations.rs#L38
 [canonical-keys]: ../../../../../crates/daemon/src/served_json.rs#L218
 [canonical-test-entry]: ../../../../../crates/daemon/src/served_json.rs#L116-L119
 [canonical-original]: ../../../../../crates/memory-store/src/lib.rs#L232-L264

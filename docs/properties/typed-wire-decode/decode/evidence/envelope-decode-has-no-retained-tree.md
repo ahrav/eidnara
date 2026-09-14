@@ -85,3 +85,15 @@ The accounting agent owns the allocation witness. Independent analyst
 `ses_f6756093fffeVjNp36S3E8pKrM` completes the supplied portfolio evaluation
 on 2026-09-13. This property remains unexercised; existing enforcement and
 test-adequacy checks remain unaudited.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`, `cargo test -p daemon --locked
+--features test-support` (1,489 tests pass; `lifecycle_cli` is platform-unsupported
+on the aarch64 host). `WireMessage` and `WireBlock` derive serde in
+`crates/memory-store/src/lib.rs` with no `Value` field outside the typed
+payloads; `source_has_no_envelope_tree_or_replay_entry` and
+`message_decode_stays_within_the_allocation_budget` in
+`crates/daemon/tests/typed_wire_decode_allocations.rs` are the structural and
+allocation witnesses (434 events, 109,432-byte peak for 74,934 message bytes;
+the restored-envelope control shows 2,185 events and 313,025 bytes).

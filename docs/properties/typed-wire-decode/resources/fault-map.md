@@ -94,3 +94,22 @@ completeness, not runtime `sometimes` or liveness. No marker name is renamed.
 
 This ranks observation cost, not implementation priority or proven adequacy.
 Test form and instrumentation design remain with the named handoff owners.
+
+## Marker status after the typed-wire U1 execution, 2026-09-13
+
+Each marker below is reported on its own; the rollup is a summary only.
+
+| Constant marker | Status | Witness |
+| --- | --- | --- |
+| `typed-wire-resources-direct-owned` | fired | `whole_request_decode_fits_its_resident_charge` decodes the frozen 40 and 200 bodies typed and asserts the message count. |
+| `typed-wire-resources-tree-combined` | fired | `parse_charge_covers_text_heavy_peaks_on_both_lanes` records the tree lane from `decode_metered::<Value>` through `from_value`, plain and escaped. |
+| `typed-wire-resources-fallback-prefix` | partial | `parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback` covers a duplicate message-envelope key after a 4 MiB prefix in one trace; the block-envelope duplicate is not constructed. |
+| `typed-wire-resources-escaped-scratch` | fired | 64 KiB and 4 MiB escaped text on both lanes; the escaped 900 KiB key in the probe tests. |
+| `typed-wire-resources-late-failure` | partial | Only the duplicate-key failure after a large prefix is constructed; a late type error and a malformed suffix are not. |
+| `typed-wire-resources-held-pool` | fired | `a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall` (`crates/daemon/src/lib.rs`, existing unit test): a backed `TestPool` holds `footprint / 2` for a distinct owner, the fitting body's metered decode is refused as transient, and the shortfall marker records needed, charged, and capacity. `a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unescaped` and the drained-pool probes prove refusal ordering only: `Granting.held` starts at zero and grants unbacked `ByteCharge::none()`, and `Drained` returns `None` for every charge, so neither has an independent holder. |
+| `typed-wire-resources-after-holder-release` | fired | The same `a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall` drops the holder, then decodes the same body with a fresh meter and asserts the decoded `kind` separately. |
+| `typed-wire-resources-frozen-boundaries` | fired | `frozen_corpus_footprints_replay_with_only_string_charge_changes` at original capacities; `text_heavy_admission_ceiling_witnesses` is additive. |
+| `typed-wire-resources-probe-above-cap` | partial | `byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation` covers the sub-cap control; the above-cap magnitude is unmeasured. |
+| `typed-wire-resources-projection-overlap` | fired | `decode_and_projection_fit_the_declared_pool` keeps the request live through projection and checks shared shells; prefix reuse is covered by `wire.rs` sharing tests. |
+| `typed-wire-resources-surviving-owner` | unfired | No eviction-with-live-owner sequence runs in this execution. |
+| `typed-wire-resources-messages-scope` | fired | `message_decode_stays_within_the_allocation_budget` over the frozen 40-message bytes. |

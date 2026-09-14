@@ -1544,8 +1544,6 @@ mod tests {
         *survivor.kind_mut() = BlockKind::Text {
             text: "§3§ SURVIVE".to_string(),
         };
-        survivor.mark_modified();
-        message.mark_modified();
 
         let encoded = encode_opencode(&[message], &decoded.sidecar, None);
         assert_eq!(
@@ -1680,8 +1678,6 @@ mod tests {
             panic!("expected leading text block");
         };
         *text = "tagged failure".to_string();
-        result.mark_modified();
-        error_message.mark_modified();
         let encoded = encode_opencode(&[error_message], &decoded.sidecar, None);
         assert_eq!(encoded[0]["parts"][0]["state"]["status"], "error");
         assert_eq!(encoded[0]["parts"][0]["state"]["error"], "tagged failure");
@@ -1738,7 +1734,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_modified_tool_mutation_preserves_native_time_verbatim() {
+    fn tool_mutation_preserves_native_time_verbatim() {
         let raw = vec![json!({
             "info": { "id": "native-tool", "role": "assistant" },
             "parts": [{
@@ -1765,8 +1761,6 @@ mod tests {
                 text: "§1§ tagged output".to_string(),
             };
         }
-        result.mark_modified();
-        message.mark_modified();
 
         let served = encode_opencode(&[message], &decoded.sidecar, None);
         assert_eq!(
@@ -1997,7 +1991,6 @@ mod tests {
                 WireBlock::bare(reduced.kind().clone())
             })
             .collect();
-        reduced_tail.mark_modified();
 
         let active_todo = crate::injection::build_synthetic_todo_pair(
             r#"[{"content":"Inspect contributor issue","status":"in_progress","priority":"high"}]"#,

@@ -189,3 +189,9 @@ The omission is in R1's Existing check field and evidence trail, not this table.
 Those links are added and the exact three-copy assertion is identified above.
 No test is removed or declared adequate. The candidate test disposition stays
 open under the accepted KTD4 coefficient decision.
+
+Rename: `crates/daemon/tests/served_json_passthrough_allocations.rs` is
+`crates/daemon/tests/served_json_shell_allocations.rs` on the typed-wire U1
+branch, and `passthrough_shell_canonicalization_allocates_independently_of_key_count`
+is `decoded_shell_canonicalization_allocates_independently_of_key_count`; the
+inventory rows above keep their pinned-HEAD names.

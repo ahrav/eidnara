@@ -1274,12 +1274,15 @@ enum Reclamation {
 }
 
 /// Takes the exclusive reclamation lock on `name` whatever its mode bits, so a reader's shared
-/// pin is honored on a directory whose mode no longer validates. `Ok(None)` only when `name` is
-/// absent.
+/// pin is honored on a directory whose mode no longer validates. `Ok(None)` when `name` is
+/// absent or is not a directory: a file or symlink cannot hold a reader's directory pin, and
+/// `remove_tree` checks its ownership before unlinking it.
 fn lock_for_reclamation(parent: &OwnedFd, name: &str) -> Result<Option<OwnedFd>, Reclamation> {
     let fd = match crate::store_fs::open_dir_for_removal(parent, name) {
         Ok(fd) => fd,
-        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => {
+            return Ok(None);
+        }
         Err(_) => {
             return Err(Reclamation::Unopenable(invalid(
                 "generation cannot be opened for reclamation",
@@ -2626,6 +2629,22 @@ mod tests {
             store.prune(&BTreeSet::new()).unwrap().removed_generations,
             1
         );
+    }
+
+    #[test]
+    fn prune_removes_an_owned_file_or_symlink_occupying_a_generation_name() {
+        let root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        stage_default(&store, src.path());
+        let generations = store.root().join(GENERATIONS_DIR_NAME);
+        let file = generations.join("a".repeat(64));
+        let link = generations.join("b".repeat(64));
+        std::fs::write(&file, b"not a directory").unwrap();
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        store.prune(&BTreeSet::new()).unwrap();
+        assert!(!file.exists());
+        assert!(std::fs::symlink_metadata(&link).is_err());
     }
 
     #[test]
