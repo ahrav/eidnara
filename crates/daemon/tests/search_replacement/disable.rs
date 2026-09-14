@@ -1738,6 +1738,37 @@ async fn selection_and_maintenance_refuse_foreign_bindings() {
     assert!(selection.maintenance_supervisor_for_test().is_none());
 }
 
+/// Disabled cleanup accepts limits only from the gate bound to its selected data home.
+#[tokio::test]
+async fn disabled_cleanup_refuses_a_foreign_gate() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+
+    let foreign_home = tempfile::tempdir().unwrap();
+    let foreign_gate = Arc::new(HookGate::for_home(foreign_home.path()));
+    foreign_gate.install(cleanup_evaluator(root.path()));
+    let result = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &foreign_gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(BuildError::Denied(
+            daemon::projection_gates::Denial::EvidenceIdentity
+        ))
+    ));
+    assert!(!disabled(root.path()).deregistered);
+}
+
 /// Maintenance cannot derive slice deadlines beyond the manifest's approved supervisor bound.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn maintenance_refuses_bounds_larger_than_the_manifest_limits() {
@@ -1762,7 +1793,9 @@ async fn maintenance_refuses_bounds_larger_than_the_manifest_limits() {
         idle: Duration::from_millis(20),
     };
 
+    let recovery_attempts = u64::from(bounds().dispatch.grant.allowance.get());
     for (name, max, observed) in [
+        ("embedding_recovery_attempts", 0, recovery_attempts),
         ("supervisor_slice_ms", 1, 200),
         ("local_transaction_rows", 1, 16),
     ] {

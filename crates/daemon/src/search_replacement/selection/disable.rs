@@ -79,6 +79,10 @@ impl SearchSelection {
             &grant,
             &InvalidationIdentity::from(&self.identity),
             &[
+                (
+                    "embedding_recovery_attempts",
+                    u64::from(bounds.dispatch.grant.allowance.get()),
+                ),
                 ("supervisor_slice_ms", slice_ms),
                 (
                     "local_transaction_rows",
@@ -137,6 +141,7 @@ impl SearchSelection {
         budget: &EvalBudget,
         observer: &mut dyn FnMut(DisableEvent),
     ) -> Result<DisabledIntent, BuildError> {
+        gate.require_binding(&self.data_home, &self.identity)?;
         let lifecycle = ProjectionLifecycle::open(&self.data_home)?;
         #[cfg(feature = "test-support")]
         let lifecycle = match self.disable_barrier.clone() {
