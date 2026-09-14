@@ -1794,8 +1794,10 @@ async fn maintenance_refuses_bounds_larger_than_the_manifest_limits() {
     };
 
     let recovery_attempts = u64::from(bounds().dispatch.grant.allowance.get());
+    let max_jobs = bounds().dispatch.max_jobs.get() as u64;
     for (name, max, observed) in [
         ("embedding_recovery_attempts", 0, recovery_attempts),
+        ("pending_count", 0, max_jobs),
         ("supervisor_slice_ms", 1, 200),
         ("local_transaction_rows", 1, 16),
     ] {

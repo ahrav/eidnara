@@ -258,6 +258,8 @@ pub enum IntentRefusal {
     Unavailable(String),
     #[error("every episode of the allowance is consumed")]
     AllowanceExhausted,
+    #[error("the lifecycle timestamp is negative")]
+    InvalidTimestamp,
     #[error("the episode deadline has passed")]
     DeadlineExpired,
     #[error("no intent is recorded")]
@@ -851,6 +853,9 @@ impl ProjectionLifecycle {
     /// Stops admission without requiring a serving grant or discarding construction obligations.
     /// Replays sync the existing record and preserve its accounting.
     pub fn disable(&self, gate: &HookGate, now: i64) -> Result<DisabledIntent, IntentRefusal> {
+        if now < 0 {
+            return Err(IntentRefusal::InvalidTimestamp);
+        }
         gate.disable();
         let _lock = self.lock().map_err(io_refusal)?;
         let handoff = match self.read() {
