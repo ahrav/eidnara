@@ -271,24 +271,58 @@ impl Operation {
     }
 }
 
-fn validate_json_nesting(value: &Value) -> Result<(), RecipeError> {
+enum ContainerChildren<'a> {
+    Array(std::slice::Iter<'a, Value>),
+    Object(serde_json::map::Values<'a>),
+}
+
+impl<'a> ContainerChildren<'a> {
+    fn new(value: &'a Value) -> Option<Self> {
+        match value {
+            Value::Array(values) => Some(Self::Array(values.iter())),
+            Value::Object(values) => Some(Self::Object(values.values())),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> Iterator for ContainerChildren<'a> {
+    type Item = &'a Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Array(values) => values.next(),
+            Self::Object(values) => values.next(),
+        }
+    }
+}
+
+/// Validates the depth bound and returns the maximum pending container frames.
+fn validate_json_nesting(value: &Value) -> Result<usize, RecipeError> {
     const MAX_JSON_NESTING: usize = 127;
-    let mut work = vec![(value, 0usize)];
-    while let Some((value, depth)) = work.pop() {
-        if matches!(value, Value::Array(_) | Value::Object(_)) && depth >= MAX_JSON_NESTING {
+    let Some(children) = ContainerChildren::new(value) else {
+        return Ok(0);
+    };
+    let mut work = vec![(0usize, children)];
+    let mut max_pending = work.len();
+    while let Some((depth, children)) = work.last_mut() {
+        let next = children.next().map(|child| (*depth + 1, child));
+        let Some((depth, child)) = next else {
+            work.pop();
+            continue;
+        };
+        let Some(children) = ContainerChildren::new(child) else {
+            continue;
+        };
+        if depth >= MAX_JSON_NESTING {
             return Err(RecipeError::Malformed(
                 "recipe exceeds the JSON nesting limit".into(),
             ));
         }
-        match value {
-            Value::Array(values) => work.extend(values.iter().map(|child| (child, depth + 1))),
-            Value::Object(values) => {
-                work.extend(values.values().map(|child| (child, depth + 1)));
-            }
-            _ => {}
-        }
+        work.push((depth, children));
+        max_pending = max_pending.max(work.len());
     }
-    Ok(())
+    Ok(max_pending)
 }
 
 impl Recipe {
@@ -981,6 +1015,17 @@ mod tests {
             canonical_len(&value).expect("measures"),
             serde_json::to_vec(&value).expect("serializes").len()
         );
+    }
+
+    #[test]
+    fn wide_nesting_check_keeps_pending_work_depth_bounded() {
+        let recipe = json!({
+            "base_revision": "b",
+            "output_revision": "o",
+            "operations": [],
+            "padding": vec![Value::Null; 10_000],
+        });
+        assert!(validate_json_nesting(&recipe).expect("valid depth") <= 127);
     }
 
     #[test]
