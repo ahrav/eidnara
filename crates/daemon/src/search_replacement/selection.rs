@@ -52,6 +52,7 @@ struct Bootstrap {
     schema: u32,
     seed: SeedVerification,
     intent: LifecycleIntent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     retiring: Option<RetiringFamily>,
 }
 
@@ -61,6 +62,13 @@ impl Bootstrap {
             seed: self.seed,
             consumer: self.intent.consumer,
         }
+    }
+
+    fn retiring_is_bound(&self, old: &RetiringFamily) -> bool {
+        old.seed.stage_manifest().digest() == self.intent.selected_generation
+            && old.consumer.generation_id == old.seed.generation_id
+            && old.consumer.consumer_id != self.intent.consumer.consumer_id
+            && old.seed.kernel_incarnation_id == self.seed.kernel_incarnation_id
     }
 }
 
@@ -254,14 +262,17 @@ impl SearchSelection {
             retiring: prior.map(Bootstrap::into_retiring),
             intent,
         };
+        let bytes = serde_json::to_vec(&certificate)
+            .map_err(|_| BuildError::Invalid("bootstrap encoding"))?;
+        if bytes.len() as u64 > MAX_RECORD_BYTES {
+            return Err(BuildError::Invalid("bootstrap certificate too large"));
+        }
         let home = self.family_home(&candidate.staged.digest)?;
         create_directory(&self.data_home, FAMILIES)?;
         if home.try_exists()? {
             self.remove_family(&candidate.staged.digest, &certificate)?;
         }
         create_directory(&self.data_home.join(FAMILIES), &candidate.staged.digest)?;
-        let bytes = serde_json::to_vec(&certificate)
-            .map_err(|_| BuildError::Invalid("bootstrap encoding"))?;
         let mut manifest = create_file(&home.join(CERTIFICATE))?;
         manifest.write_all(&bytes)?;
         observer(SelectionEvent::MetadataWritten)?;
@@ -428,6 +439,10 @@ impl SearchSelection {
                 .as_deref()
                 .and_then(|capture| capture.stage.as_deref())
                 != Some(&certificate.seed)
+            || certificate
+                .retiring
+                .as_ref()
+                .is_some_and(|old| !certificate.retiring_is_bound(old))
         {
             return Err(BuildError::Invalid("bootstrap binding mismatch"));
         }
@@ -659,7 +674,9 @@ impl SearchSelection {
             }
             _ => {}
         }
-        if certificate.schema != 2 || certificate.seed.stage_manifest().digest() != digest {
+        if !matches!(certificate.schema, 1 | 2)
+            || certificate.seed.stage_manifest().digest() != digest
+        {
             return Err(BuildError::Invalid("foreign family certificate"));
         }
         let home = self.family_home(digest)?;

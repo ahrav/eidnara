@@ -249,7 +249,8 @@ impl SearchSelection {
                 return Err(IntentRefusal::FamilyHeld.into());
             }
             self.validate_family(&family, kernel, budget)?;
-            history = Some(family.incarnation);
+            let incarnation = family.incarnation;
+            history = Some(incarnation);
             if family.certificate.retiring.is_some() {
                 self.retire_bound(
                     &family,
@@ -283,11 +284,13 @@ impl SearchSelection {
             disabled = next;
             observer(DisableEvent::LocalReleased);
             settled(&disabled, history)?;
+            // The writer re-checks the incarnation, so a restore between `settled` and this write is refused rather than acknowledged.
             kernel.acknowledge_outbox_within_budget(
                 budget,
                 &consumer,
                 through,
                 super::super::wall_ms()?,
+                incarnation,
             )?;
             observer(DisableEvent::Acknowledged);
         }
@@ -318,6 +321,9 @@ impl SearchSelection {
                 cause: "disabled consumer deregistration".to_owned(),
             },
             |envelope| {
+                if let Some(history) = history {
+                    kernel.require_incarnation(history)?;
+                }
                 envelope.deregister_outbox_consumer(
                     &intent.consumer.consumer_id,
                     super::super::wall_ms().map_err(|_| kernel::KernelError::InvalidInput)?,

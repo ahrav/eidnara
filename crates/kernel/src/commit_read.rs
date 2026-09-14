@@ -253,6 +253,15 @@ impl KernelStore {
         }
     }
 
+    /// Callers must hold a reader or writer guard so a restore cannot occur between this check
+    /// and the guarded write.
+    pub fn require_incarnation(&self, expected: CommitReadIncarnation) -> Result<(), KernelError> {
+        if self.incarnation() != expected {
+            return Err(KernelError::InvalidInput);
+        }
+        Ok(())
+    }
+
     /// Reads whole commits in `(after_commit, through_commit]` for a registered consumer until a
     /// bound is reached. Shapes are measured with `COUNT` and `SUM(LENGTH())` before a payload is
     /// selected, so admission precedes materialization. Consumer, incarnation, target, and

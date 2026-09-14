@@ -1818,7 +1818,8 @@ mod sqlite_backend {
                 ))
             })?;
             let directory = parent.join(format!(
-                ".inspect-{}-{}",
+                ".inspect-{}-{}-{}",
+                file_name.to_string_lossy(),
                 std::process::id(),
                 unique_nanos()
             ));
@@ -1990,12 +1991,16 @@ mod sqlite_backend {
         };
         for entry in entries {
             let entry = entry.map_err(StoreError::Io)?;
-            if !is_inspection_scratch_name(&entry.file_name().to_string_lossy()) {
+            if !is_inspection_scratch_name(&entry.file_name().to_string_lossy(), db_file_name) {
                 continue;
             }
             let scratch = entry.path();
             match holds_only_copies_of(&scratch, db_file_name) {
-                Ok(true) => std::fs::remove_dir_all(&scratch).map_err(StoreError::Io)?,
+                Ok(true) => match std::fs::remove_dir_all(&scratch) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(StoreError::Io(error)),
+                },
                 Ok(false) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(StoreError::Io(error)),
@@ -2004,10 +2009,12 @@ mod sqlite_backend {
         Ok(())
     }
 
-    /// Accepts `.inspect-` followed by nonempty decimal pid and nanosecond components.
-    fn is_inspection_scratch_name(name: &str) -> bool {
+    /// Accepts `.inspect-<database>-` followed by nonempty decimal pid and nanosecond components.
+    fn is_inspection_scratch_name(name: &str, db_file_name: &str) -> bool {
         let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
         name.strip_prefix(".inspect-")
+            .and_then(|rest| rest.strip_prefix(db_file_name))
+            .and_then(|rest| rest.strip_prefix('-'))
             .and_then(|rest| rest.split_once('-'))
             .is_some_and(|(pid, nanos)| digits(pid) && digits(nanos))
     }
@@ -3026,12 +3033,12 @@ mod tests {
         let path = Path::new(path);
         drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
         let name = path.file_name().expect("database file name");
-        let stale = root.join(".inspect-1-1");
+        let stale = root.join(format!(".inspect-{}-1-1", name.to_string_lossy()));
         std::fs::create_dir(&stale).expect("plant a stale inspection directory");
         std::fs::copy(path, stale.join(name)).expect("copy the database into it");
         std::fs::write(stale.join(format!("{}-wal", name.to_string_lossy())), b"w")
             .expect("plant a copied journal");
-        let foreign = root.join(".inspect-2-2");
+        let foreign = root.join(".inspect-other.db-2-2");
         std::fs::create_dir(&foreign).expect("plant another database's inspection directory");
         std::fs::write(foreign.join("other.db"), b"other").expect("plant the other copy");
 
@@ -3065,24 +3072,31 @@ mod tests {
         drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
         let name = path.file_name().expect("database file name");
         // `interrupted` is a copy that died before its first file: the generated name, nothing inside.
-        let interrupted = root.join(".inspect-3-3");
+        let interrupted = root.join(format!(".inspect-{}-3-3", name.to_string_lossy()));
         std::fs::create_dir(&interrupted).expect("plant an interrupted inspection directory");
+        // `sibling` is another database's empty interrupted inspection directory.
+        let sibling = root.join(".inspect-other.db-5-5");
+        std::fs::create_dir(&sibling).expect("plant a sibling's interrupted inspection directory");
         // `backup` is not a generated name, though it holds a same-named database.
         let backup = root.join(".inspect-backup");
         std::fs::create_dir(&backup).expect("plant a foreign directory");
         std::fs::copy(path, backup.join(name)).expect("copy the database into it");
         std::fs::write(backup.join("notes.txt"), b"keep").expect("plant unrelated contents");
         // `stray` has a generated name but contains an extra member.
-        let stray = root.join(".inspect-4-4");
+        let stray = root.join(format!(".inspect-{}-4-4", name.to_string_lossy()));
         std::fs::create_dir(&stray).expect("plant a directory with a stray member");
         std::fs::copy(path, stray.join(name)).expect("copy the database into it");
         std::fs::write(stray.join("stray"), b"s").expect("plant the stray member");
 
         delete_sqlite_family(&d).expect("delete the released family");
         assert!(!interrupted.exists(), "an interrupted copy is reaped");
+        assert!(
+            sibling.is_dir(),
+            "another database's scratch is not touched"
+        );
         assert!(backup.join(name).exists() && backup.join("notes.txt").exists());
         assert!(stray.join(name).exists() && stray.join("stray").exists());
-        for directory in [&backup, &stray] {
+        for directory in [&sibling, &backup, &stray] {
             std::fs::remove_dir_all(directory).expect("clear the retained directory");
         }
         verify_sqlite_family_removed(&d).expect("only the lease sidecar remains");
