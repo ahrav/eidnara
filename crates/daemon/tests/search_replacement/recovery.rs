@@ -2180,3 +2180,76 @@ fn a_stop_observed_before_authorization_does_not_close_the_recovered_gate() {
     finish(&mut selection, &corpus, &gate, &config);
     assert_eq!(current(root.path()).attempt_id, "recovery-b");
 }
+
+#[test]
+fn a_matching_authorization_reconciles_a_recovered_record_whose_sync_failed() {
+    use daemon::projection_gates::{Denial, EntryPoint};
+    use daemon::projection_lifecycle::{IntentRefusal, WriteBarrier};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "canonical truth");
+    let mut config = spec(root.path());
+    let gate = home_gate(root.path(), &config);
+    record(root.path(), &gate, None, &config.identity);
+    let mut selection = selector(root.path());
+    finish(&mut selection, &corpus, &gate, &config);
+    let live_digest = current(root.path()).staged_seed_digest.unwrap();
+    gate.install(disable::cleanup_evaluator(root.path()));
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    gate.install(support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &ProjectionHook::ALL,
+    ));
+    // The directory sync after the authorized record is renamed into place fails once.
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut selection = selection
+        .with_recovery_write_barrier_for_test({
+            let fail = Arc::clone(&fail);
+            move |event| {
+                if event == WriteBarrier::AfterRename
+                    && armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    fail.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        })
+        .with_recovery_directory_sync_failure_for_test(Arc::clone(&fail));
+    config.generation.generation_id = "generation-b".to_owned();
+    let next = recovery_request(&config, &live_digest, "consumer-b", "recovery-b");
+    let unknown = selection.begin_authorized_recovery(
+        &corpus.kernel,
+        &gate,
+        &next,
+        &budget(Duration::from_secs(20)),
+    );
+    assert!(
+        matches!(
+            unknown,
+            Err(BuildError::Intent(IntentRefusal::DurabilityUnknown(_)))
+        ),
+        "{unknown:?}"
+    );
+    assert_eq!(control(root.path()).attempt_id, "recovery-b");
+    assert!(matches!(
+        gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload),
+        Err(Denial::RecoveryRequired)
+    ));
+    // The same request reconciles the visible record and reopens admission.
+    selection
+        .begin_authorized_recovery(
+            &corpus.kernel,
+            &gate,
+            &next,
+            &budget(Duration::from_secs(20)),
+        )
+        .unwrap();
+    gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+        .unwrap();
+    finish(&mut selection, &corpus, &gate, &config);
+    let done = current(root.path());
+    assert_eq!(done.attempt_id, "recovery-b");
+    assert_eq!(done.authorization_ref, next.authorization_ref);
+}

@@ -5,6 +5,11 @@ use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-support")]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::sync::{Mutex, MutexGuard};
 
 use host_runtime::LifecycleTransactionLock;
@@ -359,6 +364,8 @@ pub struct ProjectionLifecycle {
     threads: Mutex<()>,
     #[cfg(feature = "test-support")]
     barrier: Option<Box<dyn Fn(WriteBarrier) + Send + Sync>>,
+    #[cfg(feature = "test-support")]
+    fail_directory_sync: Option<Arc<AtomicBool>>,
 }
 
 impl ProjectionLifecycle {
@@ -395,6 +402,8 @@ impl ProjectionLifecycle {
             threads: Mutex::new(()),
             #[cfg(feature = "test-support")]
             barrier: None,
+            #[cfg(feature = "test-support")]
+            fail_directory_sync: None,
         };
         // A temp left by a process cut before its rename is never adopted; it is removed under the writer's lock so a live writer's temp is left alone.
         let lock = this.lock()?;
@@ -434,6 +443,13 @@ impl ProjectionLifecycle {
         barrier: impl Fn(WriteBarrier) + Send + Sync + 'static,
     ) -> Self {
         self.barrier = Some(Box::new(barrier));
+        self
+    }
+
+    /// While `flag` is set, the next directory sync clears it and fails with [`IntentRefusal::DurabilityUnknown`].
+    #[cfg(feature = "test-support")]
+    pub fn with_directory_sync_failure_for_test(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.fail_directory_sync = Some(flag);
         self
     }
 
@@ -790,6 +806,14 @@ impl ProjectionLifecycle {
     }
 
     fn sync_directory(&self) -> Result<(), IntentRefusal> {
+        #[cfg(feature = "test-support")]
+        if self
+            .fail_directory_sync
+            .as_ref()
+            .is_some_and(|flag| flag.swap(false, Ordering::AcqRel))
+        {
+            return Err(IntentRefusal::DurabilityUnknown("injected".to_owned()));
+        }
         self.dir_fd
             .sync_all()
             .map_err(|error| IntentRefusal::DurabilityUnknown(error.kind().to_string()))
@@ -1006,8 +1030,16 @@ impl ProjectionLifecycle {
             return Err(IntentRefusal::IllegalCombination);
         }
         let _lock = self.lock().map_err(io_refusal)?;
-        if self.read() != ControlState::Disabled(expected.clone()) {
-            return Err(IntentRefusal::Disabled);
+        match self.read() {
+            ControlState::Disabled(disabled) if disabled == *expected => {}
+            // A prior write renamed this authorization into place but its directory sync did not return; the replay syncs it and reopens admission.
+            ControlState::Intent(existing)
+                if existing.prior_disabled.is_some() && existing.is_replay_of(request) =>
+            {
+                return gate
+                    .authorized_recovery(&self.data_home, identity, || self.sync_directory());
+            }
+            _ => return Err(IntentRefusal::Disabled),
         }
         let mut intent = new_intent(request, now);
         let mut prior = expected.clone();

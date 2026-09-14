@@ -134,6 +134,8 @@ pub struct SearchSelection {
     disable_barrier: Option<Arc<dyn Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync>>,
     #[cfg(feature = "test-support")]
     recovery_barrier: Option<Arc<dyn Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync>>,
+    #[cfg(feature = "test-support")]
+    recovery_sync_failure: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl SearchSelection {
@@ -149,6 +151,8 @@ impl SearchSelection {
             disable_barrier: None,
             #[cfg(feature = "test-support")]
             recovery_barrier: None,
+            #[cfg(feature = "test-support")]
+            recovery_sync_failure: None,
         }
     }
 

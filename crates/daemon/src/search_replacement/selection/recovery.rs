@@ -41,6 +41,28 @@ impl SearchSelection {
         self
     }
 
+    /// Installs `flag` on the recovery lifecycle handles; see `ProjectionLifecycle::with_directory_sync_failure_for_test`.
+    #[cfg(feature = "test-support")]
+    pub fn with_recovery_directory_sync_failure_for_test(
+        mut self,
+        flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.recovery_sync_failure = Some(flag);
+        self
+    }
+
+    #[cfg(feature = "test-support")]
+    fn recovery_lifecycle(&self, lifecycle: ProjectionLifecycle) -> ProjectionLifecycle {
+        let lifecycle = match self.recovery_barrier.clone() {
+            Some(barrier) => lifecycle.with_write_barrier_for_test(move |event| barrier(event)),
+            None => lifecycle,
+        };
+        match self.recovery_sync_failure.clone() {
+            Some(flag) => lifecycle.with_directory_sync_failure_for_test(flag),
+            None => lifecycle,
+        }
+    }
+
     /// Operator authorization names a new operation; it cannot amend the disabled operation's target or allowance.
     /// Recovery refuses live readers and maintenance before releasing construction state.
     pub fn begin_authorized_recovery(
@@ -73,12 +95,29 @@ impl SearchSelection {
         let transaction = LifecycleTransactionLock::acquire_exclusive(Some(&self.data_home))?;
         let lifecycle = ProjectionLifecycle::open(&self.data_home)?;
         #[cfg(feature = "test-support")]
-        let lifecycle = match self.recovery_barrier.clone() {
-            Some(barrier) => lifecycle.with_write_barrier_for_test(move |event| barrier(event)),
-            None => lifecycle,
-        };
+        let lifecycle = self.recovery_lifecycle(lifecycle);
         let disabled = match lifecycle.read() {
             ControlState::Disabled(disabled) => disabled,
+            // The record already carries this authorization; only its sync and the gate remain.
+            ControlState::Intent(existing)
+                if existing.transition == Transition::AuthorizedRecovery
+                    && existing.attempt_id == request.attempt_id =>
+            {
+                let prior = existing
+                    .prior_disabled
+                    .clone()
+                    .ok_or(IntentRefusal::Disabled)?;
+                lifecycle.authorize_recovery(
+                    gate,
+                    &prior,
+                    request,
+                    &InvalidationIdentity::from(&self.identity),
+                    wall_ms()?,
+                )?;
+                self.selected.store(None);
+                self.recovery_incarnation = None;
+                return Ok(());
+            }
             _ => return Err(IntentRefusal::Disabled.into()),
         };
         if disabled.through.is_some()
@@ -179,10 +218,7 @@ impl SearchSelection {
         self.check_recovery_kernel(kernel, budget)?;
         let lifecycle = ProjectionLifecycle::open(&self.data_home).map_err(BuildError::from)?;
         #[cfg(feature = "test-support")]
-        let lifecycle = match self.recovery_barrier.clone() {
-            Some(barrier) => lifecycle.with_write_barrier_for_test(move |event| barrier(event)),
-            None => lifecycle,
-        };
+        let lifecycle = self.recovery_lifecycle(lifecycle);
         let (intent, completed) = match lifecycle.read() {
             ControlState::Intent(intent) => (intent, false),
             ControlState::Current(intent) => (intent, true),
