@@ -23,13 +23,27 @@ enum PreparedSource {
 
 struct TransformSegments {
     envelope: Map<String, Value>,
-    messages: Vec<PreparedSegment>,
+    operations: Vec<RecipeSegment>,
 }
+
+/// One recipe operation as prepared bytes: a keep is one exact token; an insert wraps whole-message
+/// segments that are measured once and written without re-serialization.
+#[derive(Debug)]
+pub enum RecipeSegment {
+    Keep(PreparedSegment),
+    Insert(Vec<PreparedSegment>),
+}
+
+const INSERT_PREFIX: &[u8] = br#"{"op":"insert","values":["#;
+const INSERT_SUFFIX: &[u8] = b"]}";
 
 #[derive(Clone)]
 enum PreparedSegmentSource {
     Exact(Arc<[u8]>),
     Served(crate::transform::ServedMessage),
+    /// Serialized into the destination at write time; the length was measured when the value was
+    /// encoded, so no intermediate buffer is built for it.
+    Value(Arc<Value>),
 }
 
 #[derive(Clone)]
@@ -55,6 +69,14 @@ impl PreparedSegment {
         }
     }
 
+    /// `measured_len` is the value's canonical JSON length; the writer checks it on output.
+    pub fn value(value: Arc<Value>, measured_len: usize) -> Self {
+        Self {
+            source: PreparedSegmentSource::Value(value),
+            measured_len,
+        }
+    }
+
     /// Creates a segment with caller-supplied `measured_len` for length-check tests.
     #[doc(hidden)]
     pub fn inconsistent_for_test(bytes: Arc<[u8]>, measured_len: usize) -> Self {
@@ -64,18 +86,82 @@ impl PreparedSegment {
         }
     }
 
-    fn bytes(&self) -> &[u8] {
+    fn fits_recipe_depth(&self) -> bool {
+        let limit = crate::edit_recipe::MAX_JSON_NESTING - 4;
         match &self.source {
-            PreparedSegmentSource::Exact(bytes) => bytes,
-            PreparedSegmentSource::Served(message) => message.canonical_bytes(),
+            PreparedSegmentSource::Value(value) => {
+                crate::edit_recipe::validate_json_nesting(value).is_ok_and(|depth| depth <= limit)
+            }
+            PreparedSegmentSource::Exact(bytes) => encoded_depth_within(bytes, limit),
+            PreparedSegmentSource::Served(message) => {
+                encoded_depth_within(message.canonical_bytes(), limit)
+            }
         }
     }
+
+    fn write_to<W: Write>(&self, destination: &mut W) -> Result<(), PreparedOutputError> {
+        match &self.source {
+            PreparedSegmentSource::Exact(bytes) => destination.write_all(bytes)?,
+            PreparedSegmentSource::Served(message) => {
+                destination.write_all(message.canonical_bytes())?
+            }
+            PreparedSegmentSource::Value(value) => serde_json::to_writer(destination, value)
+                .map_err(|error| {
+                    if error.is_io() {
+                        PreparedOutputError::Write(error.into())
+                    } else {
+                        PreparedOutputError::Serialize(error)
+                    }
+                })?,
+        }
+        Ok(())
+    }
+}
+
+fn encoded_depth_within(bytes: &[u8], limit: usize) -> bool {
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for &byte in bytes {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else {
+            match byte {
+                b'"' => quoted = true,
+                b'[' | b'{' => {
+                    depth += 1;
+                    if depth > limit {
+                        return false;
+                    }
+                }
+                b']' | b'}' => {
+                    let Some(parent) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = parent;
+                }
+                _ => {}
+            }
+        }
+    }
+    depth == 0 && !quoted
 }
 
 impl fmt::Debug for PreparedSegment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let source = match &self.source {
+            PreparedSegmentSource::Exact(_) => "exact",
+            PreparedSegmentSource::Served(_) => "served",
+            PreparedSegmentSource::Value(_) => "value",
+        };
         f.debug_struct("PreparedSegment")
-            .field("bytes_len", &self.bytes().len())
+            .field("source", &source)
             .field("measured_len", &self.measured_len)
             .finish()
     }
@@ -100,18 +186,30 @@ impl PreparedOutput {
         }
     }
 
-    pub fn transform_segments(
+    /// The envelope carries `"operations": null` where the prepared operations are spliced in.
+    pub fn transform_recipe(
         envelope: Value,
-        messages: Vec<PreparedSegment>,
+        operations: Vec<RecipeSegment>,
     ) -> Result<Self, PreparedOutputError> {
+        crate::edit_recipe::validate_json_nesting(&envelope)
+            .map_err(|_| PreparedOutputError::RecipeNestingTooDeep)?;
         let Value::Object(envelope) = envelope else {
             return Err(PreparedOutputError::InvalidTransformEnvelope);
         };
-        if envelope.get("messages") != Some(&Value::Null) {
+        if envelope.get("operations") != Some(&Value::Null) {
             return Err(PreparedOutputError::InvalidTransformEnvelope);
         }
+        if operations.iter().any(|operation| match operation {
+            RecipeSegment::Keep(_) => false,
+            RecipeSegment::Insert(values) => values.iter().any(|value| !value.fits_recipe_depth()),
+        }) {
+            return Err(PreparedOutputError::RecipeNestingTooDeep);
+        }
         Ok(Self {
-            source: PreparedSource::Transform(Arc::new(TransformSegments { envelope, messages })),
+            source: PreparedSource::Transform(Arc::new(TransformSegments {
+                envelope,
+                operations,
+            })),
             #[cfg(test)]
             encoded_for_test: Arc::new(std::sync::OnceLock::new()),
         })
@@ -267,8 +365,10 @@ pub enum PreparedOutputError {
     BodyTooLarge { len: usize, max: usize },
     #[error("prepared body length overflowed")]
     LengthOverflow,
-    #[error("transform envelope must contain a null wire_messages field")]
+    #[error("transform envelope must contain a null operations field")]
     InvalidTransformEnvelope,
+    #[error("transform recipe exceeds the JSON nesting limit")]
+    RecipeNestingTooDeep,
     #[error("prepared JSON serialization failed: {0}")]
     Serialize(#[source] serde_json::Error),
     #[error("prepared body write failed: {0}")]
@@ -324,8 +424,8 @@ fn finish_count(
 
 fn measure_transform(segments: &TransformSegments) -> Result<usize, PreparedOutputError> {
     let mut counter = CountingWriter::default();
-    let result = write_transform_envelope(segments, &mut counter, |counter, message| {
-        counter.add_len(message.measured_len)
+    let result = write_transform_envelope(segments, &mut counter, |counter, segment| {
+        counter.add_len(segment.measured_len)
     });
     finish_count(counter, result).map(|counter| counter.len)
 }
@@ -334,16 +434,15 @@ fn write_transform<W: Write>(
     segments: &TransformSegments,
     destination: &mut W,
 ) -> Result<(), PreparedOutputError> {
-    write_transform_envelope(segments, destination, |destination, message| {
-        destination.write_all(message.bytes())?;
-        Ok(())
+    write_transform_envelope(segments, destination, |destination, segment| {
+        segment.write_to(destination)
     })
 }
 
 fn write_transform_envelope<W: Write>(
     segments: &TransformSegments,
     destination: &mut W,
-    mut write_message: impl FnMut(&mut W, &PreparedSegment) -> Result<(), PreparedOutputError>,
+    mut write_segment: impl FnMut(&mut W, &PreparedSegment) -> Result<(), PreparedOutputError>,
 ) -> Result<(), PreparedOutputError> {
     destination.write_all(b"{")?;
     for (index, (key, value)) in segments.envelope.iter().enumerate() {
@@ -352,13 +451,25 @@ fn write_transform_envelope<W: Write>(
         }
         serde_json::to_writer(&mut *destination, key).map_err(PreparedOutputError::Serialize)?;
         destination.write_all(b":")?;
-        if key == "messages" {
+        if key == "operations" {
             destination.write_all(b"[")?;
-            for (message_index, message) in segments.messages.iter().enumerate() {
-                if message_index > 0 {
+            for (operation_index, operation) in segments.operations.iter().enumerate() {
+                if operation_index > 0 {
                     destination.write_all(b",")?;
                 }
-                write_message(destination, message)?;
+                match operation {
+                    RecipeSegment::Keep(segment) => write_segment(destination, segment)?,
+                    RecipeSegment::Insert(values) => {
+                        destination.write_all(INSERT_PREFIX)?;
+                        for (value_index, value) in values.iter().enumerate() {
+                            if value_index > 0 {
+                                destination.write_all(b",")?;
+                            }
+                            write_segment(destination, value)?;
+                        }
+                        destination.write_all(INSERT_SUFFIX)?;
+                    }
+                }
             }
             destination.write_all(b"]")?;
         } else {

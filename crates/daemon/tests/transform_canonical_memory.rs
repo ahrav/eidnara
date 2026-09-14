@@ -12,12 +12,14 @@ use kernel::{
     TaintClass,
 };
 use serde_json::{Value, json};
+use support::applied::applied_messages;
 use support::kernel_daemon::{DOMAIN, KernelDaemon, SESSION, insert_decision, state_kind};
 
 fn transform_request(fingerprint: &str) -> Value {
     json!({
         "method": "transform",
         "kind": "transform",
+        "base_revision": "canonical-memory-base",
         "v": 2,
         "serializer_profile": "owned-llmrunner",
         "session_id": SESSION,
@@ -35,8 +37,9 @@ fn transform_request(fingerprint: &str) -> Value {
     })
 }
 
+/// Every request in this file carries the same input array, so the recipe applies against any of them.
 fn served_text(response: &Value) -> String {
-    serde_json::to_string(&response["messages"]).unwrap()
+    serde_json::to_string(&applied_messages(&transform_request("applied"), response)).unwrap()
 }
 
 #[tokio::test]

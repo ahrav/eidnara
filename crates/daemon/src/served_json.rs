@@ -151,7 +151,7 @@ struct Encoded {
 
 #[cfg(test)]
 thread_local! {
-    static FINALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    pub(crate) static FINALIZATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 fn encode(value: &impl Serialize) -> serde_json::Result<Vec<u8>> {

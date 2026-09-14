@@ -363,6 +363,22 @@ struct SerializedOutputSession {
     entries: HashMap<String, SerializedOutputCacheEntry>,
     #[cfg_attr(not(test), allow(dead_code))]
     stats: SerializedOutputCacheStats,
+    previous_output: Option<(crate::edit_recipe::Revision, Arc<Vec<ServedMessage>>)>,
+}
+
+fn previous_output_retained_bytes(output: &Arc<Vec<ServedMessage>>) -> usize {
+    use crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES;
+    let overhead = ARC_ALLOCATION_OVERHEAD_BYTES
+        .saturating_add(std::mem::size_of::<Vec<ServedMessage>>())
+        .saturating_add(
+            output
+                .capacity()
+                .saturating_mul(std::mem::size_of::<ServedMessage>()),
+        )
+        .saturating_add(crate::edit_recipe::MAX_REVISION_BYTES);
+    output.iter().fold(overhead, |bytes, message| {
+        bytes.saturating_add(message.retained_bytes())
+    })
 }
 
 #[derive(Debug)]
@@ -453,6 +469,60 @@ impl SerializedOutputCache {
         SerializedOutputCacheSnapshot { entries }
     }
 
+    /// Hands out the retained applied output for this pass's recipe and clears it, so a pass that
+    /// never publishes a replacement leaves no stale `previous` behind.
+    pub(crate) fn take_previous_output(
+        &mut self,
+        session_id: &str,
+        revert_epoch: u64,
+    ) -> Option<(crate::edit_recipe::Revision, Arc<Vec<ServedMessage>>)> {
+        let session = self.sessions.get_mut(session_id)?;
+        if session.revert_epoch != revert_epoch {
+            self.remove(session_id);
+            return None;
+        }
+        let previous = session.previous_output.take()?;
+        let charge = previous_output_retained_bytes(&previous.1);
+        session.retained_bytes = session.retained_bytes.saturating_sub(charge);
+        self.retained_bytes = self.retained_bytes.saturating_sub(charge);
+        Some(previous)
+    }
+
+    /// Retains this pass's ordered output as the next request's `previous` source.
+    pub(crate) fn record_previous_output(
+        &mut self,
+        session_id: &str,
+        revert_epoch: u64,
+        revision: crate::edit_recipe::Revision,
+        output: Arc<Vec<ServedMessage>>,
+    ) {
+        let Some(session) = self
+            .sessions
+            .get_mut(session_id)
+            .filter(|session| session.revert_epoch == revert_epoch)
+        else {
+            return;
+        };
+        let charge = previous_output_retained_bytes(&output);
+        let displaced = session
+            .previous_output
+            .as_ref()
+            .map_or(0, |(_, output)| previous_output_retained_bytes(output));
+        let retained_bytes = self
+            .retained_bytes
+            .saturating_sub(displaced)
+            .saturating_add(charge);
+        if retained_bytes > self.max_retained_bytes {
+            return;
+        }
+        session.previous_output = Some((revision, output));
+        session.retained_bytes = session
+            .retained_bytes
+            .saturating_sub(displaced)
+            .saturating_add(charge);
+        self.retained_bytes = retained_bytes;
+    }
+
     fn replace(
         &mut self,
         session_id: &str,
@@ -460,8 +530,17 @@ impl SerializedOutputCache {
         entries: HashMap<String, SerializedOutputCacheEntry>,
         stats: SerializedOutputCacheStats,
     ) {
+        let previous_output = self
+            .sessions
+            .get(session_id)
+            .filter(|session| session.revert_epoch == revert_epoch)
+            .and_then(|session| session.previous_output.clone());
         self.remove(session_id);
-        let retained_bytes = Self::entries_retained_bytes(session_id, &entries);
+        let previous_charge = previous_output
+            .as_ref()
+            .map_or(0, |(_, output)| previous_output_retained_bytes(output));
+        let retained_bytes =
+            Self::entries_retained_bytes(session_id, &entries).saturating_add(previous_charge);
         if retained_bytes > self.max_retained_bytes {
             return;
         }
@@ -473,6 +552,7 @@ impl SerializedOutputCache {
                 retained_bytes,
                 entries,
                 stats,
+                previous_output,
             },
         );
         self.lru.push_back(session_id.to_string());
@@ -726,6 +806,13 @@ pub struct TransformRequest {
     pub native_messages: Option<Vec<Arc<Value>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_array_fingerprint: Option<String>,
+    /// Names this attempt's exact input snapshot; every `transform` request must carry one, and the
+    /// response echoes it so the caller can bind the recipe to that snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<crate::edit_recipe::Revision>,
+    /// The caller's retained, validated, successfully applied output, when it has one to offer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_output_revision: Option<crate::edit_recipe::Revision>,
     pub messages: wire::IngressMessages,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail_delta: Option<Value>,
@@ -890,6 +977,10 @@ struct TransformRequestWire {
     #[serde(default)]
     full_array_fingerprint: Option<String>,
     #[serde(default)]
+    base_revision: Option<crate::edit_recipe::Revision>,
+    #[serde(default)]
+    previous_output_revision: Option<crate::edit_recipe::Revision>,
+    #[serde(default)]
     messages: wire::IngressMessages,
     #[serde(default)]
     tail_delta: Option<Value>,
@@ -975,6 +1066,8 @@ impl<'de> Deserialize<'de> for TransformRequest {
             serve_native: wire.serve_native,
             native_messages: wire.native_messages,
             full_array_fingerprint: wire.full_array_fingerprint,
+            base_revision: wire.base_revision,
+            previous_output_revision: wire.previous_output_revision,
             messages,
             tail_delta: wire.tail_delta,
             usage: wire.usage,
@@ -1383,13 +1476,6 @@ pub fn format_pass_timing_line(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct NativeMessagesDelta {
-    pub after: String,
-    pub replace_from: usize,
-    pub messages: Vec<Arc<Value>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransformResponse {
     pub status: TransformStatus,
     pub served_from: ServedFrom,
@@ -1430,18 +1516,24 @@ pub struct TransformResponse {
     pub ordinal_continuation_base: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub historian: Option<HistorianDiagnostics>,
-    /// Consumers distinguish `need_full_sync` by the presence of the `messages` array.
-    /// An empty array would ambiguously mean either no transformed messages or re-send required.
-    /// Every `ok` response sets `messages` to `Some`, including legitimately empty output.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// The final approved CK output. Internal to the daemon: the wire carries an edit recipe built
+    /// from this array, so policy, codec, and cache code keep the complete view while the response
+    /// does not. Every `ok` response sets it to `Some`, including legitimately empty output.
+    #[serde(skip)]
     pub messages: Option<Vec<ServedMessage>>,
-    /// `native_messages` is present only when the request opts into native serving and selects the `opencode-aisdk` serializer profile.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// Native output for the non-incremental attachment path, used to build its wire recipe.
+    /// Incremental attachment returns its output directly instead of populating this field.
+    #[serde(skip)]
     pub native_messages: Option<Vec<Arc<Value>>>,
-    /// `native_messages_delta` replaces the suffix of the previous acknowledged native output.
-    /// `native_messages_delta` keeps warm responses proportional to the changed tail; `native_messages` remains the full-array fallback.
+    /// The request's `base_revision`, echoed so the applier can bind the recipe to its input snapshot.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub native_messages_delta: Option<NativeMessagesDelta>,
+    pub base_revision: Option<crate::edit_recipe::Revision>,
+    /// Fresh for every recomputation; names exactly one final ordered array.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub output_revision: Option<crate::edit_recipe::Revision>,
+    /// Present exactly when the recipe keeps from the caller's previously applied output.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub previous_output_revision: Option<crate::edit_recipe::Revision>,
     /// Host-delivery instructions are additive and profile-gated.
     /// The module does not persist delivery because the host owns the channel-2 lease and deduplication.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1489,7 +1581,9 @@ impl TransformResponse {
             historian: None,
             messages: None,
             native_messages: None,
-            native_messages_delta: None,
+            base_revision: None,
+            output_revision: None,
+            previous_output_revision: None,
             host_directives: None,
             channel2_directive: None,
             note_deliveries: None,
@@ -2895,7 +2989,9 @@ fn apply_additive_only(
             historian: None,
             messages: Some(messages),
             native_messages: None,
-            native_messages_delta: None,
+            base_revision: req.base_revision.clone(),
+            output_revision: None,
+            previous_output_revision: None,
             host_directives: None,
             channel2_directive: None,
             note_deliveries: (!note_deliveries.is_empty()).then_some(note_deliveries),
@@ -5132,7 +5228,9 @@ fn apply_once(
             historian: None,
             messages: Some(wire_messages),
             native_messages: None,
-            native_messages_delta: None,
+            base_revision: req.base_revision.clone(),
+            output_revision: None,
+            previous_output_revision: None,
             host_directives: channel2_output.host_directives,
             channel2_directive: channel2_output.channel2_directive,
             note_deliveries: (!note_deliveries.is_empty()).then_some(note_deliveries),
@@ -13115,6 +13213,8 @@ pub(crate) mod tests {
             serve_native: false,
             native_messages: None,
             full_array_fingerprint: None,
+            base_revision: None,
+            previous_output_revision: None,
             messages: messages.into_iter().collect(),
             tail_delta: None,
             usage: None,
@@ -14121,15 +14221,21 @@ pub(crate) mod tests {
                 served.output_identity.as_ref(),
                 format!("{:x}", Sha256::digest(expected.as_bytes()))
             );
-            let output = crate::dispatch::PreparedOutput::transform_segments(
-                json!({"messages": null}),
-                vec![crate::dispatch::PreparedSegment::served(served)],
+            let output = crate::dispatch::PreparedOutput::transform_recipe(
+                json!({"operations": null}),
+                vec![crate::dispatch::RecipeSegment::Insert(vec![
+                    crate::dispatch::PreparedSegment::served(served),
+                ])],
             )
             .unwrap();
             let measured = output.measure().unwrap();
             let mut bytes = Vec::new();
             measured.write_to(&mut bytes).unwrap();
-            assert_eq!(bytes, format!("{{\"messages\":[{expected}]}}").as_bytes());
+            assert_eq!(
+                bytes,
+                format!("{{\"operations\":[{{\"op\":\"insert\",\"values\":[{expected}]}}]}}")
+                    .as_bytes()
+            );
             assert_eq!(measured.len(), bytes.len());
         }
     }
@@ -14146,14 +14252,16 @@ pub(crate) mod tests {
             let expected = serde_json::to_vec(&serde_json::to_value(&message).unwrap()).unwrap();
             let served = ServedMessage::from_message(message);
             assert_eq!(served.canonical_bytes(), expected);
-            let output = crate::dispatch::PreparedOutput::transform_segments(
-                json!({"messages": null}),
-                vec![crate::dispatch::PreparedSegment::served(served)],
+            let output = crate::dispatch::PreparedOutput::transform_recipe(
+                json!({"operations": null}),
+                vec![crate::dispatch::RecipeSegment::Insert(vec![
+                    crate::dispatch::PreparedSegment::served(served),
+                ])],
             )
             .unwrap();
-            let mut expected_frame = b"{\"messages\":[".to_vec();
+            let mut expected_frame = b"{\"operations\":[{\"op\":\"insert\",\"values\":[".to_vec();
             expected_frame.extend(expected);
-            expected_frame.extend(b"]}");
+            expected_frame.extend(b"]}]}");
             assert_eq!(output.as_ref(), expected_frame);
         }
         for (left, left_digest) in &identities {
@@ -15645,7 +15753,10 @@ pub(crate) mod tests {
         );
         let value = serde_json::to_value(&r).unwrap();
         assert!(value.get("coverage_ordinal").is_none());
-        let wire_messages = value["messages"].as_array().unwrap();
+        // The served array reaches the wire as recipe inserts, so its shape is checked as serialized.
+        assert!(value.get("messages").is_none());
+        let served = serde_json::to_value(r.messages.as_deref().unwrap()).unwrap();
+        let wire_messages = served.as_array().unwrap();
         assert!(wire_messages.iter().all(|m| m.get("mid").is_none()));
         assert!(wire_messages.iter().all(|m| m.get("ordinal").is_none()));
         assert_eq!(wire_messages[0]["role"], "user");
@@ -21299,7 +21410,7 @@ pub(crate) mod tests {
             healed_ck.clone(),
             request.full_array_fingerprint.clone(),
         );
-        let first_stats = crate::attach_native_messages_incremental(
+        let first_attachment = crate::attach_native_messages_incremental(
             &mut first,
             &request,
             0,
@@ -21309,11 +21420,13 @@ pub(crate) mod tests {
             true,
             None,
             0,
+            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
             crate::NativeCacheKeyMode::Normal,
         );
-        assert_eq!(first_stats.encoded_messages, healed_ck.len());
-        let native = first.native_messages.as_ref().unwrap();
+        assert_eq!(first_attachment.stats.encoded_messages, healed_ck.len());
+        assert!(first.native_messages.is_none());
+        let native = &first_attachment.output.values;
         let tool_ids = native
             .iter()
             .flat_map(|message| message["parts"].as_array().into_iter().flatten())
@@ -21329,7 +21442,7 @@ pub(crate) mod tests {
             healed_ck.clone(),
             request.full_array_fingerprint.clone(),
         );
-        let replay_stats = crate::attach_native_messages_incremental(
+        let replay_attachment = crate::attach_native_messages_incremental(
             &mut replay,
             &request,
             0,
@@ -21339,12 +21452,17 @@ pub(crate) mod tests {
             true,
             None,
             0,
+            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
             crate::NativeCacheKeyMode::Normal,
         );
-        assert_eq!(replay_stats.reused_messages, healed_ck.len());
-        assert_eq!(replay_stats.encoded_messages, 0);
-        assert_eq!(replay.native_messages, first.native_messages);
+        assert_eq!(replay_attachment.stats.reused_messages, healed_ck.len());
+        assert_eq!(replay_attachment.stats.encoded_messages, 0);
+        assert!(replay.native_messages.is_none());
+        assert_eq!(
+            replay_attachment.output.values,
+            first_attachment.output.values
+        );
     }
 
     #[test]
@@ -21508,6 +21626,7 @@ pub(crate) mod tests {
             true,
             None,
             0,
+            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
             crate::NativeCacheKeyMode::Normal,
         );
@@ -21525,7 +21644,7 @@ pub(crate) mod tests {
         moved_request.serve_native = true;
         moved_request.full_array_fingerprint = Some("todo-fold-fp-2".to_string());
         let mut moved_native = moved.clone();
-        let stats = crate::attach_native_messages_incremental(
+        let attachment = crate::attach_native_messages_incremental(
             &mut moved_native,
             &moved_request,
             0,
@@ -21535,11 +21654,13 @@ pub(crate) mod tests {
             true,
             None,
             0,
+            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
             crate::NativeCacheKeyMode::Normal,
         );
-        assert!(stats.encoded_messages > 0);
-        let native = moved_native.native_messages.unwrap();
+        assert!(attachment.stats.encoded_messages > 0);
+        assert!(moved_native.native_messages.is_none());
+        let native = attachment.output.values;
         let tail_index = native
             .iter()
             .position(|message| message["info"]["id"] == "t3")
@@ -29147,6 +29268,62 @@ pub(crate) mod tests {
         assert!(
             retained.abs_diff(expected) <= expected / 20,
             "serialized-output estimate left 5% fixture tolerance: retained={retained} expected={expected}"
+        );
+    }
+
+    #[test]
+    fn serialized_output_cache_charges_retained_output_payloads_the_entries_do_not_own() {
+        let (core, meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
+        let built = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
+        let mut cache = SerializedOutputCache::new(1024 * 1024);
+        cache.replace(
+            &request.session_id,
+            3,
+            built.cache_entries,
+            built.cache_stats,
+        );
+        let (before, _) = cache.metrics();
+
+        // A pass-through output serializes its own copies instead of reusing the entries.
+        let foreign =
+            ServedMessage::from_message(WireMessage::synthetic_user_text("x".repeat(64 * 1024)));
+        let payload = foreign.retained_bytes();
+        let mut output = Vec::with_capacity(128);
+        output.push(foreign);
+        let owned = payload + output.capacity() * std::mem::size_of::<ServedMessage>();
+        cache.record_previous_output(
+            &request.session_id,
+            3,
+            crate::edit_recipe::Revision::parse("rev-1").unwrap(),
+            Arc::new(output),
+        );
+        let (after, _) = cache.metrics();
+        assert!(
+            after - before >= owned,
+            "retained output charged {} but owns {owned} bytes including vector capacity",
+            after - before
+        );
+
+        cache.max_retained_bytes = after;
+        let replacement = Arc::new(vec![ServedMessage::from_message(
+            WireMessage::synthetic_user_text("replacement"),
+        )]);
+        cache.record_previous_output(
+            &request.session_id,
+            3,
+            crate::edit_recipe::Revision::parse("rev-2").unwrap(),
+            Arc::clone(&replacement),
+        );
+        assert_eq!(
+            cache.metrics().0,
+            before + previous_output_retained_bytes(&replacement),
+            "replacement releases the displaced output charge"
+        );
+        cache.take_previous_output(&request.session_id, 3);
+        assert_eq!(
+            cache.metrics().0,
+            before,
+            "taking the output releases its charge"
         );
     }
 

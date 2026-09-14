@@ -59,7 +59,10 @@ export interface RecipeRejection {
 export type RecipeParse =
     | { ok: true; recipe: EditRecipe }
     | { ok: false; rejection: RecipeRejection };
-/** `bytes` is the canonical JSON size of the reconstructed array, brackets and commas included. */
+/**
+ * `bytes` is the canonical JSON size of the reconstructed array, brackets and commas included;
+ * `lengths` holds each value's canonical length so the result can serve as a later previous base.
+ */
 export type RecipeApplication =
     | { ok: true; values: unknown[]; lengths: number[]; bytes: number }
     | { ok: false; rejection: RecipeRejection };

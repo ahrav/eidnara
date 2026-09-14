@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import fixture from "../../../../../crates/daemon/tests/fixtures/transform-edit-recipe-v1.json";
 import {
     applyRecipe,
@@ -11,6 +11,7 @@ import {
     type RecipeRejectionCode,
     type RecipeSourceBase,
 } from "./edit-recipe";
+import * as moduleWire from "./module-wire";
 
 interface FixtureCase {
     name: string;
@@ -84,6 +85,7 @@ describe("edit recipe fixtures", () => {
                 );
                 expect(result.bytes).toBe(testCase.expect.canonical_bytes as number);
                 expect(result.bytes).toBe(canonicalJsonLength(result.values));
+                expect(result.lengths).toEqual(result.values.map(canonicalJsonLength));
                 // Kept entries are the source's own objects, not copies.
                 for (const [index, value] of result.values.entries()) {
                     if (value !== null && typeof value === "object") {
@@ -133,6 +135,75 @@ describe("edit recipe fixtures", () => {
         expect(result.lengths).toEqual(result.values.map((value) => canonicalJsonLength(value)));
         expect(JSON.stringify(inputValues)).toBe(inputJson);
         expect(JSON.stringify(previousValues)).toBe(previousJson);
+    });
+});
+
+describe("canonical JSON length", () => {
+    it("matches compact bytes for nested values, omitted fields, Unicode and numeric boundaries", () => {
+        const values: unknown[] = [
+            undefined,
+            null,
+            true,
+            false,
+            "",
+            'x"y\\\n\b\f\r\t\u0000\u001f\u007fé☃😀\u2028\ud800x\udfff',
+            [],
+            {},
+            { omitted: undefined },
+            { z: undefined, b: [undefined, {}, [], { omitted: undefined, value: false }], a: null },
+            -0,
+            1.5,
+            0.00001,
+            0.000001,
+            -0.000001,
+            0.30000000000000004,
+            1e15,
+            1e16,
+            2 ** 60,
+            -(2 ** 63) + 1024,
+            -(2 ** 63),
+            2 ** 64 - 4096,
+            2 ** 64,
+            1e21,
+            1e23,
+            Number.MIN_VALUE,
+            Number.MAX_VALUE,
+            Number.NaN,
+            Number.POSITIVE_INFINITY,
+            Number.NEGATIVE_INFINITY,
+        ];
+        for (const value of values) {
+            for (const nested of [value, [value, undefined], { "😀": value, "\uE000": [value] }]) {
+                expect(canonicalJsonLength(nested)).toBe(
+                    Buffer.byteLength(moduleWire.serdeJsonCompact(nested)),
+                );
+            }
+        }
+    });
+
+    it("counts nested values without composite serialization or key sorting", () => {
+        const value = { z: [undefined, { b: "é☃😀", a: 0.000001 }, []], a: {}, omitted: undefined };
+        const expected = Buffer.byteLength(moduleWire.serdeJsonCompact(value));
+        const compactSpy = spyOn(moduleWire, "serdeJsonCompact");
+        const stringifySpy = spyOn(JSON, "stringify");
+        const sortSpy = spyOn(Array.prototype, "sort");
+        try {
+            const length = canonicalJsonLength(value);
+            const compositeSerializations = [
+                ...compactSpy.mock.calls,
+                ...stringifySpy.mock.calls,
+            ].filter(([input]) => input !== null && typeof input === "object").length;
+            const keySorts = sortSpy.mock.calls.length;
+            expect(length).toBe(expected);
+            expect({ compositeSerializations, keySorts }).toEqual({
+                compositeSerializations: 0,
+                keySorts: 0,
+            });
+        } finally {
+            sortSpy.mockRestore();
+            stringifySpy.mockRestore();
+            compactSpy.mockRestore();
+        }
     });
 });
 

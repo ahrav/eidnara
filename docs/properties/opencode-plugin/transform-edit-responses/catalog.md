@@ -43,6 +43,14 @@ capture budget are not the separate 64 MiB optional-output byte budget with
 byte-triggered LRU eviction. TE30 remains partial: no delta-versus-full
 control comparison exists; that comparison is assigned to #538.
 
+The recipe wire switch that follows these records replaces the native
+candidate builder and its suffix-delta handling with recipe application,
+adds the optional-output budget, and renames several witnesses named below.
+[`recipe-wire-switch.md`](recipe-wire-switch.md) records that change against
+its own tree and names the replacement witnesses for TE20, TE21, TE22, TE25,
+and TE30; the references in this file and in `evidence/` stay bound to the
+revision named above.
+
 ## Scope
 
 - Source guard: referenceable JSON domain over the host message array,

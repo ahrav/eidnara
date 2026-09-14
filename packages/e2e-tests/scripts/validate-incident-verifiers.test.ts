@@ -20,6 +20,28 @@ function committedCatalog() {
 }
 
 describe("incident verifier contributor gate", () => {
+    it("requires successful replay for every changed verifier before accepting it", () => {
+        const accepted = { "first.rs": "a", "second.rs": "b" };
+        const current = { "first.rs": "c", "second.rs": "d" };
+        const replayed: string[] = [];
+        expect(() =>
+            assertBoundVerifierBytesUnchanged(accepted, current, (path) => replayed.push(path)),
+        ).not.toThrow();
+        expect(replayed).toEqual(["first.rs", "second.rs"]);
+        expect(() =>
+            assertBoundVerifierBytesUnchanged(accepted, current, () => {
+                throw new Error("mutation survived");
+            }),
+        ).toThrow("mutation survived");
+        replayed.length = 0;
+        expect(() =>
+            assertBoundVerifierBytesUnchanged(accepted, { "first.rs": "c" }, (path) =>
+                replayed.push(path),
+            ),
+        ).toThrow(/no longer bind accepted verifiers/);
+        expect(replayed).toEqual([]);
+    });
+
     it("accepts unchanged or newly bound verifier bytes and blocks changed or dropped bindings", () => {
         const bound = { "tests/verifier.test.ts": "a".repeat(64) };
         expect(() => assertBoundVerifierBytesUnchanged(bound, { ...bound })).not.toThrow();

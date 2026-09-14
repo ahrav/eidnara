@@ -6,6 +6,7 @@ mod support;
 use host_runtime::{RequestOptions, TargetKind};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use support::applied::applied_messages;
 use support::direct_host::{FixtureProcess, wait_for_store};
 
 #[tokio::test]
@@ -119,9 +120,11 @@ async fn serialized_transform_corpus_preserves_host_admission_and_completion() {
                 );
                 assert_eq!(result["status"], "ok", "{name}: {result}");
                 assert!(
-                    result["messages"].is_array(),
+                    result["operations"].is_array(),
                     "{name}: final transform response"
                 );
+                let original: Value =
+                    serde_json::from_str(case["originalText"].as_str().unwrap()).unwrap();
                 let control = client
                     .request(
                         route,
@@ -132,9 +135,9 @@ async fn serialized_transform_corpus_preserves_host_admission_and_completion() {
                     .expect("unpaged control completes");
                 let control: Value = serde_json::from_slice(&control.body).unwrap();
                 assert_eq!(
-                    serde_json::to_vec(&result["messages"]).unwrap(),
-                    serde_json::to_vec(&control["messages"]).unwrap(),
-                    "{name}: paged and unpaged served-message bytes differ"
+                    serde_json::to_vec(&applied_messages(&original, &result)).unwrap(),
+                    serde_json::to_vec(&applied_messages(&original, &control)).unwrap(),
+                    "{name}: paged and unpaged applied arrays differ"
                 );
                 complete += 1;
             }

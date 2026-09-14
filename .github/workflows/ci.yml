@@ -373,6 +373,9 @@ jobs:
         if: needs.changes.result != 'success' || needs.changes.outputs.ts == 'true'
         run: bun run check:repo
 
+      - name: Rust toolchain
+        run: rustup toolchain install 1.98 --profile minimal --component rustfmt
+
       - name: Incident history and verifier gates
         # Both validators use the pull request base SHA or protected push `before` SHA.
         # An unprotected push, a scheduled run, and a manual dispatch have no trusted base, so the step is skipped there.
@@ -387,9 +390,6 @@ jobs:
       - name: Plugin bundle smokes
         if: needs.changes.result != 'success' || needs.changes.outputs.ts == 'true'
         run: bun run --cwd packages/opencode-plugin smoke
-
-      - name: Rust toolchain
-        run: rustup toolchain install 1.98 --profile minimal --component rustfmt
 
       - name: Rust format
         run: |

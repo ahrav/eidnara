@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod applied;
 #[cfg(unix)]
 pub mod direct_host;
 pub mod embedding_fixtures;

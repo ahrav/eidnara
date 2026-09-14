@@ -24,9 +24,9 @@ pub const MAX_REVISION_BYTES: usize = 128;
 pub const MAX_RECONSTRUCTED_BYTES: usize = crate::dispatch::MAX_WIRE_BODY_BYTES;
 /// Largest integer both languages read exactly; JavaScript indexes above it lose precision.
 pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
-/// Bounds equality tests per output message to prevent shared keys from making a build quadratic.
+/// Caps adversarial key collisions before they can turn one output lookup into a full source scan.
 pub const MAX_CONFIRM_PROBES: usize = 8;
-const MAX_JSON_NESTING: usize = 127;
+pub(crate) const MAX_JSON_NESTING: usize = 127;
 
 /// Opaque, nonempty, at most [`MAX_REVISION_BYTES`] UTF-8 bytes. Neither a hash nor authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -56,6 +56,68 @@ pub enum Source {
     Previous,
 }
 
+/// Allocates output revisions scoped to one daemon incarnation. The counter never wraps: at
+/// exhaustion the allocator refuses and the pass fails instead of reusing a name.
+#[derive(Debug)]
+pub struct RevisionAllocator {
+    incarnation: String,
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl Default for RevisionAllocator {
+    /// Process id and start time distinguish daemon incarnations on one host; the counter
+    /// distinguishes passes within one.
+    fn default() -> Self {
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        Self::new(format!("{:x}-{started:x}", std::process::id()))
+    }
+}
+
+impl RevisionAllocator {
+    pub fn new(incarnation: impl Into<String>) -> Self {
+        let incarnation = incarnation.into();
+        // A revision is `<incarnation>-<counter>`; both parts stay printable and within the byte limit.
+        assert!(
+            incarnation.len() <= MAX_REVISION_BYTES - 21,
+            "incarnation too long"
+        );
+        Self {
+            incarnation,
+            next: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn starting_at(incarnation: impl Into<String>, next: u64) -> Self {
+        let allocator = Self::new(incarnation);
+        allocator
+            .next
+            .store(next, std::sync::atomic::Ordering::Relaxed);
+        allocator
+    }
+
+    /// `None` once every counter value has been handed out.
+    pub fn allocate(&self) -> Option<Revision> {
+        use std::sync::atomic::Ordering;
+        let counter = self
+            .next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .ok()?;
+        Revision::parse(&format!("{}-{counter}", self.incarnation)).ok()
+    }
+}
+
+impl<'de> Deserialize<'de> for Revision {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Revision::parse(&text).map_err(de::Error::custom)
+    }
+}
+
 impl Source {
     pub const fn wire_id(self) -> &'static str {
         match self {
@@ -65,9 +127,11 @@ impl Source {
     }
 }
 
+/// `V` is the whole-message value an insert carries: a decoded JSON value on the applying side, a
+/// served message with its prepared bytes on the emitting side.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
-pub enum Operation {
+pub enum Operation<V = Arc<Value>> {
     /// `count` whole messages from `source` starting at `start`, in source order.
     Keep {
         source: Source,
@@ -75,7 +139,7 @@ pub enum Operation {
         count: u64,
     },
     /// Complete final values; never a merge into an original.
-    Insert { values: Vec<Arc<Value>> },
+    Insert { values: Vec<V> },
 }
 
 /// The application contract of one `status: ok` response. `from_json` is the validating entry
@@ -324,7 +388,7 @@ impl<'a> Iterator for ContainerChildren<'a> {
 }
 
 /// Validates the depth bound and returns the maximum pending container frames.
-fn validate_json_nesting(value: &Value) -> Result<usize, RecipeError> {
+pub(crate) fn validate_json_nesting(value: &Value) -> Result<usize, RecipeError> {
     let Some(children) = ContainerChildren::new(value) else {
         return Ok(0);
     };
@@ -516,10 +580,11 @@ impl Recipe {
 
 /// One whole message of a source or of the final output, with the provenance key that nominates
 /// it as a candidate. Keys only nominate; the builder confirms every keep by full value equality.
+/// `V` is a cheap handle (an `Arc`, or a `Copy` reference wrapper), not the payload itself.
 #[derive(Debug, Clone)]
-pub struct Keyed<'a, K> {
+pub struct Keyed<K, V> {
     pub key: K,
-    pub value: &'a Arc<Value>,
+    pub value: V,
 }
 
 /// Ascending positions per key within one source, so a nomination at or after the cursor is one
@@ -529,7 +594,7 @@ struct KeyIndex<K> {
 }
 
 impl<K: Hash + Eq + Clone> KeyIndex<K> {
-    fn new(entries: &[Keyed<'_, K>]) -> Self {
+    fn new<V>(entries: &[Keyed<K, V>]) -> Self {
         let mut positions: HashMap<K, Vec<usize>> = HashMap::with_capacity(entries.len());
         for (position, entry) in entries.iter().enumerate() {
             positions
@@ -540,20 +605,20 @@ impl<K: Hash + Eq + Clone> KeyIndex<K> {
         Self { positions }
     }
 
-    /// The shared `remaining` budget bounds probes across previous and input lookups.
-    fn confirm(
+    /// A shared budget limits deep comparisons for each output entry.
+    fn confirm<V>(
         &self,
-        entries: &[Keyed<'_, K>],
+        entries: &[Keyed<K, V>],
         cursor: usize,
-        wanted: &Keyed<'_, K>,
+        wanted: &Keyed<K, V>,
+        equal: &dyn Fn(&V, &V) -> bool,
         remaining: &mut usize,
     ) -> Option<usize> {
         let positions = self.positions.get(&wanted.key)?;
         let first = positions.partition_point(|position| *position < cursor);
         for position in positions[first..].iter().take(*remaining).copied() {
             *remaining -= 1;
-            let candidate = entries[position].value;
-            if Arc::ptr_eq(candidate, wanted.value) || candidate == wanted.value {
+            if equal(&entries[position].value, &wanted.value) {
                 return Some(position);
             }
         }
@@ -561,32 +626,40 @@ impl<K: Hash + Eq + Clone> KeyIndex<K> {
     }
 }
 
-/// Builds the recipe that reconstructs `output` from `input` and, when present, `previous`.
+/// The operations that rebuild one output, plus whether any of them keeps from `previous`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuiltOperations<V> {
+    pub operations: Vec<Operation<V>>,
+    pub used_previous: bool,
+}
+
+/// Builds the operations that reconstruct `output` from `input` and, when present, `previous`.
 ///
 /// Each output entry prefers an equal `previous` message, then an equal `input` message.
-/// Anything else becomes a literal: an unmatched message, a message that repeats or moves backward
-/// relative to its source cursor, or a match beyond [`MAX_CONFIRM_PROBES`] same-key candidates.
-/// Source cursors advance independently. Adjacent keeps of one source and adjacent inserts coalesce.
-pub fn build_recipe<K: Hash + Eq + Clone>(
-    output: &[Keyed<'_, K>],
-    input: (&Revision, &[Keyed<'_, K>]),
-    previous: Option<(&Revision, &[Keyed<'_, K>])>,
-    output_revision: Revision,
-) -> Recipe {
-    let input_index = KeyIndex::new(input.1);
-    let previous_index = previous.map(|(_, entries)| KeyIndex::new(entries));
+/// A miss or an exhausted probe budget produces a literal without changing the output value.
+/// Sharing [`MAX_CONFIRM_PROBES`] across both sources bounds work even when every key collides.
+/// Cursors advance independently per source; adjacent keeps of one source and inserts coalesce.
+pub fn build_operations<K: Hash + Eq + Clone, V: Clone>(
+    output: &[Keyed<K, V>],
+    input: &[Keyed<K, V>],
+    previous: Option<&[Keyed<K, V>]>,
+    equal: impl Fn(&V, &V) -> bool,
+) -> BuiltOperations<V> {
+    let input_index = KeyIndex::new(input);
+    let previous_index = previous.map(KeyIndex::new);
     let mut cursors = [0usize; 2];
-    let mut operations: Vec<Operation> = Vec::new();
+    let mut operations: Vec<Operation<V>> = Vec::new();
     let mut used_previous = false;
     for entry in output {
         let mut remaining = MAX_CONFIRM_PROBES;
-        let previous_hit = previous.and_then(|(_, entries)| {
+        let previous_hit = previous.and_then(|entries| {
             previous_index
                 .as_ref()?
                 .confirm(
                     entries,
                     cursors[Source::Previous as usize],
                     entry,
+                    &equal,
                     &mut remaining,
                 )
                 .map(|position| (Source::Previous, position))
@@ -594,9 +667,10 @@ pub fn build_recipe<K: Hash + Eq + Clone>(
         let hit = previous_hit.or_else(|| {
             input_index
                 .confirm(
-                    input.1,
+                    input,
                     cursors[Source::Input as usize],
                     entry,
+                    &equal,
                     &mut remaining,
                 )
                 .map(|position| (Source::Input, position))
@@ -619,20 +693,44 @@ pub fn build_recipe<K: Hash + Eq + Clone>(
                 }
             }
             None => match operations.last_mut() {
-                Some(Operation::Insert { values }) => values.push(Arc::clone(entry.value)),
+                Some(Operation::Insert { values }) => values.push(entry.value.clone()),
                 _ => operations.push(Operation::Insert {
-                    values: vec![Arc::clone(entry.value)],
+                    values: vec![entry.value.clone()],
                 }),
             },
         }
     }
+    BuiltOperations {
+        operations,
+        used_previous,
+    }
+}
+
+/// A named source array for [`build_recipe`]: the revision the client holds it under and its
+/// keyed values.
+pub type KeyedBase<'a, K> = (&'a Revision, &'a [Keyed<K, Arc<Value>>]);
+
+/// Builds a complete recipe over decoded JSON values; `Arc` identity short-circuits the equality
+/// walk for handles the two arrays share.
+pub fn build_recipe<K: Hash + Eq + Clone>(
+    output: &[Keyed<K, Arc<Value>>],
+    input: KeyedBase<'_, K>,
+    previous: Option<KeyedBase<'_, K>>,
+    output_revision: Revision,
+) -> Recipe {
+    let built = build_operations(
+        output,
+        input.1,
+        previous.map(|(_, entries)| entries),
+        |a, b| Arc::ptr_eq(a, b) || a == b,
+    );
     Recipe {
         base_revision: input.0.clone(),
         output_revision,
         previous_output_revision: previous
-            .filter(|_| used_previous)
+            .filter(|_| built.used_previous)
             .map(|(revision, _)| revision.clone()),
-        operations,
+        operations: built.operations,
     }
 }
 
@@ -1239,13 +1337,13 @@ mod tests {
         assert_eq!(serde_json::to_value(&decoded).expect("serializes"), mixed);
     }
 
-    fn keyed<'a>(values: &'a [Arc<Value>]) -> Vec<Keyed<'a, u64>> {
+    fn keyed(values: &[Arc<Value>]) -> Vec<Keyed<u64, Arc<Value>>> {
         // Provenance here is the message id; repeated ids nominate several positions.
         values
             .iter()
             .map(|value| Keyed {
                 key: value["id"].as_u64().unwrap_or(u64::MAX),
-                value,
+                value: Arc::clone(value),
             })
             .collect()
     }
@@ -1332,7 +1430,61 @@ mod tests {
     }
 
     #[test]
-    fn builder_keeps_cursors_monotone_and_uses_each_candidate_at_most_once() {
+    fn builder_bounds_same_key_confirmation_work() {
+        let input = shared(
+            &(0..=MAX_CONFIRM_PROBES)
+                .map(|n| json!({"id": 7, "n": n}))
+                .collect::<Vec<_>>(),
+        );
+        let output = shared(&[json!({"id": 7, "n": MAX_CONFIRM_PROBES})]);
+        let base = revision("base");
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            None,
+            revision("out"),
+        );
+
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "insert", "values": [{"id": 7, "n": MAX_CONFIRM_PROBES}]}])
+        );
+
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input[1..])),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "keep", "source": "input", "start": MAX_CONFIRM_PROBES - 1, "count": 1}])
+        );
+
+        for key in [None, Some("repeated")] {
+            let input: Vec<_> = (0..64).map(|value| Keyed { key, value }).collect();
+            let output: Vec<_> = (64..96).map(|value| Keyed { key, value }).collect();
+            for previous_count in [0, 7, 8, 64] {
+                let probes = std::cell::Cell::new(0);
+                let built =
+                    build_operations(&output, &input, Some(&input[..previous_count]), |a, b| {
+                        probes.set(probes.get() + 1);
+                        a == b
+                    });
+                assert_eq!(probes.get(), output.len() * MAX_CONFIRM_PROBES);
+                assert!(!built.used_previous);
+                assert_eq!(
+                    built.operations,
+                    vec![Operation::Insert {
+                        values: (64..96).collect()
+                    }]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builder_keeps_cursors_monotone() {
         // Output repeats message 1 and moves 3 before 2; only forward matches become keeps.
         let input = shared(&[json!({"id": 1}), json!({"id": 2}), json!({"id": 3})]);
         let output = shared(&[
@@ -1463,6 +1615,23 @@ mod tests {
             rendered(&recipe),
             json!({"base_revision": "base", "output_revision": "out", "operations": []})
         );
+    }
+
+    #[test]
+    fn revision_allocator_names_each_pass_once_and_refuses_exhaustion() {
+        let allocator = RevisionAllocator::new("host");
+        let first = allocator.allocate().expect("first");
+        let second = allocator.allocate().expect("second");
+        assert_eq!(first.as_str(), "host-1");
+        assert_ne!(first, second);
+        // The counter names the value it holds and refuses once the next value would wrap.
+        let exhausted = RevisionAllocator::starting_at("host", u64::MAX - 1);
+        assert_eq!(
+            exhausted.allocate().map(|r| r.as_str().to_owned()),
+            Some(format!("host-{}", u64::MAX - 1))
+        );
+        assert_eq!(exhausted.allocate(), None);
+        assert_eq!(exhausted.allocate(), None);
     }
 
     #[test]

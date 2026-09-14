@@ -92,7 +92,7 @@ function canonicalNumber(value: number): string {
  * as `f64` follows ryu's layout: fixed notation with a trailing `.0` for integer values up to
  * 16 digits, fixed notation down to `0.00001`, and `d.ddde±x` elsewhere.
  */
-function serdeJsonNumber(value: number): string {
+export function serdeJsonNumber(value: number): string {
     if (!Number.isFinite(value)) return "null";
     if (Number.isInteger(value)) {
         const wire = wireIntegerText(value);

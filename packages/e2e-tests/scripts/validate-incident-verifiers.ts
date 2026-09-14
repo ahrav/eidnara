@@ -9,9 +9,11 @@ import {
     parseIncidentCatalog,
 } from "../src/incident-pool/contract";
 import {
+    assertMutationReplayResults,
     boundVerifierDigests,
     type EvidenceView,
     loadMutationEvidence,
+    mutationRecordsBoundTo,
     REPO_ROOT,
 } from "../src/incident-pool/evidence";
 import { deriveTrustedAcceptedCommit, type GitRunner } from "./validate-incident-history";
@@ -56,6 +58,7 @@ function digestDrift(
 export function assertBoundVerifierBytesUnchanged(
     acceptedDigests: Record<string, string>,
     currentDigests: Record<string, string>,
+    replay?: (path: string) => void,
 ): void {
     const { changed, unbound } = digestDrift(acceptedDigests, currentDigests);
     if (unbound.length > 0) {
@@ -63,11 +66,12 @@ export function assertBoundVerifierBytesUnchanged(
             `mutation records no longer bind accepted verifiers: ${unbound.join(", ")}`,
         );
     }
-    if (changed.length > 0) {
+    if (changed.length > 0 && !replay) {
         throw new Error(
             `bound verifiers changed without recorded mutation replay support: ${changed.join(", ")}`,
         );
     }
+    for (const path of changed) replay?.(path);
 }
 
 /**
@@ -248,16 +252,54 @@ function cleanupTrustedWorktree(worktree: string, parent: string): Error | null 
     return null;
 }
 
+function replayMutationVerifier(path: string, evidence: EvidenceView): void {
+    if (path !== "crates/daemon/src/differential_goldens.rs") {
+        throw new Error(`bound verifier changed without a registered mutation runner: ${path}`);
+    }
+    const records = mutationRecordsBoundTo(evidence, path);
+    const drills = new Map([
+        ["DG_1_ONE_BYTE_INPUT", "1"],
+        ["DG_2_ONE_BYTE_INPUT", "2"],
+        ["DG_3_ONE_BYTE_INPUT", "3"],
+    ]);
+    if (records.length !== drills.size || records.some((record) => !drills.has(record.rawName))) {
+        throw new Error(`bound verifier has unsupported mutation records: ${path}`);
+    }
+    const results: Record<string, boolean> = {};
+    for (const record of records) {
+        const drill = drills.get(record.rawName);
+        if (!drill) throw new Error(`mutation runner missing for ${record.evidenceId}`);
+        const result = Bun.spawnSync({
+            cmd: [process.execPath, "scripts/run-goldens-mutation.ts", drill, "--check"],
+            cwd: resolve(REPO_ROOT, "packages/e2e-tests"),
+            stdout: "pipe",
+            stderr: "pipe",
+        });
+        const output = result.stdout.toString();
+        process.stdout.write(output);
+        process.stderr.write(result.stderr.toString());
+        results[record.evidenceId] =
+            result.exitCode === 0 &&
+            output.includes(
+                `verified ${record.rawName}: assertion failed under mutation and passed after restore`,
+            );
+    }
+    assertMutationReplayResults(evidence, path, results);
+}
+
 export function validateIncidentVerifiers(baseCommit: string): number {
     const accepted = loadTrustedEvidence(baseCommit);
     const current = readVerifierState(REPO_ROOT, REPO_ROOT);
-    assertBoundVerifierBytesUnchanged(accepted.mutationDigests, current.mutationDigests);
     assertMutationBindingsUnchanged(accepted.mutationBindings, current.mutationBindings);
     assertCatalogBoundVerifierBytesUnchanged(
         accepted.catalogBoundDigests,
         current.catalogBoundDigests,
     );
     assertCatalogBindingsUnchanged(accepted.catalogBindings, current.catalogBindings);
+    const evidence = loadMutationEvidence();
+    assertBoundVerifierBytesUnchanged(accepted.mutationDigests, current.mutationDigests, (path) =>
+        replayMutationVerifier(path, evidence),
+    );
     return (
         Object.keys(accepted.mutationDigests).length +
         Object.keys(accepted.catalogBoundDigests).length
