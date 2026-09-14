@@ -20,7 +20,9 @@ use daemon::projection_lifecycle::{
     Transition,
 };
 use daemon::search_catchup::{EpisodeBounds, EpisodeEvent};
-use daemon::search_replacement::{BuildError, BuildEvent, ReplacementBuilder, ReplacementSpec};
+use daemon::search_replacement::{
+    BuildError, BuildEvent, ReplacementBuilder, ReplacementSpec, RetirementBounds,
+};
 use daemon::search_seed::SeedBounds;
 use host_runtime::generation::{CurrentProfile, GenerationStore};
 use kernel::{
@@ -87,6 +89,10 @@ fn spec_with_identity(identity: retrieval::ProjectionIdentity) -> ReplacementSpe
             checkpoint_attempts: NonZeroU32::new(2).unwrap(),
             attempt_wait: Duration::from_millis(20),
             max_bytes: 64 << 20,
+        },
+        retirement: RetirementBounds {
+            max_obligations: NonZeroUsize::new(256).unwrap(),
+            max_obligation_bytes: NonZeroU64::new(1 << 20).unwrap(),
         },
     }
 }
@@ -2091,6 +2097,10 @@ fn expected_pending(rows: &Rows) -> Vec<String> {
 fn replacement_child() {
     let root = std::path::PathBuf::from(std::env::var("REPLACEMENT_CHILD_ROOT").unwrap());
     let cut = std::env::var("REPLACEMENT_CHILD_CUT").unwrap();
+    if cut.starts_with("retire-") {
+        selection::retirement::retirement_child(&root, &cut);
+        return;
+    }
     if cut.starts_with("select-") || cut.starts_with("active-") {
         selection_child(&root, &cut);
         return;

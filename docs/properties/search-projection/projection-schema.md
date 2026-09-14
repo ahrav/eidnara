@@ -5,7 +5,7 @@ search projection that the retrieval crate's
 [baseline](../../../crates/retrieval/baseline.sql) creates. Identity or schema
 incompatibility requires a rebuild from the canonical store, not a schema
 migration. A change to this inventory requires a new schema version and a
-rebuild. The schema version is 3.
+rebuild. The schema version is 4.
 
 The [lifecycle contract](spec-traceability.md) requires staging and verifying a
 complete, compatible replacement before selecting it. During replacement,
@@ -225,17 +225,56 @@ Table constraints:
 
 ## `retirement_receipts`
 
-Local receipts of a generation's retirement so its files are reclaimed once and the reclamation can be audited.
+Local receipts of a generation's retirement. Consumer retirement records the old
+generation without a foreign key because that generation belongs to a separate
+database. All six consumer-binding columns are populated together. Receipts for
+in-database identity sweeps leave those columns null.
+
+A consumer receipt has reason `consumer_retired`. Its ID is the old family's
+immutable seed digest. The selected family digest binds the replacement seed,
+generation, and verification certificate. The receipt's fixed target is not a
+second checkpoint and never advances with the kernel tip.
 
 | Column | Type | Not null | Primary key | Column constraints |
 | --- | --- | --- | --- | --- |
 | `receipt_id` | TEXT | yes | yes |  |
-| `generation_id` | TEXT | yes | no | `REFERENCES vector_generations(generation_id) ON DELETE RESTRICT` |
+| `generation_id` | TEXT | yes | no |  |
 | `reason` | TEXT | yes | no |  |
 | `operator_id` | TEXT | no | no |  |
 | `retired_at` | INTEGER | yes | no |  |
 | `recorded_at` | INTEGER | yes | no |  |
+| `old_consumer_id` | TEXT | no | no |  |
+| `old_family` | TEXT | no | no |  |
+| `selected_family` | TEXT | no | no |  |
+| `kernel_incarnation_id` | TEXT | no | no |  |
+| `through_commit_seq` | INTEGER | no | no | `CHECK(through_commit_seq>=0)` |
+| `obligation_count` | INTEGER | no | no | `CHECK(obligation_count>=0)` |
+
+Table constraints:
+
+- `CHECK((old_consumer_id IS NULL AND old_family IS NULL AND selected_family IS NULL AND kernel_incarnation_id IS NULL AND through_commit_seq IS NULL AND obligation_count IS NULL) OR (old_consumer_id IS NOT NULL AND old_family IS NOT NULL AND selected_family IS NOT NULL AND kernel_incarnation_id IS NOT NULL AND through_commit_seq IS NOT NULL AND obligation_count IS NOT NULL))`
 
 Indexes:
 
 - `idx_retirement_receipts_generation` on `(generation_id,receipt_id)`
+
+## `retirement_dispositions`
+
+Each row records completed removal for one authoritative source revision or
+old-consumer barrier. Recovery compares every field against the bounded kernel
+inventory, including satisfied barriers and invalidated source revisions.
+Missing or extra rows refuse acknowledgement even when the count matches.
+
+| Column | Type | Not null | Primary key | Column constraints |
+| --- | --- | --- | --- | --- |
+| `receipt_id` | TEXT | yes | yes | `REFERENCES retirement_receipts(receipt_id) ON DELETE RESTRICT` |
+| `kind` | TEXT | yes | yes | `CHECK(kind IN ('source','barrier'))` |
+| `identity` | TEXT | yes | yes |  |
+| `artifact_digest` | TEXT | yes | no |  |
+| `commit_seq` | INTEGER | yes | no | `CHECK(commit_seq>=0)` |
+| `invalidated_commit_seq` | INTEGER | no | no |  |
+| `disposition` | TEXT | yes | no | `CHECK(disposition='removed')` |
+
+Table constraints:
+
+- `PRIMARY KEY(receipt_id,kind,identity)`

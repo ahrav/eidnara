@@ -36,12 +36,39 @@ use crate::search_writer::QuarantineKind;
 const FAMILIES: &str = "search-families";
 const CERTIFICATE: &str = "bootstrap.json";
 
+pub mod retirement;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetiringFamily {
+    seed: SeedVerification,
+    consumer: ConsumerBinding,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Bootstrap {
     schema: u32,
     seed: SeedVerification,
     intent: LifecycleIntent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retiring: Option<RetiringFamily>,
+}
+
+impl Bootstrap {
+    fn into_retiring(self) -> RetiringFamily {
+        RetiringFamily {
+            seed: self.seed,
+            consumer: self.intent.consumer,
+        }
+    }
+
+    fn retiring_is_bound(&self, old: &RetiringFamily) -> bool {
+        old.seed.stage_manifest().digest() == self.intent.selected_generation
+            && old.consumer.generation_id == old.seed.generation_id
+            && old.consumer.consumer_id != self.intent.consumer.consumer_id
+            && old.seed.kernel_incarnation_id == self.seed.kernel_incarnation_id
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,11 +231,37 @@ impl SearchSelection {
             .owner
             .lifecycle
             .admitted_intent(candidate.owner.gate)?;
+        if let CurrentProfile::Current(current) = candidate.owner.store.read_search_current()?
+            && current != intent.selected_generation
+            && current != candidate.staged.digest
+        {
+            return Err(BuildError::Invalid("old selection differs from intent"));
+        }
+        let prior = self.predecessor(&intent)?;
+        if let Some(retiring) = prior.as_ref().and_then(|prior| prior.retiring.as_ref())
+            && (candidate
+                .owner
+                .kernel
+                .outbox_consumer_checkpoint_within_budget(budget, &retiring.consumer.consumer_id)?
+                .is_some()
+                || self
+                    .family_home(&retiring.seed.stage_manifest().digest())?
+                    .join(CERTIFICATE)
+                    .try_exists()?)
+        {
+            return Err(kernel::KernelError::ConsumerPending.into());
+        }
         let certificate = Bootstrap {
-            schema: 1,
+            schema: 2,
             seed: candidate.staged.verification.clone(),
+            retiring: prior.map(Bootstrap::into_retiring),
             intent,
         };
+        let bytes = serde_json::to_vec(&certificate)
+            .map_err(|_| BuildError::Invalid("bootstrap encoding"))?;
+        if bytes.len() as u64 > MAX_RECORD_BYTES {
+            return Err(BuildError::Invalid("bootstrap certificate too large"));
+        }
         let home = self.family_home(&candidate.staged.digest)?;
         create_directory(&self.data_home, FAMILIES)?;
         if home.try_exists()? {
@@ -223,8 +276,6 @@ impl SearchSelection {
             }
         }
         create_directory(&self.data_home.join(FAMILIES), &candidate.staged.digest)?;
-        let bytes = serde_json::to_vec(&certificate)
-            .map_err(|_| BuildError::Invalid("bootstrap encoding"))?;
         let mut manifest = create_file(&home.join(CERTIFICATE))?;
         manifest.write_all(&bytes)?;
         observer(SelectionEvent::MetadataWritten)?;
@@ -409,7 +460,7 @@ impl SearchSelection {
         let bytes = certificate_bytes(&home)?;
         let certificate: Bootstrap =
             serde_json::from_slice(&bytes).map_err(|_| BuildError::Invalid("bootstrap corrupt"))?;
-        if certificate.schema != 1
+        if certificate.schema != 2
             || certificate.intent.validate().is_err()
             || certificate.seed.stage_manifest().digest() != digest
             || certificate.intent.staged_seed_digest.as_deref() != Some(digest)
@@ -426,6 +477,10 @@ impl SearchSelection {
                 .as_deref()
                 .and_then(|capture| capture.stage.as_deref())
                 != Some(&certificate.seed)
+            || certificate
+                .retiring
+                .as_ref()
+                .is_some_and(|old| !certificate.retiring_is_bound(old))
         {
             return Err(BuildError::Invalid("bootstrap binding mismatch"));
         }
@@ -640,8 +695,9 @@ impl SearchSelection {
         match self.remove_family(
             &digest,
             &Bootstrap {
-                schema: 1,
+                schema: 2,
                 seed,
+                retiring: self.predecessor(&intent)?.map(Bootstrap::into_retiring),
                 intent: intent.clone(),
             },
         )? {
@@ -665,7 +721,9 @@ impl SearchSelection {
             }
             _ => {}
         }
-        if certificate.schema != 1 || certificate.seed.stage_manifest().digest() != digest {
+        if !matches!(certificate.schema, 1 | 2)
+            || certificate.seed.stage_manifest().digest() != digest
+        {
             return Err(BuildError::Invalid("foreign family certificate"));
         }
         let home = self.family_home(digest)?;

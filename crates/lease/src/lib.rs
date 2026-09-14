@@ -677,7 +677,8 @@ impl FileLeaseStore {
         Ok(Self { base_dir })
     }
 
-    fn lease_path(&self, key: &LeaseKey) -> PathBuf {
+    /// The sidecar file that persists `key`'s writer epoch. It outlives the leased resource.
+    pub fn lease_path(&self, key: &LeaseKey) -> PathBuf {
         self.base_dir
             .join(format!("{}.lease", fnv1a_hex(&key.identity())))
     }

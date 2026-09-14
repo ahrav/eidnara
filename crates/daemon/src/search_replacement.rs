@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -41,6 +41,16 @@ pub struct ReplacementSpec {
     pub capture: SourceHoldBounds,
     pub episode: EpisodeBounds,
     pub seed: SeedBounds,
+    pub retirement: RetirementBounds,
+}
+
+/// `object_registry` is append-only, so the retirement census grows with corpus history.
+/// Size these bounds for the whole corpus, not for one batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetirementBounds {
+    pub max_obligations: NonZeroUsize,
+    /// Encoded kind, identity, and digest bytes; payloads are never read.
+    pub max_obligation_bytes: NonZeroU64,
 }
 
 impl ReplacementSpec {

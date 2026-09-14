@@ -23,8 +23,7 @@ use crate::ProjectionError;
 /// A job row is finished when no obligation remains on it; pending, admitted, and stopped rows are obligations whatever their retry disposition.
 const FINISHED_JOB: &str = "j.state IN ('embedded','published','obsolete')";
 
-/// A generation `g` releases its identities only once it is retired and a receipt records the retirement.
-const RETIRED_GENERATION: &str = "g.state='retired' AND EXISTS(SELECT 1 FROM retirement_receipts r WHERE r.generation_id=g.generation_id)";
+const RETIRED_GENERATION: &str = "g.state='retired' AND EXISTS(SELECT 1 FROM retirement_receipts r WHERE r.generation_id=g.generation_id AND r.old_consumer_id IS NULL)";
 
 fn unreferenced() -> String {
     format!(
