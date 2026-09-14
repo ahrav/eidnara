@@ -3,7 +3,7 @@ use crate::embedding_supervisor::{EmbeddingSupervisor, Maintained, SliceBounds, 
 use crate::projection_lifecycle::{ControlState, DisabledIntent, EpisodeAccounting, IntentRefusal};
 use kernel::CommitIntent;
 use sha2::{Digest, Sha256};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
@@ -78,8 +78,19 @@ impl SearchSelection {
         maintained.gate.check_limits(
             &grant,
             &InvalidationIdentity::from(&self.identity),
-            &[("supervisor_slice_ms", slice_ms)],
+            &[
+                ("supervisor_slice_ms", slice_ms),
+                (
+                    "local_transaction_rows",
+                    bounds.sweep_candidates.get() as u64,
+                ),
+            ],
         )?;
+        let kernel_budget = EvalBudget::new(
+            Some(Instant::now() + bounds.slice),
+            Arc::new(AtomicBool::new(false)),
+        );
+        family.check_kernel(&maintained.kernel, &kernel_budget)?;
         let supervisor = EmbeddingSupervisor::new(maintained, bounds, now, events);
         let task = supervisor.spawn_pinned(SearchReader { family, grant });
         self.maintenance = Some(Maintenance { supervisor, task });

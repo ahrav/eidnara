@@ -810,6 +810,16 @@ impl HookGate {
             .map(|mut admissions| admissions.remove(0))
     }
 
+    /// Returns [`Denial::EvidenceIdentity`] unless `data_home` matches; an unbound gate is accepted only with `test-support`.
+    pub(crate) fn require_selection_home(&self, data_home: &Path) -> Result<(), Denial> {
+        match self.data_home.as_deref() {
+            Some(home) if home == data_home => Ok(()),
+            #[cfg(feature = "test-support")]
+            None => Ok(()),
+            _ => Err(Denial::EvidenceIdentity),
+        }
+    }
+
     /// Requires this gate to carry evidence for `identity` at `data_home`.
     pub(crate) fn require_binding(
         &self,

@@ -1645,15 +1645,31 @@ async fn a_finished_maintenance_owner_releases_selection_and_restart() {
         .unwrap();
 }
 
-/// The maintenance gate must be the selected family's gate: one whose evidence names another identity is refused before a task is pinned.
+/// Selection and maintenance refuse gates or kernels bound to another data home.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn maintenance_refuses_a_gate_bound_to_another_identity() {
+async fn selection_and_maintenance_refuse_foreign_bindings() {
     use daemon::embedding_supervisor::{Maintained, SliceBounds};
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
     corpus.seed();
     let gate = gate_for(root.path());
     let mut selection = build_selected(root.path(), &corpus, &gate);
+
+    let foreign_home = tempfile::tempdir().unwrap();
+    let foreign_gate = Arc::new(HookGate::for_home(foreign_home.path()));
+    foreign_gate.install(cleanup_evaluator(root.path()));
+    let wrong_home = selection.pin(
+        &corpus.kernel,
+        &foreign_gate,
+        &budget(Duration::from_secs(10)),
+    );
+    assert!(matches!(
+        wrong_home,
+        Err(BuildError::Denied(
+            daemon::projection_gates::Denial::EvidenceIdentity
+        ))
+    ));
+
     let reader = selection
         .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
         .unwrap();
@@ -1662,40 +1678,69 @@ async fn maintenance_refuses_a_gate_bound_to_another_identity() {
         &engine,
         host_runtime::synapse::SynapseLimits::default(),
     ));
+    let bounds = || SliceBounds {
+        dispatch: fixtures::bounds(),
+        sweep_candidates: NonZeroUsize::new(16).unwrap(),
+        slice: Duration::from_millis(200),
+        idle: Duration::from_millis(20),
+    };
     let (events, _received) = tokio::sync::mpsc::unbounded_channel();
-    let result = selection.start_maintenance(
+    let wrong_gate = selection.start_maintenance(
         Maintained {
             gate: open_gate(),
             kernel: Arc::clone(&corpus.kernel),
             projection: Arc::clone(reader.projection()),
-            synapse,
+            synapse: Arc::clone(&synapse),
             project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
             destination: kernel::ArtifactDestination::Remote,
         },
-        SliceBounds {
-            dispatch: fixtures::bounds(),
-            sweep_candidates: NonZeroUsize::new(16).unwrap(),
-            slice: Duration::from_millis(200),
-            idle: Duration::from_millis(20),
-        },
+        bounds(),
         Arc::new(|| fixtures::NOW),
         events,
     );
     assert!(
         matches!(
-            result,
+            wrong_gate,
             Err(BuildError::Denied(
                 daemon::projection_gates::Denial::EvidenceIdentity
             ))
         ),
-        "{result:?}"
+        "{wrong_gate:?}"
+    );
+    assert!(selection.maintenance_supervisor_for_test().is_none());
+
+    let foreign_root = tempfile::tempdir().unwrap();
+    let foreign_corpus = Corpus::open(foreign_root.path());
+    foreign_corpus.seed();
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    let wrong_kernel = selection.start_maintenance(
+        Maintained {
+            gate: Arc::clone(&gate),
+            kernel: Arc::clone(&foreign_corpus.kernel),
+            projection: Arc::clone(reader.projection()),
+            synapse,
+            project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+            destination: kernel::ArtifactDestination::Remote,
+        },
+        bounds(),
+        Arc::new(|| fixtures::NOW),
+        events,
+    );
+    assert!(
+        matches!(
+            wrong_kernel,
+            Err(BuildError::Mutation(
+                retrieval::ProjectionError::IdentityMismatch
+            ))
+        ),
+        "{wrong_kernel:?}"
     );
     assert!(selection.maintenance_supervisor_for_test().is_none());
 }
 
 /// Maintenance cannot derive slice deadlines beyond the manifest's approved supervisor bound.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn maintenance_refuses_a_slice_longer_than_the_manifest_limit() {
+async fn maintenance_refuses_bounds_larger_than_the_manifest_limits() {
     use daemon::embedding_supervisor::{Maintained, SliceBounds};
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
@@ -1705,50 +1750,54 @@ async fn maintenance_refuses_a_slice_longer_than_the_manifest_limit() {
     let reader = selection
         .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
         .unwrap();
-    let mut evaluator = cleanup_evaluator(root.path());
-    evaluator
-        .manifest
-        .limits
-        .insert("supervisor_slice_ms".to_owned(), 1);
-    gate.install(evaluator);
     let engine = fixtures::TestEngine::new();
     let synapse = Arc::new(fixtures::component(
         &engine,
         host_runtime::synapse::SynapseLimits::default(),
     ));
-    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
-    let result = selection.start_maintenance(
-        Maintained {
-            gate: Arc::clone(&gate),
-            kernel: Arc::clone(&corpus.kernel),
-            projection: Arc::clone(reader.projection()),
-            synapse,
-            project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
-            destination: kernel::ArtifactDestination::Remote,
-        },
-        SliceBounds {
-            dispatch: fixtures::bounds(),
-            sweep_candidates: NonZeroUsize::new(16).unwrap(),
-            slice: Duration::from_millis(200),
-            idle: Duration::from_millis(20),
-        },
-        Arc::new(|| fixtures::NOW),
-        events,
-    );
-    assert!(
-        matches!(
-            result,
-            Err(BuildError::Denied(
-                daemon::projection_gates::Denial::LimitExceeded {
-                    ref limit,
-                    observed: 200,
-                    max: 1,
-                }
-            )) if limit == "supervisor_slice_ms"
-        ),
-        "{result:?}"
-    );
-    assert!(selection.maintenance_supervisor_for_test().is_none());
+    let bounds = || SliceBounds {
+        dispatch: fixtures::bounds(),
+        sweep_candidates: NonZeroUsize::new(16).unwrap(),
+        slice: Duration::from_millis(200),
+        idle: Duration::from_millis(20),
+    };
+
+    for (name, max, observed) in [
+        ("supervisor_slice_ms", 1, 200),
+        ("local_transaction_rows", 1, 16),
+    ] {
+        let mut evaluator = cleanup_evaluator(root.path());
+        evaluator.manifest.limits.insert(name.to_owned(), max);
+        gate.install(evaluator);
+        let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+        let result = selection.start_maintenance(
+            Maintained {
+                gate: Arc::clone(&gate),
+                kernel: Arc::clone(&corpus.kernel),
+                projection: Arc::clone(reader.projection()),
+                synapse: Arc::clone(&synapse),
+                project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+                destination: kernel::ArtifactDestination::Remote,
+            },
+            bounds(),
+            Arc::new(|| fixtures::NOW),
+            events,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(BuildError::Denied(
+                    daemon::projection_gates::Denial::LimitExceeded {
+                        limit: ref denied,
+                        observed: seen,
+                        max: cap,
+                    }
+                )) if denied == name && seen == observed && cap == max
+            ),
+            "{name}: {result:?}"
+        );
+        assert!(selection.maintenance_supervisor_for_test().is_none());
+    }
 }
 
 /// A slice held inside a projection write past the grace is reported once, not once more for the tracked task that pins the reader.

@@ -178,6 +178,7 @@ impl SearchSelection {
 
     fn admit(&self, gate: &HookGate, budget: &EvalBudget) -> Result<Admission, BuildError> {
         deadline(budget)?;
+        gate.require_selection_home(&self.data_home)?;
         let grant = gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)?;
         gate.check_limits(
             &grant,
