@@ -546,8 +546,10 @@ fn invalid_episode_state(
         Some(_) => return Ok(true),
         None => crate::dispatch::first_episode_id(job_id),
     };
-    let wrong_episode =
-        has_episode && ledger.episode_id.as_deref() != Some(expected_episode.as_str());
+    let wrong_episode = match ledger.authorization_ref.as_deref() {
+        Some(_) => ledger.episode_id.as_deref() != Some(expected_episode.as_str()),
+        None => has_episode && ledger.episode_id.as_deref() != Some(expected_episode.as_str()),
+    };
     let expired = matches!(ledger.state.as_str(), "pending" | "admitted")
         && has_episode
         && ledger
@@ -598,5 +600,10 @@ mod tests {
         admitted.state = "embedded".to_owned();
         admitted.host_job_id = None;
         assert!(!invalid_episode_state(&admitted, "job", 101).unwrap());
+        admitted.episode_id = None;
+        admitted.episode_allowance = 0;
+        admitted.episode_deadline = None;
+        admitted.authorization_ref = Some("operator:recovery".to_owned());
+        assert!(invalid_episode_state(&admitted, "job", 101).unwrap());
     }
 }
