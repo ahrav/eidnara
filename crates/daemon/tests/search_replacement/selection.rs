@@ -280,6 +280,7 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
         "UPDATE occurrences SET created_commit_seq=created_commit_seq-1",
         "UPDATE embedding_jobs SET stop_reason='stopped' WHERE state='pending'",
         "UPDATE embedding_jobs SET state='admitted' WHERE state='pending'",
+        "UPDATE embedding_jobs SET state='admitted',host_job_id='host' WHERE state='pending'",
         "UPDATE embedding_jobs SET episode_id='episode',episode_allowance=0,episode_deadline=9223372036854775807 WHERE state='pending'",
         "UPDATE embedding_jobs SET attempts=1,episode_id='episode',episode_allowance=1,episode_deadline=9223372036854775807 WHERE state='pending'",
         "UPDATE embedding_jobs SET job_id='wrong-job'",
@@ -1019,6 +1020,37 @@ fn a_umask_that_masks_owner_bits_does_not_break_family_creation() {
 }
 
 #[test]
+fn selection_refuses_to_reuse_a_family_with_residual_entries() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    corpus.publish("late", "new bytes");
+    let candidate = next_candidate(root.path(), &corpus, &gate);
+    let home = root
+        .path()
+        .join("search-families")
+        .join(&candidate.staged().digest);
+    std::fs::create_dir_all(home.join("search")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(home.join("search"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let residual = home.join("search/notes");
+    std::fs::write(&residual, b"foreign").unwrap();
+    let error = selection.select(candidate, &mut |_| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            error.error,
+            BuildError::Invalid("family directory not empty")
+        ),
+        "{error:?}"
+    );
+    assert!(residual.is_file());
+}
+
+#[test]
 fn revoked_gate_refuses_existing_pins_without_releasing_the_family() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
@@ -1530,6 +1562,33 @@ fn observation_timestamps_that_disagree_with_the_registry_are_refused_on_reopen(
     raw.execute_batch(
         "PRAGMA foreign_keys=OFF;
          UPDATE observations SET created_commit_seq=created_commit_seq+1
+         WHERE object_id GLOB 'srcdesc:*';",
+    )
+    .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn registry_and_observation_sensitivity_must_match_on_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let raw = Connection::open(root.path().join("kernel/kernel.sqlite")).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER object_registry_append_only_update;
+         UPDATE object_registry SET sensitivity_class='restricted'
          WHERE object_id GLOB 'srcdesc:*';",
     )
     .unwrap();

@@ -555,6 +555,7 @@ struct LiveDescriptorRaw {
     object_id: String,
     domain_id: String,
     sensitivity: String,
+    registry_sensitivity: String,
     created_commit_seq: i64,
     payload: Vec<u8>,
     revision: i64,
@@ -584,7 +585,7 @@ impl KernelStore {
         crate::slice::snapshot_tip(&tx, requested)?;
         let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
         let sql = format!(
-            "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,
+            "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,
                     o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq
              {rows}
                AND o.source_kind=?1 AND o.object_kind='observation'
@@ -609,12 +610,13 @@ impl KernelStore {
                         object_id: row.get(0)?,
                         domain_id: row.get(1)?,
                         sensitivity: row.get(2)?,
-                        created_commit_seq: row.get(3)?,
-                        payload: row.get(4)?,
-                        revision: row.get(5)?,
-                        invalidated_commit_seq: row.get(6)?,
-                        observation_created: row.get(7)?,
-                        observation_invalidated: row.get(8)?,
+                        registry_sensitivity: row.get(3)?,
+                        created_commit_seq: row.get(4)?,
+                        payload: row.get(5)?,
+                        revision: row.get(6)?,
+                        invalidated_commit_seq: row.get(7)?,
+                        observation_created: row.get(8)?,
+                        observation_invalidated: row.get(9)?,
                     })
                 },
             )
@@ -630,6 +632,7 @@ impl KernelStore {
                 // The registry row and the stored detail must agree, as `source_export::preflight` requires.
                 if raw.created_commit_seq != raw.observation_created
                     || raw.invalidated_commit_seq != raw.observation_invalidated
+                    || raw.sensitivity != raw.registry_sensitivity
                     || detail.class != class.code()
                     || detail.revision != raw.revision.to_string()
                     || descriptor_object_id(&detail.lineage_id, &detail.revision) != raw.object_id

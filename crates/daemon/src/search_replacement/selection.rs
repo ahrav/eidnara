@@ -211,7 +211,15 @@ impl SearchSelection {
         let home = self.family_home(&candidate.staged.digest)?;
         create_directory(&self.data_home, FAMILIES)?;
         if home.try_exists()? {
-            self.remove_family(&candidate.staged.digest, &certificate)?;
+            match self.remove_family(&candidate.staged.digest, &certificate)? {
+                Reclaimed::Removed | Reclaimed::Absent => {}
+                Reclaimed::Uncertified => {
+                    return Err(BuildError::Invalid("uncertified family"));
+                }
+                Reclaimed::Residual => {
+                    return Err(BuildError::Invalid("family directory not empty"));
+                }
+            }
         }
         create_directory(&self.data_home.join(FAMILIES), &candidate.staged.digest)?;
         let bytes = serde_json::to_vec(&certificate)
@@ -882,6 +890,9 @@ fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
             Refusal::Storage => Some(QuarantineKind::Storage),
             Refusal::Admission | Refusal::Identity => None,
         },
+        BuildError::Kernel(kernel::KernelError::CorruptCanonicalRow) => {
+            Some(QuarantineKind::Integrity)
+        }
         BuildError::Invalid(_) => Some(QuarantineKind::Integrity),
         _ => None,
     }

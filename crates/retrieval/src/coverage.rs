@@ -498,7 +498,12 @@ pub fn verify_active(
         }
         let ledger = crate::dispatch::job_ledger(conn, &id)?.ok_or(ProjectionError::CorruptRow)?;
         let has_episode = ledger.episode()?.is_some();
-        if ledger.state == "pending" && has_episode && ledger.attempts >= ledger.episode_allowance {
+        if (ledger.state == "pending" && has_episode && ledger.attempts >= ledger.episode_allowance)
+            || (ledger.state == "admitted"
+                && (!has_episode
+                    || ledger.attempts == 0
+                    || ledger.attempts > ledger.episode_allowance))
+        {
             return Err(ProjectionError::CorruptRow);
         }
     }
