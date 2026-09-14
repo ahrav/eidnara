@@ -280,6 +280,7 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
         "UPDATE occurrences SET created_commit_seq=created_commit_seq-1",
         "UPDATE embedding_jobs SET stop_reason='stopped' WHERE state='pending'",
         "UPDATE embedding_jobs SET state='admitted' WHERE state='pending'",
+        "UPDATE embedding_jobs SET episode_id='episode',episode_allowance=0,episode_deadline=9223372036854775807 WHERE state='pending'",
         "UPDATE embedding_jobs SET job_id='wrong-job'",
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -1417,6 +1418,40 @@ fn same_manager_reopen_revalidates_the_durable_certificate() {
     assert!(
         selection
             .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn same_manager_reopen_withdraws_when_the_durable_certificate_is_missing() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let certificate = root
+        .path()
+        .join("search-families")
+        .join(old.digest())
+        .join("bootstrap.json");
+    std::fs::remove_file(certificate).unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
             .is_err()
     );
 }

@@ -113,7 +113,7 @@ impl Episode {
         deadline: Option<i64>,
     ) -> Result<Option<Self>, ProjectionError> {
         match (id, deadline) {
-            (Some(id), Some(deadline)) => Ok(Some(Self {
+            (Some(id), Some(deadline)) if allowance > 0 => Ok(Some(Self {
                 id,
                 allowance,
                 deadline,

@@ -360,7 +360,12 @@ impl SearchSelection {
 
     /// The durable certificate must still be the one the cached family was opened from.
     fn revalidate_certificate(&self, digest: &str, cached: &Bootstrap) -> Result<(), BuildError> {
-        let found = certificate_bytes(&self.family_home(digest)?)?;
+        let found = match certificate_bytes(&self.family_home(digest)?) {
+            Err(BuildError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BuildError::Invalid("bootstrap certificate missing"));
+            }
+            result => result?,
+        };
         let expected =
             serde_json::to_vec(cached).map_err(|_| BuildError::Invalid("bootstrap encoding"))?;
         if found != expected {
