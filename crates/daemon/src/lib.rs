@@ -15182,14 +15182,17 @@ enum RecipeInputs<'a> {
 #[derive(Clone, Copy)]
 enum CkEntry<'a> {
     Served(&'a transform::ServedMessage),
-    Ingress(&'a WireMessage),
+    Ingress(
+        &'a WireMessage,
+        &'a std::cell::OnceCell<serde_json::Result<Vec<u8>>>,
+    ),
 }
 
 impl<'a> CkEntry<'a> {
     fn message(self) -> &'a WireMessage {
         match self {
             Self::Served(served) => served,
-            Self::Ingress(message) => message,
+            Self::Ingress(message, _) => message,
         }
     }
 
@@ -15202,13 +15205,15 @@ impl<'a> CkEntry<'a> {
             (Self::Served(left), Self::Served(right)) => {
                 left.canonical_bytes() == right.canonical_bytes()
             }
-            (Self::Served(served), Self::Ingress(ingress))
-            | (Self::Ingress(ingress), Self::Served(served)) => {
+            (Self::Served(served), Self::Ingress(ingress, canonical))
+            | (Self::Ingress(ingress, canonical), Self::Served(served)) => {
                 **served == *ingress
-                    || crate::served_json::to_vec(ingress)
+                    || canonical
+                        .get_or_init(|| crate::served_json::to_vec(ingress))
+                        .as_ref()
                         .is_ok_and(|bytes| bytes == served.canonical_bytes())
             }
-            (Self::Ingress(left), Self::Ingress(right)) => left == right,
+            (Self::Ingress(left, _), Self::Ingress(right, _)) => left == right,
         }
     }
 }
@@ -15378,11 +15383,17 @@ fn respond_transform(
             };
             let segments = {
                 let output_keyed = recipe_keyed(output.iter().map(CkEntry::Served));
+                let canonical: Vec<_> = request
+                    .messages
+                    .iter()
+                    .map(|_| std::cell::OnceCell::new())
+                    .collect();
                 let input_keyed = recipe_keyed(
                     request
                         .messages
                         .iter()
-                        .map(|message| CkEntry::Ingress(&message.ck)),
+                        .zip(&canonical)
+                        .map(|(message, bytes)| CkEntry::Ingress(&message.ck, bytes)),
                 );
                 let previous_keyed = previous_values
                     .as_ref()
@@ -15398,7 +15409,7 @@ fn respond_transform(
                 recipe_segments(built.operations, |entry: CkEntry<'_>| match entry {
                     CkEntry::Served(served) => PreparedSegment::served(served.clone()),
                     // Output entries are always served messages; an ingress shell only ever matches.
-                    CkEntry::Ingress(_) => {
+                    CkEntry::Ingress(..) => {
                         unreachable!("recipe inserts come from the output array")
                     }
                 })
@@ -23046,6 +23057,36 @@ mod tests {
     }
 
     #[test]
+    fn colliding_recipe_keys_do_not_reserialize_large_ingress_per_output() {
+        let ingress: Vec<_> = (0..edit_recipe::MAX_CONFIRM_PROBES)
+            .map(|_| WireMessage::synthetic_user_text("x".repeat(256 * 1024)))
+            .collect();
+        let served: transform::ServedMessage = serde_json::from_value(
+            serde_json::to_value(WireMessage::synthetic_user_text("tail")).unwrap(),
+        )
+        .unwrap();
+        let canonical: Vec<_> = ingress.iter().map(|_| std::cell::OnceCell::new()).collect();
+        let input = recipe_keyed(
+            ingress
+                .iter()
+                .zip(&canonical)
+                .map(|(message, bytes)| CkEntry::Ingress(message, bytes)),
+        );
+        let output = recipe_keyed(std::iter::repeat_n(CkEntry::Served(&served), 32));
+        let before = served_json::FINALIZATIONS.with(std::cell::Cell::get);
+        let built = edit_recipe::build_operations(&output, &input, None, |a, b| a.same_message(*b));
+        let serializations = served_json::FINALIZATIONS.with(std::cell::Cell::get) - before;
+        assert!(
+            serializations <= ingress.len(),
+            "serialized {serializations} times for {} colliding input candidates",
+            ingress.len()
+        );
+        assert!(
+            matches!(&built.operations[..], [edit_recipe::Operation::Insert { values }] if values.len() == output.len())
+        );
+    }
+
+    #[test]
     fn recipe_matching_rejects_ingress_with_different_unknown_fields() {
         let value = json!({
             "role": "assistant",
@@ -23057,8 +23098,14 @@ mod tests {
         let mut changed = value;
         changed["content"][0]["custom"] = json!("B");
         let different: WireMessage = serde_json::from_value(changed).unwrap();
-        assert!(CkEntry::Served(&served).same_message(CkEntry::Ingress(&same)));
-        assert!(!CkEntry::Served(&served).same_message(CkEntry::Ingress(&different)));
+        assert!(
+            CkEntry::Served(&served)
+                .same_message(CkEntry::Ingress(&same, &std::cell::OnceCell::new()))
+        );
+        assert!(
+            !CkEntry::Served(&served)
+                .same_message(CkEntry::Ingress(&different, &std::cell::OnceCell::new()))
+        );
     }
 
     /// A retained CK output is a keep source only for the revision the request says it applied;

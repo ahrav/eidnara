@@ -504,12 +504,23 @@ impl SerializedOutputCache {
             return;
         };
         let charge = previous_output_retained_bytes(&output);
-        if self.retained_bytes.saturating_add(charge) > self.max_retained_bytes {
+        let displaced = session
+            .previous_output
+            .as_ref()
+            .map_or(0, |(_, output)| previous_output_retained_bytes(output));
+        let retained_bytes = self
+            .retained_bytes
+            .saturating_sub(displaced)
+            .saturating_add(charge);
+        if retained_bytes > self.max_retained_bytes {
             return;
         }
         session.previous_output = Some((revision, output));
-        session.retained_bytes = session.retained_bytes.saturating_add(charge);
-        self.retained_bytes = self.retained_bytes.saturating_add(charge);
+        session.retained_bytes = session
+            .retained_bytes
+            .saturating_sub(displaced)
+            .saturating_add(charge);
+        self.retained_bytes = retained_bytes;
     }
 
     fn replace(
@@ -29102,6 +29113,21 @@ pub(crate) mod tests {
             after - before
         );
 
+        cache.max_retained_bytes = after;
+        let replacement = Arc::new(vec![ServedMessage::from_message(
+            WireMessage::synthetic_user_text("replacement"),
+        )]);
+        cache.record_previous_output(
+            &request.session_id,
+            3,
+            crate::edit_recipe::Revision::parse("rev-2").unwrap(),
+            Arc::clone(&replacement),
+        );
+        assert_eq!(
+            cache.metrics().0,
+            before + previous_output_retained_bytes(&replacement),
+            "replacement releases the displaced output charge"
+        );
         cache.take_previous_output(&request.session_id, 3);
         assert_eq!(
             cache.metrics().0,
