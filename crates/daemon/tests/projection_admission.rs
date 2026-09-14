@@ -557,6 +557,19 @@ fn refresh_installs_only_for_valid_records_and_a_selected_projection() {
         Denial::UnapprovedObserver("logical-admission-charges".to_owned())
     });
 
+    let mut long_observer = campaign_json(&current);
+    long_observer["resource"]["observer"] =
+        json!(format!("{}\n{}", "o".repeat(60), "x".repeat(200)));
+    write_records(
+        home,
+        &manifest_json(&current, &ProjectionHook::ALL),
+        &long_observer,
+    );
+    let _ = refresh_at(&admission, &current, 10);
+    all_denied(&gate, |_| {
+        Denial::UnapprovedObserver(format!("{}\\n{}", "o".repeat(60), "x".repeat(3)))
+    });
+
     let mut unproved = campaign_json(&current);
     unproved["capabilities"]["opencode"]
         .as_object_mut()

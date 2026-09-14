@@ -1,4 +1,4 @@
-//! The daemon reads `runtime-manifest.json` and `campaign-evidence.json` from `<home>/search-admission/` to renew one [`HookGate`] for the selected projection. Coverage is not a record: the daemon observes it on that projection and supplies it at every refresh. No selected projection, a missing or refused record, or a closed owner leaves the gate closed. [`HookGate::renew`] keeps the grants the new evidence still admits and cancels the hooks it withdraws; neither record enables a hook by itself. Both records are read anew at every refresh, so a writer publishes each by rename, and a pair whose identities disagree is denied by the evaluator rather than installed as approval.
+//! The daemon reads `runtime-manifest.json` and `campaign-evidence.json` from `<home>/search-admission/` to renew one [`HookGate`] for the selected projection. Coverage is not a record: the daemon observes it on that projection and supplies it at every refresh. No selected projection, a missing or refused record, or a closed owner leaves the gate closed. A refresh keeps the grants the new evidence still admits and cancels the hooks it withdraws; neither record enables a hook by itself. Both records are read anew at every refresh, so a writer publishes each by rename, and a pair whose identities disagree is denied by the evaluator rather than installed as approval.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -111,7 +111,11 @@ impl AdmissionInputs {
             current: InvalidationIdentity::from(current),
             evidence: Evidence {
                 coverage,
-                resource: campaign.resource,
+                // An unapproved observer is echoed by `Denial::UnapprovedObserver`, so it is bounded as a refused key is; an approved name is unchanged.
+                resource: campaign.resource.map(|resource| ResourceEvidence {
+                    observer: bounded_name(&resource.observer),
+                    ..resource
+                }),
                 capabilities: campaign
                     .capabilities
                     .into_iter()
