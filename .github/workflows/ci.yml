@@ -66,6 +66,9 @@ jobs:
               - *workflow
               - *cargo
               - 'crates/shm-transport/**'
+              # `crates/shm-transport/tests/contract.rs` reads the protocol document's
+              # identifier table, so the document is a test input.
+              - 'docs/payload-pool-protocol.md'
             rust: &rust
               - *workflow
               - *cargo
@@ -78,6 +81,7 @@ jobs:
               - '.config/nextest.toml'
               - 'release/**'
               - 'docs/host-wire-protocol.md'
+              - 'docs/payload-pool-protocol.md'
               - 'docs/properties/search-projection/*/fault-map.md'
               - 'docs/properties/search-projection/witness-matrix.md'
               - 'docs/properties/search-projection/spec-traceability.md'
@@ -86,6 +90,9 @@ jobs:
               - *workflow
               - *cargo
               - 'crates/shm-transport/**'
+              # The direct-host E2E fixture links host-runtime, so host-runtime changes
+              # select this job even when no package file moves.
+              - 'crates/host-runtime/**'
               - 'crates/daemon/**'
               - 'packages/**'
               - 'scripts/**'
@@ -622,13 +629,31 @@ jobs:
       - name: Miri
         # `cargo miri test` exits zero when its filter matches no tests, so
         # the final grep fails the step unless at least one test ran and
-        # passed.
+        # passed. Each required ownership witness is then selected by name:
+        # a module move that drops one out of the prefix filter fails here
+        # even while unrelated lease tests keep the passed count positive.
         run: |
           set -euo pipefail
           cargo "+$MIRI_TOOLCHAIN" miri setup
           cargo "+$MIRI_TOOLCHAIN" miri test -p shm-transport --lib --locked \
             -- lease:: backend::ring::miri 2>&1 | tee miri.log
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' miri.log
+          for witness in \
+            lease::tests::owned_lease_exposes_exact_bytes_and_returns_exactly_once \
+            lease::tests::owned_lease_drop_returns_once_after_moving_to_another_thread \
+            lease::tests::stale_completion_cannot_lower_a_newer_one \
+            lease::tests::backing_outlives_the_last_endpoint_handle_until_the_lease_returns \
+            lease::tests::final_drop_reaches_no_forbidden_operation \
+            lease::tests::copy_in_then_copy_out_round_trips_at_every_alignment_and_length \
+            lease::tests::span_reads_tolerate_a_concurrent_writer \
+            backend::ring::miri::descriptor_snapshot_is_copied_out_field_by_field_and_validated \
+            backend::ring::miri::completion_cell_publication_is_monotonic \
+            backend::ring::miri::lifecycle_snapshot_sees_a_write_made_through_the_raw_page; do
+            grep -Fq "test $witness ... ok" miri.log || {
+              echo "required Miri witness did not run and pass: $witness" >&2
+              exit 1
+            }
+          done
 
   valgrind:
     name: ring under valgrind memcheck
@@ -662,10 +687,60 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Ring tests
-        run: cargo +1.98 test -p shm-transport --test ring --locked
+        # Two-process cases are skipped under the memcheck runner and run by
+        # the `two-process` job instead; each single-process witness is
+        # selected by name so a renamed test cannot drop out silently.
+        run: |
+          set -euo pipefail
+          cargo +1.98 test -p shm-transport --test ring --locked 2>&1 | tee valgrind.log
+          for witness in \
+            production_profile_round_trips_a_maximum_frame_in_both_directions \
+            artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected \
+            non_regular_attachment_object_is_rejected_before_mapping; do
+            grep -Fq "test $witness ... ok" valgrind.log || {
+              echo "required Valgrind witness did not run and pass: $witness" >&2
+              exit 1
+            }
+          done
+
+  two-process:
+    name: pool exchange across two processes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.shm == 'true') }}
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: rustup toolchain install 1.98 --profile minimal
+
+      # Swatinem/rust-cache v2.9.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Two-process witnesses
+        # These launch a child test process over inherited descriptors, which
+        # the memcheck runner cannot trace, so they run here without a runner
+        # and each is required by name.
+        run: |
+          set -euo pipefail
+          cargo +1.98 test -p shm-transport --test ring --locked -- two_process 2>&1 | tee two-process.log
+          for witness in \
+            two_process_exchange_holds_a_reuses_b_and_wakes_on_return \
+            two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return; do
+            grep -Fq "test $witness ... ok" two-process.log || {
+              echo "required two-process witness did not run and pass: $witness" >&2
+              exit 1
+            }
+          done
 
   native-addon:
-    name: native addon package (Bun)
+    name: native addon package (Node and Bun)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: changes
@@ -711,6 +786,8 @@ jobs:
           bun run --cwd packages/shm-native typecheck
           bun run --cwd packages/shm-native test
           bun run --cwd packages/shm-native test:capability:bun
+          bun run --cwd packages/shm-native test:node
+          bun run --cwd packages/shm-native test:capability:node
           bun run --cwd packages/opencode-plugin test src/shared/host-client
 
       - name: Payload and tarball smoke

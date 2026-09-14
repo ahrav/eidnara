@@ -2,9 +2,9 @@
 //!
 //! Each wrapper holds exactly one `unsafe` block, so the crate's remaining raw syscall surface
 //! is enumerable by reading this file. Wrappers that must pair a call with
-//! `OwnedFd::from_raw_fd` or `assume_init` keep those steps inside the same block. The three
-//! wrappers that act on a raw mapping address (`munmap`, `madvise_remove`, `mincore`) are
-//! `unsafe fn`: no signature can prove the address describes a live mapping.
+//! `OwnedFd::from_raw_fd` or `assume_init` keep those steps inside the same block. The one
+//! wrapper that acts on a raw mapping address (`munmap`) is an `unsafe fn`: no signature can
+//! prove the address describes a live mapping.
 
 use std::ffi::CStr;
 use std::io;
@@ -132,55 +132,6 @@ pub(crate) unsafe fn munmap(base: NonNull<u8>, len: usize) -> io::Result<()> {
     check(unsafe { libc::munmap(base.as_ptr().cast(), len) }).map(drop)
 }
 
-/// Punches `len` bytes at `base + offset` back to the kernel with `MADV_REMOVE`.
-///
-/// # Safety
-///
-/// `base + offset .. base + offset + len` must be a page-aligned range inside a live shared
-/// mapping, and no live object may occupy it.
-pub(crate) unsafe fn madvise_remove(
-    base: NonNull<u8>,
-    offset: usize,
-    len: usize,
-) -> io::Result<()> {
-    // SAFETY: the caller guarantees the offset stays inside the mapping, so the pointer
-    // arithmetic is in bounds, and the range holds no live byte.
-    check(unsafe { libc::madvise(base.as_ptr().add(offset).cast(), len, libc::MADV_REMOVE) })
-        .map(drop)
-}
-
-/// Bytes `mincore` needs for a mapping of `mapping_len` bytes at `page_size`.
-pub(crate) fn residency_vector_len(mapping_len: usize, page_size: usize) -> usize {
-    mapping_len.div_ceil(page_size.max(1))
-}
-
-/// Fills `residency` with one byte per page in `base + offset .. base + offset + len`.
-///
-/// # Safety
-///
-/// `base + offset .. base + offset + len` must lie inside a live mapping.
-pub(crate) unsafe fn mincore(
-    base: NonNull<u8>,
-    offset: usize,
-    len: usize,
-    residency: &mut [u8],
-) -> io::Result<()> {
-    if residency.len() < residency_vector_len(len, page_size()) {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput));
-    }
-    // SAFETY: the caller guarantees the range is inside a live mapping, so the pointer
-    // arithmetic is in bounds; `residency` was checked above to hold one byte per page, which
-    // is all mincore writes.
-    check(unsafe {
-        libc::mincore(
-            base.as_ptr().add(offset).cast(),
-            len,
-            residency.as_mut_ptr().cast(),
-        )
-    })
-    .map(drop)
-}
-
 /// The kernel page size, or zero if `sysconf` reports none.
 pub(crate) fn page_size() -> usize {
     // SAFETY: sysconf takes an integer name and no pointers.
@@ -275,7 +226,6 @@ pub(crate) fn eventfd() -> io::Result<OwnedFd> {
     }
 }
 
-/// An unconnected `AF_UNIX` stream socket.
 #[cfg(test)]
 pub(crate) fn unix_stream_socket() -> io::Result<OwnedFd> {
     // SAFETY: socket takes integers only; a non-negative return is a new descriptor this

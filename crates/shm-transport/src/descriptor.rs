@@ -2,29 +2,27 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::arena::{ArenaSpan, MAX_FRAME_BYTES};
+use crate::pool::{BlockPlacement, MAX_FRAME_BYTES, PoolGeometry};
 
-/// Shared descriptor schema version.
-pub const DESCRIPTOR_SCHEMA_VERSION: u16 = 3;
-/// Arena mappings a grant transfers, one per direction.
+/// Shared descriptor schema version; the sole version either peer accepts.
+pub const DESCRIPTOR_SCHEMA_VERSION: u16 = 4;
+/// Pool mappings a grant transfers, one per direction.
 pub const SETUP_MAPPING_COUNT: usize = 2;
 /// Doorbell descriptors a grant transfers, two per direction. `profile` charges this many
 /// file descriptors on top of the mappings, so the admission budget and the setup transfer
 /// count cannot drift apart.
 pub const SETUP_DOORBELL_COUNT: usize = 4;
-/// File descriptors a grant transfers over the setup socket: the arena mappings and the
+/// File descriptors a grant transfers over the setup socket: the pool mappings and the
 /// doorbells. `setup_auth` re-exports this as `RING_DESCRIPTOR_COUNT`.
 pub const SETUP_DESCRIPTOR_COUNT: usize = SETUP_MAPPING_COUNT + SETUP_DOORBELL_COUNT;
-/// Frozen wire-v2 header length.
+/// Frozen application header length.
 pub const WIRE_V3_HEADER_BYTES: usize = 21;
 /// Version byte at `wire_header[4]`.
 pub const WIRE_V3_VERSION: u8 = 3;
-/// A complete-frame descriptor contains at most two shared spans.
-pub const MAX_SPANS: usize = 2;
 
-/// Shared by `FrameDescriptor::validate` and `SamplePrefix::validate` so both paths agree on
-/// which wire headers are admissible.
-/// Callers that must reject a header before consuming a reservation use this ahead of `commit`, which runs the same check.
+/// Shared by the producer's commit and the consumer's receive so both paths agree on which
+/// wire headers are admissible. Callers that must reject a header before consuming a
+/// reservation use this ahead of `commit`, which runs the same check.
 pub fn check_wire_header(
     wire_header: &[u8; WIRE_V3_HEADER_BYTES],
     body_len: u64,
@@ -87,7 +85,7 @@ impl Serialize for HardwareProfileId {
 
 crate::redacted_debug!(HardwareProfileId);
 
-/// Fixed ring profile identity carried by an authenticated grant.
+/// Fixed pool profile identity carried by an authenticated grant.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TransportDescriptor {
     schema_version: u16,
@@ -116,9 +114,9 @@ impl TransportDescriptor {
 
 crate::redacted_debug!(TransportDescriptor);
 
-/// 128-bit identity drawn once per ring attachment. A frame from an earlier attachment
-/// carries a different incarnation, so its descriptor fails `validate` even if the lane and
-/// sequence happen to line up.
+/// 128-bit identity drawn once per pool incarnation. A payload from an earlier incarnation
+/// carries a different value, so its identity fails every check even if the block and
+/// generation line up.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Incarnation([u8; 16]);
 
@@ -144,293 +142,211 @@ impl Incarnation {
 
 crate::redacted_debug!(Incarnation);
 
-/// The triple a completion must echo back exactly: incarnation, lane, and per-lane sequence.
-/// Any mismatch means the release belongs to another frame or another attachment.
+/// The identity a payload return carries: pool incarnation, direction lane, block id, and
+/// reuse generation. No pointer or peer-supplied offset appears here; reclamation authority is
+/// this tuple checked against the producer's private ledger.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct ReleaseIdentity {
+pub struct PayloadIdentity {
     incarnation: Incarnation,
     lane: u32,
-    sequence: u64,
+    block: u32,
+    generation: u64,
 }
 
-impl ReleaseIdentity {
-    /// Assembles the identity; `sequence` zero is accepted here and rejected by `validate`.
-    pub const fn new(incarnation: Incarnation, lane: u32, sequence: u64) -> Self {
+impl PayloadIdentity {
+    /// Assembles the identity; `generation` zero is accepted here and rejected by validation.
+    pub const fn new(incarnation: Incarnation, lane: u32, block: u32, generation: u64) -> Self {
         Self {
             incarnation,
             lane,
-            sequence,
+            block,
+            generation,
         }
     }
 
-    /// Attachment this frame belongs to.
+    /// Pool incarnation this payload belongs to.
     pub const fn incarnation(self) -> Incarnation {
         self.incarnation
     }
 
-    /// Lane the frame travels on.
+    /// Direction lane.
     pub const fn lane(self) -> u32 {
         self.lane
     }
 
-    /// Per-lane sequence number. Zero is reserved so an all-zero descriptor never validates.
+    /// Block id within the direction's arena.
+    pub const fn block(self) -> u32 {
+        self.block
+    }
+
+    /// Reuse generation of the block; increases with every reservation of the block.
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
+}
+
+crate::redacted_debug!(PayloadIdentity);
+
+/// One descriptor slot as read from shared memory, field by field through fixed-width
+/// atomics, before any check runs. Copying first means a peer that rewrites the slot
+/// mid-validation cannot make one field pass and another fail against different values.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PoolDescriptor {
+    sequence: u64,
+    block: u64,
+    generation: u64,
+    body_len: u64,
+}
+
+impl PoolDescriptor {
+    /// Captures descriptor fields exactly as read from shared memory. Nothing is checked
+    /// here; `validate` decides whether the snapshot describes an admissible frame.
+    pub const fn from_untrusted(sequence: u64, block: u64, generation: u64, body_len: u64) -> Self {
+        Self {
+            sequence,
+            block,
+            generation,
+            body_len,
+        }
+    }
+
+    /// Publication sequence the slot claims.
     pub const fn sequence(self) -> u64 {
         self.sequence
     }
 
-    /// Identity mismatches are reported before any bounds check so a stale frame surfaces as
-    /// stale, not malformed.
-    pub(crate) fn check(self, expected: ReleaseIdentity) -> Result<(), DescriptorError> {
-        if self.sequence == 0 {
-            return Err(DescriptorError::InvalidSequence);
-        }
-        if self.incarnation != expected.incarnation {
-            return Err(DescriptorError::WrongIncarnation);
-        }
-        if self.lane != expected.lane {
-            return Err(DescriptorError::WrongLane);
-        }
-        if self.sequence != expected.sequence {
-            return Err(DescriptorError::InvalidSequence);
-        }
-        Ok(())
-    }
-}
-
-crate::redacted_debug!(ReleaseIdentity);
-
-/// Metadata for one frame, copied out of shared memory before any check runs. Copying first
-/// means a peer that rewrites the descriptor mid-validation cannot make one field pass and
-/// another field fail against different values.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct FrameDescriptor {
-    schema_version: u16,
-    wire_header: [u8; WIRE_V3_HEADER_BYTES],
-    identity: ReleaseIdentity,
-    body_len: u64,
-    allocation_start: u64,
-    allocation_len: u64,
-    span_count: u8,
-    spans: [ArenaSpan; MAX_SPANS],
-}
-
-impl FrameDescriptor {
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "models fixed shared descriptor fields"
-    )]
-    /// Captures descriptor fields exactly as read from shared memory. Nothing is checked
-    /// here; `validate` decides whether the snapshot describes an admissible frame.
-    pub const fn from_untrusted(
-        schema_version: u16,
-        wire_header: [u8; WIRE_V3_HEADER_BYTES],
-        identity: ReleaseIdentity,
-        body_len: u64,
-        allocation_start: u64,
-        allocation_len: u64,
-        span_count: u8,
-        spans: [ArenaSpan; MAX_SPANS],
-    ) -> Self {
-        Self {
-            schema_version,
-            wire_header,
-            identity,
-            body_len,
-            allocation_start,
-            allocation_len,
-            span_count,
-            spans,
-        }
-    }
-
-    /// Checks the snapshot against the identity the receiver expects and the arena size.
-    ///
-    /// Checks run in this order and the first failure is returned: schema version, sequence
-    /// nonzero, incarnation, lane, sequence, body length, allocation bounds, span count, span
-    /// offsets and wrap layout, wire header length and version. Identity checks come before
-    /// bounds checks so a stale frame is reported as stale, not as malformed.
+    /// Checks the snapshot against the sequence the receiver expects and the receiver's own
+    /// geometry. Checks run in this order and the first failure is returned: sequence
+    /// nonzero and expected, block id inside the geometry, generation nonzero, body length
+    /// within the protocol maximum and the block's capacity.
     pub fn validate(
         self,
-        expected: ReleaseIdentity,
-        arena_bytes: usize,
-    ) -> Result<ValidatedFrame, DescriptorError> {
+        expected_sequence: u64,
+        geometry: &PoolGeometry,
+    ) -> Result<ValidatedDescriptor, DescriptorError> {
         let Self {
-            schema_version,
-            wire_header,
-            identity,
+            sequence,
+            block,
+            generation,
             body_len,
-            allocation_start,
-            allocation_len,
-            span_count,
-            spans,
         } = self;
-
-        if schema_version != DESCRIPTOR_SCHEMA_VERSION {
-            return Err(DescriptorError::UnsupportedSchema);
+        if sequence == 0 || sequence != expected_sequence {
+            return Err(DescriptorError::InvalidSequence);
         }
-        identity.check(expected)?;
+        let block = u32::try_from(block).map_err(|_| DescriptorError::InvalidBlock)?;
+        let placement = geometry
+            .placement(block)
+            .ok_or(DescriptorError::InvalidBlock)?;
+        if generation == 0 {
+            return Err(DescriptorError::InvalidGeneration);
+        }
         if body_len > MAX_FRAME_BYTES as u64 {
             return Err(DescriptorError::FrameTooLarge);
         }
-        let arena_bytes = u64::try_from(arena_bytes).map_err(|_| DescriptorError::Overflow)?;
-        if arena_bytes == 0 || allocation_len > arena_bytes || allocation_len < body_len {
-            return Err(DescriptorError::InvalidAllocation);
+        if body_len > placement.body_capacity() {
+            return Err(DescriptorError::BodyExceedsBlock);
         }
-        allocation_start
-            .checked_add(allocation_len)
-            .ok_or(DescriptorError::Overflow)?;
-        if !(1..=MAX_SPANS as u8).contains(&span_count) {
-            return Err(DescriptorError::InvalidSpanCount);
-        }
-        if spans[0].offset != allocation_start % arena_bytes {
-            return Err(DescriptorError::InvalidWrapMetadata);
-        }
-
-        let first_end = spans[0]
+        placement
             .offset
-            .checked_add(spans[0].len)
+            .checked_add(WIRE_V3_HEADER_BYTES as u64)
+            .and_then(|start| start.checked_add(body_len))
             .ok_or(DescriptorError::Overflow)?;
-        if first_end > arena_bytes {
-            return Err(DescriptorError::OutOfBounds);
-        }
-        let summed = spans[0]
-            .len
-            .checked_add(spans[1].len)
-            .ok_or(DescriptorError::Overflow)?;
-        if summed != body_len {
-            return Err(DescriptorError::LengthMismatch);
-        }
-
-        match span_count {
-            1 => {
-                if spans[1] != ArenaSpan::default() {
-                    return Err(DescriptorError::InvalidWrapMetadata);
-                }
-            }
-            2 => {
-                if spans[0].is_empty()
-                    || spans[1].is_empty()
-                    || first_end != arena_bytes
-                    || spans[1].offset != 0
-                    || spans[1].len > arena_bytes
-                {
-                    return Err(DescriptorError::InvalidWrapMetadata);
-                }
-            }
-            _ => return Err(DescriptorError::InvalidSpanCount),
-        }
-
-        check_wire_header(&wire_header, body_len)?;
-
-        Ok(ValidatedFrame {
-            wire_header,
-            identity,
+        Ok(ValidatedDescriptor {
+            sequence,
+            block,
+            generation,
             body_len,
-            allocation_start,
-            allocation_len,
-            span_count,
-            spans,
+            placement,
         })
     }
 }
 
-crate::redacted_debug!(FrameDescriptor);
+crate::redacted_debug!(PoolDescriptor);
 
-/// A frame descriptor that passed `FrameDescriptor::validate`; its spans are in bounds and
-/// its lengths agree, so the receiver may build a lease over them.
+/// A descriptor that passed `PoolDescriptor::validate`: its block exists in the receiver's
+/// geometry and its body fits that block, so the receiver may build a lease over it once
+/// the local records also accept the identity.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct ValidatedFrame {
-    wire_header: [u8; WIRE_V3_HEADER_BYTES],
-    identity: ReleaseIdentity,
+pub struct ValidatedDescriptor {
+    sequence: u64,
+    block: u32,
+    generation: u64,
     body_len: u64,
-    allocation_start: u64,
-    allocation_len: u64,
-    span_count: u8,
-    spans: [ArenaSpan; MAX_SPANS],
+    placement: BlockPlacement,
 }
 
-impl ValidatedFrame {
-    /// The 21-byte wire-v2 header carried alongside the body.
-    pub const fn wire_header(self) -> [u8; WIRE_V3_HEADER_BYTES] {
-        self.wire_header
+impl ValidatedDescriptor {
+    /// Publication sequence, equal to the expected one.
+    pub const fn sequence(self) -> u64 {
+        self.sequence
     }
 
-    /// Identity the completion must carry.
-    pub const fn identity(self) -> ReleaseIdentity {
-        self.identity
+    /// Block id.
+    pub const fn block(self) -> u32 {
+        self.block
     }
 
-    /// Declared body length, at most `MAX_FRAME_BYTES`.
+    /// Reuse generation, nonzero.
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
+
+    /// Declared body length, at most `MAX_FRAME_BYTES` and the block's capacity.
     pub const fn body_len(self) -> u64 {
         self.body_len
     }
 
-    /// Unwrapped arena offset where the allocation begins.
-    pub const fn allocation_start(self) -> u64 {
-        self.allocation_start
-    }
-
-    /// Allocation length, at least `body_len` and at most the arena size.
-    pub const fn allocation_len(self) -> u64 {
-        self.allocation_len
-    }
-
-    /// One span, or two when the body wraps around the arena end.
-    pub const fn span_count(self) -> u8 {
-        self.span_count
-    }
-
-    /// The span at `index`, or `None` if `index >= span_count`. `validate` rejects
-    /// `span_count > MAX_SPANS`, so the slice bound is in range.
-    pub fn span(self, index: usize) -> Option<ArenaSpan> {
-        self.spans[..usize::from(self.span_count)]
-            .get(index)
-            .copied()
+    /// Where the block lives, from the receiver's geometry.
+    pub const fn placement(self) -> BlockPlacement {
+        self.placement
     }
 }
 
-crate::redacted_debug!(ValidatedFrame);
+crate::redacted_debug!(ValidatedDescriptor);
 
-/// How many descriptors sit in each ownership state. `conserves` checks that the states
-/// partition the ring depth.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DescriptorCounts {
-    /// Reusable descriptors.
-    pub free: u64,
-    /// Reserved by the producer, not yet published.
-    pub producer_reserved: u64,
-    /// Published and waiting for the receiver.
-    pub published: u64,
-    /// Taken by the receiver, not yet leased to a caller.
-    pub receiver_held: u64,
-    /// Leased to a caller through a `ReceiveLease`.
-    pub receiver_leased: u64,
-    /// Released by the caller, not yet returned to the producer.
-    pub release_pending: u64,
-    /// Withdrawn after a protocol violation; never reused.
-    pub quarantined: u64,
+/// A payload return as the producer ledger sees it: block id and the generation the returner
+/// captured at receive time.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CompletionRecord {
+    block: u64,
+    generation: u64,
 }
 
-impl DescriptorCounts {
-    /// Whether the seven states sum to exactly `depth` without overflow, so no descriptor
-    /// was lost or counted twice.
-    pub fn conserves(self, depth: u64) -> bool {
-        [
-            self.free,
-            self.producer_reserved,
-            self.published,
-            self.receiver_held,
-            self.receiver_leased,
-            self.release_pending,
-            self.quarantined,
-        ]
-        .into_iter()
-        .try_fold(0u64, u64::checked_add)
-            == Some(depth)
+impl CompletionRecord {
+    /// Captures a completion without checking it.
+    pub const fn from_untrusted(block: u64, generation: u64) -> Self {
+        Self { block, generation }
+    }
+
+    /// Checks a completion against the producer's ledger. `live` is the generation the
+    /// producer has outstanding on the block, or `None` when the block is not published.
+    /// A generation below the live one is a stale return and frees nothing; a generation
+    /// above it, or a completion for a block that is not published, names a payload this
+    /// pool never issued and is a protocol error, never free-list input.
+    pub fn validate(
+        self,
+        geometry: &PoolGeometry,
+        live: Option<u64>,
+    ) -> Result<u32, DescriptorError> {
+        let block = u32::try_from(self.block).map_err(|_| DescriptorError::InvalidBlock)?;
+        if !geometry.contains(block) {
+            return Err(DescriptorError::InvalidBlock);
+        }
+        if self.generation == 0 {
+            return Err(DescriptorError::InvalidGeneration);
+        }
+        match live {
+            None => Err(DescriptorError::FutureCompletion),
+            Some(live) if self.generation > live => Err(DescriptorError::FutureCompletion),
+            Some(live) if self.generation < live => Err(DescriptorError::StaleCompletion),
+            Some(_) => Ok(block),
+        }
     }
 }
 
-/// Why a descriptor, grant, or sample was rejected. Each variant is one failed check.
+crate::redacted_debug!(CompletionRecord);
+
+/// Why a descriptor, grant, or completion was rejected. Each variant is one failed check.
 #[derive(Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DescriptorError {
     /// The operating-system random source failed.
@@ -446,39 +362,45 @@ pub enum DescriptorError {
     #[error("descriptor schema is unsupported")]
     UnsupportedSchema,
     /// The incarnation differs from the expected one.
-    #[error("release identity does not match incarnation")]
+    #[error("payload identity does not match incarnation")]
     WrongIncarnation,
     /// The lane differs from the expected one.
-    #[error("release identity does not match lane")]
+    #[error("payload identity does not match lane")]
     WrongLane,
     /// Sequence is zero or does not match the expected sequence.
-    #[error("release sequence is invalid")]
+    #[error("publication sequence is invalid")]
     InvalidSequence,
+    /// The block id is outside the geometry.
+    #[error("payload block id is invalid")]
+    InvalidBlock,
+    /// The generation is zero.
+    #[error("payload generation is invalid")]
+    InvalidGeneration,
     /// `body_len` exceeds `MAX_FRAME_BYTES`.
     #[error("frame exceeds protocol maximum")]
     FrameTooLarge,
-    /// The arena is empty, or the allocation exceeds the arena or is shorter than the body.
-    /// A zero-length allocation is legal for a zero-length body.
-    #[error("arena allocation is invalid")]
-    InvalidAllocation,
-    /// The span count is not 1 or 2.
-    #[error("descriptor span count is invalid")]
-    InvalidSpanCount,
-    /// A span ends past the arena.
-    #[error("descriptor span is outside arena")]
-    OutOfBounds,
+    /// `body_len` exceeds the named block's body capacity.
+    #[error("body exceeds its block capacity")]
+    BodyExceedsBlock,
     /// An offset or length sum overflowed.
     #[error("descriptor arithmetic overflow")]
     Overflow,
-    /// The span lengths do not sum to the body length.
-    #[error("descriptor lengths disagree")]
-    LengthMismatch,
-    /// The spans do not describe a valid single or wrapped layout.
-    #[error("descriptor wrap metadata is invalid")]
-    InvalidWrapMetadata,
     /// The wire header's declared length or version disagrees with the descriptor.
     #[error("wire header disagrees with descriptor")]
     WireHeaderMismatch,
+    /// A completion names a generation older than the live occupant; it frees nothing.
+    #[error("payload completion is stale")]
+    StaleCompletion,
+    /// A completion names a generation newer than any this pool issued, or a block with no
+    /// published occupant.
+    #[error("payload completion names an unissued payload")]
+    FutureCompletion,
+    /// A published descriptor names a block whose previous lease is still live locally.
+    #[error("payload block is already live")]
+    DuplicateLiveBlock,
+    /// A published descriptor's generation does not exceed the last one seen for its block.
+    #[error("payload generation did not increase")]
+    NonIncreasingGeneration,
 }
 
 impl fmt::Debug for DescriptorError {

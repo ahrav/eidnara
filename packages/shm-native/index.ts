@@ -5,8 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { markAsUntransferable } from "node:worker_threads";
 
-export const QUALIFIED_TEST_PROFILE = "host-test-ring-v1";
-export const DESCRIPTOR_SCHEMA_VERSION = 3;
+export const QUALIFIED_TEST_PROFILE = "host-payload-pool-v1";
+export const DESCRIPTOR_SCHEMA_VERSION = 4;
 
 /** The addon's own values for the two constants above, or `null` when it cannot load. */
 export function nativeWireConstants(): {
@@ -19,6 +19,17 @@ export function nativeWireConstants(): {
         descriptorSchemaVersion: native.descriptorSchemaVersion(),
         qualifiedTestProfile: native.qualifiedTestProfile(),
     };
+}
+
+/**
+ * Whether `hex` is a current-layout grant for the qualified profile. Fixtures call this before
+ * mutating a descriptor so a rejection they then assert comes from the mutation, not from a
+ * stale grant encoding. `null` when the addon cannot load.
+ */
+export function grantDecodes(hex: string): boolean | null {
+    const native = addon();
+    if (!native) return null;
+    return native.grantDecodes(hex);
 }
 
 export interface NativeCapabilities {
@@ -75,8 +86,14 @@ export interface NativeSetupOptions {
 export interface NativeTestPair {
     first: NativeChannel;
     second: NativeChannel;
+    /** Ordinary descriptor slots per direction: frames a producer can publish before the consumer acknowledges any. */
     descriptorDepth: number;
-    arenaBytes: number;
+    /** Blocks per direction across every class: the bound on live leases. */
+    blockCount: number;
+    /** Largest body one block of the smallest ordinary class carries. */
+    smallestBodyCapacity: number;
+    /** Blocks in the smallest ordinary class. */
+    smallestClassCount: number;
 }
 
 interface NativeAddon {
@@ -102,8 +119,11 @@ interface NativeAddon {
         first: number;
         second: number;
         descriptorDepth: number;
-        arenaBytes: number;
+        blockCount: number;
+        smallestBodyCapacity: number;
+        smallestClassCount: number;
     };
+    grantDecodes(hex: string): boolean;
     produce(
         channel: number,
         header: Uint8Array,
@@ -769,7 +789,9 @@ export class NativeChannel {
             first: new NativeChannel(native, pair.first),
             second: new NativeChannel(native, pair.second),
             descriptorDepth: pair.descriptorDepth,
-            arenaBytes: pair.arenaBytes,
+            blockCount: pair.blockCount,
+            smallestBodyCapacity: pair.smallestBodyCapacity,
+            smallestClassCount: pair.smallestClassCount,
         };
     }
 

@@ -15,8 +15,8 @@ path = ".."
 default-features = false
 
 [[bin]]
-name = "frame_descriptor"
-path = "fuzz_targets/frame_descriptor.rs"
+name = "pool_descriptor"
+path = "fuzz_targets/pool_descriptor.rs"
 test = false
 doc = false
 bench = false
@@ -29,8 +29,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "provider_sample"
-path = "fuzz_targets/provider_sample.rs"
+name = "payload_completion"
+path = "fuzz_targets/payload_completion.rs"
 test = false
 doc = false
 bench = false

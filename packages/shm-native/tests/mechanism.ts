@@ -15,6 +15,7 @@ import {
     assertUint32Argument,
     DESCRIPTOR_SCHEMA_VERSION,
     NativeChannel,
+    grantDecodes,
     nativeWireConstants,
     isRingFullError,
     privateBytes,
@@ -135,48 +136,56 @@ function supportsMechanismTests(
     return addon !== null && process.platform === "linux";
 }
 
-/** Geometry of the `host-test-ring-v1` profile (`host_test_ring_profile`). */
-const GRANT_DESCRIPTOR_DEPTH = 8n;
-/** `MIN_ARENA_BYTES` == `MAX_FRAME_BYTES` == 64 MiB. */
-const GRANT_ARENA_BYTES = 67_108_864n;
-const GRANT_MAX_LEASES = 8n;
+/** Geometry of the `host-payload-pool-v1` profile (`PoolGeometry::host_payload_pool`). */
+const GRANT_ORDINARY_DESCRIPTORS = 32;
+const GRANT_RESERVED_DESCRIPTORS = 16;
+/** Seven classes, ordinary first: `[block_bytes, count]`. */
+const GRANT_CLASSES: [bigint, number][] = [
+    [4096n, 64],
+    [65_536n, 16],
+    [1_048_576n, 8],
+    [8_388_608n, 2],
+    [67_112_960n, 1],
+    [4096n, 32],
+    [32_768n, 64],
+];
 /**
- * Bytes the ring layout adds around a page-aligned arena: the control
- * region that precedes it (producer, consumer, and reclaim cache lines
- * plus `descriptor_depth` slots, rounded up to a page) and the trailing
- * lifecycle page.
+ * Complete mapping length at 4 KiB pages: five control cache lines and the
+ * 256-byte lifecycle page, 48 descriptor slots of 64 bytes, 187 completion
+ * cells of 8 bytes rounded to a page, then the 95_817_728-byte block arena
+ * rounded to a page.
  *
- * `RingGrant::decode` recomputes the layout and rejects any grant whose
+ * `PoolGrant::decode` recomputes the layout and rejects any grant whose
  * `total_bytes` disagrees, so this value is not decoration: it must track
- * `Layout::new(GRANT_DESCRIPTOR_DEPTH, GRANT_ARENA_BYTES).total`. Growing
- * a control-region struct past a page boundary changes it, and a stale
- * value surfaces as `invalid shared-memory descriptor` from whichever
- * test needs the grant to be *valid* — see the unresolvable-descriptor
- * test below, which is the only case that gets past decoding.
+ * `MappingLayout::new(&PoolGeometry::host_payload_pool(), 4096).total`.
+ * `grantDecodes` proves the unmutated fixture decodes before any mutation
+ * case counts, so a stale value fails there rather than in a rejection case.
  */
-const GRANT_LAYOUT_OVERHEAD_BYTES = 8_192n;
+const GRANT_TOTAL_BYTES = 95_825_920n;
+const GRANT_BYTES = 126;
 
 /**
- * Encodes one RingGrant wire image (layout version 3) as lowercase hex:
- * layout_version u16, incarnation [16], lane u32, descriptor_depth u64,
- * arena_bytes u64, max_leases u64, total_bytes u64, reserved u32 zero —
- * all little-endian.
+ * Encodes one PoolGrant wire image (layout version 4) as lowercase hex:
+ * layout_version u16, incarnation [16], lane u32, ordinary descriptors u32,
+ * reserved descriptors u32, seven (block_bytes u64, count u32) classes,
+ * total_bytes u64, reserved u32 zero — all little-endian.
  */
 function testGrantHex(lane: number, incarnation: number): string {
-    const bytes = new Uint8Array(58);
+    const bytes = new Uint8Array(GRANT_BYTES);
     const view = new DataView(bytes.buffer);
-    view.setUint16(0, 3, true);
+    view.setUint16(0, 4, true);
     bytes[2] = incarnation;
     view.setUint32(18, lane, true);
-    view.setBigUint64(22, GRANT_DESCRIPTOR_DEPTH, true);
-    view.setBigUint64(30, GRANT_ARENA_BYTES, true);
-    view.setBigUint64(38, GRANT_MAX_LEASES, true);
-    view.setBigUint64(
-        46,
-        GRANT_ARENA_BYTES + GRANT_LAYOUT_OVERHEAD_BYTES,
-        true,
-    );
-    view.setUint32(54, 0, true);
+    view.setUint32(22, GRANT_ORDINARY_DESCRIPTORS, true);
+    view.setUint32(26, GRANT_RESERVED_DESCRIPTORS, true);
+    let cursor = 30;
+    for (const [blockBytes, count] of GRANT_CLASSES) {
+        view.setBigUint64(cursor, blockBytes, true);
+        view.setUint32(cursor + 8, count, true);
+        cursor += 12;
+    }
+    view.setBigUint64(cursor, GRANT_TOTAL_BYTES, true);
+    view.setUint32(cursor + 8, 0, true);
     return [...bytes]
         .map((byte) => byte.toString(16).padStart(2, "0"))
         .join("");
@@ -681,7 +690,8 @@ describe("raw N-API descriptor boundary", () => {
     test("releasing a lease returns its slot; an unreleased ring fills", () => {
         const addon = loadRawAddon();
         if (!supportsMechanismTests(addon)) return;
-        const depth = 8; // HOST_TEST_RING_DEPTH
+        // Blocks in the smallest ordinary class; holding all of them exhausts that class.
+        const depth = GRANT_CLASSES[0]![1];
         const header = new Uint8Array(21);
         const view = new DataView(header.buffer);
         view.setUint32(0, 1, true);
@@ -707,7 +717,7 @@ describe("raw N-API descriptor boundary", () => {
         const released = addon.createTestPair();
         const held = addon.createTestPair();
         try {
-            // Releasing after every receive keeps the ring from filling at any frame count.
+            // Releasing after every receive keeps the pool from filling at any frame count.
             for (let value = 1; value <= depth * 3; value += 1) {
                 publish(released, value);
                 let token = -1;
@@ -720,7 +730,8 @@ describe("raw N-API descriptor boundary", () => {
             }
             expect(addon.poll(released.second, () => {})).toBe(false);
 
-            // Holding every lease exhausts the ring on the depth-th publish.
+            // Holding every block of the class exhausts it on the depth-th publish, although
+            // every descriptor was consumed on receive.
             const tokens: number[] = [];
             for (let value = 1; value <= depth; value += 1) {
                 publish(held, value);
@@ -923,16 +934,24 @@ describe("raw N-API descriptor boundary", () => {
         const addon = loadRawAddon();
         if (!addon || !["linux", "darwin"].includes(process.platform)) return;
         const valid = validRawDescriptor();
+        // The unmutated fixture decodes under the current layout, so every rejection below is
+        // caused by its mutation rather than by a stale grant encoding.
+        expect(grantDecodes(testGrantHex(0, 0xab))).toBe(true);
+        expect(grantDecodes(testGrantHex(1, 0xcd))).toBe(true);
         const hostileGrants = [
-            "\u00e9".repeat(58), // UTF-8 length 116, non-ASCII
+            "\u00e9".repeat(GRANT_BYTES), // UTF-8 length 2 * GRANT_BYTES, non-ASCII
             testGrantHex(0, 0xab).toUpperCase(),
-            testGrantHex(0, 0xab).slice(0, 115), // truncation
+            testGrantHex(0, 0xab).slice(0, GRANT_BYTES * 2 - 1), // truncation
             `${testGrantHex(0, 0xab)}0`, // trailing digit
-            `${testGrantHex(0, 0xab).slice(0, 114)}g0`, // non-hex tail
-            "SENTINEL_GRANT_TEXT".padEnd(116, "0"),
+            `${testGrantHex(0, 0xab).slice(0, GRANT_BYTES * 2 - 2)}g0`, // non-hex tail
+            "SENTINEL_GRANT_TEXT".padEnd(GRANT_BYTES * 2, "0"),
             "",
             42,
         ];
+        // A layout-3 image of the right length is not a current grant.
+        const stale = testGrantHex(0, 0xab);
+        expect(grantDecodes(`0300${stale.slice(4)}`)).toBe(false);
+        hostileGrants.push(`0300${stale.slice(4)}`);
         for (const grant of hostileGrants) {
             expectRejectedWithoutEffects(addon, {
                 ...valid,

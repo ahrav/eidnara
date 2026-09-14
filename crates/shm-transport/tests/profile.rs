@@ -1,26 +1,66 @@
 use std::sync::Arc;
 
-use shm_transport::backend::ring::{Ring, RingError};
-use shm_transport::descriptor::{HardwareProfileId, TransportDescriptor};
+use shm_transport::backend::ring::Ring;
+use shm_transport::descriptor::HardwareProfileId;
+use shm_transport::pool::{ClassSpec, MappingLayout, PoolGeometry, ledger_bytes};
 use shm_transport::profile::{
-    AdmissionController, AdmissionError, HostLimits, ProfileConfig, ResourceCharges, TargetProfile,
-    WorkerTopology, host_test_ring_profile, ring_profile,
+    AdmissionController, AdmissionError, HostLimits, ProfileError, ResourceCharges,
+    host_payload_pool_profile, pool_profile,
 };
+
+fn small_geometry() -> PoolGeometry {
+    PoolGeometry::new(
+        2,
+        1,
+        [
+            ClassSpec::new(4096, 2),
+            ClassSpec::new(8192, 1),
+            ClassSpec::new(16384, 1),
+            ClassSpec::new(32768, 1),
+            ClassSpec::new(64 * 1024 * 1024 + 4096, 1),
+        ],
+        ClassSpec::new(4096, 1),
+        ClassSpec::new(32768, 1),
+    )
+    .unwrap()
+}
+
+fn generous_limits() -> HostLimits {
+    HostLimits {
+        descriptors: 1 << 20,
+        mapping_bytes: 1 << 40,
+        ledger_bytes: 1 << 30,
+        leases: 1 << 20,
+        mappings: 1024,
+        file_descriptors: 1024,
+        wake_handles: 1024,
+        workers: 1024,
+        client_instances: 1024,
+        pinned_workers: 0,
+    }
+}
+
+fn exact_limits(charges: ResourceCharges, connections: u64) -> HostLimits {
+    HostLimits {
+        descriptors: charges.descriptors * connections,
+        mapping_bytes: charges.mapping_bytes * connections,
+        ledger_bytes: charges.ledger_bytes * connections,
+        leases: charges.leases * connections,
+        mappings: charges.mappings * connections,
+        file_descriptors: charges.file_descriptors * connections,
+        wake_handles: charges.wake_handles * connections,
+        workers: charges.workers * connections,
+        client_instances: charges.client_instances * connections,
+        pinned_workers: 0,
+    }
+}
 
 #[test]
 fn debug_redacts_profile_admission_and_quarantine_record() {
     let sentinel = "SENTINEL_profile_id";
-    let profile = ring_profile(HardwareProfileId::new(sentinel).unwrap()).unwrap();
-    let controller = Arc::new(AdmissionController::new(HostLimits {
-        descriptors: 1024,
-        arena_bytes: 1 << 30,
-        leases: 1024,
-        mappings: 1024,
-        file_descriptors: 1024,
-        workers: 1024,
-        client_instances: 1024,
-        pinned_workers: 0,
-    }));
+    let profile =
+        pool_profile(HardwareProfileId::new(sentinel).unwrap(), small_geometry()).unwrap();
+    let controller = Arc::new(AdmissionController::new(generous_limits()));
     let admission = controller.admit(&profile, None).unwrap();
     let formatted_profile = format!("{profile:?}");
     let formatted_admission = format!("{admission:?}");
@@ -37,74 +77,48 @@ fn debug_redacts_profile_admission_and_quarantine_record() {
 
 #[test]
 fn host_admission_retains_quarantined_commitments() {
-    let profile = ring_profile(HardwareProfileId::new("contract-host").unwrap()).unwrap();
+    let profile = pool_profile(
+        HardwareProfileId::new("contract-host").unwrap(),
+        small_geometry(),
+    )
+    .unwrap();
     let charges = profile.charges();
-    let controller = Arc::new(AdmissionController::new(HostLimits {
-        descriptors: charges.descriptors,
-        arena_bytes: charges.arena_bytes,
-        leases: charges.leases,
-        mappings: charges.mappings,
-        file_descriptors: charges.file_descriptors,
-        workers: charges.workers,
-        client_instances: charges.client_instances,
-        pinned_workers: 0,
-    }));
+    let controller = Arc::new(AdmissionController::new(exact_limits(charges, 1)));
     let admission = controller.admit(&profile, None).unwrap();
     assert_eq!(controller.snapshot().unwrap().active, charges);
     let _quarantine = admission.quarantine().unwrap();
     assert_eq!(
         controller.snapshot().unwrap().quarantined,
         ResourceCharges {
+            workers: 0,
             pinned_workers: 0,
             ..charges
         }
     );
+    assert_eq!(controller.snapshot().unwrap().active, ResourceCharges::ZERO);
+    // Quarantined commitments still count against every limit but the worker limit.
     assert!(matches!(
         controller.admit(&profile, None),
         Err(AdmissionError::DescriptorLimit)
-            | Err(AdmissionError::ArenaByteLimit)
-            | Err(AdmissionError::LeaseLimit)
-            | Err(AdmissionError::MappingLimit)
-            | Err(AdmissionError::FileDescriptorLimit)
-            | Err(AdmissionError::ClientInstanceLimit)
     ));
 }
 
 #[test]
 fn exact_aggregate_capacity_admits_n_and_rejects_n_plus_one_without_charging() {
-    // A nonzero worker charge makes `WorkerLimit` reachable in the rejection set.
-    let profile = host_test_ring_profile().unwrap();
-    let one = profile.charges();
-    assert!(one.workers > 0);
-    let count = 3;
-    let controller = Arc::new(AdmissionController::new(HostLimits {
-        descriptors: one.descriptors * count,
-        arena_bytes: one.arena_bytes * count,
-        leases: one.leases * count,
-        mappings: one.mappings * count,
-        file_descriptors: one.file_descriptors * count,
-        workers: one.workers * count,
-        client_instances: one.client_instances * count,
-        pinned_workers: one.pinned_workers * count,
-    }));
-    let admissions: Vec<_> = (0..count)
-        .map(|_| {
-            controller
-                .admit(&profile, None)
-                .expect("capacity admission")
-        })
+    let profile = pool_profile(
+        HardwareProfileId::new("contract-n").unwrap(),
+        small_geometry(),
+    )
+    .unwrap();
+    let charges = profile.charges();
+    let controller = Arc::new(AdmissionController::new(exact_limits(charges, 3)));
+    let admissions: Vec<_> = (0..3)
+        .map(|_| controller.admit(&profile, None).unwrap())
         .collect();
     let full = controller.snapshot().unwrap();
-    assert_eq!(full.active.client_instances, count);
     assert!(matches!(
         controller.admit(&profile, None),
         Err(AdmissionError::DescriptorLimit)
-            | Err(AdmissionError::ArenaByteLimit)
-            | Err(AdmissionError::LeaseLimit)
-            | Err(AdmissionError::MappingLimit)
-            | Err(AdmissionError::FileDescriptorLimit)
-            | Err(AdmissionError::WorkerLimit)
-            | Err(AdmissionError::ClientInstanceLimit)
     ));
     assert_eq!(controller.snapshot().unwrap(), full);
     drop(admissions);
@@ -114,20 +128,78 @@ fn exact_aggregate_capacity_admits_n_and_rejects_n_plus_one_without_charging() {
 }
 
 #[test]
-fn worker_limit_is_the_only_limit_that_refuses_a_second_fused_admission() {
-    let profile = host_test_ring_profile().unwrap();
+fn every_limit_is_checked_in_field_order() {
+    let profile = pool_profile(
+        HardwareProfileId::new("contract-order").unwrap(),
+        small_geometry(),
+    )
+    .unwrap();
     let one = profile.charges();
-    // Every limit but `workers` has room for many admissions.
-    let controller = Arc::new(AdmissionController::new(HostLimits {
-        descriptors: one.descriptors * 16,
-        arena_bytes: one.arena_bytes * 16,
-        leases: one.leases * 16,
-        mappings: one.mappings * 16,
-        file_descriptors: one.file_descriptors * 16,
-        workers: one.workers,
-        client_instances: one.client_instances * 16,
-        pinned_workers: 0,
-    }));
+    let mut limits = exact_limits(one, 16);
+    limits.workers = 1024;
+    type Tighten = fn(&mut HostLimits, ResourceCharges);
+    let cases: [(&str, Tighten, AdmissionError); 8] = [
+        (
+            "descriptors",
+            |l, c| l.descriptors = c.descriptors - 1,
+            AdmissionError::DescriptorLimit,
+        ),
+        (
+            "mapping_bytes",
+            |l, c| l.mapping_bytes = c.mapping_bytes - 1,
+            AdmissionError::MappingByteLimit,
+        ),
+        (
+            "ledger_bytes",
+            |l, c| l.ledger_bytes = c.ledger_bytes - 1,
+            AdmissionError::LedgerByteLimit,
+        ),
+        (
+            "leases",
+            |l, c| l.leases = c.leases - 1,
+            AdmissionError::LeaseLimit,
+        ),
+        (
+            "mappings",
+            |l, c| l.mappings = c.mappings - 1,
+            AdmissionError::MappingLimit,
+        ),
+        (
+            "file_descriptors",
+            |l, c| l.file_descriptors = c.file_descriptors - 1,
+            AdmissionError::FileDescriptorLimit,
+        ),
+        (
+            "wake_handles",
+            |l, c| l.wake_handles = c.wake_handles - 1,
+            AdmissionError::WakeHandleLimit,
+        ),
+        (
+            "client_instances",
+            |l, c| l.client_instances = c.client_instances - 1,
+            AdmissionError::ClientInstanceLimit,
+        ),
+    ];
+    for (name, tighten, expected) in cases {
+        let mut tightened = limits;
+        tighten(&mut tightened, one);
+        let controller = Arc::new(AdmissionController::new(tightened));
+        assert_eq!(
+            controller.admit(&profile, None).err(),
+            Some(expected),
+            "{name} is the first exceeded limit"
+        );
+        assert_eq!(controller.snapshot().unwrap().active, ResourceCharges::ZERO);
+    }
+}
+
+#[test]
+fn worker_limit_is_the_only_limit_that_refuses_a_second_fused_admission() {
+    let profile = host_payload_pool_profile().unwrap();
+    let one = profile.charges();
+    let mut limits = exact_limits(one, 16);
+    limits.workers = one.workers;
+    let controller = Arc::new(AdmissionController::new(limits));
     let _first = controller.admit(&profile, None).unwrap();
     assert!(matches!(
         controller.admit(&profile, None),
@@ -139,77 +211,102 @@ fn worker_limit_is_the_only_limit_that_refuses_a_second_fused_admission() {
     ));
 }
 
-fn span_profile(max_spans: usize) -> TargetProfile {
-    TargetProfile::new(ProfileConfig {
-        descriptor: TransportDescriptor::new(HardwareProfileId::new("contract-spans").unwrap()),
-        descriptor_depth: 8,
-        arena_bytes: shm_transport::MIN_ARENA_BYTES,
-        max_spans,
-        max_leases: 8,
-        mappings: 2,
-        pinned_workers: 0,
-        worker_topology: WorkerTopology::CallerThread,
-    })
-    .unwrap()
-}
-
 #[test]
-fn released_admissions_recompute_active_span_charge() {
-    let wide = span_profile(2);
-    let narrow = span_profile(1);
-    let controller = Arc::new(AdmissionController::new(HostLimits {
-        descriptors: 1024,
-        arena_bytes: 1 << 30,
-        leases: 1024,
-        mappings: 1024,
-        file_descriptors: 1024,
-        workers: 1024,
-        client_instances: 1024,
-        pinned_workers: 0,
-    }));
-
-    // The active span charge equals the maximum among live admissions.
-    let wide_admission = controller.admit(&wide, None).unwrap();
-    let narrow_admission = controller.admit(&narrow, None).unwrap();
-    assert_eq!(controller.snapshot().unwrap().active.spans_per_frame, 2);
-    wide_admission.release();
-    assert_eq!(controller.snapshot().unwrap().active.spans_per_frame, 1);
-    drop(narrow_admission);
-    assert_eq!(controller.snapshot().unwrap().active.spans_per_frame, 0);
-
-    // Quarantine removes the span charge from the active maximum.
-    let wide_admission = controller.admit(&wide, None).unwrap();
-    let _quarantine = wide_admission.quarantine().unwrap();
+fn split_admission_settles_worker_and_backing_charges_independently() {
+    let profile = pool_profile(
+        HardwareProfileId::new("contract-split").unwrap(),
+        small_geometry(),
+    )
+    .unwrap();
+    let one = profile.charges();
+    let controller = Arc::new(AdmissionController::new(generous_limits()));
+    let admission = controller.admit(&profile, None).unwrap();
+    let (worker, backing) = admission.split();
+    assert_eq!(controller.snapshot().unwrap().active, one);
+    drop(worker);
+    let after_worker = controller.snapshot().unwrap().active;
+    assert_eq!(after_worker.workers, 0);
+    assert_eq!(after_worker.mapping_bytes, one.mapping_bytes);
+    assert_eq!(after_worker.leases, one.leases);
+    // Quarantine keeps the backing counted; a second quarantine of the same charge is refused.
+    let backing = Arc::new(backing);
+    backing.quarantine().unwrap();
+    assert!(matches!(
+        backing.quarantine(),
+        Err(AdmissionError::ChargeUnderflow)
+    ));
     let snapshot = controller.snapshot().unwrap();
-    assert_eq!(snapshot.active.spans_per_frame, 0);
-    assert_eq!(snapshot.quarantined.spans_per_frame, 2);
+    assert_eq!(snapshot.active, ResourceCharges::ZERO);
+    assert_eq!(snapshot.quarantined.mapping_bytes, one.mapping_bytes);
+    drop(backing);
+    assert_eq!(
+        controller.snapshot().unwrap().quarantined.mapping_bytes,
+        one.mapping_bytes,
+        "a quarantined charge is never refunded by drop"
+    );
+
+    // An uncertain retention keeps the charge active forever.
+    let (worker, backing) = controller.admit(&profile, None).unwrap().split();
+    drop(worker);
+    backing.retain_uncertain();
+    assert!(!backing.is_active());
+    drop(backing);
+    let snapshot = controller.snapshot().unwrap();
+    assert_eq!(snapshot.active.mapping_bytes, one.mapping_bytes);
 }
 
 /// The profile id is a wire literal both peers compare byte for byte, so the test spells it
-/// and the depth rather than reading the constants it is checking.
+/// and the inventory rather than reading the constants it is checking.
 #[test]
-fn host_test_ring_profile_names_one_geometry() {
-    let profile = host_test_ring_profile().unwrap();
-    assert!(profile.descriptor().hardware_matches("host-test-ring-v1"));
-    assert_eq!(profile.descriptor_depth(), 8);
-    assert_eq!(profile.max_leases(), 8);
-    // `Ring::create` refuses a profile that allows fewer spans than a wrapping reservation
-    // needs, so the span bound is part of the geometry the id promises. The refusal is
-    // shown on a one-span profile of the same depth and arena.
-    assert_eq!(profile.max_spans(), 2);
-    assert_eq!(profile.charges().spans_per_frame, 2);
-    assert_eq!(
-        Ring::create(&span_profile(1), 0).err(),
-        Some(RingError::ProfileMismatch)
+fn host_payload_pool_profile_names_one_geometry_and_complete_charges() {
+    let profile = host_payload_pool_profile().unwrap();
+    assert!(
+        profile
+            .descriptor()
+            .hardware_matches("host-payload-pool-v1")
     );
-    // `Ring::create` reads the per-direction arena size from the profile. The literal is a
-    // pinned snapshot of the geometry: a change to `MIN_ARENA_BYTES` fails here rather
-    // than moving the id's meaning silently.
-    assert_eq!(profile.arena_bytes(), 67_108_864);
-    // One arena per logical direction is what one connection charges: two 64 MiB arenas.
+    assert_eq!(profile.descriptor().schema_version(), 4);
+    let geometry = profile.geometry();
+    assert_eq!(geometry.ordinary_descriptors(), 32);
+    assert_eq!(geometry.reserved_descriptors(), 16);
+    assert_eq!(geometry.block_count(), 187);
+    assert_eq!(geometry.arena_bytes().unwrap(), 95_817_728);
+    let layout = MappingLayout::new(geometry, 4096).unwrap();
+    assert_eq!(profile.mapping_bytes_per_direction(), layout.total as u64);
+    let charges = profile.charges();
+    assert_eq!(charges.descriptors, 96);
+    assert_eq!(charges.leases, 374);
+    assert_eq!(charges.mapping_bytes, 2 * layout.total as u64);
+    assert_eq!(charges.ledger_bytes, 2 * ledger_bytes(geometry));
+    assert_eq!(charges.mappings, 2);
+    assert_eq!(charges.file_descriptors, 6);
+    assert_eq!(charges.wake_handles, 2);
+    assert_eq!(charges.workers, 1);
+    assert_eq!(charges.client_instances, 1);
+    assert!(charges.committed_bytes().unwrap() > charges.mapping_bytes);
+    // The charge is the actual object size both directions create.
+    let ring = Ring::create(&profile, 0).unwrap();
+    assert_eq!(ring.object_size() as u64 * 2, charges.mapping_bytes);
+}
+
+#[test]
+fn profile_refuses_a_geometry_that_cannot_place_a_maximum_frame() {
+    let geometry = PoolGeometry::new(
+        2,
+        1,
+        [
+            ClassSpec::new(4096, 2),
+            ClassSpec::new(8192, 1),
+            ClassSpec::new(16384, 1),
+            ClassSpec::new(32768, 1),
+            ClassSpec::new(64 * 1024 * 1024, 1),
+        ],
+        ClassSpec::new(4096, 1),
+        ClassSpec::new(32768, 1),
+    )
+    .unwrap();
     assert_eq!(
-        profile.charges().arena_bytes,
-        2 * u64::try_from(profile.arena_bytes()).expect("arena size fits u64")
+        pool_profile(HardwareProfileId::new("contract-small").unwrap(), geometry).err(),
+        Some(ProfileError::LargestClassBelowMaximumFrame)
     );
-    assert_eq!(profile.charges().descriptors, 16);
 }

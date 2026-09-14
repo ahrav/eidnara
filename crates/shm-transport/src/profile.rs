@@ -3,10 +3,11 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use crate::arena::MIN_ARENA_BYTES;
+use crate::backend::retained::system_page_size;
 use crate::descriptor::{
-    HardwareProfileId, MAX_SPANS, SETUP_DOORBELL_COUNT, SETUP_MAPPING_COUNT, TransportDescriptor,
+    HardwareProfileId, SETUP_DOORBELL_COUNT, SETUP_MAPPING_COUNT, TransportDescriptor,
 };
+use crate::pool::{MappingLayout, PoolGeometry, ledger_bytes};
 
 /// Which thread publishes and receives on a ring. Decides the `workers` charge: zero when
 /// the caller drives both directions, one per dedicated worker otherwise.
@@ -20,23 +21,29 @@ pub enum WorkerTopology {
     Fused,
 }
 
-/// What one admitted connection costs the host. Every field but `spans_per_frame` is a sum
-/// across admissions; `spans_per_frame` is a maximum, so `AdmissionController` tracks it
-/// separately instead of subtracting on release.
+/// What one admitted connection costs the host. Every field is a sum across admissions.
+/// Physical commitment (`mapping_bytes`, `ledger_bytes`) is separate from logical occupancy
+/// (`descriptors`, `leases`), so the aggregate the host exposes is a checked layout total,
+/// not a residency claim.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResourceCharges {
-    /// Descriptor slots, both directions.
+    /// Descriptor slots, ordinary plus reserved, both directions.
     pub descriptors: u64,
-    /// Arena bytes, both directions.
-    pub arena_bytes: u64,
-    /// Largest span count any admitted frame may carry.
-    pub spans_per_frame: u64,
-    /// Outstanding receive leases, both directions.
+    /// Mapped bytes, both directions: block backing, padding, descriptors, completion cells,
+    /// and control metadata.
+    pub mapping_bytes: u64,
+    /// Private heap bytes, both directions: producer ledgers, free lists, and receiver
+    /// records, all allocated before activation.
+    pub ledger_bytes: u64,
+    /// Blocks, both directions: the bound on live leases and return records.
     pub leases: u64,
     /// Shared-memory mappings.
     pub mappings: u64,
     /// File descriptors kept open for the mappings and doorbells.
     pub file_descriptors: u64,
+    /// Local wake handles an endpoint retains beyond its thread: one capacity doorbell end per
+    /// direction, kept alive by outstanding leases.
+    pub wake_handles: u64,
     /// Dedicated endpoint workers, per `WorkerTopology`.
     pub workers: u64,
     /// Process-level client instances; one per admission.
@@ -49,11 +56,12 @@ impl ResourceCharges {
     /// No charges.
     pub const ZERO: Self = Self {
         descriptors: 0,
-        arena_bytes: 0,
-        spans_per_frame: 0,
+        mapping_bytes: 0,
+        ledger_bytes: 0,
         leases: 0,
         mappings: 0,
         file_descriptors: 0,
+        wake_handles: 0,
         workers: 0,
         client_instances: 0,
         pinned_workers: 0,
@@ -62,11 +70,12 @@ impl ResourceCharges {
     fn checked_add(self, other: Self) -> Option<Self> {
         Some(Self {
             descriptors: self.descriptors.checked_add(other.descriptors)?,
-            arena_bytes: self.arena_bytes.checked_add(other.arena_bytes)?,
-            spans_per_frame: self.spans_per_frame.max(other.spans_per_frame),
+            mapping_bytes: self.mapping_bytes.checked_add(other.mapping_bytes)?,
+            ledger_bytes: self.ledger_bytes.checked_add(other.ledger_bytes)?,
             leases: self.leases.checked_add(other.leases)?,
             mappings: self.mappings.checked_add(other.mappings)?,
             file_descriptors: self.file_descriptors.checked_add(other.file_descriptors)?,
+            wake_handles: self.wake_handles.checked_add(other.wake_handles)?,
             workers: self.workers.checked_add(other.workers)?,
             client_instances: self.client_instances.checked_add(other.client_instances)?,
             pinned_workers: self.pinned_workers.checked_add(other.pinned_workers)?,
@@ -76,32 +85,48 @@ impl ResourceCharges {
     fn checked_sub(self, other: Self) -> Option<Self> {
         Some(Self {
             descriptors: self.descriptors.checked_sub(other.descriptors)?,
-            arena_bytes: self.arena_bytes.checked_sub(other.arena_bytes)?,
-            // A maximum, not a sum: release paths recompute it from the
-            // per-admission span counts in `Accounting`.
-            spans_per_frame: self.spans_per_frame,
+            mapping_bytes: self.mapping_bytes.checked_sub(other.mapping_bytes)?,
+            ledger_bytes: self.ledger_bytes.checked_sub(other.ledger_bytes)?,
             leases: self.leases.checked_sub(other.leases)?,
             mappings: self.mappings.checked_sub(other.mappings)?,
             file_descriptors: self.file_descriptors.checked_sub(other.file_descriptors)?,
+            wake_handles: self.wake_handles.checked_sub(other.wake_handles)?,
             workers: self.workers.checked_sub(other.workers)?,
             client_instances: self.client_instances.checked_sub(other.client_instances)?,
             pinned_workers: self.pinned_workers.checked_sub(other.pinned_workers)?,
         })
     }
+
+    /// Every physical byte this admission commits: mapping plus private ledgers.
+    pub const fn committed_bytes(self) -> Option<u64> {
+        self.mapping_bytes.checked_add(self.ledger_bytes)
+    }
+
+    /// The worker-thread portion, refunded when the endpoint thread exits.
+    const fn worker_part(self) -> Self {
+        Self {
+            workers: self.workers,
+            pinned_workers: self.pinned_workers,
+            ..Self::ZERO
+        }
+    }
+
+    /// Everything but the worker portion: backing, metadata, handles, and the instance.
+    const fn backing_part(self) -> Self {
+        Self {
+            workers: 0,
+            pinned_workers: 0,
+            ..self
+        }
+    }
 }
 
-/// Requested ring geometry. `TargetProfile::new` checks it and computes the charges.
+/// Requested pool geometry. `TargetProfile::new` checks it and computes the charges.
 pub struct ProfileConfig {
     /// Schema version and hardware profile id the grant will carry.
     pub descriptor: TransportDescriptor,
-    /// Descriptor slots per direction; also bounds `max_leases`.
-    pub descriptor_depth: usize,
-    /// Arena bytes per direction, at least `MIN_ARENA_BYTES`.
-    pub arena_bytes: usize,
-    /// Spans one frame may occupy: 1 forbids wrapping, 2 allows it.
-    pub max_spans: usize,
-    /// Receive leases outstanding at once per direction, 1 to `descriptor_depth`.
-    pub max_leases: usize,
+    /// Per-direction geometry.
+    pub geometry: PoolGeometry,
     /// Mappings charged; at least `SETUP_MAPPING_COUNT`, one per direction.
     pub mappings: usize,
     /// Pinned workers charged; must be 0.
@@ -110,37 +135,27 @@ pub struct ProfileConfig {
     pub worker_topology: WorkerTopology,
 }
 
-/// A `ProfileConfig` that passed validation, with its host charges precomputed.
+/// A `ProfileConfig` that passed validation, with its host charges precomputed from the
+/// complete mapping layout.
 pub struct TargetProfile {
     descriptor: TransportDescriptor,
-    descriptor_depth: usize,
-    arena_bytes: usize,
-    max_spans: usize,
-    max_leases: usize,
+    geometry: PoolGeometry,
+    mapping_bytes_per_direction: u64,
     worker_topology: WorkerTopology,
     charges: ResourceCharges,
 }
 
 impl TargetProfile {
-    /// Validates `config` and derives the charges. Per-direction values are doubled; the file
-    /// descriptor charge is `mappings + SETUP_DOORBELL_COUNT`, the same descriptors a grant
-    /// transfers. Fails before any mapping or worker exists, so a rejected profile costs
-    /// nothing.
+    /// Validates `config` and derives the charges from the full mapping layout. Per-direction
+    /// values are doubled; the file descriptor charge is `mappings + SETUP_DOORBELL_COUNT`, the
+    /// same descriptors a grant transfers. Fails before any mapping or worker exists, so a
+    /// rejected profile costs nothing.
     pub fn new(config: ProfileConfig) -> Result<Self, ProfileError> {
         if config.descriptor.schema_version() != crate::descriptor::DESCRIPTOR_SCHEMA_VERSION {
             return Err(ProfileError::UnsupportedSchema);
         }
-        if config.descriptor_depth == 0 {
-            return Err(ProfileError::ZeroDescriptorDepth);
-        }
-        if config.arena_bytes < MIN_ARENA_BYTES {
-            return Err(ProfileError::ArenaBelowMinimum);
-        }
-        if !(1..=MAX_SPANS).contains(&config.max_spans) {
-            return Err(ProfileError::InvalidSpanLimit);
-        }
-        if config.max_leases == 0 || config.max_leases > config.descriptor_depth {
-            return Err(ProfileError::InvalidLeaseLimit);
+        if !config.geometry.holds_maximum_frame() {
+            return Err(ProfileError::LargestClassBelowMaximumFrame);
         }
         if config.mappings < SETUP_MAPPING_COUNT {
             return Err(ProfileError::InvalidMappingCharge);
@@ -148,27 +163,20 @@ impl TargetProfile {
         if config.pinned_workers != 0 {
             return Err(ProfileError::InvalidWorkerCharge);
         }
-        let descriptors = u64::try_from(config.descriptor_depth)
-            .ok()
-            .and_then(|value| value.checked_mul(2))
-            .ok_or(ProfileError::ChargeOverflow)?;
-        let arena_bytes = u64::try_from(config.arena_bytes)
-            .ok()
-            .and_then(|value| value.checked_mul(2))
-            .ok_or(ProfileError::ChargeOverflow)?;
-        let leases = u64::try_from(config.max_leases)
-            .ok()
-            .and_then(|value| value.checked_mul(2))
-            .ok_or(ProfileError::ChargeOverflow)?;
+        let layout = MappingLayout::new(&config.geometry, system_page_size())
+            .map_err(|_| ProfileError::InvalidGeometry)?;
+        let double = |value: u64| value.checked_mul(2).ok_or(ProfileError::ChargeOverflow);
+        let mapping_bytes_per_direction = layout.total as u64;
         let charges = ResourceCharges {
-            descriptors,
-            arena_bytes,
-            spans_per_frame: config.max_spans as u64,
-            leases,
+            descriptors: double(u64::from(config.geometry.descriptor_depth()))?,
+            mapping_bytes: double(mapping_bytes_per_direction)?,
+            ledger_bytes: double(ledger_bytes(&config.geometry))?,
+            leases: double(u64::from(config.geometry.block_count()))?,
             mappings: config.mappings as u64,
             file_descriptors: (config.mappings as u64)
                 .checked_add(SETUP_DOORBELL_COUNT as u64)
                 .ok_or(ProfileError::ChargeOverflow)?,
+            wake_handles: SETUP_MAPPING_COUNT as u64,
             workers: match config.worker_topology {
                 WorkerTopology::CallerThread => 0,
                 WorkerTopology::SplitDirection => 2,
@@ -177,13 +185,14 @@ impl TargetProfile {
             client_instances: 1,
             pinned_workers: config.pinned_workers as u64,
         };
+        charges
+            .committed_bytes()
+            .ok_or(ProfileError::ChargeOverflow)?;
 
         Ok(Self {
             descriptor: config.descriptor,
-            descriptor_depth: config.descriptor_depth,
-            arena_bytes: config.arena_bytes,
-            max_spans: config.max_spans,
-            max_leases: config.max_leases,
+            geometry: config.geometry,
+            mapping_bytes_per_direction,
             worker_topology: config.worker_topology,
             charges,
         })
@@ -194,24 +203,19 @@ impl TargetProfile {
         &self.descriptor
     }
 
-    /// Descriptor slots per direction.
-    pub const fn descriptor_depth(&self) -> usize {
-        self.descriptor_depth
+    /// Per-direction geometry.
+    pub const fn geometry(&self) -> &PoolGeometry {
+        &self.geometry
     }
 
-    /// Arena bytes per direction.
-    pub const fn arena_bytes(&self) -> usize {
-        self.arena_bytes
+    /// Descriptor slots per direction, ordinary plus reserved.
+    pub const fn descriptor_depth(&self) -> u32 {
+        self.geometry.descriptor_depth()
     }
 
-    /// Spans one frame may occupy, 1 or 2.
-    pub const fn max_spans(&self) -> usize {
-        self.max_spans
-    }
-
-    /// Receive leases outstanding at once per direction.
-    pub const fn max_leases(&self) -> usize {
-        self.max_leases
+    /// Complete mapping bytes per direction, from the checked layout.
+    pub const fn mapping_bytes_per_direction(&self) -> u64 {
+        self.mapping_bytes_per_direction
     }
 
     /// Which thread drives each direction.
@@ -228,19 +232,23 @@ impl TargetProfile {
 crate::redacted_debug!(TargetProfile);
 
 /// Process-wide ceilings. Quarantined charges count against every limit except `workers`
-/// and `pinned_workers`, because a quarantined ring keeps its memory but its threads exit.
+/// and `pinned_workers`, because a quarantined pool keeps its memory but its threads exit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostLimits {
     /// Descriptor slots, active plus quarantined.
     pub descriptors: u64,
-    /// Arena bytes, active plus quarantined.
-    pub arena_bytes: u64,
-    /// Receive leases, active plus quarantined.
+    /// Mapped bytes, active plus quarantined.
+    pub mapping_bytes: u64,
+    /// Private ledger bytes, active plus quarantined.
+    pub ledger_bytes: u64,
+    /// Blocks, active plus quarantined.
     pub leases: u64,
     /// Mappings, active plus quarantined.
     pub mappings: u64,
     /// File descriptors, active plus quarantined.
     pub file_descriptors: u64,
+    /// Retained wake handles, active plus quarantined.
+    pub wake_handles: u64,
     /// Endpoint workers, active only.
     pub workers: u64,
     /// Client instances, active plus quarantined.
@@ -330,37 +338,6 @@ fn parse_cpu_list(spec: &str) -> Option<Vec<u32>> {
 struct Accounting {
     active: ResourceCharges,
     quarantined: ResourceCharges,
-    // Active admissions per span charge; slot `i` counts admissions
-    // charging `i + 1` spans. `active.spans_per_frame` is the maximum over
-    // active admissions, so releasing one must recompute it from these
-    // counts instead of subtracting.
-    active_span_counts: [u64; MAX_SPANS],
-}
-
-impl Accounting {
-    fn span_slot(spans: u64) -> Option<usize> {
-        usize::try_from(spans)
-            .ok()
-            .and_then(|spans| spans.checked_sub(1))
-            .filter(|slot| *slot < MAX_SPANS)
-    }
-
-    fn charge_spans(&mut self, spans: u64) {
-        if let Some(slot) = Self::span_slot(spans) {
-            self.active_span_counts[slot] = self.active_span_counts[slot].saturating_add(1);
-        }
-    }
-
-    fn release_spans(&mut self, spans: u64) {
-        if let Some(slot) = Self::span_slot(spans) {
-            self.active_span_counts[slot] = self.active_span_counts[slot].saturating_sub(1);
-        }
-        self.active.spans_per_frame = self
-            .active_span_counts
-            .iter()
-            .rposition(|count| *count > 0)
-            .map_or(0, |slot| slot as u64 + 1);
-    }
 }
 
 /// Aggregate charges without any per-connection identity, safe to log.
@@ -377,7 +354,7 @@ pub struct AccountingSnapshot {
 /// Admits connections against `HostLimits`. One instance per process; `admit` charges,
 /// `Admission` refunds on drop or moves the charge to quarantine.
 ///
-/// Quarantine is a one-way ratchet: a quarantined ring's memory may still be mapped by its
+/// Quarantine is a one-way ratchet: a quarantined pool's memory may still be mapped by its
 /// peer, so nothing here can prove it unmapped and reclaim the charge. A peer that keeps
 /// triggering quarantine therefore consumes host capacity permanently. Callers wiring this
 /// into an accept path must export `snapshot().quarantined`, alarm on it, and treat process
@@ -395,7 +372,6 @@ impl AdmissionController {
             accounting: Mutex::new(Accounting {
                 active: ResourceCharges::ZERO,
                 quarantined: ResourceCharges::ZERO,
-                active_span_counts: [0; MAX_SPANS],
             }),
         }
     }
@@ -411,7 +387,7 @@ impl AdmissionController {
             .accounting
             .lock()
             .map_err(|_| AdmissionError::AccountingUnavailable)?;
-        self.check_admission(*accounting, profile, physical_cores)
+        self.check_admission(*accounting, profile.charges(), physical_cores)
             .map(|_| ())
     }
 
@@ -427,10 +403,9 @@ impl AdmissionController {
             .accounting
             .lock()
             .map_err(|_| AdmissionError::AccountingUnavailable)?;
-        let active = self.check_admission(*accounting, profile, physical_cores)?;
         let charges = profile.charges();
+        let active = self.check_admission(*accounting, charges, physical_cores)?;
         accounting.active = active;
-        accounting.charge_spans(charges.spans_per_frame);
         Ok(Admission {
             controller: Arc::clone(self),
             charges,
@@ -441,10 +416,9 @@ impl AdmissionController {
     fn check_admission(
         &self,
         accounting: Accounting,
-        profile: &TargetProfile,
+        requested: ResourceCharges,
         physical_cores: Option<VerifiedPhysicalCores>,
     ) -> Result<ResourceCharges, AdmissionError> {
-        let requested = profile.charges();
         let active = accounting
             .active
             .checked_add(requested)
@@ -455,8 +429,11 @@ impl AdmissionController {
         if committed.descriptors > self.limits.descriptors {
             return Err(AdmissionError::DescriptorLimit);
         }
-        if committed.arena_bytes > self.limits.arena_bytes {
-            return Err(AdmissionError::ArenaByteLimit);
+        if committed.mapping_bytes > self.limits.mapping_bytes {
+            return Err(AdmissionError::MappingByteLimit);
+        }
+        if committed.ledger_bytes > self.limits.ledger_bytes {
+            return Err(AdmissionError::LedgerByteLimit);
         }
         if committed.leases > self.limits.leases {
             return Err(AdmissionError::LeaseLimit);
@@ -466,6 +443,9 @@ impl AdmissionController {
         }
         if committed.file_descriptors > self.limits.file_descriptors {
             return Err(AdmissionError::FileDescriptorLimit);
+        }
+        if committed.wake_handles > self.limits.wake_handles {
+            return Err(AdmissionError::WakeHandleLimit);
         }
         if active.workers > self.limits.workers {
             return Err(AdmissionError::WorkerLimit);
@@ -501,7 +481,6 @@ impl AdmissionController {
         };
         if let Some(active) = accounting.active.checked_sub(charges) {
             accounting.active = active;
-            accounting.release_spans(charges.spans_per_frame);
         }
     }
 
@@ -527,7 +506,6 @@ impl AdmissionController {
             .ok_or(AdmissionError::ChargeOverflow)?;
         accounting.active = active;
         accounting.quarantined = quarantined;
-        accounting.release_spans(charges.spans_per_frame);
         Ok(())
     }
 }
@@ -540,7 +518,8 @@ enum AdmissionState {
 }
 
 /// Charges held by one admitted connection. Dropping it refunds the charges; `quarantine`
-/// moves them to the quarantined bucket instead.
+/// moves them to the quarantined bucket instead; `split` separates the worker portion, which
+/// ends with the thread, from the backing portion, which ends with the last lease.
 #[must_use = "admission must remain alive while candidate resources exist"]
 pub struct Admission {
     controller: Arc<AdmissionController>,
@@ -555,13 +534,31 @@ impl Admission {
         self.state = AdmissionState::Released;
     }
 
-    /// Moves descriptors, arena bytes, leases, mappings, file descriptors, and the client
-    /// instance to the quarantined bucket, where they stay until the process exits. Worker
-    /// charges are refunded because the threads do exit.
+    /// Moves descriptors, bytes, leases, mappings, file descriptors, wake handles, and the
+    /// client instance to the quarantined bucket, where they stay until the process exits.
+    /// Worker charges are refunded because the threads do exit.
     pub fn quarantine(mut self) -> Result<QuarantineRecord, AdmissionError> {
         self.controller.quarantine(self.charges)?;
         self.state = AdmissionState::Quarantined;
         Ok(QuarantineRecord { _private: () })
+    }
+
+    /// Separates the charge into the worker portion and the backing portion so each is
+    /// settled when its own lifetime ends.
+    pub fn split(mut self) -> (WorkerAdmission, BackingAdmission) {
+        self.state = AdmissionState::Released;
+        (
+            WorkerAdmission {
+                controller: Arc::clone(&self.controller),
+                charges: self.charges.worker_part(),
+                released: false,
+            },
+            BackingAdmission {
+                controller: Arc::clone(&self.controller),
+                charges: self.charges.backing_part(),
+                state: Mutex::new(BackingState::Active),
+            },
+        )
     }
 }
 
@@ -576,7 +573,110 @@ impl Drop for Admission {
     }
 }
 
-/// Proof that an `Admission` was quarantined rather than released. Has no operations; its
+/// The worker-thread portion of an admission; refunded when the endpoint thread exits.
+#[must_use = "worker admission must remain alive while the endpoint thread runs"]
+pub struct WorkerAdmission {
+    controller: Arc<AdmissionController>,
+    charges: ResourceCharges,
+    released: bool,
+}
+
+impl WorkerAdmission {
+    /// Refunds the worker charge. Equivalent to dropping.
+    pub fn release(mut self) {
+        self.controller.release(self.charges);
+        self.released = true;
+    }
+}
+
+crate::redacted_debug!(WorkerAdmission);
+
+impl Drop for WorkerAdmission {
+    fn drop(&mut self) {
+        if !self.released {
+            self.controller.release(self.charges);
+            self.released = true;
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackingState {
+    Active,
+    Quarantined,
+    /// An accounting operation failed; the charge stays counted as active forever rather than
+    /// being refunded for storage nobody proved released.
+    RetainedUncertain,
+}
+
+/// The backing portion of an admission: mapping, ledgers, descriptors, leases, handles, and
+/// the instance. Shared by both directions' retained backing, so it settles when the last
+/// lease of either direction returns and both handles have dropped, not when the endpoint
+/// thread exits.
+#[must_use = "backing admission must remain alive while the mapping may be reachable"]
+pub struct BackingAdmission {
+    controller: Arc<AdmissionController>,
+    charges: ResourceCharges,
+    state: Mutex<BackingState>,
+}
+
+impl BackingAdmission {
+    /// Moves the charge to the quarantined bucket. A failure leaves the charge counted as
+    /// active permanently: nothing may refund storage whose release is unproved.
+    pub fn quarantine(&self) -> Result<QuarantineRecord, AdmissionError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AdmissionError::AccountingUnavailable)?;
+        if *state != BackingState::Active {
+            return Err(AdmissionError::ChargeUnderflow);
+        }
+        // The state is moved off `Active` before the accounting call so a failure below cannot
+        // fall through to the refunding destructor.
+        *state = BackingState::RetainedUncertain;
+        self.controller.quarantine(self.charges)?;
+        *state = BackingState::Quarantined;
+        Ok(QuarantineRecord { _private: () })
+    }
+
+    /// Keeps the charge counted as active for the process lifetime. Used when ownership of the
+    /// backing is uncertain and quarantine accounting itself is unavailable.
+    pub fn retain_uncertain(&self) {
+        if let Ok(mut state) = self.state.lock()
+            && *state == BackingState::Active
+        {
+            *state = BackingState::RetainedUncertain;
+        }
+    }
+
+    /// The charges this admission holds.
+    pub const fn charges(&self) -> ResourceCharges {
+        self.charges
+    }
+
+    /// Whether the charge is still counted as an active admission that a drop would refund.
+    pub fn is_active(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| *state == BackingState::Active)
+    }
+}
+
+crate::redacted_debug!(BackingAdmission);
+
+impl Drop for BackingAdmission {
+    fn drop(&mut self) {
+        let refund = self
+            .state
+            .lock()
+            .is_ok_and(|state| *state == BackingState::Active);
+        if refund {
+            self.controller.release(self.charges);
+        }
+    }
+}
+
+/// Proof that an admission was quarantined rather than released. Has no operations; its
 /// existence in a caller's state means the charges are still counted against `HostLimits`.
 pub struct QuarantineRecord {
     _private: (),
@@ -590,18 +690,12 @@ pub enum ProfileError {
     /// `descriptor.schema_version()` is not `DESCRIPTOR_SCHEMA_VERSION`.
     #[error("target profile schema is unsupported")]
     UnsupportedSchema,
-    /// `descriptor_depth` is zero.
-    #[error("descriptor depth is zero")]
-    ZeroDescriptorDepth,
-    /// `arena_bytes` is below `MIN_ARENA_BYTES`.
-    #[error("arena is below protocol minimum")]
-    ArenaBelowMinimum,
-    /// `max_spans` is not 1 or 2.
-    #[error("span limit is invalid")]
-    InvalidSpanLimit,
-    /// `max_leases` is zero or exceeds `descriptor_depth`.
-    #[error("lease limit is invalid")]
-    InvalidLeaseLimit,
+    /// The largest ordinary class cannot hold one maximum frame.
+    #[error("largest pool class is below one maximum frame")]
+    LargestClassBelowMaximumFrame,
+    /// The geometry could not be laid out on this page size.
+    #[error("pool geometry is invalid")]
+    InvalidGeometry,
     /// `mappings` is below `SETUP_MAPPING_COUNT`.
     #[error("mapping charge is invalid")]
     InvalidMappingCharge,
@@ -634,9 +728,12 @@ pub enum AdmissionError {
     /// Descriptor commitment exceeds host limit.
     #[error("host descriptor limit exceeded")]
     DescriptorLimit,
-    /// Arena-byte commitment exceeds host limit.
-    #[error("host arena-byte limit exceeded")]
-    ArenaByteLimit,
+    /// Mapped-byte commitment exceeds host limit.
+    #[error("host mapping-byte limit exceeded")]
+    MappingByteLimit,
+    /// Ledger-byte commitment exceeds host limit.
+    #[error("host ledger-byte limit exceeded")]
+    LedgerByteLimit,
     /// Lease commitment exceeds host limit.
     #[error("host lease limit exceeded")]
     LeaseLimit,
@@ -646,6 +743,9 @@ pub enum AdmissionError {
     /// Mapping descriptor commitment exceeds host limit.
     #[error("host file-descriptor limit exceeded")]
     FileDescriptorLimit,
+    /// Wake-handle commitment exceeds host limit.
+    #[error("host wake-handle limit exceeded")]
+    WakeHandleLimit,
     /// Active endpoint workers exceed host limit.
     #[error("host worker limit exceeded")]
     WorkerLimit,
@@ -673,37 +773,31 @@ impl fmt::Debug for AdmissionError {
 
 /// Hardware profile id the host stamps into every production grant. A grant naming any other
 /// profile is rejected before mapping, so this is a wire literal, not a configuration value.
-pub const HOST_TEST_RING_PROFILE: &str = "host-test-ring-v1";
+pub const HOST_PAYLOAD_POOL_PROFILE: &str = "host-payload-pool-v1";
 
-/// Descriptor slots per direction for `HOST_TEST_RING_PROFILE`; also its lease bound.
-pub const HOST_TEST_RING_DEPTH: usize = 8;
-
-/// The geometry `HOST_TEST_RING_PROFILE` names, so a peer or harness that echoes that id
-/// exercises the depth and topology the host creates.
-pub fn host_test_ring_profile() -> Result<TargetProfile, ProfileError> {
+/// The geometry `HOST_PAYLOAD_POOL_PROFILE` names, so a peer or harness that echoes that id
+/// exercises the inventory the host creates.
+pub fn host_payload_pool_profile() -> Result<TargetProfile, ProfileError> {
     TargetProfile::new(ProfileConfig {
         descriptor: TransportDescriptor::new(
-            HardwareProfileId::new(HOST_TEST_RING_PROFILE)
+            HardwareProfileId::new(HOST_PAYLOAD_POOL_PROFILE)
                 .expect("static hardware profile id is valid"),
         ),
-        descriptor_depth: HOST_TEST_RING_DEPTH,
-        arena_bytes: MIN_ARENA_BYTES,
-        max_spans: 2,
-        max_leases: HOST_TEST_RING_DEPTH,
+        geometry: PoolGeometry::host_payload_pool(),
         mappings: SETUP_MAPPING_COUNT,
         pinned_workers: 0,
         worker_topology: WorkerTopology::Fused,
     })
 }
 
-/// Depth-32, caller-thread profile under an arbitrary id, for tests and local tools.
-pub fn ring_profile(hardware: HardwareProfileId) -> Result<TargetProfile, ProfileError> {
+/// Caller-thread profile under an arbitrary id and geometry, for tests and local tools.
+pub fn pool_profile(
+    hardware: HardwareProfileId,
+    geometry: PoolGeometry,
+) -> Result<TargetProfile, ProfileError> {
     TargetProfile::new(ProfileConfig {
         descriptor: TransportDescriptor::new(hardware),
-        descriptor_depth: 32,
-        arena_bytes: MIN_ARENA_BYTES,
-        max_spans: 2,
-        max_leases: 32,
+        geometry,
         mappings: SETUP_MAPPING_COUNT,
         pinned_workers: 0,
         worker_topology: WorkerTopology::CallerThread,

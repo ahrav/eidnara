@@ -169,14 +169,19 @@ pub(crate) async fn saturation_holds_at_frame_bound_and_spares_control_capacity<
         charge: crate::wire::ByteCharge::none(),
         written: None,
     };
-    for _ in 0..8 {
+    // Every ordinary descriptor slot is taken before the peer reads anything; frames stay
+    // charge-free, so only descriptor headroom bounds this fill.
+    let depth = crate::ring_transport::ring_profile()
+        .geometry()
+        .ordinary_descriptors() as usize;
+    for _ in 0..depth {
         h.sender
             .send(control())
             .await
             .expect("ring slot admits with the byte pool exhausted");
     }
     published
-        .wait_for(|count| *count >= 8)
+        .wait_for(|count| *count >= depth)
         .await
         .expect("publication observer outlives the drain");
     // The peer never reads, so the ring is full: the endpoint takes this frame and parks in publication.
@@ -276,15 +281,20 @@ pub(crate) async fn failure_after_publication_begins_retires_without_replay<F: C
         .await;
     let baseline = h.budget.available();
     // The fill only needs to land; the short write deadline is for the publication that must fail.
+    // The peer never reads, so every ordinary descriptor slot is taken by the fill and the
+    // next publication parks until its write deadline.
     let fill_deadline = Instant::now() + Duration::from_secs(5);
-    for corr in 1..=8 {
+    let depth = crate::ring_transport::ring_profile()
+        .geometry()
+        .ordinary_descriptors() as u64;
+    for corr in 1..=depth {
         h.sender
             .send_before(outbound(corr, b"fill"), fill_deadline)
             .await
             .expect("ring slot admits");
     }
     let charge = h.budget.try_charge(4096).expect("charge");
-    let mut frame = outbound(9, &vec![0u8; 4096]);
+    let mut frame = outbound(depth + 1, &vec![0u8; 4096]);
     frame.charge = charge;
     // After the peer disconnects, admission may succeed, but publication must fail.
     // Publication failure retires the channel rather than retrying.
@@ -300,7 +310,7 @@ pub(crate) async fn failure_after_publication_begins_retires_without_replay<F: C
         baseline,
         "a failed frame's charge is released, not retained for replay"
     );
-    assert!(h.sender.send(outbound(10, b"late")).await.is_err());
+    assert!(h.sender.send(outbound(depth + 2, b"late")).await.is_err());
 }
 
 pub(crate) async fn graceful_finish_drains_admitted_frames_before_close<F: ChannelFactory>(

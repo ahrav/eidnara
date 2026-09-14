@@ -1,7 +1,10 @@
-//! Mandatory shared-memory ring transport.
+//! Mandatory shared-memory payload-pool transport.
 //!
-//! One dedicated OS thread creates and owns both `!Send` ring endpoints. Host
+//! One dedicated OS thread creates and owns both `!Send` pool endpoints. Host
 //! tasks exchange frame tickets and completion notifications with that thread.
+//! The backing charge is shared with every owned lease the endpoint hands out,
+//! so it settles when the last lease returns, while the worker charge settles
+//! when the thread exits.
 
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,7 +14,7 @@ use std::{fmt, io};
 
 use crate::setup_socket::RING_DESCRIPTOR_COUNT;
 use crate::wire::{EnvelopeHeader, FrameType, decode_header};
-use shm_transport::backend::ring::RingGrant;
+use shm_transport::backend::ring::PoolGrant;
 use shm_transport::backend::ring::{DuplexRing, ProducerError, ProducerReservation, Ring};
 use shm_transport::profile::{
     AdmissionController, HostLimits as ShmHostLimits, ResourceCharges, TargetProfile,
@@ -26,8 +29,8 @@ use crate::frame_channel::{
 };
 use crate::wire::{ByteBudget, MAX_CONTROL_BODY_LEN};
 
-/// Current ring profile accepted by every process in one release.
-pub const RING_PROFILE: &str = shm_transport::profile::HOST_TEST_RING_PROFILE;
+/// Current pool profile accepted by every process in one release.
+pub const RING_PROFILE: &str = shm_transport::profile::HOST_PAYLOAD_POOL_PROFILE;
 
 /// Test-only observer invoked after each successful frame publication with
 /// the published frame's type and channel. It receives no descriptors,
@@ -36,7 +39,8 @@ pub const RING_PROFILE: &str = shm_transport::profile::HOST_TEST_RING_PROFILE;
 pub type PublishHook = Arc<dyn Fn(FrameType, u16) + Send + Sync>;
 
 pub fn ring_profile() -> TargetProfile {
-    shm_transport::profile::host_test_ring_profile().expect("static shared-memory profile is valid")
+    shm_transport::profile::host_payload_pool_profile()
+        .expect("static shared-memory profile is valid")
 }
 
 /// Admission limits sufficient for one connection.
@@ -44,22 +48,32 @@ pub fn per_connection_limits() -> ShmHostLimits {
     let charges = ring_profile().charges();
     ShmHostLimits {
         descriptors: charges.descriptors,
-        arena_bytes: charges.arena_bytes,
+        mapping_bytes: charges.mapping_bytes,
+        ledger_bytes: charges.ledger_bytes,
         leases: charges.leases,
         mappings: charges.mappings,
         file_descriptors: charges.file_descriptors,
+        wake_handles: charges.wake_handles,
         workers: charges.workers,
         client_instances: charges.client_instances,
         pinned_workers: charges.pinned_workers,
     }
 }
 
-/// Ceiling on sparse ring virtual arena bytes this process admits at once.
+/// Ceiling on committed transport bytes this process admits at once: every mapped byte of
+/// every pool plus its private ledgers. Sparse mappings make this a virtual commitment, not
+/// a residency claim.
 pub const MAX_RING_RESIDENT_BYTES: u64 = 1 << 30;
 
+/// Connections whose complete checked transport charge fits under
+/// [`MAX_RING_RESIDENT_BYTES`]; never below one.
 pub fn affordable_connections() -> u64 {
+    let committed = ring_profile()
+        .charges()
+        .committed_bytes()
+        .unwrap_or(u64::MAX);
     MAX_RING_RESIDENT_BYTES
-        .checked_div(per_connection_limits().arena_bytes)
+        .checked_div(committed)
         .unwrap_or(1)
         .max(1)
 }
@@ -114,10 +128,12 @@ pub fn process_limits(connections: usize) -> Result<ShmHostLimits, ProcessLimits
     };
     Ok(ShmHostLimits {
         descriptors: scale(one.descriptors)?,
-        arena_bytes: scale(one.arena_bytes)?,
+        mapping_bytes: scale(one.mapping_bytes)?,
+        ledger_bytes: scale(one.ledger_bytes)?,
         leases: scale(one.leases)?,
         mappings: scale(one.mappings)?,
         file_descriptors: scale(one.file_descriptors)?,
+        wake_handles: scale(one.wake_handles)?,
         workers: scale(one.workers)?,
         client_instances: scale(one.client_instances)?,
         pinned_workers: scale(one.pinned_workers)?,
@@ -191,10 +207,12 @@ impl RingTransport {
         let charges = |value: ResourceCharges| {
             serde_json::json!({
                 "descriptors": value.descriptors,
-                "arena_bytes": value.arena_bytes,
+                "mapping_bytes": value.mapping_bytes,
+                "ledger_bytes": value.ledger_bytes,
                 "leases": value.leases,
                 "mappings": value.mappings,
                 "file_descriptors": value.file_descriptors,
+                "wake_handles": value.wake_handles,
                 "workers": value.workers,
                 "client_instances": value.client_instances,
                 "pinned_workers": value.pinned_workers,
@@ -202,10 +220,12 @@ impl RingTransport {
         };
         let limits = serde_json::json!({
             "descriptors": self.limits.descriptors,
-            "arena_bytes": self.limits.arena_bytes,
+            "mapping_bytes": self.limits.mapping_bytes,
+            "ledger_bytes": self.limits.ledger_bytes,
             "leases": self.limits.leases,
             "mappings": self.limits.mappings,
             "file_descriptors": self.limits.file_descriptors,
+            "wake_handles": self.limits.wake_handles,
             "workers": self.limits.workers,
             "client_instances": self.limits.client_instances,
             "pinned_workers": self.limits.pinned_workers,
@@ -232,6 +252,7 @@ impl RingTransport {
                 "profile": RING_PROFILE,
                 "wire_version": crate::wire::PROTOCOL_VERSION,
                 "descriptor_schema": shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
+                "layout_version": shm_transport::backend::retained::LAYOUT_VERSION,
             },
             "bounds": limits,
             "accounting": accounting,
@@ -273,6 +294,10 @@ impl RingTransport {
             self.exhaustions.fetch_add(1, Ordering::Relaxed);
             RingUnavailable
         })?;
+        // The worker charge ends with the endpoint thread; the backing charge ends with the
+        // last owned lease of either direction, or moves to quarantine.
+        let (worker_admission, backing_admission) = admission.split();
+        let backing_admission = Arc::new(backing_admission);
         let root = CancellationToken::new();
         let read_cancel = root.child_token();
         let (sender, queue) = frame_sender(queue_frames, root.clone(), frame_deadline);
@@ -316,10 +341,13 @@ impl RingTransport {
                 let (runtime, rings) = match (runtime, rings) {
                     (Ok(runtime), Ok(rings)) => (runtime, rings),
                     _ => {
+                        // Nothing was exposed to a peer: every charge refunds with the drops.
                         let _ = initialized_tx.send(Err(RingUnavailable));
+                        drop(worker_admission);
                         return;
                     }
                 };
+                rings.retain_charge(Arc::clone(&backing_admission));
                 let transfer = worker_descriptor(&rings);
                 let Ok((descriptor, descriptors)) = transfer else {
                     let _ = initialized_tx.send(Err(RingUnavailable));
@@ -348,17 +376,20 @@ impl RingTransport {
                         .try_send(Err(ReadClose::Corrupt("shared-memory endpoint panicked")));
                 }
                 drop(panic_inbound);
-                // A quarantined ring may remain mapped by its peer, so its charges move to the quarantined bucket rather than being refunded.
-                // A peer that closed its doorbell ends has dropped its attachment, so its ring is reclaimable even though the backend latched quarantine on the closed doorbell.
+                // A quarantined pool may remain mapped by its peer, so its backing charge moves to the quarantined bucket rather than being refunded.
+                // A peer that closed its doorbell ends has dropped its attachment, so its pool is reclaimable even though the backend latched quarantine on the closed doorbell.
                 let quarantined = (rings.first.is_quarantined() || rings.second.is_quarantined())
                     && !peer_released_ring(&rings);
                 drop(rings);
-                if quarantined {
-                    // A failed quarantine drops the consumed `Admission`, which refunds the charges.
-                    let _ = admission.quarantine();
-                } else {
-                    admission.release();
+                if quarantined && backing_admission.quarantine().is_err() {
+                    // Quarantine accounting failed: the charge stays counted rather than falling
+                    // through to a refund of storage nobody proved released.
+                    backing_admission.retain_uncertain();
                 }
+                // The backing charge refunds when the last lease returns and this clone drops;
+                // the worker charge refunds now, with the thread.
+                drop(backing_admission);
+                drop(worker_admission);
                 let _ = done_tx.send(());
             });
         if spawned.is_err() {
@@ -497,9 +528,9 @@ async fn run_endpoint(
             return;
         }
     };
-    // One ring depth of receives after `read_cancel` covers every frame committed before it.
+    // One descriptor depth of receives after `read_cancel` covers every frame committed before it.
     let post_cancel_depth =
-        usize::try_from(rings.second.grant().geometry().descriptor_depth).unwrap_or(usize::MAX);
+        usize::try_from(rings.second.grant().geometry().descriptor_depth()).unwrap_or(usize::MAX);
     let mut post_cancel_frames: Option<usize> = None;
     let mut finishing = false;
     loop {
@@ -871,13 +902,22 @@ impl RingClientEndpoint {
         ] = descriptors;
         let from_host_grant = decode_grant(&descriptor.host_to_peer_grant)?;
         let to_host_grant = decode_grant(&descriptor.peer_to_host_grant)?;
-        if from_host_grant.geometry() != to_host_grant.geometry() {
+        let expected = ring_profile();
+        if from_host_grant.geometry() != to_host_grant.geometry()
+            || from_host_grant.geometry() != expected.geometry()
+            || from_host_grant == to_host_grant
+        {
             return Err(RingClientError);
         }
         let from_host = Ring::attach([from_mapping, from_data, from_capacity], from_host_grant)
             .map_err(|_| RingClientError)?;
         let to_host = Ring::attach([to_mapping, to_data, to_capacity], to_host_grant)
             .map_err(|_| RingClientError)?;
+        // Setup attaches only fresh pools: a pool with traffic already in flight was not created
+        // for this activation.
+        if !from_host.is_fresh() || !to_host.is_fresh() {
+            return Err(RingClientError);
+        }
         Ok(Self { to_host, from_host })
     }
 
@@ -955,8 +995,8 @@ impl RingClientEndpoint {
     }
 }
 
-fn decode_grant(grant: &str) -> Result<RingGrant, RingClientError> {
-    RingGrant::decode(decode_hex(grant)?).map_err(|_| RingClientError)
+fn decode_grant(grant: &str) -> Result<PoolGrant, RingClientError> {
+    PoolGrant::decode(decode_hex(grant)?).map_err(|_| RingClientError)
 }
 
 fn decode_hex<const N: usize>(text: &str) -> Result<[u8; N], RingClientError> {
@@ -1054,11 +1094,14 @@ mod tests {
         let one = per_connection_limits();
         assert_eq!(
             affordable,
-            MAX_RING_RESIDENT_BYTES / one.arena_bytes,
-            "affordable count is the arena ceiling divided by one ring's charge"
+            MAX_RING_RESIDENT_BYTES / (one.mapping_bytes + one.ledger_bytes),
+            "affordable count is the byte ceiling divided by one connection's complete charge"
         );
+        assert!(affordable >= 1);
         let exact = process_limits(usize::try_from(affordable).unwrap()).expect("affordable");
-        assert_eq!(exact.arena_bytes, one.arena_bytes * affordable);
+        assert_eq!(exact.mapping_bytes, one.mapping_bytes * affordable);
+        assert_eq!(exact.ledger_bytes, one.ledger_bytes * affordable);
+        assert_eq!(exact.wake_handles, one.wake_handles * affordable);
         assert_eq!(
             process_limits(usize::try_from(affordable + 1).unwrap()),
             Err(ProcessLimitsError::ExceedsResidentBytes {
@@ -1153,15 +1196,22 @@ mod tests {
             diagnostics["artifact"]["descriptor_schema"],
             shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION
         );
-        assert_eq!(diagnostics["bounds"]["arena_bytes"], limits.arena_bytes);
-        assert_eq!(diagnostics["accounting"]["active"]["arena_bytes"], 0);
-        assert_eq!(diagnostics["accounting"]["quarantined"]["arena_bytes"], 0);
+        assert_eq!(
+            diagnostics["artifact"]["layout_version"],
+            shm_transport::backend::retained::LAYOUT_VERSION
+        );
+        assert_eq!(diagnostics["bounds"]["mapping_bytes"], limits.mapping_bytes);
+        assert_eq!(diagnostics["bounds"]["ledger_bytes"], limits.ledger_bytes);
+        assert_eq!(diagnostics["bounds"]["wake_handles"], limits.wake_handles);
+        assert_eq!(diagnostics["accounting"]["active"]["mapping_bytes"], 0);
+        assert_eq!(diagnostics["accounting"]["quarantined"]["mapping_bytes"], 0);
         assert_eq!(diagnostics["activation"]["completed"], 1);
         assert_eq!(diagnostics["peer_death"]["observed"], 1);
         assert_eq!(diagnostics["reclamation"]["completed"], 1);
         assert_eq!(diagnostics["exhaustion"]["observed"], 0);
 
-        let encoded = diagnostics.to_string();
+        // The profile id spells "payload"; only the literal it names is allowed to.
+        let encoded = diagnostics.to_string().replace(RING_PROFILE, "");
         for secret_field in [
             "socket_path",
             "native_handle",
@@ -1230,12 +1280,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn control_frame_body_is_copied_out_of_the_ring() {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
-        let geometry = rings.first.grant().geometry();
-        assert_eq!(geometry.descriptor_depth, 8);
-        assert_eq!(geometry.max_leases, 8);
+        let grant = rings.first.grant();
+        let geometry = grant.geometry();
+        assert_eq!(geometry.descriptor_depth(), 48);
+        assert_eq!(geometry.ordinary_descriptors(), 32);
+        assert_eq!(geometry.block_count(), 187);
         assert_eq!(
-            geometry.mapping_bytes,
-            (shm_transport::MIN_ARENA_BYTES + 8_192) as u64
+            grant.mapping_bytes(),
+            ring_profile().mapping_bytes_per_direction()
         );
         let body = b"copy";
         let header = EnvelopeHeader {
@@ -1402,7 +1454,7 @@ mod tests {
         let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
             .expect("peer attaches");
         let io = tokio::spawn(io);
-        let depth = ring_profile().descriptor_depth();
+        let depth = ring_profile().geometry().ordinary_descriptors() as usize;
         for corr in 1..=depth as u64 {
             peer.send(
                 EnvelopeHeader {
@@ -1465,7 +1517,7 @@ mod tests {
         let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
             .expect("peer attaches");
         let io = tokio::spawn(io);
-        let depth = ring_profile().descriptor_depth();
+        let depth = ring_profile().geometry().ordinary_descriptors() as usize;
         let request = |corr: u64| EnvelopeHeader {
             len: 1,
             ver: PROTOCOL_VERSION,
@@ -1497,9 +1549,11 @@ mod tests {
                 Err(ReadClose::Cancelled) => break,
                 Err(other) => panic!("unexpected close {other:?}"),
             }
+            // Frames the peer filled before cancellation were already forwarded; after it, the
+            // endpoint receives at most one descriptor depth more before reporting Cancelled.
             assert!(
-                forwarded <= depth + 1,
-                "a peer that refills every released slot must not postpone Cancelled past one ring depth"
+                forwarded <= depth + ring_profile().descriptor_depth() as usize + 1,
+                "a peer that refills every released slot must not postpone Cancelled past one descriptor depth"
             );
         }
         assert!(
@@ -1531,7 +1585,7 @@ mod tests {
         let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
             .expect("peer attaches");
         let mut io = tokio::spawn(io);
-        let depth = ring_profile().descriptor_depth();
+        let depth = ring_profile().geometry().ordinary_descriptors() as usize;
         let request = |corr: u64| EnvelopeHeader {
             len: 1,
             ver: PROTOCOL_VERSION,
