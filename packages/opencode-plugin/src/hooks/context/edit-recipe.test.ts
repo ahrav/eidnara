@@ -351,6 +351,55 @@ describe("edit recipe bounds", () => {
         expect(methodRead).toBe(false);
     });
 
+    it("does not use inherited array methods to check operation fields", () => {
+        const find = Object.getOwnPropertyDescriptor(Array.prototype, "find");
+        const includes = Object.getOwnPropertyDescriptor(Array.prototype, "includes");
+        let parsed: ReturnType<typeof parseRecipe> | undefined;
+        try {
+            Object.defineProperty(Array.prototype, "find", {
+                configurable: true,
+                value() {
+                    throw new Error("inherited find called");
+                },
+            });
+            Object.defineProperty(Array.prototype, "includes", {
+                configurable: true,
+                value() {
+                    throw new Error("inherited includes called");
+                },
+            });
+            parsed = parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{ op: "insert", values: [null] }],
+            });
+        } finally {
+            if (find) Object.defineProperty(Array.prototype, "find", find);
+            if (includes) Object.defineProperty(Array.prototype, "includes", includes);
+        }
+        expect(parsed?.ok).toBe(true);
+    });
+
+    it("does not accept a rejection through an inherited operation discriminant", () => {
+        const op = Object.getOwnPropertyDescriptor(Object.prototype, "op");
+        let parsed: ReturnType<typeof parseRecipe> | undefined;
+        try {
+            Object.defineProperty(Object.prototype, "op", {
+                configurable: true,
+                value: "insert",
+            });
+            parsed = parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{}],
+            });
+        } finally {
+            if (op) Object.defineProperty(Object.prototype, "op", op);
+            else Reflect.deleteProperty(Object.prototype, "op");
+        }
+        expect(parsed).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+    });
+
     it("does not retain metadata per rejected operation", () => {
         const operations: RecipeOperation[] = Array.from({ length: 100_000 }, () => ({
             op: "insert",

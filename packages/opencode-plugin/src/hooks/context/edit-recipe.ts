@@ -201,7 +201,23 @@ function unknownField(
     record: Record<string, unknown>,
     known: readonly string[],
 ): string | undefined {
-    return Object.keys(record).find((key) => !known.includes(key));
+    const keys = Object.keys(record);
+    for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+        const key = keys[keyIndex] as string;
+        let matched = false;
+        for (let knownIndex = 0; knownIndex < known.length; knownIndex += 1) {
+            if (key === known[knownIndex]) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) return key;
+    }
+    return undefined;
+}
+
+function isRecipeRejection(value: RecipeOperation | RecipeRejection): value is RecipeRejection {
+    return Object.hasOwn(value, "code");
 }
 
 interface DataProperty {
@@ -286,7 +302,7 @@ export function parseRecipe(value: unknown): RecipeParse {
         if (!entry || !("value" in entry))
             return reject("malformed", `operation ${index} is not a data property`);
         const operation = parseOperation(entry.value, index);
-        if (!("op" in operation)) return { ok: false, rejection: operation };
+        if (isRecipeRejection(operation)) return { ok: false, rejection: operation };
         operations[operations.length] = operation;
     }
     let usesPrevious = false;
