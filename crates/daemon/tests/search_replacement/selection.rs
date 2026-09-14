@@ -1204,6 +1204,25 @@ fn preparation_failure_retains_candidate_and_retries_only_its_owned_partial_fami
 }
 
 #[test]
+fn partial_recovery_refuses_a_family_with_residual_entries() {
+    let root = tempfile::tempdir().unwrap();
+    let witness = kill_child_at(root.path(), "select-copy")["WITNESS"].clone();
+    let gate = open_gate();
+    let selection = selector(root.path());
+    let home = root
+        .path()
+        .join("search-families")
+        .join(witness["new"].as_str().unwrap());
+    let residual = home.join("search/notes");
+    std::fs::write(&residual, b"foreign").unwrap();
+    assert!(matches!(
+        selection.recover_partial(&gate),
+        Err(BuildError::Invalid("family directory not empty"))
+    ));
+    assert!(residual.is_file());
+}
+
+#[test]
 fn preparation_process_cuts_recover_using_the_durable_certificate_twice() {
     for cut in ["select-copy", "select-metadata", "select-metadata-prefix"] {
         let root = tempfile::tempdir().unwrap();
@@ -1575,6 +1594,29 @@ fn observation_timestamps_that_disagree_with_the_registry_are_refused_on_reopen(
     assert!(
         selection
             .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn evidence_binding_corruption_is_refused_on_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("first", "one");
+    corpus.publish("second", "two");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let raw = Connection::open(root.path().join("kernel/kernel.sqlite")).unwrap();
+    raw.execute(
+        "UPDATE observations SET evidence_id=(SELECT min(evidence_id) FROM evidence_meta)
+         WHERE object_id GLOB 'srcdesc:*'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
             .is_err()
     );
 }

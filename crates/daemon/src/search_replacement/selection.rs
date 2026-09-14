@@ -635,15 +635,18 @@ impl SearchSelection {
         if intent.staged_seed_digest.as_deref() != Some(&digest) {
             return Err(BuildError::Invalid("unbound ownership certificate"));
         }
-        self.remove_family(
+        match self.remove_family(
             &digest,
             &Bootstrap {
                 schema: 1,
                 seed,
                 intent: intent.clone(),
             },
-        )?;
-        Ok(intent)
+        )? {
+            Reclaimed::Removed | Reclaimed::Absent => Ok(intent),
+            Reclaimed::Uncertified => Err(BuildError::Invalid("uncertified family")),
+            Reclaimed::Residual => Err(BuildError::Invalid("family directory not empty")),
+        }
     }
 
     fn remove_family(
