@@ -12,6 +12,13 @@ pub(super) struct Maintenance {
     task: JoinHandle<()>,
 }
 
+impl Maintenance {
+    /// A finished task has dropped its reader, so this owner pins nothing.
+    pub(super) fn pins(&self) -> bool {
+        !self.task.is_finished()
+    }
+}
+
 impl Drop for Maintenance {
     fn drop(&mut self) {
         self.supervisor.request_shutdown();
@@ -41,6 +48,9 @@ impl SearchSelection {
         now: Arc<dyn Fn() -> i64 + Send + Sync>,
         events: tokio::sync::mpsc::UnboundedSender<SupervisorEvent>,
     ) -> Result<(), BuildError> {
+        if self.maintenance.as_ref().is_some_and(|owner| !owner.pins()) {
+            self.maintenance = None;
+        }
         if self.maintenance.is_some() {
             return Err(BuildError::Invalid("maintenance already owned"));
         }
@@ -51,6 +61,9 @@ impl SearchSelection {
         if !Arc::ptr_eq(&family.projection, &maintained.projection) {
             return Err(BuildError::Invalid("maintenance names another projection"));
         }
+        maintained
+            .gate
+            .require_binding(&self.data_home, &self.identity)?;
         let grant = maintained
             .gate
             .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Startup)?;

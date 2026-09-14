@@ -344,7 +344,7 @@ impl SearchSelection {
 
     /// The owned supervisor pins the family it was started on; replacing that family would leave the pin on the old one and refuse the new one's maintenance, so the owner stops maintenance first.
     fn require_unpinned(&self) -> Result<(), BuildError> {
-        if self.maintenance.is_some() {
+        if self.maintenance.as_ref().is_some_and(|owner| owner.pins()) {
             return Err(BuildError::Invalid(
                 "maintenance is bound to the selected family",
             ));

@@ -1555,6 +1555,131 @@ async fn a_completed_replay_stops_waiting_for_a_kernel_reader_at_its_budget() {
     assert_eq!(disabled(root.path()), done);
 }
 
+/// A supervisor that stopped on its own and finished draining no longer pins anything. Its finished owner does not block a replacement or a fresh start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_maintenance_owner_releases_selection_and_restart() {
+    use daemon::embedding_supervisor::{Maintained, SliceBounds, Stop, SupervisorEvent};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let weak = Arc::downgrade(reader.projection());
+    let engine = fixtures::TestEngine::new();
+    let synapse = Arc::new(fixtures::component(
+        &engine,
+        host_runtime::synapse::SynapseLimits::default(),
+    ));
+    let maintained = || Maintained {
+        gate: Arc::clone(&gate),
+        kernel: Arc::clone(&corpus.kernel),
+        projection: weak.upgrade().unwrap(),
+        synapse: Arc::clone(&synapse),
+        project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+        destination: kernel::ArtifactDestination::Remote,
+    };
+    let bounds = || SliceBounds {
+        dispatch: fixtures::bounds(),
+        sweep_candidates: NonZeroUsize::new(16).unwrap(),
+        slice: Duration::from_millis(200),
+        idle: Duration::from_millis(20),
+    };
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+    selection
+        .start_maintenance(maintained(), bounds(), Arc::new(|| fixtures::NOW), events)
+        .unwrap();
+    drop(reader);
+    selection
+        .maintenance_supervisor_for_test()
+        .unwrap()
+        .panic_next_slice_for_test();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(
+            received.recv().await.expect("supervisor event stream"),
+            SupervisorEvent::Stopped(Stop::Panicked(_))
+        ) {}
+    })
+    .await
+    .unwrap();
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match selection.start_maintenance(
+                maintained(),
+                bounds(),
+                Arc::new(|| fixtures::NOW),
+                events.clone(),
+            ) {
+                Ok(()) => break,
+                Err(BuildError::Invalid("maintenance already owned")) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(other) => panic!("{other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    selection
+        .maintenance_supervisor_for_test()
+        .unwrap()
+        .shutdown(Duration::from_secs(10))
+        .await
+        .unwrap();
+}
+
+/// The maintenance gate must be the selected family's gate: one whose evidence names another identity is refused before a task is pinned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maintenance_refuses_a_gate_bound_to_another_identity() {
+    use daemon::embedding_supervisor::{Maintained, SliceBounds};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let engine = fixtures::TestEngine::new();
+    let synapse = Arc::new(fixtures::component(
+        &engine,
+        host_runtime::synapse::SynapseLimits::default(),
+    ));
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    let result = selection.start_maintenance(
+        Maintained {
+            gate: open_gate(),
+            kernel: Arc::clone(&corpus.kernel),
+            projection: Arc::clone(reader.projection()),
+            synapse,
+            project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+            destination: kernel::ArtifactDestination::Remote,
+        },
+        SliceBounds {
+            dispatch: fixtures::bounds(),
+            sweep_candidates: NonZeroUsize::new(16).unwrap(),
+            slice: Duration::from_millis(200),
+            idle: Duration::from_millis(20),
+        },
+        Arc::new(|| fixtures::NOW),
+        events,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Denied(
+                daemon::projection_gates::Denial::EvidenceIdentity
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(selection.maintenance_supervisor_for_test().is_none());
+}
+
 /// A slice held inside a projection write past the grace is reported once, not once more for the tracked task that pins the reader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn grace_expiry_counts_only_the_held_slice_for_pinned_maintenance() {

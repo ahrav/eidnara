@@ -810,6 +810,24 @@ impl HookGate {
             .map(|mut admissions| admissions.remove(0))
     }
 
+    /// Requires this gate to carry evidence for `identity` at `data_home`.
+    pub(crate) fn require_binding(
+        &self,
+        data_home: &Path,
+        identity: &ProjectionIdentity,
+    ) -> Result<(), Denial> {
+        let state = self.state.lock().map_err(|_| Denial::NoManifest)?;
+        let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
+        let expected = InvalidationIdentity::from(identity);
+        if self.data_home.as_deref() != Some(data_home)
+            || evaluator.manifest.identity != expected
+            || evaluator.evidence.identity != expected
+        {
+            return Err(Denial::EvidenceIdentity);
+        }
+        Ok(())
+    }
+
     /// Checks only `requested`; the caller supplies every charge its operation needs.
     pub fn check_limits(
         &self,
