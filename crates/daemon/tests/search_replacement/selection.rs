@@ -329,6 +329,18 @@ fn tampered_certificate_intent_never_becomes_available_after_reopen() {
             serde_json::json!("other-incarnation"),
         ),
         ("recovery_target", serde_json::json!({"commit_seq": 999})),
+        (
+            "episodes",
+            serde_json::json!({"allowance": 0, "consumed": 0, "deadline": i64::MAX}),
+        ),
+        (
+            "episodes",
+            serde_json::json!({"allowance": 1, "consumed": 2, "deadline": i64::MAX}),
+        ),
+        (
+            "episodes",
+            serde_json::json!({"allowance": 1, "consumed": 0, "deadline": -1}),
+        ),
     ] {
         let root = tempfile::tempdir().unwrap();
         let corpus = Corpus::open(root.path());
@@ -1422,6 +1434,29 @@ fn sweep_retains_a_dangling_symlink_under_a_family_name() {
     let report = selection.sweep().unwrap();
     assert_eq!((report.removed, report.retained), (0, 1));
     assert!(std::fs::symlink_metadata(&link).is_ok());
+}
+
+#[test]
+fn a_registry_revision_that_disagrees_with_its_descriptor_is_refused_on_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    // Readable corruption of the registry row alone: the descriptor payload still decodes.
+    Connection::open(root.path().join("kernel/kernel.sqlite"))
+        .unwrap()
+        .execute_batch(
+            "DROP TRIGGER object_registry_append_only_update;
+             UPDATE object_registry SET source_revision=source_revision+1 WHERE object_id GLOB 'srcdesc:*';",
+        )
+        .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
 }
 
 #[test]

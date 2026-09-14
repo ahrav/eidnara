@@ -572,7 +572,7 @@ impl KernelStore {
         crate::slice::snapshot_tip(&tx, requested)?;
         let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
         let sql = format!(
-            "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.created_commit_seq,b.observation_payload
+            "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision
              {rows}
                AND o.source_kind=?1 AND o.object_kind='observation'
                AND {live}
@@ -583,7 +583,7 @@ impl KernelStore {
             live = Descriptors::LiveAtEnd.predicate("?2", "0"),
         );
         let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
-        let raw: Vec<(String, String, String, i64, Vec<u8>)> = statement
+        let raw: Vec<(String, String, String, i64, Vec<u8>, i64)> = statement
             .query_map(
                 rusqlite::params![
                     class.code(),
@@ -598,6 +598,7 @@ impl KernelStore {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
                     ))
                 },
             )
@@ -609,9 +610,11 @@ impl KernelStore {
             .into_iter()
             .take(max_rows.get())
             .map(
-                |(object_id, domain_id, sensitivity, created_commit_seq, payload)| {
+                |(object_id, domain_id, sensitivity, created_commit_seq, payload, revision)| {
                     let detail = stored_detail(&payload)?;
+                    // The registry row and the stored detail must agree, as `source_export::preflight` requires.
                     if detail.class != class.code()
+                        || detail.revision != revision.to_string()
                         || descriptor_object_id(&detail.lineage_id, &detail.revision) != object_id
                         || reencoded_identity(&detail).is_none()
                     {
