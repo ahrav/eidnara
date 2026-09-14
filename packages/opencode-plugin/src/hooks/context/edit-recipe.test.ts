@@ -78,6 +78,9 @@ describe("edit recipe fixtures", () => {
             if (testCase.expect.ok) {
                 if (!result.ok) throw new Error(`${testCase.name}: ${result.rejection.detail}`);
                 expect(result.values).toEqual(testCase.expect.output as unknown[]);
+                expect(result.lengths).toEqual(
+                    result.values.map((value) => canonicalJsonLength(value)),
+                );
                 expect(result.bytes).toBe(testCase.expect.canonical_bytes as number);
                 expect(result.bytes).toBe(canonicalJsonLength(result.values));
                 // Kept entries are the source's own objects, not copies.
@@ -126,6 +129,7 @@ describe("edit recipe fixtures", () => {
         expect(result.values[0]).toBe(previousValues[0]);
         expect(result.values[1]).toBe(previousValues[1]);
         expect(result.values[2]).toBe(inputValues[3]);
+        expect(result.lengths).toEqual(result.values.map((value) => canonicalJsonLength(value)));
         expect(JSON.stringify(inputValues)).toBe(inputJson);
         expect(JSON.stringify(previousValues)).toBe(previousJson);
     });
@@ -142,7 +146,12 @@ describe("edit recipe bounds", () => {
         const half = Math.floor((MAX_RECONSTRUCTED_BYTES - 3) / 2);
         const exact = [half, MAX_RECONSTRUCTED_BYTES - 3 - half];
         const accepted = applyRecipe(recipe, { revision: "b", values: [1, 2], lengths: exact });
-        expect(accepted).toEqual({ ok: true, values: [1, 2], bytes: MAX_RECONSTRUCTED_BYTES });
+        expect(accepted).toEqual({
+            ok: true,
+            values: [1, 2],
+            lengths: exact,
+            bytes: MAX_RECONSTRUCTED_BYTES,
+        });
         const over = applyRecipe(recipe, {
             revision: "b",
             values: [1, 2],
@@ -196,6 +205,51 @@ describe("edit recipe bounds", () => {
         expect(
             parseRecipe({ base_revision: "☃".repeat(42), output_revision: "o", operations: [] }).ok,
         ).toBe(true);
+    });
+
+    it("rejects recipes outside serde_json's value domain", () => {
+        const loneSurrogate = String.fromCharCode(0xd800);
+        expect(
+            parseRecipe({
+                base_revision: "b",
+                output_revision: loneSurrogate.repeat(42),
+                operations: [],
+            }),
+        ).toMatchObject({ ok: false, rejection: { code: "invalid_revision" } });
+        expect(
+            parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{ op: "insert", values: [Number.POSITIVE_INFINITY] }],
+            }),
+        ).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+        expect(
+            parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{ op: "insert", values: [loneSurrogate] }],
+            }),
+        ).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+    });
+
+    it("rejects nested literals beyond serde_json's recursion limit without throwing", () => {
+        let nested: unknown = null;
+        for (let depth = 0; depth < 123; depth += 1) nested = [nested];
+        const accepted = parseRecipe({
+            base_revision: "b",
+            output_revision: "o",
+            operations: [{ op: "insert", values: [nested] }],
+        });
+        expect(accepted.ok).toBe(true);
+        if (accepted.ok) expect(applyRecipe(accepted.recipe, base("b", [])).ok).toBe(true);
+        nested = [nested];
+        expect(
+            parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{ op: "insert", values: [nested] }],
+            }),
+        ).toMatchObject({ ok: false, rejection: { code: "malformed" } });
     });
 
     it("rejects a mismatched length table without reading values", () => {

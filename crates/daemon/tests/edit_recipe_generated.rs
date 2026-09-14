@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
-use daemon::edit_recipe::{Recipe, RecipeError, Revision, Source, SourceBase, canonical_len};
+use daemon::edit_recipe::{
+    AppliedRecipe, Recipe, RecipeError, Revision, Source, SourceBase, canonical_len,
+};
 use proptest::prelude::*;
 use serde_json::{Value, json};
 
@@ -120,7 +122,10 @@ impl Held {
         let values: Vec<Arc<Value>> = values.iter().cloned().map(Arc::new).collect();
         Self {
             revision: Revision::parse(revision).expect("revision"),
-            lengths: values.iter().map(|value| canonical_len(value)).collect(),
+            lengths: values
+                .iter()
+                .map(|value| canonical_len(value).expect("value length"))
+                .collect(),
             values,
         }
     }
@@ -253,7 +258,7 @@ fn mutate(built: &Built, mutation: Mutation) -> Option<(Value, RecipeError)> {
     Some((recipe, expected))
 }
 
-fn apply(plan: &Plan, recipe: &Value) -> Result<(Vec<Arc<Value>>, usize), RecipeError> {
+fn apply(plan: &Plan, recipe: &Value) -> Result<AppliedRecipe, RecipeError> {
     let input = Held::new("base", &plan.input);
     let previous = plan
         .previous
@@ -269,12 +274,19 @@ proptest! {
     #[test]
     fn valid_generated_recipes_reconstruct_the_planned_output(plan in plan()) {
         let built = build(&plan);
-        let (output, bytes) = apply(&plan, &built.recipe).expect("a constructively valid plan applies");
-        let rendered: Vec<Value> = output.iter().map(|value| (**value).clone()).collect();
+        let output = apply(&plan, &built.recipe).expect("a constructively valid plan applies");
+        let rendered: Vec<Value> = output.values.iter().map(|value| (**value).clone()).collect();
         prop_assert_eq!(&rendered, &built.expected);
-        prop_assert_eq!(bytes, serde_json::to_vec(&rendered).unwrap().len());
+        prop_assert_eq!(output.bytes, serde_json::to_vec(&rendered).unwrap().len());
+        prop_assert_eq!(
+            output.lengths,
+            rendered
+                .iter()
+                .map(|value| canonical_len(value).unwrap())
+                .collect::<Vec<_>>()
+        );
         let previous_len = plan.previous.as_ref().map_or(0, Vec::len);
-        prop_assert!(output.len() <= plan.input.len() + previous_len + built.literal_count);
+        prop_assert!(output.values.len() <= plan.input.len() + previous_len + built.literal_count);
         // Serialize and parse again: the wire form of a recipe is its own round trip.
         let parsed: Recipe = serde_json::from_value(built.recipe.clone()).unwrap();
         prop_assert_eq!(serde_json::to_value(&parsed).unwrap(), built.recipe);

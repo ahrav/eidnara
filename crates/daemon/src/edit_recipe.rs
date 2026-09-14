@@ -95,6 +95,26 @@ pub struct SourceBase<'a> {
     pub lengths: &'a [usize],
 }
 
+/// A reconstructed array and the per-entry lengths needed to retain it as a future source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedRecipe {
+    pub values: Vec<Arc<Value>>,
+    pub lengths: Vec<usize>,
+    /// Canonical JSON size of the array, including brackets and commas.
+    pub bytes: usize,
+}
+
+enum ValidatedSegment<'a> {
+    Kept {
+        values: &'a [Arc<Value>],
+        lengths: &'a [usize],
+    },
+    Inserted {
+        values: &'a [Arc<Value>],
+        lengths: Vec<usize>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecipeError {
     EmptyRevision,
@@ -306,7 +326,7 @@ impl Recipe {
         &self,
         input: SourceBase<'_>,
         previous: Option<SourceBase<'_>>,
-    ) -> Result<(Vec<Arc<Value>>, usize), RecipeError> {
+    ) -> Result<AppliedRecipe, RecipeError> {
         if input.values.len() != input.lengths.len() {
             return Err(RecipeError::LengthMismatch {
                 source: Source::Input,
@@ -324,7 +344,7 @@ impl Recipe {
         let mut entries = 0usize;
         // Brackets first; each entry then pays its bytes plus one comma after the first.
         let mut bytes = 2usize;
-        let mut segments: Vec<&[Arc<Value>]> = Vec::with_capacity(self.operations.len());
+        let mut segments = Vec::with_capacity(self.operations.len());
         for (index, operation) in self.operations.iter().enumerate() {
             match operation {
                 Operation::Keep {
@@ -361,14 +381,20 @@ impl Recipe {
                         bytes = add_entry(bytes, entries, *length)?;
                         entries += 1;
                     }
-                    segments.push(&base.values[range]);
+                    segments.push(ValidatedSegment::Kept {
+                        values: &base.values[range.clone()],
+                        lengths: &base.lengths[range],
+                    });
                 }
                 Operation::Insert { values } => {
+                    let mut lengths = Vec::with_capacity(values.len());
                     for value in values {
-                        bytes = add_entry(bytes, entries, canonical_len(value))?;
+                        let length = canonical_len(value)?;
+                        bytes = add_entry(bytes, entries, length)?;
                         entries += 1;
+                        lengths.push(length);
                     }
-                    segments.push(values);
+                    segments.push(ValidatedSegment::Inserted { values, lengths });
                 }
             }
         }
@@ -376,10 +402,30 @@ impl Recipe {
             return Err(RecipeError::OutputTooLarge { bytes });
         }
         let mut output = Vec::with_capacity(entries);
+        let mut lengths = Vec::with_capacity(entries);
         for segment in segments {
-            output.extend(segment.iter().cloned());
+            match segment {
+                ValidatedSegment::Kept {
+                    values,
+                    lengths: segment_lengths,
+                } => {
+                    output.extend(values.iter().cloned());
+                    lengths.extend_from_slice(segment_lengths);
+                }
+                ValidatedSegment::Inserted {
+                    values,
+                    lengths: segment_lengths,
+                } => {
+                    output.extend(values.iter().cloned());
+                    lengths.extend(segment_lengths);
+                }
+            }
         }
-        Ok((output, bytes))
+        Ok(AppliedRecipe {
+            values: output,
+            lengths,
+            bytes,
+        })
     }
 }
 
@@ -394,11 +440,14 @@ fn add_entry(bytes: usize, entries: usize, length: usize) -> Result<usize, Recip
 /// Compact `serde_json` length, the same rule the client's `serdeJsonCompact` follows. A value
 /// parsed from `1.0` re-emits as `1.0` here and as `1` in JavaScript, so the two languages agree on
 /// acceptance but may differ by a few bytes in size for non-integer numeric content.
-pub fn canonical_len(value: &Value) -> usize {
-    // `Value` always serializes.
-    serde_json::to_vec(value)
-        .expect("serde_json::Value serializes")
-        .len()
+pub fn canonical_len(value: &Value) -> Result<usize, RecipeError> {
+    crate::dispatch::measure_json(value).map_err(|error| match error {
+        crate::dispatch::PreparedOutputError::BodyTooLarge { len, .. } => {
+            RecipeError::OutputTooLarge { bytes: len }
+        }
+        crate::dispatch::PreparedOutputError::LengthOverflow => RecipeError::Overflow,
+        other => RecipeError::Malformed(other.to_string()),
+    })
 }
 
 impl<'de> Deserialize<'de> for Recipe {
@@ -418,7 +467,10 @@ mod tests {
     }
 
     fn lengths(values: &[Arc<Value>]) -> Vec<usize> {
-        values.iter().map(|value| canonical_len(value)).collect()
+        values
+            .iter()
+            .map(|value| canonical_len(value).expect("value length"))
+            .collect()
     }
 
     fn revision(text: &str) -> Revision {
@@ -459,7 +511,7 @@ mod tests {
         .expect("valid recipe");
         let base = revision("base-1");
         let prev = revision("prev-1");
-        let output = recipe
+        let applied = recipe
             .apply(
                 SourceBase {
                     revision: &base,
@@ -473,11 +525,11 @@ mod tests {
                 }),
             )
             .expect("applies");
-        let (output, bytes) = output;
+        let output = &applied.values;
         assert_eq!(output.len(), 4);
         let rendered: Vec<&Value> = output.iter().map(Arc::as_ref).collect();
         assert_eq!(
-            bytes,
+            applied.bytes,
             serde_json::to_vec(&rendered).expect("serializes").len()
         );
         assert!(Arc::ptr_eq(&output[0], &previous[0]));
@@ -485,6 +537,7 @@ mod tests {
         assert_eq!(*output[2], json!({"id": "s"}));
         assert!(Arc::ptr_eq(&output[3], &input[2]));
         assert_eq!(*input[0], json!({"id": "a"}));
+        assert_eq!(applied.lengths, lengths(output));
     }
 
     #[test]
@@ -508,7 +561,14 @@ mod tests {
             },
             None,
         );
-        assert_eq!(accepted, Ok((input.clone(), MAX_RECONSTRUCTED_BYTES)));
+        assert_eq!(
+            accepted,
+            Ok(AppliedRecipe {
+                values: input.clone(),
+                lengths: exact.to_vec(),
+                bytes: MAX_RECONSTRUCTED_BYTES,
+            })
+        );
         let over = [exact[0] + 1, exact[1]];
         let rejected = recipe.apply(
             SourceBase {
@@ -548,7 +608,7 @@ mod tests {
             "operations": [{"op": "keep", "source": "input", "start": -0.0, "count": 1e0}],
         }))
         .expect("integral floats are safe integers");
-        let (output, _) = recipe
+        let output = recipe
             .apply(
                 SourceBase {
                     revision: &base,
@@ -558,7 +618,7 @@ mod tests {
                 None,
             )
             .expect("applies");
-        assert_eq!(output.len(), 1);
+        assert_eq!(output.values.len(), 1);
         assert_eq!(
             Recipe::from_json(&json!({
                 "base_revision": "b",
@@ -796,7 +856,14 @@ mod tests {
                 None,
             )
             .expect("applies");
-        assert_eq!(output, (Vec::new(), 2));
+        assert_eq!(
+            output,
+            AppliedRecipe {
+                values: Vec::new(),
+                lengths: Vec::new(),
+                bytes: 2,
+            }
+        );
         let encoded = serde_json::to_value(&recipe).expect("serializes");
         assert_eq!(
             encoded,
@@ -821,8 +888,21 @@ mod tests {
     fn canonical_len_matches_compact_serialization() {
         let value = json!({"b": [1, 2.5, "x\ny"], "a": null, "é": true});
         assert_eq!(
-            canonical_len(&value),
+            canonical_len(&value).expect("measures"),
             serde_json::to_vec(&value).expect("serializes").len()
         );
+    }
+
+    #[test]
+    fn serde_nesting_limit_leaves_room_for_123_literal_containers() {
+        let recipe = |depth: usize| {
+            format!(
+                r#"{{"base_revision":"b","output_revision":"o","operations":[{{"op":"insert","values":[{}null{}]}}]}}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            )
+        };
+        assert!(serde_json::from_str::<Recipe>(&recipe(123)).is_ok());
+        assert!(serde_json::from_str::<Recipe>(&recipe(124)).is_err());
     }
 }

@@ -1,4 +1,5 @@
 import { MAX_FRAME_BODY_LEN } from "../../shared/host-client/protocol";
+import { isRecord } from "../../shared/record-type-guard";
 import { serdeJsonCompact } from "./module-wire";
 
 /** Revision tokens are opaque; this bound keeps a hostile daemon from turning them into a payload. */
@@ -59,10 +60,24 @@ export type RecipeParse =
     | { ok: false; rejection: RecipeRejection };
 /** `bytes` is the canonical JSON size of the reconstructed array, brackets and commas included. */
 export type RecipeApplication =
-    | { ok: true; values: unknown[]; bytes: number }
+    | { ok: true; values: unknown[]; lengths: number[]; bytes: number }
     | { ok: false; rejection: RecipeRejection };
 
 const utf8 = new TextEncoder();
+const MAX_JSON_NESTING = 127;
+
+function isWellFormed(value: string): boolean {
+    for (let index = 0; index < value.length; index += 1) {
+        const unit = value.charCodeAt(index);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+            if (index + 1 >= value.length) return false;
+            const next = value.charCodeAt(index + 1);
+            if (next < 0xdc00 || next > 0xdfff) return false;
+            index += 1;
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+    }
+    return true;
+}
 
 function reject(
     code: RecipeRejectionCode,
@@ -71,17 +86,62 @@ function reject(
     return { ok: false, rejection: { code, detail } };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function parseRevision(value: unknown, field: string): string | RecipeRejection {
     if (typeof value !== "string") return { code: "malformed", detail: `${field} is not a string` };
     if (value.length === 0) return { code: "invalid_revision", detail: `${field} is empty` };
+    if (value.length > MAX_REVISION_BYTES)
+        return { code: "invalid_revision", detail: `${field} exceeds ${MAX_REVISION_BYTES} bytes` };
+    if (!isWellFormed(value))
+        return { code: "invalid_revision", detail: `${field} contains an unpaired surrogate` };
     const bytes = utf8.encode(value).length;
     if (bytes > MAX_REVISION_BYTES)
         return { code: "invalid_revision", detail: `${field} is ${bytes} bytes` };
     return value;
+}
+
+function validateJsonValue(value: unknown): RecipeRejection | undefined {
+    type Work = { value: unknown; depth: number; exit?: object };
+    const work: Work[] = [{ value, depth: 0 }];
+    const active = new WeakSet<object>();
+    while (work.length > 0) {
+        const item = work.pop() as Work;
+        if (item.exit !== undefined) {
+            active.delete(item.exit);
+            continue;
+        }
+        const current = item.value;
+        if (current === null || typeof current === "boolean") continue;
+        if (typeof current === "number") {
+            if (!Number.isFinite(current))
+                return { code: "malformed", detail: "recipe contains a non-finite number" };
+            continue;
+        }
+        if (typeof current === "string") {
+            if (!isWellFormed(current))
+                return { code: "malformed", detail: "recipe contains an unpaired surrogate" };
+            continue;
+        }
+        if (typeof current !== "object")
+            return { code: "malformed", detail: `recipe contains a ${typeof current} value` };
+        if (item.depth >= MAX_JSON_NESTING)
+            return { code: "malformed", detail: "recipe exceeds the JSON nesting limit" };
+        if (active.has(current))
+            return { code: "malformed", detail: "recipe contains a cyclic value" };
+        active.add(current);
+        work.push({ value: null, depth: item.depth, exit: current });
+        if (Array.isArray(current)) {
+            for (let index = current.length - 1; index >= 0; index -= 1)
+                work.push({ value: current[index], depth: item.depth + 1 });
+            continue;
+        }
+        const record = current as Record<string, unknown>;
+        for (const key of Object.keys(record)) {
+            if (!isWellFormed(key))
+                return { code: "malformed", detail: "recipe contains an unpaired surrogate key" };
+            work.push({ value: record[key], depth: item.depth + 1 });
+        }
+    }
+    return undefined;
 }
 
 /** Indexes and counts both languages read exactly. */
@@ -147,6 +207,8 @@ export function parseRecipe(value: unknown): RecipeParse {
         if (typeof parsed !== "string") return { ok: false, rejection: parsed };
         previousOutputRevision = parsed;
     }
+    const invalidJson = validateJsonValue(value);
+    if (invalidJson !== undefined) return { ok: false, rejection: invalidJson };
     if (!Array.isArray(value.operations)) return reject("malformed", "operations is not an array");
     const operations: RecipeOperation[] = [];
     for (const [index, entry] of value.operations.entries()) {
@@ -174,12 +236,33 @@ export function parseRecipe(value: unknown): RecipeParse {
 }
 
 /**
- * Compact `serde_json` length of a literal, the same rule the daemon's `canonical_len` follows.
- * A value the daemon parsed from `1.0` re-emits as `1.0` there and as `1` here, so sizes for
- * non-integer numeric content can differ by a few bytes while acceptance still agrees.
+ * Compact `serde_json` length of a literal. Object order does not affect the byte count, so this
+ * walker avoids canonical key sorting and does not recurse on the JavaScript stack.
  */
 export function canonicalJsonLength(value: unknown): number {
-    return Buffer.byteLength(serdeJsonCompact(value));
+    let bytes = 0;
+    const work: unknown[] = [value];
+    while (work.length > 0) {
+        const current = work.pop();
+        if (Array.isArray(current)) {
+            bytes += 2 + Math.max(0, current.length - 1);
+            for (let index = current.length - 1; index >= 0; index -= 1)
+                work.push(current[index] === undefined ? null : current[index]);
+            continue;
+        }
+        if (current !== null && typeof current === "object") {
+            const record = current as Record<string, unknown>;
+            const keys = Object.keys(record).filter((key) => record[key] !== undefined);
+            bytes += 2 + Math.max(0, keys.length - 1);
+            for (const key of keys) {
+                bytes += Buffer.byteLength(JSON.stringify(key)) + 1;
+                work.push(record[key]);
+            }
+            continue;
+        }
+        bytes += Buffer.byteLength(serdeJsonCompact(current));
+    }
+    return bytes;
 }
 
 /**
@@ -202,7 +285,7 @@ export function applyRecipe(
     let entries = 0;
     // Brackets first; each entry then pays its bytes plus one comma after the first.
     let bytes = 2;
-    const segments: (readonly unknown[])[] = [];
+    const segments: { values: readonly unknown[]; lengths: readonly number[] }[] = [];
     const addEntry = (length: number): boolean => {
         if (!Number.isSafeInteger(length) || length < 0) return false;
         bytes += length + (entries > 0 ? 1 : 0);
@@ -211,11 +294,14 @@ export function applyRecipe(
     };
     for (const [index, operation] of recipe.operations.entries()) {
         if (operation.op === "insert") {
+            const lengths: number[] = [];
             for (const value of operation.values) {
-                if (!addEntry(canonicalJsonLength(value)))
+                const length = canonicalJsonLength(value);
+                if (!addEntry(length))
                     return reject("overflow", `operation ${index} overflowed the size sum`);
+                lengths.push(length);
             }
-            segments.push(operation.values);
+            segments.push({ values: operation.values, lengths });
             continue;
         }
         let base: RecipeSourceBase;
@@ -249,11 +335,18 @@ export function applyRecipe(
             if (!addEntry(base.lengths[position] as number))
                 return reject("overflow", `operation ${index} overflowed the size sum`);
         }
-        segments.push(base.values.slice(operation.start, end));
+        segments.push({
+            values: base.values.slice(operation.start, end),
+            lengths: base.lengths.slice(operation.start, end),
+        });
     }
     if (bytes > MAX_RECONSTRUCTED_BYTES)
         return reject("output_too_large", `reconstructed array is ${bytes} bytes`);
     const values: unknown[] = [];
-    for (const segment of segments) for (const value of segment) values.push(value);
-    return { ok: true, values, bytes };
+    const lengths: number[] = [];
+    for (const segment of segments) {
+        for (const value of segment.values) values.push(value);
+        for (const length of segment.lengths) lengths.push(length);
+    }
+    return { ok: true, values, lengths, bytes };
 }
