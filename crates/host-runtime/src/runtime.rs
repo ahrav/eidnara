@@ -102,6 +102,9 @@ pub struct HostShared<H> {
     /// This budget funds request scratch and request-derived ownership that can outlive the creating request.
     pub scratch_budget: ByteBudget,
     pub egress_budget: ByteBudget,
+    /// Dedicated encoding bytes for terminal and rejection bodies, sized per connection by
+    /// `TERMINAL_RESERVED_BYTES_PER_CONNECTION`.
+    pub terminal_budget: ByteBudget,
     /// General-class admission pools equal the configured limits minus all reserved-class declarations.
     /// Reserved work cannot draw from the general-class pools.
     pub pending_permits: Arc<Semaphore>,
@@ -673,6 +676,10 @@ pub async fn run_with_publish_hook<H: HostHandler>(
     // Startup requires `max_resident_bytes` to cover `catalog_resident`, `reservations.retained_bytes`, and `MIN_RESIDENT_BYTES` of ingress headroom.
     // `max_resident_bytes == resident_floor` succeeds; one byte less fails startup.
     let catalog_resident = catalog.resident_len() as u64;
+    let terminal_reserved = config
+        .limits
+        .terminal_reserved_bytes()
+        .map_err(|_| HostError::InitFailed("terminal encoding reserve overflows".to_owned()))?;
     let resident_floor = crate::config::MIN_RESIDENT_BYTES
         .saturating_add(catalog_resident)
         .saturating_add(reservations.retained_bytes);
@@ -823,6 +830,9 @@ pub async fn run_with_publish_hook<H: HostHandler>(
         ),
         scratch_budget: ByteBudget::new(crate::config::SCRATCH_RESERVED_BYTES),
         egress_budget: ByteBudget::new(crate::config::EGRESS_RESERVED_BYTES),
+        // Terminal and rejection bodies encode from their own slice so a saturated egress pool
+        // never starves an error terminal, and the maximum-frame egress floor stays whole.
+        terminal_budget: ByteBudget::new(terminal_reserved),
         pending_permits: Arc::new(Semaphore::new(
             config.limits.max_pending_requests - reservations.pending,
         )),
@@ -1209,6 +1219,9 @@ mod tests {
                 pending: std::sync::Mutex::new(HashMap::new()),
                 pings: std::sync::Mutex::new(HashMap::new()),
                 busy_rejects: Arc::new(tokio::sync::Semaphore::new(1)),
+                terminal_credits: Arc::new(tokio::sync::Semaphore::new(
+                    crate::config::TERMINAL_CREDITS_PER_CONNECTION,
+                )),
                 next_ping_corr: std::sync::atomic::AtomicU64::new(1),
             }),
             queue,

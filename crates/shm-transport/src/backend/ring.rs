@@ -466,6 +466,9 @@ struct ProducerLedger {
     generations: Vec<u64>,
     free: [Vec<u32>; CLASS_COUNT],
     outstanding: Vec<u32>,
+    /// Blocks returned since the owner last drained them, so a caller can settle whatever it
+    /// tied to a published block at the physical return point.
+    reclaimed: Vec<u32>,
     /// Whether this handle may produce: true for a created ring or one attached before any
     /// publication.
     allowed: bool,
@@ -493,6 +496,7 @@ impl ProducerLedger {
             generations: vec![0; blocks],
             free,
             outstanding: Vec::with_capacity(blocks),
+            reclaimed: Vec::with_capacity(blocks),
             allowed,
             retired: false,
         }
@@ -1103,6 +1107,9 @@ impl Ring {
                 #[cfg(test)]
                 crate::lease::observers::free_list_mutation();
                 ledger.free[class.index()].push(block);
+                if ledger.reclaimed.len() < ledger.reclaimed.capacity() {
+                    ledger.reclaimed.push(block);
+                }
                 continue;
             }
             index += 1;
@@ -1487,6 +1494,27 @@ impl Ring {
     /// Whether the producer ledger retired because a sequence or generation would wrap.
     pub fn is_retired(&self) -> bool {
         self.ledger.borrow().retired
+    }
+
+    /// Scans completion cells now and hands every block returned since the previous call to
+    /// `settle`, in return order. A caller that ties a credit or record to a published block
+    /// releases it here, at the physical return, not when a callback finishes. The list is
+    /// bounded by the block count, so a caller that never drains loses only the oldest
+    /// notifications, never a return.
+    pub fn take_reclaimed(&self, mut settle: impl FnMut(u32)) -> Result<(), RingError> {
+        if self.ledger.borrow().allowed && !self.is_quarantined() {
+            self.reclaim_completions()?;
+        }
+        let reclaimed: Vec<u32> = std::mem::take(&mut self.ledger.borrow_mut().reclaimed);
+        for block in &reclaimed {
+            settle(*block);
+        }
+        // The buffer keeps its capacity so steady-state returns allocate nothing.
+        let mut ledger = self.ledger.borrow_mut();
+        let mut buffer = reclaimed;
+        buffer.clear();
+        ledger.reclaimed = buffer;
+        Ok(())
     }
 
     /// Quarantines and returns `error`, for impossible shared state observed mid-operation.

@@ -10,10 +10,12 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/pool.rs:40`
-- `crates/shm-transport/src/backend/ring.rs:973`
+- `crates/host-runtime/src/dispatch.rs:652`
+- `crates/host-runtime/src/connection.rs:98`
+- `crates/shm-transport/src/backend/ring.rs:1504`
+- `crates/host-runtime/src/ring_transport.rs:1221`
 
-Witness status: not yet - the terminal-credit and dedicated encoding reservation are #548's implementation over the `Inventory::Terminal` class this transport provides.
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2597` publishes a terminal carrying a credit and shows the credit outstanding until `Ring::take_reclaimed` observes the block's return; `crates/host-runtime/tests/dispatch.rs:1571` admits 63 unsettled requests, refuses the 64th with `server_busy`/`terminal capacity exhausted` and zero dispatch while pending slots remain, then dispatches again only after the cancelled terminal's block is consumed.
 
 ## Failure scenario
 
@@ -39,7 +41,7 @@ Check semantics: `always` - the count of admitted requests never exceeds termina
 
 - Sources examined: the files listed under the evidence trail, the test names
   in `Exercised`, and the CI workflow where the record is a gate property.
-- Findings: not yet at the tree of this catalog's introducing commit; see `Exercised` for what each
+- Findings: yes at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #548.
-- Conclusion: unresolved, needs the named handoff.
+- Missing evidence: none for this task
+- Conclusion: resolved with answer.

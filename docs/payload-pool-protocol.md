@@ -280,3 +280,17 @@ or for ordinary descriptor headroom. Application ordering rules (Request
 correlation order, per-stream data before terminal, drain before `Goodbye`)
 are the Host Wire Protocol's and are enforced by the publisher's selection
 policy, not by this layer.
+
+The host publisher (`Publisher` in `crates/host-runtime/src/ring_transport.rs`)
+implements that policy as follows. Pending frames keep admission order.
+Pure-header `Ping`, `Pong`, `Cancel`, and `Goodbye` take the control reserve;
+`Error` and `StreamEnd` bodies that fit the terminal class take the terminal
+reserve; everything else, including a channel-0 `Request`, is ordinary and
+never bypasses. A control other than `Goodbye` publishes past a blocked
+ordinary head at once. A terminal publishes past it only when no earlier
+pending frame shares its `(channel, corr)`, so a stream's data always precedes
+its end. `Goodbye` waits for every earlier frame. A frame past its deadline
+retires as `not_sent` with nothing published. Each connection holds 63 terminal
+credits; a request takes one before dispatch and the credit returns when the
+terminal's block physically returns, so admitted requests never exceed the
+terminal inventory while one block stays free for a pre-admission rejection.

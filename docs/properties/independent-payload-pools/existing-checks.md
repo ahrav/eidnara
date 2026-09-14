@@ -9,31 +9,31 @@ An existing check does not remove a property from the catalog; each entry is
 
 | Test | Status |
 | --- | --- |
-| `every_page_accessor_reads_the_initialized_zero_state` (`:1895`) | unaudited |
-| `slot_and_cell_indexes_past_their_regions_are_refused_before_any_dereference` (`:1950`) | unaudited |
-| `descriptor_snapshot_is_copied_out_field_by_field_and_validated` (`:1970`) | unaudited |
-| `completion_cell_publication_is_monotonic` (`:1997`) | unaudited |
-| `lifecycle_snapshot_sees_a_write_made_through_the_raw_page` (`:2008`) | unaudited |
-| `held_payload_stays_intact_while_another_block_is_reused_beyond_descriptor_laps` (`:2110`) | unaudited |
-| `descriptor_consumption_frees_a_slot_while_the_payload_stays_held` (`:2145`) | unaudited |
-| `every_class_backpressures_without_spill_and_returns_wake_capacity` (`:2179`) | unaudited |
-| `abort_underfill_and_short_commit_conserve_blocks_and_records` (`:2208`) | unaudited |
-| `zero_body_class_boundaries_maximum_and_maximum_plus_one_have_explicit_outcomes` (`:2243`) | unaudited |
-| `reserved_inventories_progress_when_ordinary_descriptors_are_exhausted` (`:2285`) | unaudited |
-| `forged_descriptors_quarantine_before_exposing_bytes` (`:2335`) | unaudited |
-| `stale_returns_free_nothing_and_future_completions_quarantine` (`:2413`) | unaudited |
-| `retirement_at_a_counter_boundary_preserves_live_leases` (`:2441`) | unaudited |
-| `owned_lease_outlives_both_endpoint_handles_and_returns_once` (`:2473`) | unaudited |
-| `worker_final_drop_wakes_a_capacity_parked_producer_without_incoming_data` (`:2497`) | unaudited |
-| `descriptor_consumption_alone_wakes_a_descriptor_parked_producer` (`:2537`) | unaudited |
-| `wake_failure_after_publication_quarantines_but_leaves_the_frame_published` (`:2579`) | unaudited |
-| `attach_rejects_eventfd_and_datagram_doorbells_and_a_second_producer` (`:2612`) | unaudited |
-| `attach_sets_close_on_exec_on_every_descriptor` (`:2679`) | unaudited |
-| `grant_round_trips_and_rejects_every_malformation` (`:2699`) | unaudited |
-| `attachment_can_be_handed_to_another_thread_and_the_ring_cannot` (`:2738`) | unaudited |
-| `quarantine_rejects_operations_and_survives_the_peer_clearing_the_flag` (`:2755`) | unaudited |
-| `peer_closing_its_doorbell_quarantines_the_waiting_side` (`:2782`) | unaudited |
-| `forbidden_operation_observers_stay_unreached_across_a_saturated_drop_storm` (`:2794`) | unaudited |
+| `every_page_accessor_reads_the_initialized_zero_state` (`:1923`) | unaudited |
+| `slot_and_cell_indexes_past_their_regions_are_refused_before_any_dereference` (`:1978`) | unaudited |
+| `descriptor_snapshot_is_copied_out_field_by_field_and_validated` (`:1998`) | unaudited |
+| `completion_cell_publication_is_monotonic` (`:2025`) | unaudited |
+| `lifecycle_snapshot_sees_a_write_made_through_the_raw_page` (`:2036`) | unaudited |
+| `held_payload_stays_intact_while_another_block_is_reused_beyond_descriptor_laps` (`:2138`) | unaudited |
+| `descriptor_consumption_frees_a_slot_while_the_payload_stays_held` (`:2173`) | unaudited |
+| `every_class_backpressures_without_spill_and_returns_wake_capacity` (`:2207`) | unaudited |
+| `abort_underfill_and_short_commit_conserve_blocks_and_records` (`:2236`) | unaudited |
+| `zero_body_class_boundaries_maximum_and_maximum_plus_one_have_explicit_outcomes` (`:2271`) | unaudited |
+| `reserved_inventories_progress_when_ordinary_descriptors_are_exhausted` (`:2313`) | unaudited |
+| `forged_descriptors_quarantine_before_exposing_bytes` (`:2363`) | unaudited |
+| `stale_returns_free_nothing_and_future_completions_quarantine` (`:2441`) | unaudited |
+| `retirement_at_a_counter_boundary_preserves_live_leases` (`:2469`) | unaudited |
+| `owned_lease_outlives_both_endpoint_handles_and_returns_once` (`:2501`) | unaudited |
+| `worker_final_drop_wakes_a_capacity_parked_producer_without_incoming_data` (`:2525`) | unaudited |
+| `descriptor_consumption_alone_wakes_a_descriptor_parked_producer` (`:2565`) | unaudited |
+| `wake_failure_after_publication_quarantines_but_leaves_the_frame_published` (`:2607`) | unaudited |
+| `attach_rejects_eventfd_and_datagram_doorbells_and_a_second_producer` (`:2640`) | unaudited |
+| `attach_sets_close_on_exec_on_every_descriptor` (`:2707`) | unaudited |
+| `grant_round_trips_and_rejects_every_malformation` (`:2727`) | unaudited |
+| `attachment_can_be_handed_to_another_thread_and_the_ring_cannot` (`:2766`) | unaudited |
+| `quarantine_rejects_operations_and_survives_the_peer_clearing_the_flag` (`:2783`) | unaudited |
+| `peer_closing_its_doorbell_quarantines_the_waiting_side` (`:2810`) | unaudited |
+| `forbidden_operation_observers_stay_unreached_across_a_saturated_drop_storm` (`:2822`) | unaudited |
 
 ## `crates/shm-transport/src/lease.rs` - 10 tests (Lease and copy tests (Miri))
 
@@ -107,31 +107,90 @@ An existing check does not remove a property from the catalog; each entry is
 | `every_decoder_corpus_replays_without_panic` (`:78`) | unaudited |
 | `golden_grant_fixture_matches_the_frozen_pool_profile_encoding` (`:92`) | unaudited |
 
-## `crates/host-runtime/src/ring_transport.rs` - 21 tests (Host transport tests)
+## `crates/host-runtime/src/ring_transport.rs` - 29 tests (Host transport tests)
 
 | Test | Status |
 | --- | --- |
-| `process_limits_reject_counts_above_the_resident_byte_ceiling` (`:1092`) | unaudited |
-| `shared_memory_workers_have_no_periodic_polling` (`:1120`) | unaudited |
-| `finish_wakes_after_read_cancellation_with_unread_peer_data` (`:1130`) | unaudited |
-| `construction_has_no_ring_side_effects` (`:1172`) | unaudited |
-| `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts` (`:1180`) | unaudited |
-| `grant_hex_is_strict_lowercase_ascii_without_panics` (`:1229`) | unaudited |
-| `inbound_materialization_cannot_exceed_its_byte_budget` (`:1238`) | unaudited |
-| `control_frame_body_is_copied_out_of_the_ring` (`:1281`) | unaudited |
-| `budget_wait_observes_read_cancellation_without_retiring` (`:1337`) | unaudited |
-| `budget_wait_observes_discard_without_retiring` (`:1391`) | unaudited |
-| `read_cancellation_drains_frames_committed_before_it` (`:1441`) | unaudited |
-| `cancellation_reports_after_one_ring_depth_under_sustained_inbound` (`:1504`) | unaudited |
-| `root_cancellation_is_observed_under_sustained_inbound` (`:1572`) | unaudited |
-| `root_cancellation_is_observed_while_the_inbound_queue_is_full` (`:1639`) | unaudited |
-| `transport_fault_is_reported_while_the_inbound_queue_is_full` (`:1687`) | unaudited |
-| `endpoint_panic_is_reported_while_the_inbound_queue_is_full` (`:1732`) | unaudited |
-| `peer_close_refunds_admission_although_the_backend_quarantines_the_ring` (`:1797`) | unaudited |
-| `root_cancellation_ends_a_budget_wait` (`:1858`) | unaudited |
-| `a_commit_past_the_write_deadline_is_refused` (`:1904`) | unaudited |
-| `a_client_send_past_its_frame_deadline_publishes_nothing` (`:1936`) | unaudited |
-| `quarantined_ring_moves_its_charges_to_the_quarantined_bucket` (`:1967`) | unaudited |
+| `process_limits_reject_counts_above_the_resident_byte_ceiling` (`:1509`) | unaudited |
+| `shared_memory_workers_have_no_periodic_polling` (`:1537`) | unaudited |
+| `finish_wakes_after_read_cancellation_with_unread_peer_data` (`:1547`) | unaudited |
+| `construction_has_no_ring_side_effects` (`:1589`) | unaudited |
+| `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts` (`:1597`) | unaudited |
+| `grant_hex_is_strict_lowercase_ascii_without_panics` (`:1646`) | unaudited |
+| `inbound_materialization_cannot_exceed_its_byte_budget` (`:1655`) | unaudited |
+| `control_frame_body_is_copied_out_of_the_ring` (`:1698`) | unaudited |
+| `budget_wait_observes_read_cancellation_without_retiring` (`:1754`) | unaudited |
+| `budget_wait_observes_discard_without_retiring` (`:1809`) | unaudited |
+| `read_cancellation_drains_frames_committed_before_it` (`:1860`) | unaudited |
+| `cancellation_reports_after_one_ring_depth_under_sustained_inbound` (`:1923`) | unaudited |
+| `root_cancellation_is_observed_under_sustained_inbound` (`:1991`) | unaudited |
+| `root_cancellation_is_observed_while_the_inbound_queue_is_full` (`:2058`) | unaudited |
+| `transport_fault_is_reported_while_the_inbound_queue_is_full` (`:2106`) | unaudited |
+| `endpoint_panic_is_reported_while_the_inbound_queue_is_full` (`:2151`) | unaudited |
+| `peer_close_refunds_admission_although_the_backend_quarantines_the_ring` (`:2217`) | unaudited |
+| `root_cancellation_ends_a_budget_wait` (`:2278`) | unaudited |
+| `a_commit_past_the_write_deadline_is_refused` (`:2324`) | unaudited |
+| `a_client_send_past_its_frame_deadline_publishes_nothing` (`:2360`) | unaudited |
+| `quarantined_ring_moves_its_charges_to_the_quarantined_bucket` (`:2391`) | unaudited |
+| `eligible_controls_and_unrelated_terminals_publish_past_a_blocked_ordinary_ticket` (`:2485`) | unaudited |
+| `an_unreserved_direct_serializer_never_runs_and_a_reserved_one_runs_once` (`:2545`) | unaudited |
+| `a_terminal_credit_returns_with_its_block_not_with_settlement` (`:2597`) | unaudited |
+| `a_pending_ticket_past_its_deadline_retires_instead_of_waiting` (`:2629`) | unaudited |
+| `inventory_classification_reserves_controls_and_small_terminals_only` (`:2642`) | unaudited |
+| `barrier_held_copy_returns_block_and_charge_once_after_physical_completion` (`:2689`) | unaudited |
+| `refusals_are_counted_by_exhausted_resource_and_charge_nothing` (`:2810`) | unaudited |
+| `return_snapshot_separates_outstanding_leases_from_released_backing` (`:2856`) | unaudited |
+
+## `crates/host-runtime/tests/dispatch.rs` - 29 tests (Host dispatch tests)
+
+| Test | Status |
+| --- | --- |
+| `a_unary_request_dispatches_once_with_one_matching_terminal` (`:23`) | unaudited |
+| `an_application_error_is_a_terminal_for_its_correlation_only` (`:57`) | unaudited |
+| `streams_are_ordered_and_end_with_exactly_one_terminal` (`:106`) | unaudited |
+| `correlation_namespaces_are_per_generation_and_strictly_increasing` (`:155`) | unaudited |
+| `a_non_increasing_correlation_closes_the_generation_before_dispatch` (`:210`) | unaudited |
+| `an_unknown_route_is_refused_with_zero_dispatch` (`:270`) | unaudited |
+| `saturated_request_capacity_returns_server_busy_without_dispatch` (`:294`) | unaudited |
+| `cancel_and_completion_settle_exactly_once` (`:357`) | unaudited |
+| `simultaneous_cancel_and_completion_still_emit_one_terminal` (`:452`) | unaudited |
+| `cancelling_a_stream_stops_it_with_one_terminal` (`:503`) | unaudited |
+| `a_handler_panic_maps_to_one_redacted_internal_error` (`:551`) | unaudited |
+| `handler_panic_payload_is_redacted_from_process_stderr` (`:603`) | unaudited |
+| `blocking_work_panic_payload_is_redacted_from_process_stderr` (`:610`) | unaudited |
+| `panic_redaction_subprocess_child` (`:643`) | unaudited |
+| `cancel_waits_for_the_request_blocking_work` (`:725`) | unaudited |
+| `route_close_waits_for_the_request_blocking_work` (`:781`) | unaudited |
+| `route_close_waits_for_blocking_work_the_handler_did_not_await` (`:830`) | unaudited |
+| `a_blocking_work_panic_settles_as_one_internal_error` (`:872`) | unaudited |
+| `oversized_handler_output_cannot_corrupt_framing` (`:909`) | unaudited |
+| `concurrent_handler_output_is_reserved_before_allocation` (`:956`) | unaudited |
+| `egress_budget_deadline_retires_the_generation` (`:1032`) | unaudited |
+| `closing_a_route_settles_its_admitted_work` (`:1079`) | unaudited |
+| `concurrent_requests_never_interleave_frame_bytes` (`:1137`) | unaudited |
+| `saturated_model_execution_reserve_cannot_consume_a_general_slot` (`:1216`) | unaudited |
+| `saturated_general_capacity_cannot_consume_the_model_execution_reserve` (`:1338`) | unaudited |
+| `work_offered_while_the_route_drains_is_joined_or_refused` (`:1434`) | unaudited |
+| `detached_blocking_work_observes_route_cancellation` (`:1496`) | unaudited |
+| `held_blocking_work_retains_handler_and_instance_after_fatal_close` (`:1526`) | unaudited |
+| `terminal_credits_bound_admission_and_return_with_the_settled_block` (`:1571`) | unaudited |
+
+## `crates/host-runtime/src/config.rs` - 12 tests (Host limits tests)
+
+| Test | Status |
+| --- | --- |
+| `defaults_validate` (`:514`) | unaudited |
+| `noncanonical_payload_digests_are_rejected` (`:519`) | unaudited |
+| `zero_limits_rejected` (`:549`) | unaudited |
+| `the_resident_cap_splits_into_three_non_overlapping_pools` (`:561`) | unaudited |
+| `byte_budget_below_interop_minimum_rejected` (`:586`) | unaudited |
+| `aggregate_overflow_is_rejected_before_activation` (`:613`) | unaudited |
+| `oversize_byte_budget_rejected` (`:636`) | unaudited |
+| `constructor_capacity_bounds_are_validated` (`:648`) | unaudited |
+| `daemon_version_boundary_keeps_auth_and_discovery_readable` (`:675`) | unaudited |
+| `daemon_version_must_carry_the_published_prefix` (`:709`) | unaudited |
+| `zero_durations_rejected` (`:738`) | unaudited |
+| `overflowing_durations_rejected` (`:748`) | unaudited |
 
 ## Native and TypeScript
 
@@ -144,7 +203,8 @@ An existing check does not remove a property from the catalog; each entry is
 ## Suspiciously quiet areas
 
 - No test injects a detach or reference-deletion failure (F7); #550.
-- No test holds copy work under `Cancel` (F9); #548.
-- No test exercises publisher selection under exhaustion (F10); #548, #552, #550.
+- No test exercises client publisher selection under exhaustion (F10); #552, #550.
+- No test injects a failure between descriptor duplication and grant transfer;
+  the last implementation task's combined matrix.
 - No test runs the two-process exchange under Valgrind; the memcheck runner
   cannot trace the child, so those witnesses run unrunnered in a separate job.

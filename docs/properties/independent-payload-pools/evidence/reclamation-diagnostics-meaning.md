@@ -11,9 +11,10 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/backend/retained.rs:344`
-- `crates/host-runtime/src/ring_transport.rs:275`
+- `crates/host-runtime/src/ring_transport.rs:229`
+- `crates/host-runtime/src/ring_transport.rs:359`
 
-Witness status: partial - the transport exposes `outstanding_returns` (`crates/shm-transport/src/backend/retained.rs:440`) and `PoolInventory` (`crates/shm-transport/src/backend/ring.rs:515`); the host's `reclamation.completed` counter still counts generation ends (`crates/host-runtime/src/ring_transport.rs:261`).
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2856` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:229`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
 
 ## Failure scenario
 
@@ -39,7 +40,7 @@ Check semantics: `always` - `outstanding_returns` counts live leases exactly, an
 
 - Sources examined: the files listed under the evidence trail, the test names
   in `Exercised`, and the CI workflow where the record is a gate property.
-- Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
+- Findings: yes at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #548.
-- Conclusion: unresolved, needs the named handoff.
+- Missing evidence: none for this task
+- Conclusion: resolved with answer.

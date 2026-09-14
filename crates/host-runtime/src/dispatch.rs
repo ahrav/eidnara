@@ -15,7 +15,7 @@ use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
 use crate::connection::{GenerationCore, PendingEntry, PendingKey};
 use crate::control::{CODE_CANCELLED, CODE_INTERNAL_ERROR, CODE_SERVER_BUSY, CODE_UNKNOWN_CHANNEL};
-use crate::frame_channel::{DirectFrame, OutboundFrame, OwnedInboundFrame};
+use crate::frame_channel::{DirectFrame, InboundFrame, OutboundFrame};
 use crate::handler::{
     HostHandler, OutputBuffer, OutputParts, RequestCtx, RequestOutcome, RouteHandle, StreamClosed,
 };
@@ -35,15 +35,28 @@ pub struct Settlement {
     /// A streamed response may terminate only with `StreamEnd` or `Error` (protocol §8.3).
     /// later unary `Response` from the handler is a contract violation.
     streamed: AtomicBool,
+    /// The request's terminal credit. It moves onto the terminal frame at settlement and from
+    /// there onto the frame's block, where the endpoint releases it at the physical return; a
+    /// settlement that emits nothing drops it here.
+    credit: std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 impl Settlement {
-    pub fn new() -> Arc<Self> {
+    /// A settlement carrying the admitted request's terminal credit.
+    pub fn with_credit(credit: Option<tokio::sync::OwnedSemaphorePermit>) -> Arc<Self> {
         Arc::new(Self {
             won: AtomicBool::new(false),
             order: tokio::sync::Mutex::new(()),
             streamed: AtomicBool::new(false),
+            credit: std::sync::Mutex::new(credit),
         })
+    }
+
+    fn take_credit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.credit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     pub fn is_settled(&self) -> bool {
@@ -234,6 +247,23 @@ pub async fn emit_frame(
     emit_frame_with_written(budget, generation, ty, flags, id, body, None, deadline).await
 }
 
+/// `emit_frame` for a terminal that carries the request's credit to its block.
+async fn emit_frame_with_credit(
+    budget: &crate::wire::ByteBudget,
+    generation: &GenerationCore,
+    ty: FrameType,
+    flags: Flags,
+    id: FrameId,
+    body: Vec<u8>,
+    credit: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<(), ()> {
+    let deadline = generation.writer.admission_deadline();
+    emit_frame_inner(
+        budget, generation, ty, flags, id, body, None, deadline, credit,
+    )
+    .await
+}
+
 /// `deadline` bounds charging, enqueueing, and write completion in one admission window.
 #[allow(clippy::too_many_arguments)]
 async fn emit_frame_with_written(
@@ -245,6 +275,24 @@ async fn emit_frame_with_written(
     body: Vec<u8>,
     written: Option<Box<dyn FnOnce(Instant) + Send>>,
     deadline: Instant,
+) -> Result<(), ()> {
+    emit_frame_inner(
+        budget, generation, ty, flags, id, body, written, deadline, None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn emit_frame_inner(
+    budget: &crate::wire::ByteBudget,
+    generation: &GenerationCore,
+    ty: FrameType,
+    flags: Flags,
+    id: FrameId,
+    body: Vec<u8>,
+    written: Option<Box<dyn FnOnce(Instant) + Send>>,
+    deadline: Instant,
+    credit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Result<(), ()> {
     if body.len() > crate::wire::MAX_BODY_LEN as usize
         || generation.writer.is_retired()
@@ -270,6 +318,7 @@ async fn emit_frame_with_written(
                 direct: None,
                 charge,
                 written,
+                credit,
             },
             deadline,
         )
@@ -286,6 +335,7 @@ async fn emit_reserved_frame(
     id: FrameId,
     body: OutputBuffer,
     deadline: Instant,
+    credit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Result<(), ()> {
     if generation.writer.is_retired() || generation.token.is_cancelled() {
         return Err(());
@@ -324,6 +374,7 @@ async fn emit_reserved_frame(
                 direct,
                 charge,
                 written: None,
+                credit,
             },
             deadline,
         )
@@ -351,6 +402,7 @@ pub async fn emit_error_terminal(
         id,
         body,
         deadline,
+        None,
     )
     .await
     .is_err()
@@ -374,6 +426,8 @@ pub async fn settle(
     if settlement.won.swap(true, Ordering::SeqCst) {
         return false;
     }
+    // The credit rides the terminal frame to its block and returns with the block.
+    let credit = settlement.take_credit();
     let (ty, flags, body) = match terminal {
         Terminal::Response { body, binary } => {
             // `settlement.order` serializes stream emission, so `has_streamed()` must be checked while holding it.
@@ -398,6 +452,7 @@ pub async fn settle(
                     FrameId::routed(route, corr),
                     error_body,
                     deadline,
+                    credit,
                 )
                 .await
                 .is_err()
@@ -413,6 +468,7 @@ pub async fn settle(
                 FrameId::routed(route, corr),
                 body,
                 generation.writer.admission_deadline(),
+                credit,
             )
             .await
             .is_err()
@@ -439,6 +495,7 @@ pub async fn settle(
                 FrameId::routed(route, corr),
                 body,
                 deadline,
+                credit,
             )
             .await
             .is_err()
@@ -453,13 +510,14 @@ pub async fn settle(
             Vec::new(),
         ),
     };
-    if emit_frame(
+    if emit_frame_with_credit(
         budget,
         generation,
         ty,
         flags,
         FrameId::routed(route, corr),
         body,
+        credit,
     )
     .await
     .is_err()
@@ -571,6 +629,7 @@ impl StreamSink {
                 FrameId::routed(self.route, self.corr),
                 item,
                 self.generation.writer.admission_deadline(),
+                None,
             ) => match result {
                 Ok(()) => {
                     self.settlement.streamed.store(true, Ordering::SeqCst);
@@ -596,7 +655,8 @@ pub async fn emit_rejection<H: HostHandler>(
             let gen_task = Arc::clone(generation);
             shared.spawn_tracked(generation.read_tasks.track_future(async move {
                 let _reject_permit = reject_permit;
-                emit_error_terminal(&shared_task.egress_budget, &gen_task, id, code, message).await;
+                emit_error_terminal(&shared_task.terminal_budget, &gen_task, id, code, message)
+                    .await;
             }));
         }
         Err(_) => {
@@ -720,6 +780,7 @@ pub async fn handle_host_shutdown<H: HostHandler>(
                         commit.acknowledge();
                     }
                 })),
+                credit: None,
             },
             deadline,
         )
@@ -753,7 +814,7 @@ pub(crate) async fn emit_authoritative_rejection<H: HostHandler>(
     message: &'static str,
 ) {
     let Ok((body, deadline)) =
-        charged_error_body(&shared.egress_budget, generation, code, message, None).await
+        charged_error_body(&shared.terminal_budget, generation, code, message, None).await
     else {
         return;
     };
@@ -773,6 +834,7 @@ pub(crate) async fn emit_authoritative_rejection<H: HostHandler>(
                 direct: None,
                 charge,
                 written: None,
+                credit: None,
             },
             deadline,
         )
@@ -784,7 +846,7 @@ pub(crate) async fn emit_authoritative_rejection<H: HostHandler>(
 pub async fn dispatch_request<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     generation: &Arc<GenerationCore>,
-    frame: OwnedInboundFrame,
+    frame: InboundFrame,
 ) {
     let header = frame.header;
     let route = RouteHandle {
@@ -829,6 +891,22 @@ pub async fn dispatch_request<H: HostHandler>(
         ),
     };
 
+    // One terminal credit per admitted request, taken before any pending or task permit: the
+    // credit reserves the terminal's delivery storage and returns only when that block does, so
+    // a connection cannot admit more requests than its reserved terminal inventory can settle.
+    let Ok(terminal_credit) = generation.terminal_credits.clone().try_acquire_owned() else {
+        drop(frame);
+        emit_rejection(
+            shared,
+            generation,
+            FrameId::routed(route, corr),
+            CODE_SERVER_BUSY,
+            "terminal capacity exhausted",
+        )
+        .await;
+        return;
+    };
+
     // Admission acquires permits synchronously with the read loop to prevent clients from queueing unbounded dispatch tasks ahead of the capacity gate.
     let Ok(pending_permit) = pending_pool.clone().try_acquire_owned() else {
         drop(frame);
@@ -856,7 +934,7 @@ pub async fn dispatch_request<H: HostHandler>(
     };
 
     // The pending entry is visible before the read loop processes later frames, so a pipelined `Cancel` finds the correlation.
-    let settlement = Settlement::new();
+    let settlement = Settlement::with_credit(Some(terminal_credit));
     let key: PendingKey = (route.channel, route.epoch, corr);
     generation.pending.lock().expect("pending lock").insert(
         key,
@@ -880,15 +958,12 @@ pub async fn dispatch_request<H: HostHandler>(
             return;
         }
 
-        let OwnedInboundFrame {
-            body,
-            charge: body_charge,
-            ..
-        } = frame;
         if cancel.is_cancelled() {
+            // The lease returns with `frame` before any copy; nothing private was reserved.
+            drop(frame);
             settle(
                 &settlement,
-                &shared_task.egress_budget,
+                &shared_task.terminal_budget,
                 &gen_task,
                 route,
                 corr,
@@ -900,6 +975,60 @@ pub async fn dispatch_request<H: HostHandler>(
         }
 
         let binary = header.flags.is_binary();
+        // Blocking work belongs to request, route, and host trackers.
+        // Cancellation waits for request work after the handler task ends.
+        // Route close also covers work submitted by a surviving task.
+        // The host tracker retains work when forced shutdown aborts dispatch.
+        let request_work = TaskTracker::new();
+        let ledgers = crate::handler::WorkLedgers {
+            request: request_work.clone(),
+            route: handler_fence.clone(),
+            host: shared_task.tracker.clone(),
+        };
+        // The private copy is request-scoped blocking work: cancellation and route close join
+        // it, so the transport block cannot be returned or its charge refunded while the copy is
+        // still reading. The lease is released inside `into_private`, before any storage or
+        // response work, and a copied length that disagrees with the header is a structural
+        // fault that ends the generation.
+        let copied = ledgers.run_blocking(move || frame.into_private()).await;
+        let private = match copied {
+            Ok(Ok(private)) => private,
+            Ok(Err(_)) => {
+                gen_task.token.cancel();
+                gen_task.writer.discard();
+                remove_pending(&gen_task, key);
+                return;
+            }
+            Err(_) => {
+                // The route closed or the runtime stopped before the copy could run; the lease
+                // returned with the dropped work and no private bytes exist.
+                settle(
+                    &settlement,
+                    &shared_task.terminal_budget,
+                    &gen_task,
+                    route,
+                    corr,
+                    cancelled_terminal(),
+                )
+                .await;
+                remove_pending(&gen_task, key);
+                return;
+            }
+        };
+        if cancel.is_cancelled() {
+            drop(private);
+            settle(
+                &settlement,
+                &shared_task.terminal_budget,
+                &gen_task,
+                route,
+                corr,
+                cancelled_terminal(),
+            )
+            .await;
+            remove_pending(&gen_task, key);
+            return;
+        }
         let sink = StreamSink {
             settlement: Arc::clone(&settlement),
             generation: Arc::clone(&gen_task),
@@ -908,27 +1037,18 @@ pub async fn dispatch_request<H: HostHandler>(
             corr,
             cancel: cancel.clone(),
         };
-        // Blocking work belongs to request, route, and host trackers.
-        // Cancellation waits for request work after the handler task ends.
-        // Route close also covers work submitted by a surviving task.
-        // The host tracker retains work when forced shutdown aborts dispatch.
-        let request_work = TaskTracker::new();
         let ctx = RequestCtx {
             route,
             // A handler that moves the body into a background task retains ingress accounting in that task.
             body: crate::handler::InputBuffer {
-                body,
-                _charge: body_charge,
+                body: private.body,
+                _charge: private.charge,
             },
             binary,
             cancel: cancel.clone(),
             stream: sink,
             scratch: shared_task.scratch_budget.clone(),
-            work: crate::handler::WorkLedgers {
-                request: request_work.clone(),
-                route: handler_fence.clone(),
-                host: shared_task.tracker.clone(),
-            },
+            work: ledgers,
         };
         let handler = Arc::clone(&shared_task.handler);
         let inner = shared_task.spawn_tracked(handler_fence.track_future(async move {
@@ -951,7 +1071,7 @@ pub async fn dispatch_request<H: HostHandler>(
                 request_work.wait().await;
                 settle(
                     &settlement,
-                    &shared_task.egress_budget,
+                    &shared_task.terminal_budget,
                     &gen_task,
                     route,
                     corr,
@@ -998,7 +1118,7 @@ pub async fn dispatch_request<H: HostHandler>(
                         return;
                     }
                 };
-                settle(&settlement, &shared_task.egress_budget, &gen_task, route, corr, terminal).await;
+                settle(&settlement, &shared_task.terminal_budget, &gen_task, route, corr, terminal).await;
             }
         }
         remove_pending(&gen_task, key);
@@ -1071,7 +1191,7 @@ pub async fn open_route<H: HostHandler>(
 ) {
     if shared.draining.load(Ordering::SeqCst) || shared.shutdown.is_cancelled() {
         emit_error_terminal(
-            &shared.egress_budget,
+            &shared.terminal_budget,
             &generation,
             FrameId::control(corr),
             crate::control::CODE_TARGET_UNAVAILABLE,
@@ -1086,7 +1206,7 @@ pub async fn open_route<H: HostHandler>(
         .expect("validated route.open target is indexed");
     let Some(handle) = shared.registry.reserve(&generation, class) else {
         emit_error_terminal(
-            &shared.egress_budget,
+            &shared.terminal_budget,
             &generation,
             FrameId::control(corr),
             crate::control::CODE_TARGET_UNAVAILABLE,
@@ -1173,7 +1293,7 @@ pub async fn open_route<H: HostHandler>(
                 code
             };
             emit_error_terminal(
-                &shared.egress_budget,
+                &shared.terminal_budget,
                 &generation,
                 FrameId::control(corr),
                 &code,
@@ -1296,7 +1416,7 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
                         }
                         settle(
                             settlement,
-                            &shared.egress_budget,
+                            &shared.terminal_budget,
                             &generation,
                             handle,
                             key.2,
@@ -1399,6 +1519,7 @@ pub async fn send_connection_goodbye(
                 written: Some(Box::new(move |_| {
                     let _ = written.send(());
                 })),
+                credit: None,
             },
             deadline,
         )
@@ -1442,6 +1563,31 @@ mod tests {
                 None => assert!(parsed.get("retry_after_ms").is_none()),
             }
         }
+    }
+
+    #[test]
+    fn terminal_frame_bytes_match_the_serializer() {
+        use crate::config::TERMINAL_FRAME_BYTES;
+        use crate::wire::HEADER_LEN;
+        // Every byte a control character: the widest JSON escape the serializer emits.
+        let code = "\u{1}".repeat(super::MAX_TERMINAL_CODE_LEN);
+        let message = "\u{1}".repeat(super::MAX_TERMINAL_MESSAGE_LEN);
+        let body = error_body_json_into(Vec::new(), &code, &message, Some(u64::MAX));
+        assert_eq!(body.len(), error_body_len(&code, &message, Some(u64::MAX)));
+        assert_eq!(
+            (body.len() + HEADER_LEN) as u64,
+            TERMINAL_FRAME_BYTES,
+            "the reserved terminal slice is exactly the serializer's worst case"
+        );
+        let terminal_block_body_capacity = crate::ring_transport::ring_profile()
+            .geometry()
+            .class(shm_transport::pool::BlockClass::Terminal)
+            .body_capacity();
+        assert!(
+            TERMINAL_FRAME_BYTES <= terminal_block_body_capacity,
+            "terminal frame {TERMINAL_FRAME_BYTES} must fit a terminal block body of \
+             {terminal_block_body_capacity}"
+        );
     }
 
     #[test]

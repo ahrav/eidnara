@@ -1241,20 +1241,37 @@ async fn saturated_model_execution_reserve_cannot_consume_a_general_slot() {
         .await
         .expect("context binds");
 
-    // Hanging handler tasks hold all 96 reserved pending-request and task permits.
-    for _ in 0..96 {
-        let corr = client.next_corr();
-        client
-            .send_frame(
-                TY_REQUEST,
-                FLAGS_INTERACTIVE,
-                br_channel,
-                br_epoch,
-                corr,
-                &mode_body(serde_json::json!({"mode": "hang"})),
-            )
-            .await
-            .expect("send reserved hang");
+    // Hanging handler tasks hold all 96 reserved pending-request and task permits. One
+    // connection may hold at most 63 admitted terminal obligations, so the hangs are split
+    // across two connections, each keeping credits free for the requests below.
+    let mut second = host.client().await;
+    let (second_channel, second_epoch) = second
+        .route_open_target(
+            "management_surface",
+            "model_execution",
+            ROOT,
+            "opencode",
+            "s2",
+        )
+        .await
+        .expect("model_execution binds on the second connection");
+    for index in 0..96 {
+        let (peer, channel, epoch) = if index % 2 == 0 {
+            (&mut client, br_channel, br_epoch)
+        } else {
+            (&mut second, second_channel, second_epoch)
+        };
+        let corr = peer.next_corr();
+        peer.send_frame(
+            TY_REQUEST,
+            FLAGS_INTERACTIVE,
+            channel,
+            epoch,
+            corr,
+            &mode_body(serde_json::json!({"mode": "hang"})),
+        )
+        .await
+        .expect("send reserved hang");
     }
     let deadline = tokio::time::Instant::now() + BUDGET;
     while model_execution.dispatch_count() < 96 {
@@ -1312,6 +1329,7 @@ async fn saturated_model_execution_reserve_cannot_consume_a_general_slot() {
     assert_eq!(frame.json()["served_by"], "context");
 
     drop(client);
+    drop(second);
     host.shutdown().await.expect("graceful shutdown");
 }
 
@@ -1543,4 +1561,127 @@ async fn held_blocking_work_retains_handler_and_instance_after_fatal_close() {
         handler.handler_dropped(),
         "released work must finish deferred cleanup"
     );
+}
+
+/// The terminal credit ceiling is per connection and independent of the pending-request limit:
+/// with 63 requests admitted and unsettled, the 64th is refused before dispatch even though
+/// pending slots remain. A settled terminal returns its credit only once the client has
+/// consumed the block, after which the next request dispatches again.
+#[tokio::test]
+async fn terminal_credits_bound_admission_and_return_with_the_settled_block() {
+    const CREDITS: usize = 63;
+    let host = TestHost::start_with(|config| {
+        config.limits.max_pending_requests = CREDITS + 8;
+    })
+    .await;
+    let mut client = host.client().await;
+    let (channel, epoch) = client
+        .route_open(LINKED_MODULE_ID, ROOT, "opencode", "credits")
+        .await
+        .expect("route");
+
+    let mut holding = Vec::with_capacity(CREDITS);
+    for _ in 0..CREDITS {
+        let corr = client.next_corr();
+        client
+            .send_frame(
+                TY_REQUEST,
+                FLAGS_INTERACTIVE,
+                channel,
+                epoch,
+                corr,
+                &mode_body(serde_json::json!({"mode": "hang"})),
+            )
+            .await
+            .expect("send holding");
+        holding.push(corr);
+    }
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    while host.handler.dispatch_count() < CREDITS {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "only {} of {CREDITS} holding requests dispatched",
+            host.handler.dispatch_count()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let rejected = client.next_corr();
+    client
+        .send_frame(
+            TY_REQUEST,
+            FLAGS_INTERACTIVE,
+            channel,
+            epoch,
+            rejected,
+            &support::echo_body("one too many"),
+        )
+        .await
+        .expect("send overflow");
+    let (skipped, frame) = client
+        .frames_until_corr(rejected, BUDGET)
+        .await
+        .expect("busy terminal");
+    assert!(skipped.is_empty(), "holding requests must not settle");
+    assert_eq!(frame.ty, TY_ERROR);
+    assert_eq!(frame.error_code(), "server_busy");
+    assert_eq!(
+        frame.json()["message"],
+        "terminal capacity exhausted",
+        "pending slots remain, so only the terminal credit ceiling can refuse this request"
+    );
+    assert_eq!(
+        host.handler.dispatch_count(),
+        CREDITS,
+        "a credit refusal must prove no handler dispatch"
+    );
+
+    // Settling one holding request frees its credit once the client consumes the terminal.
+    let released = holding[0];
+    client
+        .send_frame(TY_CANCEL, FLAGS_PURE_HEADER, channel, epoch, released, &[])
+        .await
+        .expect("cancel");
+    let (skipped, frame) = client
+        .frames_until_corr(released, BUDGET)
+        .await
+        .expect("cancelled terminal");
+    assert!(skipped.is_empty());
+    assert_eq!(frame.error_code(), "cancelled");
+
+    // The credit follows the block, not the settlement, so it returns once the host's ring
+    // reclaims the consumed terminal; admission is retried until that reclamation lands.
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    loop {
+        let corr = client.next_corr();
+        client
+            .send_frame(
+                TY_REQUEST,
+                FLAGS_INTERACTIVE,
+                channel,
+                epoch,
+                corr,
+                &support::echo_body("after release"),
+            )
+            .await
+            .expect("send after release");
+        let (skipped, frame) = client
+            .frames_until_corr(corr, BUDGET)
+            .await
+            .expect("terminal after release");
+        assert!(skipped.is_empty());
+        if frame.ty == TY_RESPONSE {
+            break;
+        }
+        assert_eq!(frame.error_code(), "server_busy");
+        assert_eq!(frame.json()["message"], "terminal capacity exhausted");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the released credit never returned"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(host.handler.dispatch_count(), CREDITS + 1);
+
+    host.shutdown_gracefully().await;
 }

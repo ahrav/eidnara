@@ -11,7 +11,7 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `packages/shm-native/src/lib.rs:409`
-- `packages/shm-native/src/lib.rs:1653`
+- `packages/shm-native/src/lib.rs:1650`
 
 Witness status: partial - `packages/shm-native/src/lib.rs:409` sweeps every alias and reports the first failure; `finish_close` retains alias-holding channels; mechanism tests in packages/shm-native/tests/mechanism.ts cover repeated release and close.
 

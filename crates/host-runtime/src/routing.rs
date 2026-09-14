@@ -482,6 +482,9 @@ mod tests {
             pending: Mutex::new(HashMap::new()),
             pings: Mutex::new(HashMap::new()),
             busy_rejects: Arc::new(tokio::sync::Semaphore::new(4)),
+            terminal_credits: Arc::new(tokio::sync::Semaphore::new(
+                crate::config::TERMINAL_CREDITS_PER_CONNECTION,
+            )),
             next_ping_corr: AtomicU64::new(1),
         })
     }

@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/host-runtime/src/handler.rs:606`
-- PR #518 `c70367615f7e391d7786395b58fb71b4a43bc47e`
+- `crates/host-runtime/src/handler.rs:617`
+- `crates/host-runtime/src/dispatch.rs:993`
 
-Witness status: not yet - the request-scoped copy/conversion seam over the owned lease is #548's implementation; the join owner from PR #518 exists in `crates/host-runtime/src/handler.rs` (`RequestCtx::run_blocking`).
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2689` holds a real copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once; `crates/host-runtime/tests/dispatch.rs:725` and `crates/host-runtime/tests/dispatch.rs:781` cover the same barrier end to end.
 
 ## Failure scenario
 
@@ -39,7 +39,7 @@ Check semantics: `always` - a lease moved into blocking work returns only after 
 
 - Sources examined: the files listed under the evidence trail, the test names
   in `Exercised`, and the CI workflow where the record is a gate property.
-- Findings: not yet at the tree of this catalog's introducing commit; see `Exercised` for what each
+- Findings: yes at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #548.
-- Conclusion: unresolved, needs the named handoff.
+- Missing evidence: none for this task
+- Conclusion: resolved with answer.

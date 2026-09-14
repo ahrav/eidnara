@@ -48,6 +48,7 @@ fn shared() -> Arc<HostShared<UnusedHandler>> {
         ingress_budget: ByteBudget::new(4096),
         scratch_budget: ByteBudget::new(4096),
         egress_budget: ByteBudget::new(4096),
+        terminal_budget: ByteBudget::new(1 << 20),
         pending_permits: Arc::new(Semaphore::new(4)),
         task_permits: Arc::new(Semaphore::new(4)),
         reserved_pending_permits: Arc::new(Semaphore::new(0)),
@@ -103,6 +104,9 @@ fn fixture() -> CloseFixture {
         pending: Mutex::new(HashMap::new()),
         pings: Mutex::new(HashMap::new()),
         busy_rejects: Arc::new(Semaphore::new(4)),
+        terminal_credits: Arc::new(tokio::sync::Semaphore::new(
+            crate::config::TERMINAL_CREDITS_PER_CONNECTION,
+        )),
         next_ping_corr: AtomicU64::new(1),
     });
     let route = shared
@@ -112,7 +116,7 @@ fn fixture() -> CloseFixture {
     shared.registry.install_bound(route);
     let (tracker, _, cancelled) = shared.registry.route_tracker(route, 1).unwrap();
     let key = (route.channel, route.epoch, 1);
-    let settlement = Settlement::new();
+    let settlement = Settlement::with_credit(None);
     generation.pending.lock().unwrap().insert(
         key,
         PendingEntry {

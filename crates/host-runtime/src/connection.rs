@@ -91,6 +91,11 @@ pub struct GenerationCore {
     pub pings: Mutex<HashMap<u64, PingProbe>>,
     /// This bound prevents a client that floods control frames past global capacity from creating unbounded `server_busy` rejection-emission tasks.
     pub busy_rejects: Arc<tokio::sync::Semaphore>,
+    /// One credit per admitted request, taken before dispatch and released only when the
+    /// terminal's transport block physically returns. Sized so admitted terminals can never
+    /// exceed the connection's reserved terminal inventory while one block stays free for a
+    /// pre-admission rejection.
+    pub terminal_credits: Arc<tokio::sync::Semaphore>,
     pub next_ping_corr: std::sync::atomic::AtomicU64,
 }
 
@@ -241,6 +246,10 @@ fn new_generation<H: HostHandler>(
         pending: Mutex::new(HashMap::new()),
         pings: Mutex::new(HashMap::new()),
         busy_rejects: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_BUSY_REJECTS)),
+        // A connection never holds more admitted terminals than the pending pool could grant it.
+        terminal_credits: Arc::new(tokio::sync::Semaphore::new(
+            crate::config::TERMINAL_CREDITS_PER_CONNECTION.min(shared.limits.max_pending_requests),
+        )),
         next_ping_corr: std::sync::atomic::AtomicU64::new(1),
     })
 }
@@ -404,13 +413,19 @@ async fn read_loop<H: HostHandler>(
                         }
                         watermark = header.corr;
                         if header.channel == 0 {
-                            let (corr, action) = decode_control_frame(frame, &shared.targets);
+                            // The transport bounded this body at `MAX_CONTROL_BODY_LEN`, so the
+                            // private copy is finite; a copy that disagrees with the header is
+                            // structural corruption and closes the generation.
+                            let Some((corr, action)) = decode_control_frame(frame, &shared.targets)
+                            else {
+                                return ReadExit::Peer;
+                            };
                             handle_control(shared, generation, corr, action).await;
                         } else {
                             if header.epoch == 0 {
                                 return ReadExit::Peer;
                             }
-                            dispatch_request(shared, generation, frame.into_owned()).await;
+                            dispatch_request(shared, generation, frame).await;
                         }
                     }
                     FrameType::Cancel => {
@@ -510,24 +525,21 @@ async fn read_loop<H: HostHandler>(
     }
 }
 
-/// Runs `decode` over the frame's body as one contiguous byte slice. A body
-/// that wraps the ring arena end flattens through the explicit copying adapter
-/// first. Only decoded values leave the lease scope.
-fn decode_contiguous<T>(
-    frame: &crate::frame_channel::InboundFrame,
-    decode: impl FnOnce(&[u8]) -> T,
-) -> T {
-    frame.with_lease(|lease| decode(lease.bytes()))
-}
-
+/// Copies a channel-0 body into private bytes and decodes it there. The transport lease is
+/// returned before the decoder runs, so a peer rewriting the block cannot change a message
+/// under the parser, and the control path never waits on application-input bytes. `None`
+/// means the copied body disagreed with its header.
 fn decode_control_frame(
     frame: crate::frame_channel::InboundFrame,
     targets: &crate::control::TargetIndex,
-) -> (u64, ControlAction) {
+) -> Option<(u64, ControlAction)> {
     let corr = frame.header.corr;
     let binary = frame.header.flags.is_binary();
-    let action = decode_contiguous(&frame, |body| parse_control(body, binary, targets));
-    (corr, action)
+    let private = frame.into_private().ok()?;
+    let action = parse_control(&private.body, binary, targets);
+    // The private bytes and their ingress charge end with the decode.
+    drop(private);
+    Some((corr, action))
 }
 
 async fn handle_control<H: HostHandler>(
@@ -620,10 +632,24 @@ async fn handle_control<H: HostHandler>(
                         .health_snapshot
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    crate::control::host_status_response_json(
-                        &report,
-                        shared_task.ring.diagnostics(),
-                    )
+                    let mut diagnostics = shared_task.ring.diagnostics();
+                    // The three ceilings and their checked sum, so an operator reads one
+                    // commitment figure instead of adding limits by hand. Overflow was refused
+                    // at configuration validation, so this cannot fail on a running host.
+                    if let (Ok(aggregate), serde_json::Value::Object(fields)) =
+                        (shared_task.limits.checked_aggregate(), &mut diagnostics)
+                    {
+                        fields.insert(
+                            "aggregate".to_owned(),
+                            serde_json::json!({
+                                "transport_bytes": aggregate.transport_bytes,
+                                "host_bytes": aggregate.host_bytes,
+                                "terminal_bytes": aggregate.terminal_bytes,
+                                "total": aggregate.total,
+                            }),
+                        );
+                    }
+                    crate::control::host_status_response_json(&report, diagnostics)
                 };
                 if emit_catalog_response(
                     &shared_task.egress_budget,
@@ -713,6 +739,7 @@ async fn reserve_catalog_frame(
         direct: None,
         charge,
         written: None,
+        credit: None,
     })
 }
 
@@ -802,6 +829,7 @@ async fn liveness_loop(
             direct: None,
             charge: crate::wire::ByteCharge::none(),
             written: Some(written_hook),
+            credit: None,
         });
         let sent = tokio::select! {
             biased;
@@ -896,6 +924,9 @@ mod tests {
             pending: Mutex::new(HashMap::new()),
             pings: Mutex::new(HashMap::new()),
             busy_rejects: Arc::new(tokio::sync::Semaphore::new(1)),
+            terminal_credits: Arc::new(tokio::sync::Semaphore::new(
+                crate::config::TERMINAL_CREDITS_PER_CONNECTION,
+            )),
             next_ping_corr: std::sync::atomic::AtomicU64::new(1),
         };
 
