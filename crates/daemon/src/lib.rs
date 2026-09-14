@@ -22820,8 +22820,10 @@ mod tests {
                 1,
                 "text with [brackets] and \\\"quotes\\\"",
             )]);
-            input["session_id"] =
-                json!(format!("{}deep", historian::HISTORIAN_CHILD_SESSION_PREFIX));
+            input["session_id"] = json!(format!(
+                "{}deep",
+                history_summarizer::HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX
+            ));
             input["messages"][0]["ck"]["provider_extras"] = json!({"p": {"v": nested}});
             let encoded = serde_json::to_vec(&input).unwrap();
             assert!(serde_json::from_slice::<Value>(&encoded).is_ok());
