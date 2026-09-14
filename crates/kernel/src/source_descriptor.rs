@@ -559,6 +559,7 @@ struct LiveDescriptorRaw {
     created_commit_seq: i64,
     payload: Vec<u8>,
     revision: i64,
+    source_id: String,
     invalidated_commit_seq: Option<i64>,
     observation_created: i64,
     observation_invalidated: Option<i64>,
@@ -587,7 +588,7 @@ impl KernelStore {
         crate::slice::snapshot_tip(&tx, requested)?;
         let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
         let sql = format!(
-            "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,
+            "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
                     o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest
              {rows}
                AND o.source_kind=?1 AND o.object_kind='observation'
@@ -616,11 +617,12 @@ impl KernelStore {
                         created_commit_seq: row.get(4)?,
                         payload: row.get(5)?,
                         revision: row.get(6)?,
-                        invalidated_commit_seq: row.get(7)?,
-                        observation_created: row.get(8)?,
-                        observation_invalidated: row.get(9)?,
-                        evidence_id: row.get(10)?,
-                        artifact_digest: row.get(11)?,
+                        source_id: row.get(7)?,
+                        invalidated_commit_seq: row.get(8)?,
+                        observation_created: row.get(9)?,
+                        observation_invalidated: row.get(10)?,
+                        evidence_id: row.get(11)?,
+                        artifact_digest: row.get(12)?,
                     })
                 },
             )
@@ -637,6 +639,7 @@ impl KernelStore {
                 if raw.created_commit_seq != raw.observation_created
                     || raw.invalidated_commit_seq != raw.observation_invalidated
                     || raw.sensitivity != raw.registry_sensitivity
+                    || detail.lineage_id != raw.source_id
                     || detail.evidence_id != raw.evidence_id
                     || detail.artifact_digest != raw.artifact_digest
                     || detail.class != class.code()

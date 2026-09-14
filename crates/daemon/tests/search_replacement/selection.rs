@@ -285,6 +285,7 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
         "UPDATE embedding_jobs SET attempts=1,episode_id='episode',episode_allowance=1,episode_deadline=9223372036854775807 WHERE state='pending'",
         "UPDATE embedding_jobs SET attempts=0,episode_id='episode',episode_allowance=1,episode_deadline=0 WHERE state='pending'",
         "UPDATE embedding_jobs SET attempts=1 WHERE state='pending'",
+        "UPDATE embedding_jobs SET episode_id='bogus',episode_allowance=1,episode_deadline=9223372036854775807 WHERE state='pending'",
         "UPDATE embedding_jobs SET job_id='wrong-job'",
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -1612,6 +1613,28 @@ fn evidence_binding_corruption_is_refused_on_reopen() {
         "UPDATE observations SET evidence_id=(SELECT min(evidence_id) FROM evidence_meta)
          WHERE object_id GLOB 'srcdesc:*'",
         [],
+    )
+    .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn registry_source_id_must_match_descriptor_lineage_on_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let raw = Connection::open(root.path().join("kernel/kernel.sqlite")).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER object_registry_append_only_update;
+         UPDATE object_registry SET source_id='other-lineage'
+         WHERE object_id GLOB 'srcdesc:*';",
     )
     .unwrap();
     assert!(
