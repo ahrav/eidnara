@@ -257,6 +257,37 @@ describe("edit recipe bounds", () => {
         expect(parsed).toMatchObject({ ok: false, rejection: { code: "malformed" } });
     });
 
+    it("stops container traversal before reading later children", () => {
+        let laterRead = false;
+        const values = new Proxy<unknown[]>([1n, null], {
+            get(target, property, receiver) {
+                if (property === "1") {
+                    laterRead = true;
+                    throw new Error("later child read");
+                }
+                return Reflect.get(target, property, receiver);
+            },
+            getOwnPropertyDescriptor(target, property) {
+                if (property === "1") {
+                    laterRead = true;
+                    throw new Error("later child inspected");
+                }
+                return Reflect.getOwnPropertyDescriptor(target, property);
+            },
+        });
+        expect(() =>
+            parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [{ op: "insert", values }],
+            }),
+        ).not.toThrow();
+        expect(laterRead).toBe(false);
+
+        expect(() => canonicalJsonLength(values)).toThrow();
+        expect(laterRead).toBe(false);
+    });
+
     it("rejects recipes outside serde_json's value domain", () => {
         const loneSurrogate = String.fromCharCode(0xd800);
         expect(

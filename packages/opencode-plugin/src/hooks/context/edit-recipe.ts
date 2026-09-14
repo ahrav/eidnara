@@ -66,6 +66,44 @@ export type RecipeApplication =
 const utf8 = new TextEncoder();
 const MAX_JSON_NESTING = 127;
 
+interface JsonChild {
+    key?: string;
+    value: unknown;
+}
+
+type JsonContainer = unknown[] | Record<string, unknown>;
+
+function* dataChildren(value: JsonContainer): Generator<JsonChild | RecipeRejection> {
+    if (Array.isArray(value)) {
+        for (let index = 0; index < value.length; index += 1) {
+            const property = Object.getOwnPropertyDescriptor(value, index);
+            if (!property || !("value" in property)) {
+                yield {
+                    code: "malformed",
+                    detail: `recipe array index ${index} is not a data property`,
+                };
+                return;
+            }
+            yield { value: property.value };
+        }
+        return;
+    }
+    const record = value as Record<string, unknown>;
+    for (const key in record) {
+        if (!Object.hasOwn(record, key)) continue;
+        if (!isWellFormed(key)) {
+            yield { code: "malformed", detail: "recipe contains an unpaired surrogate key" };
+            return;
+        }
+        const property = Object.getOwnPropertyDescriptor(record, key);
+        if (!property || !("value" in property)) {
+            yield { code: "malformed", detail: `recipe field ${key} is not a data property` };
+            return;
+        }
+        yield { key, value: property.value };
+    }
+}
+
 function isWellFormed(value: string): boolean {
     for (let index = 0; index < value.length; index += 1) {
         const unit = value.charCodeAt(index);
@@ -100,13 +138,25 @@ function parseRevision(value: unknown, field: string): string | RecipeRejection 
 }
 
 function validateJsonValue(value: unknown): RecipeRejection | undefined {
-    type Work = { value: unknown; depth: number; exit?: object };
-    const work: Work[] = [{ value, depth: 0 }];
+    type ValueWork = { value: unknown; depth: number };
+    type ChildrenWork = {
+        owner: JsonContainer;
+        depth: number;
+        children: Generator<JsonChild | RecipeRejection>;
+    };
+    const work: (ValueWork | ChildrenWork)[] = [{ value, depth: 0 }];
     const active = new WeakSet<object>();
     while (work.length > 0) {
-        const item = work.pop() as Work;
-        if (item.exit !== undefined) {
-            active.delete(item.exit);
+        const item = work.pop() as ValueWork | ChildrenWork;
+        if ("children" in item) {
+            const next = item.children.next();
+            if (next.done) {
+                active.delete(item.owner);
+                continue;
+            }
+            work.push(item);
+            if ("code" in next.value) return next.value;
+            work.push({ value: next.value.value, depth: item.depth + 1 });
             continue;
         }
         const current = item.value;
@@ -127,29 +177,9 @@ function validateJsonValue(value: unknown): RecipeRejection | undefined {
             return { code: "malformed", detail: "recipe exceeds the JSON nesting limit" };
         if (active.has(current))
             return { code: "malformed", detail: "recipe contains a cyclic value" };
-        active.add(current);
-        work.push({ value: null, depth: item.depth, exit: current });
-        if (Array.isArray(current)) {
-            for (let index = current.length - 1; index >= 0; index -= 1) {
-                const property = Object.getOwnPropertyDescriptor(current, index);
-                if (!property || !("value" in property))
-                    return {
-                        code: "malformed",
-                        detail: `recipe array index ${index} is not a data property`,
-                    };
-                work.push({ value: property.value, depth: item.depth + 1 });
-            }
-            continue;
-        }
-        const record = current as Record<string, unknown>;
-        for (const key of Object.keys(record)) {
-            if (!isWellFormed(key))
-                return { code: "malformed", detail: "recipe contains an unpaired surrogate key" };
-            const property = Object.getOwnPropertyDescriptor(record, key);
-            if (!property || !("value" in property))
-                return { code: "malformed", detail: `recipe field ${key} is not a data property` };
-            work.push({ value: property.value, depth: item.depth + 1 });
-        }
+        const container = current as JsonContainer;
+        active.add(container);
+        work.push({ owner: container, depth: item.depth, children: dataChildren(container) });
     }
     return undefined;
 }
@@ -274,24 +304,49 @@ export function parseRecipe(value: unknown): RecipeParse {
  * walker avoids canonical key sorting and does not recurse on the JavaScript stack.
  */
 export function canonicalJsonLength(value: unknown): number {
+    type ValueWork = { value: unknown };
+    type ChildrenWork = {
+        array: boolean;
+        entries: number;
+        children: Generator<JsonChild | RecipeRejection>;
+    };
     let bytes = 0;
-    const work: unknown[] = [value];
+    const work: (ValueWork | ChildrenWork)[] = [{ value }];
     while (work.length > 0) {
-        const current = work.pop();
+        const item = work.pop() as ValueWork | ChildrenWork;
+        if ("children" in item) {
+            const next = item.children.next();
+            if (next.done) continue;
+            if ("code" in next.value) throw new TypeError(next.value.detail);
+            if (item.array) {
+                work.push(item, {
+                    value: next.value.value === undefined ? null : next.value.value,
+                });
+                continue;
+            }
+            if (next.value.value === undefined) {
+                work.push(item);
+                continue;
+            }
+            bytes +=
+                (item.entries > 0 ? 1 : 0) + Buffer.byteLength(JSON.stringify(next.value.key)) + 1;
+            item.entries += 1;
+            work.push(item, { value: next.value.value });
+            continue;
+        }
+        const current = item.value;
         if (Array.isArray(current)) {
             bytes += 2 + Math.max(0, current.length - 1);
-            for (let index = current.length - 1; index >= 0; index -= 1)
-                work.push(current[index] === undefined ? null : current[index]);
+            work.push({ array: true, entries: 0, children: dataChildren(current) });
             continue;
         }
         if (current !== null && typeof current === "object") {
-            const record = current as Record<string, unknown>;
-            const keys = Object.keys(record).filter((key) => record[key] !== undefined);
-            bytes += 2 + Math.max(0, keys.length - 1);
-            for (const key of keys) {
-                bytes += Buffer.byteLength(JSON.stringify(key)) + 1;
-                work.push(record[key]);
-            }
+            bytes += 2;
+            work.push({
+                array: false,
+                entries: 0,
+                children: dataChildren(current as JsonContainer),
+            });
             continue;
         }
         bytes += Buffer.byteLength(serdeJsonCompact(current));
