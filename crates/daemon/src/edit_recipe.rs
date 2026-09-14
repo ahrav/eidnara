@@ -1242,6 +1242,80 @@ mod tests {
     }
 
     #[test]
+    fn builder_tests_at_most_max_confirm_probes_candidates_per_nomination() {
+        assert_eq!(MAX_CONFIRM_PROBES, 8);
+        // One key nominates MAX_CONFIRM_PROBES + 1 input positions; only the last equals the
+        // output. The scan stops after MAX_CONFIRM_PROBES candidates and emits a literal.
+        let bucket = MAX_CONFIRM_PROBES + 1;
+        let input = shared(
+            &(0..bucket)
+                .map(|n| json!({"id": 7, "n": n}))
+                .collect::<Vec<_>>(),
+        );
+        let output = shared(&[json!({"id": 7, "n": bucket - 1})]);
+        let base = revision("base");
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "insert", "values": [{"id": 7, "n": bucket - 1}]}])
+        );
+        // With exactly MAX_CONFIRM_PROBES candidates the last one is still tested and kept.
+        let recipe = build_recipe(
+            &keyed(&output[..]),
+            (&base, &keyed(&input[1..])),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "keep", "source": "input", "start": 7, "count": 1}])
+        );
+        // Spent positions do not count against the budget.
+        let output = shared(&[json!({"id": 7, "n": 1}), json!({"id": 7, "n": bucket - 1})]);
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([
+                {"op": "keep", "source": "input", "start": 1, "count": 1},
+                {"op": "keep", "source": "input", "start": bucket - 1, "count": 1},
+            ])
+        );
+    }
+
+    #[test]
+    fn builder_shares_confirm_probe_budget_across_sources() {
+        let previous = shared(
+            &(0..MAX_CONFIRM_PROBES)
+                .map(|n| json!({"id": 7, "n": n}))
+                .collect::<Vec<_>>(),
+        );
+        let input = shared(&[json!({"id": 7, "n": 99})]);
+        let output = shared(&[json!({"id": 7, "n": 99})]);
+        let base = revision("base");
+        let prev = revision("prev");
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            Some((&prev, &keyed(&previous))),
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "insert", "values": [{"id": 7, "n": 99}]}])
+        );
+    }
+
+    #[test]
     fn builder_emits_empty_operations_for_empty_output_and_omits_unused_previous() {
         let input = shared(&[json!({"id": 1})]);
         let previous = shared(&[json!({"id": 2})]);
