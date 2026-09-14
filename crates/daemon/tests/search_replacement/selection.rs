@@ -4,6 +4,8 @@ use daemon::search_replacement::selection::{SearchReader, SearchSelection, Selec
 use host_runtime::generation::{GenerationError, ProfileEvent};
 use retrieval::coverage::CoverageBounds;
 
+#[path = "disable.rs"]
+pub(super) mod disable;
 #[path = "retirement.rs"]
 pub(super) mod retirement;
 
@@ -1930,11 +1932,11 @@ fn an_oversized_certificate_is_refused_before_a_family_is_created() {
     let gate = open_gate();
     let selection = build_selected(root.path(), &corpus, &gate);
     corpus.publish("late", "late bytes");
-    // The intent itself fits its record cap with a little room; the certificate adds two seeds.
+    // The intent itself fits its record cap with room for the reserved disabled wrapper; the certificate adds two seeds.
     let intent_len = std::fs::metadata(root.path().join("search-lifecycle/intent.json"))
         .unwrap()
         .len();
-    let padding = usize::try_from(MAX_RECORD_BYTES - intent_len - 256).unwrap();
+    let padding = usize::try_from(MAX_RECORD_BYTES - intent_len - 512).unwrap();
     let candidate =
         candidate_with_attempt(root.path(), &corpus, &gate, "second", "a".repeat(padding));
     let digest = candidate.staged().digest.clone();

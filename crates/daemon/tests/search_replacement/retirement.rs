@@ -154,6 +154,359 @@ fn barrier_memberships(root: &Path) -> Vec<(String, String, i64, String, String)
         .collect::<rusqlite::Result<Vec<_>>>().unwrap()
 }
 
+#[tokio::test]
+async fn default_disable_uses_certified_retirement_then_preserves_the_selected_pending_obligation()
+{
+    use daemon::search_replacement::selection::disable::DisableEvent;
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    case.gate
+        .install(super::disable::cleanup_evaluator(root.path()));
+    let old_path = case.old.as_ref().unwrap().projection().path().to_owned();
+    let selected = case
+        .selection
+        .pin(
+            &case.corpus.kernel,
+            &case.gate,
+            &budget(Duration::from_secs(10)),
+        )
+        .unwrap();
+    let selected_path = selected.projection().path().to_owned();
+    drop(selected);
+    drop(case.old.take());
+    let original = case
+        .selection
+        .begin_disable(&case.gate, &mut |_| {})
+        .unwrap();
+    let mut ledger = Vec::new();
+    let result = case
+        .selection
+        .reconcile_disabled(
+            &case.corpus.kernel,
+            &case.gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| ledger.push(event),
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
+        ),
+        "{result:?}"
+    );
+    assert!(ledger.contains(&DisableEvent::Retirement(RetirementEvent::Removed)));
+    assert!(!old_path.exists());
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint("second-consumer")
+            .unwrap(),
+        Some(case.target)
+    );
+    let raw = Connection::open(selected_path).unwrap();
+    assert_eq!(
+        raw.query_row(
+            "SELECT through_commit_seq FROM retirement_receipts WHERE old_consumer_id=?1",
+            [CONSUMER],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        case.target
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT count(*) FROM retirement_dispositions WHERE disposition='removed'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        case.expected.len() as i64
+    );
+    match ProjectionLifecycle::open(root.path()).unwrap().read() {
+        ControlState::Disabled(current) => {
+            assert_eq!(current.handoff, original.handoff);
+            assert_eq!(current.through, Some(case.target));
+            assert!(!current.deregistered);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A manifest too small for the retirement obligation transaction refuses disabled cleanup before any retirement write, and the selected projection and consumer checkpoint stay unchanged.
+#[tokio::test]
+async fn disabled_cleanup_charges_the_retirement_bounds_before_retiring() {
+    use daemon::projection_gates::Denial;
+    use daemon::projection_lifecycle::MAX_RECORD_BYTES;
+    for (name, max) in [
+        ("local_transaction_rows", 5_000),
+        ("local_transaction_bytes", 4 << 20),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut case = RetirementCase::new(root.path());
+        let mut evaluator = super::disable::cleanup_evaluator(root.path());
+        evaluator.manifest.limits.insert(name.to_owned(), max);
+        case.gate.install(evaluator);
+        let mut config = spec(root.path());
+        config.retirement.max_obligations = NonZeroUsize::new(10_000).unwrap();
+        config.retirement.max_obligation_bytes = NonZeroU64::new(8 << 20).unwrap();
+        let per_row = (PAYLOAD_MANIFEST_DIGEST_LEN + "removed".len()) as u64;
+        let expected = match name {
+            "local_transaction_rows" => 10_001,
+            _ => 10_000 * per_row + (8 << 20) + MAX_RECORD_BYTES,
+        };
+        let old_path = case.old.as_ref().unwrap().projection().path().to_owned();
+        let selected_path = case
+            .selection
+            .pin(
+                &case.corpus.kernel,
+                &case.gate,
+                &budget(Duration::from_secs(10)),
+            )
+            .unwrap()
+            .projection()
+            .path()
+            .to_owned();
+        drop(case.old.take());
+        case.selection
+            .begin_disable(&case.gate, &mut |_| {})
+            .unwrap();
+        let mut ledger = Vec::new();
+        let result = case
+            .selection
+            .reconcile_disabled(
+                &case.corpus.kernel,
+                &case.gate,
+                &config,
+                &budget(Duration::from_secs(20)),
+                &mut |event| ledger.push(event),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(BuildError::Denied(Denial::LimitExceeded {
+                    limit: ref denied,
+                    observed,
+                    max: cap,
+                })) if denied == name && observed == expected && cap == max
+            ),
+            "{name}: {result:?}"
+        );
+        assert!(ledger.iter().all(|event| !matches!(
+            event,
+            daemon::search_replacement::selection::disable::DisableEvent::Retirement(_)
+        )));
+        assert!(old_path.exists());
+        let raw = Connection::open(selected_path).unwrap();
+        for table in ["retirement_receipts", "retirement_dispositions"] {
+            assert_eq!(
+                raw.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            case.corpus
+                .kernel
+                .outbox_consumer_checkpoint(CONSUMER)
+                .unwrap(),
+            Some(case.old_checkpoint)
+        );
+    }
+}
+
+/// A projection reference upgraded from a `Weak` while retirement runs is a live holder. Local release is refused rather than recorded over it, and the retry after the holder drops proceeds.
+#[tokio::test]
+async fn a_projection_upgraded_during_retirement_blocks_local_release() {
+    use daemon::search_replacement::selection::disable::DisableEvent;
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    case.gate
+        .install(super::disable::cleanup_evaluator(root.path()));
+    let selected = case
+        .selection
+        .pin(
+            &case.corpus.kernel,
+            &case.gate,
+            &budget(Duration::from_secs(10)),
+        )
+        .unwrap();
+    let weak = Arc::downgrade(selected.projection());
+    drop(selected);
+    drop(case.old.take());
+    case.selection
+        .begin_disable(&case.gate, &mut |_| {})
+        .unwrap();
+    let mut held = None;
+    let mut ledger = Vec::new();
+    let result = case
+        .selection
+        .reconcile_disabled(
+            &case.corpus.kernel,
+            &case.gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| {
+                if event == DisableEvent::Retirement(RetirementEvent::Removed) {
+                    held = weak.upgrade();
+                }
+                ledger.push(event);
+            },
+        )
+        .await;
+    assert!(
+        held.is_some(),
+        "the weak reference upgraded during retirement"
+    );
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Intent(
+                daemon::projection_lifecycle::IntentRefusal::FamilyHeld
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(!ledger.contains(&DisableEvent::LocalReleased));
+    match ProjectionLifecycle::open(root.path()).unwrap().read() {
+        ControlState::Disabled(current) => assert_eq!(current.through, None),
+        other => panic!("{other:?}"),
+    }
+    drop(held);
+    let mut ledger = Vec::new();
+    let result = case
+        .selection
+        .reconcile_disabled(
+            &case.corpus.kernel,
+            &case.gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| ledger.push(event),
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
+        ),
+        "{result:?}"
+    );
+    assert!(ledger.contains(&DisableEvent::LocalReleased));
+    match ProjectionLifecycle::open(root.path()).unwrap().read() {
+        ControlState::Disabled(current) => assert_eq!(current.through, Some(case.target)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn disabled_receipt_refusal_retains_the_selected_owner_and_original_target() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    drop(case.old.take());
+    let interrupted = budget(Duration::from_secs(20));
+    assert!(matches!(
+        case.selection.retire(
+            &case.corpus.kernel,
+            &case.gate,
+            &spec(root.path()),
+            &interrupted,
+            &mut |event| {
+                if event == RetirementEvent::LocalReleased {
+                    interrupted.cancel();
+                }
+            }
+        ),
+        Err(BuildError::Expired)
+    ));
+    let reader = case
+        .selection
+        .pin(
+            &case.corpus.kernel,
+            &case.gate,
+            &budget(Duration::from_secs(10)),
+        )
+        .unwrap();
+    let path = reader.projection().path().to_owned();
+    let weak = Arc::downgrade(reader.projection());
+    reader.projection().write(|conn| {
+        assert_eq!(conn.execute("UPDATE retirement_receipts SET obligation_count=obligation_count+1 WHERE old_consumer_id=?1", [CONSUMER])?, 1);
+        Ok(())
+    }).unwrap();
+    drop(reader);
+    case.gate
+        .install(super::disable::cleanup_evaluator(root.path()));
+    case.selection
+        .begin_disable(&case.gate, &mut |_| {})
+        .unwrap();
+    assert!(
+        case.selection
+            .reconcile_disabled(
+                &case.corpus.kernel,
+                &case.gate,
+                &spec(root.path()),
+                &budget(Duration::from_secs(20)),
+                &mut |_| {}
+            )
+            .await
+            .is_err()
+    );
+    assert!(weak.upgrade().is_some());
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        Some(case.old_checkpoint)
+    );
+    let raw = Connection::open(path).unwrap();
+    assert_eq!(raw.execute("UPDATE retirement_receipts SET obligation_count=obligation_count-1 WHERE old_consumer_id=?1", [CONSUMER]).unwrap(), 1);
+    assert!(matches!(
+        case.selection
+            .reconcile_disabled(
+                &case.corpus.kernel,
+                &case.gate,
+                &spec(root.path()),
+                &budget(Duration::from_secs(20)),
+                &mut |_| {}
+            )
+            .await,
+        Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
+    ));
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint("second-consumer")
+            .unwrap(),
+        Some(case.target)
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT through_commit_seq FROM retirement_receipts WHERE old_consumer_id=?1",
+            [CONSUMER],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        case.target
+    );
+}
+
 #[test]
 fn missing_corrupt_and_healthy_old_databases_retire_from_authority_not_new_checkpoint() {
     for damage in ["missing", "corrupt", "healthy"] {

@@ -54,6 +54,25 @@ pub struct RetirementBounds {
 }
 
 impl ReplacementSpec {
+    /// The manifest charges for one commit page of the episode's catch-up read. Every path that pages through commits under `episode.commits` charges these, so one page costs the same at construction and at cleanup.
+    pub(crate) fn catchup_page_charges(&self) -> [(&'static str, u64); 3] {
+        let episode = &self.episode;
+        [
+            (
+                "catchup_batch_commits",
+                episode.commits.max_commits.get() as u64,
+            ),
+            (
+                "catchup_batch_encoded_bytes",
+                episode.commits.max_payload_bytes.get(),
+            ),
+            (
+                "catchup_batch_encoded_bytes",
+                episode.max_source_encoded_bytes.get(),
+            ),
+        ]
+    }
+
     fn admit(
         &self,
         gate: &HookGate,
@@ -137,7 +156,7 @@ impl ReplacementSpec {
             Transition::Rebuilding => "B_recovery_ms",
             Transition::AuthorizedRecovery => "B_authorized_recovery_ms",
         };
-        let requested = [
+        let mut requested = vec![
             ("export_page_rows", page.max_rows.get() as u64),
             ("export_page_encoded_bytes", page.max_encoded_bytes.get()),
             (
@@ -145,18 +164,6 @@ impl ReplacementSpec {
                 page.max_encoded_bytes.get(),
             ),
             ("export_live_decoded_bytes", decoded),
-            (
-                "catchup_batch_commits",
-                episode.commits.max_commits.get() as u64,
-            ),
-            (
-                "catchup_batch_encoded_bytes",
-                episode.commits.max_payload_bytes.get(),
-            ),
-            (
-                "catchup_batch_encoded_bytes",
-                episode.max_source_encoded_bytes.get(),
-            ),
             (
                 "catchup_batch_source_bytes",
                 batch.max_source_bytes.get() as u64,
@@ -172,6 +179,7 @@ impl ReplacementSpec {
             (duration_limit, duration),
             (duration_limit, wait),
         ];
+        requested.extend(self.catchup_page_charges());
         let expected = InvalidationIdentity::from(&self.identity);
         for grant in &grants {
             gate.check_limits(grant, &expected, &requested)?;
@@ -199,6 +207,8 @@ pub enum BuildEvent {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    #[error(transparent)]
+    UnresolvedDrain(#[from] crate::embedding_supervisor::Unresolved),
     #[error(transparent)]
     Kernel(#[from] kernel::KernelError),
     #[error(transparent)]

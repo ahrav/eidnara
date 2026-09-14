@@ -150,9 +150,14 @@ fn largest_receipt_peak(population: &Population) -> usize {
         .content()
         .iter()
         .map(|block| {
-            let (receipt, ledger) =
+            let (serialized, ledger) =
                 record_window(|| daemon::served_json::canonical_block_bytes_for_test(block));
-            drop(receipt);
+            assert!(!ledger.overflow, "receipt ledger overflow");
+            assert_eq!(
+                ledger.live_bytes_at_close,
+                serialized.capacity() as isize,
+                "only the receipt string remains live"
+            );
             ledger.peak_live_bytes
         })
         .max()

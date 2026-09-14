@@ -479,6 +479,20 @@ fn capture_and_target_writes_keep_upstream_revocation_and_size_guards() {
     assert_eq!(lifecycle.read(), before);
 }
 
+/// The encoded size `record` reserves for `intent`: the disabled record wrapping it with every optional field at its widest.
+fn reserved(intent: &LifecycleIntent) -> usize {
+    serde_json::to_vec(&json!({
+        "schema": 3,
+        "handoff": intent,
+        "recorded_at": i64::MAX,
+        "episodes": {"allowance": u32::MAX, "consumed": u32::MAX, "deadline": i64::MAX},
+        "through": i64::MAX,
+        "deregistered": false,
+    }))
+    .unwrap()
+    .len()
+}
+
 /// The record the test expects, built from the request alone.
 fn expected(request: &LifecycleRequest, consumed: u32) -> LifecycleIntent {
     LifecycleIntent {
@@ -1151,17 +1165,12 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         ..expected(&base, base.allowance)
     };
     // One byte short of fitting with the digest at the terminal size; without the digest it fits.
-    let slack = 64 * 1024 + 1 - serde_json::to_vec(&terminal).unwrap().len();
+    let slack = 64 * 1024 + 1 - reserved(&terminal);
     let pin_cap = LifecycleRequest {
         attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack)),
         ..base.clone()
     };
-    assert!(
-        serde_json::to_vec(&expected(&pin_cap, base.allowance))
-            .unwrap()
-            .len()
-            <= 64 * 1024
-    );
+    assert!(reserved(&expected(&pin_cap, base.allowance)) <= 64 * 1024);
     assert_eq!(
         lifecycle.record(&open, &pin_cap, NOW),
         Err(IntentRefusal::Oversized)
@@ -1194,7 +1203,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         }),
         ..expected(&untargeted, base.allowance)
     };
-    let slack = 64 * 1024 + 1 - serde_json::to_vec(&terminal).unwrap().len();
+    let slack = 64 * 1024 + 1 - reserved(&terminal);
     let target_cap = LifecycleRequest {
         attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack)),
         ..untargeted.clone()
@@ -1227,6 +1236,51 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     for _ in 0..base.allowance {
         lifecycle.consume_episode(&open, NOW).unwrap();
     }
+
+    // A record accepted by `record` still fits after `disable` adds terminal fields.
+    let dir = tempfile::tempdir().unwrap();
+    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    let terminal = LifecycleIntent {
+        staged_seed_digest: Some(digest.clone()),
+        ..expected(&base, base.allowance)
+    };
+    let accepted = LifecycleRequest {
+        attempt_id: format!(
+            "{}{}",
+            base.attempt_id,
+            "a".repeat(64 * 1024 - reserved(&terminal))
+        ),
+        ..base.clone()
+    };
+    // `disable` latches its gate, so this block uses its own.
+    let disabling = open_gate();
+    lifecycle.record(&disabling, &accepted, NOW).unwrap();
+    let before_disable = lifecycle.read();
+    assert_eq!(
+        lifecycle.disable(&disabling, -1),
+        Err(IntentRefusal::InvalidTimestamp)
+    );
+    assert_eq!(lifecycle.read(), before_disable);
+    disabling
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .unwrap();
+    lifecycle.disable(&disabling, NOW).unwrap();
+    let mut stored: Value =
+        serde_json::from_slice(&fs::read(record_path(dir.path())).unwrap()).unwrap();
+    stored["handoff"] = serde_json::to_value(LifecycleIntent {
+        staged_seed_digest: Some(digest.clone()),
+        ..expected(&accepted, base.allowance)
+    })
+    .unwrap();
+    stored["recorded_at"] = json!(i64::MAX);
+    stored["episodes"] = json!({
+        "allowance": u32::MAX,
+        "consumed": u32::MAX,
+        "deadline": i64::MAX,
+    });
+    stored["through"] = json!(i64::MAX);
+    stored["deregistered"] = json!(false);
+    assert!(serde_json::to_vec(&stored).unwrap().len() <= 64 * 1024);
 
     // A well-formed record the daemon did not write: a symlink to one.
     let dir = tempfile::tempdir().unwrap();

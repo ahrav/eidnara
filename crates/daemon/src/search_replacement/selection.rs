@@ -36,6 +36,7 @@ use crate::search_writer::QuarantineKind;
 const FAMILIES: &str = "search-families";
 const CERTIFICATE: &str = "bootstrap.json";
 
+pub mod disable;
 pub mod retirement;
 
 #[derive(Serialize, Deserialize)]
@@ -121,11 +122,12 @@ pub struct SearchReader {
 }
 
 struct SelectedFamily {
-    projection: SearchProjection,
+    projection: Arc<SearchProjection>,
     certificate: Bootstrap,
     incarnation: CommitReadIncarnation,
     bounds: CoverageBounds,
     _seed_pin: ValidatedGeneration,
+    unavailable: std::sync::atomic::AtomicBool,
 }
 
 pub struct SearchSelection {
@@ -133,6 +135,9 @@ pub struct SearchSelection {
     identity: ProjectionIdentity,
     bounds: CoverageBounds,
     selected: ArcSwapOption<SelectedFamily>,
+    maintenance: Option<disable::Maintenance>,
+    #[cfg(feature = "test-support")]
+    disable_barrier: Option<Arc<dyn Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync>>,
 }
 
 impl SearchSelection {
@@ -142,6 +147,9 @@ impl SearchSelection {
             identity,
             bounds,
             selected: ArcSwapOption::empty(),
+            maintenance: None,
+            #[cfg(feature = "test-support")]
+            disable_barrier: None,
         }
     }
 
@@ -173,6 +181,7 @@ impl SearchSelection {
 
     fn admit(&self, gate: &HookGate, budget: &EvalBudget) -> Result<Admission, BuildError> {
         deadline(budget)?;
+        gate.require_selection_home(&self.data_home)?;
         let grant = gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)?;
         gate.check_limits(
             &grant,
@@ -214,6 +223,7 @@ impl SearchSelection {
                 "candidate belongs to another data home",
             ));
         }
+        self.require_unpinned()?;
         candidate
             .owner
             .spec
@@ -344,6 +354,16 @@ impl SearchSelection {
         Ok(())
     }
 
+    /// The owned supervisor pins the family it was started on; replacing that family would leave the pin on the old one and refuse the new one's maintenance, so the owner stops maintenance first.
+    fn require_unpinned(&self) -> Result<(), BuildError> {
+        if self.maintenance.as_ref().is_some_and(|owner| owner.pins()) {
+            return Err(BuildError::Invalid(
+                "maintenance is bound to the selected family",
+            ));
+        }
+        Ok(())
+    }
+
     /// Reopen recovers the selected database's own WAL without reinstalling its identity or copying its seed.
     pub fn reopen(
         &self,
@@ -412,6 +432,7 @@ impl SearchSelection {
                     None => {
                         // The durable pointer names a family this manager does not hold, so
                         // whatever is cached is stale whether or not the open succeeds.
+                        self.require_unpinned()?;
                         self.selected.store(None);
                         Arc::new(self.open_family(&digest, kernel, budget)?)
                     }
@@ -494,7 +515,8 @@ impl SearchSelection {
             return Err(BuildError::Invalid("selected database missing"));
         }
         let family = SelectedFamily {
-            projection: SearchProjection::open(&home)?,
+            unavailable: std::sync::atomic::AtomicBool::new(false),
+            projection: Arc::new(SearchProjection::open(&home)?),
             certificate,
             incarnation: kernel
                 .capture_commit_read_target_within_budget(budget)?
@@ -869,8 +891,8 @@ impl SearchReader {
     pub fn handoff(&self) -> &LifecycleIntent {
         &self.family.certificate.intent
     }
-    /// The projection borrows the reader, so a physical worker must retain its reader clone for the entire execution.
-    pub fn projection(&self) -> &SearchProjection {
+    /// A connection clone retains the database lease; a reader clone also retains the seed pin.
+    pub fn projection(&self) -> &Arc<SearchProjection> {
         &self.family.projection
     }
 
@@ -880,7 +902,13 @@ impl SearchReader {
         budget: &EvalBudget,
         read: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
     ) -> Result<T, BuildError> {
-        if self.grant.invalidated.is_cancelled() || self.family.projection.quarantine().is_some() {
+        if self
+            .family
+            .unavailable
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.grant.invalidated.is_cancelled()
+            || self.family.projection.quarantine().is_some()
+        {
             return Err(BuildError::Invalid("pinned read unavailable"));
         }
         Ok(self

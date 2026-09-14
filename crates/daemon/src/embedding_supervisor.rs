@@ -144,6 +144,8 @@ pub struct EmbeddingSupervisor {
     tracker: TaskTracker,
     shutdown: CancellationToken,
     slices: AtomicUsize,
+    /// Set by `spawn_pinned`: one tracked task is the reader's owner, not a slice.
+    pinned: AtomicBool,
     /// Set by the first `run`; the loop it starts is the only one this supervisor ever runs.
     started: AtomicBool,
     stop: Mutex<Option<Stop>>,
@@ -177,6 +179,7 @@ impl EmbeddingSupervisor {
             tracker: TaskTracker::new(),
             shutdown: CancellationToken::new(),
             slices: AtomicUsize::new(0),
+            pinned: AtomicBool::new(false),
             started: AtomicBool::new(false),
             stop: Mutex::new(None),
             admitted: Mutex::new(BTreeMap::new()),
@@ -492,32 +495,30 @@ impl EmbeddingSupervisor {
     /// Returns [`Unresolved`] when a tracked task is still running or a native call is still owned after `grace`; native work keeps every permit, charge, and lease, and a later call may still find it settled.
     pub async fn shutdown(&self, grace: Duration) -> Result<DrainReport, Unresolved> {
         let deadline = Instant::now() + grace;
-        self.shutdown.cancel();
-        self.tracker.close();
+        self.request_shutdown();
         if tokio::time::timeout_at(deadline.into(), self.tracker.wait())
             .await
             .is_err()
         {
             // The loop's own token is tracked too; everything beyond it is a slice thread.
             return Err(Unresolved {
-                slices: self.tracker.len().saturating_sub(1),
+                slices: self
+                    .tracker
+                    .len()
+                    .saturating_sub(1 + usize::from(self.pinned.load(Ordering::SeqCst))),
                 native: self.native_census().0,
             });
         }
         // Slices are joined; the host still owns whatever native calls they admitted. A call has no join handle, so its exit is observed by polling the host until the grace ends; a ready result is a held lease the next incarnation reconciles.
-        let (native, held_results) = loop {
-            let (native, held_results) = self.native_census();
-            if native == 0 || Instant::now() >= deadline {
-                break (native, held_results);
-            }
-            tokio::time::sleep(
-                NATIVE_EXIT_POLL.min(deadline.saturating_duration_since(Instant::now())),
-            )
-            .await;
+        let held_results = match tokio::time::timeout_at(deadline.into(), self.wait_native()).await
+        {
+            Ok(held) => held,
+            // A final census excludes calls that exited since the last poll.
+            Err(_) => match self.native_census() {
+                (0, held) => held,
+                (native, _) => return Err(Unresolved { slices: 0, native }),
+            },
         };
-        if native > 0 {
-            return Err(Unresolved { slices: 0, native });
-        }
         // The first writer wins: this records `Shutdown` only for a loop the cancellation reached before it was first polled, so the report is final.
         self.stop_with(Stop::Shutdown);
         Ok(DrainReport {
@@ -557,6 +558,36 @@ impl EmbeddingSupervisor {
     #[cfg(feature = "test-support")]
     pub fn tracked_host_jobs_for_test(&self) -> usize {
         self.lock_admitted().len()
+    }
+
+    /// Signals cancellation without waiting for native work to finish.
+    pub(crate) fn request_shutdown(&self) {
+        self.shutdown.cancel();
+        self.tracker.close();
+    }
+
+    /// The tracked task retains the reader until the slice loop and native census have drained.
+    pub(crate) fn spawn_pinned(
+        self: &Arc<Self>,
+        reader: crate::search_replacement::selection::SearchReader,
+    ) -> tokio::task::JoinHandle<()> {
+        let owner = Arc::clone(self);
+        self.pinned.store(true, Ordering::SeqCst);
+        self.tracker.spawn(async move {
+            let _reader = reader;
+            Arc::clone(&owner).run().await;
+            owner.wait_native().await;
+        })
+    }
+
+    async fn wait_native(&self) -> usize {
+        loop {
+            let (native, held) = self.native_census();
+            if native == 0 {
+                return held;
+            }
+            tokio::time::sleep(NATIVE_EXIT_POLL).await;
+        }
     }
 
     /// Observes every dispatch event on the slice thread, before the supervisor acts on it.
