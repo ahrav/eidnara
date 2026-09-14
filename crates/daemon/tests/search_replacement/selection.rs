@@ -1472,6 +1472,48 @@ fn reopen_admits_the_hook_named_by_the_certificate_transition() {
 }
 
 #[test]
+fn same_manager_retries_a_transient_generation_read_failure_with_an_old_reader_alive() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let manifest = GenerationStore::open(Some(root.path()))
+        .unwrap()
+        .root()
+        .join(host_runtime::generation::GENERATIONS_DIR_NAME)
+        .join(old.digest())
+        .join(host_runtime::generation::GENERATION_MANIFEST_NAME);
+    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600)).unwrap();
+    selection
+        .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    assert!(
+        old.read(&budget(Duration::from_secs(10)), |_| Ok(()))
+            .is_ok()
+    );
+}
+
+#[test]
 fn same_manager_reopen_revalidates_the_retained_generation() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());

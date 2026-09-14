@@ -558,7 +558,8 @@ fn invalid_episode_state(
         && ledger
             .episode_deadline
             .is_some_and(|deadline| deadline < now);
-    let retry_after_expiry = has_episode
+    let retry_after_expiry = matches!(ledger.state.as_str(), "pending" | "admitted")
+        && has_episode
         && next_attempt_at.is_some_and(|retry| {
             ledger
                 .episode_deadline
@@ -614,6 +615,8 @@ mod tests {
         admitted.state = "embedded".to_owned();
         admitted.host_job_id = None;
         assert!(!invalid_episode_state(&admitted, "job", None, 101).unwrap());
+        admitted.state = "obsolete".to_owned();
+        assert!(!invalid_episode_state(&admitted, "job", Some(101), 50).unwrap());
         admitted.episode_id = None;
         admitted.episode_allowance = 0;
         admitted.episode_deadline = None;
