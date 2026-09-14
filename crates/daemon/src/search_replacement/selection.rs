@@ -129,6 +129,7 @@ impl SearchSelection {
             .selected
             .load_full()
             .ok_or(BuildError::Invalid("search unavailable; rebuild required"))?;
+        self.revalidate_certificate(&family._seed_pin.digest, &family.certificate)?;
         family
             .certificate
             .seed
@@ -328,7 +329,9 @@ impl SearchSelection {
                         if let Err(error) =
                             self.revalidate_certificate(&digest, &family.certificate)
                         {
-                            self.selected.store(None);
+                            if matches!(error, BuildError::Invalid(_)) {
+                                self.selected.store(None);
+                            }
                             return Err(error);
                         }
                         if let Err(error) = family

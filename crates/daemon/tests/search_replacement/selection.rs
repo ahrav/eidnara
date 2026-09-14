@@ -281,6 +281,7 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
         "UPDATE embedding_jobs SET stop_reason='stopped' WHERE state='pending'",
         "UPDATE embedding_jobs SET state='admitted' WHERE state='pending'",
         "UPDATE embedding_jobs SET episode_id='episode',episode_allowance=0,episode_deadline=9223372036854775807 WHERE state='pending'",
+        "UPDATE embedding_jobs SET attempts=1,episode_id='episode',episode_allowance=1,episode_deadline=9223372036854775807 WHERE state='pending'",
         "UPDATE embedding_jobs SET job_id='wrong-job'",
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -1428,6 +1429,47 @@ fn same_manager_reopen_revalidates_the_durable_certificate() {
 }
 
 #[test]
+fn same_manager_retries_a_transient_certificate_read_failure_with_an_old_reader_alive() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let certificate = root
+        .path()
+        .join("search-families")
+        .join(old.digest())
+        .join("bootstrap.json");
+    std::fs::set_permissions(&certificate, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    std::fs::set_permissions(&certificate, std::fs::Permissions::from_mode(0o600)).unwrap();
+    selection
+        .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    assert!(
+        old.read(&budget(Duration::from_secs(10)), |_| Ok(()))
+            .is_ok()
+    );
+}
+
+#[test]
 fn same_manager_reopen_withdraws_when_the_durable_certificate_is_missing() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
@@ -1474,6 +1516,28 @@ fn sweep_retains_a_dangling_symlink_under_a_family_name() {
     let report = selection.sweep().unwrap();
     assert_eq!((report.removed, report.retained), (0, 1));
     assert!(std::fs::symlink_metadata(&link).is_ok());
+}
+
+#[test]
+fn observation_timestamps_that_disagree_with_the_registry_are_refused_on_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let raw = Connection::open(root.path().join("kernel/kernel.sqlite")).unwrap();
+    raw.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         UPDATE observations SET created_commit_seq=created_commit_seq+1
+         WHERE object_id GLOB 'srcdesc:*';",
+    )
+    .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
 }
 
 #[test]

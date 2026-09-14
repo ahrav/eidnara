@@ -496,9 +496,11 @@ pub fn verify_active(
         if id != crate::batch::job_id(&occurrence, &generation) {
             return Err(ProjectionError::CorruptRow);
         }
-        crate::dispatch::job_ledger(conn, &id)?
-            .ok_or(ProjectionError::CorruptRow)?
-            .episode()?;
+        let ledger = crate::dispatch::job_ledger(conn, &id)?.ok_or(ProjectionError::CorruptRow)?;
+        let has_episode = ledger.episode()?.is_some();
+        if ledger.state == "pending" && has_episode && ledger.attempts >= ledger.episode_allowance {
+            return Err(ProjectionError::CorruptRow);
+        }
     }
     let mut seen = 0i64;
     for row in vectors.query_map([&generation.generation_id], |row| {
