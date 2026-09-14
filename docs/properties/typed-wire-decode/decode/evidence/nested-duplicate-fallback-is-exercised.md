@@ -106,6 +106,9 @@ claim either marker has fired. This property remains unexercised.
 Branch `perf/typed-wire-u1-owned-decode`, `cargo test -p daemon --locked
 --features test-support` (1,489 tests pass; `lifecycle_cli` is platform-unsupported
 on the aarch64 host). `parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback`
-constructs a duplicate `mid` in a message envelope after a 4 MiB prefix and
+constructs a duplicate `mid` in the ingress wrapper after a 4 MiB prefix and
 observes walk acceptance, typed refusal, restart, and tree conversion in one
-trace. The block-envelope duplicate marker is not constructed.
+trace. The corpus's `duplicate nested key` body also repeats ingress `mid`.
+These are current-path controls, not witnesses for the required repeated CK
+role or block kind. Neither envelope-specific marker is constructed, so this
+property remains unexercised.
