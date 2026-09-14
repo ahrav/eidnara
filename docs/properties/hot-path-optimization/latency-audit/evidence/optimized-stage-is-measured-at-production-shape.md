@@ -127,6 +127,19 @@ specification enumerates the stages, and no name is built at run time.
 - Missing evidence: A `meta` byte count per message at both points.
 - Conclusion: unresolved, needs a measured `meta` size at 1_000 and 1_400.
 
+## W1 grouping for the typed-wire decode payoff, 2026-09-13
+
+The typed-wire decode plan's payoff evidence is recorded under this record's
+name as its single W1 grouping, at
+`docs/properties/typed-wire-decode/resources/evidence/eg1-decode-projection/`
+(EG1). It times `serde_json::from_slice::<TransformRequest>` alone and with
+`wire::project_messages` on frozen 40- and 200-message bodies in five
+alternating process pairs, with a predeclared noise rule, and reports
+`proceed` on all four cells. It does not reach `Handler::handle`, a
+production-sized steady session, or a build/host/workload manifest of this
+record's shape, so this record stays invalidated; the grouping is a pointer,
+not a reactivation.
+
 [ci-bench]: ../../../../../.github/workflows/ci.yml#L514-L518
 [nextest]: ../../../../../.config/nextest.toml#L4-L7
 [hp-header]: ../../../../../crates/daemon/benches/hot_path.rs#L1-L10

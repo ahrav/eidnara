@@ -112,3 +112,44 @@ local alias accounting; introduce no new global deduplication or RSS policy.
 - Missing evidence: Candidate logical-pool and requested-layout observations only.
 - Conclusion: resolved. R4 uses the existing declared logical budget and keeps
   the full decode-plus-projection interval, without an exact RSS promise.
+
+## Typed-wire U1 execution, 2026-09-13
+
+`decode_and_projection_fit_the_declared_pool` in
+`crates/daemon/tests/typed_wire_decode_allocations.rs` derives the declared
+scratch pool from public constants (`MIN_RESIDENT_BYTES` less two
+`MAX_BODY_LEN` and one `HEADER_LEN`: 184,878,336 bytes) and records one window
+from the metered direct decode through `project_messages`, with the request and
+projection live at the close and every projection block checked to share the
+request's shell:
+
+| Body | Decode charge | Decode + projection peak | Live at handoff |
+| --- | --- | --- | --- |
+| frozen 40 messages (75,628 B) | 223,024 | 252,996 | 246,760 |
+| frozen 200 messages (372,397 B) | 1,047,156 | 1,226,090 | 1,212,801 |
+| one 31 MiB text block (32,506,018 B) | 32,513,498 | 130,025,153 | 65,014,966 |
+
+All fit the pool. The 31 MiB case is the text ceiling under the 32 MiB length
+cap; its projection peak is the decoded text plus the canonical block string
+grown to twice the text plus the `Arc<str>` copy. The test pins the per-request
+ratio at `DECODE_PROJECTION_PEAK_MULTIPLE = 4` times the decode charge.
+
+Full owner set: constructing one served message per ingress message over the
+live request and projection adds a further 162,530,100 peak bytes on the 31 MiB
+body (65,012,492 retained), so request, projection, and served output together
+reach 227,545,066 requested layout bytes, above the 184,878,336-byte declared
+pool, at `SERVED_OWNER_SET_PEAK_MULTIPLE = 7` times the decode charge (pinned
+by the same test). The excess is the served canonicalizer's serialization
+buffer, its exact-size reorder copy, and the retained `Arc<[u8]>` copy.
+
+This is a gap against the record's guarantee, not a fit: one near-cap request
+holds seven times its charge, and the pool's charge accounting admits about
+five such requests concurrently. The gap predates this change (the same served
+copies existed beside two envelope trees) and is not produced by the string
+coefficient; closing it means charging serializer workspace and served copies
+before construction or lowering the admitted text ceiling, which the
+canonical-output egress plan owns together with `ServedMessage.canonical_bytes`.
+Requested layout bytes are not an RSS bound. Owner decision needed.
+
+Not measured: concurrent requests, an eviction with an active lease, and the
+above-cap probe's own allocation.

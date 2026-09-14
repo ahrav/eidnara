@@ -18,6 +18,8 @@ export const MODULE_ITEM_CONTINUATION_CHUNK_BYTES = 64 * 1024;
 // The module reassembles this envelope for live transform requests.
 export const MODULE_ITEM_CONTINUATION_KEY = "__shadow_item_continuation";
 export const MODULE_ORDINAL_PAGE_SIZE = 500;
+/** Retained-heap estimate for one ordinal memo entry or one persisted ordinal row. */
+export const ORDINAL_ENTRY_RETAINED_BYTES = 96;
 
 /** Matches the daemon's marker check in `assemble_transform_page_field`. */
 function looksLikeContinuationMarker(value: unknown): boolean {
@@ -382,11 +384,10 @@ function isSyntheticWireMessage(message: MessageLike): boolean {
 }
 
 /**
- * The session's durable ordinal-memo state, passed as one bundle. Callers
- * project their session-state fields into this shape exactly once so the
- * field-to-field rename map cannot drift between call sites. The resolver
- * mutates `entries` in place (clear/set): pass the live session Map, never
- * a copy, or resolved ordinals silently detach from the session state.
+ * The session's ordinal-memo state, passed as one bundle. Callers project their memo fields
+ * into this shape exactly once so the field-to-field rename map cannot drift between call
+ * sites. The resolver mutates `entries` in place (clear/set): the transform passes a charged
+ * pass-local copy and promotes it to the session only after accepted publication.
  */
 export interface ModuleOrdinalMemo {
     generation: number;
@@ -399,10 +400,19 @@ export interface ModuleOrdinalMemo {
     continuationBase?: number;
 }
 
+/** Cancellation and byte accounting for an ordinal scan owned by a transform pass. */
+export interface OrdinalScanBudget {
+    /** An aborted signal stops the scan at its next yield boundary. */
+    signal: AbortSignal;
+    /** Charges each fetched page's rows, ID strings, and memo growth before the scan retains it across a yield; throws when the owner cannot grant them. */
+    reserve: (bytes: number) => void;
+}
+
 /** Reads every ordinal row after `anchor`, then the stored count that must account for them. */
 async function scanOrdinalRows(
     sessionId: string,
     anchor: RawMessageOrdinalAnchor | null,
+    budget: OrdinalScanBudget,
 ): Promise<{
     entries: ReturnType<typeof readRawSessionMessageOrdinalPage>;
     anchor: RawMessageOrdinalAnchor | null;
@@ -411,13 +421,21 @@ async function scanOrdinalRows(
     const entries: ReturnType<typeof readRawSessionMessageOrdinalPage> = [];
     let pageAnchor = anchor;
     while (true) {
+        budget.signal.throwIfAborted();
         const page = readRawSessionMessageOrdinalPage(
             sessionId,
             pageAnchor,
             MODULE_ORDINAL_PAGE_SIZE,
         );
+        // The page provider and the reservation are owner callbacks that may abort the pass.
+        budget.signal.throwIfAborted();
         if (page.length === 0) break;
-        entries.push(...page);
+        // Rows and memo slots coexist during assignment and share their UTF-16 ID strings.
+        let bytes = page.length * 2 * ORDINAL_ENTRY_RETAINED_BYTES;
+        for (const row of page) bytes += row.id.length * 2;
+        budget.reserve(bytes);
+        budget.signal.throwIfAborted();
+        for (const row of page) entries.push(row);
         const last = page[page.length - 1];
         pageAnchor = { timeCreated: last.timeCreated, id: last.id };
         if (page.length < MODULE_ORDINAL_PAGE_SIZE) break;
@@ -426,24 +444,16 @@ async function scanOrdinalRows(
     return { entries, anchor: pageAnchor, storedCount: getRawSessionStoredMessageCount(sessionId) };
 }
 
-/**
- * Resolve OpenCode message ids to the absolute ordinals used by the module.
- */
-export async function resolveOrdinalsForModule(args: {
-    sessionId: string;
-    messages: MessageLike[];
-    memo: ModuleOrdinalMemo;
-    /** Absolute ordinal immediately before a sliced unresolved tail. */
-    provisionalBase?: number;
-    assertSourceUnchanged?: () => void;
-}): Promise<
+export interface PrimedOrdinalMemo {
+    memoAnchor: RawMessageOrdinalAnchor | null;
+    memoStoredCount: number;
+    memoCanonicalCount: number;
+}
+
+export type OrdinalResolution =
     | {
           ok: true;
           annotatedInput: unknown[];
-          memoGeneration: number;
-          memoAnchor: RawMessageOrdinalAnchor | null;
-          memoStoredCount: number;
-          memoCanonicalCount: number;
           normalizations: ModuleNormalizationRecord[];
       }
     | {
@@ -452,53 +462,83 @@ export async function resolveOrdinalsForModule(args: {
           messageId?: string;
           messageIndex?: number;
           messageRole?: string;
-      }
+      };
+
+/**
+ * Asynchronous half of ordinal resolution: read persisted ordinal rows and assign their
+ * ordinals into `memo.entries` only after a consistent, uncancelled scan. Rejection leaves the
+ * supplied map untouched. No message object is read here, so a caller can revalidate its captured
+ * messages after this returns and before `annotateOrdinals` reads them.
+ */
+export async function primeOrdinalMemo(args: {
+    sessionId: string;
+    memo: ModuleOrdinalMemo;
+    budget: OrdinalScanBudget;
+}): Promise<
+    { ok: true; primed: PrimedOrdinalMemo } | { ok: false; reason: "mismatch"; messageId?: string }
 > {
     const memo = args.memo.entries;
     const generationChanged = args.memo.memoGeneration !== args.memo.generation;
-    if (generationChanged) memo.clear();
-
     const continuationBase = Math.max(0, args.memo.continuationBase ?? 0);
-    let anchor = generationChanged ? null : (args.memo.anchor ?? null);
-    let storedCount = generationChanged ? null : (args.memo.storedCount ?? null);
-    let canonicalCount = generationChanged
-        ? continuationBase
-        : (args.memo.canonicalCount ?? continuationBase);
-    let priming = storedCount === null;
-    if (priming) {
-        memo.clear();
-        anchor = null;
-        canonicalCount = continuationBase;
-    }
+    const storedCount = generationChanged ? null : (args.memo.storedCount ?? null);
+    const reset = storedCount === null;
+    const anchor = reset ? null : (args.memo.anchor ?? null);
+    let canonicalBase = reset ? continuationBase : (args.memo.canonicalCount ?? continuationBase);
+    let priming = reset;
 
-    let scan = await scanOrdinalRows(args.sessionId, anchor);
+    let scan = await scanOrdinalRows(args.sessionId, anchor, args.budget);
+    args.budget.signal.throwIfAborted();
     if (scan.storedCount !== (storedCount ?? 0) + scan.entries.length) {
         // A row that sorts at or before `anchor` is unreachable from it. Restart without an
         // anchor; `memo` is preserved until a scan is consistent.
-        scan = await scanOrdinalRows(args.sessionId, null);
+        scan = await scanOrdinalRows(args.sessionId, null, args.budget);
+        args.budget.signal.throwIfAborted();
         if (scan.storedCount !== scan.entries.length) {
             return { ok: false, reason: "mismatch" };
         }
         priming = true;
-        canonicalCount = continuationBase;
+        canonicalBase = continuationBase;
     }
 
-    const assigned = new Map<string, number>();
+    // Validate `scan.entries` against `memo` before assignment mutates it.
+    let canonicalCount = canonicalBase;
     for (const entry of scan.entries) {
         if (!entry.contributesOrdinal) continue;
         canonicalCount += 1;
-        const prior = memo.get(entry.id);
+        const prior = reset ? undefined : memo.get(entry.id);
         if (prior !== undefined && prior !== canonicalCount) {
             return { ok: false, reason: "mismatch", messageId: entry.id };
         }
-        assigned.set(entry.id, canonicalCount);
     }
     if (priming) memo.clear();
-    for (const [id, ordinal] of assigned) memo.set(id, ordinal);
-    anchor = scan.anchor;
-    storedCount = scan.storedCount;
+    let ordinal = canonicalBase;
+    for (const entry of scan.entries) {
+        if (entry.contributesOrdinal) memo.set(entry.id, ++ordinal);
+    }
+    if (ordinal !== canonicalCount) throw new Error("ordinal scan changed during memo assignment");
+    return {
+        ok: true,
+        primed: {
+            memoAnchor: scan.anchor,
+            memoStoredCount: scan.storedCount,
+            memoCanonicalCount: canonicalCount,
+        },
+    };
+}
 
-    args.assertSourceUnchanged?.();
+/**
+ * Synchronous half of ordinal resolution: map the captured messages onto the primed memo and
+ * build the annotated wire input. Runs to completion without yielding.
+ */
+export function annotateOrdinals(args: {
+    messages: MessageLike[];
+    memo: ModuleOrdinalMemo;
+    primed: PrimedOrdinalMemo;
+    /** Absolute ordinal immediately before a sliced unresolved tail. */
+    provisionalBase?: number;
+}): OrdinalResolution {
+    const memo = args.memo.entries;
+    const canonicalCount = args.primed.memoCanonicalCount;
     const normalizations: ModuleNormalizationRecord[] = [];
     const visibleIndexes: number[] = [];
     const visibleMessages = args.messages.filter((message, index) => {
@@ -600,15 +640,7 @@ export async function resolveOrdinalsForModule(args: {
         annotated[index] = { ...visibleMessages[index], absolute_ordinal: ordinal };
     }
 
-    return {
-        ok: true,
-        annotatedInput: annotated,
-        memoGeneration: args.memo.generation,
-        memoAnchor: anchor,
-        memoStoredCount: storedCount,
-        memoCanonicalCount: canonicalCount,
-        normalizations,
-    };
+    return { ok: true, annotatedInput: annotated, normalizations };
 }
 
 /** Flatten the typed builder shape to the module's top-level wire envelope. */
@@ -885,7 +917,6 @@ export const __moduleWireTest = {
     canonicalJson,
     encodeOpenCodeMessagesToCk,
     moduleWireBodyBytes,
-    resolveOrdinalsForModule,
     serdeJsonCompact,
     stableHashPrefix,
     toFlatModuleWireBody,

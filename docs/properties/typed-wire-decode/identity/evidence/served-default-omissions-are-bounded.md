@@ -79,3 +79,21 @@ ordinary plugin metadata require no testing flag, although todo state is needed.
 - Missing evidence: explicit reconciliation with older exact-replay promises.
 - Conclusion: needs human input from the specification owner. Test strategy
   receives the bounded omission oracle; no benchmark result is implied.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`; replay envelopes removed. `served_canonical_shell_bytes_and_segments_are_frozen` pins the served bytes of a decoded message: unknown envelope keys (`z`, `future`, a block's `unknown`) are absent, false `synthetic` is omitted, true is kept, and an edit serializes immediately. `typed_only_blocks_canonicalize_by_field_selection_and_sorted_order` pins explicit-false `provider_executed` on ingress to the omitted default, the accepted false-default omission. Unknown-envelope discard is the R3 normalization domain, separate from the two R5 omissions; no persisted synthetic-pair replay ran.
+
+Served synthetic flag: `TransformIngress::rendered_message` writes the
+pass-local effective `synthetic` flag into the served copy. With replay gone the
+served bytes of a plugin-echoed synthetic todo pair that arrived unflagged carry
+`"synthetic":true`, where the retained envelope used to replay the ingress
+`false` while the struct already carried `true` for every decision
+(`synthetic_ingress_matches_flagged_reference` pins the served bytes to the
+flagged reference). The plugin reads only `native_messages`, which already
+carried the effective flag through `encode_opencode`, so no plugin-visible
+behavior changes; the affected daemon-side identities are that message's
+`canonical_hash` and `output_identity`, which feed the native cache key and
+change once for such a message. This is typed-envelope normalization of a
+daemon-built value, not one of the two R5 omissions, and is listed in the PR
+description for the owner.

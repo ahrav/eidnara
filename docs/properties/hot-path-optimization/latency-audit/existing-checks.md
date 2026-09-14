@@ -611,7 +611,7 @@ not a claim that no related check exists anywhere in the repository.
 [served-fallback]: ../../../../crates/daemon/src/transform.rs#L13797
 [served-once]: ../../../../crates/daemon/src/served_json.rs#L171
 [served-key-order]: ../../../../crates/daemon/src/served_json.rs#L218
-[served-allocations]: ../../../../crates/daemon/tests/served_json_passthrough_allocations.rs#L68
+[served-allocations]: ../../../../crates/daemon/tests/served_json_shell_allocations.rs#L38
 [served-source]: ../../../../crates/daemon/src/transform.rs#L13942
 [t-fpids]: ../../../../crates/daemon/src/transform.rs#L13605
 [t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L33

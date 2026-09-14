@@ -18,7 +18,7 @@ use retrieval::{ProjectionError, ProjectionIdentity};
 use serde::{Deserialize, Serialize};
 use storage::GuardedConn;
 
-use super::{BuildError, VerifiedReplacement};
+use super::{BuildError, VerifiedReplacement, wall_ms};
 use crate::projection_gates::{
     Admission, EntryPoint, HookGate, InvalidationIdentity, ProjectionHook,
 };
@@ -156,6 +156,8 @@ impl SearchSelection {
             .selected
             .load_full()
             .ok_or(BuildError::Invalid("search unavailable; rebuild required"))?;
+        GenerationStore::open(Some(&self.data_home))?.validate(&family._seed_pin.digest)?;
+        self.revalidate_certificate(&family._seed_pin.digest, &family.certificate)?;
         family
             .certificate
             .seed
@@ -165,6 +167,7 @@ impl SearchSelection {
         if family.projection.quarantine().is_some() {
             return Err(BuildError::Invalid("search quarantined; rebuild required"));
         }
+        admit_transition_hook(gate, &family.certificate)?;
         Ok(SearchReader { family, grant })
     }
 
@@ -262,7 +265,15 @@ impl SearchSelection {
         let home = self.family_home(&candidate.staged.digest)?;
         create_directory(&self.data_home, FAMILIES)?;
         if home.try_exists()? {
-            self.remove_family(&candidate.staged.digest, &certificate)?;
+            match self.remove_family(&candidate.staged.digest, &certificate)? {
+                Reclaimed::Removed | Reclaimed::Absent => {}
+                Reclaimed::Uncertified => {
+                    return Err(BuildError::Invalid("uncertified family"));
+                }
+                Reclaimed::Residual => {
+                    return Err(BuildError::Invalid("family directory not empty"));
+                }
+            }
         }
         create_directory(&self.data_home.join(FAMILIES), &candidate.staged.digest)?;
         let mut manifest = create_file(&home.join(CERTIFICATE))?;
@@ -340,6 +351,8 @@ impl SearchSelection {
         gate: &HookGate,
         budget: &EvalBudget,
     ) -> Result<(), BuildError> {
+        // An exhausted budget is refused before the lock's retry window can outlast it.
+        deadline(budget)?;
         let transaction = LifecycleTransactionLock::acquire_exclusive(Some(&self.data_home))?;
         self.reopen_locked(kernel, gate, budget, &transaction)
     }
@@ -371,7 +384,23 @@ impl SearchSelection {
                     .filter(|family| family._seed_pin.digest == digest)
                 {
                     Some(family) => {
-                        if let Err(error) = self.validate_family(&family, kernel, budget) {
+                        store.validate(&digest)?;
+                        // Certificate loss withdraws the selection but does not damage the open
+                        // database or invalidate readers that already hold it.
+                        if let Err(error) =
+                            self.revalidate_certificate(&digest, &family.certificate)
+                        {
+                            if matches!(error, BuildError::Invalid(_)) {
+                                self.selected.store(None);
+                            }
+                            return Err(error);
+                        }
+                        if let Err(error) = family
+                            .projection
+                            .read_within(deadline(budget)?, verify_pages)
+                            .map_err(BuildError::from)
+                            .and_then(|()| self.validate_family(&family, kernel, budget))
+                        {
                             if let Some(kind) = family_damage(&error) {
                                 family.projection.enter_quarantine(kind, &error);
                                 self.selected.store(None);
@@ -388,10 +417,27 @@ impl SearchSelection {
                     }
                 };
                 self.admit(gate, budget)?;
+                admit_transition_hook(gate, &family.certificate)?;
                 self.selected.store(Some(family));
                 Ok(())
             }
         }
+    }
+
+    /// The durable certificate must still be the one the cached family was opened from.
+    fn revalidate_certificate(&self, digest: &str, cached: &Bootstrap) -> Result<(), BuildError> {
+        let found = match certificate_bytes(&self.family_home(digest)?) {
+            Err(BuildError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BuildError::Invalid("bootstrap certificate missing"));
+            }
+            result => result?,
+        };
+        let expected =
+            serde_json::to_vec(cached).map_err(|_| BuildError::Invalid("bootstrap encoding"))?;
+        if found != expected {
+            return Err(BuildError::Invalid("bootstrap certificate changed"));
+        }
+        Ok(())
     }
 
     fn family_home(&self, digest: &str) -> Result<PathBuf, BuildError> {
@@ -471,8 +517,9 @@ impl SearchSelection {
         budget: &EvalBudget,
     ) -> Result<(), BuildError> {
         family.check_kernel(kernel, budget)?;
+        let now = wall_ms()?;
         let report = family.projection.read_within(deadline(budget)?, |conn| {
-            verify_active(conn, &self.identity, &family.generation(), self.bounds).map_err(
+            verify_active(conn, &self.identity, &family.generation(), self.bounds, now).map_err(
                 |error| {
                     match error {
                         // `check_kernel` excludes a kernel change, so the stored identity row itself is corrupt.
@@ -605,8 +652,14 @@ impl SearchSelection {
 
     fn reclaim_locked(&self, digest: &str) -> Result<Reclaimed, BuildError> {
         let home = self.family_home(digest)?;
-        if !home.try_exists()? {
-            return Ok(Reclaimed::Absent);
+        // Non-following, so a dangling symlink is a retained entry rather than an absent one.
+        match fs::symlink_metadata(&home) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Ok(Reclaimed::Residual),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Reclaimed::Absent);
+            }
+            Err(error) => return Err(error.into()),
         }
         if !home.join(CERTIFICATE).try_exists()? {
             if home.join("search").join(SEED_FILE).try_exists()? {
@@ -639,7 +692,7 @@ impl SearchSelection {
         if intent.staged_seed_digest.as_deref() != Some(&digest) {
             return Err(BuildError::Invalid("unbound ownership certificate"));
         }
-        self.remove_family(
+        match self.remove_family(
             &digest,
             &Bootstrap {
                 schema: 2,
@@ -647,8 +700,11 @@ impl SearchSelection {
                 retiring: self.predecessor(&intent)?.map(Bootstrap::into_retiring),
                 intent: intent.clone(),
             },
-        )?;
-        Ok(intent)
+        )? {
+            Reclaimed::Removed | Reclaimed::Absent => Ok(intent),
+            Reclaimed::Uncertified => Err(BuildError::Invalid("uncertified family")),
+            Reclaimed::Residual => Err(BuildError::Invalid("family directory not empty")),
+        }
     }
 
     fn remove_family(
@@ -707,11 +763,10 @@ impl SearchSelection {
             for entry in fs::read_dir(&search)? {
                 let entry = entry?;
                 if entry.file_type()?.is_file()
-                    && entry.file_name().to_str().is_some_and(|name| {
-                        std::path::Path::new(name)
-                            .extension()
-                            .is_some_and(|ext| ext == "lease")
-                    })
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(is_lease_sidecar_name)
                 {
                     fs::remove_file(entry.path())?;
                 }
@@ -899,9 +954,32 @@ fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
             Refusal::Storage => Some(QuarantineKind::Storage),
             Refusal::Admission | Refusal::Identity => None,
         },
+        BuildError::Kernel(kernel::KernelError::CorruptCanonicalRow) => {
+            Some(QuarantineKind::Integrity)
+        }
         BuildError::Invalid(_) => Some(QuarantineKind::Integrity),
         _ => None,
     }
+}
+
+/// Authorized recovery also needs the hook its transition names, as construction did.
+fn admit_transition_hook(gate: &HookGate, certificate: &Bootstrap) -> Result<(), BuildError> {
+    let hook = certificate.intent.transition.hook();
+    if hook != ProjectionHook::EmbeddingBootstrap {
+        gate.admit(hook, EntryPoint::Reload)?;
+    }
+    Ok(())
+}
+
+/// The lease store names its sidecar `<16 lowercase hex digits>.lease`; any other `.lease`
+/// entry is foreign data the sweep must not unlink.
+fn is_lease_sidecar_name(name: &str) -> bool {
+    name.strip_suffix(".lease").is_some_and(|stem| {
+        stem.len() == 16
+            && stem
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn create_directory(parent: &Path, name: &str) -> Result<(), BuildError> {

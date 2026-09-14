@@ -443,6 +443,7 @@ pub fn verify_active(
     expected: &ProjectionIdentity,
     generation: &VectorGeneration,
     bounds: CoverageBounds,
+    now: i64,
 ) -> Result<CoverageReport, ProjectionError> {
     read_identity(conn)?
         .ok_or(ProjectionError::IdentityMismatch)?
@@ -484,21 +485,34 @@ pub fn verify_active(
          FROM occurrence_vectors v JOIN vector_generations g USING(generation_id)
          WHERE v.vector_dimension=g.vector_dimension AND v.generation_id=?1"
     )?;
-    let mut jobs = conn.prepare("SELECT job_id,occurrence_id,generation_id FROM embedding_jobs")?;
+    let mut jobs = conn
+        .prepare("SELECT job_id,occurrence_id,generation_id,next_attempt_at FROM embedding_jobs")?;
     for row in jobs.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
+            row.get::<_, Option<i64>>(3)?,
         ))
     })? {
-        let (id, occurrence, generation) = row?;
+        let (id, occurrence, generation, next_attempt_at) = row?;
         if id != crate::batch::job_id(&occurrence, &generation) {
             return Err(ProjectionError::CorruptRow);
         }
-        crate::dispatch::job_ledger(conn, &id)?
-            .ok_or(ProjectionError::CorruptRow)?
-            .episode()?;
+        let ledger = crate::dispatch::job_ledger(conn, &id)?.ok_or(ProjectionError::CorruptRow)?;
+        if invalid_episode_state(&ledger, &id, next_attempt_at, now)? {
+            return Err(ProjectionError::CorruptRow);
+        }
+        if let Some(reference) = ledger.authorization_ref.as_deref() {
+            let recorded: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM embedding_recovery_authorizations WHERE job_id=?1 AND authorization_ref=?2)",
+                params![id, reference],
+                |row| row.get(0),
+            )?;
+            if !recorded {
+                return Err(ProjectionError::CorruptRow);
+            }
+        }
     }
     let mut seen = 0i64;
     for row in vectors.query_map([&generation.generation_id], |row| {
@@ -519,4 +533,94 @@ pub fn verify_active(
         return Err(ProjectionError::CorruptRow);
     }
     Ok(report)
+}
+
+fn invalid_episode_state(
+    ledger: &crate::dispatch::JobLedger,
+    job_id: &str,
+    next_attempt_at: Option<i64>,
+    now: i64,
+) -> Result<bool, ProjectionError> {
+    let has_episode = ledger.episode()?.is_some();
+    let expected_episode = match ledger.authorization_ref.as_deref() {
+        Some(reference) if crate::dispatch::valid_authorization_ref(reference) => {
+            crate::dispatch::authorized_episode_id(job_id, reference)
+        }
+        Some(_) => return Ok(true),
+        None => crate::dispatch::first_episode_id(job_id),
+    };
+    let wrong_episode = match ledger.authorization_ref.as_deref() {
+        Some(_) => ledger.episode_id.as_deref() != Some(expected_episode.as_str()),
+        None => has_episode && ledger.episode_id.as_deref() != Some(expected_episode.as_str()),
+    };
+    let expired = matches!(ledger.state.as_str(), "pending" | "admitted")
+        && has_episode
+        && ledger
+            .episode_deadline
+            .is_some_and(|deadline| deadline < now);
+    let retry_after_expiry = matches!(ledger.state.as_str(), "pending" | "admitted")
+        && has_episode
+        && next_attempt_at.is_some_and(|retry| {
+            ledger
+                .episode_deadline
+                .is_some_and(|deadline| retry > deadline)
+        });
+    Ok(wrong_episode
+        || expired
+        || retry_after_expiry
+        || (ledger.state == "pending"
+            && ((has_episode && ledger.attempts >= ledger.episode_allowance)
+                || (!has_episode && ledger.attempts != 0)))
+        || (ledger.state == "admitted"
+            && (!has_episode
+                || ledger.host_job_id.is_none()
+                || ledger.attempts == 0
+                || ledger.attempts > ledger.episode_allowance)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invalid_episode_state;
+    use crate::dispatch::JobLedger;
+
+    fn pending(deadline: i64) -> JobLedger {
+        JobLedger {
+            state: "pending".to_owned(),
+            attempts: 0,
+            episode_id: Some(crate::dispatch::first_episode_id("job")),
+            episode_allowance: 1,
+            episode_deadline: Some(deadline),
+            host_job_id: None,
+            host_incarnation: None,
+            last_failure_kind: None,
+            stop_reason: None,
+            authorization_ref: None,
+        }
+    }
+
+    #[test]
+    fn active_verification_uses_the_dispatchers_inclusive_episode_deadline() {
+        let ledger = pending(100);
+        assert!(!invalid_episode_state(&ledger, "job", None, 100).unwrap());
+        assert!(invalid_episode_state(&ledger, "job", None, 101).unwrap());
+        assert!(invalid_episode_state(&ledger, "job", Some(101), 50).unwrap());
+        let mut admitted = pending(100);
+        admitted.state = "admitted".to_owned();
+        admitted.attempts = 1;
+        admitted.host_job_id = Some("host".to_owned());
+        assert!(!invalid_episode_state(&admitted, "job", None, 100).unwrap());
+        assert!(invalid_episode_state(&admitted, "job", None, 101).unwrap());
+        admitted.host_job_id = None;
+        assert!(invalid_episode_state(&admitted, "job", None, 100).unwrap());
+        admitted.state = "embedded".to_owned();
+        admitted.host_job_id = None;
+        assert!(!invalid_episode_state(&admitted, "job", None, 101).unwrap());
+        admitted.state = "obsolete".to_owned();
+        assert!(!invalid_episode_state(&admitted, "job", Some(101), 50).unwrap());
+        admitted.episode_id = None;
+        admitted.episode_allowance = 0;
+        admitted.episode_deadline = None;
+        admitted.authorization_ref = Some("operator:recovery".to_owned());
+        assert!(invalid_episode_state(&admitted, "job", None, 101).unwrap());
+    }
 }

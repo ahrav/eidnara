@@ -1,8 +1,8 @@
 use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
 
 pub const KEYS_PER_EXTRA_OBJECT: usize = 8;
-/// Keys per passthrough block: `extra`, `kind`, `text`, `type`, plus the extras.
-pub const KEYS_PER_ASCII_BLOCK: usize = KEYS_PER_EXTRA_OBJECT + 4;
+/// Keys per decoded ASCII block: `kind`, `provider_extras`, `text`, `type`, the `x` namespace, plus the extras.
+pub const KEYS_PER_ASCII_BLOCK: usize = KEYS_PER_EXTRA_OBJECT + 5;
 pub const BLOCK_COUNTS: [usize; 2] = [1, 65];
 
 /// The fixture orders keys by decoded strings, not JSON escape sequences.
@@ -18,13 +18,15 @@ const ESCAPED_KEYS: &[&str] = &[
     r#""😀""#,
 ];
 
-/// Retained-original shells replay parsed `Value` maps, whose keys are already in
-/// decoded order. Typed shells serialize fields in declaration order and need reordering.
+/// Every message is an owned typed value that serializes `role` before `content`
+/// and each block's tag before its payload, so the canonicalizer reorders all of
+/// them. The decoded populations carry their discriminating keys inside
+/// `provider_extras`, the one block-level map the decode retains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Population {
-    RetainedAscii { blocks: usize },
-    RetainedEscaped { blocks: usize },
-    RetainedLargePayload { blocks: usize, payload_bytes: usize },
+    DecodedAscii { blocks: usize },
+    DecodedEscaped { blocks: usize },
+    DecodedLargePayload { blocks: usize, payload_bytes: usize },
     TypedShell { blocks: usize },
     OneEditedBlock { blocks: usize },
 }
@@ -32,9 +34,9 @@ pub enum Population {
 pub fn populations() -> impl Iterator<Item = Population> {
     BLOCK_COUNTS.into_iter().flat_map(|blocks| {
         [
-            Population::RetainedAscii { blocks },
-            Population::RetainedEscaped { blocks },
-            Population::RetainedLargePayload {
+            Population::DecodedAscii { blocks },
+            Population::DecodedEscaped { blocks },
+            Population::DecodedLargePayload {
                 blocks,
                 payload_bytes: 64 * 1024,
             },
@@ -47,42 +49,25 @@ pub fn populations() -> impl Iterator<Item = Population> {
 impl Population {
     pub fn label(&self) -> String {
         match self {
-            Self::RetainedAscii { blocks } => format!("retained_ascii/{blocks}blocks"),
-            Self::RetainedEscaped { blocks } => format!("retained_escaped/{blocks}blocks"),
-            Self::RetainedLargePayload {
+            Self::DecodedAscii { blocks } => format!("decoded_ascii/{blocks}blocks"),
+            Self::DecodedEscaped { blocks } => format!("decoded_escaped/{blocks}blocks"),
+            Self::DecodedLargePayload {
                 blocks,
                 payload_bytes,
-            } => format!("retained_large_payload/{blocks}blocks_{payload_bytes}B"),
+            } => format!("decoded_large_payload/{blocks}blocks_{payload_bytes}B"),
             Self::TypedShell { blocks } => format!("typed_shell/{blocks}blocks"),
             Self::OneEditedBlock { blocks } => format!("one_edited_block/{blocks}blocks"),
         }
     }
 
-    pub fn expects_canonical_miss(&self) -> bool {
-        matches!(
-            self,
-            Self::RetainedAscii { .. }
-                | Self::RetainedEscaped { .. }
-                | Self::RetainedLargePayload { .. }
-        )
-    }
-
-    /// Whether the canonicalizer returns its serialization buffer for this
-    /// population instead of a fresh exact-size reorder buffer. Retained
-    /// originals serialize in canonical order and keep the buffer; typed and
-    /// edited shells still need the reorder copy.
-    pub fn expects_serialization_buffer_return(&self) -> bool {
-        self.expects_canonical_miss()
-    }
-
     pub fn build(&self) -> WireMessage {
         match *self {
-            Self::RetainedAscii { blocks } => retained_ascii_message(blocks),
-            Self::RetainedEscaped { blocks } => retained_escaped_message(blocks),
-            Self::RetainedLargePayload {
+            Self::DecodedAscii { blocks } => decoded_ascii_message(blocks),
+            Self::DecodedEscaped { blocks } => decoded_escaped_message(blocks),
+            Self::DecodedLargePayload {
                 blocks,
                 payload_bytes,
-            } => retained_large_payload_message(blocks, payload_bytes),
+            } => decoded_large_payload_message(blocks, payload_bytes),
             Self::TypedShell { blocks } => typed_shell_message(blocks),
             Self::OneEditedBlock { blocks } => one_edited_block_message(blocks),
         }
@@ -113,32 +98,27 @@ pub fn serialization_buffer_root_bytes() -> usize {
     probe.capacity()
 }
 
-fn retained(body: &str) -> WireMessage {
-    let message: WireMessage = serde_json::from_str(body).expect("fixture body parses");
-    assert!(
-        message.original().is_some(),
-        "retained fixtures must carry their original JSON"
-    );
-    message
+fn decoded(body: &str) -> WireMessage {
+    serde_json::from_str(body).expect("fixture body parses")
 }
 
-fn passthrough_body(block_count: usize, mut extra_object: impl FnMut(&mut String)) -> String {
+fn decoded_body(block_count: usize, mut extra_object: impl FnMut(&mut String)) -> String {
     let mut body = String::from(r#"{"role":"user","content":["#);
     for block in 0..block_count {
         if block != 0 {
             body.push(',');
         }
-        body.push_str(r#"{"extra":{"#);
+        body.push_str(r#"{"kind":{"text":"t","type":"text"},"provider_extras":{"x":{"#);
         extra_object(&mut body);
-        body.push_str(r#"},"kind":{"text":"t","type":"text"}}"#);
+        body.push_str("}}}");
     }
     body.push_str("]}");
     body
 }
 
 /// Every key is unescaped ASCII, so no object needs the escape-aware decode path.
-pub fn retained_ascii_message(block_count: usize) -> WireMessage {
-    retained(&passthrough_body(block_count, |body| {
+pub fn decoded_ascii_message(block_count: usize) -> WireMessage {
+    decoded(&decoded_body(block_count, |body| {
         for key in 0..KEYS_PER_EXTRA_OBJECT {
             if key != 0 {
                 body.push(',');
@@ -148,8 +128,8 @@ pub fn retained_ascii_message(block_count: usize) -> WireMessage {
     }))
 }
 
-pub fn retained_escaped_message(block_count: usize) -> WireMessage {
-    retained(&passthrough_body(block_count, |body| {
+pub fn decoded_escaped_message(block_count: usize) -> WireMessage {
+    decoded(&decoded_body(block_count, |body| {
         for (index, key) in ESCAPED_KEYS.iter().enumerate() {
             if index != 0 {
                 body.push(',');
@@ -161,7 +141,7 @@ pub fn retained_escaped_message(block_count: usize) -> WireMessage {
     }))
 }
 
-pub fn retained_large_payload_message(block_count: usize, payload_bytes: usize) -> WireMessage {
+pub fn decoded_large_payload_message(block_count: usize, payload_bytes: usize) -> WireMessage {
     let payload = "x".repeat(payload_bytes);
     let mut body = String::from(r#"{"role":"user","content":["#);
     for block in 0..block_count {
@@ -173,7 +153,7 @@ pub fn retained_large_payload_message(block_count: usize, payload_bytes: usize) 
         body.push_str(r#"","type":"text"}}"#);
     }
     body.push_str("]}");
-    retained(&body)
+    decoded(&body)
 }
 
 pub fn typed_shell_message(block_count: usize) -> WireMessage {
@@ -184,27 +164,25 @@ pub fn typed_shell_message(block_count: usize) -> WireMessage {
             })
         })
         .collect();
-    let message = WireMessage::from_parts(
+    WireMessage::from_parts(
         "user",
         blocks,
         None,
         ProviderExtras::new(),
         HarnessMeta::default(),
-    );
-    assert!(message.original().is_none());
-    message
+    )
 }
 
 pub fn one_edited_block_message(block_count: usize) -> WireMessage {
-    let mut message = retained_ascii_message(block_count);
+    let mut message = decoded_ascii_message(block_count);
+    let sibling_bytes = serde_json::to_vec(&message.content()[1..]).expect("to_vec");
     *message.content_mut()[0].kind_mut() = BlockKind::Text {
         text: "edited".to_string(),
     };
-    assert!(message.original().is_none());
-    assert!(message.content()[0].original().is_none());
-    assert!(
-        block_count == 1 || message.content()[1].original().is_some(),
-        "untouched sibling blocks keep their originals"
+    assert_eq!(
+        serde_json::to_vec(&message.content()[1..]).expect("to_vec"),
+        sibling_bytes,
+        "an edit to one block leaves its siblings' bytes unchanged"
     );
     message
 }
