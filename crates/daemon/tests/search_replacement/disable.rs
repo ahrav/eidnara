@@ -1085,8 +1085,9 @@ async fn disable_process_cuts_and_lost_ack_reconcile_twice_without_reenable() {
                     &corpus.kernel,
                     &gate,
                     &spec(root.path()),
+                    // A completed replay consumes no episode; it still confirms with one budgeted kernel read that the consumer is absent.
                     &budget(if reopen == 1 {
-                        Duration::ZERO
+                        Duration::from_secs(5)
                     } else {
                         Duration::from_secs(20)
                     }),
@@ -1314,6 +1315,246 @@ async fn a_deregistration_committed_on_the_last_attempt_completes_without_a_new_
     }
 }
 
+/// A kernel restored after the deregistration commit but before the record is updated holds the consumer again. Completion is not persisted over it.
+#[tokio::test]
+async fn a_restore_before_the_completion_write_refuses_to_persist_deregistration() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(backup.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let saved = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup.path().to_path_buf(),
+            deadline: std::time::Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let checkpoint = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    assert!(checkpoint.is_some());
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let result = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| {
+                if event == DisableEvent::Deregistered {
+                    corpus.kernel.restore(&saved.destination_path).unwrap();
+                }
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Invalid(
+                "deregistered consumer is registered again"
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(!disabled(root.path()).deregistered);
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        checkpoint
+    );
+}
+
+/// Maintenance pins the selected family; publishing another family under it would leave the pin on the old one, so selection is refused until the owner stops maintenance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selecting_a_replacement_is_refused_while_maintenance_is_bound() {
+    use daemon::embedding_supervisor::{Maintained, SliceBounds};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let engine = fixtures::TestEngine::new();
+    let synapse = Arc::new(fixtures::component(
+        &engine,
+        host_runtime::synapse::SynapseLimits::default(),
+    ));
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    selection
+        .start_maintenance(
+            Maintained {
+                gate: Arc::clone(&gate),
+                kernel: Arc::clone(&corpus.kernel),
+                projection: Arc::clone(reader.projection()),
+                synapse,
+                project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+                destination: kernel::ArtifactDestination::Remote,
+            },
+            SliceBounds {
+                dispatch: fixtures::bounds(),
+                sweep_candidates: NonZeroUsize::new(16).unwrap(),
+                slice: Duration::from_millis(200),
+                idle: Duration::from_millis(20),
+            },
+            Arc::new(|| fixtures::NOW),
+            events,
+        )
+        .unwrap();
+    let selected = reader.digest().to_owned();
+    drop(reader);
+    corpus.publish("late", "late bytes");
+    let candidate = next_candidate(root.path(), &corpus, &gate);
+    let failure = selection.select(candidate, &mut |_| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            failure.error,
+            BuildError::Invalid("maintenance is bound to the selected family")
+        ),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .unwrap()
+            .digest(),
+        selected
+    );
+    selection
+        .maintenance_supervisor_for_test()
+        .unwrap()
+        .shutdown(Duration::from_secs(10))
+        .await
+        .unwrap();
+}
+
+/// The receipt-only retry validated no family. A kernel restored before its deregistration commit holds the consumer without this operation's receipt, so the commit must be fenced to the history the retry observed, not run against the restored one.
+#[tokio::test]
+async fn a_restore_before_the_retry_deregistration_is_refused_without_a_validated_family() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(backup.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let saved = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup.path().to_path_buf(),
+            deadline: std::time::Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let checkpoint = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    assert!(checkpoint.is_some());
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let done = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(done.deregistered);
+    // The cut after `Deregistered`: the kernel holds the receipt, the record does not.
+    let path = root.path().join("search-lifecycle/intent.json");
+    let mut cut: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    cut["deregistered"] = serde_json::Value::Bool(false);
+    std::fs::write(&path, serde_json::to_vec(&cut).unwrap()).unwrap();
+    let mut selection = selector(root.path());
+    let result = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate_for(root.path()),
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| {
+                if event == DisableEvent::BeforeDeregister {
+                    corpus.kernel.restore(&saved.destination_path).unwrap();
+                }
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Mutation(
+                retrieval::ProjectionError::IdentityMismatch
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(!disabled(root.path()).deregistered);
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        checkpoint
+    );
+}
+
+/// The completion check waits for a kernel reader only as long as the caller's budget allows; a held pool returns `Deadline` at that bound, not when the holder lets go.
+#[tokio::test]
+async fn a_completed_replay_stops_waiting_for_a_kernel_reader_at_its_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let done = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(done.deregistered);
+    let held = Arc::new(std::sync::Barrier::new(2));
+    let holder = {
+        let kernel = Arc::clone(&corpus.kernel);
+        let held = Arc::clone(&held);
+        std::thread::spawn(move || kernel.hold_readers_for_test(&held, Duration::from_secs(3)))
+    };
+    held.wait();
+    let started = std::time::Instant::now();
+    let result = selector(root.path())
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate_for(root.path()),
+            &spec(root.path()),
+            &budget(Duration::from_millis(200)),
+            &mut |_| {},
+        )
+        .await;
+    let waited = started.elapsed();
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Kernel(kernel::KernelError::Deadline))
+        ),
+        "{result:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(2),
+        "the completion check waited {waited:?} for the holder instead of its budget"
+    );
+    holder.join().unwrap();
+    assert_eq!(disabled(root.path()), done);
+}
+
 /// A slice held inside a projection write past the grace is reported once, not once more for the tracked task that pins the reader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn grace_expiry_counts_only_the_held_slice_for_pinned_maintenance() {
@@ -1392,7 +1633,8 @@ fn an_unreadable_record_denies_per_call_without_latching_the_gate() {
     let directory = root.path().join("search-lifecycle");
     let mut modes = vec![0o750];
     if rustix::process::geteuid().as_raw() != 0 {
-        modes.push(0o000);
+        // Without the search bit the directory opens but its record does not; `open` repairs that too.
+        modes.extend([0o600, 0o000]);
     }
     for mode in modes {
         let grant = gate
@@ -1429,7 +1671,7 @@ fn an_unreadable_record_denies_per_call_without_latching_the_gate() {
     }
 }
 
-/// Nothing repairs the record file's own mode: a record readable by others is refused like a rejected record, so the gate latches closed and cancels every grant.
+/// Nothing repairs the record file's own mode: a record readable by others, or one its owner can no longer read, is refused like a rejected record, so the gate latches closed and cancels every grant.
 #[test]
 fn a_record_file_with_drifted_mode_latches_the_gate_closed() {
     use daemon::projection_gates::Denial;
@@ -1440,24 +1682,101 @@ fn a_record_file_with_drifted_mode_latches_the_gate_closed() {
     let gate = gate_for(root.path());
     let selection = build_selected(root.path(), &corpus, &gate);
     let record = root.path().join("search-lifecycle").join("intent.json");
-    let grant = gate
-        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+    let mut modes = vec![0o644];
+    if rustix::process::geteuid().as_raw() != 0 {
+        modes.push(0o000);
+    }
+    for mode in modes {
+        let gate = gate_for(root.path());
+        let grant = gate
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap();
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(mode)).unwrap();
+        let denial = gate
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap_err();
+        assert!(
+            matches!(denial, Denial::RecoveryRequired),
+            "mode {mode:o}: {denial:?}"
+        );
+        assert!(grant.invalidated.is_cancelled(), "mode {mode:o}");
+        assert!(matches!(
+            ProjectionLifecycle::open(root.path()).unwrap().read(),
+            ControlState::Unavailable(_)
+        ));
+        assert!(
+            selection
+                .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .is_err()
+        );
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// A kernel restored from before the disable holds the consumer again. The record's completion marker does not outrank that: reconciliation refuses instead of reporting the resurrected consumer as deregistered.
+#[tokio::test]
+async fn a_deregistered_record_refuses_a_consumer_the_kernel_holds_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(backup.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let saved = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup.path().to_path_buf(),
+            deadline: std::time::Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
         .unwrap();
-    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let denial = gate
-        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
-        .unwrap_err();
-    assert!(matches!(denial, Denial::RecoveryRequired), "{denial:?}");
-    assert!(grant.invalidated.is_cancelled());
-    assert!(matches!(
-        ProjectionLifecycle::open(root.path()).unwrap().read(),
-        ControlState::Unavailable(_)
-    ));
-    assert!(
-        selection
-            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
-            .is_err()
+    let checkpoint = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    assert!(checkpoint.is_some());
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let done = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(done.deregistered);
+    corpus.kernel.restore(&saved.destination_path).unwrap();
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        checkpoint
     );
+    for _ in 0..2 {
+        let mut selection = selector(root.path());
+        let result = selection
+            .reconcile_disabled(
+                &corpus.kernel,
+                &gate_for(root.path()),
+                &spec(root.path()),
+                &budget(Duration::from_secs(20)),
+                &mut |_| {},
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(BuildError::Invalid(
+                    "deregistered consumer is registered again"
+                ))
+            ),
+            "{result:?}"
+        );
+        assert_eq!(disabled(root.path()), done);
+        assert_eq!(
+            corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+            checkpoint
+        );
+    }
 }
 
 /// Cleanup walks the same commit pages construction and retirement admitted, so it charges the same per-page catch-up limits. A manifest sized for one page admits construction and must admit the disable that follows.

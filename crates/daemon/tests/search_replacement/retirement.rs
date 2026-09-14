@@ -1,6 +1,7 @@
 use super::*;
 use daemon::search_projection::SearchProjectionError;
 use daemon::search_replacement::selection::retirement::RetirementEvent;
+use host_runtime::lifecycle::PAYLOAD_MANIFEST_DIGEST_LEN;
 use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ConsumerObligation,
 };
@@ -257,9 +258,10 @@ async fn disabled_cleanup_charges_the_retirement_bounds_before_retiring() {
         let mut config = spec(root.path());
         config.retirement.max_obligations = NonZeroUsize::new(10_000).unwrap();
         config.retirement.max_obligation_bytes = NonZeroU64::new(8 << 20).unwrap();
+        let per_row = (PAYLOAD_MANIFEST_DIGEST_LEN + "removed".len()) as u64;
         let expected = match name {
             "local_transaction_rows" => 10_001,
-            _ => (8 << 20) + MAX_RECORD_BYTES,
+            _ => 10_000 * per_row + (8 << 20) + MAX_RECORD_BYTES,
         };
         let old_path = case.old.as_ref().unwrap().projection().path().to_owned();
         let selected_path = case
@@ -320,6 +322,89 @@ async fn disabled_cleanup_charges_the_retirement_bounds_before_retiring() {
                 .unwrap(),
             Some(case.old_checkpoint)
         );
+    }
+}
+
+/// A projection reference upgraded from a `Weak` while retirement runs is a live holder. Local release is refused rather than recorded over it, and the retry after the holder drops proceeds.
+#[tokio::test]
+async fn a_projection_upgraded_during_retirement_blocks_local_release() {
+    use daemon::search_replacement::selection::disable::DisableEvent;
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    case.gate
+        .install(super::disable::cleanup_evaluator(root.path()));
+    let selected = case
+        .selection
+        .pin(
+            &case.corpus.kernel,
+            &case.gate,
+            &budget(Duration::from_secs(10)),
+        )
+        .unwrap();
+    let weak = Arc::downgrade(selected.projection());
+    drop(selected);
+    drop(case.old.take());
+    case.selection
+        .begin_disable(&case.gate, &mut |_| {})
+        .unwrap();
+    let mut held = None;
+    let mut ledger = Vec::new();
+    let result = case
+        .selection
+        .reconcile_disabled(
+            &case.corpus.kernel,
+            &case.gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| {
+                if event == DisableEvent::Retirement(RetirementEvent::Removed) {
+                    held = weak.upgrade();
+                }
+                ledger.push(event);
+            },
+        )
+        .await;
+    assert!(
+        held.is_some(),
+        "the weak reference upgraded during retirement"
+    );
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Intent(
+                daemon::projection_lifecycle::IntentRefusal::FamilyHeld
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(!ledger.contains(&DisableEvent::LocalReleased));
+    match ProjectionLifecycle::open(root.path()).unwrap().read() {
+        ControlState::Disabled(current) => assert_eq!(current.through, None),
+        other => panic!("{other:?}"),
+    }
+    drop(held);
+    let mut ledger = Vec::new();
+    let result = case
+        .selection
+        .reconcile_disabled(
+            &case.corpus.kernel,
+            &case.gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| ledger.push(event),
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
+        ),
+        "{result:?}"
+    );
+    assert!(ledger.contains(&DisableEvent::LocalReleased));
+    match ProjectionLifecycle::open(root.path()).unwrap().read() {
+        ControlState::Disabled(current) => assert_eq!(current.through, Some(case.target)),
+        other => panic!("{other:?}"),
     }
 }
 
@@ -586,7 +671,10 @@ fn a_stale_inspection_copy_of_the_old_database_is_owned_residue_not_a_permanent_
     let mut case = RetirementCase::new(root.path());
     let database = case.old.as_ref().unwrap().projection().path().to_owned();
     drop(case.old.take());
-    let scratch = database.parent().unwrap().join(".inspect-4242-1");
+    let scratch = database.parent().unwrap().join(format!(
+        ".inspect-{}-4242-1",
+        database.file_name().unwrap().to_string_lossy()
+    ));
     std::fs::create_dir(&scratch).unwrap();
     std::fs::copy(&database, scratch.join(database.file_name().unwrap())).unwrap();
     case.retire(root.path(), &mut |_| {}).unwrap();
@@ -600,6 +688,61 @@ fn a_stale_inspection_copy_of_the_old_database_is_owned_residue_not_a_permanent_
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn a_tampered_retiring_binding_never_becomes_available_after_reopen() {
+    for (path, value) in [
+        ("consumer/consumer_id", serde_json::json!("second-consumer")),
+        ("seed/generation_id", serde_json::json!("ghost-generation")),
+        (
+            "seed/kernel_incarnation_id",
+            serde_json::json!("other-incarnation"),
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut case = RetirementCase::new(root.path());
+        drop(case.old.take());
+        let certificate = case
+            .selection
+            .pin(
+                &case.corpus.kernel,
+                &case.gate,
+                &budget(Duration::from_secs(10)),
+            )
+            .unwrap()
+            .projection()
+            .path()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("bootstrap.json");
+        let RetirementCase {
+            corpus,
+            gate,
+            selection,
+            ..
+        } = case;
+        drop(selection);
+        let mut bootstrap: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&certificate).unwrap()).unwrap();
+        *bootstrap.pointer_mut(&format!("/retiring/{path}")).unwrap() = value;
+        std::fs::write(&certificate, serde_json::to_vec(&bootstrap).unwrap()).unwrap();
+        let selection = selector(root.path());
+        assert!(
+            selection
+                .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .is_err(),
+            "{path}"
+        );
+        assert!(
+            selection
+                .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .is_err(),
+            "{path}"
+        );
+    }
 }
 
 #[test]
@@ -828,7 +971,8 @@ fn inventory_bounds_and_cancelled_acknowledgement_preserve_old_checkpoint() {
             &cancelled,
             CONSUMER,
             case.target,
-            now()
+            now(),
+            target.incarnation,
         ),
         Err(kernel::KernelError::Deadline)
     );
@@ -915,6 +1059,44 @@ fn census_bound_is_independent_of_the_per_batch_persist_limit() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn the_receipt_transaction_charge_covers_every_disposition_row() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    drop(case.old.take());
+    let config = spec(root.path());
+    // The limit leaves room for `max_obligation_bytes` and one `MAX_RECORD_BYTES`; each disposition row adds a digest and `removed`.
+    let censused = config.retirement.max_obligation_bytes.get() + MAX_RECORD_BYTES;
+    let mut evaluator = support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &daemon::projection_gates::ProjectionHook::ALL,
+    );
+    evaluator
+        .manifest
+        .limits
+        .insert("local_transaction_bytes".to_owned(), censused);
+    case.gate.install(evaluator);
+    let error = case.retire(root.path(), &mut |_| {}).unwrap_err();
+    match error {
+        BuildError::Denied(daemon::projection_gates::Denial::LimitExceeded {
+            limit,
+            observed,
+            max,
+        }) => {
+            assert_eq!(limit, "local_transaction_bytes");
+            assert_eq!(max, censused);
+            let per_row = (PAYLOAD_MANIFEST_DIGEST_LEN + "removed".len()) as u64;
+            assert_eq!(
+                observed,
+                censused + config.retirement.max_obligations.get() as u64 * per_row
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    case.assert_no_receipt();
 }
 
 #[test]

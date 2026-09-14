@@ -385,6 +385,7 @@ impl SearchSelection {
                 &intent.consumer.consumer_id,
                 target,
                 wall_ms()?,
+                family.incarnation,
             )
             .map_err(BuildError::from)?;
         if kernel
