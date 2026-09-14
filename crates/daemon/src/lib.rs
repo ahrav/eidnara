@@ -17,6 +17,7 @@ pub mod decay_render;
 pub mod dispatch;
 pub(crate) mod divergence;
 pub(crate) mod dreamer_scheduler;
+pub mod edit_recipe;
 pub mod embedding_dispatch;
 pub mod embedding_publication;
 pub mod embedding_supervisor;

@@ -1,0 +1,3070 @@
+{
+  "schema": "transform-edit-recipe-fixtures-v1",
+  "notes": "Shared acceptance and rejection cases for the two-source edit recipe. Both languages must agree on `expect.ok` and, when accepted, on the exact reconstructed `output`. Rejection reasons are not standardized across languages. `input` is the base the applier holds under `input_revision` (default `input_revision_default`); `previous`, when present, is the retained applied output held under `previous.revision`. The recipe's own `base_revision` and `previous_output_revision` must match those held revisions. Canonical lengths are derived by each language from these values. Accepted cases also state `canonical_bytes`, the compact JSON length of the reconstructed array that both appliers must compute; fixture values contain only integers and strings, so the two languages' number formatting cannot diverge here.",
+  "input_revision_default": "base-1",
+  "cases": [
+    {
+      "name": "AE1 keeps A and D, inserts summary and instruction, omits B and C",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "c",
+            "role": "user"
+          },
+          "parts": []
+        },
+        {
+          "info": {
+            "id": "d",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "output": "ok"
+              }
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          },
+          {
+            "op": "insert",
+            "values": [
+              {
+                "info": {
+                  "role": "user",
+                  "synthetic": true
+                },
+                "parts": [
+                  {
+                    "type": "text",
+                    "text": "summary",
+                    "synthetic": true
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 3,
+            "count": 1
+          },
+          {
+            "op": "insert",
+            "values": [
+              {
+                "info": {
+                  "role": "user"
+                },
+                "parts": [
+                  {
+                    "type": "text",
+                    "text": "instruction"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "a",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ],
+            "future_field": {
+              "kept": true
+            }
+          },
+          {
+            "info": {
+              "role": "user",
+              "synthetic": true
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "summary",
+                "synthetic": true
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "d",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                  "status": "completed",
+                  "output": "ok"
+                }
+              }
+            ]
+          },
+          {
+            "info": {
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "instruction"
+              }
+            ]
+          }
+        ],
+        "canonical_bytes": 399
+      }
+    },
+    {
+      "name": "AE2 keeps a transformed previous prefix and a new unchanged input message",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "c",
+            "role": "user"
+          },
+          "parts": []
+        },
+        {
+          "info": {
+            "id": "d",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "output": "ok"
+              }
+            }
+          ]
+        }
+      ],
+      "previous": {
+        "revision": "prev-1",
+        "values": [
+          {
+            "info": {
+              "id": "p0",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "prev0"
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "p1",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "prev1 ☃"
+              }
+            ]
+          }
+        ]
+      },
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "previous_output_revision": "prev-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "previous",
+            "start": 0,
+            "count": 2
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 3,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "p0",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "prev0"
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "p1",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "prev1 ☃"
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "d",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                  "status": "completed",
+                  "output": "ok"
+                }
+              }
+            ]
+          }
+        ],
+        "canonical_bytes": 286
+      }
+    },
+    {
+      "name": "empty input and empty output",
+      "input": [],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": []
+      },
+      "expect": {
+        "ok": true,
+        "output": [],
+        "canonical_bytes": 2
+      }
+    },
+    {
+      "name": "empty output from nonempty input",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": []
+      },
+      "expect": {
+        "ok": true,
+        "output": [],
+        "canonical_bytes": 2
+      }
+    },
+    {
+      "name": "identity keep of the whole input",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "c",
+            "role": "user"
+          },
+          "parts": []
+        },
+        {
+          "info": {
+            "id": "d",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "output": "ok"
+              }
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 4
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "a",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ],
+            "future_field": {
+              "kept": true
+            }
+          },
+          {
+            "info": {
+              "id": "b",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "c",
+              "role": "user"
+            },
+            "parts": []
+          },
+          {
+            "info": {
+              "id": "d",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                  "status": "completed",
+                  "output": "ok"
+                }
+              }
+            ]
+          }
+        ],
+        "canonical_bytes": 346
+      }
+    },
+    {
+      "name": "adjacent input keeps in separate operations",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "c",
+            "role": "user"
+          },
+          "parts": []
+        },
+        {
+          "info": {
+            "id": "d",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "output": "ok"
+              }
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 2
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 2,
+            "count": 2
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "a",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ],
+            "future_field": {
+              "kept": true
+            }
+          },
+          {
+            "info": {
+              "id": "b",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "c",
+              "role": "user"
+            },
+            "parts": []
+          },
+          {
+            "info": {
+              "id": "d",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                  "status": "completed",
+                  "output": "ok"
+                }
+              }
+            ]
+          }
+        ],
+        "canonical_bytes": 346
+      }
+    },
+    {
+      "name": "append a literal after the whole input",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 2
+          },
+          {
+            "op": "insert",
+            "values": [
+              {
+                "info": {
+                  "role": "user"
+                },
+                "parts": [
+                  {
+                    "type": "text",
+                    "text": "instruction"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "a",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ],
+            "future_field": {
+              "kept": true
+            }
+          },
+          {
+            "info": {
+              "id": "b",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          },
+          {
+            "info": {
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "instruction"
+              }
+            ]
+          }
+        ],
+        "canonical_bytes": 249
+      }
+    },
+    {
+      "name": "delete all through a single insert",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "c",
+            "role": "user"
+          },
+          "parts": []
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "insert",
+            "values": [
+              {
+                "info": {
+                  "role": "user",
+                  "synthetic": true
+                },
+                "parts": [
+                  {
+                    "type": "text",
+                    "text": "summary",
+                    "synthetic": true
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "role": "user",
+              "synthetic": true
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "summary",
+                "synthetic": true
+              }
+            ]
+          }
+        ],
+        "canonical_bytes": 103
+      }
+    },
+    {
+      "name": "multiple replacements interleaved with keeps",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "c",
+            "role": "user"
+          },
+          "parts": []
+        },
+        {
+          "info": {
+            "id": "d",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "output": "ok"
+              }
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "insert",
+            "values": [
+              {
+                "info": {
+                  "role": "user",
+                  "synthetic": true
+                },
+                "parts": [
+                  {
+                    "type": "text",
+                    "text": "summary",
+                    "synthetic": true
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 1,
+            "count": 1
+          },
+          {
+            "op": "insert",
+            "values": [
+              {
+                "info": {
+                  "role": "user"
+                },
+                "parts": [
+                  {
+                    "type": "text",
+                    "text": "instruction"
+                  }
+                ]
+              },
+              {
+                "info": {
+                  "role": "user",
+                  "synthetic": true
+                },
+                "parts": [
+                  {
+                    "type": "text",
+                    "text": "summary",
+                    "synthetic": true
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 3,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "role": "user",
+              "synthetic": true
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "summary",
+                "synthetic": true
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "b",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          },
+          {
+            "info": {
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "instruction"
+              }
+            ]
+          },
+          {
+            "info": {
+              "role": "user",
+              "synthetic": true
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "summary",
+                "synthetic": true
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "d",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                  "status": "completed",
+                  "output": "ok"
+                }
+              }
+            ]
+          }
+        ],
+        "canonical_bytes": 477
+      }
+    },
+    {
+      "name": "mixed sources with a literal between them",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "c",
+            "role": "user"
+          },
+          "parts": []
+        },
+        {
+          "info": {
+            "id": "d",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "output": "ok"
+              }
+            }
+          ]
+        }
+      ],
+      "previous": {
+        "revision": "prev-1",
+        "values": [
+          {
+            "info": {
+              "id": "p0",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "prev0"
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "p1",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "prev1 ☃"
+              }
+            ]
+          }
+        ]
+      },
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "previous_output_revision": "prev-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "previous",
+            "start": 1,
+            "count": 1
+          },
+          {
+            "op": "insert",
+            "values": [
+              {
+                "info": {
+                  "role": "user"
+                },
+                "parts": [
+                  {
+                    "type": "text",
+                    "text": "instruction"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 2,
+            "count": 1
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 3,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "p1",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "prev1 ☃"
+              }
+            ]
+          },
+          {
+            "info": {
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "instruction"
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "c",
+              "role": "user"
+            },
+            "parts": []
+          },
+          {
+            "info": {
+              "id": "d",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                  "status": "completed",
+                  "output": "ok"
+                }
+              }
+            ]
+          }
+        ],
+        "canonical_bytes": 327
+      }
+    },
+    {
+      "name": "synthetic messages without ids keep stable indexes",
+      "input": [
+        {
+          "info": {
+            "role": "user",
+            "synthetic": true
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "summary",
+              "synthetic": true
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "role": "user",
+            "synthetic": true
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "summary",
+              "synthetic": true
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 2,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "role": "user",
+              "synthetic": true
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "summary",
+                "synthetic": true
+              }
+            ]
+          },
+          {
+            "info": {
+              "role": "user",
+              "synthetic": true
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "summary",
+                "synthetic": true
+              }
+            ]
+          }
+        ],
+        "canonical_bytes": 205
+      }
+    },
+    {
+      "name": "indexes stay stable after an output deletion shift",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "c",
+            "role": "user"
+          },
+          "parts": []
+        },
+        {
+          "info": {
+            "id": "d",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "output": "ok"
+              }
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 1,
+            "count": 1
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 3,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "b",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "d",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                  "status": "completed",
+                  "output": "ok"
+                }
+              }
+            ]
+          }
+        ],
+        "canonical_bytes": 201
+      }
+    },
+    {
+      "name": "previous keep of a value that also exists in input still comes from previous",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        }
+      ],
+      "previous": {
+        "revision": "prev-1",
+        "values": [
+          {
+            "info": {
+              "id": "a",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ],
+            "future_field": {
+              "kept": true
+            }
+          },
+          {
+            "info": {
+              "id": "p1",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "prev1 ☃"
+              }
+            ]
+          }
+        ]
+      },
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "previous_output_revision": "prev-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "previous",
+            "start": 0,
+            "count": 1
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 1,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "a",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ],
+            "future_field": {
+              "kept": true
+            }
+          },
+          {
+            "info": {
+              "id": "b",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          }
+        ],
+        "canonical_bytes": 177
+      }
+    },
+    {
+      "name": "unknown fields on a kept input value survive",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "a",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ],
+            "future_field": {
+              "kept": true
+            }
+          }
+        ],
+        "canonical_bytes": 101
+      }
+    },
+    {
+      "name": "revision at the 128-byte limit is accepted",
+      "input_revision": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "a",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ],
+            "future_field": {
+              "kept": true
+            }
+          }
+        ],
+        "canonical_bytes": 101
+      }
+    },
+    {
+      "name": "integral float start and count read as indexes",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 1.0,
+            "count": 1.0
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "a",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ],
+            "future_field": {
+              "kept": true
+            }
+          }
+        ],
+        "canonical_bytes": 101
+      }
+    },
+    {
+      "name": "negative zero start reads as zero",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": -0.0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "output": [
+          {
+            "info": {
+              "id": "a",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ],
+            "future_field": {
+              "kept": true
+            }
+          }
+        ],
+        "canonical_bytes": 101
+      }
+    },
+    {
+      "name": "wrong base revision",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-2",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "empty base revision",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "",
+        "output_revision": "out-1",
+        "operations": []
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "revision one byte over the limit",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+        "output_revision": "out-1",
+        "operations": []
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "empty output revision",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "",
+        "operations": []
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "missing previous base for a previous keep",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "previous_output_revision": "prev-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "previous",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "previous keep without previous_output_revision",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "previous",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "previous revision does not match the retained output",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "previous": {
+        "revision": "prev-2",
+        "values": [
+          {
+            "info": {
+              "id": "p0",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "prev0"
+              }
+            ]
+          }
+        ]
+      },
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "previous_output_revision": "prev-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "previous",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "previous_output_revision without a previous keep",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "previous_output_revision": "prev-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "unknown opcode",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "replace",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "unknown source",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "cache",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "zero count",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 0
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "negative start",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": -1,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "fractional start",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0.5,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "string start",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": "0",
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "unsafe integer start",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 9007199254740992,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "unsafe integer count",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 9007199254740992
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "range end past the end of input",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 1,
+            "count": 2
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "range end arithmetic near the safe limit",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 9007199254740991,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "repeated range",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "overlapping range",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "c",
+            "role": "user"
+          },
+          "parts": []
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 2
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 1,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "backward range",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "c",
+            "role": "user"
+          },
+          "parts": []
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 2,
+            "count": 1
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "backward previous range with a forward input range",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        }
+      ],
+      "previous": {
+        "revision": "prev-1",
+        "values": [
+          {
+            "info": {
+              "id": "p0",
+              "role": "user"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "prev0"
+              }
+            ]
+          },
+          {
+            "info": {
+              "id": "p1",
+              "role": "assistant"
+            },
+            "parts": [
+              {
+                "type": "text",
+                "text": "prev1 ☃"
+              }
+            ]
+          }
+        ]
+      },
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "previous_output_revision": "prev-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "previous",
+            "start": 1,
+            "count": 1
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          },
+          {
+            "op": "keep",
+            "source": "previous",
+            "start": 0,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "empty insert",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "insert",
+            "values": []
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "insert values not an array",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "insert",
+            "values": {}
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "missing operations",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1"
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "operations not an array",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": {}
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "operation is not an object",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          "keep"
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "unknown field on a keep",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1,
+            "path": "/x"
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "unknown field on an insert",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "insert",
+            "values": [
+              {
+                "info": {
+                  "role": "user",
+                  "synthetic": true
+                },
+                "parts": [
+                  {
+                    "type": "text",
+                    "text": "summary",
+                    "synthetic": true
+                  }
+                ]
+              }
+            ],
+            "source": "input"
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "valid prefix followed by a malformed final operation",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "c",
+            "role": "user"
+          },
+          "parts": []
+        },
+        {
+          "info": {
+            "id": "d",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "output": "ok"
+              }
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 2
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 2,
+            "count": 3
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "valid prefix followed by an unknown final opcode",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 1
+          },
+          {
+            "op": "delete",
+            "start": 1,
+            "count": 1
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    },
+    {
+      "name": "a small recipe cannot repeat a source range to amplify output",
+      "input": [
+        {
+          "info": {
+            "id": "a",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "a"
+            }
+          ],
+          "future_field": {
+            "kept": true
+          }
+        },
+        {
+          "info": {
+            "id": "b",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        }
+      ],
+      "recipe": {
+        "base_revision": "base-1",
+        "output_revision": "out-1",
+        "operations": [
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 2
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 2
+          },
+          {
+            "op": "keep",
+            "source": "input",
+            "start": 0,
+            "count": 2
+          }
+        ]
+      },
+      "expect": {
+        "ok": false
+      }
+    }
+  ]
+}
