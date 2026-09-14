@@ -234,7 +234,9 @@ interface DataProperty {
 
 function ownDataProperty(record: Record<string, unknown>, key: string): DataProperty | undefined {
     const property = Object.getOwnPropertyDescriptor(record, key);
-    return property && "value" in property ? { value: property.value as unknown } : undefined;
+    return property && property.enumerable && "value" in property
+        ? { value: property.value as unknown }
+        : undefined;
 }
 
 function parseOperation(value: unknown, index: number): RecipeOperation | RecipeRejection {

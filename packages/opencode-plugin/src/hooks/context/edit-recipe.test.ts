@@ -432,6 +432,23 @@ describe("edit recipe bounds", () => {
         }
     });
 
+    it("rejects non-enumerable known fields skipped by validation", () => {
+        const cyclic: unknown[] = [];
+        cyclic[0] = cyclic;
+        const operation = { op: "insert" };
+        Object.defineProperty(operation, "values", {
+            enumerable: false,
+            value: [cyclic],
+        });
+        expect(
+            parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [operation],
+            }),
+        ).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+    });
+
     it("does not retain metadata per rejected operation", () => {
         const operations: RecipeOperation[] = Array.from({ length: 100_000 }, () => ({
             op: "insert",
