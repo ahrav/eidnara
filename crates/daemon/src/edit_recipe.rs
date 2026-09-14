@@ -12,7 +12,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
-use serde::de::{self, Deserializer};
+use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -271,9 +271,30 @@ impl Operation {
     }
 }
 
+fn validate_json_nesting(value: &Value) -> Result<(), RecipeError> {
+    const MAX_JSON_NESTING: usize = 127;
+    let mut work = vec![(value, 0usize)];
+    while let Some((value, depth)) = work.pop() {
+        if matches!(value, Value::Array(_) | Value::Object(_)) && depth >= MAX_JSON_NESTING {
+            return Err(RecipeError::Malformed(
+                "recipe exceeds the JSON nesting limit".into(),
+            ));
+        }
+        match value {
+            Value::Array(values) => work.extend(values.iter().map(|child| (child, depth + 1))),
+            Value::Object(values) => {
+                work.extend(values.values().map(|child| (child, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 impl Recipe {
     /// Structural validation of a decoded response body. Base-relative checks run in [`Self::apply`].
     pub fn from_json(value: &Value) -> Result<Self, RecipeError> {
+        validate_json_nesting(value)?;
         let map = value
             .as_object()
             .ok_or_else(|| RecipeError::Malformed("recipe is not an object".into()))?;
@@ -450,9 +471,78 @@ pub fn canonical_len(value: &Value) -> Result<usize, RecipeError> {
     })
 }
 
+struct PreservedValue(Value);
+
+impl<'de> Deserialize<'de> for PreservedValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ValueVisitor;
+
+        impl<'de> Visitor<'de> for ValueVisitor {
+            type Value = PreservedValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(PreservedValue(Value::Bool(value)))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(PreservedValue(Value::Number(value.into())))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(PreservedValue(Value::Number(value.into())))
+            }
+
+            fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                serde_json::Number::from_f64(value)
+                    .map(Value::Number)
+                    .map(PreservedValue)
+                    .ok_or_else(|| E::custom("non-finite JSON number"))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(PreservedValue(Value::String(value.to_owned())))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(PreservedValue(Value::String(value)))
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(PreservedValue(Value::Null))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(PreservedValue(Value::Null))
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut values = Vec::new();
+                while let Some(value) = seq.next_element::<PreservedValue>()? {
+                    values.push(value.0);
+                }
+                Ok(PreservedValue(Value::Array(values)))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut values = serde_json::Map::new();
+                while let Some((key, value)) = map.next_entry::<String, PreservedValue>()? {
+                    values.insert(key, value.0);
+                }
+                Ok(PreservedValue(Value::Object(values)))
+            }
+        }
+
+        deserializer.deserialize_any(ValueVisitor)
+    }
+}
+
 impl<'de> Deserialize<'de> for Recipe {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
+        let value = PreservedValue::deserialize(deserializer)?.0;
         Recipe::from_json(&value).map_err(de::Error::custom)
     }
 }
@@ -894,15 +984,50 @@ mod tests {
     }
 
     #[test]
+    fn serde_round_trip_preserves_raw_value_marker_literals() {
+        let marker = Value::Object(
+            [(
+                crate::metered_decode::RAW_VALUE_TOKEN.to_owned(),
+                Value::String("[1]".to_owned()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let recipe = Recipe::from_json(&json!({
+            "base_revision": "b",
+            "output_revision": "o",
+            "operations": [{ "op": "insert", "values": [marker] }],
+        }))
+        .expect("valid recipe");
+        let encoded = serde_json::to_value(&recipe).expect("serialize recipe");
+        let decoded = serde_json::from_value::<Recipe>(encoded).expect("deserialize recipe");
+        assert_eq!(decoded, recipe);
+    }
+
+    #[test]
     fn serde_nesting_limit_leaves_room_for_123_literal_containers() {
-        let recipe = |depth: usize| {
+        let recipe_text = |depth: usize| {
             format!(
                 r#"{{"base_revision":"b","output_revision":"o","operations":[{{"op":"insert","values":[{}null{}]}}]}}"#,
                 "[".repeat(depth),
                 "]".repeat(depth)
             )
         };
-        assert!(serde_json::from_str::<Recipe>(&recipe(123)).is_ok());
-        assert!(serde_json::from_str::<Recipe>(&recipe(124)).is_err());
+        assert!(serde_json::from_str::<Recipe>(&recipe_text(123)).is_ok());
+        assert!(serde_json::from_str::<Recipe>(&recipe_text(124)).is_err());
+
+        let recipe_value = |depth: usize| {
+            let mut literal = Value::Null;
+            for _ in 0..depth {
+                literal = Value::Array(vec![literal]);
+            }
+            json!({
+                "base_revision": "b",
+                "output_revision": "o",
+                "operations": [{ "op": "insert", "values": [literal] }],
+            })
+        };
+        assert!(Recipe::from_json(&recipe_value(123)).is_ok());
+        assert!(Recipe::from_json(&recipe_value(124)).is_err());
     }
 }

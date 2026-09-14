@@ -130,8 +130,15 @@ function validateJsonValue(value: unknown): RecipeRejection | undefined {
         active.add(current);
         work.push({ value: null, depth: item.depth, exit: current });
         if (Array.isArray(current)) {
-            for (let index = current.length - 1; index >= 0; index -= 1)
-                work.push({ value: current[index], depth: item.depth + 1 });
+            for (let index = current.length - 1; index >= 0; index -= 1) {
+                const property = Object.getOwnPropertyDescriptor(current, index);
+                if (!property || !("value" in property))
+                    return {
+                        code: "malformed",
+                        detail: `recipe array index ${index} is not a data property`,
+                    };
+                work.push({ value: property.value, depth: item.depth + 1 });
+            }
             continue;
         }
         const record = current as Record<string, unknown>;

@@ -236,6 +236,25 @@ describe("edit recipe bounds", () => {
         }).not.toThrow();
         expect(accessed).toBe(false);
         expect(parsed).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+
+        const operations = [null];
+        Object.defineProperty(operations, 0, {
+            enumerable: true,
+            get() {
+                accessed = true;
+                throw new Error("indexed accessor invoked");
+            },
+        });
+        parsed = undefined;
+        expect(() => {
+            parsed = parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations,
+            });
+        }).not.toThrow();
+        expect(accessed).toBe(false);
+        expect(parsed).toMatchObject({ ok: false, rejection: { code: "malformed" } });
     });
 
     it("rejects recipes outside serde_json's value domain", () => {
