@@ -44,6 +44,14 @@ function keepLines(output: string, pattern: RegExp): string {
         .join("\n");
 }
 
+export function cargoTestCompleted(output: string, testName: string): boolean {
+    const lines = output.split("\n");
+    return (
+        lines.includes(`test ${testName} ... ok`) &&
+        lines.some((line) => /^test result: ok\. 1 passed; 0 failed; 0 ignored;/.test(line))
+    );
+}
+
 export function cargoTestEvidence(output: string): string {
     return keepLines(output, CARGO_EVIDENCE_LINE);
 }

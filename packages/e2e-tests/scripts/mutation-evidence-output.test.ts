@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { bunTestEvidence, cargoTestEvidence } from "./mutation-evidence-output";
+import { bunTestEvidence, cargoTestCompleted, cargoTestEvidence } from "./mutation-evidence-output";
 
 const BUN_FAILURE = [
     "bun test v1.4.0 (34cbb9a40)",
@@ -46,6 +46,23 @@ const CARGO_FAILURE = [
 ].join("\n");
 
 describe("mutation evidence output", () => {
+    it("requires the completed target test and a one-test passing summary", () => {
+        const name = "differential_goldens::dg_goldens_match_ts_wire_surface_and_gate_labels";
+        const passed = `test ${name} ... ok`;
+        const summary =
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
+        expect(cargoTestCompleted(`${passed}\n${summary}`, name)).toBe(true);
+        for (const output of [
+            "",
+            passed,
+            summary,
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out",
+            `test other ... ok\n${summary}`,
+            `${passed}\ntest result: ok. 0 passed; 0 failed; 1 ignored;`,
+        ])
+            expect(cargoTestCompleted(output, name)).toBe(false);
+    });
+
     it("keeps Bun verdicts, assertion text, and counts while dropping paths and diagnostics", () => {
         const kept = bunTestEvidence(BUN_FAILURE);
         expect(kept).toBe(
