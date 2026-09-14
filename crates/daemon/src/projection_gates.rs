@@ -659,19 +659,54 @@ impl HookGate {
     }
 
     /// Consults the durable record before an admission. A `Disabled` record, or one that was read and refused, latches the gate closed; a record that could not be read denies only this call, since the next lifecycle open or write repairs it and no durable stop exists.
-    fn observe_stop(&self) -> Result<(), Denial> {
+    /// The caller holds `state` across the probe and the latch, so `authorized_recovery`, which persists the recovered record under the same lock, cannot interleave with a stale observation.
+    fn observe_stop(&self, state: Option<&mut GateState>) -> Result<(), Denial> {
         use crate::projection_lifecycle::{ControlState, ProjectionLifecycle, Unreadable};
         let Some(home) = &self.data_home else {
             return Ok(());
         };
         match ProjectionLifecycle::probe_at(home) {
-            Ok(ControlState::Absent | ControlState::Intent(_)) => Ok(()),
+            Ok(ControlState::Absent | ControlState::Intent(_) | ControlState::Current(_)) => Ok(()),
             Ok(ControlState::Disabled(_) | ControlState::Unavailable(_)) => {
-                self.disable();
+                if let Some(state) = state {
+                    state.disabled = true;
+                    state.invalidated.cancel();
+                }
                 Ok(())
             }
             Err(Unreadable(reason)) => Err(Denial::ControlUnreadable(reason)),
         }
+    }
+
+    pub(crate) fn authorized_recovery(
+        &self,
+        home: &Path,
+        expected: &InvalidationIdentity,
+        persist: impl FnOnce() -> Result<(), crate::projection_lifecycle::IntentRefusal>,
+    ) -> Result<(), crate::projection_lifecycle::IntentRefusal> {
+        use crate::projection_lifecycle::IntentRefusal;
+        if self.data_home.as_deref().is_some_and(|bound| bound != home) {
+            return Err(IntentRefusal::Revoked);
+        }
+        let mut state = self.state.lock().map_err(|_| IntentRefusal::Revoked)?;
+        let evaluator = state
+            .evaluator
+            .as_ref()
+            .ok_or(IntentRefusal::Denied(Denial::NoManifest))?;
+        if evaluator.current != *expected {
+            return Err(IntentRefusal::Denied(Denial::EvidenceIdentity));
+        }
+        for hook in [
+            ProjectionHook::EmbeddingBootstrap,
+            ProjectionHook::EmbeddingBackfill,
+        ] {
+            evaluator.judge(hook).map_err(IntentRefusal::Denied)?;
+        }
+        persist()?;
+        state.invalidated.cancel();
+        state.invalidated = CancellationToken::new();
+        state.disabled = false;
+        Ok(())
     }
 
     /// Cleanup consumes resource evidence, not a query or hook grant.
@@ -765,8 +800,8 @@ impl HookGate {
         if hooks.is_empty() {
             return Err(Denial::NoManifest);
         }
-        let observed = self.observe_stop();
-        let state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
+        let mut state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
+        let observed = self.observe_stop(state.as_deref_mut());
         let verdicts: Vec<Result<Admission, Denial>> = hooks
             .iter()
             .map(|hook| {

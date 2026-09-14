@@ -6,6 +6,8 @@ use retrieval::coverage::CoverageBounds;
 
 #[path = "disable.rs"]
 pub(super) mod disable;
+#[path = "recovery.rs"]
+pub(super) mod recovery;
 #[path = "retirement.rs"]
 pub(super) mod retirement;
 

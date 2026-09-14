@@ -513,6 +513,7 @@ fn expected(request: &LifecycleRequest, consumed: u32) -> LifecycleIntent {
         staged_seed_digest: None,
         replacement_capture: None,
         recorded_at: NOW,
+        prior_disabled: None,
     }
 }
 
@@ -1171,6 +1172,12 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         ..base.clone()
     };
     assert!(reserved(&expected(&pin_cap, base.allowance)) <= 64 * 1024);
+    assert!(
+        reserved(&terminal)
+            >= serde_json::to_vec(&json!({"schema": 4, "current": &terminal}))
+                .unwrap()
+                .len()
+    );
     assert_eq!(
         lifecycle.record(&open, &pin_cap, NOW),
         Err(IntentRefusal::Oversized)

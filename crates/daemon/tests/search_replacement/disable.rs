@@ -60,7 +60,7 @@ fn admissions(selection: &SearchSelection, corpus: &Corpus, gate: &HookGate) -> 
     (queries, hooks)
 }
 
-fn apply_prefix(reader: &SearchReader, through: i64, invalidations: Vec<Invalidation>) {
+pub(super) fn apply_prefix(reader: &SearchReader, through: i64, invalidations: Vec<Invalidation>) {
     let checkpoint = reader
         .coverage(&budget(Duration::from_secs(10)))
         .unwrap()

@@ -287,7 +287,7 @@ impl SearchSelection {
                 }
             };
             family.unavailable.store(true, Ordering::Release);
-            if family.certificate.intent != *intent {
+            if !family.names_operation(intent) {
                 return Err(BuildError::Invalid(
                     "disabled handoff differs from selected certificate",
                 ));

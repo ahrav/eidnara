@@ -558,7 +558,12 @@ impl<'a> ReplacementBuilder<'a> {
         } else {
             self.cleanup(budget)?;
         }
-        self.lifecycle.consume_episode(self.gate, wall_ms()?)?;
+        let mut expected = intent.clone();
+        if !staging {
+            expected.replacement_capture = None;
+        }
+        self.lifecycle
+            .consume_expected_episode(self.gate, &expected, wall_ms()?)?;
         let run = Run {
             budget: budget.clone(),
             grants,
@@ -593,8 +598,24 @@ impl<'a> ReplacementBuilder<'a> {
             actor: "daemon".to_owned(),
             cause: "replacement capture".to_owned(),
         };
+        // Only a handoff that holds its own registration receipt hands the consumer over. The
+        // registration attempt still commits under its own key so retries replay its receipt.
+        let inherited = intent
+            .prior_disabled
+            .as_deref()
+            .and_then(|disabled| disabled.handoff.as_deref())
+            .filter(|handoff| handoff.consumer.consumer_id == binding.consumer_id)
+            .map(|handoff| CommitIntent {
+                operation_key: handoff.attempt_id.clone(),
+                ..registration.clone()
+            });
         self.kernel
             .commit_within_budget(&run.budget, registration, |envelope| {
+                if let Some(prior) = inherited.clone()
+                    && envelope.stored_receipt(prior)?.is_some()
+                {
+                    return Ok(String::new());
+                }
                 envelope.register_outbox_consumer(&binding.consumer_id, run.now())?;
                 Ok(String::new())
             })?;

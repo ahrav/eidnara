@@ -80,33 +80,7 @@ impl SearchSelection {
             .load_full()
             .ok_or(BuildError::Invalid("search unavailable"))?;
         let certificate = &family.certificate;
-        let grants = spec.admit(gate, &certificate.intent)?;
-        let remaining = certificate
-            .intent
-            .episodes
-            .deadline
-            .checked_sub(super::super::wall_ms()?)
-            .and_then(|n| u64::try_from(n).ok())
-            .ok_or(BuildError::Expired)?;
-        if deadline(budget)?
-            > std::time::Instant::now() + std::time::Duration::from_millis(remaining)
-        {
-            return Err(BuildError::Invalid(
-                "retirement budget exceeds original deadline",
-            ));
-        }
-        let (transaction_rows, transaction_bytes) = retirement_transaction_charges(spec)?;
-        for grant in &grants {
-            gate.check_limits(
-                grant,
-                &InvalidationIdentity::from(&self.identity),
-                &[
-                    ("physical_drain_ms", remaining),
-                    ("local_transaction_rows", transaction_rows),
-                    ("local_transaction_bytes", transaction_bytes),
-                ],
-            )?;
-        }
+        let grants = self.admit_retirement(gate, spec, budget, &certificate.intent)?;
         let check = || -> Result<(), BuildError> {
             deadline(budget)?;
             if super::super::wall_ms()? >= certificate.intent.episodes.deadline
@@ -128,6 +102,44 @@ impl SearchSelection {
             },
             observer,
         )
+    }
+
+    /// Rejects a budget that ends after `intent.episodes.deadline`.
+    pub(super) fn admit_retirement(
+        &self,
+        gate: &HookGate,
+        spec: &super::super::ReplacementSpec,
+        budget: &EvalBudget,
+        intent: &LifecycleIntent,
+    ) -> Result<Vec<Admission>, BuildError> {
+        spec.identity.require_compatible(&self.identity)?;
+        let remaining = intent
+            .episodes
+            .deadline
+            .checked_sub(super::super::wall_ms()?)
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or(BuildError::Expired)?;
+        if deadline(budget)?
+            > std::time::Instant::now() + std::time::Duration::from_millis(remaining)
+        {
+            return Err(BuildError::Invalid(
+                "retirement budget exceeds original deadline",
+            ));
+        }
+        let grants = spec.admit(gate, intent)?;
+        let (transaction_rows, transaction_bytes) = retirement_transaction_charges(spec)?;
+        for grant in &grants {
+            gate.check_limits(
+                grant,
+                &InvalidationIdentity::from(&self.identity),
+                &[
+                    ("physical_drain_ms", remaining),
+                    ("local_transaction_rows", transaction_rows),
+                    ("local_transaction_bytes", transaction_bytes),
+                ],
+            )?;
+        }
+        Ok(grants)
     }
 
     pub(super) fn retire_bound(
@@ -185,14 +197,39 @@ impl SearchSelection {
         if recovered {
             self.remove_retiring_family(old, transaction)?;
         } else {
-            let mut after =
-                checkpoint.ok_or(BuildError::Invalid("old consumer missing without receipt"))?;
+            // The proof is the immediate prior disable, or the one an aborted follow-up retained.
+            let prior = certificate.intent.prior_disabled.as_deref();
+            let retired = prior
+                .into_iter()
+                .chain(
+                    prior
+                        .and_then(|disabled| disabled.handoff.as_deref())
+                        .and_then(|handoff| handoff.prior_disabled.as_deref()),
+                )
+                .any(|disabled| {
+                    disabled.deregistered
+                        && disabled
+                            .through
+                            .is_some_and(|t| t >= old.seed.checkpoint_commit_seq)
+                        && disabled.handoff.as_deref().is_some_and(|handoff| {
+                            handoff.consumer == old.consumer
+                                && handoff.staged_seed_digest.as_deref() == Some(&old_digest)
+                        })
+                });
+            let mut after = match checkpoint {
+                Some(after) => after,
+                None if retired => target.through_commit,
+                None => return Err(BuildError::Invalid("old consumer missing without receipt")),
+            };
             if after > target.through_commit {
                 return Err(BuildError::Invalid(
                     "old checkpoint exceeds retirement target",
                 ));
             }
             for _ in 0..spec.episode.max_source_pages.get() {
+                if after == target.through_commit {
+                    break;
+                }
                 check()?;
                 let span = kernel
                     .verify_complete_commits_within_budget(

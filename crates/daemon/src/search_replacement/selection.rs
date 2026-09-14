@@ -37,6 +37,7 @@ const FAMILIES: &str = "search-families";
 const CERTIFICATE: &str = "bootstrap.json";
 
 pub mod disable;
+pub mod recovery;
 pub mod retirement;
 
 #[derive(Serialize, Deserialize)]
@@ -136,8 +137,13 @@ pub struct SearchSelection {
     bounds: CoverageBounds,
     selected: ArcSwapOption<SelectedFamily>,
     maintenance: Option<disable::Maintenance>,
+    recovery_incarnation: Option<CommitReadIncarnation>,
     #[cfg(feature = "test-support")]
     disable_barrier: Option<Arc<dyn Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync>>,
+    #[cfg(feature = "test-support")]
+    recovery_barrier: Option<Arc<dyn Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync>>,
+    #[cfg(feature = "test-support")]
+    recovery_sync_failure: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl SearchSelection {
@@ -148,8 +154,13 @@ impl SearchSelection {
             bounds,
             selected: ArcSwapOption::empty(),
             maintenance: None,
+            recovery_incarnation: None,
             #[cfg(feature = "test-support")]
             disable_barrier: None,
+            #[cfg(feature = "test-support")]
+            recovery_barrier: None,
+            #[cfg(feature = "test-support")]
+            recovery_sync_failure: None,
         }
     }
 
@@ -855,6 +866,21 @@ fn certificate_bytes(home: &Path) -> Result<Vec<u8>, BuildError> {
 }
 
 impl SelectedFamily {
+    /// The record moves only its consumed episodes and its cleared construction history after selection.
+    fn names_operation(&self, intent: &LifecycleIntent) -> bool {
+        let bound = &self.certificate.intent;
+        *bound
+            == LifecycleIntent {
+                episodes: crate::projection_lifecycle::EpisodeAccounting {
+                    consumed: bound.episodes.consumed,
+                    ..intent.episodes
+                },
+                replacement_capture: bound.replacement_capture.clone(),
+                prior_disabled: bound.prior_disabled.clone(),
+                ..intent.clone()
+            }
+    }
+
     fn generation(&self) -> VectorGeneration {
         let seed = &self.certificate.seed;
         VectorGeneration {
