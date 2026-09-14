@@ -54,6 +54,7 @@ import {
 import type { MessageLike } from "./tag-content-primitives";
 import {
     CaptureBudgetExceeded,
+    type CapturedMessages,
     type CaptureLease,
     capturedMessagesUnchanged,
     captureMessages,
@@ -136,7 +137,8 @@ interface AppliedOutput {
     revision: string;
     values: readonly unknown[];
     lengths: readonly number[];
-    /** Canonical bytes of `values` plus the retained lengths; the optional-output budget charges this. */
+    capture: CapturedMessages;
+    /** Canonical bytes, retained lengths, and snapshots all count against the optional-output budget. */
     charge: number;
 }
 
@@ -1314,7 +1316,15 @@ export function createRustModeTransform(
                           delta: wireDelta,
                       });
             // The retained output stays reusable only while the cache that applied it survives.
-            const previousApplied = previousWireCache?.applied;
+            let previousApplied = previousWireCache?.applied;
+            if (
+                previousApplied &&
+                !capturedMessagesUnchanged(previousApplied.values, previousApplied.capture)
+            ) {
+                previousApplied = undefined;
+                if (previousWireCache) previousWireCache.applied = undefined;
+                appliedOutputs.release(sessionId);
+            }
             let baseRevision = nextBaseRevision();
             const usageEntry = deps.contextUsageMap.get(sessionId);
             // Fields both the first attempt and the full-wire retry forward
@@ -1517,6 +1527,16 @@ export function createRustModeTransform(
             const appliedDeliveryPassIds = new Set(noteDeliveryPassIds(response));
             const applyStartedAt = performance.now();
             try {
+                // Previous outputs may share objects with an earlier host array, not this pass's input.
+                if (
+                    previousApplied &&
+                    response.previous_output_revision !== undefined &&
+                    !capturedMessagesUnchanged(previousApplied.values, previousApplied.capture)
+                ) {
+                    if (previousWireCache) previousWireCache.applied = undefined;
+                    appliedOutputs.release(sessionId);
+                    throw new PassDeclined(sessionId, "source_changed", "previous output");
+                }
                 // Recipe validation, sizing, and every boundary check run before the host array is touched.
                 const application = applyTransformRecipe(
                     response,
@@ -1525,12 +1545,27 @@ export function createRustModeTransform(
                     (slots) => lease.reserve(slots * (CANDIDATE_SLOT_BYTES + LENGTH_SLOT_BYTES)),
                 );
                 const candidate = application.values;
-                const applied: AppliedOutput = {
-                    revision: application.outputRevision,
-                    values: candidate,
-                    lengths: application.lengths,
-                    charge: application.bytes + application.lengths.length * LENGTH_SLOT_BYTES,
-                };
+                let applied: AppliedOutput | undefined;
+                try {
+                    const inspection = inspectReferenceableMessages(
+                        candidate,
+                        lease.remainingBytes,
+                    );
+                    if (inspection.ok && lease.reserve(inspection.estimatedBytes)) {
+                        applied = {
+                            revision: application.outputRevision,
+                            values: candidate,
+                            lengths: application.lengths,
+                            capture: captureMessages(candidate, lease),
+                            charge:
+                                application.bytes +
+                                application.lengths.length * LENGTH_SLOT_BYTES +
+                                inspection.estimatedBytes,
+                        };
+                    }
+                } catch (error) {
+                    if (!(error instanceof CaptureBudgetExceeded)) throw error;
+                }
                 const boundaryId = response.boundary_id;
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
                     assertNativeBoundary(candidate, sessionId, boundaryId);
@@ -1566,9 +1601,11 @@ export function createRustModeTransform(
                 // Publication and state promotion are synchronous from here to the lease release.
                 replaceHostArrayContents(target, candidate);
                 // A refused retention keeps the pass; only the next pass loses its `previous` source.
-                pendingWireCache.applied = appliedOutputs.retain(sessionId, applied.charge)
-                    ? applied
-                    : undefined;
+                appliedOutputs.release(sessionId);
+                pendingWireCache.applied =
+                    applied && appliedOutputs.retain(sessionId, applied.charge)
+                        ? applied
+                        : undefined;
                 state.ordinals = stagedMemo;
                 state.initialized = true;
                 state.consecutiveFailures = 0;

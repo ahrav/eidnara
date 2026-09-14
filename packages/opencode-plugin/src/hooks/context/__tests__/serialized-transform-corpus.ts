@@ -31,6 +31,7 @@ function body(messages: Record<string, unknown>[]): Record<string, unknown> {
         kind: "transform",
         v: 2,
         session_id: SERIALIZED_TRANSFORM_SESSION,
+        base_revision: "serialized-transform-corpus",
         serializer_profile: "owned-llmrunner",
         render_config: "serialized-transform-corpus",
         messages,

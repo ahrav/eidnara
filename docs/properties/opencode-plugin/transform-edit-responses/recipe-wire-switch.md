@@ -5,9 +5,10 @@ switch adds on `feat/transform-recipe-wire`, stacked on
 `feat/transform-recipe-builder` (`ed538110`). The eleven #533 records in
 [`catalog.md`](catalog.md) keep their revision-bound line references; where this
 change renames or replaces one of their named witnesses, the replacement is
-named here. Line numbers below are from the tree this file is committed with.
+named here. Unchanged numeric references and the following run receipts describe
+the pre-review tree at `1f5531cc`, not the later review fixes.
 
-Run receipts for that tree, from the repository root with Node 24.18.0 first on
+Run receipts recorded for that tree, from the repository root with Node 24.18.0 first on
 PATH: `bun run check:repo` exits 0 (`packages/opencode-plugin` 3511 pass, 0
 fail); `cargo +1.98 test -p daemon --all-features --locked --no-fail-fast
 --tests --examples` reports 1552 passed, 0 failed with the four tests skipped
@@ -56,25 +57,32 @@ generated single-fault mutations in `crates/daemon/tests/edit_recipe_generated.r
 
 ### TE21 `previous-base-is-applied-and-live`
 
-Status: active, exercised. The client advertises `previous_output_revision`
-only from the wire cache's `applied` entry, which is set in the synchronous
-publication block after `replaceHostArrayContents`
-(`rust-mode-transform.ts:1570`) and dropped by invalidation, clear, budget
-eviction, and session-count eviction. The daemon hands the retained output to
-the builder only when the request names its revision: CK at `lib.rs:9117`,
-native at `lib.rs:13909`. Every keep is confirmed by value equality in the
-builder, so a stale advertisement produces inserts, not a wrong keep.
-Witnesses: `lib.rs:23059` `ck_recipe_keeps_from_previous_only_when_the_request_applied_it`
-(no advertised revision: no `previous_output_revision`, zero previous keeps;
-the retained revision advertised: echoed, previous keeps present);
-`rust-mode-transform.test.ts:1359` "keeps from the applied previous output and
-the submitted input, then acks its note deliveries" (the second request
-advertises the first response's `output_revision`; the published array is
-`[previous[0], inserted, input[1]]` by identity); `:3513` "preserves the
-payload identity of kept and returned messages on publication" (a `previous`
-keep plus an insert). Value mutation of a kept entry between passes still
-declines through the capture recheck (TE17), which compares the live input
-against the snapshots the previous pass recorded.
+Status: active, exercised. In `rust-mode-transform.ts`, each retained `applied`
+output carries a descriptor-safe `capture`. The client validates that capture
+before advertising `previous_output_revision` and again after the response
+arrives, before accepting a recipe that names the previous output. Mutation
+before advertisement drops the previous source; mutation while a response is
+pending declines publication and NACKs deliveries. The current-input capture
+alone cannot validate objects retained from an earlier host array.
+
+The synchronous publication block stores the applied output. Invalidation,
+clear, budget eviction, and session-count eviction drop it. The daemon offers
+its retained output only when the request names that revision. In `lib.rs`,
+`CkEntry::same_message` compares served canonical bytes without falling back to
+typed equality; ingress matches also include unknown serialized fields.
+
+Witnesses in `rust-mode-transform.test.ts`:
+- "rejects mutated retained output before request"
+- "rejects mutated retained output pending response"
+- "keeps from the applied previous output and the submitted input, then acks
+  its note deliveries"
+
+The mutation tests send serialized fake requests and fresh second-pass input
+objects. They verify retained-object mutation cannot change the published
+array and distinguish successful input-only recovery from rejected delivery.
+Daemon witnesses in `lib.rs` cover missing and matching advertised revisions,
+changed unknown fields between passes, and ingress candidates with different
+unknown fields.
 
 ### TE22 `delivery-disposition-follows-publication`
 
@@ -90,9 +98,10 @@ with full arrays when a delta response omits native content".
 
 ### TE25 optional-output budget
 
-`AppliedOutputBudget` (`rust-mode-transform.ts:148`) charges each session's
-applied output at its canonical bytes plus eight bytes per retained length,
-evicts the least recently retained sessions once the 64 MiB
+`AppliedOutputBudget` in `rust-mode-transform.ts` charges each session's
+applied output at its canonical bytes plus eight bytes per retained length
+and the descriptor-safe snapshot estimate. It evicts the least recently
+retained sessions once the 64 MiB
 `OPTIONAL_OUTPUT_BUDGET_BYTES` (`:130`) is exceeded, and refuses a single
 retention larger than the budget. Refusal or eviction drops only the
 `previous` source; the pass that produced the output has already published.
@@ -140,7 +149,13 @@ separate owners.
 ## Cross-language round trip
 
 The shared fixture file and `edit_recipe_generated.rs` are the executable
-agreement between the Rust and TypeScript appliers. A live daemon-to-plugin
+agreement between the Rust and TypeScript appliers. The separate
+`verify-serialized-transform-pages.ts` command generates requests with
+`base_revision` and verifies all 19 paging/admission cases against a real
+host. Its Rust test reconstructs both paged and unpaged responses through
+`support::applied::applied_messages` before comparing them.
+
+A live daemon-to-plugin
 round trip is not exercised by CI on this tree: the e2e Rust-mode harness gates
 on the shared-memory channel probe, which reports
 `runtime_mechanism_unavailable` under Bun 1.3.14 (`markAsUntransferable` is not

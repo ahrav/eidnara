@@ -363,20 +363,22 @@ struct SerializedOutputSession {
     entries: HashMap<String, SerializedOutputCacheEntry>,
     #[cfg_attr(not(test), allow(dead_code))]
     stats: SerializedOutputCacheStats,
-    /// The ordered output the caller applied under this revision. Its messages share the
-    /// entries' payload handles, so the charge covers the vector and the revision only.
     previous_output: Option<(crate::edit_recipe::Revision, Arc<Vec<ServedMessage>>)>,
 }
 
-fn previous_output_retained_bytes(output: &[ServedMessage]) -> usize {
+fn previous_output_retained_bytes(output: &Arc<Vec<ServedMessage>>) -> usize {
     use crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES;
-    ARC_ALLOCATION_OVERHEAD_BYTES
+    let overhead = ARC_ALLOCATION_OVERHEAD_BYTES
+        .saturating_add(std::mem::size_of::<Vec<ServedMessage>>())
         .saturating_add(
             output
-                .len()
+                .capacity()
                 .saturating_mul(std::mem::size_of::<ServedMessage>()),
         )
-        .saturating_add(crate::edit_recipe::MAX_REVISION_BYTES)
+        .saturating_add(crate::edit_recipe::MAX_REVISION_BYTES);
+    output.iter().fold(overhead, |bytes, message| {
+        bytes.saturating_add(message.retained_bytes())
+    })
 }
 
 #[derive(Debug)]
@@ -494,7 +496,6 @@ impl SerializedOutputCache {
         revision: crate::edit_recipe::Revision,
         output: Arc<Vec<ServedMessage>>,
     ) {
-        let charge = previous_output_retained_bytes(&output);
         let Some(session) = self
             .sessions
             .get_mut(session_id)
@@ -502,6 +503,7 @@ impl SerializedOutputCache {
         else {
             return;
         };
+        let charge = previous_output_retained_bytes(&output);
         if self.retained_bytes.saturating_add(charge) > self.max_retained_bytes {
             return;
         }
@@ -517,8 +519,6 @@ impl SerializedOutputCache {
         entries: HashMap<String, SerializedOutputCacheEntry>,
         stats: SerializedOutputCacheStats,
     ) {
-        // The applied output outlives the entry refresh: the pass that replaces entries has not
-        // published yet, and its own retention lands afterwards.
         let previous_output = self
             .sessions
             .get(session_id)
@@ -29066,6 +29066,47 @@ pub(crate) mod tests {
         assert!(
             retained.abs_diff(expected) <= expected / 20,
             "serialized-output estimate left 5% fixture tolerance: retained={retained} expected={expected}"
+        );
+    }
+
+    #[test]
+    fn serialized_output_cache_charges_retained_output_payloads_the_entries_do_not_own() {
+        let (core, meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
+        let built = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
+        let mut cache = SerializedOutputCache::new(1024 * 1024);
+        cache.replace(
+            &request.session_id,
+            3,
+            built.cache_entries,
+            built.cache_stats,
+        );
+        let (before, _) = cache.metrics();
+
+        // A pass-through output serializes its own copies instead of reusing the entries.
+        let foreign =
+            ServedMessage::from_message(WireMessage::synthetic_user_text("x".repeat(64 * 1024)));
+        let payload = foreign.retained_bytes();
+        let mut output = Vec::with_capacity(128);
+        output.push(foreign);
+        let owned = payload + output.capacity() * std::mem::size_of::<ServedMessage>();
+        cache.record_previous_output(
+            &request.session_id,
+            3,
+            crate::edit_recipe::Revision::parse("rev-1").unwrap(),
+            Arc::new(output),
+        );
+        let (after, _) = cache.metrics();
+        assert!(
+            after - before >= owned,
+            "retained output charged {} but owns {owned} bytes including vector capacity",
+            after - before
+        );
+
+        cache.take_previous_output(&request.session_id, 3);
+        assert_eq!(
+            cache.metrics().0,
+            before,
+            "taking the output releases its charge"
         );
     }
 

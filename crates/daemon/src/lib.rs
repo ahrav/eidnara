@@ -15178,7 +15178,7 @@ enum RecipeInputs<'a> {
 }
 
 /// One CK candidate for recipe matching: a served output message with prepared bytes, or an
-/// ingress shell that is compared without ever serializing it.
+/// ingress shell.
 #[derive(Clone, Copy)]
 enum CkEntry<'a> {
     Served(&'a transform::ServedMessage),
@@ -15197,30 +15197,23 @@ impl<'a> CkEntry<'a> {
         self.message().meta.harness_id.clone()
     }
 
-    /// Typed equality ignores the retained ingress `original`: unchanged typed fields render the
-    /// same prompt, and keeping the caller's own object preserves any harmless unknown fields.
     fn same_message(self, other: Self) -> bool {
-        if let (Self::Served(left), Self::Served(right)) = (self, other)
-            && (std::ptr::eq(left.canonical_bytes(), right.canonical_bytes())
-                || left.canonical_bytes() == right.canonical_bytes())
-        {
-            return true;
+        match (self, other) {
+            (Self::Served(left), Self::Served(right)) => {
+                left.canonical_bytes() == right.canonical_bytes()
+            }
+            (Self::Served(served), Self::Ingress(ingress))
+            | (Self::Ingress(ingress), Self::Served(served)) => {
+                **served == *ingress
+                    || crate::served_json::to_vec(ingress)
+                        .is_ok_and(|bytes| bytes == served.canonical_bytes())
+            }
+            (Self::Ingress(left), Self::Ingress(right)) => left == right,
         }
-        let (left, right) = (self.message(), other.message());
-        left.role == right.role
-            && left.meta == right.meta
-            && left.origin == right.origin
-            && left.provider_extras == right.provider_extras
-            && left.content().len() == right.content().len()
-            && left
-                .content()
-                .iter()
-                .zip(right.content())
-                .all(|(a, b)| a.kind() == b.kind() && a.provider_extras == b.provider_extras)
     }
 }
 
-fn ck_keyed<'a>(
+fn recipe_keyed<'a>(
     entries: impl Iterator<Item = CkEntry<'a>>,
 ) -> Vec<Keyed<Option<String>, CkEntry<'a>>> {
     entries
@@ -15384,8 +15377,8 @@ fn respond_transform(
                 None => (None, None),
             };
             let segments = {
-                let output_keyed = ck_keyed(output.iter().map(CkEntry::Served));
-                let input_keyed = ck_keyed(
+                let output_keyed = recipe_keyed(output.iter().map(CkEntry::Served));
+                let input_keyed = recipe_keyed(
                     request
                         .messages
                         .iter()
@@ -15393,7 +15386,7 @@ fn respond_transform(
                 );
                 let previous_keyed = previous_values
                     .as_ref()
-                    .map(|values| ck_keyed(values.iter().map(CkEntry::Served)));
+                    .map(|values| recipe_keyed(values.iter().map(CkEntry::Served)));
                 let built = edit_recipe::build_operations(
                     &output_keyed,
                     &input_keyed,
@@ -18338,7 +18331,7 @@ fn test_route(channel_id: u16) -> RouteHandle {
 #[cfg(test)]
 #[derive(Default)]
 struct TestClientSession {
-    ck_input: Vec<Value>,
+    wire_input: Vec<Value>,
     native_input: Vec<Value>,
     applied_ck: Option<(String, Vec<Value>)>,
     applied_native: Option<(String, Vec<Value>)>,
@@ -18399,9 +18392,9 @@ impl Handler {
         if let Some(delta) = request.get("tail_delta").filter(|delta| delta.is_object()) {
             let replace_from = delta["replace_from"].as_u64().unwrap_or(0) as usize;
             let native_replace_from = delta["native_replace_from"].as_u64().unwrap_or(0) as usize;
-            let mut ck = client.ck_input[..replace_from.min(client.ck_input.len())].to_vec();
+            let mut ck = client.wire_input[..replace_from.min(client.wire_input.len())].to_vec();
             ck.extend(suffix_ck);
-            client.ck_input = ck;
+            client.wire_input = ck;
             if let Some(suffix) = suffix_native {
                 let mut full = client.native_input
                     [..native_replace_from.min(client.native_input.len())]
@@ -18410,7 +18403,7 @@ impl Handler {
                 client.native_input = full;
             }
         } else {
-            client.ck_input = suffix_ck;
+            client.wire_input = suffix_ck;
             if let Some(suffix) = suffix_native {
                 client.native_input = suffix;
             }
@@ -18453,7 +18446,7 @@ impl Handler {
         let input_values = if native {
             &client.native_input
         } else {
-            &client.ck_input
+            &client.wire_input
         };
         let applied = if native {
             &client.applied_native
@@ -23052,10 +23045,26 @@ mod tests {
         assert_eq!(error_code(outcome), "serve_native_unsupported_profile");
     }
 
+    #[test]
+    fn recipe_matching_rejects_ingress_with_different_unknown_fields() {
+        let value = json!({
+            "role": "assistant",
+            "content": [{"kind": {"type": "text", "text": "hello"}, "custom": "A"}],
+            "meta": {"harness_id": "m1"}
+        });
+        let served: transform::ServedMessage = serde_json::from_value(value.clone()).unwrap();
+        let same: WireMessage = serde_json::from_value(value.clone()).unwrap();
+        let mut changed = value;
+        changed["content"][0]["custom"] = json!("B");
+        let different: WireMessage = serde_json::from_value(changed).unwrap();
+        assert!(CkEntry::Served(&served).same_message(CkEntry::Ingress(&same)));
+        assert!(!CkEntry::Served(&served).same_message(CkEntry::Ingress(&different)));
+    }
+
     /// A retained CK output is a keep source only for the revision the request says it applied;
     /// a request that advertises none receives a recipe that addresses the input alone.
     #[tokio::test(flavor = "current_thread")]
-    async fn ck_recipe_keeps_from_previous_only_when_the_request_applied_it() {
+    async fn wire_recipe_keeps_from_previous_only_when_the_request_applied_it() {
         let (handler, _store, _dir, _project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         let messages = vec![ck("m1", 1, "hello"), ck("m2", 2, "again")];
@@ -23094,6 +23103,38 @@ mod tests {
         let response: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(response["previous_output_revision"], retained, "{response}");
         assert!(keeps_from(&response, "previous") > 0, "{response}");
+    }
+
+    /// An unknown pass-through field that changed between passes must not be kept from `previous`:
+    /// the client would republish the stale field while the daemon retains the new one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wire_recipe_does_not_keep_previous_output_whose_unknown_field_changed() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let mut first = request(vec![ck("m1", 1, "hello"), ck("m2", 2, "again")]);
+        first["messages"][1]["ck"]["content"][0]["custom"] = json!("A");
+        let mut second = first.clone();
+        second["messages"][1]["ck"]["content"][0]["custom"] = json!("B");
+        second["base_revision"] = json!("test-base-changed");
+
+        let response = call_transform_request(&handler, first).await;
+        assert_eq!(response["status"], "ok", "{response}");
+        let response = call_transform_request(&handler, second).await;
+        assert_eq!(response["status"], "ok", "{response}");
+        assert!(
+            response.get("previous_output_revision").is_some(),
+            "the harness advertised the first pass: {response}"
+        );
+
+        let applied = response["messages"].as_array().unwrap();
+        let republished = applied
+            .iter()
+            .find(|message| message["meta"]["harness_id"] == "m2")
+            .expect("m2 stays in the output");
+        assert_eq!(
+            republished["content"][0]["custom"], "B",
+            "the applied array must carry the current input's field, not the retained one: {response}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -402,8 +402,8 @@ describe("Rust mode transform request", () => {
             replace_from: 1,
             native_replace_from: 1,
         });
-        expect((bodies[1]?.messages as unknown[]).length).toBe(0);
-        expect((bodies[1]?.native_messages as unknown[]).length).toBe(0);
+        expect(bodies[1]?.messages).toEqual([]);
+        expect(bodies[1]?.native_messages).toEqual([]);
         expect(secondOutput.messages).toEqual(native);
     });
 
@@ -1130,8 +1130,10 @@ describe("Rust mode transform transport", () => {
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
         });
-        const ordinalsOf = (body: Record<string, unknown> | undefined): number[] =>
-            (body?.messages as Array<{ ordinal: number }>).map((message) => message.ordinal);
+        const ordinalsOf = (body: Record<string, unknown> | undefined): number[] => {
+            if (!body) throw new Error("missing recorded transform request");
+            return (body.messages as Array<{ ordinal: number }>).map((message) => message.ordinal);
+        };
 
         const first = rowMessages(sessionId, rawRows(2));
         await transform.run(sessionId, { messages: [...first] });
@@ -1357,6 +1359,61 @@ describe("Rust mode transform transport", () => {
 });
 
 describe("recipe application", () => {
+    for (const mutationTime of ["before request", "pending response"] as const) {
+        it(`rejects mutated retained output ${mutationTime}`, async () => {
+            const sessionId = `retained-mutation-${mutationTime}-${Date.now()}`;
+            installRawRows(sessionId, rawRows(1));
+            const original = makeMessages(sessionId);
+            const fresh = structuredClone(original);
+            let detachedFirst: unknown;
+            const mutate = () => {
+                original[0].parts[0].text = "mutated".repeat(1024);
+            };
+            const { client, bodies, calls } = recordingClient(async (body, index) => {
+                const request = JSON.parse(JSON.stringify(body));
+                if (index === 0) detachedFirst = request.native_messages;
+                if (index === 1 && mutationTime === "pending response") {
+                    await Promise.resolve();
+                    mutate();
+                }
+                return {
+                    status: "ok",
+                    base_revision: request.base_revision,
+                    output_revision: `retained-${index}`,
+                    previous_output_revision: request.previous_output_revision,
+                    operations: [
+                        {
+                            op: "keep",
+                            source: request.previous_output_revision ? "previous" : "input",
+                            start: 0,
+                            count: 1,
+                        },
+                    ],
+                    ...(index === 1
+                        ? { note_deliveries: [{ transform_pass_id: "mutation-pass" }] }
+                        : {}),
+                };
+            });
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const first = { messages: [...original] as unknown[] };
+            await transform.run(sessionId, first);
+            expect(first.messages[0]).toBe(original[0]);
+            if (mutationTime === "before request") mutate();
+            const second = { messages: [...fresh] as unknown[] };
+            await transform.run(sessionId, second);
+            expect(bodies).toHaveLength(2);
+            expect(second.messages).toEqual(detachedFirst);
+            expect(second.messages[0]).toBe(fresh[0]);
+            if (mutationTime === "before request") {
+                expect(bodies[1].previous_output_revision).toBeUndefined();
+                expect(calls.at(-1)?.method).toBe("transform.ack");
+            } else {
+                expect(bodies[1].previous_output_revision).toBe("retained-0");
+                expect(calls.at(-1)?.method).toBe("transform.nack");
+            }
+        });
+    }
+
     it("keeps from the applied previous output and the submitted input, then acks its note deliveries", async () => {
         const sessionId = `rust-native-delta-ack-${Date.now()}`;
         const rows = rawRows(1);
