@@ -3979,9 +3979,12 @@ impl HandlerCore {
                         if kernel.state() == kernel_routes::KernelState::Ready
                             && kernel.background_sampler_enabled()
                         {
-                            task_admission.spawn(kernel.run_sampler(cancel));
+                            task_admission.spawn(kernel.run_sampler(cancel.clone()));
                         }
-                        Self::open_projection_admission(&projection_admission, path);
+                        // `kernel.open` returns on cancellation too; an owner bound then would read records during shutdown for a gate nothing can consult.
+                        if !cancel.is_cancelled() {
+                            Self::open_projection_admission(&projection_admission, path);
+                        }
                     }
                     (true, StorageBackend::Postgres { .. }) => {
                         kernel.mark_unavailable(kernel_routes::UnavailableKind::Unsupported)
@@ -12546,10 +12549,14 @@ impl CompositeComponent for Handler {
             self.cancel.cancel();
             self.tasks.close();
         }
+        // Closing before the join cancels every grant so a slice holding one can exit; closing again after it catches an owner the store-open task bound while the join was in progress, which the first pass could not see.
         if let Some(admission) = self.projection_admission.get() {
             admission.close();
         }
         self.tasks.wait().await;
+        if let Some(admission) = self.projection_admission.get() {
+            admission.close();
+        }
 
         self.bindings.lock().expect("bindings mutex").clear();
         self.transform_route_channels
@@ -19139,6 +19146,38 @@ mod tests {
 
         assert!(observed.load(Ordering::SeqCst));
         assert!(handler.tasks.is_empty());
+    }
+
+    /// The tracked task binds `projection_admission` after cancellation, so the owner exists only once shutdown is already joining its tasks.
+    #[tokio::test]
+    async fn shutdown_closes_an_admission_owner_bound_during_the_join() {
+        use projection_admission::{Closed, ProjectionAdmission, Refresh};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_owned();
+        let handler = Handler::new();
+        let slot = Arc::clone(&handler.projection_admission);
+        let cancel = handler.cancel.clone();
+        handler
+            .spawn_tracked_task(async move {
+                cancel.cancelled().await;
+                slot.get_or_init(|| ProjectionAdmission::for_home(&home));
+            })
+            .expect("late binder admitted");
+
+        <Handler as CompositeComponent>::shutdown(&handler)
+            .await
+            .unwrap();
+
+        let admission = handler
+            .projection_admission
+            .get()
+            .expect("the owner was bound during the join");
+        assert_eq!(
+            admission.refresh(None),
+            Refresh::Closed(Closed::ShutDown),
+            "no refresh reopens a gate after shutdown"
+        );
     }
 
     fn handler_with_blocking_lifecycle(

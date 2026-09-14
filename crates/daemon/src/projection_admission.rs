@@ -20,7 +20,7 @@ pub const EVIDENCE_RECORD: &str = "campaign-evidence.json";
 /// Longest record name echoed in a refusal; the rest of a name stays in the record.
 const NAME_BYTES: usize = 64;
 
-/// Why an admission record was not accepted. Variants name the record, the check, and at most `NAME_BYTES` of an offending key, never record content.
+/// Why an admission record was not accepted. Variants name the record, the check, and at most `NAME_BYTES` of an offending key or version string, never record content. A [`ManifestRefusal`] is bounded the same way before it is stored here, so a refusal from either record is safe to log.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InputRefusal {
     #[error("{0} is absent")]
@@ -38,17 +38,20 @@ pub enum InputRefusal {
     #[error("{0} is not a record of its schema")]
     Malformed(&'static str),
     #[error(transparent)]
-    Manifest(#[from] ManifestRefusal),
+    Manifest(ManifestRefusal),
     #[error("{0} is not a supported harness")]
     UnknownHarness(String),
     #[error("{0} is not a projection capability")]
     UnknownCapability(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// A passed run records its `invalidation_identity` because each harness runs independently; a pass under an earlier identity cannot satisfy a record after its identity changes.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 enum HarnessRunRecord {
-    Passed,
+    Passed {
+        invalidation_identity: InvalidationIdentity,
+    },
     Failed,
 }
 
@@ -75,7 +78,8 @@ impl AdmissionInputs {
     /// Returns the first [`InputRefusal`]: a missing, unreadable, refused, or malformed record; a [`ManifestRefusal`]; or an unknown harness or capability name.
     pub fn read(home: &Path) -> Result<Self, InputRefusal> {
         let dir = home.join(ADMISSION_DIR);
-        let manifest = RuntimeManifest::parse(&read_record(&dir, MANIFEST_RECORD)?)?;
+        let manifest = RuntimeManifest::parse(&read_record(&dir, MANIFEST_RECORD)?)
+            .map_err(|refusal| InputRefusal::Manifest(bounded_manifest_refusal(refusal)))?;
         let campaign: CampaignRecord = serde_json::from_value(read_record(&dir, EVIDENCE_RECORD)?)
             .map_err(|_| InputRefusal::Malformed(EVIDENCE_RECORD))?;
         for harness in campaign
@@ -102,7 +106,6 @@ impl AdmissionInputs {
         coverage: Option<ProjectionCoverage>,
     ) -> EvidenceEvaluator {
         let campaign = self.campaign;
-        let identity = campaign.invalidation_identity;
         EvidenceEvaluator {
             manifest: self.manifest,
             current: InvalidationIdentity::from(current),
@@ -123,15 +126,17 @@ impl AdmissionInputs {
                     .into_iter()
                     .map(|(harness, record)| {
                         let run = match record {
-                            HarnessRunRecord::Passed => HarnessRun::Passed {
-                                identity: identity.clone(),
+                            HarnessRunRecord::Passed {
+                                invalidation_identity,
+                            } => HarnessRun::Passed {
+                                identity: invalidation_identity,
                             },
                             HarnessRunRecord::Failed => HarnessRun::Failed,
                         };
                         (harness, run)
                     })
                     .collect(),
-                identity,
+                identity: campaign.invalidation_identity,
             },
         }
     }
@@ -144,6 +149,26 @@ fn bounded_name(name: &str) -> String {
         .nth(NAME_BYTES)
         .unwrap_or(name.len());
     name[..end].escape_debug().to_string()
+}
+
+/// Every string a manifest refusal carries is copied from the record, so each one is bounded and escaped as a campaign key is. Variants are matched exhaustively so a new string-bearing variant cannot reach a log unbounded.
+fn bounded_manifest_refusal(refusal: ManifestRefusal) -> ManifestRefusal {
+    match refusal {
+        ManifestRefusal::Shape | ManifestRefusal::MissingProtocolVersion => refusal,
+        ManifestRefusal::ProtocolMismatch { manifest, identity } => {
+            ManifestRefusal::ProtocolMismatch {
+                manifest: bounded_name(&manifest),
+                identity: bounded_name(&identity),
+            }
+        }
+        ManifestRefusal::MissingLimit(name) => ManifestRefusal::MissingLimit(bounded_name(&name)),
+        ManifestRefusal::NonNumericLimit(name) => {
+            ManifestRefusal::NonNumericLimit(bounded_name(&name))
+        }
+        ManifestRefusal::UnknownLimit(name) => ManifestRefusal::UnknownLimit(bounded_name(&name)),
+        ManifestRefusal::UnknownHook(id) => ManifestRefusal::UnknownHook(bounded_name(&id)),
+        ManifestRefusal::MalformedFlag(id) => ManifestRefusal::MalformedFlag(bounded_name(&id)),
+    }
 }
 
 fn read_record(dir: &Path, record: &'static str) -> Result<serde_json::Value, InputRefusal> {
