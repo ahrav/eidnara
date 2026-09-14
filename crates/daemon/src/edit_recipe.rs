@@ -24,6 +24,8 @@ pub const MAX_REVISION_BYTES: usize = 128;
 pub const MAX_RECONSTRUCTED_BYTES: usize = crate::dispatch::MAX_WIRE_BODY_BYTES;
 /// Largest integer both languages read exactly; JavaScript indexes above it lose precision.
 pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+/// Bounds equality tests per output message to prevent shared keys from making a build quadratic.
+pub const MAX_CONFIRM_PROBES: usize = 8;
 
 /// Opaque, nonempty, at most [`MAX_REVISION_BYTES`] UTF-8 bytes. Neither a hash nor authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -411,8 +413,9 @@ impl<K: Hash + Eq + Clone> KeyIndex<K> {
         Self { positions }
     }
 
-    /// The first position at or after `cursor` whose value equals `wanted`. Positions before the
-    /// cursor are spent, so each candidate is tested at most once across the whole build.
+    /// Positions before the cursor are skipped by binary search and at most [`MAX_CONFIRM_PROBES`]
+    /// candidates are compared, so each output message costs one lookup plus a bounded number of
+    /// value comparisons whatever the key distribution.
     fn confirm(
         &self,
         entries: &[Keyed<'_, K>],
@@ -421,19 +424,23 @@ impl<K: Hash + Eq + Clone> KeyIndex<K> {
     ) -> Option<usize> {
         let positions = self.positions.get(&wanted.key)?;
         let first = positions.partition_point(|position| *position < cursor);
-        positions[first..].iter().copied().find(|position| {
-            let candidate = entries[*position].value;
-            Arc::ptr_eq(candidate, wanted.value) || candidate == wanted.value
-        })
+        positions[first..]
+            .iter()
+            .take(MAX_CONFIRM_PROBES)
+            .copied()
+            .find(|position| {
+                let candidate = entries[*position].value;
+                Arc::ptr_eq(candidate, wanted.value) || candidate == wanted.value
+            })
     }
 }
 
 /// Builds the recipe that reconstructs `output` from `input` and, when present, `previous`.
 ///
-/// Each output entry prefers an equal `previous` message, then an equal `input` message, and is
-/// otherwise inserted as a literal. Cursors move forward independently per source, so a message
-/// that repeats or moves backward relative to the last keep becomes a literal instead of a search
-/// over every pair. Adjacent keeps of one source and adjacent inserts coalesce.
+/// Each output entry prefers an equal `previous` message, then an equal `input` message.
+/// Anything else becomes a literal: an unmatched message, a message that repeats or moves backward
+/// relative to its source cursor, or a match beyond [`MAX_CONFIRM_PROBES`] same-key candidates.
+/// Source cursors advance independently. Adjacent keeps of one source and adjacent inserts coalesce.
 pub fn build_recipe<K: Hash + Eq + Clone>(
     output: &[Keyed<'_, K>],
     input: (&Revision, &[Keyed<'_, K>]),
@@ -1017,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn builder_keeps_cursors_monotone_and_visits_each_candidate_once() {
+    fn builder_keeps_cursors_monotone_and_uses_each_candidate_at_most_once() {
         // Output repeats message 1 and moves 3 before 2; only forward matches become keeps.
         let input = shared(&[json!({"id": 1}), json!({"id": 2}), json!({"id": 3})]);
         let output = shared(&[
@@ -1054,6 +1061,57 @@ mod tests {
             json!([
                 {"op": "keep", "source": "input", "start": 0, "count": 2},
                 {"op": "insert", "values": [{"id": 7}]},
+            ])
+        );
+    }
+
+    #[test]
+    fn builder_tests_at_most_max_confirm_probes_candidates_per_nomination() {
+        assert_eq!(MAX_CONFIRM_PROBES, 8);
+        // One key nominates MAX_CONFIRM_PROBES + 1 input positions; only the last equals the
+        // output. The scan stops after MAX_CONFIRM_PROBES candidates and emits a literal.
+        let bucket = MAX_CONFIRM_PROBES + 1;
+        let input = shared(
+            &(0..bucket)
+                .map(|n| json!({"id": 7, "n": n}))
+                .collect::<Vec<_>>(),
+        );
+        let output = shared(&[json!({"id": 7, "n": bucket - 1})]);
+        let base = revision("base");
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "insert", "values": [{"id": 7, "n": bucket - 1}]}])
+        );
+        // With exactly MAX_CONFIRM_PROBES candidates the last one is still tested and kept.
+        let recipe = build_recipe(
+            &keyed(&output[..]),
+            (&base, &keyed(&input[1..])),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "keep", "source": "input", "start": 7, "count": 1}])
+        );
+        // Spent positions do not count against the budget.
+        let output = shared(&[json!({"id": 7, "n": 1}), json!({"id": 7, "n": bucket - 1})]);
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([
+                {"op": "keep", "source": "input", "start": 1, "count": 1},
+                {"op": "keep", "source": "input", "start": bucket - 1, "count": 1},
             ])
         );
     }

@@ -5,9 +5,11 @@
 use std::sync::Arc;
 
 use daemon::edit_recipe::{
-    Keyed, Recipe, RecipeError, Revision, Source, SourceBase, build_recipe, canonical_len,
+    Keyed, MAX_CONFIRM_PROBES, Recipe, RecipeError, Revision, Source, SourceBase, build_recipe,
+    canonical_len,
 };
 use proptest::prelude::*;
+use proptest::test_runner::TestCaseError;
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -321,14 +323,102 @@ fn assembled_output() -> impl Strategy<Value = (Vec<Value>, Option<Vec<Value>>, 
     })
 }
 
-fn keyed(values: &[Arc<Value>]) -> Vec<Keyed<'_, String>> {
+fn keyed<'a>(values: &'a [Arc<Value>], key: fn(&Value) -> String) -> Vec<Keyed<'a, String>> {
     values
         .iter()
         .map(|value| Keyed {
-            key: value["info"]["id"].as_str().unwrap_or("").to_owned(),
+            key: key(value),
             value,
         })
         .collect()
+}
+
+fn message_id(value: &Value) -> String {
+    value["info"]["id"].as_str().unwrap_or("").to_owned()
+}
+
+fn shared_key(_: &Value) -> String {
+    String::new()
+}
+
+fn round_trip(
+    input: &[Value],
+    previous: Option<&[Value]>,
+    output: &[Value],
+    key: fn(&Value) -> String,
+) -> Result<Value, TestCaseError> {
+    let input = Held::new("base", input);
+    let previous = previous.map(|values| Held::new("prev", values));
+    let output: Vec<Arc<Value>> = output.iter().cloned().map(Arc::new).collect();
+    let previous_keyed = previous.as_ref().map(|held| keyed(&held.values, key));
+    let previous_source = previous
+        .as_ref()
+        .zip(previous_keyed.as_ref())
+        .map(|(held, entries)| (&held.revision, entries.as_slice()));
+    let recipe = build_recipe(
+        &keyed(&output, key),
+        (&input.revision, &keyed(&input.values, key)),
+        previous_source,
+        Revision::parse("out").unwrap(),
+    );
+    let wire = serde_json::to_value(&recipe).unwrap();
+    let parsed = Recipe::from_json(&wire).expect("built recipes are valid");
+    let (applied, bytes) = parsed
+        .apply(input.base(), previous.as_ref().map(Held::base))
+        .expect("built recipes apply");
+    prop_assert_eq!(applied.len(), output.len());
+    for (kept, wanted) in applied.iter().zip(&output) {
+        prop_assert_eq!(kept.as_ref(), wanted.as_ref());
+    }
+    let rendered: Vec<Value> = applied.iter().map(|value| (**value).clone()).collect();
+    prop_assert_eq!(bytes, serde_json::to_vec(&rendered).unwrap().len());
+    // Adjacent operations are coalesced: no two consecutive inserts, no contiguous same-source keeps.
+    let operations = wire["operations"].as_array().unwrap();
+    for pair in operations.windows(2) {
+        let both_inserts = pair[0]["op"] == "insert" && pair[1]["op"] == "insert";
+        prop_assert!(!both_inserts, "adjacent inserts not coalesced: {pair:?}");
+        if pair[0]["op"] == "keep"
+            && pair[1]["op"] == "keep"
+            && pair[0]["source"] == pair[1]["source"]
+        {
+            let end = pair[0]["start"].as_u64().unwrap() + pair[0]["count"].as_u64().unwrap();
+            prop_assert_ne!(
+                end,
+                pair[1]["start"].as_u64().unwrap(),
+                "contiguous keeps not coalesced"
+            );
+        }
+    }
+    Ok(wire)
+}
+
+fn assembled_output_with_long_sources()
+-> impl Strategy<Value = (Vec<Value>, Option<Vec<Value>>, Vec<Value>)> {
+    let cap = MAX_CONFIRM_PROBES;
+    (0usize..3 * cap, proptest::option::of(0usize..3 * cap)).prop_flat_map(
+        move |(input_len, previous_len)| {
+            let input: Vec<Value> = (0..input_len as u32).map(message).collect();
+            let previous: Option<Vec<Value>> =
+                previous_len.map(|len| (100..100 + len as u32).map(message).collect());
+            let pool: Vec<Value> = input
+                .iter()
+                .chain(previous.iter().flatten())
+                .cloned()
+                .chain((200..203).map(message))
+                .collect();
+            let picks = proptest::collection::vec(0..pool.len().max(1), 0..3 * cap);
+            (Just(input), Just(previous), Just(pool), picks).prop_map(
+                |(input, previous, pool, picks)| {
+                    let output = if pool.is_empty() {
+                        Vec::new()
+                    } else {
+                        picks.into_iter().map(|pick| pool[pick].clone()).collect()
+                    };
+                    (input, previous, output)
+                },
+            )
+        },
+    )
 }
 
 proptest! {
@@ -336,41 +426,26 @@ proptest! {
 
     #[test]
     fn edit_recipe_generated_built_recipes_round_trip_through_the_applier((input, previous, output) in assembled_output()) {
-        let input = Held::new("base", &input);
-        let previous = previous.map(|values| Held::new("prev", &values));
-        let output: Vec<Arc<Value>> = output.into_iter().map(Arc::new).collect();
-        let previous_keyed = previous.as_ref().map(|held| keyed(&held.values));
-        let previous_source = previous
-            .as_ref()
-            .zip(previous_keyed.as_ref())
-            .map(|(held, entries)| (&held.revision, entries.as_slice()));
-        let recipe = build_recipe(
-            &keyed(&output),
-            (&input.revision, &keyed(&input.values)),
-            previous_source,
-            Revision::parse("out").unwrap(),
-        );
-        // Serialize and parse as the wire would, then apply against the held bases.
-        let wire = serde_json::to_value(&recipe).unwrap();
-        let parsed = Recipe::from_json(&wire).expect("built recipes are valid");
-        let (applied, bytes) = parsed
-            .apply(input.base(), previous.as_ref().map(Held::base))
-            .expect("built recipes apply");
-        prop_assert_eq!(applied.len(), output.len());
-        for (kept, wanted) in applied.iter().zip(&output) {
-            prop_assert_eq!(kept.as_ref(), wanted.as_ref());
-        }
-        let rendered: Vec<Value> = applied.iter().map(|value| (**value).clone()).collect();
-        prop_assert_eq!(bytes, serde_json::to_vec(&rendered).unwrap().len());
-        // Adjacent operations are coalesced: no two consecutive inserts, no contiguous same-source keeps.
-        let operations = wire["operations"].as_array().unwrap();
-        for pair in operations.windows(2) {
-            let both_inserts = pair[0]["op"] == "insert" && pair[1]["op"] == "insert";
-            prop_assert!(!both_inserts, "adjacent inserts not coalesced: {pair:?}");
-            if pair[0]["op"] == "keep" && pair[1]["op"] == "keep" && pair[0]["source"] == pair[1]["source"] {
-                let end = pair[0]["start"].as_u64().unwrap() + pair[0]["count"].as_u64().unwrap();
-                prop_assert_ne!(end, pair[1]["start"].as_u64().unwrap(), "contiguous keeps not coalesced");
+        round_trip(&input, previous.as_deref(), &output, message_id)?;
+    }
+
+    #[test]
+    fn edit_recipe_generated_shared_key_round_trips_within_the_probe_budget((input, previous, output) in assembled_output_with_long_sources()) {
+        let wire = round_trip(&input, previous.as_deref(), &output, shared_key)?;
+        // With one shared key every position is a candidate, so `start - cursor` counts probes.
+        let mut cursors = [0u64; 2];
+        for operation in wire["operations"].as_array().unwrap() {
+            if operation["op"] != "keep" {
+                continue;
             }
+            let source = usize::from(operation["source"] == "previous");
+            let start = operation["start"].as_u64().unwrap();
+            prop_assert!(
+                start - cursors[source] < MAX_CONFIRM_PROBES as u64,
+                "keep at {start} probed past the budget from cursor {}",
+                cursors[source]
+            );
+            cursors[source] = start + operation["count"].as_u64().unwrap();
         }
     }
 }
