@@ -11,6 +11,7 @@ use daemon::projection_gates::{Denial, EntryPoint, ProjectionHook};
 use daemon::projection_lifecycle::{
     Cause, ConsumerBinding, ControlState, LifecycleRequest, ProjectionLifecycle, Transition,
 };
+use daemon::search_catchup::{Blocked, EpisodeEnd};
 use daemon::search_lifecycle_owner::{
     IDENTITY_CONTRACT_VERSION, PROJECTION_POLICY_VERSION, SearchLifecycleOwner, SliceOutcome,
     SpecRefusal,
@@ -473,7 +474,90 @@ fn slices_are_bounded_by_the_records_deadline_and_a_restart_renews_nothing() {
     assert!(done.episodes.consumed <= done.episodes.allowance);
 }
 
-/// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied; nothing in the owner catches it up, so the slice reports the block rather than a fabricated observation.
+/// A Current family within the freshness limit catches up in the next slice under the hold its checkpoint names and is at the tip afterwards; after the kernel lease changes, the hold is dead, so the same slice reports the blocked episode while the family still serves; and a family that trails the kernel past the freshness limit is denied on its own coverage, so nothing runs on stale rows until a rebuild is requested.
+#[test]
+fn a_current_family_catches_up_under_its_hold_until_the_lease_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+
+    let later = corpus.publish("later", "later text");
+    let outcome = owner.run_slice(&slice_budget());
+    let SliceOutcome::CaughtUp(report) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(report.end, EpisodeEnd::ReachedTarget);
+    assert!(report.batches_applied >= 1);
+    assert_eq!(report.acknowledged_through, corpus.tip());
+    let reader = owner.pin(&slice_budget()).unwrap();
+    assert_eq!(
+        reader
+            .coverage(&slice_budget())
+            .unwrap()
+            .checkpoint
+            .checkpoint_commit_seq,
+        corpus.tip()
+    );
+    let rows: Vec<String> = reader
+        .read(&slice_budget(), |conn| {
+            Ok(conn
+                .prepare("SELECT source_object_id FROM occurrences ORDER BY created_commit_seq")?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap();
+    assert_eq!(rows.last(), Some(&later));
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        Some(corpus.tip()),
+        "the kernel acknowledged only what the projection applied"
+    );
+    drop(reader);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    owner.shutdown();
+    drop(owner);
+
+    drop(corpus);
+    let corpus = Corpus::open(home);
+    let restarted = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane());
+    assert!(matches!(
+        restarted.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    corpus.publish("after-restart", "text");
+    let outcome = restarted.run_slice(&slice_budget());
+    let SliceOutcome::CaughtUp(report) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(
+        matches!(report.end, EpisodeEnd::Blocked(Blocked::HoldExtension(_))),
+        "{report:?}"
+    );
+    assert_eq!(report.batches_applied, 0);
+    restarted
+        .pin(&slice_budget())
+        .expect("a family within the freshness limit still serves");
+}
+
+/// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {
     let root = tempfile::tempdir().unwrap();

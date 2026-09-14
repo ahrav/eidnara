@@ -12597,10 +12597,14 @@ impl CompositeComponent for Handler {
             self.cancel.cancel();
             self.tasks.close();
         }
+        // Closing admission cancels every grant, so a slice in flight ends at its next check; the owner itself is released once no slice can run.
+        if let Some(owner) = self.search_lifecycle.get() {
+            owner.admission().close();
+        }
+        self.tasks.wait().await;
         if let Some(owner) = self.search_lifecycle.get() {
             owner.shutdown();
         }
-        self.tasks.wait().await;
 
         self.bindings.lock().expect("bindings mutex").clear();
         self.transform_route_channels

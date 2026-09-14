@@ -2374,16 +2374,22 @@ fn kill_child_at(root: &Path, cut: &str) -> BTreeMap<String, serde_json::Value> 
     observations
 }
 
-fn assert_hold_released(root: &Path, hold: &str) {
-    let released: bool = Connection::open(root.join("kernel/kernel.sqlite"))
+fn hold_released(root: &Path, hold: &str) -> bool {
+    Connection::open(root.join("kernel/kernel.sqlite"))
         .unwrap()
         .query_row(
             "SELECT released_at IS NOT NULL FROM capture_pins WHERE capture_pin_id=?1",
             [hold],
             |row| row.get(0),
         )
-        .unwrap();
-    assert!(released, "old hold {hold} must be released");
+        .unwrap()
+}
+
+fn assert_hold_released(root: &Path, hold: &str) {
+    assert!(
+        hold_released(root, hold),
+        "old hold {hold} must be released"
+    );
 }
 
 #[test]
