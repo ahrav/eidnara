@@ -143,7 +143,7 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
         let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
         let mut first =
             TransformResponse::passthrough(served.clone(), request.full_array_fingerprint.clone());
-        attach_native_messages_incremental(
+        let first_attachment = attach_native_messages_incremental(
             &mut first,
             &request,
             0,
@@ -159,7 +159,7 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
         );
         let mut replay =
             TransformResponse::passthrough(served.clone(), request.full_array_fingerprint.clone());
-        let stats = attach_native_messages_incremental(
+        let replay_attachment = attach_native_messages_incremental(
             &mut replay,
             &request,
             0,
@@ -172,16 +172,32 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
             &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
             NativeCacheKeyMode::Normal,
-        )
-        .stats;
+        );
+        assert!(!first_attachment.output.values.is_empty(), "{}", case.id);
         assert_eq!(
-            serde_json::to_vec(&first.native_messages).unwrap(),
-            serde_json::to_vec(&replay.native_messages).unwrap(),
+            serde_json::to_vec(&first_attachment.output.values).unwrap(),
+            serde_json::to_vec(&replay_attachment.output.values).unwrap(),
             "native replay drift in {}",
             case.id
         );
+        for attachment in [&first_attachment, &replay_attachment] {
+            assert_eq!(
+                attachment.output.wire_lens,
+                attachment
+                    .output
+                    .values
+                    .iter()
+                    .map(|value| serde_json::to_vec(value).unwrap().len())
+                    .collect::<Vec<_>>(),
+                "native wire lengths in {}",
+                case.id
+            );
+        }
+        let stats = replay_attachment.stats;
         assert_eq!(stats.encoded_messages, 0, "{} missed cache", case.id);
         assert_eq!(stats.reused_messages, served.len(), "{} prefix", case.id);
+        assert!(first.native_messages.is_none(), "{}", case.id);
+        assert!(replay.native_messages.is_none(), "{}", case.id);
 
         let mut appended = request.messages.clone();
         appended.push(IngressMessage {

@@ -9,6 +9,7 @@ import { promptSurfaceConfigIdentity } from "../../shared/prompt-surface";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { deriveWindowGeometry } from "../../shared/window-geometry";
+import * as editRecipe from "./edit-recipe";
 import {
     MODULE_ORDINAL_PAGE_SIZE,
     MODULE_PAGE_MAX_BYTES,
@@ -2563,6 +2564,56 @@ describe("bounded transform ownership", () => {
         expect(bodies).toHaveLength(2);
         expect(bodies[1]?.tail_delta).toBeDefined();
         expect(transform.getState(sessionId).ordinals).toEqual(priorMemo);
+    });
+
+    it("reuses validated input lengths without repeated measurement on a full-sync retry", async () => {
+        const sessionId = "rust-full-retry-input-lengths";
+        const rows = rawRows(4);
+        installRawRows(sessionId, rows);
+        const messages = rowMessages(sessionId, rows);
+        const { client, bodies } = recordingClient((request, index) => {
+            if (index === 1) return { status: "need_full_sync" };
+            return {
+                ...recipeResponse(request, []),
+                operations: [
+                    {
+                        op: "keep",
+                        source: "input",
+                        start: 0,
+                        count: (request.native_messages as unknown[]).length,
+                    },
+                ],
+            };
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        await transform.run(sessionId, { messages: messages.slice(0, 3) });
+        expect(bodies).toHaveLength(1);
+        expect(transform.getState(sessionId).initialized).toBe(true);
+
+        const lengthSpy = spyOn(editRecipe, "canonicalJsonLength");
+        try {
+            const output = { messages: [...messages] };
+            await transform.run(sessionId, output);
+            expect(bodies).toHaveLength(3);
+            expect(bodies[1].tail_delta).toMatchObject({ native_replace_from: 2 });
+            expect(bodies[1].native_messages).toEqual(messages.slice(2));
+            expect(bodies[2].tail_delta).toBeUndefined();
+            expect(bodies[2].native_messages).toEqual(messages);
+            expect(bodies[2].base_revision).not.toBe(bodies[1].base_revision);
+            expect(transform.getState(sessionId).failureCount).toBe(0);
+            expect(transform.getState(sessionId).forceFullWire).toBe(false);
+            expect(output.messages).toHaveLength(messages.length);
+            for (const [index, message] of messages.entries()) {
+                expect(output.messages[index]).toBe(message);
+            }
+            const measuredMessages = lengthSpy.mock.calls
+                .map(([value]) => value)
+                .filter((value) => messages.some((message) => message === value));
+            expect(measuredMessages).toHaveLength(2);
+            expect(measuredMessages).toEqual(messages.slice(2));
+        } finally {
+            lengthSpy.mockRestore();
+        }
     });
 
     it("retains full-sync recovery after a failed retry until a full request publishes", async () => {

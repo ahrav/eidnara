@@ -1297,7 +1297,7 @@ export function createRustModeTransform(
             const encodedInput = encodeOpenCodeMessagesToCk(resolved.annotatedInput);
             timings.wireMessages = messages.length - (wireDelta?.rawStart ?? 0);
             charge(messages.length * LENGTH_SLOT_BYTES, "input lengths");
-            let inputLengths = measureInputLengths(
+            const inputLengths = measureInputLengths(
                 messages,
                 previousWireCache,
                 wireDelta?.rawStart ?? 0,
@@ -1481,7 +1481,6 @@ export function createRustModeTransform(
                         retryResolved.annotatedInput,
                     );
                     timings.wireMessages = messages.length;
-                    inputLengths = measureInputLengths(messages, undefined, 0);
                     pendingWireCache = buildWireCache({
                         messages,
                         encoded: retryEncodedInput,

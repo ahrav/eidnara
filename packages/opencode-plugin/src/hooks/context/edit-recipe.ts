@@ -1,5 +1,5 @@
 import { MAX_FRAME_BODY_LEN } from "../../shared/host-client/protocol";
-import { serdeJsonCompact } from "./module-wire";
+import { serdeJsonNumber } from "./module-wire";
 
 /** Revision tokens are opaque; this bound keeps a hostile daemon from turning them into a payload. */
 export const MAX_REVISION_BYTES = 128;
@@ -182,7 +182,30 @@ export function parseRecipe(value: unknown): RecipeParse {
  * non-integer numeric content can differ by a few bytes while acceptance still agrees.
  */
 export function canonicalJsonLength(value: unknown): number {
-    return Buffer.byteLength(serdeJsonCompact(value));
+    if (Array.isArray(value)) {
+        return value.reduce<number>(
+            (length, item) => length + canonicalJsonLength(item),
+            2 + Math.max(0, value.length - 1),
+        );
+    }
+    if (value !== null && typeof value === "object") {
+        const record = value as Record<string, unknown>;
+        let length = 2;
+        let entries = 0;
+        for (const key of Object.keys(record)) {
+            const item = record[key];
+            if (item === undefined) continue;
+            length +=
+                (entries > 0 ? 1 : 0) +
+                Buffer.byteLength(JSON.stringify(key)) +
+                1 +
+                canonicalJsonLength(item);
+            entries += 1;
+        }
+        return length;
+    }
+    if (typeof value === "number") return serdeJsonNumber(value).length;
+    return Buffer.byteLength(JSON.stringify(value) ?? "null");
 }
 
 /**

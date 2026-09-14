@@ -1510,8 +1510,8 @@ pub struct TransformResponse {
     /// does not. Every `ok` response sets it to `Some`, including legitimately empty output.
     #[serde(skip)]
     pub messages: Option<Vec<ServedMessage>>,
-    /// The final approved native output when the request opts into native serving. Internal, like
-    /// `messages`; the wire recipe is built from it.
+    /// Native output for the non-incremental attachment path, used to build its wire recipe.
+    /// Incremental attachment returns its output directly instead of populating this field.
     #[serde(skip)]
     pub native_messages: Option<Vec<Arc<Value>>>,
     /// The request's `base_revision`, echoed so the applier can bind the recipe to its input snapshot.
@@ -21246,7 +21246,7 @@ pub(crate) mod tests {
             healed_ck.clone(),
             request.full_array_fingerprint.clone(),
         );
-        let first_stats = crate::attach_native_messages_incremental(
+        let first_attachment = crate::attach_native_messages_incremental(
             &mut first,
             &request,
             0,
@@ -21260,8 +21260,9 @@ pub(crate) mod tests {
             &cache,
             crate::NativeCacheKeyMode::Normal,
         );
-        assert_eq!(first_stats.encoded_messages, healed_ck.len());
-        let native = first.native_messages.as_ref().unwrap();
+        assert_eq!(first_attachment.stats.encoded_messages, healed_ck.len());
+        assert!(first.native_messages.is_none());
+        let native = &first_attachment.output.values;
         let tool_ids = native
             .iter()
             .flat_map(|message| message["parts"].as_array().into_iter().flatten())
@@ -21277,7 +21278,7 @@ pub(crate) mod tests {
             healed_ck.clone(),
             request.full_array_fingerprint.clone(),
         );
-        let replay_stats = crate::attach_native_messages_incremental(
+        let replay_attachment = crate::attach_native_messages_incremental(
             &mut replay,
             &request,
             0,
@@ -21291,9 +21292,13 @@ pub(crate) mod tests {
             &cache,
             crate::NativeCacheKeyMode::Normal,
         );
-        assert_eq!(replay_stats.reused_messages, healed_ck.len());
-        assert_eq!(replay_stats.encoded_messages, 0);
-        assert_eq!(replay.native_messages, first.native_messages);
+        assert_eq!(replay_attachment.stats.reused_messages, healed_ck.len());
+        assert_eq!(replay_attachment.stats.encoded_messages, 0);
+        assert!(replay.native_messages.is_none());
+        assert_eq!(
+            replay_attachment.output.values,
+            first_attachment.output.values
+        );
     }
 
     #[test]
@@ -21475,7 +21480,7 @@ pub(crate) mod tests {
         moved_request.serve_native = true;
         moved_request.full_array_fingerprint = Some("todo-fold-fp-2".to_string());
         let mut moved_native = moved.clone();
-        let stats = crate::attach_native_messages_incremental(
+        let attachment = crate::attach_native_messages_incremental(
             &mut moved_native,
             &moved_request,
             0,
@@ -21488,10 +21493,10 @@ pub(crate) mod tests {
             &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
             crate::NativeCacheKeyMode::Normal,
-        )
-        .stats;
-        assert!(stats.encoded_messages > 0);
-        let native = moved_native.native_messages.unwrap();
+        );
+        assert!(attachment.stats.encoded_messages > 0);
+        assert!(moved_native.native_messages.is_none());
+        let native = attachment.output.values;
         let tail_index = native
             .iter()
             .position(|message| message["info"]["id"] == "t3")

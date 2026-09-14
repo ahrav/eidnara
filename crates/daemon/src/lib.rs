@@ -14196,7 +14196,6 @@ fn attach_native_messages_incremental(
             reason.as_str(),
         );
     }
-    response.native_messages = Some(native_messages.clone());
     NativeAttachment {
         stats,
         output: NativeOutput {
@@ -23398,7 +23397,7 @@ mod tests {
                     projection_cache: None,
                 })
             });
-        let stats = attach_native_messages_incremental(
+        let attachment = attach_native_messages_incremental(
             &mut response,
             request,
             reasoning_watermark,
@@ -23411,9 +23410,10 @@ mod tests {
             &Revision::parse("test-output").unwrap(),
             cache,
             mode,
-        )
-        .stats;
-        (response, stats)
+        );
+        assert!(response.native_messages.is_none());
+        response.native_messages = Some(attachment.output.values);
+        (response, attachment.stats)
     }
 
     fn seed_handler_delta_snapshot(
@@ -23668,7 +23668,7 @@ mod tests {
             served,
             second_request.full_array_fingerprint.clone(),
         );
-        let second_stats = attach_native_messages_incremental(
+        let second_attachment = attach_native_messages_incremental(
             &mut second,
             &second_request,
             1,
@@ -23681,8 +23681,10 @@ mod tests {
             &Revision::parse("test-output").unwrap(),
             cache,
             NativeCacheKeyMode::Normal,
-        )
-        .stats;
+        );
+        assert!(second.native_messages.is_none());
+        let second_stats = second_attachment.stats;
+        let second_native = second_attachment.output.values;
         assert_eq!(second_stats.delta_fallback_reason, None);
         assert_eq!(frontier.native_replace_from, 2);
         let native_values = second_request.native_messages.as_ref().unwrap();
@@ -23701,7 +23703,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            serde_json::to_vec(&second.native_messages).unwrap(),
+            serde_json::to_vec(&second_native).unwrap(),
             serde_json::to_vec(&fresh.native_messages).unwrap(),
         );
         assert_eq!(second.messages(), fresh.messages());
@@ -23724,7 +23726,7 @@ mod tests {
                 &second_sidecar.messages[mid]
             ));
         }
-        for (replayed, original) in second.native_messages.as_ref().unwrap()[..4]
+        for (replayed, original) in second_native[..4]
             .iter()
             .zip(first.native_messages.as_ref().unwrap())
         {
@@ -23744,7 +23746,10 @@ mod tests {
             NativeCacheKeyMode::Normal,
         );
         assert_eq!(shared_stats.encoded_messages, 0);
-        assert_eq!(shared_replay.native_messages, second.native_messages);
+        assert_eq!(
+            shared_replay.native_messages.as_ref().unwrap(),
+            &second_native
+        );
         assert_eq!(
             serde_json::to_vec(shared_replay.messages()).unwrap(),
             serde_json::to_vec(second.messages()).unwrap()
@@ -23755,15 +23760,9 @@ mod tests {
         let mut edited_output = shared_replay.native_messages.clone().unwrap();
         let original_output = serde_json::to_vec(&shared_replay.native_messages).unwrap();
         Arc::make_mut(&mut edited_output[0])["alias_mutation"] = json!(true);
-        assert!(!Arc::ptr_eq(
-            &edited_output[0],
-            &second.native_messages.as_ref().unwrap()[0]
-        ));
-        assert_eq!(
-            serde_json::to_vec(&second.native_messages).unwrap(),
-            original_output
-        );
-        let native = second.native_messages.expect("incremental native output");
+        assert!(!Arc::ptr_eq(&edited_output[0], &second_native[0]));
+        assert_eq!(serde_json::to_vec(&second_native).unwrap(), original_output);
+        let native = second_native;
         let encoded = serde_json::to_string(&native).unwrap();
         assert!(encoded.contains("syntheticTodoMarker"));
         assert!(encoded.contains("keep marker representation"));

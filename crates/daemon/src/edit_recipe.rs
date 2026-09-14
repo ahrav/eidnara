@@ -24,6 +24,8 @@ pub const MAX_REVISION_BYTES: usize = 128;
 pub const MAX_RECONSTRUCTED_BYTES: usize = crate::dispatch::MAX_WIRE_BODY_BYTES;
 /// Largest integer both languages read exactly; JavaScript indexes above it lose precision.
 pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+/// Caps adversarial key collisions before they can turn one output lookup into a full source scan.
+pub const MAX_CONFIRM_PROBES: usize = 8;
 
 /// Opaque, nonempty, at most [`MAX_REVISION_BYTES`] UTF-8 bytes. Neither a hash nor authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -476,21 +478,24 @@ impl<K: Hash + Eq + Clone> KeyIndex<K> {
         Self { positions }
     }
 
-    /// The first position at or after `cursor` whose value equals `wanted`. Positions before the
-    /// cursor are spent, so each candidate is tested at most once across the whole build.
+    /// A shared budget limits deep comparisons for each output entry.
     fn confirm<V>(
         &self,
         entries: &[Keyed<K, V>],
         cursor: usize,
         wanted: &Keyed<K, V>,
         equal: &dyn Fn(&V, &V) -> bool,
+        remaining: &mut usize,
     ) -> Option<usize> {
         let positions = self.positions.get(&wanted.key)?;
         let first = positions.partition_point(|position| *position < cursor);
-        positions[first..]
-            .iter()
-            .copied()
-            .find(|position| equal(&entries[*position].value, &wanted.value))
+        for position in positions[first..].iter().take(*remaining).copied() {
+            *remaining -= 1;
+            if equal(&entries[position].value, &wanted.value) {
+                return Some(position);
+            }
+        }
+        None
     }
 }
 
@@ -503,11 +508,10 @@ pub struct BuiltOperations<V> {
 
 /// Builds the operations that reconstruct `output` from `input` and, when present, `previous`.
 ///
-/// Each output entry prefers an equal `previous` message, then an equal `input` message, and is
-/// otherwise inserted as a literal. `equal` decides value equality for the selected
-/// representation. Cursors move forward independently per source, so a message that repeats or
-/// moves backward relative to the last keep becomes a literal instead of a search over every pair.
-/// Adjacent keeps of one source and adjacent inserts coalesce.
+/// Each output entry prefers an equal `previous` message, then an equal `input` message.
+/// A miss or an exhausted probe budget produces a literal without changing the output value.
+/// Sharing [`MAX_CONFIRM_PROBES`] across both sources bounds work even when every key collides.
+/// Cursors advance independently per source; adjacent keeps of one source and inserts coalesce.
 pub fn build_operations<K: Hash + Eq + Clone, V: Clone>(
     output: &[Keyed<K, V>],
     input: &[Keyed<K, V>],
@@ -520,15 +524,28 @@ pub fn build_operations<K: Hash + Eq + Clone, V: Clone>(
     let mut operations: Vec<Operation<V>> = Vec::new();
     let mut used_previous = false;
     for entry in output {
+        let mut remaining = MAX_CONFIRM_PROBES;
         let previous_hit = previous.and_then(|entries| {
             previous_index
                 .as_ref()?
-                .confirm(entries, cursors[Source::Previous as usize], entry, &equal)
+                .confirm(
+                    entries,
+                    cursors[Source::Previous as usize],
+                    entry,
+                    &equal,
+                    &mut remaining,
+                )
                 .map(|position| (Source::Previous, position))
         });
         let hit = previous_hit.or_else(|| {
             input_index
-                .confirm(input, cursors[Source::Input as usize], entry, &equal)
+                .confirm(
+                    input,
+                    cursors[Source::Input as usize],
+                    entry,
+                    &equal,
+                    &mut remaining,
+                )
                 .map(|position| (Source::Input, position))
         });
         match hit {
@@ -1129,7 +1146,61 @@ mod tests {
     }
 
     #[test]
-    fn builder_keeps_cursors_monotone_and_visits_each_candidate_once() {
+    fn builder_bounds_same_key_confirmation_work() {
+        let input = shared(
+            &(0..=MAX_CONFIRM_PROBES)
+                .map(|n| json!({"id": 7, "n": n}))
+                .collect::<Vec<_>>(),
+        );
+        let output = shared(&[json!({"id": 7, "n": MAX_CONFIRM_PROBES})]);
+        let base = revision("base");
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            None,
+            revision("out"),
+        );
+
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "insert", "values": [{"id": 7, "n": MAX_CONFIRM_PROBES}]}])
+        );
+
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input[1..])),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "keep", "source": "input", "start": MAX_CONFIRM_PROBES - 1, "count": 1}])
+        );
+
+        for key in [None, Some("repeated")] {
+            let input: Vec<_> = (0..64).map(|value| Keyed { key, value }).collect();
+            let output: Vec<_> = (64..96).map(|value| Keyed { key, value }).collect();
+            for previous_count in [0, 7, 8, 64] {
+                let probes = std::cell::Cell::new(0);
+                let built =
+                    build_operations(&output, &input, Some(&input[..previous_count]), |a, b| {
+                        probes.set(probes.get() + 1);
+                        a == b
+                    });
+                assert_eq!(probes.get(), output.len() * MAX_CONFIRM_PROBES);
+                assert!(!built.used_previous);
+                assert_eq!(
+                    built.operations,
+                    vec![Operation::Insert {
+                        values: (64..96).collect()
+                    }]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builder_keeps_cursors_monotone() {
         // Output repeats message 1 and moves 3 before 2; only forward matches become keeps.
         let input = shared(&[json!({"id": 1}), json!({"id": 2}), json!({"id": 3})]);
         let output = shared(&[
