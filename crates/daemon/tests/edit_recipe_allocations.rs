@@ -6,10 +6,37 @@ use std::sync::Arc;
 
 use alloc_recorder::record_window;
 use daemon::edit_recipe::{Operation, Recipe, RecipeError, Revision, Source, SourceBase};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[global_allocator]
 static GLOBAL: alloc_recorder::RecordingAlloc = alloc_recorder::RecordingAlloc;
+
+#[test]
+fn rejected_many_insert_operations_validate_before_materializing_literals() {
+    let mut operations = (0..20_000)
+        .map(|_| json!({ "op": "insert", "values": [null] }))
+        .collect::<Vec<_>>();
+    operations.push(json!({}));
+    let value = json!({
+        "base_revision": "b",
+        "output_revision": "o",
+        "operations": operations,
+    });
+
+    let (result, ledger) = record_window(|| Recipe::from_json(&value));
+    assert_eq!(result, Err(RecipeError::MissingField("op")));
+    assert!(!ledger.overflow, "allocation ledger overflowed");
+    assert!(
+        ledger.allocation_events < 100,
+        "validation made {} allocations",
+        ledger.allocation_events
+    );
+    assert!(
+        ledger.peak_live_bytes < 512 * 1024,
+        "validation peaked at {} bytes",
+        ledger.peak_live_bytes
+    );
+}
 
 #[test]
 fn rejected_many_insert_operations_keep_validation_allocations_flat() {

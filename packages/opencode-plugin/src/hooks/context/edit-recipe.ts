@@ -139,26 +139,31 @@ function parseRevision(value: unknown, field: string): string | RecipeRejection 
 }
 
 function validateJsonValue(value: unknown): RecipeRejection | undefined {
-    type ValueWork = { value: unknown; depth: number };
+    type ValueWork = { kind: "value"; value: unknown; depth: number };
     type ChildrenWork = {
+        kind: "children";
         owner: JsonContainer;
         depth: number;
         children: Generator<JsonChild | RecipeRejection>;
     };
-    const work: (ValueWork | ChildrenWork)[] = [{ value, depth: 0 }];
+    const work: (ValueWork | ChildrenWork)[] = [{ kind: "value", value, depth: 0 }];
     const active = new WeakSet<object>();
     while (work.length > 0) {
         const item = work[work.length - 1] as ValueWork | ChildrenWork;
         work.length -= 1;
-        if ("children" in item) {
+        if (item.kind === "children") {
             const next = item.children.next();
             if (next.done) {
                 active.delete(item.owner);
                 continue;
             }
             work[work.length] = item;
-            if ("code" in next.value) return next.value;
-            work[work.length] = { value: next.value.value, depth: item.depth + 1 };
+            if (isRecipeRejection(next.value)) return next.value;
+            work[work.length] = {
+                kind: "value",
+                value: next.value.value,
+                depth: item.depth + 1,
+            };
             continue;
         }
         const current = item.value;
@@ -182,6 +187,7 @@ function validateJsonValue(value: unknown): RecipeRejection | undefined {
         const container = current as JsonContainer;
         active.add(container);
         work[work.length] = {
+            kind: "children",
             owner: container,
             depth: item.depth,
             children: dataChildren(container),
@@ -216,7 +222,9 @@ function unknownField(
     return undefined;
 }
 
-function isRecipeRejection(value: RecipeOperation | RecipeRejection): value is RecipeRejection {
+function isRecipeRejection(
+    value: JsonChild | RecipeOperation | RecipeRejection,
+): value is RecipeRejection {
     return Object.hasOwn(value, "code");
 }
 
@@ -334,49 +342,56 @@ export function parseRecipe(value: unknown): RecipeParse {
  * walker avoids canonical key sorting and does not recurse on the JavaScript stack.
  */
 export function canonicalJsonLength(value: unknown): number {
-    type ValueWork = { value: unknown };
+    type ValueWork = { kind: "value"; value: unknown };
     type ChildrenWork = {
+        kind: "children";
         array: boolean;
         entries: number;
         children: Generator<JsonChild | RecipeRejection>;
     };
     let bytes = 0;
-    const work: (ValueWork | ChildrenWork)[] = [{ value }];
+    const work: (ValueWork | ChildrenWork)[] = [{ kind: "value", value }];
     while (work.length > 0) {
-        const item = work.pop() as ValueWork | ChildrenWork;
-        if ("children" in item) {
+        const item = work[work.length - 1] as ValueWork | ChildrenWork;
+        work.length -= 1;
+        if (item.kind === "children") {
             const next = item.children.next();
             if (next.done) continue;
-            if ("code" in next.value) throw new TypeError(next.value.detail);
+            if (isRecipeRejection(next.value)) throw new TypeError(next.value.detail);
+            work[work.length] = item;
             if (item.array) {
-                work.push(item, {
+                work[work.length] = {
+                    kind: "value",
                     value: next.value.value === undefined ? null : next.value.value,
-                });
+                };
                 continue;
             }
-            if (next.value.value === undefined) {
-                work.push(item);
-                continue;
-            }
+            if (next.value.value === undefined) continue;
             bytes +=
                 (item.entries > 0 ? 1 : 0) + Buffer.byteLength(JSON.stringify(next.value.key)) + 1;
             item.entries += 1;
-            work.push(item, { value: next.value.value });
+            work[work.length] = { kind: "value", value: next.value.value };
             continue;
         }
         const current = item.value;
         if (Array.isArray(current)) {
             bytes += 2 + Math.max(0, current.length - 1);
-            work.push({ array: true, entries: 0, children: dataChildren(current) });
+            work[work.length] = {
+                kind: "children",
+                array: true,
+                entries: 0,
+                children: dataChildren(current),
+            };
             continue;
         }
         if (current !== null && typeof current === "object") {
             bytes += 2;
-            work.push({
+            work[work.length] = {
+                kind: "children",
                 array: false,
                 entries: 0,
                 children: dataChildren(current as JsonContainer),
-            });
+            };
             continue;
         }
         bytes += Buffer.byteLength(serdeJsonCompact(current));

@@ -400,6 +400,38 @@ describe("edit recipe bounds", () => {
         expect(parsed).toMatchObject({ ok: false, rejection: { code: "malformed" } });
     });
 
+    it("uses own tags for internal traversal frames", () => {
+        const children = Object.getOwnPropertyDescriptor(Object.prototype, "children");
+        const code = Object.getOwnPropertyDescriptor(Object.prototype, "code");
+        try {
+            Object.defineProperty(Object.prototype, "children", {
+                configurable: true,
+                value: {
+                    next: () => {
+                        throw new Error("inherited children used");
+                    },
+                },
+            });
+            Object.defineProperty(Object.prototype, "code", {
+                configurable: true,
+                value: "malformed",
+            });
+            expect(
+                parseRecipe({
+                    base_revision: "b",
+                    output_revision: "o",
+                    operations: [{ op: "insert", values: [null] }],
+                }).ok,
+            ).toBe(true);
+            expect(canonicalJsonLength([null])).toBe(6);
+        } finally {
+            if (children) Object.defineProperty(Object.prototype, "children", children);
+            else Reflect.deleteProperty(Object.prototype, "children");
+            if (code) Object.defineProperty(Object.prototype, "code", code);
+            else Reflect.deleteProperty(Object.prototype, "code");
+        }
+    });
+
     it("does not retain metadata per rejected operation", () => {
         const operations: RecipeOperation[] = Array.from({ length: 100_000 }, () => ({
             op: "insert",

@@ -214,10 +214,38 @@ fn reject_unknown_fields(
     }
 }
 
+enum ParsedOperation<'a> {
+    Keep {
+        source: Source,
+        start: u64,
+        count: u64,
+    },
+    Insert {
+        values: &'a [Value],
+    },
+}
+
+impl ParsedOperation<'_> {
+    fn into_owned(self) -> Operation {
+        match self {
+            Self::Keep {
+                source,
+                start,
+                count,
+            } => Operation::Keep {
+                source,
+                start,
+                count,
+            },
+            Self::Insert { values } => Operation::Insert {
+                values: values.iter().cloned().map(Arc::new).collect(),
+            },
+        }
+    }
+}
+
 impl Operation {
-    /// Field-level validation: opcode, source, integer domain, count, and nonempty values.
-    /// Range validity against a base belongs to [`Recipe::apply`].
-    pub fn from_json(value: &Value) -> Result<Self, RecipeError> {
+    fn parse_json(value: &Value) -> Result<ParsedOperation<'_>, RecipeError> {
         let map = value
             .as_object()
             .ok_or_else(|| RecipeError::Malformed("operation is not an object".into()))?;
@@ -238,7 +266,7 @@ impl Operation {
                 if count == 0 {
                     return Err(RecipeError::ZeroCount);
                 }
-                Ok(Self::Keep {
+                Ok(ParsedOperation::Keep {
                     source,
                     start,
                     count,
@@ -252,12 +280,16 @@ impl Operation {
                 if values.is_empty() {
                     return Err(RecipeError::EmptyInsert);
                 }
-                Ok(Self::Insert {
-                    values: values.iter().cloned().map(Arc::new).collect(),
-                })
+                Ok(ParsedOperation::Insert { values })
             }
             other => Err(RecipeError::UnknownOperation(other.to_owned())),
         }
+    }
+
+    /// Field-level validation: opcode, source, integer domain, count, and nonempty values.
+    /// Range validity against a base belongs to [`Recipe::apply`].
+    pub fn from_json(value: &Value) -> Result<Self, RecipeError> {
+        Self::parse_json(value).map(ParsedOperation::into_owned)
     }
 }
 
@@ -333,9 +365,13 @@ impl Recipe {
             .get("previous_output_revision")
             .map(|value| revision(value, "previous_output_revision"))
             .transpose()?;
-        let operations = required(map, "operations")?
+        let operation_values = required(map, "operations")?
             .as_array()
-            .ok_or_else(|| RecipeError::Malformed("operations is not an array".into()))?
+            .ok_or_else(|| RecipeError::Malformed("operations is not an array".into()))?;
+        for value in operation_values {
+            Operation::parse_json(value)?;
+        }
+        let operations = operation_values
             .iter()
             .map(Operation::from_json)
             .collect::<Result<Vec<_>, _>>()?;
