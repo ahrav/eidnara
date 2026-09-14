@@ -413,25 +413,24 @@ impl<K: Hash + Eq + Clone> KeyIndex<K> {
         Self { positions }
     }
 
-    /// Positions before the cursor are skipped by binary search and at most [`MAX_CONFIRM_PROBES`]
-    /// candidates are compared, so each output message costs one lookup plus a bounded number of
-    /// value comparisons whatever the key distribution.
+    /// The shared `remaining` budget bounds probes across previous and input lookups.
     fn confirm(
         &self,
         entries: &[Keyed<'_, K>],
         cursor: usize,
         wanted: &Keyed<'_, K>,
+        remaining: &mut usize,
     ) -> Option<usize> {
         let positions = self.positions.get(&wanted.key)?;
         let first = positions.partition_point(|position| *position < cursor);
-        positions[first..]
-            .iter()
-            .take(MAX_CONFIRM_PROBES)
-            .copied()
-            .find(|position| {
-                let candidate = entries[*position].value;
-                Arc::ptr_eq(candidate, wanted.value) || candidate == wanted.value
-            })
+        for position in positions[first..].iter().take(*remaining).copied() {
+            *remaining -= 1;
+            let candidate = entries[position].value;
+            if Arc::ptr_eq(candidate, wanted.value) || candidate == wanted.value {
+                return Some(position);
+            }
+        }
+        None
     }
 }
 
@@ -453,15 +452,26 @@ pub fn build_recipe<K: Hash + Eq + Clone>(
     let mut operations: Vec<Operation> = Vec::new();
     let mut used_previous = false;
     for entry in output {
+        let mut remaining = MAX_CONFIRM_PROBES;
         let previous_hit = previous.and_then(|(_, entries)| {
             previous_index
                 .as_ref()?
-                .confirm(entries, cursors[Source::Previous as usize], entry)
+                .confirm(
+                    entries,
+                    cursors[Source::Previous as usize],
+                    entry,
+                    &mut remaining,
+                )
                 .map(|position| (Source::Previous, position))
         });
         let hit = previous_hit.or_else(|| {
             input_index
-                .confirm(input.1, cursors[Source::Input as usize], entry)
+                .confirm(
+                    input.1,
+                    cursors[Source::Input as usize],
+                    entry,
+                    &mut remaining,
+                )
                 .map(|position| (Source::Input, position))
         });
         match hit {
@@ -1113,6 +1123,29 @@ mod tests {
                 {"op": "keep", "source": "input", "start": 1, "count": 1},
                 {"op": "keep", "source": "input", "start": bucket - 1, "count": 1},
             ])
+        );
+    }
+
+    #[test]
+    fn builder_shares_confirm_probe_budget_across_sources() {
+        let previous = shared(
+            &(0..MAX_CONFIRM_PROBES)
+                .map(|n| json!({"id": 7, "n": n}))
+                .collect::<Vec<_>>(),
+        );
+        let input = shared(&[json!({"id": 7, "n": 99})]);
+        let output = shared(&[json!({"id": 7, "n": 99})]);
+        let base = revision("base");
+        let prev = revision("prev");
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            Some((&prev, &keyed(&previous))),
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "insert", "values": [{"id": 7, "n": 99}]}])
         );
     }
 
