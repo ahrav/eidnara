@@ -370,7 +370,13 @@ function scanPredecessorTokens(extractedRoot: string): string[] {
         const bytes = readFileSync(path);
         // A NUL byte within the first 8 KiB marks a binary, matching `grep -I`.
         if (bytes.subarray(0, 8192).includes(0)) continue;
-        const text = bytes.toString("utf8");
+        let text = bytes.toString("utf8");
+        if (rel.endsWith(".map")) {
+            // Source-map mappings encode positions, not source identifiers.
+            text = JSON.stringify(JSON.parse(text), (key, value) =>
+                key === "mappings" ? undefined : value,
+            );
+        }
         const before = hits.length;
         for (const [index, line] of text.split("\n").entries()) {
             if (PREDECESSOR_TOKENS.test(line)) {
