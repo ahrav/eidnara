@@ -165,15 +165,15 @@ fn serialization_buffer(ledger: &Ledger, output_len: usize, returned_ptr: usize)
     }
 }
 
-fn largest_receipt_capacity(population: &served_output_fixtures::Population) -> usize {
+fn largest_receipt_peak(population: &served_output_fixtures::Population) -> usize {
     population
         .build()
         .content()
         .iter()
         .map(|block| {
-            serde_json::to_string(block)
-                .expect("block serializes")
-                .capacity()
+            let (_, ledger) =
+                record_window(|| daemon::served_json::canonical_block_bytes_for_test(block));
+            ledger.peak_live_bytes
         })
         .max()
         .unwrap_or(0)
@@ -230,7 +230,8 @@ fn full_constructor_observation_covers_receipts_hashing_and_arc_conversion() {
         // `Arc` overlap only during that conversion.
         let conversion_peak = returned_capacity + arc_size;
         let live_after_conversion = arc_size + fingerprint_vec + digests;
-        let hashing_peak = live_after_conversion + largest_receipt_capacity(&population);
+        // Canonical receipt serialization also holds span buffers before returning the bytes.
+        let hashing_peak = live_after_conversion + largest_receipt_peak(&population);
         // Ownership transfer: the identity string and its `Arc` overlap, then the
         // fingerprint `Vec` and its `Arc` overlap while the identity `Arc` is live.
         let ownership_peak = live_after_conversion
