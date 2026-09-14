@@ -1174,12 +1174,12 @@ export function buildArgs(
         }
     }
 
-    // The runner loads the lean subagent extension only for children that need scoped `ctx_*` tools.
+    // The runner loads the lean subagent extension only for children that need scoped `eidnara_*` tools.
     // Without an allowlist, discovered extensions remain enabled so provider extensions can register models.
     // The full Eidnara entry receives `EIDNARA_PI_SUBAGENT=1`.
     // With `EIDNARA_PI_SUBAGENT=1`, the full Eidnara entry returns before registering hooks, tools, or timers.
     // The lean entry does not check `EIDNARA_PI_SUBAGENT`; it registers only subagent-scoped tools.
-    // The runner omits `--extension` when the bundle is absent, so the child lacks Eidnara `ctx_*` tools.
+    // The runner omits `--extension` when the bundle is absent, so the child lacks Eidnara `eidnara_*` tools.
     //
     // The runner uses `--extension`, not `-e`, because extension-registered flags can conflict with `-e`.
     const subagentEntryPath = opts?.subagentEntryPath ?? SUBAGENT_ENTRY_PATH;

@@ -717,7 +717,7 @@ const SESSION_STATUS_HISTORY_SEGMENT_PAGE_LIMIT: usize = 50;
 /// After a history_summarizer abandon, suppress refires for the cooldown duration.
 const HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS: i64 =
     history_summarizer::HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS;
-const SESSION_UNRESOLVED_MESSAGE: &str = "session unresolved; launch Claude Code through the Eidnara wrapper so ctx_* can bind to this conversation";
+const SESSION_UNRESOLVED_MESSAGE: &str = "session unresolved; launch Claude Code through the Eidnara wrapper so eidnara_* can bind to this conversation";
 const OPENCODE_HARNESS: &str = "opencode";
 const STATE_SYNC_SEED_MAX_ID_BYTES: usize = 128;
 const STATE_SYNC_SEED_MAX_STAGED_BYTES: usize = 32 * 1024 * 1024;
