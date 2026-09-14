@@ -397,12 +397,14 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: partial - `parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback`
+Exercised: not yet - `parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback`
 constructs a duplicate `mid` in the last message after a 4 MiB prefix and
 asserts the walk accepts, the typed decode refuses, and the tree conversion
 succeeds in one trace; the corpus's `duplicate nested key` body reaches the tree
-lane with its last value. A duplicate key inside a block envelope is not
-constructed.
+lane with its last value. Both bodies repeat ingress `mid`, which is the
+current-path control, not either required envelope-specific witness. Neither
+constructs a repeated CK role or block kind, so neither required marker is
+satisfied.
 Guarantee: The compatibility campaign constructs successful tree recovery
 from duplicate recognized fields inside message and block envelopes after
 the typed attempt fails.
