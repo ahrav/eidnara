@@ -13,7 +13,7 @@ inferred from this supplement.
 ## Evidence trail
 
 Revision: the #533 change on `fix/client-transform-owner` after merging
-`origin/main` at `5def3c71`. Line numbers below are from that tree.
+`origin/main` at `5def3c71`. Line numbers below are from `d5a525e8`.
 
 - [transform-capture.ts](../../../../../packages/opencode-plugin/src/hooks/context/transform-capture.ts):
   `rootArrayRejection` (`:94-117`) returns a `ReferenceableRejection`
@@ -21,21 +21,21 @@ Revision: the #533 change on `fix/client-transform-owner` after merging
   altered prototype chain (`:97-102`), an own or inherited `then` (`:103`),
   or an accessor on `Array`, `Object`, `String`, `Number`, or
   `Boolean.prototype` (`:105-115`, reason `prototype_accessor`, path such as
-  `Object.prototype/agent`). `ReferenceableWalk.members` (`:187-195`) calls it
-  first, so `inspectReferenceableMessages` (`:345-363`), `captureMessages`
-  (`:383-400`), `capturedMessagesUnchanged` (`:403-430`), and
-  `hostArrayReplacementRejection` (`:439-455`) all refuse a polluted
+  `Object.prototype/agent`). `ReferenceableWalk.members` (`:206-214`) calls it
+  first, so `inspectReferenceableMessages` (`:364-382`), `captureMessages`
+  (`:402-419`), `capturedMessagesUnchanged` (`:422-449`), and
+  `hostArrayReplacementRejection` (`:458-474`) all refuse a polluted
   prototype.
-- `entries` (`:237-334`) rejects proxies with `util.types.isProxy` before any
-  prototype or descriptor read (`:242`), rejects boxed primitives with
-  `util.types.isBoxedPrimitive` (`:244`), checks the prototype, depth, and
-  cycles (`:245-255`), walks the prototype chain for an own or inherited
-  `toJSON` using `Object.hasOwn(hook, "value")` (`:257-273`), charges the
-  declared array length before element reads (`:277-278`), and records
-  `prototype === null` on the tape for objects (`:285`). `data` spends one
+- `entries` (`:256-353`) rejects proxies with `util.types.isProxy` before any
+  prototype or descriptor read (`:261`), rejects boxed primitives with
+  `util.types.isBoxedPrimitive` (`:263`), checks the prototype, depth, and
+  cycles (`:264-274`), walks the prototype chain for an own or inherited
+  `toJSON` using `Object.hasOwn(hook, "value")` (`:276-292`), charges the
+  declared array length before element reads (`:296-297`), and records
+  `prototype === null` on the tape for objects (`:304`). `data` spends one
   slot per descriptor read and rejects sparse slots and accessors with
-  `Object.hasOwn(slot, "value")` (`:228-234`). `walk` rejects functions,
-  symbols, bigints, and non-finite numbers (`:170-185`). `readOwnDataProperty`
+  `Object.hasOwn(slot, "value")` (`:247-253`). `walk` rejects functions,
+  symbols, bigints, and non-finite numbers (`:190-204`). `readOwnDataProperty`
   (`:72-76`) returns `undefined` for accessors, proxies, and inherited
   properties.
 - [rust-mode-transform.ts](../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts):
@@ -44,7 +44,7 @@ Revision: the #533 change on `fix/client-transform-owner` after merging
   inspects the source before any message read (`:969-977`, `unsupported_source`
   at warn for `prototype_accessor`, debug otherwise), and captures it
   (`:980`). The daemon's candidate is not inspected before
-  `assertNativeBoundary` (`:1433-1446`); kept-prefix validation is #538's
+  `assertNativeBoundary` (`:1436-1449`); kept-prefix validation is #538's
   TE21.
 - [module-wire.ts](../../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts):
   `primeOrdinalMemo` (`:473`) scans asynchronously; the caller rechecks the
@@ -119,11 +119,11 @@ removal, metadata renames, descriptor changes, and prototype pollution.
   and `Boolean.prototype` entries of the scan have no dedicated witness.
 - Missing evidence: A witness for an accessor on `Number.prototype` or
   `Boolean.prototype`; native-addon CI coverage as before.
-- Conclusion (2026-09-13, revision-bound run after merging `origin/main` at
-  `5def3c71`, 1107 pass, 0 fail): resolved as exercised. Witnesses, all with
+- Conclusion (2026-09-13, revision-bound run at `d5a525e8`, after merging
+  `origin/main` at `5def3c71`, 1122 pass, 0 fail): resolved as exercised. Witnesses, all with
   a zero trap, getter, or hook count:
   - `transform-capture.test.ts:76`, `:108`, `:213`, `:283`, `:292`, `:306`,
-    `:339`, `:365`, `:760`, `:1094`, and the `it.each` families at `:133`
+    `:339`, `:365`, `:760`, `:1113`, and the `it.each` families at `:133`
     (own array `toJSON`), `:147` (hidden array operation overrides), `:166`
     (membership accessors), `:183` (inherited `toJSON`), `:241` (hidden
     accessors on production-read fields).
@@ -150,12 +150,12 @@ removal, metadata renames, descriptor changes, and prototype pollution.
     accessor on a built-in prototype and defines slots without invoking it"
     (2 cases; `inspectReferenceableMessages` reports `prototype_accessor` at
     `<Array|Object>.prototype/0`, `counter.count` 0).
-  - `rust-mode-transform.test.ts:2575` "declines an unsupported source before
-    any dispatch and leaves the host array intact" (`calls` 0); `:2375`
+  - `rust-mode-transform.test.ts:2699` "declines an unsupported source before
+    any dispatch and leaves the host array intact" (`calls` 0); `:2499`
     "rejects nested <accessor|toJSON|proxy> installed at <source-await|
-    pre-apply> without invoking it" (6 cases); `:2536` "declines before
+    pre-apply> without invoking it" (6 cases); `:2660` "declines before
     publication and NACKs known deliveries when the source changes between
-    pages" (`hook` never called); `:2608` (accessor on `info` during the
+    pages" (`hook` never called); `:2732` (accessor on `info` during the
     directory await, `getter` never called).
   - `hook.test.ts:210` "rejects <unsupported> at the actual <hook|wrapper>
     entry without triggering reads" (12 cases; also `client.session.get`,
@@ -178,7 +178,7 @@ bun test src/hooks/context/ src/plugin/messages-transform.test.ts \
   src/shared/host-client/client.test.ts
 ```
 
-Result: 1107 pass, 0 fail, 31,373 `expect()` calls, 34 files. `bun run
+Result: 1122 pass, 0 fail, 31,659 `expect()` calls, 34 files. `bun run
 typecheck` (which includes `tsc --noEmit`, `tsconfig.scripts.json`, and
 `tsconfig.tui.json`) exits 0 in the same tree. Earlier whole-repository
 gate claims from a prior revision are not repeated here.

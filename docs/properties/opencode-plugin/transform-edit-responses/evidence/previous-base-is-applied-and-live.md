@@ -9,24 +9,24 @@ An applied object can still be mutated later.
 ## Evidence trail
 
 Revision: the #533 change on `fix/client-transform-owner` after merging
-`origin/main` at `5def3c71`. Line numbers were verified against that tree.
+`origin/main` at `5def3c71`. Line numbers were verified against `d5a525e8`.
 
 - In [rust-mode-transform.ts](../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts),
   `buildNativeCandidate` (`:578-626`) receives the previous cache's
-  `nativeOutput` and `fingerprint` (call at `:1433-1442`), checks
+  `nativeOutput` and `fingerprint` (call at `:1436-1445`), checks
   `delta.after` against `previous.fingerprint` and `replace_from` against the
   prefix range (`:609-621`), reserves candidate slots (`:622`), and copies
   references from the previous output by slice (`:625`).
 - The candidate is not inspected before `assertNativeBoundary`
-  (`:1443-1446`), which reads the candidate's head entries plainly
+  (`:1446-1449`), which reads the candidate's head entries plainly
   (`:377-383`). A kept previous-output entry that gained an accessor is
   therefore not refused on this path. Previous-output validation, including
   kept prefix entries, is #538's TE21 work.
 - `pendingWireCache.nativeOutput = candidate` runs after host replacement
-  (`:1477`); a delta pass that failed leaves the previous cache's
+  (`:1480`); a delta pass that failed leaves the previous cache's
   `nativeOutput` in place only when the pass never replaced it. A dispatched
   pass that declines sets nothing here, but `state.forceFullWire` is already
-  true (`:1361`), so the next pass sends the full history and does not
+  true (`:1363`), so the next pass sends the full history and does not
   advertise the previous base.
 - The cache fingerprint describes inbound wire state (`:286`). Matching it is
   not a content validation of previously applied output or a recipe revision.
@@ -78,18 +78,18 @@ unmodified base and an unapplied response as controls.
 ### Q: What does the owner check about the previous base?
 
 - Sources examined: `buildNativeCandidate` at `rust-mode-transform.ts:578-626`,
-  the application block at `:1431-1446`, `assertNativeBoundary` at
-  `:377-383`, `:1361`, `:1477`; the witnesses below.
+  the application block at `:1434-1449`, `assertNativeBoundary` at
+  `:377-383`, `:1363`, `:1480`; the witnesses below.
 - Findings: The fingerprint and range checks and the identity-preserving
   slice are the only checks on the previous base. Nothing on this path reads
   a kept entry's values or refuses a hooked kept entry before
   `assertNativeBoundary` reads the head entries plainly.
 - Missing evidence: #538's before-advertisement and before-reuse validation,
   its value-mutation witnesses, and a refusal for a hooked kept entry.
-- Conclusion (2026-09-13, revision-bound run after merging `origin/main` at
-  `5def3c71`, 1107 pass, 0 fail): TE21 remains partial. Kept-prefix
+- Conclusion (2026-09-13, revision-bound run at `d5a525e8`, after merging
+  `origin/main` at `5def3c71`, 1122 pass, 0 fail): TE21 remains partial. Kept-prefix
   validation is #538's TE21. Executed witnesses and markers:
-  - `rust-mode-transform.test.ts:3100` "preserves the payload identity of
+  - `rust-mode-transform.test.ts:3224` "preserves the payload identity of
     kept and returned messages on publication". Marker:
     `secondOutput.messages[0]` is `returned[0]`, `entries.size` 2.
   - `:1242` "applies a native_messages_delta in place and acks its note

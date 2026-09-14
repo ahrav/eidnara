@@ -109,3 +109,22 @@ This is not blanket invariance of the admitted set for every possible input.
 - Missing evidence: None for this scope correction; candidate results remain absent.
 - Conclusion: resolved. Preserve original cases and fixed rules, add new ceiling
   witnesses, and keep the retuning conflict open. The slug is unchanged.
+
+## Typed-wire U1 execution, 2026-09-13
+
+`frozen_corpus_footprints_replay_with_only_string_charge_changes` in
+`crates/daemon/src/lib.rs` holds the 46 A2 bodies with their footprints and
+terminals recorded at three string copies before the change: the terminal
+through both lanes with an unbounded pool, at the frozen footprint, and one byte
+under it. Replay on the current tree: every unbounded terminal is unchanged;
+both lanes agree at every capacity; every frozen terminal is unchanged except a
+frozen too-large terminal on a body with string bytes, which is now the body's
+unbounded terminal. For every such body the frozen and current footprints differ
+by exactly two times the visited string bytes, and for the 30 bodies whose
+`Value` tree keeps every key that count equals the tree's string total. The
+raw-value-token-under-discriminator body stays refused at its frozen footprint
+because the byte-derived node floor, not the string charge, refuses it; the
+page-field bodies keep their own `invalid_params` terminals. Length caps and the
+node floor are not touched by the coefficient. A1's ring witnesses in
+`crates/daemon/tests/direct_host.rs` are node-dense and unaffected. New ceiling
+witnesses are additive (`text_heavy_admission_ceiling_witnesses`).

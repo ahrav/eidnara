@@ -7,6 +7,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
+use kernel::applicability::EvalBudget;
 use kernel::{
     BackupRequest, CommitIntent, CommitPageBounds, CommitReadError, CommitReadRequest,
     CompleteCommit, DomainSpec, KernelError, KernelStore, PageEnd, Sensitivity,
@@ -658,6 +659,79 @@ fn missing_rows_and_malformed_ordinals_fail_and_leave_progress_untouched() {
 }
 
 #[test]
+fn verifying_complete_commits_paginates_like_reading_them_without_selecting_payloads() {
+    let fixture = seeded();
+    let tip = fixture.tip();
+    let many = *fixture
+        .ledger
+        .commits
+        .iter()
+        .find(|(_, changes)| changes.len() == 3)
+        .unwrap()
+        .0;
+    let full = fixture
+        .store
+        .read_complete_commits(&fixture.request(many - 1, many), wide())
+        .unwrap();
+    let many_bytes: u64 = full.commits[0]
+        .rows
+        .iter()
+        .map(|row| row.payload.len() as u64)
+        .sum();
+    for (after, through, bounds) in [
+        (0, tip, wide()),
+        (0, tip, bounds(1, 1024, 1 << 20)),
+        (0, tip, bounds(64, 2, 1 << 20)),
+        (many - 1, tip, bounds(1, 3, many_bytes - 1)),
+        (many - 1, many, bounds(1, 3, many_bytes)),
+        (tip, tip, wide()),
+    ] {
+        let request = fixture.request(after, through);
+        let read = fixture
+            .store
+            .read_complete_commits(&request, bounds)
+            .unwrap();
+        let materialized = fixture.store.materialized_outbox_rows_for_test();
+        let span = fixture
+            .store
+            .verify_complete_commits(&request, bounds)
+            .unwrap();
+        assert_eq!(
+            (span.through, span.end),
+            (read.through, read.end),
+            "{request:?}"
+        );
+        assert_eq!(
+            fixture.store.materialized_outbox_rows_for_test(),
+            materialized,
+            "verification selected payload rows for {request:?}"
+        );
+    }
+    assert_eq!(
+        fixture
+            .store
+            .verify_complete_commits(&fixture.request(tip, tip + 1), wide())
+            .unwrap_err(),
+        CommitReadError::TargetBeyondTip
+    );
+
+    fixture
+        .mutate()
+        .execute(
+            "DELETE FROM outbox WHERE commit_seq=?1 AND ordinal=1",
+            [many],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .verify_complete_commits(&fixture.request(0, tip), wide())
+            .unwrap_err(),
+        CommitReadError::MissingHistory { commit_seq: many }
+    );
+}
+
+#[test]
 fn admission_precedes_materialization_and_refusal_moves_nothing() {
     let fixture = seeded();
     let tip = fixture.tip();
@@ -919,6 +993,64 @@ fn acknowledgement_and_pruning_bound_what_a_consumer_may_still_read() {
     );
     assert!(pending.last().unwrap().commit_boundary);
     assert_eq!(fixture.published_rows(), 0);
+}
+
+#[test]
+fn acknowledgement_and_deregistration_refuse_a_displaced_incarnation() {
+    let fixture = seeded();
+    let budget = EvalBudget::unbounded();
+    let target = fixture
+        .store
+        .capture_commit_read_target_within_budget(&budget)
+        .unwrap();
+    let before = fixture.checkpoint();
+
+    let mut other = Fixture::open();
+    other.register(CONSUMER);
+    other.insert_domains("other-one", &[20]);
+    other.insert_domains("other-many", &[21, 22]);
+    let destination = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(destination.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = other
+        .store
+        .backup(BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    fixture.store.restore(&backup.destination_path).unwrap();
+
+    assert_eq!(
+        fixture.store.acknowledge_outbox_within_budget(
+            &budget,
+            CONSUMER,
+            target.through_commit,
+            1,
+            target.incarnation,
+        ),
+        Err(KernelError::InvalidInput)
+    );
+    assert_eq!(fixture.checkpoint(), before);
+    assert_eq!(
+        fixture.store.require_incarnation(target.incarnation),
+        Err(KernelError::InvalidInput)
+    );
+    let live = fixture
+        .store
+        .capture_commit_read_target_within_budget(&budget)
+        .unwrap();
+    fixture
+        .store
+        .acknowledge_outbox_within_budget(
+            &budget,
+            CONSUMER,
+            live.through_commit,
+            1,
+            live.incarnation,
+        )
+        .unwrap();
+    assert_eq!(fixture.checkpoint(), live.through_commit);
 }
 
 #[test]

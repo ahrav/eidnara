@@ -12,6 +12,7 @@ pub mod applicability;
 mod backup;
 mod cas;
 mod commit_read;
+mod consumer_obligations;
 mod current_input;
 mod durable_fs;
 mod eligibility;
@@ -66,8 +67,9 @@ pub use cas::{
 };
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
-    CommitReadTarget, CompleteCommit, PageEnd,
+    CommitReadTarget, CommitSpan, CompleteCommit, PageEnd,
 };
+pub use consumer_obligations::{ConsumerObligation, ConsumerObligationError};
 pub use current_input::{
     CurrentInputDescriptor, CurrentInputExpectation, CurrentInputGuard, EligibilityBinding,
     StaleCurrentInput, StaleInput,

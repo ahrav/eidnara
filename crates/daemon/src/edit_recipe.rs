@@ -14,7 +14,7 @@ use std::hash::Hash;
 use std::ops::Range;
 use std::sync::Arc;
 
-use serde::de::{self, Deserializer};
+use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -26,6 +26,7 @@ pub const MAX_RECONSTRUCTED_BYTES: usize = crate::dispatch::MAX_WIRE_BODY_BYTES;
 pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 /// Bounds equality tests per output message to prevent shared keys from making a build quadratic.
 pub const MAX_CONFIRM_PROBES: usize = 8;
+const MAX_JSON_NESTING: usize = 127;
 
 /// Opaque, nonempty, at most [`MAX_REVISION_BYTES`] UTF-8 bytes. Neither a hash nor authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -97,6 +98,15 @@ pub struct SourceBase<'a> {
     pub revision: &'a Revision,
     pub values: &'a [Arc<Value>],
     pub lengths: &'a [usize],
+}
+
+/// A reconstructed array and the per-entry lengths needed to retain it as a future source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedRecipe {
+    pub values: Vec<Arc<Value>>,
+    pub lengths: Vec<usize>,
+    /// Canonical JSON size of the array, including brackets and commas.
+    pub bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,10 +218,38 @@ fn reject_unknown_fields(
     }
 }
 
+enum ParsedOperation<'a> {
+    Keep {
+        source: Source,
+        start: u64,
+        count: u64,
+    },
+    Insert {
+        values: &'a [Value],
+    },
+}
+
+impl ParsedOperation<'_> {
+    fn into_owned(self) -> Operation {
+        match self {
+            Self::Keep {
+                source,
+                start,
+                count,
+            } => Operation::Keep {
+                source,
+                start,
+                count,
+            },
+            Self::Insert { values } => Operation::Insert {
+                values: values.iter().cloned().map(Arc::new).collect(),
+            },
+        }
+    }
+}
+
 impl Operation {
-    /// Field-level validation: opcode, source, integer domain, count, and nonempty values.
-    /// Range validity against a base belongs to [`Recipe::apply`].
-    pub fn from_json(value: &Value) -> Result<Self, RecipeError> {
+    fn parse_json(value: &Value) -> Result<ParsedOperation<'_>, RecipeError> {
         let map = value
             .as_object()
             .ok_or_else(|| RecipeError::Malformed("operation is not an object".into()))?;
@@ -232,7 +270,7 @@ impl Operation {
                 if count == 0 {
                     return Err(RecipeError::ZeroCount);
                 }
-                Ok(Self::Keep {
+                Ok(ParsedOperation::Keep {
                     source,
                     start,
                     count,
@@ -246,18 +284,76 @@ impl Operation {
                 if values.is_empty() {
                     return Err(RecipeError::EmptyInsert);
                 }
-                Ok(Self::Insert {
-                    values: values.iter().cloned().map(Arc::new).collect(),
-                })
+                Ok(ParsedOperation::Insert { values })
             }
             other => Err(RecipeError::UnknownOperation(other.to_owned())),
         }
     }
+
+    /// Field-level validation: opcode, source, integer domain, count, and nonempty values.
+    /// Range validity against a base belongs to [`Recipe::apply`].
+    pub fn from_json(value: &Value) -> Result<Self, RecipeError> {
+        Self::parse_json(value).map(ParsedOperation::into_owned)
+    }
+}
+
+enum ContainerChildren<'a> {
+    Array(std::slice::Iter<'a, Value>),
+    Object(serde_json::map::Values<'a>),
+}
+
+impl<'a> ContainerChildren<'a> {
+    fn new(value: &'a Value) -> Option<Self> {
+        match value {
+            Value::Array(values) => Some(Self::Array(values.iter())),
+            Value::Object(values) => Some(Self::Object(values.values())),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> Iterator for ContainerChildren<'a> {
+    type Item = &'a Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Array(values) => values.next(),
+            Self::Object(values) => values.next(),
+        }
+    }
+}
+
+/// Validates the depth bound and returns the maximum pending container frames.
+fn validate_json_nesting(value: &Value) -> Result<usize, RecipeError> {
+    let Some(children) = ContainerChildren::new(value) else {
+        return Ok(0);
+    };
+    let mut work = vec![(0usize, children)];
+    let mut max_pending = work.len();
+    while let Some((depth, children)) = work.last_mut() {
+        let next = children.next().map(|child| (*depth + 1, child));
+        let Some((depth, child)) = next else {
+            work.pop();
+            continue;
+        };
+        let Some(children) = ContainerChildren::new(child) else {
+            continue;
+        };
+        if depth >= MAX_JSON_NESTING {
+            return Err(RecipeError::Malformed(
+                "recipe exceeds the JSON nesting limit".into(),
+            ));
+        }
+        work.push((depth, children));
+        max_pending = max_pending.max(work.len());
+    }
+    Ok(max_pending)
 }
 
 impl Recipe {
     /// Structural validation of a decoded response body. Base-relative checks run in [`Self::apply`].
     pub fn from_json(value: &Value) -> Result<Self, RecipeError> {
+        validate_json_nesting(value)?;
         let map = value
             .as_object()
             .ok_or_else(|| RecipeError::Malformed("recipe is not an object".into()))?;
@@ -273,9 +369,13 @@ impl Recipe {
             .get("previous_output_revision")
             .map(|value| revision(value, "previous_output_revision"))
             .transpose()?;
-        let operations = required(map, "operations")?
+        let operation_values = required(map, "operations")?
             .as_array()
-            .ok_or_else(|| RecipeError::Malformed("operations is not an array".into()))?
+            .ok_or_else(|| RecipeError::Malformed("operations is not an array".into()))?;
+        for value in operation_values {
+            Operation::parse_json(value)?;
+        }
+        let operations = operation_values
             .iter()
             .map(Operation::from_json)
             .collect::<Result<Vec<_>, _>>()?;
@@ -310,7 +410,7 @@ impl Recipe {
         &self,
         input: SourceBase<'_>,
         previous: Option<SourceBase<'_>>,
-    ) -> Result<(Vec<Arc<Value>>, usize), RecipeError> {
+    ) -> Result<AppliedRecipe, RecipeError> {
         if input.values.len() != input.lengths.len() {
             return Err(RecipeError::LengthMismatch {
                 source: Source::Input,
@@ -328,7 +428,7 @@ impl Recipe {
         let mut entries = 0usize;
         // Brackets first; each entry then pays its bytes plus one comma after the first.
         let mut bytes = 2usize;
-        let mut segments: Vec<&[Arc<Value>]> = Vec::with_capacity(self.operations.len());
+        let mut inserted_lengths = Vec::new();
         for (index, operation) in self.operations.iter().enumerate() {
             match operation {
                 Operation::Keep {
@@ -361,18 +461,18 @@ impl Recipe {
                     *cursor = end;
                     // `end <= len <= usize::MAX`, so both casts are exact.
                     let range: Range<usize> = *start as usize..end as usize;
-                    for length in &base.lengths[range.clone()] {
+                    for length in &base.lengths[range] {
                         bytes = add_entry(bytes, entries, *length)?;
                         entries += 1;
                     }
-                    segments.push(&base.values[range]);
                 }
                 Operation::Insert { values } => {
                     for value in values {
-                        bytes = add_entry(bytes, entries, canonical_len(value))?;
+                        let length = canonical_len(value)?;
+                        bytes = add_entry(bytes, entries, length)?;
                         entries += 1;
+                        inserted_lengths.push(length);
                     }
-                    segments.push(values);
                 }
             }
         }
@@ -380,10 +480,37 @@ impl Recipe {
             return Err(RecipeError::OutputTooLarge { bytes });
         }
         let mut output = Vec::with_capacity(entries);
-        for segment in segments {
-            output.extend(segment.iter().cloned());
+        let mut lengths = Vec::with_capacity(entries);
+        let mut inserted_index = 0usize;
+        for operation in &self.operations {
+            match operation {
+                Operation::Keep {
+                    source,
+                    start,
+                    count,
+                } => {
+                    let base = match source {
+                        Source::Input => input,
+                        Source::Previous => previous.ok_or(RecipeError::MissingPreviousBase)?,
+                    };
+                    let end = start.checked_add(*count).ok_or(RecipeError::Overflow)?;
+                    let range: Range<usize> = *start as usize..end as usize;
+                    output.extend(base.values[range.clone()].iter().cloned());
+                    lengths.extend_from_slice(&base.lengths[range]);
+                }
+                Operation::Insert { values } => {
+                    let end = inserted_index + values.len();
+                    output.extend(values.iter().cloned());
+                    lengths.extend_from_slice(&inserted_lengths[inserted_index..end]);
+                    inserted_index = end;
+                }
+            }
         }
-        Ok((output, bytes))
+        Ok(AppliedRecipe {
+            values: output,
+            lengths,
+            bytes,
+        })
     }
 }
 
@@ -511,25 +638,127 @@ pub fn build_recipe<K: Hash + Eq + Clone>(
 
 fn add_entry(bytes: usize, entries: usize, length: usize) -> Result<usize, RecipeError> {
     let separator = usize::from(entries > 0);
-    bytes
+    let sum = bytes
         .checked_add(length)
         .and_then(|sum| sum.checked_add(separator))
-        .ok_or(RecipeError::Overflow)
+        .ok_or(RecipeError::Overflow)?;
+    if sum > MAX_RECONSTRUCTED_BYTES {
+        return Err(RecipeError::OutputTooLarge { bytes: sum });
+    }
+    Ok(sum)
 }
 
 /// Compact `serde_json` length, the same rule the client's `serdeJsonCompact` follows. A value
 /// parsed from `1.0` re-emits as `1.0` here and as `1` in JavaScript, so the two languages agree on
 /// acceptance but may differ by a few bytes in size for non-integer numeric content.
-pub fn canonical_len(value: &Value) -> usize {
-    // `Value` always serializes.
-    serde_json::to_vec(value)
-        .expect("serde_json::Value serializes")
-        .len()
+pub fn canonical_len(value: &Value) -> Result<usize, RecipeError> {
+    crate::dispatch::measure_json(value).map_err(|error| match error {
+        crate::dispatch::PreparedOutputError::BodyTooLarge { len, .. } => {
+            RecipeError::OutputTooLarge { bytes: len }
+        }
+        crate::dispatch::PreparedOutputError::LengthOverflow => RecipeError::Overflow,
+        other => RecipeError::Malformed(other.to_string()),
+    })
+}
+
+struct PreservedValue(Value);
+
+#[derive(Clone, Copy)]
+struct PreservedValueSeed {
+    depth: usize,
+}
+
+struct PreservedValueVisitor {
+    depth: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for PreservedValueSeed {
+    type Value = PreservedValue;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(PreservedValueVisitor { depth: self.depth })
+    }
+}
+
+impl<'de> Visitor<'de> for PreservedValueVisitor {
+    type Value = PreservedValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .map(PreservedValue)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::Null))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        if self.depth >= MAX_JSON_NESTING {
+            return Err(de::Error::custom("recipe exceeds the JSON nesting limit"));
+        }
+        let mut values = Vec::new();
+        while let Some(value) = seq.next_element_seed(PreservedValueSeed {
+            depth: self.depth + 1,
+        })? {
+            values.push(value.0);
+        }
+        Ok(PreservedValue(Value::Array(values)))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        if self.depth >= MAX_JSON_NESTING {
+            return Err(de::Error::custom("recipe exceeds the JSON nesting limit"));
+        }
+        let mut values = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let value = map.next_value_seed(PreservedValueSeed {
+                depth: self.depth + 1,
+            })?;
+            values.insert(key, value.0);
+        }
+        Ok(PreservedValue(Value::Object(values)))
+    }
+}
+
+impl<'de> Deserialize<'de> for PreservedValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        PreservedValueSeed { depth: 0 }.deserialize(deserializer)
+    }
 }
 
 impl<'de> Deserialize<'de> for Recipe {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
+        let value = PreservedValue::deserialize(deserializer)?.0;
         Recipe::from_json(&value).map_err(de::Error::custom)
     }
 }
@@ -537,14 +766,66 @@ impl<'de> Deserialize<'de> for Recipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::de::DeserializeSeed;
     use serde_json::json;
+
+    struct NestedArray {
+        remaining: usize,
+    }
+
+    struct OneElement {
+        remaining: usize,
+        emitted: bool,
+    }
+
+    impl<'de> Deserializer<'de> for NestedArray {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            if self.remaining == 0 {
+                visitor.visit_unit()
+            } else {
+                visitor.visit_seq(OneElement {
+                    remaining: self.remaining,
+                    emitted: false,
+                })
+            }
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+            byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map struct enum
+            identifier ignored_any
+        }
+    }
+
+    impl<'de> SeqAccess<'de> for OneElement {
+        type Error = serde::de::value::Error;
+
+        fn next_element_seed<T: DeserializeSeed<'de>>(
+            &mut self,
+            seed: T,
+        ) -> Result<Option<T::Value>, Self::Error> {
+            if self.emitted {
+                return Ok(None);
+            }
+            self.emitted = true;
+            seed.deserialize(NestedArray {
+                remaining: self.remaining - 1,
+            })
+            .map(Some)
+        }
+    }
 
     fn shared(values: &[Value]) -> Vec<Arc<Value>> {
         values.iter().cloned().map(Arc::new).collect()
     }
 
     fn lengths(values: &[Arc<Value>]) -> Vec<usize> {
-        values.iter().map(|value| canonical_len(value)).collect()
+        values
+            .iter()
+            .map(|value| canonical_len(value).expect("value length"))
+            .collect()
     }
 
     fn revision(text: &str) -> Revision {
@@ -585,7 +866,7 @@ mod tests {
         .expect("valid recipe");
         let base = revision("base-1");
         let prev = revision("prev-1");
-        let output = recipe
+        let applied = recipe
             .apply(
                 SourceBase {
                     revision: &base,
@@ -599,11 +880,11 @@ mod tests {
                 }),
             )
             .expect("applies");
-        let (output, bytes) = output;
+        let output = &applied.values;
         assert_eq!(output.len(), 4);
         let rendered: Vec<&Value> = output.iter().map(Arc::as_ref).collect();
         assert_eq!(
-            bytes,
+            applied.bytes,
             serde_json::to_vec(&rendered).expect("serializes").len()
         );
         assert!(Arc::ptr_eq(&output[0], &previous[0]));
@@ -611,6 +892,7 @@ mod tests {
         assert_eq!(*output[2], json!({"id": "s"}));
         assert!(Arc::ptr_eq(&output[3], &input[2]));
         assert_eq!(*input[0], json!({"id": "a"}));
+        assert_eq!(applied.lengths, lengths(output));
     }
 
     #[test]
@@ -634,7 +916,14 @@ mod tests {
             },
             None,
         );
-        assert_eq!(accepted, Ok((input.clone(), MAX_RECONSTRUCTED_BYTES)));
+        assert_eq!(
+            accepted,
+            Ok(AppliedRecipe {
+                values: input.clone(),
+                lengths: exact.to_vec(),
+                bytes: MAX_RECONSTRUCTED_BYTES,
+            })
+        );
         let over = [exact[0] + 1, exact[1]];
         let rejected = recipe.apply(
             SourceBase {
@@ -674,7 +963,7 @@ mod tests {
             "operations": [{"op": "keep", "source": "input", "start": -0.0, "count": 1e0}],
         }))
         .expect("integral floats are safe integers");
-        let (output, _) = recipe
+        let output = recipe
             .apply(
                 SourceBase {
                     revision: &base,
@@ -684,7 +973,7 @@ mod tests {
                 None,
             )
             .expect("applies");
-        assert_eq!(output.len(), 1);
+        assert_eq!(output.values.len(), 1);
         assert_eq!(
             Recipe::from_json(&json!({
                 "base_revision": "b",
@@ -922,7 +1211,14 @@ mod tests {
                 None,
             )
             .expect("applies");
-        assert_eq!(output, (Vec::new(), 2));
+        assert_eq!(
+            output,
+            AppliedRecipe {
+                values: Vec::new(),
+                lengths: Vec::new(),
+                bytes: 2,
+            }
+        );
         let encoded = serde_json::to_value(&recipe).expect("serializes");
         assert_eq!(
             encoded,
@@ -996,7 +1292,9 @@ mod tests {
             })
         );
         // The recipe reconstructs the output through the applier, sharing every kept handle.
-        let (applied, _) = recipe
+        let AppliedRecipe {
+            values: applied, ..
+        } = recipe
             .apply(
                 SourceBase {
                     revision: &base,
@@ -1171,8 +1469,82 @@ mod tests {
     fn canonical_len_matches_compact_serialization() {
         let value = json!({"b": [1, 2.5, "x\ny"], "a": null, "é": true});
         assert_eq!(
-            canonical_len(&value),
+            canonical_len(&value).expect("measures"),
             serde_json::to_vec(&value).expect("serializes").len()
         );
+    }
+
+    #[test]
+    fn size_accumulator_rejects_the_first_byte_over_the_cap() {
+        assert_eq!(
+            add_entry(MAX_RECONSTRUCTED_BYTES, 1, 4),
+            Err(RecipeError::OutputTooLarge {
+                bytes: MAX_RECONSTRUCTED_BYTES + 5,
+            }),
+        );
+    }
+
+    #[test]
+    fn wide_nesting_check_keeps_pending_work_depth_bounded() {
+        let recipe = json!({
+            "base_revision": "b",
+            "output_revision": "o",
+            "operations": [],
+            "padding": vec![Value::Null; 10_000],
+        });
+        assert!(validate_json_nesting(&recipe).expect("valid depth") <= 127);
+    }
+
+    #[test]
+    fn preserved_value_rejects_depth_before_deserializing_the_full_tree() {
+        assert!(PreservedValue::deserialize(NestedArray { remaining: 140 }).is_err());
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_raw_value_marker_literals() {
+        let marker = Value::Object(
+            [(
+                crate::metered_decode::RAW_VALUE_TOKEN.to_owned(),
+                Value::String("[1]".to_owned()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let recipe = Recipe::from_json(&json!({
+            "base_revision": "b",
+            "output_revision": "o",
+            "operations": [{ "op": "insert", "values": [marker] }],
+        }))
+        .expect("valid recipe");
+        let encoded = serde_json::to_value(&recipe).expect("serialize recipe");
+        let decoded = serde_json::from_value::<Recipe>(encoded).expect("deserialize recipe");
+        assert_eq!(decoded, recipe);
+    }
+
+    #[test]
+    fn serde_nesting_limit_leaves_room_for_123_literal_containers() {
+        let recipe_text = |depth: usize| {
+            format!(
+                r#"{{"base_revision":"b","output_revision":"o","operations":[{{"op":"insert","values":[{}null{}]}}]}}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            )
+        };
+        assert!(serde_json::from_str::<Recipe>(&recipe_text(123)).is_ok());
+        assert!(serde_json::from_str::<Recipe>(&recipe_text(124)).is_err());
+
+        let recipe_value = |depth: usize| {
+            let mut literal = Value::Null;
+            for _ in 0..depth {
+                literal = Value::Array(vec![literal]);
+            }
+            json!({
+                "base_revision": "b",
+                "output_revision": "o",
+                "operations": [{ "op": "insert", "values": [literal] }],
+            })
+        };
+        assert!(Recipe::from_json(&recipe_value(123)).is_ok());
+        assert!(Recipe::from_json(&recipe_value(124)).is_err());
     }
 }

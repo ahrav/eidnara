@@ -54,6 +54,8 @@ fail:
 
 - unknown `op` or `source`, a missing required field, or an unknown field on an
   operation;
+- a value outside the `serde_json` domain, including non-finite numbers,
+  unpaired UTF-16 surrogates, or more than 127 nested containers;
 - `start` or `count` whose numeric value is not a nonnegative integer at or
   below 2^53 - 1. The check is on the value, not the lexical form: JavaScript
   cannot tell `1.0` from `1`, so `1.0`, `1e3`, and `-0` read as integers in
@@ -70,9 +72,10 @@ fail:
   `serde_json` rule. This limit is checked before allocation and separately
   from the wire frame limit.
 
-Reconstruction produces a new array of shared references and literal values
-together with its measured canonical length. It never edits a source or splices
-the host array in place.
+Reconstruction produces a new array of shared references and literal values,
+each entry's canonical length for use as a later `previous` source, and the
+array's measured canonical length. It never edits a source or splices the host
+array in place.
 
 Both appliers measure literals with the compact `serde_json` rule. The daemon
 keeps a number parsed from `1.0` as a float and re-emits `1.0`; JavaScript has

@@ -546,7 +546,25 @@ pub struct LiveDescriptorPage {
 pub struct LiveDescriptor {
     pub object_id: String,
     pub domain_id: String,
+    pub sensitivity: Sensitivity,
+    pub created_commit_seq: i64,
     pub detail: SourceDescriptorDetail,
+}
+
+struct LiveDescriptorRaw {
+    object_id: String,
+    domain_id: String,
+    sensitivity: String,
+    registry_sensitivity: String,
+    created_commit_seq: i64,
+    payload: Vec<u8>,
+    revision: i64,
+    source_id: String,
+    invalidated_commit_seq: Option<i64>,
+    observation_created: i64,
+    observation_invalidated: Option<i64>,
+    evidence_id: String,
+    artifact_digest: String,
 }
 
 impl KernelStore {
@@ -570,7 +588,8 @@ impl KernelStore {
         crate::slice::snapshot_tip(&tx, requested)?;
         let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
         let sql = format!(
-            "SELECT o.object_id,o.domain_id,b.observation_payload
+            "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.sensitivity_class,o.created_commit_seq,b.observation_payload,o.source_revision,o.source_id,
+                    o.invalidated_commit_seq,b.created_commit_seq,b.invalidated_commit_seq,e.evidence_id,e.artifact_digest
              {rows}
                AND o.source_kind=?1 AND o.object_kind='observation'
                AND {live}
@@ -581,7 +600,7 @@ impl KernelStore {
             live = Descriptors::LiveAtEnd.predicate("?2", "0"),
         );
         let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
-        let raw: Vec<(String, String, Vec<u8>)> = statement
+        let raw: Vec<LiveDescriptorRaw> = statement
             .query_map(
                 rusqlite::params![
                     class.code(),
@@ -589,26 +608,52 @@ impl KernelStore {
                     after.unwrap_or(""),
                     limit.saturating_add(1)
                 ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok(LiveDescriptorRaw {
+                        object_id: row.get(0)?,
+                        domain_id: row.get(1)?,
+                        sensitivity: row.get(2)?,
+                        registry_sensitivity: row.get(3)?,
+                        created_commit_seq: row.get(4)?,
+                        payload: row.get(5)?,
+                        revision: row.get(6)?,
+                        source_id: row.get(7)?,
+                        invalidated_commit_seq: row.get(8)?,
+                        observation_created: row.get(9)?,
+                        observation_invalidated: row.get(10)?,
+                        evidence_id: row.get(11)?,
+                        artifact_digest: row.get(12)?,
+                    })
+                },
             )
             .map_err(map_sqlite)?
             .collect::<rusqlite::Result<_>>()
             .map_err(map_sqlite)?;
-        let next = (raw.len() > max_rows.get()).then(|| raw[max_rows.get() - 1].0.clone());
+        let next = (raw.len() > max_rows.get()).then(|| raw[max_rows.get() - 1].object_id.clone());
         let rows = raw
             .into_iter()
             .take(max_rows.get())
-            .map(|(object_id, domain_id, payload)| {
-                let detail = stored_detail(&payload)?;
-                if detail.class != class.code()
-                    || descriptor_object_id(&detail.lineage_id, &detail.revision) != object_id
+            .map(|raw| {
+                let detail = stored_detail(&raw.payload)?;
+                // The registry row and the stored detail must agree, as `source_export::preflight` requires.
+                if raw.created_commit_seq != raw.observation_created
+                    || raw.invalidated_commit_seq != raw.observation_invalidated
+                    || raw.sensitivity != raw.registry_sensitivity
+                    || detail.lineage_id != raw.source_id
+                    || detail.evidence_id != raw.evidence_id
+                    || detail.artifact_digest != raw.artifact_digest
+                    || detail.class != class.code()
+                    || detail.revision != raw.revision.to_string()
+                    || descriptor_object_id(&detail.lineage_id, &detail.revision) != raw.object_id
                     || reencoded_identity(&detail).is_none()
                 {
                     return Err(KernelError::CorruptCanonicalRow);
                 }
                 Ok(LiveDescriptor {
-                    object_id,
-                    domain_id,
+                    object_id: raw.object_id,
+                    domain_id: raw.domain_id,
+                    sensitivity: Sensitivity::from_stored(&raw.sensitivity),
+                    created_commit_seq: raw.created_commit_seq,
                     detail,
                 })
             })

@@ -113,7 +113,7 @@ impl Episode {
         deadline: Option<i64>,
     ) -> Result<Option<Self>, ProjectionError> {
         match (id, deadline) {
-            (Some(id), Some(deadline)) => Ok(Some(Self {
+            (Some(id), Some(deadline)) if allowance > 0 => Ok(Some(Self {
                 id,
                 allowance,
                 deadline,
@@ -130,7 +130,7 @@ pub fn first_episode_id(job_id: &str) -> String {
 }
 
 /// Authorized episodes have their own namespace, so no reference can name the first episode.
-fn authorized_episode_id(job_id: &str, authorization_ref: &str) -> String {
+pub(crate) fn authorized_episode_id(job_id: &str, authorization_ref: &str) -> String {
     format!("{job_id}/auth/{authorization_ref}")
 }
 

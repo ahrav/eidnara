@@ -8,20 +8,20 @@ baseline even when approved output differs from it.
 ## Evidence trail
 
 Revision: the #533 change on `fix/client-transform-owner` after merging
-`origin/main` at `5def3c71`. Line numbers were verified against that tree.
+`origin/main` at `5def3c71`. Line numbers were verified against `d5a525e8`.
 
 - In [rust-mode-transform.ts](../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts),
   `buildWireCache` (`:263-288`) derives `rawContentSnapshots`, the CK and
   native fingerprints, and the combined `fingerprint` from the encoded
   submitted input and `captured.snapshots`. The pass builds its pending cache
-  from the capture (`:1221-1230`, and `:1397-1401` on the full retry).
-  `nativeOutput` is attached separately after host replacement (`:1477`).
+  from the capture (`:1222-1231`, and `:1400-1404` on the full retry).
+  `nativeOutput` is attached separately after host replacement (`:1480`).
   `computeWireDelta` (`:219`, called at `:997`) compares the next capture's
   snapshots with the previous cache's raw snapshots, not with `nativeOutput`.
   This is source evidence for the separation, not an end-to-end equality
   oracle.
-- `state.forceFullWire = true` is set before the first daemon send (`:1361`)
-  and cleared only on publication (`:1481`). A dispatched pass that declines
+- `state.forceFullWire = true` is set before the first daemon send (`:1363`)
+  and cleared only on publication (`:1484`). A dispatched pass that declines
   afterwards leaves the daemon's committed snapshot ahead of the client's
   wire cache, and the next pass resends the full history instead of a delta
   against a baseline the client did not commit.
@@ -71,8 +71,8 @@ remains #538.
 
 ### Q: Can a declined dispatched pass leave a stale baseline?
 
-- Sources examined: `rust-mode-transform.ts:263-288`, `:997`, `:1221-1230`,
-  `:1361`, `:1397-1401`, `:1477`, `:1481`; the witnesses below.
+- Sources examined: `rust-mode-transform.ts:263-288`, `:997`, `:1222-1231`,
+  `:1363`, `:1400-1404`, `:1480`, `:1484`; the witnesses below.
 - Findings: The cache derives from the capture and the encoded input, not
   from `nativeOutput`. The forced full send precedes the first dispatch, so a
   pass declined at publication cannot leave the client sending a delta
@@ -81,10 +81,10 @@ remains #538.
   TE30 requires.
 - Missing evidence: The #538 comparison and optional-output-only eviction
   case, with audited independent expectations.
-- Conclusion (2026-09-13, revision-bound run after merging `origin/main` at
-  `5def3c71`, 1107 pass, 0 fail): TE30 remains partial. Related executed
+- Conclusion (2026-09-13, revision-bound run at `d5a525e8`, after merging
+  `origin/main` at `5def3c71`, 1122 pass, 0 fail): TE30 remains partial. Related executed
   witnesses and what they do show:
-  - `rust-mode-transform.test.ts:2901` "releases capture admission before
+  - `rust-mode-transform.test.ts:3025` "releases capture admission before
     the ACK so a paused ACK does not block the next pass". Marker: the first
     pass publishes `applied`, then a second pass over two rows dispatches;
     no delta/full comparison.
@@ -99,7 +99,7 @@ remains #538.
     replaces `live[0]`; after the decline `forceFullWire` true; the next
     pass's `bodies[3]` has no `tail_delta` and its `native_messages` equal
     the new input (`:830-831`).
-  - `:2470` (4 cases). Marker: `forceFullWire` equals `fault !== "clear"`
-    after a `need_full_sync` retry is refused (`:2531`).
+  - `:2594` (4 cases). Marker: `forceFullWire` equals `fault !== "clear"`
+    after a `need_full_sync` retry is refused (`:2655`).
   Two transform calls do not establish equality; the comparison belongs to
   #538.

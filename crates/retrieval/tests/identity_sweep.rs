@@ -112,6 +112,43 @@ fn seed(store: &SqliteStore, count: usize, tombstoned: bool) {
         .unwrap();
 }
 
+#[test]
+fn consumer_retirement_does_not_authorize_generation_identity_reclamation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    store
+        .with_conn_fenced(|conn| {
+            install_generations(conn)?;
+            embedded(conn, "retained", RETIRED, "retained-job")?;
+            conn.execute(
+                "UPDATE retirement_receipts SET old_consumer_id='old-consumer',
+                 old_family='old-family',selected_family='new-family',
+                 kernel_incarnation_id='kernel',through_commit_seq=2,obligation_count=0",
+                [],
+            )?;
+            assert!(
+                candidates(conn, NonZeroUsize::MIN, None)
+                    .unwrap()
+                    .candidates
+                    .is_empty()
+            );
+            conn.execute(
+                "INSERT INTO retirement_receipts(receipt_id,generation_id,reason,retired_at,recorded_at)
+                 VALUES ('generation-retirement',?1,'superseded',2,2)",
+                [RETIRED],
+            )?;
+            assert_eq!(
+                candidates(conn, NonZeroUsize::MIN, None)
+                    .unwrap()
+                    .candidates
+                    .len(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
 /// VDBE steps are a deterministic cost measure, unlike wall-clock time.
 fn measured_page(store: &SqliteStore, limit: usize, after: Option<&str>) -> (CandidatePage, i32) {
     store

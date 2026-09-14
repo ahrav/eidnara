@@ -100,3 +100,15 @@ Independent analyst `ses_f6756093fffeVjNp36S3E8pKrM` completes the supplied
 portfolio pass on 2026-09-13; the prospective production-path label does not
 claim either marker has fired. This property remains unexercised.
 `/testing:invariant-test-review` owns the paired safety/coverage oracle audit.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`, `cargo test -p daemon --locked
+--features test-support` (1,489 tests pass; `lifecycle_cli` is platform-unsupported
+on the aarch64 host). `parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback`
+constructs a duplicate `mid` in the ingress wrapper after a 4 MiB prefix and
+observes walk acceptance, typed refusal, restart, and tree conversion in one
+trace. The corpus's `duplicate nested key` body also repeats ingress `mid`.
+These are current-path controls, not witnesses for the required repeated CK
+role or block kind. Neither envelope-specific marker is constructed, so this
+property remains unexercised.

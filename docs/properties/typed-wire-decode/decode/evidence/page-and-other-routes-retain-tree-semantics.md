@@ -89,3 +89,11 @@ ignored at `crates/daemon/tests/serialized_transform_pages.rs:11-15`.
 `/testing:test-strategy` owns raw-page vectors and the existing generated
 TypeScript/direct-host seam. `/testing:invariant-test-review` audits parity
 and digest oracles. No tests or generation scripts run in this discovery.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`, `cargo test -p daemon --locked
+--features test-support` (1,489 tests pass; `lifecycle_cli` is platform-unsupported
+on the aarch64 host). Paging and non-transform routing code
+is unchanged; the corpus page-field bodies keep their `invalid_params` terminals
+and the page-assembly comparison passes. No new page-digest witness was added.

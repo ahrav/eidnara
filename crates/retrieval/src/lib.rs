@@ -17,6 +17,7 @@ pub mod dispatch;
 pub mod eligibility;
 pub mod identity_sweep;
 pub mod message_cleanup;
+pub mod retirement;
 pub mod vectors;
 
 use std::collections::HashMap;
@@ -36,7 +37,7 @@ use storage::{CachedStatement, GuardedConn};
 pub const BASELINE: &str = include_str!("../baseline.sql");
 
 /// A schema mismatch requires a rebuild from canonical state.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Connection opening does not compare projection identities.
 /// A matching identity does not establish completeness or authorize search.
@@ -51,6 +52,16 @@ pub struct ProjectionIdentity {
     pub tokenizer_fingerprint: String,
     pub vector_dimension: u32,
     pub generation_epoch: u64,
+}
+
+impl ProjectionIdentity {
+    pub fn require_compatible(&self, expected: &Self) -> Result<(), ProjectionError> {
+        if self.schema_version == SCHEMA_VERSION && self == expected {
+            Ok(())
+        } else {
+            Err(ProjectionError::IdentityMismatch)
+        }
+    }
 }
 
 /// The text a record carries: either the whole buffer the span selects from,
@@ -308,11 +319,7 @@ pub fn install_identity(
         return Err(ProjectionError::IdentityMismatch);
     }
     if let Some(stored) = read_identity(conn)? {
-        return if stored == *identity {
-            Ok(())
-        } else {
-            Err(ProjectionError::IdentityMismatch)
-        };
+        return stored.require_compatible(identity);
     }
     conn.execute(
         "INSERT INTO projection_identity(

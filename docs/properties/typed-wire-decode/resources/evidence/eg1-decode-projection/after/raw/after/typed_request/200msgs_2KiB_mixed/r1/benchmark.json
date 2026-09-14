@@ -1,0 +1,1 @@
+{"group_id":"decode","function_id":"typed_request","value_str":"200msgs_2KiB_mixed","throughput":{"Bytes":372397},"full_id":"decode/typed_request/200msgs_2KiB_mixed","directory_name":"decode/typed_request/200msgs_2KiB_mixed","title":"decode/typed_request/200msgs_2KiB_mixed"}

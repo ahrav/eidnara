@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -32,6 +32,8 @@ use crate::search_catchup::{
 use crate::search_projection::SearchProjection;
 use crate::search_seed::{self, ClosedSeed, SeedBounds, StagedSeed};
 
+pub mod selection;
+
 #[derive(Debug, Clone)]
 pub struct ReplacementSpec {
     pub identity: ProjectionIdentity,
@@ -39,9 +41,38 @@ pub struct ReplacementSpec {
     pub capture: SourceHoldBounds,
     pub episode: EpisodeBounds,
     pub seed: SeedBounds,
+    pub retirement: RetirementBounds,
+}
+
+/// `object_registry` is append-only, so the retirement census grows with corpus history.
+/// Size these bounds for the whole corpus, not for one batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetirementBounds {
+    pub max_obligations: NonZeroUsize,
+    /// Encoded kind, identity, and digest bytes; payloads are never read.
+    pub max_obligation_bytes: NonZeroU64,
 }
 
 impl ReplacementSpec {
+    /// The manifest charges for one commit page of the episode's catch-up read. Every path that pages through commits under `episode.commits` charges these, so one page costs the same at construction and at cleanup.
+    pub(crate) fn catchup_page_charges(&self) -> [(&'static str, u64); 3] {
+        let episode = &self.episode;
+        [
+            (
+                "catchup_batch_commits",
+                episode.commits.max_commits.get() as u64,
+            ),
+            (
+                "catchup_batch_encoded_bytes",
+                episode.commits.max_payload_bytes.get(),
+            ),
+            (
+                "catchup_batch_encoded_bytes",
+                episode.max_source_encoded_bytes.get(),
+            ),
+        ]
+    }
+
     fn admit(
         &self,
         gate: &HookGate,
@@ -125,7 +156,7 @@ impl ReplacementSpec {
             Transition::Rebuilding => "B_recovery_ms",
             Transition::AuthorizedRecovery => "B_authorized_recovery_ms",
         };
-        let requested = [
+        let mut requested = vec![
             ("export_page_rows", page.max_rows.get() as u64),
             ("export_page_encoded_bytes", page.max_encoded_bytes.get()),
             (
@@ -133,18 +164,6 @@ impl ReplacementSpec {
                 page.max_encoded_bytes.get(),
             ),
             ("export_live_decoded_bytes", decoded),
-            (
-                "catchup_batch_commits",
-                episode.commits.max_commits.get() as u64,
-            ),
-            (
-                "catchup_batch_encoded_bytes",
-                episode.commits.max_payload_bytes.get(),
-            ),
-            (
-                "catchup_batch_encoded_bytes",
-                episode.max_source_encoded_bytes.get(),
-            ),
             (
                 "catchup_batch_source_bytes",
                 batch.max_source_bytes.get() as u64,
@@ -160,6 +179,7 @@ impl ReplacementSpec {
             (duration_limit, duration),
             (duration_limit, wait),
         ];
+        requested.extend(self.catchup_page_charges());
         let expected = InvalidationIdentity::from(&self.identity);
         for grant in &grants {
             gate.check_limits(grant, &expected, &requested)?;
@@ -187,6 +207,8 @@ pub enum BuildEvent {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    #[error(transparent)]
+    UnresolvedDrain(#[from] crate::embedding_supervisor::Unresolved),
     #[error(transparent)]
     Kernel(#[from] kernel::KernelError),
     #[error(transparent)]
@@ -536,7 +558,12 @@ impl<'a> ReplacementBuilder<'a> {
         } else {
             self.cleanup(budget)?;
         }
-        self.lifecycle.consume_episode(self.gate, wall_ms()?)?;
+        let mut expected = intent.clone();
+        if !staging {
+            expected.replacement_capture = None;
+        }
+        self.lifecycle
+            .consume_expected_episode(self.gate, &expected, wall_ms()?)?;
         let run = Run {
             budget: budget.clone(),
             grants,
@@ -571,8 +598,24 @@ impl<'a> ReplacementBuilder<'a> {
             actor: "daemon".to_owned(),
             cause: "replacement capture".to_owned(),
         };
+        // Only a handoff that holds its own registration receipt hands the consumer over. The
+        // registration attempt still commits under its own key so retries replay its receipt.
+        let inherited = intent
+            .prior_disabled
+            .as_deref()
+            .and_then(|disabled| disabled.handoff.as_deref())
+            .filter(|handoff| handoff.consumer.consumer_id == binding.consumer_id)
+            .map(|handoff| CommitIntent {
+                operation_key: handoff.attempt_id.clone(),
+                ..registration.clone()
+            });
         self.kernel
             .commit_within_budget(&run.budget, registration, |envelope| {
+                if let Some(prior) = inherited.clone()
+                    && envelope.stored_receipt(prior)?.is_some()
+                {
+                    return Ok(String::new());
+                }
                 envelope.register_outbox_consumer(&binding.consumer_id, run.now())?;
                 Ok(String::new())
             })?;

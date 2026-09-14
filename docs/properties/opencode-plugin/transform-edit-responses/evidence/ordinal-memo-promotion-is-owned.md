@@ -9,16 +9,16 @@ from promoting shared memo state.
 
 Revision: the #533 change on `fix/client-transform-owner` after merging
 `origin/main` at `5def3c71`. The session memo field is `state.ordinals`
-(`rust-mode-transform.ts:151`). Line numbers were verified against that tree.
+(`rust-mode-transform.ts:151`). Line numbers were verified against `d5a525e8`.
 
 - [rust-mode-transform.ts](../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts)
   charges a copy of every existing entry and ID before the first await
   (`:1006-1009`), builds `stagedMemo` as that copy (`:1028-1031`), passes it
   to `primeOrdinalMemo` and `annotateOrdinals` (`:1164-1182`), rechecks the
   capture between the prime and the annotation (`:1172`), shifts it for a
-  continuation base (`:1447-1466`), and assigns `state.ordinals = stagedMemo`
-  (`:1478`) only after `replaceHostArrayContents` (`:1476`).
-- `invalidateWireState` (`:815-832`) and `clearSession` (`:1538-1540`) reset
+  continuation base (`:1450-1469`), and assigns `state.ordinals = stagedMemo`
+  (`:1481`) only after `replaceHostArrayContents` (`:1479`).
+- `invalidateWireState` (`:815-832`) and `clearSession` (`:1541-1543`) reset
   or drop the memo by their own contract and request lease cancellation, so a
   pass in flight declines at its next `assertCurrentPass` (`:957-962`).
 - [module-wire.ts](../../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts)
@@ -67,46 +67,46 @@ preservation of entries or metadata.
 ### Q: Does the owner promote only in the publication block?
 
 - Sources examined: `rust-mode-transform.ts:1006-1009`, `:1028-1031`,
-  `:1164-1182`, `:1447-1466`, `:1476-1478`, `:815-832`, `:1538-1540`; the
+  `:1164-1182`, `:1450-1469`, `:1479-1481`, `:815-832`, `:1541-1543`; the
   witnesses below.
 - Findings: The staging and promotion sites are the ones listed above. A pass
-  assigns `state.ordinals` only at `:1478`; `invalidateWireState` resets it
-  (`:823`) and `clearSession` drops the state (`:1538`). The between-pages
+  assigns `state.ordinals` only at `:1481`; `invalidateWireState` resets it
+  (`:823`) and `clearSession` drops the state (`:1541`). The between-pages
   witness completes a paged series, is refused at publication, and leaves the
   memo empty. The `module-wire` witnesses cover the supplied map, byte
   boundaries, and restart.
 - Missing evidence: None for the paths this revision implements.
-- Conclusion (2026-09-13, revision-bound run after merging `origin/main` at
-  `5def3c71`, 1107 pass, 0 fail): resolved as exercised. Witnesses and
+- Conclusion (2026-09-13, revision-bound run at `d5a525e8`, after merging
+  `origin/main` at `5def3c71`, 1122 pass, 0 fail): resolved as exercised. Witnesses and
   markers:
-  - `rust-mode-transform.test.ts:2243` "rejects <fault> at the persisted
+  - `rust-mode-transform.test.ts:2367` "rejects <fault> at the persisted
     ordinal yield with <shared|distinct> arrays" (8 cases). Marker:
     `pageSizes` equals `[MODULE_ORDINAL_PAGE_SIZE]`, `entries.size` 0, and
     `heldBytes > MODULE_ORDINAL_PAGE_SIZE * ORDINAL_ENTRY_RETAINED_BYTES`
-    (`:2282`) at the yield; `entries.size` equals `rows.length` only after
+    (`:2406`) at the yield; `entries.size` equals `rows.length` only after
     the recovery pass.
-  - `:2470` "does not dispatch a need_full_sync retry after <fault> of the
+  - `:2594` "does not dispatch a need_full_sync retry after <fault> of the
     valid first send" (4 cases). Marker: `priorMemo.entries.size` 1 and a
-    pending tail delta; `state.ordinals` equals `priorMemo` (`:2528`) for
+    pending tail delta; `state.ordinals` equals `priorMemo` (`:2652`) for
     mutation and supersession, and is empty for clear and invalidation.
-  - `:2156` "charges every existing ordinal entry and ID before copying a warm
+  - `:2280` "charges every existing ordinal entry and ID before copying a warm
     memo". Marker: decline log `ordinal memo copy`;
-    `toEqual(priorMemo)` at `:2196`.
+    `toEqual(priorMemo)` at `:2320`.
   - `:1084` "discards a partly shifted ordinal memo before host publication
     when shifting throws". Marker: `shiftFailed` true; `toEqual(priorMemo)`
     at `:1125`.
   - `:1144` "rejects ordinal continuation overflow before publication and
     recovers on a valid response". Marker: `entries.get("m-1")` 11 after the
     valid response (`:1164`).
-  - `:2683` "rejects publication and promotes no memo when the wire state is
+  - `:2807` "rejects publication and promotes no memo when the wire state is
     invalidated mid-flight". Marker: `calls` 1 before `invalidateWireState`.
-  - `:2536` "declines before publication and NACKs known deliveries when the
+  - `:2660` "declines before publication and NACKs known deliveries when the
     source changes between pages". Marker: the series completed with
     `transform_page_complete` true; `ordinals.entries.size` 0 after the
-    refusal (`:2571`). This witness starts from an empty memo, so it shows
+    refusal (`:2695`). This witness starts from an empty memo, so it shows
     non-promotion rather than preservation of prior entries.
   - `module-wire.test.ts:892` (27 cases), `:990` (2 cases), `:1085` (5 cases)
     as above.
-  - Promotion controls: `rust-mode-transform.test.ts:2901`
-    (`entries.get("m-1")` is 1 at `:2944` while the ACK is paused) and
-    `:3100` (`entries.size` 2 after a delta publication).
+  - Promotion controls: `rust-mode-transform.test.ts:3025`
+    (`entries.get("m-1")` is 1 at `:3068` while the ACK is paused) and
+    `:3224` (`entries.size` 2 after a delta publication).
