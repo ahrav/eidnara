@@ -1454,6 +1454,11 @@ fn same_manager_reopen_withdraws_when_the_durable_certificate_is_missing() {
             .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
             .is_err()
     );
+    assert!(
+        old.read(&budget(Duration::from_secs(10)), |_| Ok(()))
+            .is_ok(),
+        "certificate loss withdraws selection without damaging the open database"
+    );
 }
 
 #[test]

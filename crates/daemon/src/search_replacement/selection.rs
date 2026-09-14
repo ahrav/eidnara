@@ -323,16 +323,18 @@ impl SearchSelection {
                     .filter(|family| family._seed_pin.digest == digest)
                 {
                     Some(family) => {
-                        // The cached family gets the same certificate check and page scan a
-                        // fresh open would run.
-                        if let Err(error) = self
-                            .revalidate_certificate(&digest, &family.certificate)
-                            .and_then(|()| {
-                                family
-                                    .projection
-                                    .read_within(deadline(budget)?, verify_pages)
-                                    .map_err(BuildError::from)
-                            })
+                        // Certificate loss withdraws the selection but does not damage the open
+                        // database or invalidate readers that already hold it.
+                        if let Err(error) =
+                            self.revalidate_certificate(&digest, &family.certificate)
+                        {
+                            self.selected.store(None);
+                            return Err(error);
+                        }
+                        if let Err(error) = family
+                            .projection
+                            .read_within(deadline(budget)?, verify_pages)
+                            .map_err(BuildError::from)
                             .and_then(|()| self.validate_family(&family, kernel, budget))
                         {
                             if let Some(kind) = family_damage(&error) {
