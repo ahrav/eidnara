@@ -1,6 +1,8 @@
 /** Local exploratory client timing, not a daemon, transport, or end-to-end benchmark.
- * Timing includes run(), request decoding and the fake native response encode/parse round trip.
- * Fixture construction, equality checks and memory observations stay outside the timer.
+ * Timing includes run(), request decoding, the fake's recipe construction, and the response
+ * encode/parse round trip. Fixture construction, equality checks and memory observations stay
+ * outside the timer. The fake also sizes the native suffix response the old wire would have
+ * carried, as a byte comparator only; that encoding is never sent.
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -101,16 +103,92 @@ function makeDeps(): RustModeTransformDeps {
     };
 }
 
+type Operation =
+    | { op: "keep"; source: "input" | "previous"; start: number; count: number }
+    | { op: "insert"; values: unknown[] };
+
+/**
+ * Nominates by `info.id`, confirms by JSON equality, prefers `previous` then `input`, and
+ * coalesces adjacent keeps: the same policy the daemon builder applies to its final array.
+ */
+function buildOperations(
+    output: readonly Record<string, unknown>[],
+    input: readonly Record<string, unknown>[],
+    previous: readonly Record<string, unknown>[] | undefined,
+): { operations: Operation[]; usedPrevious: boolean } {
+    const idOf = (message: Record<string, unknown>) =>
+        (message.info as { id?: unknown } | undefined)?.id;
+    const index = (values: readonly Record<string, unknown>[]) => {
+        const byId = new Map<unknown, number>();
+        values.forEach((value, position) => {
+            const id = idOf(value);
+            if (typeof id === "string") byId.set(id, byId.has(id) ? -1 : position);
+        });
+        return byId;
+    };
+    const inputById = index(input);
+    const previousById = previous ? index(previous) : new Map<unknown, number>();
+    const cursors = { input: 0, previous: 0 };
+    const operations: Operation[] = [];
+    let usedPrevious = false;
+    const keep = (source: "input" | "previous", position: number) => {
+        const last = operations.at(-1);
+        if (last?.op === "keep" && last.source === source && last.start + last.count === position)
+            last.count += 1;
+        else operations.push({ op: "keep", source, start: position, count: 1 });
+        cursors[source] = position + 1;
+    };
+    for (const value of output) {
+        const id = idOf(value);
+        // Shared references confirm without serializing, as the daemon's `Arc` identity check does.
+        let text: string | undefined;
+        const candidate = (
+            source: "input" | "previous",
+            values: readonly Record<string, unknown>[] | undefined,
+            byId: Map<unknown, number>,
+        ) => {
+            const position = byId.get(id);
+            if (values === undefined || position === undefined || position < cursors[source])
+                return undefined;
+            if (values[position] === value) return position;
+            text ??= JSON.stringify(value);
+            return JSON.stringify(values[position]) === text ? position : undefined;
+        };
+        const fromPrevious = candidate("previous", previous, previousById);
+        if (fromPrevious !== undefined) {
+            keep("previous", fromPrevious);
+            usedPrevious = true;
+            continue;
+        }
+        const fromInput = candidate("input", input, inputById);
+        if (fromInput !== undefined) {
+            keep("input", fromInput);
+            continue;
+        }
+        const last = operations.at(-1);
+        if (last?.op === "insert") last.values.push(value);
+        else operations.push({ op: "insert", values: [value] });
+    }
+    return { operations, usedPrevious };
+}
+
 function echoClient() {
     const stats = {
         requestBytes: 0,
         responseBytes: 0,
+        /** Bytes the native suffix response of the old wire would have carried. */
+        suffixComparatorBytes: 0,
         pages: 0,
         chunks: 0,
         completed: 0,
         deltas: 0,
     };
     let native: Array<Record<string, unknown>> = [];
+    /** The complete native input after tail-delta expansion, per session. */
+    const inputs = new Map<string, Array<Record<string, unknown>>>();
+    /** The last output each session applied, with the revision that named it. */
+    const applied = new Map<string, { revision: string; values: Array<Record<string, unknown>> }>();
+    let outputCounter = 0;
     let chunks: string[] = [];
     let chunkTotal = 0;
     let pageId: unknown;
@@ -158,21 +236,54 @@ function echoClient() {
                 return { staged: true };
             }
             assert.equal(chunks.length, 0, "unfinished native continuation");
-            if ((native[0]?.info as { id?: string })?.id === "m-1") {
-                native[0] = { ...native[0], benchmarkPublished: true };
-            }
+            const sessionId = request.session_id as string;
             const tailDelta = request.tail_delta as
                 | { after: string; native_replace_from: number }
                 | undefined;
-            const response: Record<string, unknown> = tailDelta
-                ? {
-                      native_messages_delta: {
-                          after: tailDelta.after,
-                          replace_from: tailDelta.native_replace_from,
-                          messages: native,
-                      },
-                  }
-                : { native_messages: native };
+            const input = tailDelta
+                ? [
+                      ...(inputs.get(sessionId) ?? []).slice(0, tailDelta.native_replace_from),
+                      ...native,
+                  ]
+                : native;
+            inputs.set(sessionId, input);
+            const output = input.map((value, position) =>
+                position === 0 && (value.info as { id?: string })?.id === "m-1"
+                    ? { ...value, benchmarkPublished: true }
+                    : value,
+            );
+            const previous = applied.get(sessionId);
+            const eligible =
+                previous && request.previous_output_revision === previous.revision
+                    ? previous
+                    : undefined;
+            const built = buildOperations(output, input, eligible?.values);
+            outputCounter += 1;
+            const outputRevision = `bench-out-${outputCounter}`;
+            const response: Record<string, unknown> = {
+                base_revision: request.base_revision,
+                output_revision: outputRevision,
+                ...(built.usedPrevious && eligible
+                    ? { previous_output_revision: eligible.revision }
+                    : {}),
+                operations: built.operations,
+            };
+            applied.set(sessionId, { revision: outputRevision, values: output });
+            // The old wire re-sent the changed suffix (or the whole array) as literals.
+            const suffix = tailDelta ? output.slice(tailDelta.native_replace_from) : output;
+            stats.suffixComparatorBytes += Buffer.byteLength(
+                JSON.stringify(
+                    tailDelta
+                        ? {
+                              native_messages_delta: {
+                                  after: tailDelta.after,
+                                  replace_from: tailDelta.native_replace_from,
+                                  messages: suffix,
+                              },
+                          }
+                        : { native_messages: suffix },
+                ),
+            );
             const encoded = JSON.stringify(response);
             stats.responseBytes += Buffer.byteLength(encoded);
             stats.completed += 1;
@@ -216,6 +327,7 @@ async function timePass(
         inputSha256: sha256(inputJson),
         requestBytes: stats.requestBytes - before.requestBytes,
         responseBytes: stats.responseBytes - before.responseBytes,
+        suffixComparatorBytes: stats.suffixComparatorBytes - before.suffixComparatorBytes,
         pages: stats.pages - before.pages,
         chunks: stats.chunks - before.chunks,
         deltas: stats.deltas - before.deltas,
@@ -284,6 +396,10 @@ async function main(): Promise<void> {
             pass_min_ms: Number(Math.min(...pass).toFixed(3)),
             response_bytes_median: quantile(
                 samples.map((sample) => sample.responseBytes),
+                0.5,
+            ),
+            suffix_comparator_bytes_median: quantile(
+                samples.map((sample) => sample.suffixComparatorBytes),
                 0.5,
             ),
         };

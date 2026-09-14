@@ -93,6 +93,43 @@ backward relative to the last keep becomes a literal instead of an all-pairs
 search. Adjacent keeps of one source and adjacent inserts coalesce. The recipe
 names `previous_output_revision` only when a `previous` keep was used.
 
+## Wire integration
+
+A `transform` request names its input snapshot with `base_revision`; the daemon
+refuses a request without one (`transform_base_revision_missing`). A request
+may also carry `previous_output_revision`, the `output_revision` of the last
+recipe the caller applied for this session. The daemon offers that output as
+the `previous` source only when the revision the caller names is the one it
+retained; otherwise the recipe addresses the input alone.
+
+A `status: ok` response carries `base_revision`, a fresh `output_revision`,
+`operations`, and `previous_output_revision` when a `previous` keep was used.
+The served CK array and the native array never cross the wire as whole
+arrays: the response has no `messages`, `native_messages`, or native suffix
+field. `need_full_sync` carries neither a recipe nor an output revision and
+cannot be applied. An `ok` response without `operations` is an invalid recipe
+on both sides: the daemon refuses to emit one
+(`transform_recipe_omitted`), and the client treats one it receives as a
+failed pass, nacks that attempt's deliveries, and serves the input unchanged.
+Recomputed output gets a new revision; the daemon allocates revisions as
+`<pid>-<start>-<counter>` and refuses a pass when the counter is exhausted
+(`transform_output_revision_exhausted`).
+
+Inserted literals are written straight into the response body from the
+daemon's retained values against lengths measured when they were encoded, and
+kept messages contribute no literal bytes. The frame limit and the 64 MiB
+reconstructed-array limit stay independent
+(`transform_output_too_large`).
+
+The OpenCode plugin measures the canonical length of each submitted native
+message once, reuses the acknowledged prefix's lengths on delta passes, and
+applies the recipe against the complete captured native array. The applied
+output, its lengths, and its revision are retained per session under a
+separate 64 MiB optional-output budget with least-recently-retained eviction;
+the 64-session wire cache bound still applies. Eviction, refusal, wire
+invalidation, and session clear drop only the `previous` source: the next pass
+still applies, from the input alone.
+
 ## Shared fixtures
 
 `crates/daemon/tests/fixtures/transform-edit-recipe-v1.json` holds the cases

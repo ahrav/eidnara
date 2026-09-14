@@ -2,7 +2,9 @@ use std::cell::Cell;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use daemon::dispatch::{MAX_WIRE_BODY_BYTES, PreparedOutput, PreparedOutputError, PreparedSegment};
+use daemon::dispatch::{
+    MAX_WIRE_BODY_BYTES, PreparedOutput, PreparedOutputError, PreparedSegment, RecipeSegment,
+};
 use serde_json::json;
 
 fn reserved_vec(output: &PreparedOutput) -> Result<Vec<u8>, PreparedOutputError> {
@@ -30,25 +32,48 @@ fn json_measurement_matches_small_and_facade_sized_bytes() {
 }
 
 #[test]
-fn transform_segments_preserve_existing_golden_bytes() {
-    let messages = vec![
-        PreparedSegment::exact(Arc::from(
-            br#"{"mid":"m1","content":[{"kind":{"text":"hello"}}]}"#.as_slice(),
-        )),
-        PreparedSegment::exact(Arc::from(
-            br#"{"mid":"m2","content":[{"kind":{"text":"cached"}}]}"#.as_slice(),
-        )),
+fn recipe_segments_write_keeps_and_inserts_as_prepared_bytes() {
+    let operations = vec![
+        RecipeSegment::Keep(PreparedSegment::exact(Arc::from(
+            br#"{"op":"keep","source":"input","start":0,"count":1}"#.as_slice(),
+        ))),
+        RecipeSegment::Insert(vec![
+            PreparedSegment::exact(Arc::from(
+                br#"{"mid":"m1","content":[{"kind":{"text":"hello"}}]}"#.as_slice(),
+            )),
+            PreparedSegment::exact(Arc::from(
+                br#"{"mid":"m2","content":[{"kind":{"text":"cached"}}]}"#.as_slice(),
+            )),
+        ]),
+        RecipeSegment::Keep(PreparedSegment::exact(Arc::from(
+            br#"{"op":"keep","source":"previous","start":2,"count":3}"#.as_slice(),
+        ))),
     ];
-    let output = PreparedOutput::transform_segments(
-        json!({"status": "ok", "messages": null, "cache_ttl": "1h"}),
-        messages,
+    let output = PreparedOutput::transform_recipe(
+        json!({"status": "ok", "operations": null, "cache_ttl": "1h"}),
+        operations,
     )
     .unwrap();
-    let expected = br#"{"cache_ttl":"1h","messages":[{"mid":"m1","content":[{"kind":{"text":"hello"}}]},{"mid":"m2","content":[{"kind":{"text":"cached"}}]}],"status":"ok"}"#;
+    let expected = br#"{"cache_ttl":"1h","operations":[{"op":"keep","source":"input","start":0,"count":1},{"op":"insert","values":[{"mid":"m1","content":[{"kind":{"text":"hello"}}]},{"mid":"m2","content":[{"kind":{"text":"cached"}}]}]},{"op":"keep","source":"previous","start":2,"count":3}],"status":"ok"}"#;
 
     let measured = output.measure().unwrap();
     assert_eq!(measured.len(), expected.len());
     assert_eq!(reserved_vec(&output).unwrap(), expected);
+    // Every operation is JSON the applier can parse.
+    let parsed: serde_json::Value = serde_json::from_slice(expected).unwrap();
+    assert_eq!(parsed["operations"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn recipe_envelope_requires_the_operations_placeholder() {
+    assert!(matches!(
+        PreparedOutput::transform_recipe(json!({"status": "ok"}), Vec::new()),
+        Err(PreparedOutputError::InvalidTransformEnvelope)
+    ));
+    assert!(matches!(
+        PreparedOutput::transform_recipe(json!([]), Vec::new()),
+        Err(PreparedOutputError::InvalidTransformEnvelope)
+    ));
 }
 
 struct ReservationWriter<'a> {
@@ -130,14 +155,14 @@ fn exactly_at_wire_cap_succeeds_without_destination_allocation() {
 
 #[test]
 fn cap_plus_one_and_arithmetic_overflow_fail_before_write() {
-    let envelope = json!({"messages": null});
-    let fixed_len = br#"{"messages":[]}"#.len();
-    let cap_plus_one = PreparedOutput::transform_segments(
+    let envelope = json!({"operations": null});
+    let fixed_len = br#"{"operations":[]}"#.len();
+    let cap_plus_one = PreparedOutput::transform_recipe(
         envelope.clone(),
-        vec![PreparedSegment::inconsistent_for_test(
+        vec![RecipeSegment::Keep(PreparedSegment::inconsistent_for_test(
             Arc::from([]),
             MAX_WIRE_BODY_BYTES + 1 - fixed_len,
-        )],
+        ))],
     )
     .unwrap();
     assert!(matches!(
@@ -148,12 +173,12 @@ fn cap_plus_one_and_arithmetic_overflow_fail_before_write() {
         }) if len == MAX_WIRE_BODY_BYTES + 1
     ));
 
-    let overflow = PreparedOutput::transform_segments(
+    let overflow = PreparedOutput::transform_recipe(
         envelope,
-        vec![PreparedSegment::inconsistent_for_test(
+        vec![RecipeSegment::Keep(PreparedSegment::inconsistent_for_test(
             Arc::from([]),
             usize::MAX,
-        )],
+        ))],
     )
     .unwrap();
     assert!(matches!(
@@ -205,12 +230,12 @@ fn destination_failure_retains_no_partial_terminal() {
 
 #[test]
 fn inconsistent_source_reports_length_mismatch_without_emission() {
-    let output = PreparedOutput::transform_segments(
-        json!({"messages": null}),
-        vec![PreparedSegment::inconsistent_for_test(
+    let output = PreparedOutput::transform_recipe(
+        json!({"operations": null}),
+        vec![RecipeSegment::Keep(PreparedSegment::inconsistent_for_test(
             Arc::from(b"1".as_slice()),
             2,
-        )],
+        ))],
     )
     .unwrap();
     let measured = output.measure().unwrap();
@@ -222,7 +247,7 @@ fn inconsistent_source_reports_length_mismatch_without_emission() {
         terminal = Some(destination.clone());
     }
 
-    let expected = br#"{"messages":[1]}"#;
+    let expected = br#"{"operations":[1]}"#;
     // The segment claims one more byte than it holds, so measured is the written envelope plus one.
     assert!(matches!(
         result,

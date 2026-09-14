@@ -177,7 +177,7 @@ fn adapter_source_has_one_prepared_outcome_and_tracked_spawn_boundary() {
         .split("fn emit_pass_timing")
         .next()
         .unwrap();
-    assert!(transform.contains("PreparedOutput::transform_segments"));
+    assert!(transform.contains("PreparedOutput::transform_recipe"));
     assert!(!transform.contains("serde_json::to_vec"));
     assert!(!transform.contains("Vec::with_capacity"));
 }

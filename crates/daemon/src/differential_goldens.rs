@@ -153,6 +153,7 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
             false,
             None,
             0,
+            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
             NativeCacheKeyMode::Normal,
         );
@@ -168,9 +169,11 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
             false,
             None,
             0,
+            &crate::edit_recipe::Revision::parse("test-output").unwrap(),
             &cache,
             NativeCacheKeyMode::Normal,
-        );
+        )
+        .stats;
         assert_eq!(
             serde_json::to_vec(&first.native_messages).unwrap(),
             serde_json::to_vec(&replay.native_messages).unwrap(),

@@ -80,6 +80,7 @@ describe("edit recipe fixtures", () => {
                 expect(result.values).toEqual(testCase.expect.output as unknown[]);
                 expect(result.bytes).toBe(testCase.expect.canonical_bytes as number);
                 expect(result.bytes).toBe(canonicalJsonLength(result.values));
+                expect(result.lengths).toEqual(result.values.map(canonicalJsonLength));
                 // Kept entries are the source's own objects, not copies.
                 for (const [index, value] of result.values.entries()) {
                     if (value !== null && typeof value === "object") {
@@ -142,7 +143,12 @@ describe("edit recipe bounds", () => {
         const half = Math.floor((MAX_RECONSTRUCTED_BYTES - 3) / 2);
         const exact = [half, MAX_RECONSTRUCTED_BYTES - 3 - half];
         const accepted = applyRecipe(recipe, { revision: "b", values: [1, 2], lengths: exact });
-        expect(accepted).toEqual({ ok: true, values: [1, 2], bytes: MAX_RECONSTRUCTED_BYTES });
+        expect(accepted).toEqual({
+            ok: true,
+            values: [1, 2],
+            lengths: exact,
+            bytes: MAX_RECONSTRUCTED_BYTES,
+        });
         const over = applyRecipe(recipe, {
             revision: "b",
             values: [1, 2],

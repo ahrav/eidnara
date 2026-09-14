@@ -321,12 +321,12 @@ fn assembled_output() -> impl Strategy<Value = (Vec<Value>, Option<Vec<Value>>, 
     })
 }
 
-fn keyed(values: &[Arc<Value>]) -> Vec<Keyed<'_, String>> {
+fn keyed(values: &[Arc<Value>]) -> Vec<Keyed<String, Arc<Value>>> {
     values
         .iter()
         .map(|value| Keyed {
             key: value["info"]["id"].as_str().unwrap_or("").to_owned(),
-            value,
+            value: Arc::clone(value),
         })
         .collect()
 }

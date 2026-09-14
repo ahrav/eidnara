@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
@@ -19,6 +19,12 @@ import {
     type ToolAvailabilityVerdict,
     todowritePermissionDenied,
 } from "./ctx-reduce-availability";
+import {
+    applyRecipe,
+    canonicalJsonLength,
+    parseRecipe,
+    type RecipeSourceBase,
+} from "./edit-recipe";
 import type { ContextUsageEntry } from "./event-handler";
 import type { ContextUsage } from "./event-payloads";
 import {
@@ -118,8 +124,69 @@ export interface RustModeModuleClient {
     hasSessionRoute?(sessionId: string): boolean;
 }
 
-/** Wire caches hold a session's content snapshots and its last native output, so the LRU bound is sized to the sessions one OpenCode process keeps active. An evicted session sends its next pass as a full array. */
+/** Wire caches hold a session's content snapshots and its last applied output, so the LRU bound is sized to the sessions one OpenCode process keeps active. An evicted session sends its next pass as a full array. */
 const WIRE_CACHE_SESSION_CAPACITY = 64;
+/** Applied outputs are optional reuse state, budgeted apart from the frame and reconstruction caps. */
+const OPTIONAL_OUTPUT_BUDGET_BYTES = 64 * 1024 * 1024;
+/** Each retained canonical length occupies one number slot. */
+const LENGTH_SLOT_BYTES = 8;
+
+/** One successfully applied output, eligible as the `previous` source of the next recipe. */
+interface AppliedOutput {
+    revision: string;
+    values: readonly unknown[];
+    lengths: readonly number[];
+    /** Canonical bytes of `values` plus the retained lengths; the optional-output budget charges this. */
+    charge: number;
+}
+
+/**
+ * Charges applied outputs across sessions and evicts the least recently retained ones once the
+ * total exceeds the budget. A retention larger than the whole budget is refused, and refusal only
+ * costs the next pass its `previous` source.
+ */
+class AppliedOutputBudget {
+    private readonly charges = new Map<string, number>();
+    private used = 0;
+
+    constructor(
+        private readonly capacity: number,
+        private readonly evict: (sessionId: string) => void,
+    ) {}
+
+    retain(sessionId: string, charge: number): boolean {
+        this.release(sessionId);
+        if (charge > this.capacity) return false;
+        for (const [oldest] of this.charges) {
+            if (this.used + charge <= this.capacity) break;
+            this.release(oldest);
+            this.evict(oldest);
+        }
+        this.charges.set(sessionId, charge);
+        this.used += charge;
+        return true;
+    }
+
+    release(sessionId: string): void {
+        const charge = this.charges.get(sessionId);
+        if (charge === undefined) return;
+        this.charges.delete(sessionId);
+        this.used -= charge;
+    }
+
+    get usedBytes(): number {
+        return this.used;
+    }
+}
+
+let baseRevisionCounter = 0;
+const baseRevisionNonce = randomUUID().slice(0, 8);
+
+/** Names one pass's submitted input; the daemon echoes it so the recipe binds to that snapshot. */
+function nextBaseRevision(): string {
+    baseRevisionCounter += 1;
+    return `${baseRevisionNonce}-${baseRevisionCounter.toString(36)}`;
+}
 
 interface RustWireCache {
     rawCount: number;
@@ -132,9 +199,10 @@ interface RustWireCache {
     nativeFingerprint: string;
     nativePrefixFingerprintBeforeLast: string;
     fingerprint: string;
-    /** The previous acknowledged module output is reused by reference as the prefix for a validated native-output delta.
-     * The array supplies the prefix for a validated native-output delta; eviction requires a full response. */
-    nativeOutput?: unknown[];
+    /** Canonical JSON length of each submitted native message; a delta pass reuses the prefix. */
+    inputLengths: readonly number[];
+    /** The output the last pass published, offered to the daemon as the next recipe's `previous`. */
+    applied?: AppliedOutput;
 }
 
 export interface RustSessionState {
@@ -163,6 +231,8 @@ export interface RustModeTransformOptions {
     projectRoot?: string;
     /** Shared admission owner; tests inject one with smaller limits. */
     captureAdmission?: TransformCaptureAdmission;
+    /** Retained applied-output budget across sessions; tests inject a smaller one. */
+    optionalOutputBudgetBytes?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -259,14 +329,15 @@ function computeWireDelta(
     return { rawStart, wireStart, ckAfter, nativeAfter, after: previous.fingerprint };
 }
 
-/** The pending cache for a pass; `nativeOutput` is attached on publication. */
+/** The pending cache for a pass; `applied` is attached on publication. */
 function buildWireCache(args: {
     messages: readonly MessageLike[];
     encoded: readonly { mid?: unknown }[];
     snapshots: readonly MessageContentSnapshot[];
+    inputLengths: readonly number[];
     delta?: WireDelta;
 }): RustWireCache {
-    const { messages, encoded, snapshots, delta } = args;
+    const { messages, encoded, snapshots, inputLengths, delta } = args;
     const rawLast = messages.at(-1);
     const ck = buildWireFingerprint(encoded, delta?.ckAfter);
     const native = buildWireFingerprint(
@@ -284,7 +355,23 @@ function buildWireCache(args: {
         nativePrefixFingerprintBeforeLast: native.prefixFingerprintBeforeLast,
         rawContentSnapshots: snapshots,
         fingerprint: `${ck.fingerprint}|${native.fingerprint}`,
+        inputLengths,
     };
+}
+
+/**
+ * Lengths for the submitted native array: the acknowledged prefix keeps the lengths measured when
+ * it was first sent, and only the suffix this pass sends is measured.
+ */
+function measureInputLengths(
+    messages: readonly unknown[],
+    previous: RustWireCache | undefined,
+    rawStart: number,
+): number[] {
+    const lengths = previous ? previous.inputLengths.slice(0, rawStart) : [];
+    for (let index = lengths.length; index < messages.length; index += 1)
+        lengths.push(canonicalJsonLength(messages[index]));
+    return lengths;
 }
 
 function newestUserMessage(messages: MessageLike[]): MessageLike | undefined {
@@ -562,71 +649,41 @@ function isNeedFullSync(response: Record<string, unknown>): boolean {
     return response.status === "need_full_sync" || response.action === "NEED_FULL_SYNC";
 }
 
-function hasNativeResponseContent(response: Record<string, unknown>): boolean {
-    if (typeof response.native_messages === "string" || Array.isArray(response.native_messages)) {
-        return true;
-    }
-    const delta = response.native_messages_delta;
-    return isRecord(delta) && Array.isArray(delta.messages);
-}
-
 /**
- * Build the candidate output array from a module response. The result is a fresh array of shared
- * references: kept prefix entries come from the acknowledged previous output, and every entry the
- * module returned is used as-is because the module owns healing, ordering, and codec fidelity.
+ * Applies a `status: ok` response's recipe against the submitted input and, when the daemon named
+ * it, the retained previous output. The result is a fresh array of shared references, sized and
+ * validated before any allocation; nothing is published on failure.
  */
-export function buildNativeCandidate(
+export function applyTransformRecipe(
     response: Record<string, unknown>,
-    previous: { messages: readonly unknown[]; fingerprint: string } | undefined,
+    input: RecipeSourceBase,
+    previous: RecipeSourceBase | undefined,
     reserve: (slots: number) => boolean,
-): unknown[] {
-    const nativeMessages = response.native_messages;
-    if (typeof nativeMessages === "string") {
-        // Each JSON array entry needs at least one character plus a separator.
-        if (!reserve(Math.ceil(nativeMessages.length / 2)))
-            throw new CaptureBudgetExceeded("native candidate array");
-        let parsed: unknown;
-        try {
-            parsed = JSON.parse(nativeMessages) as unknown;
-        } catch (error) {
-            throw new Error(
-                `rust transform native_messages string was not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-            );
-        }
-        if (!Array.isArray(parsed))
-            throw new Error("rust transform native_messages string was not an array");
-        return parsed;
-    }
-    if (Array.isArray(nativeMessages)) {
-        if (!reserve(nativeMessages.length))
-            throw new CaptureBudgetExceeded("native candidate array");
-        return Array.from(nativeMessages);
-    }
-    const delta = response.native_messages_delta;
-    if (!isRecord(delta) || !Array.isArray(delta.messages)) {
-        throw new Error("rust transform response omitted native_messages");
-    }
-    const replaceFrom = delta.replace_from;
-    if (
-        !previous ||
-        delta.after !== previous.fingerprint ||
-        typeof replaceFrom !== "number" ||
-        !Number.isSafeInteger(replaceFrom) ||
-        replaceFrom < 0 ||
-        replaceFrom > previous.messages.length
-    ) {
+): { values: unknown[]; lengths: number[]; bytes: number; outputRevision: string } {
+    const parsed = parseRecipe(response);
+    if (!parsed.ok) {
         throw new Error(
-            "rust transform native_messages_delta did not match the acknowledged output",
+            `rust transform recipe rejected: ${parsed.rejection.code}: ${parsed.rejection.detail}`,
         );
     }
-    if (!reserve(replaceFrom + delta.messages.length)) {
-        throw new CaptureBudgetExceeded("native candidate array");
+    let slots = 0;
+    for (const operation of parsed.recipe.operations)
+        slots += operation.op === "keep" ? operation.count : operation.values.length;
+    if (!Number.isSafeInteger(slots) || !reserve(slots))
+        throw new CaptureBudgetExceeded("recipe output array");
+    const applied = applyRecipe(parsed.recipe, input, previous);
+    if (!applied.ok) {
+        throw new Error(
+            `rust transform recipe rejected: ${applied.rejection.code}: ${applied.rejection.detail}`,
+        );
     }
-    return previous.messages.slice(0, replaceFrom).concat(delta.messages);
+    return { ...applied, outputRevision: parsed.recipe.outputRevision };
 }
 
 function buildTransformBody(args: {
     sessionId: string;
+    baseRevision: string;
+    previousOutputRevision?: string;
     input: unknown[];
     nativeMessages: unknown[];
     passInputs: Record<string, unknown>;
@@ -652,6 +709,10 @@ function buildTransformBody(args: {
         serializer_profile: "opencode-aisdk",
         serve_native: true,
         session_id: args.sessionId,
+        base_revision: args.baseRevision,
+        ...(args.previousOutputRevision
+            ? { previous_output_revision: args.previousOutputRevision }
+            : {}),
         // Model, provider, and system-prompt changes evict provider caches; send the native module the identity inputs used by the TypeScript materializer rather than leaving the native identity blank.
         render_config: [
             args.providerId ? `provider:${args.providerId}` : "",
@@ -787,6 +848,21 @@ export function createRustModeTransform(
 } {
     const states = new Map<string, RustSessionState>();
     const wireCaches = new BoundedSessionMap<RustWireCache>(WIRE_CACHE_SESSION_CAPACITY);
+    const appliedOutputs = new AppliedOutputBudget(
+        options.optionalOutputBudgetBytes ?? OPTIONAL_OUTPUT_BUDGET_BYTES,
+        (sessionId) => {
+            const cache = wireCaches.peek(sessionId);
+            if (cache) cache.applied = undefined;
+        },
+    );
+    /** The session map evicts silently on count; its victim's applied charge is released here. */
+    const storeWireCache = (sessionId: string, cache: RustWireCache): void => {
+        if (!wireCaches.has(sessionId) && wireCaches.size >= WIRE_CACHE_SESSION_CAPACITY) {
+            const oldest = wireCaches.entries().next().value;
+            if (oldest) appliedOutputs.release(oldest[0]);
+        }
+        wireCaches.set(sessionId, cache);
+    };
     const captureAdmission = options.captureAdmission ?? defaultTransformCaptureAdmission;
 
     const logStage = (
@@ -814,6 +890,7 @@ export function createRustModeTransform(
 
     const invalidateWireState = (sessionId: string): void => {
         wireCaches.delete(sessionId);
+        appliedOutputs.release(sessionId);
         captureAdmission.requestCancel(
             sessionId,
             `rust session ${sessionId} wire state invalidated`,
@@ -1219,16 +1296,26 @@ export function createRustModeTransform(
             const wireBuildStartedAt = performance.now();
             const encodedInput = encodeOpenCodeMessagesToCk(resolved.annotatedInput);
             timings.wireMessages = messages.length - (wireDelta?.rawStart ?? 0);
+            charge(messages.length * LENGTH_SLOT_BYTES, "input lengths");
+            let inputLengths = measureInputLengths(
+                messages,
+                previousWireCache,
+                wireDelta?.rawStart ?? 0,
+            );
             let pendingWireCache: RustWireCache =
                 // An empty delta replaces nothing: the terminal message, its wire visibility, and both before-last fingerprints stay the acknowledged ones.
                 wireDelta && previousWireCache && wireDelta.rawStart === messages.length
-                    ? { ...previousWireCache, nativeOutput: undefined }
+                    ? { ...previousWireCache, applied: undefined }
                     : buildWireCache({
                           messages,
                           encoded: encodedInput,
                           snapshots: captured.snapshots,
+                          inputLengths,
                           delta: wireDelta,
                       });
+            // The retained output stays reusable only while the cache that applied it survives.
+            const previousApplied = previousWireCache?.applied;
+            let baseRevision = nextBaseRevision();
             const usageEntry = deps.contextUsageMap.get(sessionId);
             // Fields both the first attempt and the full-wire retry forward
             // unchanged. `fullArrayFingerprint` stays per-site: the retry
@@ -1252,6 +1339,8 @@ export function createRustModeTransform(
             };
             let body = buildTransformBody({
                 ...transformBodyBase,
+                baseRevision,
+                previousOutputRevision: previousApplied?.revision,
                 input: encodedInput,
                 nativeMessages: wireDelta ? messages.slice(wireDelta.rawStart) : messages,
                 fullArrayFingerprint: pendingWireCache.fingerprint,
@@ -1363,17 +1452,12 @@ export function createRustModeTransform(
             state.forceFullWire = true;
             let response = await sendTransformSeriesWithSingleRestart(body, "");
             captureResponseTelemetry(response);
-            if (isNeedFullSync(response) || !hasNativeResponseContent(response)) {
-                if (isNeedFullSync(response)) {
-                    // A cleared or superseded session must not receive the flag.
-                    assertCurrentPass();
-                    state.forceFullWire = true;
-                } else {
-                    sessionLog.warn(
-                        sessionId,
-                        "native_delta_fallback_reason=adapter_response_omitted_native_content retry=full",
-                    );
-                }
+            if (isNeedFullSync(response)) {
+                // A cleared or superseded session must not receive the flag.
+                assertCurrentPass();
+                state.forceFullWire = true;
+                // The retry names a fresh input snapshot; the recipe it receives binds to that one.
+                baseRevision = nextBaseRevision();
                 if (wireDelta) {
                     reserveWire(0, wireDelta.rawStart);
                     let retryResolved = await resolveOrdinals(
@@ -1397,14 +1481,18 @@ export function createRustModeTransform(
                         retryResolved.annotatedInput,
                     );
                     timings.wireMessages = messages.length;
+                    inputLengths = measureInputLengths(messages, undefined, 0);
                     pendingWireCache = buildWireCache({
                         messages,
                         encoded: retryEncodedInput,
                         snapshots: captured.snapshots,
+                        inputLengths,
                     });
                     const retryWireBuildStartedAt = performance.now();
                     body = buildTransformBody({
                         ...transformBodyBase,
+                        baseRevision,
+                        previousOutputRevision: previousApplied?.revision,
                         input: retryEncodedInput,
                         nativeMessages: messages,
                         fullArrayFingerprint: pendingWireCache.fingerprint,
@@ -1419,30 +1507,31 @@ export function createRustModeTransform(
                 } else {
                     // The same body is serialized again from the live objects, so the source is rechecked first.
                     recheckCapture("full-retry");
+                    body = { ...body, base_revision: baseRevision };
                 }
                 response = await sendTransformSeriesWithSingleRestart(body, " retry=full");
                 captureResponseTelemetry(response);
                 if (isNeedFullSync(response)) {
                     throw new Error("rust module still requires full sync after a full-array send");
                 }
-                if (!hasNativeResponseContent(response)) {
-                    throw new Error("rust module omitted native content after a full-array retry");
-                }
             }
             const appliedDeliveryPassIds = new Set(noteDeliveryPassIds(response));
             const applyStartedAt = performance.now();
             try {
-                // Candidate construction and every boundary check run before the host array is touched.
-                const candidate = buildNativeCandidate(
+                // Recipe validation, sizing, and every boundary check run before the host array is touched.
+                const application = applyTransformRecipe(
                     response,
-                    previousWireCache?.nativeOutput
-                        ? {
-                              messages: previousWireCache.nativeOutput,
-                              fingerprint: previousWireCache.fingerprint,
-                          }
-                        : undefined,
-                    (slots) => lease.reserve(slots * CANDIDATE_SLOT_BYTES),
+                    { revision: baseRevision, values: messages, lengths: inputLengths },
+                    previousApplied,
+                    (slots) => lease.reserve(slots * (CANDIDATE_SLOT_BYTES + LENGTH_SLOT_BYTES)),
                 );
+                const candidate = application.values;
+                const applied: AppliedOutput = {
+                    revision: application.outputRevision,
+                    values: candidate,
+                    lengths: application.lengths,
+                    charge: application.bytes + application.lengths.length * LENGTH_SLOT_BYTES,
+                };
                 const boundaryId = response.boundary_id;
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
                     assertNativeBoundary(candidate, sessionId, boundaryId);
@@ -1477,12 +1566,15 @@ export function createRustModeTransform(
                 const applyReplaceStartedAt = performance.now();
                 // Publication and state promotion are synchronous from here to the lease release.
                 replaceHostArrayContents(target, candidate);
-                pendingWireCache.nativeOutput = candidate;
+                // A refused retention keeps the pass; only the next pass loses its `previous` source.
+                pendingWireCache.applied = appliedOutputs.retain(sessionId, applied.charge)
+                    ? applied
+                    : undefined;
                 state.ordinals = stagedMemo;
                 state.initialized = true;
                 state.consecutiveFailures = 0;
                 state.forceFullWire = false;
-                wireCaches.set(sessionId, pendingWireCache);
+                storeWireCache(sessionId, pendingWireCache);
                 deliveries.applied = appliedDeliveryPassIds;
                 logStage(sessionId, "apply", applyReplaceStartedAt, timings);
             } catch (error) {
@@ -1540,6 +1632,7 @@ export function createRustModeTransform(
                 knownSessionDirectory(deps, sessionId);
             states.delete(sessionId);
             wireCaches.delete(sessionId);
+            appliedOutputs.release(sessionId);
             captureAdmission.requestCancel(sessionId, `rust session ${sessionId} cleared`);
             // Route close asks the host to settle active work within its close budget before deletion acquires the lane; cleanup closes the replacement route.
             options.moduleClient.closeSession?.(sessionId);
@@ -1565,11 +1658,12 @@ export function createRustModeTransform(
 
 export const __rustModeTransformTest = {
     WIRE_CACHE_SESSION_CAPACITY,
-    buildNativeCandidate,
+    OPTIONAL_OUTPUT_BUDGET_BYTES,
+    AppliedOutputBudget,
+    applyTransformRecipe,
     buildTransformBody,
     transformGeometryForWire,
     formatRustPassLog,
     isTransformPageAttemptMismatch,
-    hasNativeResponseContent,
     createRustModeTransform,
 };

@@ -11,6 +11,7 @@ use base64::Engine;
 use host_runtime::TargetKind;
 use memory_store::{MemoryStore, StoredCompartment};
 use serde_json::{Value, json};
+use support::applied::applied_messages;
 use support::direct_host::{
     BUDGET, FixtureProcess, REDACTION_SENTINEL, mode, request_json, send_body, wait_for_store,
     workspace_root,
@@ -90,6 +91,7 @@ async fn readiness_permissions_catalog_and_real_unary_transform() {
         primary,
         json!({
             "kind": "transform",
+            "base_revision": "direct-host-base-1",
             "v": 2,
             "session_id": session,
             "serializer_profile": "owned-llmrunner",
@@ -156,6 +158,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
 
     let request = json!({
         "kind": "transform",
+        "base_revision": "restart-base-1",
         "v": 2,
         "session_id": "restart-transform",
         "serializer_profile": "owned-llmrunner",
@@ -196,9 +199,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     let materialized = request_json(&client, route, request.clone()).await;
     assert_eq!(materialized["action"], "HARD");
     assert_eq!(materialized["project_memory"]["kind"], "canonical");
-    let first_m0 = materialized["messages"]
-        .as_array()
-        .expect("messages")
+    let first_m0 = applied_messages(&request, &materialized)
         .iter()
         .find(|message| message["meta"]["synthetic"] == true)
         .expect("synthetic m0")["content"][0]["kind"]["text"]
@@ -223,12 +224,11 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
         )
         .await;
     wait_for_store(&client, route, "restart-transform").await;
-    let replay = request_json(&client, route, request).await;
+    let replay = request_json(&client, route, request.clone()).await;
     assert_eq!(replay["action"], "SOFT+", "{replay}");
     assert_eq!(replay["project_memory"], materialized["project_memory"]);
-    let replay_m0 = replay["messages"]
-        .as_array()
-        .expect("messages")
+    let replay_messages = applied_messages(&request, &replay);
+    let replay_m0 = replay_messages
         .iter()
         .find(|message| message["meta"]["synthetic"] == true)
         .expect("synthetic m0")["content"][0]["kind"]["text"]
@@ -520,6 +520,7 @@ async fn refused_bodies_emit_one_terminal_and_leave_no_dispatch_state() {
         primary,
         json!({
             "kind": "transform",
+            "base_revision": "direct-host-base-2",
             "v": 2,
             "session_id": session,
             "serializer_profile": "owned-llmrunner",

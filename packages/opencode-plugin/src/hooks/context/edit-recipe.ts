@@ -57,9 +57,12 @@ export interface RecipeRejection {
 export type RecipeParse =
     | { ok: true; recipe: EditRecipe }
     | { ok: false; rejection: RecipeRejection };
-/** `bytes` is the canonical JSON size of the reconstructed array, brackets and commas included. */
+/**
+ * `bytes` is the canonical JSON size of the reconstructed array, brackets and commas included;
+ * `lengths` holds each value's canonical length so the result can serve as a later previous base.
+ */
 export type RecipeApplication =
-    | { ok: true; values: unknown[]; bytes: number }
+    | { ok: true; values: unknown[]; lengths: number[]; bytes: number }
     | { ok: false; rejection: RecipeRejection };
 
 const utf8 = new TextEncoder();
@@ -199,14 +202,14 @@ export function applyRecipe(
     if (recipe.baseRevision !== input.revision)
         return reject("wrong_base_revision", "base_revision does not name the input");
     const cursors = { input: 0, previous: 0 };
-    let entries = 0;
+    const lengths: number[] = [];
     // Brackets first; each entry then pays its bytes plus one comma after the first.
     let bytes = 2;
     const segments: (readonly unknown[])[] = [];
     const addEntry = (length: number): boolean => {
         if (!Number.isSafeInteger(length) || length < 0) return false;
-        bytes += length + (entries > 0 ? 1 : 0);
-        entries += 1;
+        bytes += length + (lengths.length > 0 ? 1 : 0);
+        lengths.push(length);
         return Number.isSafeInteger(bytes);
     };
     for (const [index, operation] of recipe.operations.entries()) {
@@ -255,5 +258,5 @@ export function applyRecipe(
         return reject("output_too_large", `reconstructed array is ${bytes} bytes`);
     const values: unknown[] = [];
     for (const segment of segments) for (const value of segment) values.push(value);
-    return { ok: true, values, bytes };
+    return { ok: true, values, lengths, bytes };
 }

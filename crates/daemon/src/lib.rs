@@ -114,11 +114,13 @@ use storage::StoreError;
 use storage::{Isolation, StorageBackend, StorageDescriptor, sqlite_store_path};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment};
+use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment, RecipeSegment};
+use crate::edit_recipe::{Keyed, Revision, RevisionAllocator};
 use crate::metered_decode::{
     DecodeFailure, RAW_VALUE_TOKEN, Refusal, ResidentMeter, decode_metered, footprint_floor_exceeds,
 };
 use host_runtime::{BlockingWorkFailed, CancelSignal};
+use memory_store::WireMessage;
 
 use crate::transform_unit::{
     AdmissionPermit, HistorianFollowup, PageApplyGuard, PassContinuation, PassEntry, PassHold,
@@ -2376,6 +2378,9 @@ struct NativeEncodedChunk {
     end_index: usize,
     value: Arc<Value>,
     retained_bytes: usize,
+    /// Canonical JSON length, measured once when the chunk is encoded; recipe sizing reads it
+    /// instead of serializing a kept chunk again.
+    wire_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2385,7 +2390,6 @@ enum NativeDeltaFallbackReason {
     CacheContextMismatch,
     InvalidFrontier,
     NoReusableOutput,
-    MissingNativeContent,
 }
 
 impl NativeDeltaFallbackReason {
@@ -2396,7 +2400,6 @@ impl NativeDeltaFallbackReason {
             Self::CacheContextMismatch => "cache_context_mismatch",
             Self::InvalidFrontier => "invalid_frontier",
             Self::NoReusableOutput => "no_reusable_output",
-            Self::MissingNativeContent => "missing_native_content",
         }
     }
 }
@@ -2415,6 +2418,8 @@ struct NativeAttachmentCacheStats {
 #[derive(Debug, Clone)]
 struct NativeAttachmentCacheSnapshot {
     context: NativeAttachmentContext,
+    /// The revision the caller applied these chunks under; a request advertising it may keep from them.
+    output_revision: Option<Revision>,
     full_array_fingerprint: Option<String>,
     // Message order and `mid` identify a delta.
     sidecar: Arc<codec::DecodeSidecar>,
@@ -3000,6 +3005,7 @@ pub struct HandlerCore {
     transform_snapshots: Arc<Mutex<TransformSnapshotCache>>,
     serialized_outputs: Mutex<SerializedOutputCache>,
     native_attachments: Mutex<NativeAttachmentCache>,
+    output_revisions: RevisionAllocator,
     projections: Mutex<ProjectionCache>,
     boundary_tokens: Mutex<BoundaryTokenCache>,
     scheduler_observations: Mutex<HashMap<String, SchedulerObservation>>,
@@ -3007,6 +3013,10 @@ pub struct HandlerCore {
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
+    /// Test-side mirror of a client: full input arrays and applied outputs per session, so wire
+    /// recipes can be reconstructed and asserted as arrays.
+    #[cfg(test)]
+    test_client: Mutex<HashMap<String, TestClientSession>>,
     #[cfg(test)]
     reduction_injection: Mutex<HashMap<String, Vec<ReductionDecision>>>,
     #[cfg(test)]
@@ -3720,6 +3730,11 @@ impl Handler {
 #[cfg(test)]
 impl Handler {
     async fn dispatch_value(&self, route: RouteHandle, request: Value) -> PreparedOutcome {
+        if request["method"] == "transform" || request["kind"] == "transform" {
+            let request = self.test_client_prepare_request(request);
+            let outcome = self.dispatch_value_for_test(route, request.clone()).await;
+            return self.test_client_apply(&request, outcome);
+        }
         self.dispatch_value_for_test(route, request).await
     }
 
@@ -3733,6 +3748,20 @@ impl Handler {
         let runner = transform_unit::DetachedRunner::default();
         self.handle_transform_with_runner(route, request, &runner)
             .await
+    }
+
+    /// Runs a transform as a client would: names the input snapshot, then applies the wire recipe
+    /// against the test client's retained input and previous output so the caller can assert on
+    /// the reconstructed `messages` and `native_messages` arrays.
+    #[cfg(test)]
+    async fn handle_transform_applied_for_test(
+        &self,
+        route: RouteHandle,
+        request: Value,
+    ) -> PreparedOutcome {
+        let request = self.test_client_prepare_request(request);
+        let outcome = self.handle_transform_for_test(route, request.clone()).await;
+        self.test_client_apply(&request, outcome)
     }
 
     /// As `handle_transform_for_test`, on the runner a test supplies.
@@ -3815,6 +3844,7 @@ impl Handler {
             ))),
             serialized_outputs: Mutex::new(SerializedOutputCache::default()),
             native_attachments: Mutex::new(NativeAttachmentCache::default()),
+            output_revisions: RevisionAllocator::default(),
             projections: Mutex::new(ProjectionCache::default()),
             boundary_tokens: Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES)),
             scheduler_observations: Mutex::new(HashMap::new()),
@@ -3822,6 +3852,8 @@ impl Handler {
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
+            #[cfg(test)]
+            test_client: Mutex::new(HashMap::new()),
             #[cfg(test)]
             reduction_injection: Mutex::new(HashMap::new()),
             #[cfg(test)]
@@ -4165,12 +4197,14 @@ impl Handler {
             ))),
             serialized_outputs: Mutex::new(SerializedOutputCache::default()),
             native_attachments: Mutex::new(NativeAttachmentCache::default()),
+            output_revisions: RevisionAllocator::default(),
             projections: Mutex::new(ProjectionCache::default()),
             boundary_tokens: Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES)),
             scheduler_observations: Mutex::new(HashMap::new()),
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             guidance_now_ms: Mutex::new(None),
+            test_client: Mutex::new(HashMap::new()),
             reduction_injection: Mutex::new(HashMap::new()),
             after_transform_commit: Mutex::new(None),
             between_transform_and_prepare: Mutex::new(None),
@@ -8294,6 +8328,13 @@ impl HandlerCore {
         if parsed.serve_native && serializer_profile != Some(SerializerProfile::OpencodeAiSdk) {
             return serve_native_unsupported_profile_error(&parsed.serializer_profile);
         }
+        if parsed.base_revision.is_none() {
+            return PreparedOutcome::Error {
+                code: "transform_base_revision_missing".to_string(),
+                message: "transform requests must name their input snapshot with base_revision"
+                    .to_string(),
+            };
+        }
         if parsed
             .session_id
             .starts_with(historian::HISTORIAN_CHILD_SESSION_PREFIX)
@@ -8302,7 +8343,7 @@ impl HandlerCore {
                 return need_full_sync_response(&parsed);
             }
             ticket.accept();
-            return passthrough_transform_response(&parsed);
+            return self.passthrough_transform_response(&parsed);
         }
         if self.dreamer.dreamer_run_registered(&parsed.session_id) {
             match self.resolve_binding(channel, &parsed.session_id) {
@@ -8311,7 +8352,7 @@ impl HandlerCore {
                         return need_full_sync_response(&parsed);
                     }
                     ticket.accept();
-                    return passthrough_transform_response(&parsed);
+                    return self.passthrough_transform_response(&parsed);
                 }
                 Err(BindingError::Unbound) => {
                     return PreparedOutcome::Error {
@@ -9039,9 +9080,12 @@ impl HandlerCore {
             projection_cache_store_started_at.elapsed().as_secs_f64() * 1_000.0;
         let mut response = result.response;
         response.historian = Some(diagnostics);
+        let Some(output_revision) = self.output_revisions.allocate() else {
+            return revision_exhausted_error();
+        };
         let native_attach_started_at = Instant::now();
-        let native_cache_stats = if parsed.serve_native {
-            attach_native_messages_incremental(
+        let (native_cache_stats, recipe) = if parsed.serve_native {
+            let attachment = attach_native_messages_incremental(
                 &mut response,
                 parsed,
                 reasoning_watermark,
@@ -9051,23 +9095,35 @@ impl HandlerCore {
                 transition_consumed,
                 env.native_delta_frontier.as_ref(),
                 revert_epoch,
+                &output_revision,
                 &self.native_attachments,
                 NativeCacheKeyMode::Normal,
+            );
+            (
+                attachment.stats,
+                RecipeInputs::Native {
+                    output_revision,
+                    output: attachment.output,
+                    previous: attachment.previous,
+                },
             )
         } else {
-            NativeAttachmentCacheStats::default()
+            // The retained output stays a keep source only for the revision the caller says it applied.
+            let previous = self
+                .serialized_outputs
+                .lock()
+                .expect("serialized output cache mutex")
+                .take_previous_output(&parsed.session_id, revert_epoch)
+                .filter(|(revision, _)| parsed.previous_output_revision.as_ref() == Some(revision));
+            (
+                NativeAttachmentCacheStats::default(),
+                RecipeInputs::Ck {
+                    output_revision,
+                    previous,
+                    retain: Some((&self.serialized_outputs, revert_epoch)),
+                },
+            )
         };
-        finalize_native_messages_response(
-            &mut response,
-            parsed,
-            reasoning_watermark,
-            &tag_numbers,
-            mutation_exempt_mid.as_deref(),
-            lineage_anchor_mid.as_deref(),
-            transition_consumed,
-            env.native_delta_frontier.as_ref(),
-            native_cache_stats,
-        );
         let native_attach_ms = native_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
         let trace_complete_started_at = Instant::now();
         let _ = store.trace_pass_completed(&parsed.session_id, now_ms());
@@ -9126,7 +9182,45 @@ impl HandlerCore {
             response_timings.native_cache_evicted = native_cache_stats.evicted;
             response_timings.post_attach = post_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
         }
-        respond_transform(parsed, response)
+        respond_transform(parsed, response, Some(recipe))
+    }
+
+    /// Historian children and dreamer sessions receive their input unchanged; the recipe is one
+    /// keep of the whole input, so no payload crosses the wire twice.
+    fn passthrough_transform_response(&self, request: &TransformRequest) -> PreparedOutcome {
+        let mut response = transform::TransformResponse::passthrough(
+            request
+                .messages
+                .iter()
+                .map(|message| message.ck.clone())
+                .collect(),
+            request.full_array_fingerprint.clone(),
+        );
+        let Some(output_revision) = self.output_revisions.allocate() else {
+            return revision_exhausted_error();
+        };
+        let recipe = if request.serve_native {
+            attach_native_messages(&mut response, request, 0, None);
+            let values = response.native_messages.clone().unwrap_or_default();
+            RecipeInputs::Native {
+                output_revision,
+                output: NativeOutput {
+                    wire_lens: values
+                        .iter()
+                        .map(|value| edit_recipe::canonical_len(value))
+                        .collect(),
+                    values,
+                },
+                previous: None,
+            }
+        } else {
+            RecipeInputs::Ck {
+                output_revision,
+                previous: None,
+                retain: None,
+            }
+        };
+        respond_transform(request, response, Some(recipe))
     }
 
     fn collector_now(&self) -> Instant {
@@ -13771,6 +13865,26 @@ fn native_attachment_differential_enabled() -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The caller's previously applied native output, offered as the recipe's `previous` source only
+/// when the request advertises the revision it was applied under.
+struct PreviousNativeOutput {
+    revision: Revision,
+    values: Vec<Arc<Value>>,
+}
+
+/// The native output of one pass with the per-chunk canonical lengths recipe sizing needs.
+struct NativeOutput {
+    values: Vec<Arc<Value>>,
+    wire_lens: Vec<usize>,
+}
+
+struct NativeAttachment {
+    stats: NativeAttachmentCacheStats,
+    output: NativeOutput,
+    previous: Option<PreviousNativeOutput>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn attach_native_messages_incremental(
     response: &mut transform::TransformResponse,
     request: &TransformRequest,
@@ -13781,17 +13895,28 @@ fn attach_native_messages_incremental(
     transition_consumed: bool,
     native_delta_frontier: Option<&NativeDeltaFrontier>,
     revert_epoch: u64,
+    output_revision: &Revision,
     cache: &Mutex<NativeAttachmentCache>,
     mode: NativeCacheKeyMode,
-) -> NativeAttachmentCacheStats {
-    if !request.serve_native {
-        return NativeAttachmentCacheStats::default();
-    }
-
+) -> NativeAttachment {
     let mut cached = cache
         .lock()
         .expect("native attachment cache mutex")
         .snapshot(&request.session_id, revert_epoch);
+    // The retained output stays reusable only for the revision the caller says it applied.
+    let previous = cached.as_ref().and_then(|snapshot| {
+        let revision = snapshot.output_revision.clone()?;
+        (request.previous_output_revision.as_ref() == Some(&revision)).then(|| {
+            PreviousNativeOutput {
+                revision,
+                values: snapshot
+                    .chunks
+                    .iter()
+                    .map(|chunk| Arc::clone(&chunk.value))
+                    .collect(),
+            }
+        })
+    });
     let trusted_prefix = cached
         .as_ref()
         .map(|snapshot| validated_native_prefix(request, snapshot, native_delta_frontier))
@@ -13993,6 +14118,7 @@ fn attach_native_messages_incremental(
                 start_index: chunk.start_index,
                 end_index: chunk.end_index,
                 retained_bytes: native_value_retained_bytes(&value),
+                wire_len: edit_recipe::canonical_len(&value),
                 value: Arc::new(value),
             }),
     );
@@ -14023,6 +14149,10 @@ fn attach_native_messages_incremental(
         );
     }
 
+    let wire_lens = chunks
+        .iter()
+        .map(|chunk| chunk.wire_len)
+        .collect::<Vec<_>>();
     let mut stats = NativeAttachmentCacheStats {
         reused_messages: suffix_start,
         encoded_messages: message_keys.len().saturating_sub(suffix_start),
@@ -14046,6 +14176,7 @@ fn attach_native_messages_incremental(
             revert_epoch,
             NativeAttachmentCacheSnapshot {
                 context,
+                output_revision: Some(output_revision.clone()),
                 full_array_fingerprint: request.full_array_fingerprint.clone(),
                 sidecar,
                 message_keys,
@@ -14058,103 +14189,37 @@ fn attach_native_messages_incremental(
             &mut stats,
             served_bytes,
         );
-    response.native_messages = Some(native_messages);
-    stats
-}
-
-#[allow(clippy::too_many_arguments)]
-fn finalize_native_messages_response(
-    response: &mut transform::TransformResponse,
-    request: &TransformRequest,
-    reasoning_watermark: u64,
-    tag_numbers: &BTreeMap<String, u64>,
-    mutation_exempt_mid: Option<&str>,
-    lineage_anchor_mid: Option<&str>,
-    transition_consumed: bool,
-    native_delta_frontier: Option<&NativeDeltaFrontier>,
-    native_cache_stats: NativeAttachmentCacheStats,
-) {
-    if !request.serve_native {
-        return;
-    }
-
-    let mut fallback_reason = native_cache_stats.delta_fallback_reason;
-    if let Some(frontier) = native_delta_frontier {
-        if fallback_reason.is_none() && native_cache_stats.reused_messages > 0 {
-            match response.native_messages.take() {
-                Some(mut native_messages)
-                    if native_cache_stats.reused_messages <= native_messages.len() =>
-                {
-                    let messages = native_messages.split_off(native_cache_stats.reused_messages);
-                    response.native_messages_delta = Some(transform::NativeMessagesDelta {
-                        after: frontier.after.clone(),
-                        replace_from: native_cache_stats.reused_messages,
-                        messages,
-                    });
-                }
-                Some(native_messages) => {
-                    response.native_messages = Some(native_messages);
-                    fallback_reason = Some(NativeDeltaFallbackReason::InvalidFrontier);
-                }
-                None => {
-                    fallback_reason = Some(NativeDeltaFallbackReason::MissingNativeContent);
-                }
-            }
-        }
-    } else {
-        // Without a frontier, callers cannot reconstruct a suffix after an unexpected pre-existing delta.
-        response.native_messages_delta = None;
-    }
-
-    if response.native_messages.is_none() && response.native_messages_delta.is_none() {
-        fallback_reason.get_or_insert(NativeDeltaFallbackReason::MissingNativeContent);
-        response.native_messages = Some(
-            encode_full_native_messages(
-                response.messages(),
-                request,
-                reasoning_watermark,
-                tag_numbers,
-                mutation_exempt_mid,
-                lineage_anchor_mid,
-                transition_consumed,
-            )
-            .into_iter()
-            .map(Arc::new)
-            .collect(),
-        );
-    }
-
-    if let Some(reason) = fallback_reason {
+    if let Some(reason) = stats.delta_fallback_reason {
         eprintln!(
-            "native-delta fallback session={} native_delta_fallback_reason={}",
+            "native-cache reuse unavailable session={} native_delta_fallback_reason={}",
             request.session_id,
             reason.as_str(),
         );
     }
-    debug_assert!(
-        response.native_messages.is_some() || response.native_messages_delta.is_some(),
-        "successful serve_native response must carry full or delta native content"
-    );
-}
-
-fn passthrough_transform_response(request: &TransformRequest) -> PreparedOutcome {
-    let mut response = transform::TransformResponse::passthrough(
-        request
-            .messages
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect(),
-        request.full_array_fingerprint.clone(),
-    );
-    attach_native_messages(&mut response, request, 0, None);
-    respond_transform(request, response)
+    response.native_messages = Some(native_messages.clone());
+    NativeAttachment {
+        stats,
+        output: NativeOutput {
+            values: native_messages,
+            wire_lens,
+        },
+        previous,
+    }
 }
 
 fn need_full_sync_response(request: &TransformRequest) -> PreparedOutcome {
     respond_transform(
         request,
         transform::TransformResponse::need_full_sync(request.full_array_fingerprint.clone()),
+        None,
     )
+}
+
+fn revision_exhausted_error() -> PreparedOutcome {
+    PreparedOutcome::Error {
+        code: "transform_output_revision_exhausted".to_string(),
+        message: "the daemon has allocated every output revision for this incarnation".to_string(),
+    }
 }
 
 fn classify_attempt_timeout(ceiling: Duration, deadline: Instant) -> Duration {
@@ -15097,9 +15162,144 @@ fn replay_dream_task_response(response_json: &str) -> PreparedOutcome {
     respond(response)
 }
 
+/// What the recipe is built from, per selected representation. Input is always the request's own
+/// array; `previous` is the caller's retained applied output when it advertised the matching revision.
+enum RecipeInputs<'a> {
+    Native {
+        output_revision: Revision,
+        output: NativeOutput,
+        previous: Option<PreviousNativeOutput>,
+    },
+    Ck {
+        output_revision: Revision,
+        previous: Option<(Revision, Arc<Vec<transform::ServedMessage>>)>,
+        /// The owner that retains this pass's ordered output for the next request's `previous`.
+        retain: Option<(&'a Mutex<SerializedOutputCache>, u64)>,
+    },
+}
+
+/// One CK candidate for recipe matching: a served output message with prepared bytes, or an
+/// ingress shell that is compared without ever serializing it.
+#[derive(Clone, Copy)]
+enum CkEntry<'a> {
+    Served(&'a transform::ServedMessage),
+    Ingress(&'a WireMessage),
+}
+
+impl<'a> CkEntry<'a> {
+    fn message(self) -> &'a WireMessage {
+        match self {
+            Self::Served(served) => served,
+            Self::Ingress(message) => message,
+        }
+    }
+
+    fn key(self) -> Option<String> {
+        self.message().meta.harness_id.clone()
+    }
+
+    /// Typed equality ignores the retained ingress `original`: unchanged typed fields render the
+    /// same prompt, and keeping the caller's own object preserves any harmless unknown fields.
+    fn same_message(self, other: Self) -> bool {
+        if let (Self::Served(left), Self::Served(right)) = (self, other)
+            && (std::ptr::eq(left.canonical_bytes(), right.canonical_bytes())
+                || left.canonical_bytes() == right.canonical_bytes())
+        {
+            return true;
+        }
+        let (left, right) = (self.message(), other.message());
+        left.role == right.role
+            && left.meta == right.meta
+            && left.origin == right.origin
+            && left.provider_extras == right.provider_extras
+            && left.content().len() == right.content().len()
+            && left
+                .content()
+                .iter()
+                .zip(right.content())
+                .all(|(a, b)| a.kind() == b.kind() && a.provider_extras == b.provider_extras)
+    }
+}
+
+fn ck_keyed<'a>(
+    entries: impl Iterator<Item = CkEntry<'a>>,
+) -> Vec<Keyed<Option<String>, CkEntry<'a>>> {
+    entries
+        .map(|entry| Keyed {
+            key: entry.key(),
+            value: entry,
+        })
+        .collect()
+}
+
+fn native_key(value: &Value) -> Option<String> {
+    value
+        .get("info")
+        .and_then(|info| info.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Sums canonical lengths with brackets and commas; `None` when the sum overflows or exceeds the
+/// reconstructed-array limit.
+fn reconstructed_len(lengths: impl Iterator<Item = usize>) -> Option<usize> {
+    let mut total = 2usize;
+    for (index, length) in lengths.enumerate() {
+        total = total
+            .checked_add(length)?
+            .checked_add(usize::from(index > 0))?;
+    }
+    (total <= edit_recipe::MAX_RECONSTRUCTED_BYTES).then_some(total)
+}
+
+fn keep_segment(operation: &edit_recipe::Operation<Arc<Value>>) -> RecipeSegment {
+    RecipeSegment::Keep(PreparedSegment::exact(Arc::from(
+        serde_json::to_vec(operation).expect("keep operations serialize"),
+    )))
+}
+
+fn recipe_segments<V>(
+    built: Vec<edit_recipe::Operation<V>>,
+    insert: impl Fn(V) -> PreparedSegment,
+) -> Vec<RecipeSegment> {
+    built
+        .into_iter()
+        .map(|operation| match operation {
+            edit_recipe::Operation::Keep {
+                source,
+                start,
+                count,
+            } => keep_segment(&edit_recipe::Operation::Keep {
+                source,
+                start,
+                count,
+            }),
+            edit_recipe::Operation::Insert { values } => {
+                RecipeSegment::Insert(values.into_iter().map(&insert).collect())
+            }
+        })
+        .collect()
+}
+
+fn output_too_large_error(bytes: Option<usize>) -> PreparedOutcome {
+    PreparedOutcome::Error {
+        code: "transform_output_too_large".to_string(),
+        message: match bytes {
+            Some(bytes) => format!(
+                "reconstructed output is {bytes} bytes; limit {}",
+                edit_recipe::MAX_RECONSTRUCTED_BYTES
+            ),
+            None => "reconstructed output length overflowed".to_string(),
+        },
+    }
+}
+
+/// Builds the recipe for the selected representation and writes it as prepared segments: keeps
+/// as exact tokens, inserts as served or once-serialized whole values.
 fn respond_transform(
     request: &TransformRequest,
     mut response: transform::TransformResponse,
+    recipe: Option<RecipeInputs<'_>>,
 ) -> PreparedOutcome {
     if response.status == transform::TransformStatus::Ok && request.tail_delta.is_some() {
         return PreparedOutcome::Error {
@@ -15107,20 +15307,127 @@ fn respond_transform(
             message: "successful transform response retained an unexpanded tail_delta".to_string(),
         };
     }
-    if response.status == transform::TransformStatus::Ok
-        && request.serve_native
-        && response.native_messages.is_none()
-        && response.native_messages_delta.is_none()
-    {
+    if response.status == transform::TransformStatus::Ok && recipe.is_none() {
         return PreparedOutcome::Error {
-            code: "transform_native_response_omitted".to_string(),
-            message: "successful serve_native response omitted native content".to_string(),
+            code: "transform_recipe_omitted".to_string(),
+            message: "successful transform response carried no edit recipe".to_string(),
         };
     }
+    // The response names the input snapshot it answers, whichever builder produced it.
+    response.base_revision = request.base_revision.clone();
     let session_id = &request.session_id;
     let response_encode_started_at = Instant::now();
     let pass_timings = response.timings.clone();
-    let messages = response.messages.take();
+    let operations = match recipe {
+        None => None,
+        Some(RecipeInputs::Native {
+            output_revision,
+            output,
+            previous,
+        }) => {
+            if reconstructed_len(output.wire_lens.iter().copied()).is_none() {
+                return output_too_large_error(
+                    output
+                        .wire_lens
+                        .iter()
+                        .try_fold(2usize, |total, len| total.checked_add(*len)),
+                );
+            }
+            let keyed = |values: &[Arc<Value>]| -> Vec<Keyed<Option<String>, Arc<Value>>> {
+                values
+                    .iter()
+                    .map(|value| Keyed {
+                        key: native_key(value),
+                        value: Arc::clone(value),
+                    })
+                    .collect()
+            };
+            let input = request.native_messages.as_deref().unwrap_or(&[]);
+            let previous_values = previous.as_ref().map(|previous| keyed(&previous.values));
+            let built = edit_recipe::build_operations(
+                &keyed(&output.values),
+                &keyed(input),
+                previous_values.as_deref(),
+                |a, b| Arc::ptr_eq(a, b) || a == b,
+            );
+            response.output_revision = Some(output_revision);
+            response.previous_output_revision = previous
+                .filter(|_| built.used_previous)
+                .map(|previous| previous.revision);
+            // Inserts come from the output array, whose lengths the attach measured once; the
+            // segment serializes at write time against that length.
+            let wire_lens: HashMap<*const Value, usize> = output
+                .values
+                .iter()
+                .zip(&output.wire_lens)
+                .map(|(value, len)| (Arc::as_ptr(value), *len))
+                .collect();
+            Some(recipe_segments(built.operations, |value: Arc<Value>| {
+                let len = wire_lens[&Arc::as_ptr(&value)];
+                PreparedSegment::value(value, len)
+            }))
+        }
+        Some(RecipeInputs::Ck {
+            output_revision,
+            previous,
+            retain,
+        }) => {
+            let output = Arc::new(response.messages.take().unwrap_or_default());
+            if reconstructed_len(output.iter().map(|message| message.canonical_bytes().len()))
+                .is_none()
+            {
+                return output_too_large_error(output.iter().try_fold(2usize, |total, m| {
+                    total.checked_add(m.canonical_bytes().len())
+                }));
+            }
+            let (previous_revision, previous_values) = match previous {
+                Some((revision, values)) => (Some(revision), Some(values)),
+                None => (None, None),
+            };
+            let segments = {
+                let output_keyed = ck_keyed(output.iter().map(CkEntry::Served));
+                let input_keyed = ck_keyed(
+                    request
+                        .messages
+                        .iter()
+                        .map(|message| CkEntry::Ingress(&message.ck)),
+                );
+                let previous_keyed = previous_values
+                    .as_ref()
+                    .map(|values| ck_keyed(values.iter().map(CkEntry::Served)));
+                let built = edit_recipe::build_operations(
+                    &output_keyed,
+                    &input_keyed,
+                    previous_keyed.as_deref(),
+                    |a, b| a.same_message(*b),
+                );
+                response.previous_output_revision =
+                    previous_revision.filter(|_| built.used_previous);
+                recipe_segments(built.operations, |entry: CkEntry<'_>| match entry {
+                    CkEntry::Served(served) => PreparedSegment::served(served.clone()),
+                    // Output entries are always served messages; an ingress shell only ever matches.
+                    CkEntry::Ingress(_) => {
+                        unreachable!("recipe inserts come from the output array")
+                    }
+                })
+            };
+            response.output_revision = Some(output_revision.clone());
+            if let Some((cache, revert_epoch)) = retain {
+                cache
+                    .lock()
+                    .expect("serialized output cache mutex")
+                    .record_previous_output(
+                        &request.session_id,
+                        revert_epoch,
+                        output_revision,
+                        output,
+                    );
+            }
+            Some(segments)
+        }
+    };
+    #[cfg(test)]
+    record_served_output_for_test(&response);
     let mut value = match serde_json::to_value(response) {
         Ok(value) => value,
         Err(error) => {
@@ -15130,49 +15437,40 @@ fn respond_transform(
             };
         }
     };
-    if messages.is_some() {
-        value
-            .as_object_mut()
-            .expect("transform responses serialize as objects")
-            .insert("messages".to_string(), Value::Null);
-    }
     let response_meta_encode_ms = response_encode_started_at.elapsed().as_secs_f64() * 1_000.0;
-    let output = match messages {
-        None => PreparedOutput::json(value),
-        Some(messages) => {
-            let response_size_account_started_at = Instant::now();
-            let segments = messages
-                .into_iter()
-                .map(PreparedSegment::served)
-                .collect::<Vec<_>>();
-            let response_size_account_ms =
-                response_size_account_started_at.elapsed().as_secs_f64() * 1_000.0;
-            let output = match PreparedOutput::transform_segments(value, segments) {
-                Ok(output) => output,
-                Err(error) => {
-                    return PreparedOutcome::Error {
-                        code: "encode_failed".to_string(),
-                        message: error.to_string(),
-                    };
-                }
+    let Some(operations) = operations else {
+        emit_pass_timing(
+            session_id,
+            pass_timings.as_ref(),
+            response_encode_started_at,
+            response_meta_encode_ms,
+            0.0,
+            0.0,
+        );
+        return PreparedOutcome::Response(PreparedOutput::json(value));
+    };
+    value
+        .as_object_mut()
+        .expect("transform responses serialize as objects")
+        .insert("operations".to_string(), Value::Null);
+    let response_size_account_started_at = Instant::now();
+    let output = match PreparedOutput::transform_recipe(value, operations) {
+        Ok(output) => output,
+        Err(error) => {
+            return PreparedOutcome::Error {
+                code: "encode_failed".to_string(),
+                message: error.to_string(),
             };
-            emit_pass_timing(
-                session_id,
-                pass_timings.as_ref(),
-                response_encode_started_at,
-                response_meta_encode_ms,
-                response_size_account_ms,
-                0.0,
-            );
-            return PreparedOutcome::Response(output);
         }
     };
+    let response_size_account_ms =
+        response_size_account_started_at.elapsed().as_secs_f64() * 1_000.0;
     emit_pass_timing(
         session_id,
         pass_timings.as_ref(),
         response_encode_started_at,
         response_meta_encode_ms,
-        0.0,
+        response_size_account_ms,
         0.0,
     );
     PreparedOutcome::Response(output)
@@ -18036,6 +18334,180 @@ fn test_route(channel_id: u16) -> RouteHandle {
     }
 }
 
+/// What a client retains per session: its last complete input arrays, so a tail delta can be
+/// expanded the way the client would, and the outputs it applied under their revisions.
+#[cfg(test)]
+#[derive(Default)]
+struct TestClientSession {
+    ck_input: Vec<Value>,
+    native_input: Vec<Value>,
+    applied_ck: Option<(String, Vec<Value>)>,
+    applied_native: Option<(String, Vec<Value>)>,
+    next_base: u64,
+}
+
+/// Served CK arrays by output revision. Native passes never put the CK view on the wire, so tests
+/// that replay a native attachment against the served array read it from here.
+#[cfg(test)]
+static SERVED_OUTPUTS_FOR_TEST: std::sync::LazyLock<
+    Mutex<HashMap<String, Vec<transform::ServedMessage>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+fn record_served_output_for_test(response: &transform::TransformResponse) {
+    if let (Some(revision), Some(messages)) = (&response.output_revision, &response.messages) {
+        SERVED_OUTPUTS_FOR_TEST
+            .lock()
+            .expect("served outputs mutex")
+            .insert(revision.as_str().to_owned(), messages.clone());
+    }
+}
+
+#[cfg(test)]
+fn served_output_for_test(response: &Value) -> Vec<transform::ServedMessage> {
+    let revision = response["output_revision"]
+        .as_str()
+        .expect("successful responses name their output revision");
+    SERVED_OUTPUTS_FOR_TEST
+        .lock()
+        .expect("served outputs mutex")
+        .get(revision)
+        .cloned()
+        .expect("the pass recorded its served array")
+}
+
+#[cfg(test)]
+impl Handler {
+    /// Expands a tail delta against the retained input, records the complete arrays, and names the
+    /// attempt with a fresh `base_revision` unless the test supplied one. Advertises the applied
+    /// output for the selected representation.
+    fn test_client_prepare_request(&self, mut request: Value) -> Value {
+        let Some(session_id) = request["session_id"].as_str().map(str::to_owned) else {
+            return request;
+        };
+        let mut clients = self.test_client.lock().expect("test client mutex");
+        let client = clients.entry(session_id).or_default();
+        let native = request["serve_native"] == true;
+        // A CK keep addresses `request.messages[i].ck`, never the ingress envelope around it.
+        let suffix_ck: Vec<Value> = request["messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|message| message.get("ck").cloned().unwrap_or(message))
+            .collect();
+        let suffix_native = request["native_messages"].as_array().cloned();
+        if let Some(delta) = request.get("tail_delta").filter(|delta| delta.is_object()) {
+            let replace_from = delta["replace_from"].as_u64().unwrap_or(0) as usize;
+            let native_replace_from = delta["native_replace_from"].as_u64().unwrap_or(0) as usize;
+            let mut ck = client.ck_input[..replace_from.min(client.ck_input.len())].to_vec();
+            ck.extend(suffix_ck);
+            client.ck_input = ck;
+            if let Some(suffix) = suffix_native {
+                let mut full = client.native_input
+                    [..native_replace_from.min(client.native_input.len())]
+                    .to_vec();
+                full.extend(suffix);
+                client.native_input = full;
+            }
+        } else {
+            client.ck_input = suffix_ck;
+            if let Some(suffix) = suffix_native {
+                client.native_input = suffix;
+            }
+        }
+        if request.get("base_revision").is_none() {
+            client.next_base += 1;
+            request["base_revision"] = json!(format!("test-base-{}", client.next_base));
+        }
+        if request.get("previous_output_revision").is_none() {
+            let applied = if native {
+                client.applied_native.as_ref()
+            } else {
+                client.applied_ck.as_ref()
+            };
+            if let Some((revision, _)) = applied {
+                request["previous_output_revision"] = json!(revision);
+            }
+        }
+        request
+    }
+
+    /// Applies a successful wire recipe and attaches the reconstructed arrays to the response value
+    /// under the field names the pre-recipe wire used, so assertions read the applied output.
+    fn test_client_apply(&self, request: &Value, outcome: PreparedOutcome) -> PreparedOutcome {
+        let PreparedOutcome::Response(output) = outcome else {
+            return outcome;
+        };
+        let mut response: Value = serde_json::from_slice(&output).expect("wire response is JSON");
+        if response.get("operations").is_none() {
+            return PreparedOutcome::Response(output);
+        }
+        let session_id = request["session_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let native = request["serve_native"] == true;
+        let recipe = edit_recipe::Recipe::from_json(&response).expect("wire recipe validates");
+        let mut clients = self.test_client.lock().expect("test client mutex");
+        let client = clients.entry(session_id).or_default();
+        let input_values = if native {
+            &client.native_input
+        } else {
+            &client.ck_input
+        };
+        let applied = if native {
+            &client.applied_native
+        } else {
+            &client.applied_ck
+        };
+        let base =
+            edit_recipe::Revision::parse(request["base_revision"].as_str().unwrap()).unwrap();
+        let input: Vec<Arc<Value>> = input_values.iter().cloned().map(Arc::new).collect();
+        let input_lengths: Vec<usize> = input
+            .iter()
+            .map(|v| edit_recipe::canonical_len(v))
+            .collect();
+        let previous_revision = applied
+            .as_ref()
+            .map(|(revision, _)| edit_recipe::Revision::parse(revision).unwrap());
+        let previous: Vec<Arc<Value>> = applied
+            .as_ref()
+            .map(|(_, values)| values.iter().cloned().map(Arc::new).collect())
+            .unwrap_or_default();
+        let previous_lengths: Vec<usize> = previous
+            .iter()
+            .map(|v| edit_recipe::canonical_len(v))
+            .collect();
+        let (values, _) = recipe
+            .apply(
+                edit_recipe::SourceBase {
+                    revision: &base,
+                    values: &input,
+                    lengths: &input_lengths,
+                },
+                previous_revision
+                    .as_ref()
+                    .map(|revision| edit_recipe::SourceBase {
+                        revision,
+                        values: &previous,
+                        lengths: &previous_lengths,
+                    }),
+            )
+            .expect("wire recipe applies against the client's bases");
+        let values: Vec<Value> = values.iter().map(|value| (**value).clone()).collect();
+        let output_revision = response["output_revision"].as_str().unwrap().to_owned();
+        if native {
+            client.applied_native = Some((output_revision, values.clone()));
+            response["native_messages"] = Value::Array(values);
+        } else {
+            client.applied_ck = Some((output_revision, values.clone()));
+            response["messages"] = Value::Array(values);
+        }
+        PreparedOutcome::Response(PreparedOutput::json(response))
+    }
+}
+
 #[path = "."]
 #[cfg(test)]
 mod tests {
@@ -20083,7 +20555,7 @@ mod tests {
         let message = serde_json::to_string(&ck("m1", 1, "seed block + new_messages")).unwrap();
         let valid = |extra: &str| {
             format!(
-                r#"{{"kind":"transform","v":2,"serializer_profile":"owned-llmrunner","session_id":"ses","render_config":"cfg0","messages":[{message}]{extra}}}"#
+                r#"{{"kind":"transform","base_revision":"test-base","v":2,"serializer_profile":"owned-llmrunner","session_id":"ses","render_config":"cfg0","messages":[{message}]{extra}}}"#
             )
             .into_bytes()
         };
@@ -20406,6 +20878,7 @@ mod tests {
         let messages = whole["messages"].take();
         let first = json!({
             "kind": "transform",
+            "base_revision": "test-base",
             "session_id": "ses",
             "messages": [messages[0].clone()],
             "transform_page_id": "page-1",
@@ -20436,14 +20909,15 @@ mod tests {
         );
     }
 
-    /// One outcome per body, with the timing block removed: it differs between two runs of
-    /// the same body and says nothing about the lane.
+    /// One outcome per body, with the timing block and the per-pass output revision removed:
+    /// both differ between two runs of the same body and say nothing about the lane.
     fn comparable_outcome(outcome: PreparedOutcome) -> (String, String, Option<Value>) {
         match outcome {
             PreparedOutcome::Response(bytes) => {
                 let mut response: Value = serde_json::from_slice(&bytes).unwrap();
                 if let Some(object) = response.as_object_mut() {
                     object.remove("timings");
+                    object.remove("output_revision");
                 }
                 ("response".to_string(), String::new(), Some(response))
             }
@@ -21496,6 +21970,7 @@ mod tests {
     fn claude_code_config_controls_fill_request_without_changing_default_request_bytes() {
         let value = json!({
             "kind": "transform",
+            "base_revision": "test-base",
             "v": 2,
             "serializer_profile": "claude-code-anthropic",
             "session_id": "config-controls",
@@ -21569,6 +22044,7 @@ mod tests {
         fn decision(wire_threshold: Option<f64>, config_threshold: f64) -> scheduler::BaseDecision {
             let mut request = json!({
                 "kind": "transform",
+                "base_revision": "test-base",
                 "v": 2,
                 "serializer_profile": "owned-llmrunner",
                 "session_id": "threshold-wire",
@@ -21774,6 +22250,7 @@ mod tests {
     ) -> Value {
         json!({
             "kind": "transform",
+            "base_revision": "test-base",
             "v": 2,
             "serializer_profile": "owned-llmrunner",
             "session_id": "ses",
@@ -21808,13 +22285,26 @@ mod tests {
         call_transform_request_on_channel(handler, 7, request).await
     }
 
+    /// Number of wire `keep` operations that address the named source.
+    fn keeps_from(response: &Value, source: &str) -> usize {
+        response["operations"]
+            .as_array()
+            .map(|operations| {
+                operations
+                    .iter()
+                    .filter(|op| op["op"] == "keep" && op["source"] == source)
+                    .count()
+            })
+            .unwrap_or_default()
+    }
+
     async fn call_transform_request_on_channel(
         handler: &Handler,
         channel: u16,
         request: Value,
     ) -> Value {
         match handler
-            .handle_transform_for_test(test_route(channel), request)
+            .handle_transform_applied_for_test(test_route(channel), request)
             .await
         {
             PreparedOutcome::Response(bytes) => serde_json::from_slice(&bytes).unwrap(),
@@ -21824,7 +22314,7 @@ mod tests {
 
     async fn call_transform_outcome(handler: &Handler, request: Value) -> PreparedOutcome {
         handler
-            .handle_transform_for_test(test_route(7), request)
+            .handle_transform_applied_for_test(test_route(7), request)
             .await
     }
 
@@ -22174,10 +22664,25 @@ mod tests {
         let expected =
             serde_json::to_vec(&serde_json::to_value(response.clone()).unwrap()).unwrap();
         let request = transform_request(vec![ck("wire-byte-cache", 1, "hello")], 1, 100);
-        let PreparedOutcome::Response(actual) = respond_transform(&request, response) else {
+        let PreparedOutcome::Response(actual) = respond_transform(
+            &request,
+            response,
+            Some(RecipeInputs::Ck {
+                output_revision: Revision::parse("out-1").unwrap(),
+                previous: None,
+                retain: None,
+            }),
+        ) else {
             panic!("cached transform response failed to encode");
         };
-        assert_eq!(actual, expected);
+        // The wire carries the recipe, not the served array; a passthrough of one message is one keep.
+        let actual_value: Value = serde_json::from_slice(&actual).unwrap();
+        let mut expected_value: Value = serde_json::from_slice(&expected).unwrap();
+        expected_value["base_revision"] = json!(request.base_revision.as_ref().unwrap().as_str());
+        expected_value["output_revision"] = json!("out-1");
+        expected_value["operations"] =
+            json!([{"op": "keep", "source": "input", "start": 0, "count": 1}]);
+        assert_eq!(actual_value, expected_value);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -22453,12 +22958,19 @@ mod tests {
             absent["serializer_profile"] = json!(profile);
             let mut explicit_false = absent.clone();
             explicit_false["serve_native"] = json!(false);
-            let absent_response = call_transform_request(&handler, absent).await;
-            let explicit_response = call_transform_request(&handler, explicit_false).await;
+            let mut absent_response = call_transform_request(&handler, absent).await;
+            let mut explicit_response = call_transform_request(&handler, explicit_false).await;
+            // Every recomputation names a fresh output revision and may keep from the previous one.
+            for response in [&mut absent_response, &mut explicit_response] {
+                let object = response.as_object_mut().unwrap();
+                object.remove("output_revision");
+                object.remove("previous_output_revision");
+                object.remove("operations");
+            }
             assert_eq!(
                 serde_json::to_vec(&absent_response).unwrap(),
                 serde_json::to_vec(&explicit_response).unwrap(),
-                "profile {profile} changed the legacy response when serve_native=false"
+                "profile {profile} changed the response when serve_native=false"
             );
         }
     }
@@ -22541,6 +23053,50 @@ mod tests {
         assert_eq!(error_code(outcome), "serve_native_unsupported_profile");
     }
 
+    /// A retained CK output is a keep source only for the revision the request says it applied;
+    /// a request that advertises none receives a recipe that addresses the input alone.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ck_recipe_keeps_from_previous_only_when_the_request_applied_it() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let messages = vec![ck("m1", 1, "hello"), ck("m2", 2, "again")];
+        let first = call_transform_request(&handler, request(messages.clone())).await;
+        assert_eq!(first["status"], "ok", "{first}");
+        let applied = first["output_revision"].as_str().unwrap().to_owned();
+
+        let mut unapplied = request(messages.clone());
+        unapplied["base_revision"] = json!("test-base-unapplied");
+        let PreparedOutcome::Response(bytes) = handler
+            .handle_transform_for_test(test_route(7), unapplied)
+            .await
+        else {
+            panic!("a transform without a previous revision still answers");
+        };
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["status"], "ok", "{response}");
+        assert!(
+            response.get("previous_output_revision").is_none(),
+            "{response}"
+        );
+        assert_eq!(keeps_from(&response, "previous"), 0, "{response}");
+        let retained = response["output_revision"].as_str().unwrap().to_owned();
+        assert_ne!(retained, applied);
+
+        // Naming the revision the daemon retained reopens the previous source.
+        let mut applied_request = request(messages);
+        applied_request["base_revision"] = json!("test-base-applied");
+        applied_request["previous_output_revision"] = json!(retained);
+        let PreparedOutcome::Response(bytes) = handler
+            .handle_transform_for_test(test_route(7), applied_request)
+            .await
+        else {
+            panic!("a transform naming the retained revision answers");
+        };
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["previous_output_revision"], retained, "{response}");
+        assert!(keeps_from(&response, "previous") > 0, "{response}");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn serve_native_adds_opencode_messages_without_changing_wire_response() {
         let producer = Arc::new(ProducerState::default());
@@ -22573,7 +23129,8 @@ mod tests {
                 .iter()
                 .any(|message| { message["parts"][0]["synthetic"] == json!(true) })
         );
-        assert!(first.get("messages").is_some());
+        // Only the selected representation crosses the wire; the CK view stays daemon-internal.
+        assert!(first.get("messages").is_none());
 
         let second = call_transform_request(&handler, request).await;
         assert_eq!(second["status"], "ok");
@@ -22597,40 +23154,7 @@ mod tests {
     }
 
     #[test]
-    fn native_response_release_guard_full_serializes_without_frontier() {
-        let request = native_cache_request(
-            "native-release-guard",
-            vec![ck("guard-message", 1, "hello")],
-            vec![native_text_message("guard-message", "user", "hello")],
-            "guard-fingerprint",
-        );
-        let mut response = transform::TransformResponse::passthrough(
-            request
-                .messages
-                .iter()
-                .map(|message| message.ck.clone())
-                .collect(),
-            request.full_array_fingerprint.clone(),
-        );
-
-        finalize_native_messages_response(
-            &mut response,
-            &request,
-            1,
-            &BTreeMap::new(),
-            None,
-            None,
-            false,
-            None,
-            NativeAttachmentCacheStats::default(),
-        );
-
-        assert!(response.native_messages.is_some());
-        assert!(response.native_messages_delta.is_none());
-    }
-
-    #[test]
-    fn transform_response_seam_turns_native_omission_into_a_typed_refusal() {
+    fn transform_response_seam_turns_missing_recipe_into_a_typed_refusal() {
         let request = native_cache_request(
             "native-response-seam",
             vec![ck("seam-message", 1, "hello")],
@@ -22646,9 +23170,9 @@ mod tests {
             request.full_array_fingerprint.clone(),
         );
 
-        let outcome = respond_transform(&request, response);
+        let outcome = respond_transform(&request, response, None);
 
-        assert_eq!(error_code(outcome), "transform_native_response_omitted");
+        assert_eq!(error_code(outcome), "transform_recipe_omitted");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -22741,6 +23265,7 @@ mod tests {
     ) -> TransformRequest {
         serde_json::from_value(json!({
             "kind": "transform",
+            "base_revision": "test-base",
             "v": 2,
             "serializer_profile": "opencode-aisdk",
             "session_id": session_id,
@@ -22883,9 +23408,11 @@ mod tests {
             transition_consumed,
             native_delta_frontier.as_ref(),
             revert_epoch,
+            &Revision::parse("test-output").unwrap(),
             cache,
             mode,
-        );
+        )
+        .stats;
         (response, stats)
     }
 
@@ -23151,9 +23678,11 @@ mod tests {
             false,
             Some(&frontier),
             0,
+            &Revision::parse("test-output").unwrap(),
             cache,
             NativeCacheKeyMode::Normal,
-        );
+        )
+        .stats;
         assert_eq!(second_stats.delta_fallback_reason, None);
         assert_eq!(frontier.native_replace_from, 2);
         let native_values = second_request.native_messages.as_ref().unwrap();
@@ -23593,9 +24122,11 @@ mod tests {
             false,
             Some(&frontier),
             0,
+            &Revision::parse("test-output").unwrap(),
             &handler.native_attachments,
             NativeCacheKeyMode::Normal,
-        );
+        )
+        .stats;
         assert!(
             second_stats.reused_messages >= GIANT_MESSAGE_COUNT - 1,
             "{second_stats:?}"
@@ -24540,6 +25071,7 @@ mod tests {
             false,
             None,
             0,
+            &Revision::parse("test-output").unwrap(),
             &native,
             NativeCacheKeyMode::Normal,
         );
@@ -24627,10 +25159,8 @@ mod tests {
             response["native_messages"].is_array(),
             "a mismatched attachment snapshot must fall back to a full native serve: {response}"
         );
-        assert!(
-            response.get("native_messages_delta").is_none(),
-            "{response}"
-        );
+        // The encoded-prefix cache falls back to a full re-encode; the recipe layer still keeps
+        // equal messages from the output the client says it applied.
         assert_eq!(
             handler
                 .native_attachments
@@ -24660,8 +25190,9 @@ mod tests {
         )
         .await;
         assert_eq!(healed["status"], "ok", "{healed}");
-        assert!(healed["native_messages_delta"].is_object(), "{healed}");
-        assert!(healed.get("native_messages").is_none(), "{healed}");
+        assert!(healed["previous_output_revision"].is_string(), "{healed}");
+        assert!(keeps_from(&healed, "previous") > 0, "{healed}");
+        assert!(healed["native_messages"].is_array(), "{healed}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -24706,8 +25237,8 @@ mod tests {
             delta_request("evict-fp-0", "evict-fp-1", "one"),
         )
         .await;
-        assert!(pass_n["native_messages_delta"].is_object(), "{pass_n}");
-        assert!(pass_n.get("native_messages").is_none(), "{pass_n}");
+        assert!(pass_n["previous_output_revision"].is_string(), "{pass_n}");
+        assert!(keeps_from(&pass_n, "previous") > 0, "{pass_n}");
 
         handler.native_attachments.lock().unwrap().remove(session);
         let pass_n_plus_1 = call_transform_request_on_channel(
@@ -24721,9 +25252,10 @@ mod tests {
             "{pass_n_plus_1}"
         );
         assert!(
-            pass_n_plus_1.get("native_messages_delta").is_none(),
-            "{pass_n_plus_1}"
+            pass_n_plus_1.get("previous_output_revision").is_none(),
+            "an evicted cache leaves nothing to keep from: {pass_n_plus_1}"
         );
+        assert_eq!(keeps_from(&pass_n_plus_1, "previous"), 0);
         assert_eq!(
             handler
                 .native_attachments
@@ -24742,11 +25274,11 @@ mod tests {
         )
         .await;
         assert!(
-            pass_n_plus_2["native_messages_delta"].is_object(),
+            pass_n_plus_2["previous_output_revision"].is_string(),
             "{pass_n_plus_2}"
         );
         assert!(
-            pass_n_plus_2.get("native_messages").is_none(),
+            keeps_from(&pass_n_plus_2, "previous") > 0,
             "{pass_n_plus_2}"
         );
     }
@@ -24995,8 +25527,7 @@ mod tests {
             assistant_tool_call("call-project", 2),
             tool_result("result-project", 3, "first result"),
         ];
-        let mut cached_native_before = Vec::new();
-        for (index, handler) in [&cached_handler, &control_handler].into_iter().enumerate() {
+        for handler in [&cached_handler, &control_handler] {
             let initial = native_cache_request(
                 "ses",
                 initial_messages.clone(),
@@ -25006,12 +25537,6 @@ mod tests {
             let response =
                 call_transform_request(handler, serde_json::to_value(initial).unwrap()).await;
             assert_eq!(response["status"], "ok", "{response}");
-            if index == 0 {
-                cached_native_before = response["native_messages"]
-                    .as_array()
-                    .expect("initial native response array")
-                    .clone();
-            }
         }
 
         let changed_messages = vec![
@@ -25030,7 +25555,7 @@ mod tests {
             "replace_from": 2,
             "native_replace_from": 0,
         }));
-        let mut cached =
+        let cached =
             call_transform_request(&cached_handler, serde_json::to_value(delta).unwrap()).await;
         let full = call_transform_request(
             &control_handler,
@@ -25047,23 +25572,9 @@ mod tests {
         assert_eq!(full["status"], "ok", "{full}");
         assert_eq!(cached["timings"]["projection_reused_messages"], 2);
         assert_eq!(cached["timings"]["projection_projected_messages"], 1);
-        let native_delta = cached["native_messages_delta"]
-            .as_object()
-            .expect("cached response uses a native suffix");
-        assert_eq!(native_delta["after"], "projection-handler-fp-1");
-        let replace_from = native_delta["replace_from"]
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-            .expect("native suffix frontier");
-        let mut expanded_native = cached_native_before[..replace_from].to_vec();
-        expanded_native.extend(
-            native_delta["messages"]
-                .as_array()
-                .expect("native suffix messages")
-                .iter()
-                .cloned(),
-        );
-        cached["native_messages"] = Value::Array(expanded_native);
+        // The cached pass keeps its unchanged prefix from the previous output rather than resending it.
+        assert!(cached["previous_output_revision"].is_string(), "{cached}");
+        assert!(keeps_from(&cached, "previous") > 0, "{cached}");
         assert_eq!(full["timings"]["projection_reused_messages"], 0);
         assert_eq!(full["timings"]["projection_projected_messages"], 3);
 
@@ -25074,21 +25585,14 @@ mod tests {
             "boundary_id",
             "coverage_ordinal",
             "historian",
-            "messages",
             "native_messages",
         ] {
             assert_eq!(cached[field], full[field], "full-control drift in {field}");
         }
-        let result = cached["messages"]
-            .as_array()
-            .expect("CK response array")
-            .iter()
-            .find(|message| message["meta"]["harness_id"] == "result-project")
-            .expect("changed result message");
-        assert_eq!(
-            result["content"][0]["kind"]["output"]["kind"]["text"],
-            "changed result"
-        );
+        // The changed tool result reaches the native array through the tool arc it completes.
+        let native_bytes = serde_json::to_string(&cached["native_messages"]).unwrap();
+        assert!(native_bytes.contains("changed result"), "{native_bytes}");
+        assert!(!native_bytes.contains("first result"), "{native_bytes}");
         codec::opencode::assert_unique_tool_use_ids(
             cached["native_messages"]
                 .as_array()
@@ -25782,24 +26286,14 @@ mod tests {
             );
             assert!(prompt_ordinal_range(&third_prompt).unwrap().0 > 1);
             assert!(!third_prompt.contains("replayed synthetic carrier sentinel"));
-            let native = if let Some(suffix) = third_response.get("native_messages_delta") {
-                assert_eq!(suffix["after"], "todo-replay-delta");
-                let replace_from = suffix["replace_from"].as_u64().unwrap() as usize;
-                let mut native =
-                    response["native_messages"].as_array().unwrap()[..replace_from].to_vec();
-                native.extend(suffix["messages"].as_array().unwrap().iter().cloned());
-                native
-            } else {
-                third_response["native_messages"]
-                    .as_array()
-                    .unwrap()
-                    .clone()
-            };
+            let native = third_response["native_messages"]
+                .as_array()
+                .unwrap()
+                .clone();
             assert!(!native.is_empty());
             observations.push((
                 first_prompt,
                 third_prompt,
-                third_response["messages"].clone(),
                 serde_json::to_vec(&native).unwrap(),
             ));
             producer.block_output.store(false, Ordering::SeqCst);
@@ -25820,7 +26314,6 @@ mod tests {
             assistant_tool_call("call-ordinary", 2),
             tool_result("result-ordinary", 3, "ordinary"),
         ];
-        let mut initial_native = Vec::new();
         for handler in [&cached_handler, &control_handler] {
             let request = native_cache_request(
                 "ses",
@@ -25831,7 +26324,6 @@ mod tests {
             let response =
                 call_transform_request(handler, serde_json::to_value(request).unwrap()).await;
             assert_eq!(response["status"], "ok", "{response}");
-            initial_native.push(response["native_messages"].as_array().unwrap().clone());
         }
 
         let pair = injection::build_synthetic_todo_pair(
@@ -25883,14 +26375,9 @@ mod tests {
         .await;
         assert_eq!(cached["status"], "ok", "{cached}");
         assert_eq!(cached["timings"]["projection_reused_messages"], 1);
-        assert_eq!(cached["messages"], full["messages"]);
-        let native_delta = &cached["native_messages_delta"];
-        assert_eq!(native_delta["after"], "todo-normalize-fp-1");
-        let frontier = native_delta["replace_from"].as_u64().unwrap() as usize;
-        let mut expanded_native = initial_native[0][..frontier].to_vec();
-        expanded_native.extend(native_delta["messages"].as_array().unwrap().iter().cloned());
+        // The applied delta pass reconstructs the same native array the full pass emits.
         assert_eq!(
-            serde_json::to_vec(&expanded_native).unwrap(),
+            serde_json::to_vec(&cached["native_messages"]).unwrap(),
             serde_json::to_vec(&full["native_messages"]).unwrap()
         );
         let cached_epoch = cached_store.load("ses").unwrap().meta.revert_epoch;
@@ -26015,7 +26502,9 @@ mod tests {
             .meta
             .reasoning_cleared_through_tag
             .max(loaded.meta.reasoning_cleared_through_ordinal);
+        let served = served_output_for_test(&actual);
         let mut replay: transform::TransformResponse = serde_json::from_value(actual).unwrap();
+        replay.messages = Some(served);
         replay.native_messages = None;
         attach_native_messages_with_tags(
             &mut replay,
@@ -26129,6 +26618,7 @@ mod tests {
             &handler,
             json!({
                 "kind": "transform",
+                "base_revision": "test-base",
                 "v": 2,
                 "serializer_profile": "owned-llmrunner",
                 "session_id": child_session,
@@ -26182,8 +26672,9 @@ mod tests {
         let refused = call_transform_request(&handler, serde_json::to_value(delta).unwrap()).await;
 
         assert_eq!(refused["status"], "need_full_sync", "{refused}");
-        assert!(refused.get("native_messages").is_none(), "{refused}");
-        assert!(refused.get("native_messages_delta").is_none(), "{refused}");
+        // A refusal carries neither a recipe nor an output revision, so nothing can be applied.
+        assert!(refused.get("operations").is_none(), "{refused}");
+        assert!(refused.get("output_revision").is_none(), "{refused}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -26228,8 +26719,9 @@ mod tests {
                 .await;
 
         assert_eq!(refused["status"], "need_full_sync", "{refused}");
-        assert!(refused.get("native_messages").is_none(), "{refused}");
-        assert!(refused.get("native_messages_delta").is_none(), "{refused}");
+        // A refusal carries neither a recipe nor an output revision, so nothing can be applied.
+        assert!(refused.get("operations").is_none(), "{refused}");
+        assert!(refused.get("output_revision").is_none(), "{refused}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -26246,6 +26738,7 @@ mod tests {
         }
         let opencode_request = json!({
             "kind": "transform",
+            "base_revision": "test-base",
             "v": 2,
             "serializer_profile": "opencode-aisdk",
             "session_id": "ses",
@@ -26280,6 +26773,7 @@ mod tests {
             8,
             json!({
                 "kind": "transform",
+                "base_revision": "test-base",
                 "v": 2,
                 "serializer_profile": "claude-code-anthropic",
                 "tool_present": true,
@@ -26307,6 +26801,7 @@ mod tests {
             9,
             json!({
                 "kind": "transform",
+                "base_revision": "test-base",
                 "v": 2,
                 "serializer_profile": "pi",
                 "session_id": "pi-ses",
@@ -26346,6 +26841,7 @@ mod tests {
         let request_for = |messages: Vec<IngressMessage>, input_tokens: u64, context_limit: u64| {
             json!({
                 "kind": "transform",
+                "base_revision": "test-base",
                 "v": 2,
                 "serializer_profile": "claude-code-anthropic",
                 "tool_present": true,
@@ -26951,6 +27447,7 @@ mod tests {
             &handler,
             json!({
                 "kind": "transform",
+                "base_revision": "test-base",
                 "v": 2,
                 "serializer_profile": "opencode-aisdk",
                 "session_id": "ses",
@@ -29652,6 +30149,7 @@ mod tests {
             8,
             json!({
                 "kind": "transform",
+                "base_revision": "test-base",
                 "v": 2,
                 "serializer_profile": "owned-llmrunner",
                 "session_id": key_a,
@@ -29666,6 +30164,7 @@ mod tests {
             9,
             json!({
                 "kind": "transform",
+                "base_revision": "test-base",
                 "v": 2,
                 "serializer_profile": "owned-llmrunner",
                 "session_id": key_b,
@@ -29685,6 +30184,7 @@ mod tests {
             10,
             json!({
                 "kind": "transform",
+                "base_revision": "test-base",
                 "v": 2,
                 "serializer_profile": "owned-llmrunner",
                 "session_id": suffix_key,
@@ -30597,6 +31097,7 @@ mod tests {
     fn transform_page_scalar_digest_covers_non_array_fields_only() {
         let base = json!({
             "kind": "transform",
+            "base_revision": "test-base",
             "session_id": "ses",
             "render_config": "cfg-a",
             "messages": [{"role": "user"}],
@@ -36167,7 +36668,7 @@ mod tests {
         assert_eq!(transition["surface_state"], "transition");
         let tagged = call_transform_request(&handler, transform_request.clone()).await;
         assert_eq!(tagged["surface_state"], "active");
-        let tagged_bytes = serde_json::to_string(&tagged["messages"]).unwrap();
+        let tagged_bytes = serde_json::to_string(&tagged["native_messages"]).unwrap();
         assert!(tagged_bytes.contains("§1§ output 1"));
         assert!(tagged_bytes.contains("§2§ output 2"));
         assert!(tagged_bytes.contains("§3§ output 3"));
@@ -36192,7 +36693,7 @@ mod tests {
 
         transform_request["render_config"] = json!("cfg1");
         let drained = call_transform_request(&handler, transform_request).await;
-        let drained_bytes = serde_json::to_string(&drained["messages"]).unwrap();
+        let drained_bytes = serde_json::to_string(&drained["native_messages"]).unwrap();
         assert!(drained_bytes.contains("[dropped §1§]"));
         assert!(drained_bytes.contains("[dropped §2§]"));
         assert!(drained_bytes.contains("[dropped §3§]"));
@@ -38002,9 +38503,11 @@ mod tests {
 
         let scalar_runs_before = store.cache_state_scalar_runs();
         let runner = blocking_unit_tests::JoinedUnitRunner::default();
+        let emergency =
+            handler.test_client_prepare_request(request_with_usage(messages, 48_000, 50_000));
         let mut blocked = Box::pin(handler.handle_transform_with_runner(
             test_route(7),
-            request_with_usage(messages, 48_000, 50_000),
+            emergency.clone(),
             &runner,
         ));
         std::future::poll_fn(|cx| {
@@ -38024,7 +38527,7 @@ mod tests {
 
         producer.block_output.store(false, Ordering::SeqCst);
         producer.notify.notify_waiters();
-        let response = tool_body(blocked.await);
+        let response = tool_body(handler.test_client_apply(&emergency, blocked.await));
 
         assert!(response["action"].is_string());
         assert!(m0_text(&response).contains("autonomous summary"));
@@ -38193,12 +38696,14 @@ mod tests {
             },
         )
         .unwrap();
+        // The served array stays daemon-internal; compare it against the applied wire output.
+        let expected_messages = serde_json::to_value(expected.messages.as_deref()).unwrap();
         let expected_value = serde_json::to_value(expected).unwrap();
 
         let response = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
 
         assert_eq!(response["action"], expected_value["action"]);
-        assert_eq!(response["messages"], expected_value["messages"]);
+        assert_eq!(response["messages"], expected_messages);
         let state = store.load("ses").unwrap().meta.historian;
         assert_eq!(state.state, HistorianPhase::Idle);
         assert!(
@@ -38942,13 +39447,16 @@ mod tests {
         let messages = [ck("m1", 1, "seed block + new_messages payload")];
         let req = serde_json::json!({
             "kind": "transform",
+            "base_revision": "test-base",
             "v": 2,
             "serializer_profile": "owned-llmrunner",
             "session_id": session,
             "render_config": "cfg0",
             "messages": messages.iter().map(|m| serde_json::to_value(m).unwrap()).collect::<Vec<_>>(),
         });
-        let out = handler.handle_transform_for_test(test_route(9), req).await;
+        let out = handler
+            .handle_transform_applied_for_test(test_route(9), req)
+            .await;
         let PreparedOutcome::Response(bytes) = out else {
             panic!("pass-through must be a response");
         };

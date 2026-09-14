@@ -105,6 +105,21 @@ afterEach(() => {
     tempDirs.length = 0;
 });
 
+/** A daemon answer that inserts `output` whole, bound to the transform body's base revision. */
+function recipeResponse(
+    body: unknown,
+    output: readonly unknown[],
+    extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+    const request = body as Record<string, unknown>;
+    return {
+        ...extra,
+        base_revision: request.base_revision,
+        output_revision: `out-${crypto.randomUUID()}`,
+        operations: output.length === 0 ? [] : [{ op: "insert", values: output }],
+    };
+}
+
 function createFakeModuleClient(
     respond: (call: RecordedCall) => unknown = () => ({ ok: true }),
 ): FakeModuleClient {
@@ -179,7 +194,7 @@ describe("eidnara hook", () => {
                 info: { id: "approved" },
                 parts: [{ type: "text", text: "result" }],
             };
-            const fake = createFakeModuleClient(() => ({ native_messages: [approved] }));
+            const fake = createFakeModuleClient(({ body }) => recipeResponse(body, [approved]));
             const hook = requireHook(
                 createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
             );
@@ -210,7 +225,7 @@ describe("eidnara hook", () => {
             it(`rejects ${unsupported} at the actual ${entry} entry without triggering reads`, async () => {
                 useTempDataHome("hook-source-traps-");
                 const sessionId = `ses-${entry}-${unsupported}`;
-                const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+                const fake = createFakeModuleClient(({ body }) => recipeResponse(body, []));
                 const client = createClientMock();
                 const hook = requireHook(
                     createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
@@ -277,7 +292,7 @@ describe("eidnara hook", () => {
                 info: { id: "returned", sessionID: sessionId, role: "user" },
                 parts: [{ type: "text", text: "transformed" }],
             };
-            const fake = createFakeModuleClient(() => ({ native_messages: [returned] }));
+            const fake = createFakeModuleClient(({ body }) => recipeResponse(body, [returned]));
             const hook = requireHook(
                 createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
             );
@@ -300,7 +315,7 @@ describe("eidnara hook", () => {
 
     it("logs a byte-budget decline at warn before preflight", async () => {
         useTempDataHome("hook-source-limit-");
-        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const fake = createFakeModuleClient(({ body }) => recipeResponse(body, []));
         const client = createClientMock();
         const hook = requireHook(
             createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
@@ -334,7 +349,7 @@ describe("eidnara hook", () => {
         const messages = installOneRawMessage(sessionId);
         const member = messages[0]!;
         const approved = { info: { id: "approved" }, parts: [{ type: "text", text: "result" }] };
-        const fake = createFakeModuleClient(() => ({ native_messages: [approved] }));
+        const fake = createFakeModuleClient(({ body }) => recipeResponse(body, [approved]));
         const hook = requireHook(
             createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
         );
@@ -361,7 +376,7 @@ describe("eidnara hook", () => {
         useTempDataHome("hook-source-directory-");
         const sessionId = "ses-source-directory";
         const messages = installOneRawMessage(sessionId);
-        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const fake = createFakeModuleClient(({ body }) => recipeResponse(body, []));
         const client = createClientMock();
         const started = Promise.withResolvers<void>();
         const release = Promise.withResolvers<void>();
@@ -404,7 +419,7 @@ describe("eidnara hook", () => {
             return directory.promise;
         });
         client.session.get = get as never;
-        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const fake = createFakeModuleClient(({ body }) => recipeResponse(body, []));
         const hook = requireHook(
             createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
         );
@@ -469,7 +484,7 @@ describe("eidnara hook", () => {
                 data: [{ name: "build", permission: { todowrite: "deny" } }],
             }));
             client.app.agents = agents as never;
-            const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+            const fake = createFakeModuleClient(({ body }) => recipeResponse(body, []));
             const hook = requireHook(
                 createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
             );
@@ -543,7 +558,7 @@ describe("eidnara hook", () => {
         const client = createClientMock();
         const agents = mock(async () => ({ data: [{ name: "build" }] }));
         client.app.agents = agents as never;
-        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const fake = createFakeModuleClient(({ body }) => recipeResponse(body, []));
         const hook = requireHook(
             createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
         );
@@ -565,7 +580,7 @@ describe("eidnara hook", () => {
         useTempDataHome("hook-permission-unavailable-");
         const sessionId = "ses-permission-unavailable";
         clearToolPermissionDenied(sessionId);
-        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const fake = createFakeModuleClient(({ body }) => recipeResponse(body, []));
         const hook = requireHook(
             createEidnaraHook(createDeps({ client: undefined, rustModeModuleClient: fake.client })),
         );
@@ -598,10 +613,9 @@ describe("eidnara hook", () => {
                 })),
             }));
             client.app.agents = agents as never;
-            const fake = createFakeModuleClient(() => ({
-                native_messages: [],
-                result: { armed: false },
-            }));
+            const fake = createFakeModuleClient(({ body }) =>
+                recipeResponse(body, [], { result: { armed: false } }),
+            );
             const hook = requireHook(
                 createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
             );
@@ -675,7 +689,7 @@ describe("eidnara hook", () => {
             return response.promise as never;
         });
         client.app.agents = agents as never;
-        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const fake = createFakeModuleClient(({ body }) => recipeResponse(body, []));
         const hook = requireHook(
             createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
         );
@@ -720,7 +734,7 @@ describe("eidnara hook", () => {
             const agents = mock(async () => ({ data: agent ? [{ name: agent }] : [] }));
             client.app.agents = agents as never;
             const resolver = spyOn(permissionAvailability, "todowritePermissionDenied");
-            const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+            const fake = createFakeModuleClient(({ body }) => recipeResponse(body, []));
             const hook = requireHook(
                 createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
             );
@@ -1022,9 +1036,9 @@ describe("eidnara hook", () => {
 
     it("skips the transform for a hidden eidnara- child restored after a restart", async () => {
         useTempDataHome("hook-internal-child-rehydrate-");
-        const fake = createFakeModuleClient(({ method }) =>
+        const fake = createFakeModuleClient(({ method, body }) =>
             method === "transform"
-                ? { decision: "PASSTHROUGH", native_messages: [] }
+                ? recipeResponse(body, [], { decision: "PASSTHROUGH" })
                 : { ok: true },
         );
         const liveSessionState = createLiveSessionState();
@@ -1053,9 +1067,9 @@ describe("eidnara hook", () => {
 
     it("treats a restored child session as a subagent from the host's parentID", async () => {
         useTempDataHome("hook-subagent-rehydrate-");
-        const fake = createFakeModuleClient(({ method }) =>
+        const fake = createFakeModuleClient(({ method, body }) =>
             method === "transform"
-                ? { decision: "PASSTHROUGH", native_messages: [] }
+                ? recipeResponse(body, [], { decision: "PASSTHROUGH" })
                 : { ok: true },
         );
         const liveSessionState = createLiveSessionState();
@@ -1276,9 +1290,9 @@ describe("eidnara hook", () => {
 
     it("routes the transform by the session's own directory and skips hidden eidnara- children", async () => {
         useTempDataHome("hook-transform-route-");
-        const fake = createFakeModuleClient(({ method }) =>
+        const fake = createFakeModuleClient(({ method, body }) =>
             method === "transform"
-                ? { decision: "PASSTHROUGH", native_messages: [] }
+                ? recipeResponse(body, [], { decision: "PASSTHROUGH" })
                 : { ok: true },
         );
         const liveSessionState = createLiveSessionState();
@@ -1307,9 +1321,9 @@ describe("eidnara hook", () => {
 
     it("skips a transform for a session deleted while its directory read is pending", async () => {
         useTempDataHome("hook-transform-deleted-race-");
-        const fake = createFakeModuleClient(({ method }) =>
+        const fake = createFakeModuleClient(({ method, body }) =>
             method === "transform"
-                ? { decision: "PASSTHROUGH", native_messages: [] }
+                ? recipeResponse(body, [], { decision: "PASSTHROUGH" })
                 : { ok: true },
         );
         const liveSessionState = createLiveSessionState();
@@ -1389,9 +1403,9 @@ describe("eidnara hook", () => {
 
     it("clears the transform session and prompt state on session.deleted", async () => {
         useTempDataHome("hook-session-deleted-");
-        const fake = createFakeModuleClient(({ method }) =>
+        const fake = createFakeModuleClient(({ method, body }) =>
             method === "transform"
-                ? { decision: "PASSTHROUGH", native_messages: [] }
+                ? recipeResponse(body, [], { decision: "PASSTHROUGH" })
                 : { ok: true },
         );
         const liveSessionState = createLiveSessionState();
@@ -1710,7 +1724,7 @@ it("sends a serialized body carrier from the live transform hook", async () => {
     const { serializedJsonText } = await import("../../shared/host-client/serialized-json-body");
     useTempDataHome("hook-serialized-body-");
     const sessionId = "hook-serialized-body";
-    const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+    const fake = createFakeModuleClient(({ body }) => recipeResponse(body, []));
     const hook = requireHook(createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })));
     const messages = installOneRawMessage(sessionId);
     await hook["experimental.chat.messages.transform"]({}, { messages });

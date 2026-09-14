@@ -46,7 +46,12 @@ afterEach(() => {
     expect(defaultTransformCaptureAdmission.chargedBytes).toBe(0);
 });
 
-type RawRow = { id: string; timeCreated: number; contributesOrdinal: true; hasValidInfo: true };
+type RawRow = {
+    id: string;
+    timeCreated: number;
+    contributesOrdinal: true;
+    hasValidInfo: true;
+};
 
 function rawRows(count: number): RawRow[] {
     return Array.from({ length: count }, (_, index) => ({
@@ -106,6 +111,37 @@ function makeDeps(): RustModeTransformDeps {
     };
 }
 
+let recipeOutputCounter = 0;
+
+/**
+ * A daemon answer that inserts `output` whole, bound to the request's base revision. Tests that
+ * exercise `previous` keeps build their operations by hand.
+ */
+function recipeResponse(
+    request: Record<string, unknown>,
+    output: readonly unknown[],
+    extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+    recipeOutputCounter += 1;
+    return {
+        ...extra,
+        base_revision: request.base_revision,
+        output_revision: `out-${recipeOutputCounter}`,
+        operations: output.length === 0 ? [] : [{ op: "insert", values: output }],
+    };
+}
+
+/** For a response resolved after the fact: binds the recipe to the most recent transform body. */
+function recipeForLast(
+    bodies: readonly Record<string, unknown>[],
+    output: readonly unknown[],
+    extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+    const request = bodies.at(-1);
+    if (!request) throw new Error("no transform body was recorded");
+    return recipeResponse(request, output, extra);
+}
+
 type RecordedCall = {
     method: string;
     body: unknown;
@@ -128,7 +164,9 @@ function recordingClient(
             calls.push({ method, body, generationSensitive, signal });
             if (method !== "transform") {
                 return (
-                    respondDisposition?.(method, body as Record<string, unknown>) ?? { ok: true }
+                    respondDisposition?.(method, body as Record<string, unknown>) ?? {
+                        ok: true,
+                    }
                 );
             }
             const request = body as Record<string, unknown>;
@@ -164,7 +202,11 @@ function installAvailabilityDb(sessionId: string, firstUserTools?: Record<string
                 sessionId,
                 1,
                 1,
-                JSON.stringify({ id: "availability-user", role: "user", tools: firstUserTools }),
+                JSON.stringify({
+                    id: "availability-user",
+                    role: "user",
+                    tools: firstUserTools,
+                }),
             );
     }
     closeQuietly(opencodeDb);
@@ -269,21 +311,30 @@ describe("Rust mode transform request", () => {
                 decision: "HARD",
                 materialize_reason: "first_render",
                 served_from: "transform",
-                timings: { handler_total: 5, total: 4, native_cache_encoded_messages: 1 },
+                timings: {
+                    handler_total: 5,
+                    total: 4,
+                    native_cache_encoded_messages: 1,
+                },
             },
             {
                 decision: "SOFT+",
                 served_from: "cache",
-                timings: { handler_total: 3, total: 2, native_cache_reused_messages: 1 },
+                timings: {
+                    handler_total: 3,
+                    total: 2,
+                    native_cache_reused_messages: 1,
+                },
             },
         ];
-        const { client } = recordingClient((_body, index) => ({
-            ...responses[index],
-            native_messages: makeMessages(sessionId),
-        }));
+        const { client } = recordingClient((request, index) =>
+            recipeResponse(request, makeMessages(sessionId), responses[index]),
+        );
         const logSpy = spyOn(logger.sessionLog, "debug");
         try {
-            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const transform = createRustModeTransform(makeDeps(), {
+                moduleClient: client,
+            });
             for (let index = 0; index < 2; index += 1) {
                 const messages = makeMessages(sessionId);
                 await transform.run(sessionId, { messages: [...messages] });
@@ -309,8 +360,12 @@ describe("Rust mode transform request", () => {
         installAvailabilityDb(sessionId, {});
         installRawRows(sessionId, rawRows(1));
         const native = [{ role: "user", parts: [{ type: "text", text: "module output" }] }];
-        const { client, bodies, calls } = recordingClient(() => ({ native_messages: native }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, bodies, calls } = recordingClient((request) =>
+            recipeResponse(request, native),
+        );
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const messages = makeMessages(sessionId);
         const output = { messages: messages as unknown[] };
 
@@ -355,9 +410,9 @@ describe("Rust mode transform request", () => {
         const sessionId = `rust-prompt-surface-${Date.now()}`;
         installAvailabilityDb(sessionId, {});
         installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient(() => ({
-            native_messages: makeMessages(sessionId),
-        }));
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, makeMessages(sessionId)),
+        );
         const deps = makeDeps();
         deps.promptSurface = {
             default: "full",
@@ -391,7 +446,9 @@ describe("Rust mode transform request", () => {
             prompt_surface_preset: "light",
             prompt_surface_model_key: "openai/gpt-5.6-sol",
             prompt_surface_config_identity: promptSurfaceConfigIdentity(deps.promptSurface),
-            prompt_surface_tool_descriptions: { ctx_search: "Search the project memory index." },
+            prompt_surface_tool_descriptions: {
+                ctx_search: "Search the project memory index.",
+            },
             prompt_surface_guidance_override: "## Eidnara\n\nTrusted user guidance.",
         });
     });
@@ -400,8 +457,10 @@ describe("Rust mode transform request", () => {
         const sessionId = `rust-availability-provisional-${Date.now()}`;
         installAvailabilityDb(sessionId);
         installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const messages: MessageLike[] = [
             {
                 info: { id: "m-1", role: "assistant", sessionID: sessionId },
@@ -420,10 +479,14 @@ describe("Rust mode transform request", () => {
         const sessionId = `rust-ctx-reduce-from-messages-${Date.now()}`;
         installAvailabilityDb(sessionId);
         installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const messages = makeMessages(sessionId);
-        (messages[0]!.info as { tools?: Record<string, boolean> }).tools = { ctx_reduce: true };
+        (messages[0]!.info as { tools?: Record<string, boolean> }).tools = {
+            ctx_reduce: true,
+        };
 
         await transform.run(sessionId, { messages: messages as unknown[] });
 
@@ -435,7 +498,7 @@ describe("Rust mode transform request", () => {
         const sessionId = `rust-usage-absent-${Date.now()}`;
         installAvailabilityDb(sessionId, {});
         installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
+        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
         const deps = makeDeps();
         const transform = createRustModeTransform(deps, { moduleClient: client });
 
@@ -463,7 +526,7 @@ describe("Rust mode transform request", () => {
         const sessionId = `rust-todo-permission-denied-${Date.now()}`;
         installAvailabilityDb(sessionId, {});
         installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
+        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
         const deps = makeDeps();
         const agents = mock(async () => ({
             data: [{ name: "build", permission: { todowrite: "deny" } }],
@@ -471,7 +534,9 @@ describe("Rust mode transform request", () => {
         deps.client = {
             app: { agents },
             session: {
-                get: async () => ({ data: { agent: "build", directory: "/tmp/project" } }),
+                get: async () => ({
+                    data: { agent: "build", directory: "/tmp/project" },
+                }),
             },
         } as never;
         const transform = createRustModeTransform(deps, { moduleClient: client });
@@ -489,13 +554,15 @@ describe("Rust mode transform request", () => {
         const sessionId = `rust-todo-permission-hang-${Date.now()}`;
         installAvailabilityDb(sessionId, {});
         installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
+        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
         const deps = makeDeps();
         const agents = mock(() => new Promise<never>(() => {}));
         deps.client = {
             app: { agents },
             session: {
-                get: async () => ({ data: { agent: "build", directory: "/tmp/project" } }),
+                get: async () => ({
+                    data: { agent: "build", directory: "/tmp/project" },
+                }),
             },
         } as never;
         const transform = createRustModeTransform(deps, { moduleClient: client });
@@ -517,17 +584,23 @@ describe("Rust mode transform request", () => {
     it("logs a synthetic-turn cascade once after three consecutive synthetic turns", async () => {
         const sessionId = `rust-synthetic-cascade-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient(() => ({
-            native_messages: [{ role: "assistant", parts: [] }],
-        }));
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, [{ role: "assistant", parts: [] }]),
+        );
         const logSpy = spyOn(logger.sessionLog, "warn");
         try {
-            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const transform = createRustModeTransform(makeDeps(), {
+                moduleClient: client,
+            });
             for (let turn = 1; turn <= 4; turn += 1) {
                 const input = [
                     ...makeMessages(sessionId),
                     {
-                        info: { id: `synthetic-${turn}`, role: "user", sessionID: sessionId },
+                        info: {
+                            id: `synthetic-${turn}`,
+                            role: "user",
+                            sessionID: sessionId,
+                        },
                         parts: [{ type: "text", text: "synthetic turn", synthetic: true }],
                     },
                 ];
@@ -565,9 +638,13 @@ describe("Rust mode transform transport", () => {
                 retryStarted = true;
                 return { status: "need_full_sync" };
             }
-            return { native_messages: native };
+            return page.transform_page_complete === false
+                ? { staged: true }
+                : recipeResponse(page, native);
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const output = { messages: messages as unknown[] };
         await transform.run(sessionId, output);
 
@@ -614,12 +691,17 @@ describe("Rust mode transform transport", () => {
                     );
                 }
                 return page.transform_page_complete === true
-                    ? { decision: "HARD", served_from: "transform", native_messages: native }
+                    ? recipeResponse(page, native, {
+                          decision: "HARD",
+                          served_from: "transform",
+                      })
                     : { staged: true };
             });
             const logSpy = spyOn(logger.sessionLog, "warn");
             try {
-                const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+                const transform = createRustModeTransform(makeDeps(), {
+                    moduleClient: client,
+                });
                 const output = { messages: messages as unknown[] };
                 await transform.run(sessionId, output);
 
@@ -655,12 +737,17 @@ describe("Rust mode transform transport", () => {
                 };
             }
             return page.transform_page_complete === true
-                ? { decision: "HARD", served_from: "transform", native_messages: native }
+                ? recipeResponse(page, native, {
+                      decision: "HARD",
+                      served_from: "transform",
+                  })
                 : { staged: true };
         });
         const logSpy = spyOn(logger.sessionLog, "warn");
         try {
-            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const transform = createRustModeTransform(makeDeps(), {
+                moduleClient: client,
+            });
             const output = { messages: messages as unknown[] };
             await transform.run(sessionId, output);
 
@@ -685,10 +772,9 @@ describe("Rust mode transform transport", () => {
         installRawRows(sessionId, rawRows(1));
         const deleteSession = mock(async () => {});
         const closeSession = mock(() => {});
-        const { client, bodies } = recordingClient(() => ({
-            decision: "PASSTHROUGH",
-            native_messages: [],
-        }));
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, [], { decision: "PASSTHROUGH" }),
+        );
         client.deleteSession = deleteSession;
         client.closeSession = closeSession;
         const deps = makeDeps();
@@ -725,10 +811,12 @@ describe("Rust mode transform transport", () => {
             events.push(`close:${activeRoute ?? "none"}`);
             activeRoute = null;
         });
-        const { client } = recordingClient(() => ({ native_messages: [] }));
+        const { client } = recordingClient((request) => recipeResponse(request, []));
         client.deleteSession = deleteSession;
         client.closeSession = closeSession;
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
 
         transform.clearSession(sessionId);
         await Bun.sleep(0);
@@ -752,7 +840,7 @@ describe("Rust mode transform transport", () => {
             },
         } as never;
         const deleteSession = mock(async () => {});
-        const { client, calls } = recordingClient(() => ({ native_messages: [] }));
+        const { client, calls } = recordingClient((request) => recipeResponse(request, []));
         client.deleteSession = deleteSession;
         const logSpy = spyOn(logger.sessionLog, "debug");
         try {
@@ -782,7 +870,7 @@ describe("Rust mode transform transport", () => {
         const sessionId = `rust-clear-before-pass-${Date.now()}`;
         const deleteSession = mock(async () => {});
         const closeSession = mock(() => {});
-        const { client } = recordingClient(() => ({ native_messages: [] }));
+        const { client } = recordingClient((request) => recipeResponse(request, []));
         client.deleteSession = deleteSession;
         client.closeSession = closeSession;
         const deps = makeDeps();
@@ -804,14 +892,18 @@ describe("Rust mode transform transport", () => {
         const sessionId = `rust-decline-after-dispatch-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
         let live: unknown[] | undefined;
-        const { client, bodies, calls } = recordingClient(() => {
+        const { client, bodies, calls } = recordingClient((request) => {
             // The daemon committed its snapshot for this request; the host replaces a member before the response is applied.
             if (live) live[0] = makeMessages(sessionId)[0];
-            return { native_messages: [] };
+            return recipeResponse(request, []);
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         for (let pass = 0; pass < 2; pass += 1) {
-            await transform.run(sessionId, { messages: [...makeMessages(sessionId)] });
+            await transform.run(sessionId, {
+                messages: [...makeMessages(sessionId)],
+            });
         }
         expect(bodies[1]?.tail_delta).toBeDefined();
 
@@ -835,8 +927,10 @@ describe("Rust mode transform transport", () => {
     it("forces a full send after invalidateWireState", async () => {
         const sessionId = `rust-invalidate-wire-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         for (let pass = 0; pass < 2; pass += 1) {
             const input = makeMessages(sessionId);
             await transform.run(sessionId, { messages: [...input] });
@@ -862,16 +956,19 @@ describe("Rust mode transform transport", () => {
         const bodies: Record<string, unknown>[] = [];
         const client: RustModeModuleClient = {
             call: async ({ body }) => {
-                bodies.push(body as Record<string, unknown>);
+                const request = body as Record<string, unknown>;
+                bodies.push(request);
                 if (bodies.length === 2) {
                     await new Promise<void>((resolve) => {
                         release = resolve;
                     });
                 }
-                return { native_messages: [] };
+                return recipeResponse(request, []);
             },
         };
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const first = makeMessages(sessionId);
         await transform.run(sessionId, { messages: [...first] });
 
@@ -906,9 +1003,9 @@ describe("Rust mode transform transport", () => {
             },
         } as never;
         deps.sessionMetadataReadStateBySession = new Map();
-        const { client, bodies } = recordingClient((request) => ({
-            native_messages: request.native_messages,
-        }));
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, request.native_messages as unknown[]),
+        );
         const transform = createRustModeTransform(deps, { moduleClient: client });
         const firstInput = makeMessages(sessionId);
         const firstOutput = { messages: [...firstInput] as unknown[] };
@@ -943,12 +1040,14 @@ describe("Rust mode transform transport", () => {
         installRawRows(sessionId, rawRows(1));
         const started = Promise.withResolvers<void>();
         const response = Promise.withResolvers<unknown>();
-        const { client, calls } = recordingClient((_request, index) => {
-            if (index > 0) return { native_messages: [] };
+        const { client, bodies, calls } = recordingClient((request, index) => {
+            if (index > 0) return recipeResponse(request, []);
             started.resolve();
             return response.promise;
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const firstInput = makeMessages(sessionId);
         const firstOutput = { messages: [...firstInput] as unknown[] };
         const firstArray = firstOutput.messages;
@@ -962,10 +1061,11 @@ describe("Rust mode transform transport", () => {
         const secondMember = secondInput[0];
         await transform.run(sessionId, secondOutput);
 
-        response.resolve({
-            native_messages: [{ info: { id: "superseded" }, parts: [] }],
-            note_deliveries: [{ transform_pass_id: "pass-superseded" }],
-        });
+        response.resolve(
+            recipeForLast(bodies, [{ info: { id: "superseded" }, parts: [] }], {
+                note_deliveries: [{ transform_pass_id: "pass-superseded" }],
+            }),
+        );
         await first;
 
         expect(firstOutput.messages).toBe(firstArray);
@@ -985,15 +1085,18 @@ describe("Rust mode transform transport", () => {
         const bodies: Record<string, unknown>[] = [];
         const client: RustModeModuleClient = {
             call: async ({ body }) => {
-                bodies.push(body as Record<string, unknown>);
+                const request = body as Record<string, unknown>;
+                bodies.push(request);
                 if (bodies.length === 2) {
                     started.resolve();
                     await release.promise;
                 }
-                return { native_messages: [] };
+                return recipeResponse(request, []);
             },
         };
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const first = makeMessages(sessionId);
         await transform.run(sessionId, { messages: [...first] });
 
@@ -1020,11 +1123,12 @@ describe("Rust mode transform transport", () => {
     it("re-primes persisted ordinals after the continuation base when the memo is reset", async () => {
         const sessionId = `rust-continuation-reprime-${Date.now()}`;
         installRawRows(sessionId, rawRows(2));
-        const { client, bodies } = recordingClient(() => ({
-            native_messages: [],
-            ordinal_continuation_base: 10,
-        }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, [], { ordinal_continuation_base: 10 }),
+        );
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const ordinalsOf = (body: Record<string, unknown> | undefined): number[] =>
             (body?.messages as Array<{ ordinal: number }>).map((message) => message.ordinal);
 
@@ -1084,8 +1188,8 @@ describe("Rust mode transform transport", () => {
     it("discards a partly shifted ordinal memo before host publication when shifting throws", async () => {
         const sessionId = "rust-continuation-shift-failure";
         installRawRows(sessionId, rawRows(2));
-        const { client, calls } = recordingClient((_request, index) => ({
-            native_messages: [],
+        const { client, calls } = recordingClient((request, index) => ({
+            ...recipeResponse(request, []),
             ...(index > 0
                 ? {
                       ordinal_continuation_base: 10,
@@ -1093,7 +1197,9 @@ describe("Rust mode transform transport", () => {
                   }
                 : {}),
         }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const messages = rowMessages(sessionId, rawRows(2));
         await transform.run(sessionId, { messages: [...messages] });
         const priorMemo = transform.getState(sessionId).ordinals;
@@ -1144,12 +1250,14 @@ describe("Rust mode transform transport", () => {
     it("rejects ordinal continuation overflow before publication and recovers on a valid response", async () => {
         const sessionId = "rust-continuation-overflow";
         installRawRows(sessionId, rawRows(1));
-        const { client, calls } = recordingClient((_request, index) => ({
-            native_messages: [],
+        const { client, calls } = recordingClient((request, index) => ({
+            ...recipeResponse(request, []),
             ordinal_continuation_base: index === 0 ? Number.MAX_SAFE_INTEGER : 10,
             note_deliveries: [{ transform_pass_id: `overflow-${index}` }],
         }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const input = makeMessages(sessionId);
         const output = { messages: [...input] as unknown[] };
         const array = output.messages;
@@ -1172,13 +1280,16 @@ describe("Rust mode transform transport", () => {
         const bodiesBySession = new Map<string, Record<string, unknown>[]>();
         const client: RustModeModuleClient = {
             call: async ({ sessionId, body }) => {
+                const request = body as Record<string, unknown>;
                 const list = bodiesBySession.get(sessionId) ?? [];
-                list.push(body as Record<string, unknown>);
+                list.push(request);
                 bodiesBySession.set(sessionId, list);
-                return { native_messages: [] };
+                return recipeResponse(request, []);
             },
         };
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         for (let index = 0; index <= capacity; index += 1) {
             const sessionId = sessionIdAt(index);
             installRawRows(sessionId, rawRows(1));
@@ -1202,11 +1313,12 @@ describe("Rust mode transform transport", () => {
         const sessionId = `rust-wire-paged-delta-${Date.now()}`;
         const rows = rawRows(3);
         installRawRows(sessionId, rows);
-        const { client, bodies } = recordingClient(() => ({
-            decision: "PASSTHROUGH",
-            native_messages: [],
-        }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, [], { decision: "PASSTHROUGH" }),
+        );
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const buildMessages = () =>
             rowMessages(sessionId, rows, (row) =>
                 row.id === "m-4" ? `large delta ${"x".repeat(350 * 1024)}` : `message ${row.id}`,
@@ -1214,7 +1326,12 @@ describe("Rust mode transform transport", () => {
 
         const initial = buildMessages();
         await transform.run(sessionId, { messages: [...initial] });
-        rows.push({ id: "m-4", timeCreated: 4, contributesOrdinal: true, hasValidInfo: true });
+        rows.push({
+            id: "m-4",
+            timeCreated: 4,
+            contributesOrdinal: true,
+            hasValidInfo: true,
+        });
         const appended = buildMessages();
         await transform.run(sessionId, { messages: [...appended] });
 
@@ -1238,8 +1355,8 @@ describe("Rust mode transform transport", () => {
     });
 });
 
-describe("native output delta", () => {
-    it("applies a native_messages_delta in place and acks its note deliveries", async () => {
+describe("recipe application", () => {
+    it("keeps from the applied previous output and the submitted input, then acks its note deliveries", async () => {
         const sessionId = `rust-native-delta-ack-${Date.now()}`;
         const rows = rawRows(1);
         installRawRows(sessionId, rows);
@@ -1247,32 +1364,50 @@ describe("native output delta", () => {
             { info: { id: "m0" }, parts: [{ type: "text", text: "stable" }] },
             { info: { id: "m-1" }, parts: [{ type: "text", text: "old" }] },
         ];
-        const suffix = [
-            { info: { id: "m-1" }, parts: [{ type: "text", text: "new" }] },
-            { info: { id: "m-2" }, parts: [{ type: "text", text: "tail" }] },
-        ];
-        const { client, bodies, calls } = recordingClient((_request, index) =>
-            index === 0
-                ? { native_messages: first }
-                : {
-                      native_messages_delta: {
-                          after: bodies[0]?.full_array_fingerprint,
-                          replace_from: 1,
-                          messages: suffix,
-                      },
-                      note_deliveries: [{ transform_pass_id: "pass-1" }],
-                  },
-        );
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const inserted = {
+            info: { id: "m-1" },
+            parts: [{ type: "text", text: "new" }],
+        };
+        let firstOutputRevision: unknown;
+        const { client, bodies, calls } = recordingClient((request, index) => {
+            if (index === 0) {
+                const response = recipeResponse(request, first);
+                firstOutputRevision = response.output_revision;
+                return response;
+            }
+            return {
+                base_revision: request.base_revision,
+                output_revision: "out-second",
+                previous_output_revision: request.previous_output_revision,
+                operations: [
+                    { op: "keep", source: "previous", start: 0, count: 1 },
+                    { op: "insert", values: [inserted] },
+                    { op: "keep", source: "input", start: 1, count: 1 },
+                ],
+                note_deliveries: [{ transform_pass_id: "pass-1" }],
+            };
+        });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const initial = rowMessages(sessionId, rows);
         await transform.run(sessionId, { messages: [...initial] });
-        rows.push({ id: "m-2", timeCreated: 2, contributesOrdinal: true, hasValidInfo: true });
+        rows.push({
+            id: "m-2",
+            timeCreated: 2,
+            contributesOrdinal: true,
+            hasValidInfo: true,
+        });
         const appended = rowMessages(sessionId, rows);
         const output = { messages: [...appended] as unknown[] };
         await transform.run(sessionId, output);
 
-        expect(output.messages).toEqual([first[0], ...suffix]);
+        // The second request advertises the first pass's applied output as its previous source.
+        expect(typeof firstOutputRevision).toBe("string");
+        expect(bodies[1]?.previous_output_revision).toBe(firstOutputRevision);
+        expect(output.messages).toEqual([first[0], inserted, appended[1]]);
         expect(output.messages[0]).toBe(first[0]);
+        expect(output.messages[2]).toBe(appended[1]);
         expect(calls.filter((call) => call.method !== "transform")).toEqual([
             {
                 method: "transform.ack",
@@ -1295,8 +1430,8 @@ describe("native output delta", () => {
         let maxActiveCalls = 0;
         const native = [{ role: "assistant", parts: [] }];
         const { client, calls } = recordingClient(
-            () => ({
-                native_messages: native,
+            (request) => ({
+                ...recipeResponse(request, native),
                 note_deliveries: [
                     { transform_pass_id: "pass-1" },
                     { transform_pass_id: "pass-2" },
@@ -1317,7 +1452,9 @@ describe("native output delta", () => {
         );
         const logSpy = spyOn(logger.sessionLog, "warn");
         try {
-            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const transform = createRustModeTransform(makeDeps(), {
+                moduleClient: client,
+            });
             const input = makeMessages(sessionId);
             const output = { messages: [...input] as unknown[] };
 
@@ -1351,13 +1488,13 @@ describe("native output delta", () => {
             { info: { id: "second-applied-2" }, parts: [] },
         ];
         const { client, bodies } = recordingClient(
-            (_request, index) =>
+            (request, index) =>
                 index === 0
                     ? {
-                          native_messages: firstNative,
+                          ...recipeResponse(request, firstNative),
                           note_deliveries: [{ transform_pass_id: "pass-first" }],
                       }
-                    : { native_messages: secondNative },
+                    : recipeResponse(request, secondNative),
             async (method) => {
                 if (method === "transform.ack") {
                     await new Promise<void>((resolve) => {
@@ -1367,7 +1504,9 @@ describe("native output delta", () => {
                 return { ok: true };
             },
         );
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const firstInput = rowMessages(sessionId, rawRows(1));
         const firstOutput = { messages: [...firstInput] as unknown[] };
         const first = transform.run(sessionId, firstOutput);
@@ -1393,8 +1532,8 @@ describe("native output delta", () => {
     it("disposes each duplicate delivery pass ID only once", async () => {
         const sessionId = `rust-note-delivery-dedup-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
-        const { client, calls } = recordingClient(() => ({
-            native_messages: [],
+        const { client, calls } = recordingClient((request) => ({
+            ...recipeResponse(request, []),
             note_deliveries: [
                 { transform_pass_id: "pass-1" },
                 { transform_pass_id: "pass-1" },
@@ -1402,7 +1541,9 @@ describe("native output delta", () => {
                 { transform_pass_id: "pass-1" },
             ],
         }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const input = makeMessages(sessionId);
 
         await transform.run(sessionId, { messages: [...input] });
@@ -1419,9 +1560,9 @@ describe("native output delta", () => {
         installRawRows(sessionId, rawRows(1));
         const nackFailure = new Error("first nack failed");
         const { client, calls } = recordingClient(
-            () => ({
+            (request) => ({
                 boundary_id: "m-1#0",
-                native_messages: [{ role: "assistant", parts: [] }],
+                ...recipeResponse(request, [{ role: "assistant", parts: [] }]),
                 note_deliveries: [{ transform_pass_id: "pass-1" }, { transform_pass_id: "pass-2" }],
             }),
             (_method, body) => {
@@ -1431,7 +1572,9 @@ describe("native output delta", () => {
         );
         const logSpy = spyOn(logger.sessionLog, "warn");
         try {
-            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const transform = createRustModeTransform(makeDeps(), {
+                moduleClient: client,
+            });
             const input = makeMessages(sessionId);
             const output = { messages: [...input] as unknown[] };
 
@@ -1460,64 +1603,55 @@ describe("native output delta", () => {
         }
     });
 
-    it("nacks discarded delivery IDs and acks only IDs from the applied retry response", async () => {
-        const sessionId = `rust-note-delivery-retry-union-${Date.now()}`;
+    it("nacks every delivery of an ok response that carries no recipe and does not retry", async () => {
+        const sessionId = `rust-note-delivery-no-recipe-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
-        const native = [{ role: "assistant", parts: [] }];
-        const { client, bodies, calls } = recordingClient((_request, index) =>
-            index === 0
-                ? {
-                      status: "ok",
-                      served_from: "transform",
-                      note_deliveries: [
-                          { transform_pass_id: "pass-initial" },
-                          { transform_pass_id: "pass-shared" },
-                      ],
-                  }
-                : {
-                      native_messages: native,
-                      note_deliveries: [
-                          { transform_pass_id: "pass-shared" },
-                          { transform_pass_id: "pass-retry" },
-                      ],
-                  },
-        );
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, bodies, calls } = recordingClient(() => ({
+            status: "ok",
+            served_from: "transform",
+            note_deliveries: [
+                { transform_pass_id: "pass-initial" },
+                { transform_pass_id: "pass-shared" },
+            ],
+        }));
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const input = makeMessages(sessionId);
         const output = { messages: [...input] as unknown[] };
 
         await transform.run(sessionId, output);
 
-        expect(bodies).toHaveLength(2);
-        expect(output.messages).toEqual(native);
+        // A response without operations is an invalid recipe, not a request for another format.
+        expect(bodies).toHaveLength(1);
+        expect(output.messages).toEqual(input);
         expect(
             calls
                 .filter((call) => call.method === "transform.nack")
                 .map((call) => (call.body as Record<string, unknown>).transform_pass_id),
-        ).toEqual(["pass-initial"]);
-        expect(
-            calls
-                .filter((call) => call.method === "transform.ack")
-                .map((call) => (call.body as Record<string, unknown>).transform_pass_id),
-        ).toEqual(["pass-shared", "pass-retry"]);
+        ).toEqual(["pass-initial", "pass-shared"]);
+        expect(calls.some((call) => call.method === "transform.ack")).toBe(false);
+        expect(transform.getState(sessionId).failureCount).toBe(1);
     });
 
     it("nacks initial and retry delivery IDs when the full retry still cannot be applied", async () => {
         const sessionId = `rust-note-delivery-retry-failure-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
-        const { client, calls } = recordingClient((_request, index) =>
+        const { client, calls } = recordingClient((request, index) =>
             index === 0
                 ? {
-                      status: "ok",
-                      served_from: "transform",
+                      status: "need_full_sync",
                       note_deliveries: [{ transform_pass_id: "pass-initial" }],
                   }
                 : {
-                      status: "need_full_sync",
+                      ...recipeResponse(request, []),
+                      base_revision: "not-the-retry-base",
                       note_deliveries: [{ transform_pass_id: "pass-retry" }],
                   },
         );
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const input = makeMessages(sessionId);
         const output = { messages: [...input] as unknown[] };
 
@@ -1536,19 +1670,26 @@ describe("native output delta", () => {
         const sessionId = `rust-wire-invariant-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
         const input = makeMessages(sessionId);
-        const { client, calls } = recordingClient(() => ({
-            action: "CACHE_HIT",
-            served_from: "transform",
-            boundary_id: "m-1#0",
-            note_deliveries: [{ transform_pass_id: "pass-1" }],
-            native_messages: [
+        const { client, calls } = recordingClient((request) =>
+            recipeResponse(
+                request,
+                [
+                    {
+                        info: { role: "user", sessionID: sessionId },
+                        parts: [{ type: "text", text: "not marked synthetic" }],
+                    },
+                ],
                 {
-                    info: { role: "user", sessionID: sessionId },
-                    parts: [{ type: "text", text: "not marked synthetic" }],
+                    action: "CACHE_HIT",
+                    served_from: "transform",
+                    boundary_id: "m-1#0",
+                    note_deliveries: [{ transform_pass_id: "pass-1" }],
                 },
-            ],
-        }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            ),
+        );
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const output = { messages: input as unknown[] };
 
         await transform.run(sessionId, output);
@@ -1559,62 +1700,105 @@ describe("native output delta", () => {
         expect(transform.getState(sessionId).failureCount).toBe(1);
     });
 
-    it("retries with full arrays when a delta response omits native content", async () => {
-        const sessionId = `rust-native-omission-retry-${Date.now()}`;
+    it("fails a delta pass whose response carries no recipe and sends the next pass in full", async () => {
+        const sessionId = `rust-recipe-omission-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
-        let healedNative: unknown[] = [];
         const { client, bodies } = recordingClient((request, index) => {
-            if (index === 0) return { native_messages: structuredClone(request.native_messages) };
+            if (index === 0)
+                return recipeResponse(request, structuredClone(request.native_messages));
             if (request.tail_delta) return { status: "ok", served_from: "transform" };
-            return { native_messages: structuredClone(healedNative) };
+            return recipeResponse(request, structuredClone(request.native_messages));
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const initial = makeMessages(sessionId);
         await transform.run(sessionId, { messages: [...initial] });
 
         const changed = structuredClone(initial);
         changed[0]!.parts = [{ type: "text", text: "changed after warm prime" }];
-        healedNative = structuredClone(changed);
         const output = { messages: [...changed] as unknown[] };
-        const logSpy = spyOn(logger.sessionLog, "debug");
-        try {
-            await transform.run(sessionId, output);
-            // The retry pass builds two bodies (the delta and its full replacement); the send itself is transport time, not wire-build time.
-            const stageLogs = sessionLogs(logSpy, sessionId);
-            expect(
-                stageLogs.filter((message) => message.includes("stage=rust.wire_build")),
-            ).toHaveLength(2);
-            expect(
-                stageLogs.filter((message) => message.includes("stage=rust.transport")),
-            ).toHaveLength(2);
-        } finally {
-            logSpy.mockRestore();
-        }
+        await transform.run(sessionId, output);
 
-        expect(bodies).toHaveLength(3);
+        // The delta pass is refused as an invalid recipe; no second body is built for it.
+        expect(bodies).toHaveLength(2);
         expect(bodies[1]?.tail_delta).toEqual({
             after: bodies[0]?.full_array_fingerprint,
             replace_from: 0,
             native_replace_from: 0,
         });
+        expect(output.messages).toEqual(changed);
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
+
+        // The failed pass never applied, so the next pass resends the full array and recovers.
+        const recovered = { messages: [...changed] as unknown[] };
+        await transform.run(sessionId, recovered);
+        expect(bodies).toHaveLength(3);
         expect(bodies[2]?.tail_delta).toBeUndefined();
         expect(bodies[2]?.native_messages).toEqual(changed);
-        expect(output.messages).toEqual(healedNative);
         expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
     });
 
-    it("rejects a delta whose prefix fingerprint is not acknowledged", () => {
-        const admission = new TransformCaptureAdmission().admit("invalid-delta");
+    it("rejects a recipe that keeps from a previous output the client did not apply", () => {
+        const admission = new TransformCaptureAdmission().admit("invalid-recipe");
         if (!("lease" in admission)) throw new Error("admission failed");
+        const input = {
+            revision: "base",
+            values: [{ info: { id: "m0" } }],
+            lengths: [17],
+        };
         expect(() =>
-            __rustModeTransformTest.buildNativeCandidate(
-                { native_messages_delta: { after: "stale", replace_from: 1, messages: [] } },
-                { messages: [{ info: { id: "m0" } }], fingerprint: "current" },
+            __rustModeTransformTest.applyTransformRecipe(
+                {
+                    base_revision: "base",
+                    output_revision: "out",
+                    previous_output_revision: "stale",
+                    operations: [{ op: "keep", source: "previous", start: 0, count: 1 }],
+                },
+                input,
+                undefined,
                 (slots) => admission.lease.reserve(slots * 8),
             ),
-        ).toThrow("did not match the acknowledged output");
-        expect(admission.lease.chargedBytes).toBe(0);
+        ).toThrow("missing_previous_base");
+        expect(() =>
+            __rustModeTransformTest.applyTransformRecipe(
+                { base_revision: "other", output_revision: "out", operations: [] },
+                input,
+                undefined,
+                (slots) => admission.lease.reserve(slots * 8),
+            ),
+        ).toThrow("wrong_base_revision");
+        expect(() =>
+            __rustModeTransformTest.applyTransformRecipe(
+                { base_revision: "base", output_revision: "out" },
+                input,
+                undefined,
+                (slots) => admission.lease.reserve(slots * 8),
+            ),
+        ).toThrow("rust transform recipe rejected: malformed");
         admission.lease.release();
+    });
+
+    it("evicts the least recently retained applied output once the optional budget is exceeded", () => {
+        const evicted: string[] = [];
+        const budget = new __rustModeTransformTest.AppliedOutputBudget(100, (sessionId) =>
+            evicted.push(sessionId),
+        );
+        expect(budget.retain("a", 60)).toBe(true);
+        expect(budget.retain("b", 30)).toBe(true);
+        expect(budget.usedBytes).toBe(90);
+        // Re-retaining a session replaces its charge instead of adding to it.
+        expect(budget.retain("a", 50)).toBe(true);
+        expect(budget.usedBytes).toBe(80);
+        expect(evicted).toEqual([]);
+        // The oldest retention goes first; `b` is older than the refreshed `a`.
+        expect(budget.retain("c", 40)).toBe(true);
+        expect(evicted).toEqual(["b"]);
+        expect(budget.usedBytes).toBe(90);
+        expect(budget.retain("d", 101)).toBe(false);
+        expect(budget.usedBytes).toBe(90);
+        budget.release("a");
+        expect(budget.usedBytes).toBe(40);
     });
 });
 
@@ -1634,9 +1818,11 @@ describe("delta prefix-mutation guard", () => {
                           ...structuredClone(suffix),
                       ]
                     : structuredClone(suffix);
-            return { native_messages: structuredClone(moduleNativeSnapshot) };
+            return recipeResponse(request, structuredClone(moduleNativeSnapshot));
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const buildMessages = (count: number, mutatePrefix = false): MessageLike[] =>
             rowMessages(sessionId, rows.slice(0, count), (row) =>
                 mutatePrefix && row.id === "m-1" ? "MESSAGE m-1" : `message ${row.id}`,
@@ -1681,8 +1867,10 @@ describe("delta prefix-mutation guard", () => {
         const sessionId = `rust-empty-delta-visibility-${Date.now()}`;
         const rows = rawRows(2);
         installRawRows(sessionId, rows);
-        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const buildMessages = (count: number, mutateTerminal = false): MessageLike[] =>
             rowMessages(sessionId, rows.slice(0, count), (row) =>
                 mutateTerminal && row.id === "m-2" ? "MESSAGE m-2" : `message ${row.id}`,
@@ -1698,7 +1886,12 @@ describe("delta prefix-mutation guard", () => {
             native_replace_from: 2,
         });
 
-        rows.push({ id: "m-3", timeCreated: 3, contributesOrdinal: true, hasValidInfo: true });
+        rows.push({
+            id: "m-3",
+            timeCreated: 3,
+            contributesOrdinal: true,
+            hasValidInfo: true,
+        });
         const appended = buildMessages(3, true);
         await transform.run(sessionId, { messages: [...appended] });
         expect(bodies).toHaveLength(3);
@@ -1715,8 +1908,10 @@ describe("delta prefix-mutation guard", () => {
         const sessionId = `rust-invisible-terminal-append-${Date.now()}`;
         const rows = rawRows(2);
         installRawRows(sessionId, rows);
-        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const buildMessages = (count: number, summaryText: string): MessageLike[] =>
             rows.slice(0, count).map((row) =>
                 row.id === "m-2"
@@ -1740,7 +1935,12 @@ describe("delta prefix-mutation guard", () => {
         await transform.run(sessionId, { messages: [...first] });
         expect(bodies[0]?.messages).toHaveLength(1);
 
-        rows.push({ id: "m-3", timeCreated: 3, contributesOrdinal: true, hasValidInfo: true });
+        rows.push({
+            id: "m-3",
+            timeCreated: 3,
+            contributesOrdinal: true,
+            hasValidInfo: true,
+        });
         const appended = buildMessages(3, "summary v2");
         await transform.run(sessionId, { messages: [...appended] });
         expect(bodies).toHaveLength(2);
@@ -1763,11 +1963,13 @@ describe("delta prefix-mutation guard", () => {
             () => "<system-reminder>queued user message was wrapped in place</system-reminder>",
         );
         const recovered = rowMessages(sessionId, rawRows(1), () => "module recovered");
-        const { client, bodies } = recordingClient((_request, index) => {
+        const { client, bodies } = recordingClient((request, index) => {
             if (index === 1 || index === 2) throw new Error("CK message block identity drift");
-            return { native_messages: recovered };
+            return recipeResponse(request, recovered);
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
 
         await transform.run(sessionId, { messages: initial as unknown[] });
         for (let retry = 0; retry < 2; retry += 1) {
@@ -1793,15 +1995,17 @@ describe("delta prefix-mutation guard", () => {
         writer.exec(
             "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT)",
         );
-        writer
-            .prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)")
-            .run(
-                "assistant",
-                sessionId,
-                100,
-                100,
-                JSON.stringify({ role: "assistant", finish: "stop", time: { completed: 100 } }),
-            );
+        writer.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
+            "assistant",
+            sessionId,
+            100,
+            100,
+            JSON.stringify({
+                role: "assistant",
+                finish: "stop",
+                time: { completed: 100 },
+            }),
+        );
         writer
             .prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)")
             .run("new-user", sessionId, 200, 200, '{"role":"user"}');
@@ -1809,10 +2013,12 @@ describe("delta prefix-mutation guard", () => {
             .prepare("INSERT INTO part VALUES (?, ?, ?, ?)")
             .run("part", "new-user", sessionId, '{"type":"text","text":"prompt","ignored":true}');
         installRawRows(sessionId, rawRows(1));
-        const { client, bodies } = recordingClient(() => ({
-            native_messages: makeMessages(sessionId),
-        }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, bodies } = recordingClient((request) =>
+            recipeResponse(request, makeMessages(sessionId)),
+        );
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         try {
             for (let pass = 0; pass < 3; pass++) {
                 const messages = makeMessages(sessionId);
@@ -1893,9 +2099,11 @@ describe("bounded transform ownership", () => {
                     note_deliveries: [{ transform_pass_id: "discarded" }],
                 };
             }
-            return { native_messages: request.native_messages };
+            return recipeResponse(request, request.native_messages);
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         if (phase === "full-retry") {
             await transform.run(sessionId, { messages: [...messages] });
             expect(transform.getState(sessionId).initialized).toBe(true);
@@ -1929,9 +2137,12 @@ describe("bounded transform ownership", () => {
         messages[0]!.parts = [{ type: "text", text: character.repeat(100_000) }];
         const deps = makeDeps();
         const directoryRead = spyOn(deps.client.session, "get");
-        const admission = new TransformCaptureAdmission({ maxPasses: 1, maxBytes: 1_200_000 });
+        const admission = new TransformCaptureAdmission({
+            maxPasses: 1,
+            maxBytes: 1_200_000,
+        });
         const { client, bodies } = recordingClient((page) =>
-            page.transform_page_complete === false ? { staged: true } : { native_messages: [] },
+            page.transform_page_complete === false ? { staged: true } : recipeResponse(page, []),
         );
         const transform = createRustModeTransform(deps, {
             moduleClient: client,
@@ -1989,7 +2200,7 @@ describe("bounded transform ownership", () => {
             // The request pages; the complete page carries the response for the whole array.
             return page.transform_page_complete === false
                 ? { staged: true }
-                : { native_messages: messages };
+                : recipeResponse(page, messages);
         });
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
@@ -2033,13 +2244,18 @@ describe("bounded transform ownership", () => {
                 }
                 if (page.transform_page_complete === true) {
                     return {
-                        native_messages: [{ role: "assistant", parts: [] }],
+                        ...recipeResponse(page, [{ role: "assistant", parts: [] }]),
                         note_deliveries: [{ transform_pass_id: "restarted" }],
                     };
                 }
-                return { staged: true, note_deliveries: [{ transform_pass_id: "page-zero" }] };
+                return {
+                    staged: true,
+                    note_deliveries: [{ transform_pass_id: "page-zero" }],
+                };
             });
-            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const transform = createRustModeTransform(makeDeps(), {
+                moduleClient: client,
+            });
             const output = { messages: messages as unknown[] };
             const pass = transform.run(sessionId, output);
             await Promise.race([reachedPage1.promise, pass]);
@@ -2090,7 +2306,7 @@ describe("bounded transform ownership", () => {
             const candidateLength = 12;
             const started = Promise.withResolvers<void>();
             const response = Promise.withResolvers<unknown>();
-            const { client, calls } = recordingClient(() => {
+            const { client, bodies, calls } = recordingClient(() => {
                 started.resolve();
                 return response.promise;
             });
@@ -2109,19 +2325,26 @@ describe("bounded transform ownership", () => {
                 const pass = transform.run(sessionId, output);
                 await Promise.race([started.promise, pass]);
                 expect(calls).toHaveLength(1);
-                // Leave exactly the candidate array's slot charge, minus the offset, for the pending pass.
+                // Leave exactly the applied array's slot charge (a value slot plus its retained length per entry), minus the offset, for the pending pass.
                 const blocker = admission.admit(`${sessionId}-blocker`);
                 if (!("lease" in blocker)) throw new Error("blocker not admitted");
                 expect(
-                    blocker.lease.reserve(admission.remainingBytes - candidateLength * 8 + offset),
+                    blocker.lease.reserve(admission.remainingBytes - candidateLength * 16 + offset),
                 ).toBe(true);
-                response.resolve({
-                    native_messages: Array.from({ length: candidateLength }, (_, index) => ({
-                        info: { id: `out-${index}`, role: "assistant", sessionID: sessionId },
-                        parts: [],
-                    })),
-                    note_deliveries: [{ transform_pass_id: "candidate" }],
-                });
+                response.resolve(
+                    recipeForLast(
+                        bodies,
+                        Array.from({ length: candidateLength }, (_, index) => ({
+                            info: {
+                                id: `out-${index}`,
+                                role: "assistant",
+                                sessionID: sessionId,
+                            },
+                            parts: [],
+                        })),
+                        { note_deliveries: [{ transform_pass_id: "candidate" }] },
+                    ),
+                );
                 await pass;
                 blocker.lease.release();
                 expect(output.messages).toBe(array);
@@ -2133,11 +2356,13 @@ describe("bounded transform ownership", () => {
                     expect(output.messages[0]).toBe(member);
                     expect(calls.at(-1)?.method).toBe("transform.nack");
                     expect(sessionLogs(logSpy, sessionId)).toContain(
-                        `rust session ${sessionId} pass declined: capture_bytes (transform capture byte budget exceeded: native candidate array)`,
+                        `rust session ${sessionId} pass declined: capture_bytes (transform capture byte budget exceeded: recipe output array)`,
                     );
                     expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
                 }
-                expect(calls.at(-1)?.body).toMatchObject({ transform_pass_id: "candidate" });
+                expect(calls.at(-1)?.body).toMatchObject({
+                    transform_pass_id: "candidate",
+                });
                 expect(transform.getState(sessionId).failureCount).toBe(0);
                 expect(admission.chargedBytes).toBe(0);
             } finally {
@@ -2177,13 +2402,16 @@ describe("bounded transform ownership", () => {
             maxBytes: size.estimatedBytes + wireBytes[0] + wireBytes[1] + wireBytes[2] + 2000,
         });
         const { client, calls, bodies } = recordingClient((request, index) => {
-            if (index === 0) return { native_messages: request.native_messages };
+            if (index === 0) return recipeResponse(request, request.native_messages);
             if (index === 1)
                 return {
                     status: "need_full_sync",
                     note_deliveries: [{ transform_pass_id: "discarded" }],
                 };
-            return { native_messages: [], note_deliveries: [{ transform_pass_id: "applied" }] };
+            return {
+                ...recipeResponse(request, []),
+                note_deliveries: [{ transform_pass_id: "applied" }],
+            };
         });
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
@@ -2214,7 +2442,9 @@ describe("bounded transform ownership", () => {
         expect(transform.getState(sessionId).failureCount).toBe(0);
         expect(transform.getState(sessionId).forceFullWire).toBe(true);
         expect(admission.chargedBytes).toBe(wireBytes[2]);
-        expect(calls.at(-1)?.body).toMatchObject({ transform_pass_id: "discarded" });
+        expect(calls.at(-1)?.body).toMatchObject({
+            transform_pass_id: "discarded",
+        });
         expect(calls.at(-1)?.method).toBe("transform.nack");
         // Once the other session settles, the next call is a full send that fits the budget.
         blocker.lease.release();
@@ -2282,8 +2512,11 @@ describe("bounded transform ownership", () => {
         const rows = rawRows(2);
         rows[1].id = "persisted-only-".repeat(400);
         installRawRows(sessionId, rows);
-        const admission = new TransformCaptureAdmission({ maxPasses: 64, maxBytes: 1024 * 1024 });
-        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
+        const admission = new TransformCaptureAdmission({
+            maxPasses: 64,
+            maxBytes: 1024 * 1024,
+        });
+        const { client, bodies } = recordingClient((request) => recipeResponse(request, []));
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
             captureAdmission: admission,
@@ -2338,9 +2571,11 @@ describe("bounded transform ownership", () => {
         const { client, bodies } = recordingClient((request, index) => {
             if (index === 1) return { status: "need_full_sync" };
             if (index === 2) throw new Error("full request connection reset");
-            return { native_messages: request.native_messages };
+            return recipeResponse(request, request.native_messages);
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const warm = rowMessages(sessionId, rawRows(1));
         await transform.run(sessionId, { messages: [...warm] });
         const changed = rowMessages(sessionId, rawRows(2));
@@ -2385,9 +2620,9 @@ describe("bounded transform ownership", () => {
                     }),
                 );
                 const admission = new TransformCaptureAdmission();
-                const { client, calls, bodies } = recordingClient((request) => ({
-                    native_messages: request.native_messages,
-                }));
+                const { client, calls, bodies } = recordingClient((request) =>
+                    recipeResponse(request, request.native_messages as unknown[]),
+                );
                 const transform = createRustModeTransform(makeDeps(), {
                     moduleClient: client,
                     captureAdmission: admission,
@@ -2456,11 +2691,13 @@ describe("bounded transform ownership", () => {
                 installRawRows(sessionId, rawRows(1));
                 const started = Promise.withResolvers<void>();
                 const response = Promise.withResolvers<unknown>();
-                const { client, calls } = recordingClient(() => {
+                const { client, bodies, calls } = recordingClient(() => {
                     started.resolve();
                     return response.promise;
                 });
-                const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+                const transform = createRustModeTransform(makeDeps(), {
+                    moduleClient: client,
+                });
                 const messages = makeMessages(sessionId);
                 const original = messages[0];
                 const output = { messages: sharedArray ? messages : [...messages] };
@@ -2474,10 +2711,11 @@ describe("bounded transform ownership", () => {
                 else if (change === "rebind") output.messages = [current];
                 else Object.assign(output.messages, { bookkeeping: "host edit" });
                 const currentArray = output.messages;
-                response.resolve({
-                    native_messages: [],
-                    note_deliveries: [{ transform_pass_id: "unapplied" }],
-                });
+                response.resolve(
+                    recipeForLast(bodies, [], {
+                        note_deliveries: [{ transform_pass_id: "unapplied" }],
+                    }),
+                );
                 await pass;
                 expect(output.messages).toBe(currentArray);
                 expect(output.messages).toHaveLength(change === "append" ? 2 : 1);
@@ -2501,7 +2739,9 @@ describe("bounded transform ownership", () => {
                 installRawRows(sessionId, rawRows(1));
                 const deps = makeDeps();
                 const started = Promise.withResolvers<void>();
-                const directory = Promise.withResolvers<{ data: { directory: string } }>();
+                const directory = Promise.withResolvers<{
+                    data: { directory: string };
+                }>();
                 let directoryReached = false;
                 if (window === "source-await") {
                     deps.sessionMetadataReadStateBySession = new Map();
@@ -2533,16 +2773,22 @@ describe("bounded transform ownership", () => {
                             },
                         );
                     } else if (unsupported === "toJSON") {
-                        Object.defineProperty(part, "toJSON", { value: hook, enumerable: true });
+                        Object.defineProperty(part, "toJSON", {
+                            value: hook,
+                            enumerable: true,
+                        });
                     } else {
-                        Object.defineProperty(part, "text", { get: hook, enumerable: true });
+                        Object.defineProperty(part, "text", {
+                            get: hook,
+                            enumerable: true,
+                        });
                     }
                 };
                 const methods: string[] = [];
                 let transportProcessedBeforeInstall = false;
                 const logSpy = spyOn(logger.sessionLog, "debug");
                 const client: RustModeModuleClient = {
-                    call: ({ method }) => {
+                    call: ({ method, body }) => {
                         methods.push(method);
                         if (method !== "transform") return Promise.resolve({ ok: true });
                         if (window === "pre-apply")
@@ -2555,13 +2801,16 @@ describe("bounded transform ownership", () => {
                                     install();
                                 }),
                             );
-                        return Promise.resolve({
-                            native_messages: [],
-                            note_deliveries: [{ transform_pass_id: "nested-unapplied" }],
-                        });
+                        return Promise.resolve(
+                            recipeResponse(body as Record<string, unknown>, [], {
+                                note_deliveries: [{ transform_pass_id: "nested-unapplied" }],
+                            }),
+                        );
                     },
                 };
-                const transform = createRustModeTransform(deps, { moduleClient: client });
+                const transform = createRustModeTransform(deps, {
+                    moduleClient: client,
+                });
                 try {
                     const pass = transform.run(sessionId, output);
                     if (window === "source-await") {
@@ -2598,11 +2847,13 @@ describe("bounded transform ownership", () => {
             const started = Promise.withResolvers<void>();
             const response = Promise.withResolvers<unknown>();
             const { client, bodies, calls } = recordingClient((request, index) => {
-                if (index === 0) return { native_messages: request.native_messages };
+                if (index === 0) return recipeResponse(request, request.native_messages);
                 started.resolve();
                 return response.promise;
             });
-            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const transform = createRustModeTransform(makeDeps(), {
+                moduleClient: client,
+            });
             const seed = makeMessages(sessionId);
             await transform.run(sessionId, { messages: [...seed] });
             const priorMemo = transform.getState(sessionId).ordinals;
@@ -2641,7 +2892,9 @@ describe("bounded transform ownership", () => {
                 "transform",
                 "transform.nack",
             ]);
-            expect(calls.at(-1)?.body).toMatchObject({ transform_pass_id: "retry-discarded" });
+            expect(calls.at(-1)?.body).toMatchObject({
+                transform_pass_id: "retry-discarded",
+            });
             expect(output.messages).toBe(array);
             expect(output.messages[0]).toBe(messages[0]);
             expect(output.messages[1]).toBe(messages[1]);
@@ -2672,11 +2925,13 @@ describe("bounded transform ownership", () => {
             if (page.transform_page_complete !== true) return { staged: true };
             delivered.push("paged");
             return {
-                native_messages: [{ role: "assistant", parts: [] }],
+                ...recipeResponse(page, [{ role: "assistant", parts: [] }]),
                 note_deliveries: [{ transform_pass_id: "paged" }],
             };
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const output = { messages: messages as unknown[] };
         await transform.run(sessionId, output);
         expect(bodies.length).toBeGreaterThan(1);
@@ -2699,11 +2954,16 @@ describe("bounded transform ownership", () => {
     it("declines an unsupported source before any dispatch and leaves the host array intact", async () => {
         const sessionId = `rust-unsupported-source-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
-        const { client, calls } = recordingClient(() => ({ native_messages: [] }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, calls } = recordingClient((request) => recipeResponse(request, []));
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const hooked = makeMessages(sessionId);
         const getter = mock(trap);
-        Object.defineProperty(hooked[0], "parts", { get: getter, enumerable: true });
+        Object.defineProperty(hooked[0], "parts", {
+            get: getter,
+            enumerable: true,
+        });
         const output = { messages: [...hooked] as unknown[] };
         const array = output.messages;
         await transform.run(sessionId, output);
@@ -2718,8 +2978,10 @@ describe("bounded transform ownership", () => {
     it("declines a proxied or non-replaceable host container without dispatch", async () => {
         const sessionId = `rust-host-container-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
-        const { client, calls } = recordingClient(() => ({ native_messages: [] }));
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const { client, calls } = recordingClient((request) => recipeResponse(request, []));
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const messages = makeMessages(sessionId);
         const frozen = Object.freeze([...messages]) as unknown[];
         await transform.run(sessionId, { messages: frozen });
@@ -2744,7 +3006,7 @@ describe("bounded transform ownership", () => {
             },
         } as never;
         deps.sessionMetadataReadStateBySession = new Map();
-        const { client, calls } = recordingClient(() => ({ native_messages: [] }));
+        const { client, calls } = recordingClient((request) => recipeResponse(request, []));
         const transform = createRustModeTransform(deps, { moduleClient: client });
         const messages = makeMessages(sessionId);
         const output = { messages: [...messages] as unknown[] };
@@ -2757,7 +3019,10 @@ describe("bounded transform ownership", () => {
                 throw new Error("preflight not reached");
             }),
         ]);
-        Object.defineProperty(messages[0], "info", { get: getter, enumerable: true });
+        Object.defineProperty(messages[0], "info", {
+            get: getter,
+            enumerable: true,
+        });
         directory.resolve({ data: { directory: "/tmp/project" } });
         await pass;
         expect(getter).not.toHaveBeenCalled();
@@ -2772,11 +3037,13 @@ describe("bounded transform ownership", () => {
         installRawRows(sessionId, rawRows(1));
         const started = Promise.withResolvers<void>();
         const response = Promise.withResolvers<unknown>();
-        const { client, calls } = recordingClient(() => {
+        const { client, bodies, calls } = recordingClient(() => {
             started.resolve();
             return response.promise;
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const messages = makeMessages(sessionId);
         const output = { messages: [...messages] as unknown[] };
         const array = output.messages;
@@ -2790,10 +3057,11 @@ describe("bounded transform ownership", () => {
         ]);
         expect(calls).toHaveLength(1);
         (messages[0].parts[0] as { text: string }).text = "edited during transport";
-        response.resolve({
-            native_messages: [{ info: { id: "stale" }, parts: [] }],
-            note_deliveries: [{ transform_pass_id: "pass-stale" }],
-        });
+        response.resolve(
+            recipeForLast(bodies, [{ info: { id: "stale" }, parts: [] }], {
+                note_deliveries: [{ transform_pass_id: "pass-stale" }],
+            }),
+        );
         await pass;
         expect(output.messages).toBe(array);
         expect(output.messages).toHaveLength(1);
@@ -2809,11 +3077,13 @@ describe("bounded transform ownership", () => {
         installRawRows(sessionId, rawRows(1));
         const started = Promise.withResolvers<void>();
         const response = Promise.withResolvers<unknown>();
-        const { client, calls } = recordingClient(() => {
+        const { client, bodies, calls } = recordingClient(() => {
             started.resolve();
             return response.promise;
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const messages = makeMessages(sessionId);
         const output = { messages: [...messages] as unknown[] };
         const array = output.messages;
@@ -2827,10 +3097,11 @@ describe("bounded transform ownership", () => {
         ]);
         expect(calls).toHaveLength(1);
         transform.invalidateWireState(sessionId);
-        response.resolve({
-            native_messages: [{ info: { id: "stale" }, parts: [] }],
-            note_deliveries: [{ transform_pass_id: "pass-stale" }],
-        });
+        response.resolve(
+            recipeForLast(bodies, [{ info: { id: "stale" }, parts: [] }], {
+                note_deliveries: [{ transform_pass_id: "pass-stale" }],
+            }),
+        );
         await pass;
         expect(output.messages).toBe(array);
         expect(output.messages).toHaveLength(1);
@@ -2845,11 +3116,13 @@ describe("bounded transform ownership", () => {
         installRawRows(sessionId, rawRows(1));
         const started = Promise.withResolvers<void>();
         const response = Promise.withResolvers<unknown>();
-        const { client, calls } = recordingClient(() => {
+        const { client, bodies, calls } = recordingClient(() => {
             started.resolve();
             return response.promise;
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const messages = makeMessages(sessionId);
         const output = { messages: [...messages] as unknown[] };
         const array = output.messages;
@@ -2863,7 +3136,7 @@ describe("bounded transform ownership", () => {
         ]);
         expect(calls).toHaveLength(1);
         transform.clearSession(sessionId);
-        response.resolve({ native_messages: [{ info: { id: "stale" }, parts: [] }] });
+        response.resolve(recipeForLast(bodies, [{ info: { id: "stale" }, parts: [] }]));
         await pass;
         expect(output.messages).toBe(array);
         expect(output.messages).toHaveLength(1);
@@ -2881,7 +3154,7 @@ describe("bounded transform ownership", () => {
         const { client, calls } = recordingClient(async (request, index) => {
             if (index === 1) started.resolve();
             await release.promise;
-            return { native_messages: request.native_messages };
+            return recipeResponse(request, request.native_messages);
         });
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
@@ -2931,6 +3204,7 @@ describe("bounded transform ownership", () => {
         const largeInspection = inspectReferenceableMessages(largeMessages);
         const smallInspection = inspectReferenceableMessages(smallMessages);
         if (!largeInspection.ok || !smallInspection.ok) throw new Error("invalid budget fixture");
+        // Capture walk, wire projection, the two memo copies, and one retained length slot per message.
         const heldCharge =
             largeInspection.estimatedBytes +
             largeInspection.messageWireBytes.reduce((sum, bytes) => sum + 4 * bytes, 0) +
@@ -2938,9 +3212,13 @@ describe("bounded transform ownership", () => {
             rows.reduce(
                 (sum, row) => sum + 2 * ORDINAL_ENTRY_RETAINED_BYTES + row.id.length * 2,
                 0,
-            );
+            ) +
+            largeMessages.length * 8;
         const maxBytes = heldCharge + smallInspection.estimatedBytes - 1;
-        const admission = new TransformCaptureAdmission({ maxPasses: 64, maxBytes });
+        const admission = new TransformCaptureAdmission({
+            maxPasses: 64,
+            maxBytes,
+        });
         const started = Promise.withResolvers<void>();
         const release = Promise.withResolvers<void>();
         const { client, calls } = recordingClient(async (request, index) => {
@@ -2948,7 +3226,7 @@ describe("bounded transform ownership", () => {
                 started.resolve();
                 await release.promise;
             }
-            return { native_messages: request.native_messages };
+            return recipeResponse(request, request.native_messages);
         });
         const transform = createRustModeTransform(makeDeps(), {
             moduleClient: client,
@@ -2998,7 +3276,7 @@ describe("bounded transform ownership", () => {
         installRawRows(sessionId, rawRows(1));
         const started = Promise.withResolvers<void>();
         const response = Promise.withResolvers<unknown>();
-        const { client, calls } = recordingClient(() => {
+        const { client, bodies, calls } = recordingClient(() => {
             started.resolve();
             return response.promise;
         });
@@ -3016,7 +3294,7 @@ describe("bounded transform ownership", () => {
         await transform.run(sessionId, { messages: [...messages] });
         expect(admission.activePasses).toBe(1);
         expect(admission.chargedBytes).toBe(chargedWhileHeld);
-        response.resolve({ native_messages: [] });
+        response.resolve(recipeForLast(bodies, []));
         await first;
         expect(admission.activePasses).toBe(0);
         expect(admission.chargedBytes).toBe(0);
@@ -3036,10 +3314,10 @@ describe("bounded transform ownership", () => {
             (request, index) =>
                 index === 0
                     ? {
-                          native_messages: applied,
+                          ...recipeResponse(request, applied),
                           note_deliveries: [{ transform_pass_id: "pass-first" }],
                       }
-                    : { native_messages: request.native_messages },
+                    : recipeResponse(request, request.native_messages as unknown[]),
             async (method) => {
                 if (method === "transform.ack") {
                     ackStarted.resolve();
@@ -3073,7 +3351,10 @@ describe("bounded transform ownership", () => {
         await transform.run(sessionId, secondOutput);
         expect(calls.filter((call) => call.method === "transform")).toHaveLength(2);
         const getter = mock(trap);
-        Object.defineProperty(firstInput[0], "parts", { get: getter, enumerable: true });
+        Object.defineProperty(firstInput[0], "parts", {
+            get: getter,
+            enumerable: true,
+        });
         releaseAck.resolve();
         await first;
         // ACK failure never rolls back the published output.
@@ -3094,14 +3375,14 @@ describe("bounded transform ownership", () => {
         const response = Promise.withResolvers<unknown>();
         const nackStarted = Promise.withResolvers<void>();
         const releaseNack = Promise.withResolvers<void>();
-        const { client, calls } = recordingClient(
+        const { client, bodies, calls } = recordingClient(
             (request, index) => {
                 if (index === 0) {
                     started.resolve();
                     return response.promise;
                 }
                 return {
-                    native_messages: request.native_messages,
+                    ...recipeResponse(request, request.native_messages as unknown[]),
                     note_deliveries: [{ transform_pass_id: "accepted" }],
                 };
             },
@@ -3126,10 +3407,11 @@ describe("bounded transform ownership", () => {
             await Promise.race([started.promise, first]);
             expect(calls).toHaveLength(1);
             (member.parts[0] as { text: string }).text = "host edit";
-            response.resolve({
-                native_messages: [],
-                note_deliveries: [{ transform_pass_id: "discarded" }],
-            });
+            response.resolve(
+                recipeForLast(bodies, [], {
+                    note_deliveries: [{ transform_pass_id: "discarded" }],
+                }),
+            );
             await Promise.race([nackStarted.promise, first]);
             expect(calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
             expect(admission.activePasses).toBe(0);
@@ -3161,7 +3443,7 @@ describe("bounded transform ownership", () => {
             expect(output.messages[0]).toBe(member);
             expect(transform.getState(sessionId).failureCount).toBe(0);
         } finally {
-            response.resolve({ native_messages: [] });
+            response.resolve(recipeForLast(bodies, []));
             releaseNack.resolve();
             await first;
         }
@@ -3172,13 +3454,19 @@ describe("bounded transform ownership", () => {
         installRawRows(sessionId, rawRows(1));
         const started = Promise.withResolvers<void>();
         const response = Promise.withResolvers<unknown>();
-        const { client, calls } = recordingClient(() => {
+        const { client, bodies, calls } = recordingClient(() => {
             started.resolve();
             return response.promise;
         });
-        const other = recordingClient((request) => ({ native_messages: request.native_messages }));
-        const firstFactory = createRustModeTransform(makeDeps(), { moduleClient: client });
-        const secondFactory = createRustModeTransform(makeDeps(), { moduleClient: other.client });
+        const other = recordingClient((request) =>
+            recipeResponse(request, request.native_messages),
+        );
+        const firstFactory = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
+        const secondFactory = createRustModeTransform(makeDeps(), {
+            moduleClient: other.client,
+        });
         const input = makeMessages(sessionId);
         const firstOutput = { messages: [...input] };
         const firstArray = firstOutput.messages;
@@ -3200,10 +3488,11 @@ describe("bounded transform ownership", () => {
             expect(secondOutput.messages[0]).toBe(secondInput[0]);
             expect(defaultTransformCaptureAdmission.activePasses).toBe(1);
             expect(defaultTransformCaptureAdmission.chargedBytes).toBe(heldBytes);
-            response.resolve({
-                native_messages: [],
-                note_deliveries: [{ transform_pass_id: "old-factory" }],
-            });
+            response.resolve(
+                recipeForLast(bodies, [], {
+                    note_deliveries: [{ transform_pass_id: "old-factory" }],
+                }),
+            );
             await first;
             expect(calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
             expect(firstOutput.messages).toBe(firstArray);
@@ -3215,7 +3504,7 @@ describe("bounded transform ownership", () => {
             expect(other.calls).toHaveLength(1);
             expect(secondFactory.getState(sessionId).initialized).toBe(true);
         } finally {
-            response.resolve({ native_messages: [] });
+            response.resolve(recipeForLast(bodies, []));
             await first;
             logSpy.mockRestore();
         }
@@ -3230,16 +3519,20 @@ describe("bounded transform ownership", () => {
         ];
         const { client } = recordingClient((request, index) =>
             index === 0
-                ? { native_messages: [returned[0]] }
+                ? recipeResponse(request, [returned[0]])
                 : {
-                      native_messages_delta: {
-                          after: (request.tail_delta as { after: string }).after,
-                          replace_from: 1,
-                          messages: [returned[1]],
-                      },
+                      base_revision: request.base_revision,
+                      output_revision: "out-identity",
+                      previous_output_revision: request.previous_output_revision,
+                      operations: [
+                          { op: "keep", source: "previous", start: 0, count: 1 },
+                          { op: "insert", values: [returned[1]] },
+                      ],
                   },
         );
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const firstInput = rowMessages(sessionId, rawRows(1));
         await transform.run(sessionId, { messages: [...firstInput] });
         const secondInput = rowMessages(sessionId, rawRows(2));
@@ -3257,9 +3550,11 @@ describe("bounded transform ownership", () => {
         installRawRows(sessionId, rawRows(1));
         const { client, calls } = recordingClient((request, index) => {
             if (index === 0) throw new Error("connection reset after write");
-            return { native_messages: request.native_messages };
+            return recipeResponse(request, request.native_messages);
         });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const transform = createRustModeTransform(makeDeps(), {
+            moduleClient: client,
+        });
         const messages = makeMessages(sessionId);
         const output = { messages: [...messages] as unknown[] };
         const array = output.messages;

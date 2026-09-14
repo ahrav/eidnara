@@ -550,10 +550,14 @@ describe("logger", () => {
                         contextUsageMap, clearReasoningAge: 50, cacheTtl: "5m", compactionOff: true,
                         directory: process.env.LOGGER_SCENARIO_ROOT, sessionDirectoryBySession: new Map(),
                         isSubagentSession: () => false, systemPromptHashFor: () => "",
-                    }, { moduleClient: { call: async () => {
+                    }, { moduleClient: { call: async ({ body }) => {
                         calls++;
                         if (fail) throw new Error("provider\\nfailed\\u0007");
-                        return { native_messages: native, decision: "HARD", timings: { handler_total: 5 } };
+                        return {
+                            decision: "HARD", timings: { handler_total: 5 },
+                            base_revision: body.base_revision, output_revision: "out-1",
+                            operations: [{ op: "insert", values: native }],
+                        };
                     } } });
                     const output = { messages: structuredClone(input) };
                     await transform.run(sessionId, output);
