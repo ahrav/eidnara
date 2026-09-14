@@ -203,7 +203,7 @@ async function timePass(
     const output = { messages: [...messages] as unknown[] };
     const hostArray = output.messages;
     const startedAt = performance.now();
-    await transform.run(sessionId, messages, output);
+    await transform.run(sessionId, output);
     const passMs = performance.now() - startedAt;
     assert.equal(stats.completed - before.completed, 1, "missing completion or unexpected retry");
     assert.equal(stats.deltas - before.deltas, Number(warm), "unexpected full/delta path");

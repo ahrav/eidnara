@@ -107,3 +107,13 @@ as a discriminating requirement, not as a confirmed defect without a run.
 2026-09-13; its disposition retains the raw-token hypothesis without adopting
 another reviewer's unrun defect claim. The implementation owner enforces
 stop-and-report. No tests run; this property remains unexercised.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`, `cargo test -p daemon --locked
+--features test-support` (1,489 tests pass; `lifecycle_cli` is platform-unsupported
+on the aarch64 host). The A2 entry differential and the
+same-footprint test pass unchanged; `frozen_corpus_footprints_replay_with_only_string_charge_changes`
+replays each body's frozen terminals through both lanes, and the direct-lane set
+(11 bodies) is the one pinned before the change. The failing typed decode still
+falls back to the tree from the same bytes (`parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback`).

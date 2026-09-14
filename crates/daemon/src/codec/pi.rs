@@ -1223,8 +1223,6 @@ mod tests {
         *survivor.kind_mut() = BlockKind::Text {
             text: "§3§ SURVIVE".to_string(),
         };
-        survivor.mark_modified();
-        message.mark_modified();
 
         let encoded = encode_pi(&[message], &decoded.sidecar);
         assert_eq!(
@@ -1299,8 +1297,6 @@ mod tests {
             panic!("expected image result block");
         };
         media.filename = Some("failure.png".to_string());
-        block.mark_modified();
-        message.mark_modified();
 
         let encoded = encode_pi(&[message], &decoded.sidecar);
         assert_eq!(encoded[0]["isError"], true);
@@ -1357,8 +1353,6 @@ mod tests {
             panic!("expected leading text block");
         };
         *text = "tagged failed".to_string();
-        result.mark_modified();
-        message.mark_modified();
         let encoded = encode_pi(&[message], &decoded.sidecar);
         assert_eq!(encoded[0]["isError"], true);
         assert_eq!(

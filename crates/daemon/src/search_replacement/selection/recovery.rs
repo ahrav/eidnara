@@ -355,10 +355,11 @@ impl SearchSelection {
             .recovery_target
             .ok_or(BuildError::Invalid("missing fixed target"))?
             .commit_seq;
+        let now = wall_ms()?;
         let report = family
             .projection
             .read_within(deadline(budget)?, |conn| {
-                verify_active(conn, &self.identity, &family.generation(), self.bounds)
+                verify_active(conn, &self.identity, &family.generation(), self.bounds, now)
             })
             .map_err(BuildError::from)?;
         if report.checkpoint.checkpoint_commit_seq != target {

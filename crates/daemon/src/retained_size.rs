@@ -222,20 +222,15 @@ fn kind_heap_bytes(kind: &BlockKind) -> usize {
 }
 
 /// Estimates total bytes retained by one wire block.
-///
-/// `size_of::<WireBlock>()` already covers the inline `Option<Value>` slot of the
-/// retained original JSON, so the original contributes only its reachable heap bytes.
 pub(crate) fn wire_block_retained_bytes(block: &WireBlock) -> usize {
     size_of::<WireBlock>()
         .saturating_add(kind_heap_bytes(block.kind()))
         .saturating_add(provider_extras_heap_bytes(&block.provider_extras))
-        .saturating_add(block.original().map_or(0, value_heap_bytes))
 }
 
 /// Estimates total bytes retained by one wire message.
 ///
-/// Block inline storage is charged through content capacity. Each block and the
-/// message also charge their independently retained original JSON trees.
+/// Block inline storage is charged through content capacity.
 pub(crate) fn wire_message_retained_bytes(message: &WireMessage) -> usize {
     let blocks = message
         .content()
@@ -256,8 +251,6 @@ pub(crate) fn wire_message_retained_bytes(message: &WireMessage) -> usize {
         .saturating_add(origin_heap_bytes(message.origin.as_ref()))
         .saturating_add(provider_extras_heap_bytes(&message.provider_extras))
         .saturating_add(harness_meta_heap_bytes(&message.meta))
-        // Message deserialization retains the complete original object independently of every block's original object.
-        .saturating_add(message.original().map_or(0, value_heap_bytes))
 }
 
 /// Charges one shared ingress shell's backing, including its Arc counters.
@@ -286,35 +279,31 @@ mod tests {
         )
     }
 
+    /// Decoding retains no envelope tree: a block or message decoded from JSON, with
+    /// or without unknown envelope fields, charges the same bytes as one built from
+    /// parts with equal typed fields.
     #[test]
-    fn original_json_is_charged_only_while_retained() {
+    fn decoded_envelope_charges_only_typed_fields() {
         let bare = WireBlock::bare(BlockKind::Text {
             text: "a".repeat(16),
         });
         let mut json = serde_json::to_value(&bare).unwrap();
-        json["future_field"] = Value::from("kept for pass-through");
+        json["future_field"] = Value::from("discarded on decode");
         let deserialized: WireBlock = serde_json::from_value(json).unwrap();
-        let original = deserialized.original().unwrap();
+        assert_eq!(deserialized, bare);
         assert_eq!(
-            wire_block_retained_bytes(&deserialized) - wire_block_retained_bytes(&bare),
-            value_heap_bytes(original)
-        );
-
-        let mut cleared = deserialized;
-        cleared.mark_modified();
-        assert_eq!(
-            wire_block_retained_bytes(&cleared),
+            wire_block_retained_bytes(&deserialized),
             wire_block_retained_bytes(&bare)
         );
 
         let constructed = text_message(vec![bare.clone()]);
-        let reparsed: WireMessage =
-            serde_json::from_value(serde_json::to_value(&constructed).unwrap()).unwrap();
-        let message_original = reparsed.original().unwrap();
-        let block_original = reparsed.content()[0].original().unwrap();
+        let mut json = serde_json::to_value(&constructed).unwrap();
+        json["future_envelope"] = Value::from(1);
+        let reparsed: WireMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(reparsed, constructed);
         assert_eq!(
-            wire_message_retained_bytes(&reparsed) - wire_message_retained_bytes(&constructed),
-            value_heap_bytes(message_original) + value_heap_bytes(block_original)
+            wire_message_retained_bytes(&reparsed),
+            wire_message_retained_bytes(&constructed)
         );
     }
 

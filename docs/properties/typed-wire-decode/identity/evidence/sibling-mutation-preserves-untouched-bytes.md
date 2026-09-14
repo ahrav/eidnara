@@ -77,3 +77,7 @@ projection reattachment; only the proposed observation marker is test-only.
 - Missing evidence: explicit source/sibling snapshots across a real edit.
 - Conclusion: unresolved, needs `/testing:test-strategy` to observe both
   ownership noninterference and expected edited bytes. No test ran here.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`; replay envelopes removed. `a_block_edit_leaves_its_sibling_unchanged_and_envelope_unknowns_are_discarded` (memory-store) and `overlay_canonicalizes_only_the_mutated_block` (transform.rs): the edited block re-encodes, the sibling is equal by value with its payload intact, and unknown envelope keys are discarded on both.

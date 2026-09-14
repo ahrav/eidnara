@@ -3,13 +3,20 @@ use crate::embedding_supervisor::{EmbeddingSupervisor, Maintained, SliceBounds, 
 use crate::projection_lifecycle::{ControlState, DisabledIntent, EpisodeAccounting, IntentRefusal};
 use kernel::CommitIntent;
 use sha2::{Digest, Sha256};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 pub(super) struct Maintenance {
     supervisor: Arc<EmbeddingSupervisor>,
     task: JoinHandle<()>,
+}
+
+impl Maintenance {
+    /// A finished task has dropped its reader, so this owner pins nothing.
+    pub(super) fn pins(&self) -> bool {
+        !self.task.is_finished()
+    }
 }
 
 impl Drop for Maintenance {
@@ -41,6 +48,9 @@ impl SearchSelection {
         now: Arc<dyn Fn() -> i64 + Send + Sync>,
         events: tokio::sync::mpsc::UnboundedSender<SupervisorEvent>,
     ) -> Result<(), BuildError> {
+        if self.maintenance.as_ref().is_some_and(|owner| !owner.pins()) {
+            self.maintenance = None;
+        }
         if self.maintenance.is_some() {
             return Err(BuildError::Invalid("maintenance already owned"));
         }
@@ -51,9 +61,41 @@ impl SearchSelection {
         if !Arc::ptr_eq(&family.projection, &maintained.projection) {
             return Err(BuildError::Invalid("maintenance names another projection"));
         }
+        maintained
+            .gate
+            .require_binding(&self.data_home, &self.identity)?;
         let grant = maintained
             .gate
             .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Startup)?;
+        let slice_ms = u64::try_from(bounds.slice.as_millis())
+            .ok()
+            .and_then(|whole| {
+                whole.checked_add(u64::from(
+                    !bounds.slice.subsec_nanos().is_multiple_of(1_000_000),
+                ))
+            })
+            .ok_or(BuildError::Invalid("maintenance slice"))?;
+        maintained.gate.check_limits(
+            &grant,
+            &InvalidationIdentity::from(&self.identity),
+            &[
+                (
+                    "embedding_recovery_attempts",
+                    u64::from(bounds.dispatch.grant.allowance.get()),
+                ),
+                ("pending_count", bounds.dispatch.max_jobs.get() as u64),
+                ("supervisor_slice_ms", slice_ms),
+                (
+                    "local_transaction_rows",
+                    bounds.sweep_candidates.get() as u64,
+                ),
+            ],
+        )?;
+        let kernel_budget = EvalBudget::new(
+            Some(Instant::now() + bounds.slice),
+            Arc::new(AtomicBool::new(false)),
+        );
+        family.check_kernel(&maintained.kernel, &kernel_budget)?;
         let supervisor = EmbeddingSupervisor::new(maintained, bounds, now, events);
         let task = supervisor.spawn_pinned(SearchReader { family, grant });
         self.maintenance = Some(Maintenance { supervisor, task });
@@ -101,6 +143,11 @@ impl SearchSelection {
         observer: &mut dyn FnMut(DisableEvent),
     ) -> Result<DisabledIntent, BuildError> {
         let lifecycle = ProjectionLifecycle::open(&self.data_home)?;
+        #[cfg(feature = "test-support")]
+        let lifecycle = match self.disable_barrier.clone() {
+            Some(barrier) => lifecycle.with_write_barrier_for_test(move |event| barrier(event)),
+            None => lifecycle,
+        };
         let mut disabled = match lifecycle.read() {
             ControlState::Disabled(intent) => intent,
             _ => return Err(IntentRefusal::Disabled.into()),
@@ -142,6 +189,7 @@ impl SearchSelection {
                 "disabled handoff missing for owned selection",
             ));
         }
+        gate.require_selection_home(&self.data_home)?;
         deadline(budget)?;
         if disabled.episodes.is_none() {
             let (allowance, duration) =
@@ -340,6 +388,11 @@ impl SearchSelection {
         let mut next = disabled.clone();
         next.deregistered = true;
         lifecycle.update_disabled(&disabled, &next)?;
+        if registered_again(&next)? {
+            return Err(BuildError::Invalid(
+                "deregistered consumer is registered again",
+            ));
+        }
         Ok(next)
     }
 

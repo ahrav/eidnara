@@ -159,6 +159,14 @@ impl LifecycleIntent {
             self.cause,
         )
         .map_err(|refusal| refusal.to_string())?;
+        // `record` admits only a positive allowance and a deadline at or after `recorded_at`,
+        // and `consume_episode` never passes the allowance, so other accounting is corruption.
+        if self.episodes.allowance == 0
+            || self.episodes.consumed > self.episodes.allowance
+            || self.episodes.deadline < self.recorded_at
+        {
+            return Err("impossible episode accounting".to_owned());
+        }
         if !self
             .replacement_capture
             .as_deref()
@@ -313,6 +321,8 @@ pub enum IntentRefusal {
     Unavailable(String),
     #[error("every episode of the allowance is consumed")]
     AllowanceExhausted,
+    #[error("the lifecycle timestamp is negative")]
+    InvalidTimestamp,
     #[error("the episode deadline has passed")]
     DeadlineExpired,
     #[error("no intent is recorded")]
@@ -978,6 +988,9 @@ impl ProjectionLifecycle {
     /// Stops admission without requiring a serving grant or discarding construction obligations.
     /// Replays sync the existing record and preserve its accounting.
     pub fn disable(&self, gate: &HookGate, now: i64) -> Result<DisabledIntent, IntentRefusal> {
+        if now < 0 {
+            return Err(IntentRefusal::InvalidTimestamp);
+        }
         gate.disable();
         let _lock = self.lock().map_err(io_refusal)?;
         let handoff = match self.read() {
@@ -1247,7 +1260,7 @@ fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
             deadline: i64::MAX,
         }),
         through: Some(i64::MAX),
-        deregistered: true,
+        deregistered: false,
     };
     let bytes =
         serde_json::to_vec(&disabled).map_err(|_| IntentRefusal::Io("encode".to_owned()))?;

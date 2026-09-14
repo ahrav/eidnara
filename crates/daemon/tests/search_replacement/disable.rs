@@ -384,7 +384,7 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
             Some(corpus.tip())
         );
         drop(release);
-        let done = selection
+        let error = selection
             .reconcile_disabled(
                 &corpus.kernel,
                 &gate,
@@ -393,15 +393,32 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
                 &mut |_| {},
             )
             .await
-            .unwrap();
-        assert!(done.deregistered);
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            BuildError::Projection(
+                daemon::search_projection::SearchProjectionError::Projection(
+                    retrieval::ProjectionError::CorruptRow
+                )
+            )
+        ));
+        let retained = disabled(root.path());
+        assert_eq!(retained.through, None);
+        assert!(!retained.deregistered);
+        assert_eq!(retained.episodes.unwrap().consumed, 1);
         assert_eq!((engine.calls(), engine.completed()), (1, 1));
-        assert!(weak.upgrade().is_none());
-        rustix::fs::flock(
-            &seed_directory,
-            rustix::fs::FlockOperation::NonBlockingLockExclusive,
-        )
-        .unwrap();
+        assert!(weak.upgrade().is_some());
+        assert!(
+            rustix::fs::flock(
+                &seed_directory,
+                rustix::fs::FlockOperation::NonBlockingLockExclusive
+            )
+            .is_err()
+        );
+        assert_eq!(
+            corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+            Some(corpus.tip())
+        );
         assert_eq!(admissions(&selection, &corpus, &gate), (0, 0));
         assert!(synapse.embed_blocking(&["probe"]).is_ok());
     }
@@ -1336,6 +1353,22 @@ async fn a_restore_before_the_completion_write_refuses_to_persist_deregistration
         .unwrap();
     let checkpoint = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
     assert!(checkpoint.is_some());
+    let record = root.path().join("search-lifecycle/intent.json");
+    let restored = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let restore_once = Arc::clone(&restored);
+    let kernel = Arc::clone(&corpus.kernel);
+    let backup_path = saved.destination_path.clone();
+    selection = selection.with_disable_write_barrier_for_test(move |event| {
+        if event == daemon::projection_lifecycle::WriteBarrier::AfterRename
+            && !restore_once.load(std::sync::atomic::Ordering::SeqCst)
+            && serde_json::from_slice::<serde_json::Value>(&std::fs::read(&record).unwrap())
+                .unwrap()["deregistered"]
+                == true
+        {
+            kernel.restore(&backup_path).unwrap();
+            restore_once.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
     selection.begin_disable(&gate, &mut |_| {}).unwrap();
     let result = selection
         .reconcile_disabled(
@@ -1343,11 +1376,7 @@ async fn a_restore_before_the_completion_write_refuses_to_persist_deregistration
             &gate,
             &spec(root.path()),
             &budget(Duration::from_secs(20)),
-            &mut |event| {
-                if event == DisableEvent::Deregistered {
-                    corpus.kernel.restore(&saved.destination_path).unwrap();
-                }
-            },
+            &mut |_| {},
         )
         .await;
     assert!(
@@ -1359,7 +1388,8 @@ async fn a_restore_before_the_completion_write_refuses_to_persist_deregistration
         ),
         "{result:?}"
     );
-    assert!(!disabled(root.path()).deregistered);
+    assert!(restored.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(disabled(root.path()).deregistered);
     assert_eq!(
         corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
         checkpoint
@@ -1553,6 +1583,273 @@ async fn a_completed_replay_stops_waiting_for_a_kernel_reader_at_its_budget() {
     );
     holder.join().unwrap();
     assert_eq!(disabled(root.path()), done);
+}
+
+/// A supervisor that stopped on its own and finished draining no longer pins anything. Its finished owner does not block a replacement or a fresh start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_maintenance_owner_releases_selection_and_restart() {
+    use daemon::embedding_supervisor::{Maintained, SliceBounds, Stop, SupervisorEvent};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let weak = Arc::downgrade(reader.projection());
+    let engine = fixtures::TestEngine::new();
+    let synapse = Arc::new(fixtures::component(
+        &engine,
+        host_runtime::synapse::SynapseLimits::default(),
+    ));
+    let maintained = || Maintained {
+        gate: Arc::clone(&gate),
+        kernel: Arc::clone(&corpus.kernel),
+        projection: weak.upgrade().unwrap(),
+        synapse: Arc::clone(&synapse),
+        project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+        destination: kernel::ArtifactDestination::Remote,
+    };
+    let bounds = || SliceBounds {
+        dispatch: fixtures::bounds(),
+        sweep_candidates: NonZeroUsize::new(16).unwrap(),
+        slice: Duration::from_millis(200),
+        idle: Duration::from_millis(20),
+    };
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+    selection
+        .start_maintenance(maintained(), bounds(), Arc::new(|| fixtures::NOW), events)
+        .unwrap();
+    drop(reader);
+    selection
+        .maintenance_supervisor_for_test()
+        .unwrap()
+        .panic_next_slice_for_test();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(
+            received.recv().await.expect("supervisor event stream"),
+            SupervisorEvent::Stopped(Stop::Panicked(_))
+        ) {}
+    })
+    .await
+    .unwrap();
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match selection.start_maintenance(
+                maintained(),
+                bounds(),
+                Arc::new(|| fixtures::NOW),
+                events.clone(),
+            ) {
+                Ok(()) => break,
+                Err(BuildError::Invalid("maintenance already owned")) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(other) => panic!("{other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    selection
+        .maintenance_supervisor_for_test()
+        .unwrap()
+        .shutdown(Duration::from_secs(10))
+        .await
+        .unwrap();
+}
+
+/// Selection and maintenance refuse gates or kernels bound to another data home.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selection_and_maintenance_refuse_foreign_bindings() {
+    use daemon::embedding_supervisor::{Maintained, SliceBounds};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+
+    let foreign_home = tempfile::tempdir().unwrap();
+    let foreign_gate = Arc::new(HookGate::for_home(foreign_home.path()));
+    foreign_gate.install(cleanup_evaluator(root.path()));
+    let wrong_home = selection.pin(
+        &corpus.kernel,
+        &foreign_gate,
+        &budget(Duration::from_secs(10)),
+    );
+    assert!(matches!(
+        wrong_home,
+        Err(BuildError::Denied(
+            daemon::projection_gates::Denial::EvidenceIdentity
+        ))
+    ));
+
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let engine = fixtures::TestEngine::new();
+    let synapse = Arc::new(fixtures::component(
+        &engine,
+        host_runtime::synapse::SynapseLimits::default(),
+    ));
+    let bounds = || SliceBounds {
+        dispatch: fixtures::bounds(),
+        sweep_candidates: NonZeroUsize::new(16).unwrap(),
+        slice: Duration::from_millis(200),
+        idle: Duration::from_millis(20),
+    };
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    let wrong_gate = selection.start_maintenance(
+        Maintained {
+            gate: open_gate(),
+            kernel: Arc::clone(&corpus.kernel),
+            projection: Arc::clone(reader.projection()),
+            synapse: Arc::clone(&synapse),
+            project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+            destination: kernel::ArtifactDestination::Remote,
+        },
+        bounds(),
+        Arc::new(|| fixtures::NOW),
+        events,
+    );
+    assert!(
+        matches!(
+            wrong_gate,
+            Err(BuildError::Denied(
+                daemon::projection_gates::Denial::EvidenceIdentity
+            ))
+        ),
+        "{wrong_gate:?}"
+    );
+    assert!(selection.maintenance_supervisor_for_test().is_none());
+
+    let foreign_root = tempfile::tempdir().unwrap();
+    let foreign_corpus = Corpus::open(foreign_root.path());
+    foreign_corpus.seed();
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    let wrong_kernel = selection.start_maintenance(
+        Maintained {
+            gate: Arc::clone(&gate),
+            kernel: Arc::clone(&foreign_corpus.kernel),
+            projection: Arc::clone(reader.projection()),
+            synapse,
+            project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+            destination: kernel::ArtifactDestination::Remote,
+        },
+        bounds(),
+        Arc::new(|| fixtures::NOW),
+        events,
+    );
+    assert!(
+        matches!(
+            wrong_kernel,
+            Err(BuildError::Mutation(
+                retrieval::ProjectionError::IdentityMismatch
+            ))
+        ),
+        "{wrong_kernel:?}"
+    );
+    assert!(selection.maintenance_supervisor_for_test().is_none());
+}
+
+/// Disabled cleanup accepts limits only from the gate bound to its selected data home.
+#[tokio::test]
+async fn disabled_cleanup_refuses_a_foreign_gate() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+
+    let foreign_home = tempfile::tempdir().unwrap();
+    let foreign_gate = Arc::new(HookGate::for_home(foreign_home.path()));
+    foreign_gate.install(cleanup_evaluator(root.path()));
+    let result = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &foreign_gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(BuildError::Denied(
+            daemon::projection_gates::Denial::EvidenceIdentity
+        ))
+    ));
+    assert!(!disabled(root.path()).deregistered);
+}
+
+/// Maintenance cannot derive slice deadlines beyond the manifest's approved supervisor bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maintenance_refuses_bounds_larger_than_the_manifest_limits() {
+    use daemon::embedding_supervisor::{Maintained, SliceBounds};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let engine = fixtures::TestEngine::new();
+    let synapse = Arc::new(fixtures::component(
+        &engine,
+        host_runtime::synapse::SynapseLimits::default(),
+    ));
+    let bounds = || SliceBounds {
+        dispatch: fixtures::bounds(),
+        sweep_candidates: NonZeroUsize::new(16).unwrap(),
+        slice: Duration::from_millis(200),
+        idle: Duration::from_millis(20),
+    };
+
+    let recovery_attempts = u64::from(bounds().dispatch.grant.allowance.get());
+    let max_jobs = bounds().dispatch.max_jobs.get() as u64;
+    for (name, max, observed) in [
+        ("embedding_recovery_attempts", 0, recovery_attempts),
+        ("pending_count", 0, max_jobs),
+        ("supervisor_slice_ms", 1, 200),
+        ("local_transaction_rows", 1, 16),
+    ] {
+        let mut evaluator = cleanup_evaluator(root.path());
+        evaluator.manifest.limits.insert(name.to_owned(), max);
+        gate.install(evaluator);
+        let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+        let result = selection.start_maintenance(
+            Maintained {
+                gate: Arc::clone(&gate),
+                kernel: Arc::clone(&corpus.kernel),
+                projection: Arc::clone(reader.projection()),
+                synapse: Arc::clone(&synapse),
+                project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+                destination: kernel::ArtifactDestination::Remote,
+            },
+            bounds(),
+            Arc::new(|| fixtures::NOW),
+            events,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(BuildError::Denied(
+                    daemon::projection_gates::Denial::LimitExceeded {
+                        limit: ref denied,
+                        observed: seen,
+                        max: cap,
+                    }
+                )) if denied == name && seen == observed && cap == max
+            ),
+            "{name}: {result:?}"
+        );
+        assert!(selection.maintenance_supervisor_for_test().is_none());
+    }
 }
 
 /// A slice held inside a projection write past the grace is reported once, not once more for the tracked task that pins the reader.

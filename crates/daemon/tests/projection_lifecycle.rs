@@ -487,7 +487,7 @@ fn reserved(intent: &LifecycleIntent) -> usize {
         "recorded_at": i64::MAX,
         "episodes": {"allowance": u32::MAX, "consumed": u32::MAX, "deadline": i64::MAX},
         "through": i64::MAX,
-        "deregistered": true,
+        "deregistered": false,
     }))
     .unwrap()
     .len()
@@ -1262,6 +1262,15 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     // `disable` latches its gate, so this block uses its own.
     let disabling = open_gate();
     lifecycle.record(&disabling, &accepted, NOW).unwrap();
+    let before_disable = lifecycle.read();
+    assert_eq!(
+        lifecycle.disable(&disabling, -1),
+        Err(IntentRefusal::InvalidTimestamp)
+    );
+    assert_eq!(lifecycle.read(), before_disable);
+    disabling
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .unwrap();
     lifecycle.disable(&disabling, NOW).unwrap();
     let mut stored: Value =
         serde_json::from_slice(&fs::read(record_path(dir.path())).unwrap()).unwrap();
@@ -1277,7 +1286,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         "deadline": i64::MAX,
     });
     stored["through"] = json!(i64::MAX);
-    stored["deregistered"] = json!(true);
+    stored["deregistered"] = json!(false);
     assert!(serde_json::to_vec(&stored).unwrap().len() <= 64 * 1024);
 
     // A well-formed record the daemon did not write: a symlink to one.

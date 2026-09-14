@@ -121,13 +121,21 @@ fn completed_observation_accepts_historical_deadline_without_writes_or_old_targe
         .join(completed.staged_seed_digest.as_ref().unwrap())
         .join("bootstrap.json");
     // The real completed family supplies every non-time field of this historical fixture.
-    for (path, field) in [(&control_path, "current"), (&certificate_path, "intent")] {
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        value[field]["episodes"]["deadline"] =
-            serde_json::json!(completed.episodes.deadline - shift);
-        value[field]["recorded_at"] = serde_json::json!(completed.recorded_at - shift);
-        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    for path in [&control_path, &certificate_path] {
+        let bytes = std::fs::read(path).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let shifted = text.replacen(
+            &format!("\"deadline\":{}", completed.episodes.deadline),
+            &format!("\"deadline\":{}", completed.episodes.deadline - shift),
+            1,
+        );
+        let shifted = shifted.replacen(
+            &format!("\"recorded_at\":{}", completed.recorded_at),
+            &format!("\"recorded_at\":{}", completed.recorded_at - shift),
+            1,
+        );
+        assert_ne!(shifted, text);
+        std::fs::write(path, shifted).unwrap();
     }
     let mut expected = completed;
     expected.episodes.deadline -= shift;
