@@ -23626,7 +23626,45 @@ mod tests {
         assert!(keeps_from(&response, "previous") > 0, "{response}");
     }
 
-    /// Raw input cannot replay fields discarded or defaults materialized by typed CK decoding.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wire_recipe_insert_depth_is_bounded_after_ingress() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        for depth in [120, 121] {
+            let mut nested = Value::Null;
+            for _ in 0..depth {
+                nested = Value::Array(vec![nested]);
+            }
+            let mut input = request(vec![ck(
+                "deep",
+                1,
+                "text with [brackets] and \\\"quotes\\\"",
+            )]);
+            input["session_id"] =
+                json!(format!("{}deep", historian::HISTORIAN_CHILD_SESSION_PREFIX));
+            input["messages"][0]["ck"]["provider_extras"] = json!({"p": {"v": nested}});
+            let encoded = serde_json::to_vec(&input).unwrap();
+            assert!(serde_json::from_slice::<Value>(&encoded).is_ok());
+            match handler
+                .handle_transform_for_test(test_route(7), input)
+                .await
+            {
+                PreparedOutcome::Response(output) => {
+                    let response: Value = serde_json::from_slice(&output)
+                        .expect("successful recipe must fit the default JSON depth limit");
+                    edit_recipe::Recipe::from_json(&response).expect("recipe depth contract");
+                    assert_eq!(depth, 120, "oversized literal must be refused");
+                    assert_eq!(response["status"], "ok");
+                }
+                PreparedOutcome::Error { code, .. } => {
+                    assert_eq!(depth, 121, "boundary literal must be accepted");
+                    assert_eq!(code, "encode_failed");
+                }
+                _ => panic!("transform must have a unary outcome"),
+            }
+        }
+    }
+
     #[test]
     fn wire_passthrough_recipe_matches_typed_output_not_raw_input() {
         let (handler, _store, _dir, _project) =

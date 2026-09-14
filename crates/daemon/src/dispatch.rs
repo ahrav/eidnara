@@ -86,6 +86,19 @@ impl PreparedSegment {
         }
     }
 
+    fn fits_recipe_depth(&self) -> bool {
+        let limit = crate::edit_recipe::MAX_JSON_NESTING - 4;
+        match &self.source {
+            PreparedSegmentSource::Value(value) => {
+                crate::edit_recipe::validate_json_nesting(value).is_ok_and(|depth| depth <= limit)
+            }
+            PreparedSegmentSource::Exact(bytes) => encoded_depth_within(bytes, limit),
+            PreparedSegmentSource::Served(message) => {
+                encoded_depth_within(message.canonical_bytes(), limit)
+            }
+        }
+    }
+
     fn write_to<W: Write>(&self, destination: &mut W) -> Result<(), PreparedOutputError> {
         match &self.source {
             PreparedSegmentSource::Exact(bytes) => destination.write_all(bytes)?,
@@ -103,6 +116,41 @@ impl PreparedSegment {
         }
         Ok(())
     }
+}
+
+fn encoded_depth_within(bytes: &[u8], limit: usize) -> bool {
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for &byte in bytes {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else {
+            match byte {
+                b'"' => quoted = true,
+                b'[' | b'{' => {
+                    depth += 1;
+                    if depth > limit {
+                        return false;
+                    }
+                }
+                b']' | b'}' => {
+                    let Some(parent) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = parent;
+                }
+                _ => {}
+            }
+        }
+    }
+    depth == 0 && !quoted
 }
 
 impl fmt::Debug for PreparedSegment {
@@ -143,11 +191,19 @@ impl PreparedOutput {
         envelope: Value,
         operations: Vec<RecipeSegment>,
     ) -> Result<Self, PreparedOutputError> {
+        crate::edit_recipe::validate_json_nesting(&envelope)
+            .map_err(|_| PreparedOutputError::RecipeNestingTooDeep)?;
         let Value::Object(envelope) = envelope else {
             return Err(PreparedOutputError::InvalidTransformEnvelope);
         };
         if envelope.get("operations") != Some(&Value::Null) {
             return Err(PreparedOutputError::InvalidTransformEnvelope);
+        }
+        if operations.iter().any(|operation| match operation {
+            RecipeSegment::Keep(_) => false,
+            RecipeSegment::Insert(values) => values.iter().any(|value| !value.fits_recipe_depth()),
+        }) {
+            return Err(PreparedOutputError::RecipeNestingTooDeep);
         }
         Ok(Self {
             source: PreparedSource::Transform(Arc::new(TransformSegments {
@@ -311,6 +367,8 @@ pub enum PreparedOutputError {
     LengthOverflow,
     #[error("transform envelope must contain a null operations field")]
     InvalidTransformEnvelope,
+    #[error("transform recipe exceeds the JSON nesting limit")]
+    RecipeNestingTooDeep,
     #[error("prepared JSON serialization failed: {0}")]
     Serialize(#[source] serde_json::Error),
     #[error("prepared body write failed: {0}")]

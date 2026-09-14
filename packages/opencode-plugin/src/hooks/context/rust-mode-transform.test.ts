@@ -2385,11 +2385,10 @@ describe("bounded transform ownership", () => {
                 const pass = transform.run(sessionId, output);
                 await Promise.race([started.promise, pass]);
                 expect(calls).toHaveLength(1);
-                // Leave exactly the applied array's slot charge (a value slot plus its retained length per entry), minus the offset, for the pending pass.
                 const blocker = admission.admit(`${sessionId}-blocker`);
                 if (!("lease" in blocker)) throw new Error("blocker not admitted");
                 expect(
-                    blocker.lease.reserve(admission.remainingBytes - candidateLength * 16 + offset),
+                    blocker.lease.reserve(admission.remainingBytes - candidateLength * 24 + offset),
                 ).toBe(true);
                 response.resolve(
                     recipeForLast(

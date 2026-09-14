@@ -26,7 +26,7 @@ pub const MAX_RECONSTRUCTED_BYTES: usize = crate::dispatch::MAX_WIRE_BODY_BYTES;
 pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 /// Caps adversarial key collisions before they can turn one output lookup into a full source scan.
 pub const MAX_CONFIRM_PROBES: usize = 8;
-const MAX_JSON_NESTING: usize = 127;
+pub(crate) const MAX_JSON_NESTING: usize = 127;
 
 /// Opaque, nonempty, at most [`MAX_REVISION_BYTES`] UTF-8 bytes. Neither a hash nor authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -388,7 +388,7 @@ impl<'a> Iterator for ContainerChildren<'a> {
 }
 
 /// Validates the depth bound and returns the maximum pending container frames.
-fn validate_json_nesting(value: &Value) -> Result<usize, RecipeError> {
+pub(crate) fn validate_json_nesting(value: &Value) -> Result<usize, RecipeError> {
     let Some(children) = ContainerChildren::new(value) else {
         return Ok(0);
     };

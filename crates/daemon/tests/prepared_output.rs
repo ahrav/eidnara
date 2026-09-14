@@ -65,6 +65,37 @@ fn recipe_segments_write_keeps_and_inserts_as_prepared_bytes() {
 }
 
 #[test]
+fn recipe_insert_depth_agrees_for_encoded_and_value_segments() {
+    for depth in [0, 123, 124] {
+        let mut literal = json!("[brackets] {braces} \\\"quotes\\\" \\\\ backslash");
+        for _ in 0..depth {
+            literal = json!([literal]);
+        }
+        let bytes = serde_json::to_vec(&literal).unwrap();
+        for segment in [
+            PreparedSegment::exact(Arc::from(bytes.clone())),
+            PreparedSegment::value(Arc::new(literal.clone()), bytes.len()),
+        ] {
+            let output = PreparedOutput::transform_recipe(
+                json!({"base_revision": "b", "output_revision": "o", "operations": null}),
+                vec![RecipeSegment::Insert(vec![segment])],
+            );
+            if depth <= 123 {
+                let parsed: serde_json::Value =
+                    serde_json::from_slice(&reserved_vec(&output.unwrap()).unwrap()).unwrap();
+                daemon::edit_recipe::Recipe::from_json(&parsed).unwrap();
+                assert_eq!(parsed["operations"][0]["values"][0], literal);
+            } else {
+                assert!(matches!(
+                    output,
+                    Err(PreparedOutputError::RecipeNestingTooDeep)
+                ));
+            }
+        }
+    }
+}
+
+#[test]
 fn recipe_envelope_requires_the_operations_placeholder() {
     assert!(matches!(
         PreparedOutput::transform_recipe(json!({"status": "ok"}), Vec::new()),

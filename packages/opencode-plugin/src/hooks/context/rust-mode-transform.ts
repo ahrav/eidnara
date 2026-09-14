@@ -660,7 +660,7 @@ export function applyTransformRecipe(
     response: Record<string, unknown>,
     input: RecipeSourceBase,
     previous: RecipeSourceBase | undefined,
-    reserve: (slots: number) => boolean,
+    reserve: (slots: number, insertedSlots: number) => boolean,
 ): { values: unknown[]; lengths: number[]; bytes: number; outputRevision: string } {
     const parsed = parseRecipe(response);
     if (!parsed.ok) {
@@ -669,9 +669,12 @@ export function applyTransformRecipe(
         );
     }
     let slots = 0;
-    for (const operation of parsed.recipe.operations)
+    let insertedSlots = 0;
+    for (const operation of parsed.recipe.operations) {
         slots += operation.op === "keep" ? operation.count : operation.values.length;
-    if (!Number.isSafeInteger(slots) || !reserve(slots))
+        if (operation.op === "insert") insertedSlots += operation.values.length;
+    }
+    if (!Number.isSafeInteger(slots) || !reserve(slots, insertedSlots))
         throw new CaptureBudgetExceeded("recipe output array");
     const applied = applyRecipe(parsed.recipe, input, previous);
     if (!applied.ok) {
@@ -1542,7 +1545,11 @@ export function createRustModeTransform(
                     response,
                     { revision: baseRevision, values: messages, lengths: inputLengths },
                     previousApplied,
-                    (slots) => lease.reserve(slots * (CANDIDATE_SLOT_BYTES + LENGTH_SLOT_BYTES)),
+                    (slots, insertedSlots) =>
+                        lease.reserve(
+                            slots * (CANDIDATE_SLOT_BYTES + LENGTH_SLOT_BYTES) +
+                                insertedSlots * LENGTH_SLOT_BYTES,
+                        ),
                 );
                 const candidate = application.values;
                 let applied: AppliedOutput | undefined;
