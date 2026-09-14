@@ -3,7 +3,7 @@
 //! The cache machinery uses stable block identities instead of full wire messages.
 //! This module bridges full wire messages and stable block identities.
 //! The module assigns each content block a session-stable `mid#block_index` identity.
-//! The module retains original messages so unreduced responses can pass them through without rebuilding.
+//! Projections hold `Arc` shells of the ingress messages, so an unreduced response serves them without rebuilding.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
@@ -14,9 +14,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-// The re-exported wire serializers retain the original `serde_json::Value` for pass-through.
-// Pass-through must replay the retained `Value`, not round-trip through typed structs.
-// Value-level replay preserves harmless future wire fields that typed round-trips could drop.
 pub use memory_store::{
     BlockKind, HarnessMeta, MediaBlock, MediaKind, MessageOrigin, OpaqueBlock, OutputKind,
     ProviderExtras, ResultBlock, ResultBlockKind, ToolOutput, WireBlock, WireMessage,
@@ -538,24 +535,13 @@ fn project_messages_from_state(
         }
 
         let synthetic = ingress.is_synthetic(msg);
-        // Replay preserves block originals but discards unknown message fields.
-        let msg = if msg.ck.original().is_none() && msg.ck.meta.synthetic == synthetic {
+        // The shell is shared unless the effective synthetic flag differs.
+        let msg = if msg.ck.meta.synthetic == synthetic {
             Arc::clone(msg)
         } else {
-            Arc::new(IngressMessage {
-                mid: msg.mid.clone(),
-                ordinal: msg.ordinal,
-                ck: WireMessage::from_parts(
-                    msg.ck.role.clone(),
-                    msg.ck.content().clone(),
-                    msg.ck.origin.clone(),
-                    msg.ck.provider_extras.clone(),
-                    HarnessMeta {
-                        synthetic,
-                        ..msg.ck.meta.clone()
-                    },
-                ),
-            })
+            let mut rebuilt = IngressMessage::clone(msg);
+            rebuilt.ck.meta.synthetic = synthetic;
+            Arc::new(rebuilt)
         };
         let role = msg.ck.role.as_str();
         if role == "assistant" {
@@ -882,8 +868,8 @@ pub(crate) fn fingerprint_from_projected_wire(
 }
 
 /// Hashes block equality identity for request-local fallback candidate selection, not served
-/// bytes. The field list mirrors `WireBlock`'s derived `PartialEq` by hand, so callers
-/// re-check equality on the selected candidate.
+/// bytes. Signed zeros hash alike because `f64` equality treats them alike; callers re-check
+/// equality on the selected candidate.
 pub(crate) fn block_identity_digest(block: &WireBlock) -> [u8; 32] {
     use serde_json::ser::{CompactFormatter, Formatter};
     use std::io::{self, Write};
@@ -898,7 +884,7 @@ pub(crate) fn block_identity_digest(block: &WireBlock) -> [u8; 32] {
 
     let mut writer = Sha256::new();
     let mut serializer = serde_json::Serializer::with_formatter(&mut writer, IdentityFormatter);
-    (block.kind(), &block.provider_extras, block.original())
+    block
         .serialize(&mut serializer)
         .expect("CK wire block identity must serialize");
     writer.finalize().into()
@@ -1026,12 +1012,10 @@ mod tests {
                 },
             ),
         });
-        // Reparsing through the wire gives both `WireMessage` and `WireBlock` ownership of the original JSON.
         let message: Arc<IngressMessage> =
             serde_json::from_value(serde_json::to_value(constructed).unwrap()).unwrap();
         let projection = project_messages(&[message]).unwrap();
         let block = &projection.blocks[0];
-        let wire_json = serde_json::to_value(block.wire.as_ref()).unwrap();
         let BlockKind::ToolCall {
             id, name, input, ..
         } = block.wire.kind()
@@ -1041,10 +1025,7 @@ mod tests {
         let wire_retained = size_of::<WireBlock>()
             .saturating_add(id.capacity())
             .saturating_add(name.capacity())
-            .saturating_add(manual_value_retained_bytes(input).saturating_sub(size_of::<Value>()))
-            .saturating_add(
-                manual_value_retained_bytes(&wire_json).saturating_sub(size_of::<Value>()),
-            );
+            .saturating_add(manual_value_retained_bytes(input).saturating_sub(size_of::<Value>()));
         let block_heap = block
             .id
             .capacity()
@@ -1707,7 +1688,7 @@ mod tests {
     }
 
     #[test]
-    fn reattach_keeps_block_level_original_but_rebuilds_the_message_shell() {
+    fn reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded() {
         let mut json = serde_json::to_value(text_msg("m0", 0, "user", "hello")).unwrap();
         json["ck"]["future_field"] = Value::from(1);
         json["ck"]["content"][0]["future_block_field"] = Value::from(2);
@@ -1727,24 +1708,69 @@ mod tests {
         let projection = project_messages(std::slice::from_ref(&message)).unwrap();
 
         let reattached = projection.reattach_messages_prefix(1).unwrap();
+        assert!(
+            Arc::ptr_eq(&reattached[0], &message),
+            "the effective synthetic flag matches, so the decoded shell is shared"
+        );
         let replayed = serde_json::to_value(&reattached[0].ck).unwrap();
+        // Unknown envelope fields are discarded at both the message and block level.
         assert_eq!(replayed.get("future_field"), None);
-        assert_eq!(replayed["content"][0]["future_block_field"], Value::from(2));
+        assert_eq!(replayed["content"][0].get("future_block_field"), None);
         assert_eq!(reattached[0].mid, message.mid);
         assert_eq!(reattached[0].ordinal, message.ordinal);
         assert_eq!(reattached[0].ck.origin, message.ck.origin);
         assert_eq!(reattached[0].ck.provider_extras, message.ck.provider_extras);
         assert_eq!(reattached[0].ck.meta, message.ck.meta);
         assert_eq!(reattached[0].ck.content(), message.ck.content());
-        assert!(reattached[0].ck.original().is_none());
-        assert!(reattached[0].ck.content()[0].original().is_some());
         let mut expected = json["ck"].clone();
         expected.as_object_mut().unwrap().remove("future_field");
+        expected["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("future_block_field");
         assert_eq!(
             serde_json::to_vec(&replayed).unwrap(),
             serde_json::to_vec(&expected).unwrap()
         );
-        assert_eq!(serde_json::to_value(&message).unwrap(), json);
+        let mut typed = json.clone();
+        typed["ck"].as_object_mut().unwrap().remove("future_field");
+        typed["ck"]["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("future_block_field");
+        assert_eq!(serde_json::to_value(&message).unwrap(), typed);
+    }
+
+    /// A message whose effective synthetic flag differs from its ingress flag gets a rebuilt shell with only that flag changed; the ingress shell is untouched.
+    #[test]
+    fn projection_rebuilds_only_the_shell_whose_synthetic_flag_changes() {
+        let pair = crate::injection::build_synthetic_todo_pair(
+            r#"[{"content":"rebuild","status":"pending","priority":"high"}]"#,
+        )
+        .unwrap();
+        let mut unflagged = pair.assistant_msg.clone();
+        unflagged.meta.synthetic = false;
+        let messages = IngressMessages(vec![
+            text_msg("m0", 0, "user", "live"),
+            Arc::new(IngressMessage {
+                mid: "m1".into(),
+                ordinal: 1,
+                ck: unflagged.clone(),
+            }),
+        ]);
+        let mut ingress = MessageProjection::new(&messages);
+        ingress.mark_synthetic(&messages[1]);
+        let projection = ingress.project().unwrap();
+        let reattached = projection.reattach_messages_prefix(2).unwrap();
+        assert!(Arc::ptr_eq(&reattached[0], &messages[0]));
+        assert!(!Arc::ptr_eq(&reattached[1], &messages[1]));
+        assert!(reattached[1].ck.meta.synthetic);
+        assert!(!messages[1].ck.meta.synthetic);
+        let mut expected = unflagged;
+        expected.meta.synthetic = true;
+        assert_eq!(reattached[1].ck, expected);
+        assert_eq!(reattached[1].mid, "m1");
+        assert_eq!(reattached[1].ordinal, 1);
     }
 
     #[test]
@@ -1782,8 +1808,6 @@ mod tests {
             serde_json::to_vec(&shared).unwrap()
         );
         assert_eq!(serde_json::to_vec(&messages).unwrap(), original_bytes);
-        assert!(first[0].ck.original().is_none());
-        assert!(first[0].ck.content()[0].original().is_some());
         let mut edited = shared;
         Arc::make_mut(&mut edited[0]).ck.content_mut().clear();
         assert!(!Arc::ptr_eq(&first[0], &edited[0]));

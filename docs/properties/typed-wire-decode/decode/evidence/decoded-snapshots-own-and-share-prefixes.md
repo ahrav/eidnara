@@ -90,3 +90,13 @@ usable until it is dropped. No test executes in this discovery pass.
 `/testing:test-strategy` owns mobility and owner-drop checks. The issue 524
 owner owns private-input release; the issue 438 owner owns joined work.
 `/testing:invariant-test-review` audits B1's existing prefix assertions.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`, `cargo test -p daemon --locked
+--features test-support` (1,489 tests pass; `lifecycle_cli` is platform-unsupported
+on the aarch64 host). Projection shares the ingress shell whenever
+the effective synthetic flag matches (`project_messages_from_state`); the
+`wire.rs` sharing tests and `decode_and_projection_fit_the_declared_pool`
+(every projection block points into the request's shells) pass. No input-drop
+sequence was added.

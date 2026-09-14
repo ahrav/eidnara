@@ -387,3 +387,16 @@ passed.
 [fixture]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/tests/direct_host.rs#L285-L290
 [wire63]: https://github.com/ahrav/eidnara/blob/9132344/docs/host-wire-protocol.md#L308
 [wire751]: https://github.com/ahrav/eidnara/blob/9132344/docs/host-wire-protocol.md#L440
+
+## Typed-wire U1 string charge, 2026-09-13
+
+`RETAINED_STRING_COPIES` is 1 on branch `perf/typed-wire-u1-owned-decode`: the
+owned typed decode keeps one copy of each string on either lane, and the two
+retained envelope trees that motivated three copies no longer exist. The
+charge-magnitude clause in the Check holds with the new constant; the byte cap,
+the node floor, the upfront unescape charge, and both refusal codes are
+unchanged, and the node-dense ring witnesses in `tests/direct_host.rs` do not
+depend on the string coefficient. The frozen A2 replay
+(`frozen_corpus_footprints_replay_with_only_string_charge_changes`) records the
+admission differences the lower charge produces; see
+`docs/properties/typed-wire-decode/resources/evidence/frozen-admission-outcomes-and-boundaries-stay-stable.md`.

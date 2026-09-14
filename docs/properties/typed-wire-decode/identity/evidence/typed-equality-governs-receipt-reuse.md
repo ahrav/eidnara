@@ -77,3 +77,7 @@ plugin's JSON.stringify emits negative zero.
 - Missing evidence: none for the contract; new field-set coverage is missing.
 - Conclusion: resolved. `/testing:invariant-test-review` audits the existing
   test; `/testing:test-strategy` designs the prospective replacement oracle.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`; replay envelopes removed. `served_fingerprint_fallback_preserves_complete_identity_and_first_match` checks that `typed`, `unknown`, and both `raw` candidates are equal typed values with equal `block_identity_digest`s, so the first equal candidate (index 1) is reused. `receipt_reuse_is_separate_from_fresh_hashing` checks that signed-zero reuse keeps `-0.0` in served bytes, an unequal positional candidate hashes afresh, and only an absent positional candidate enables equality-index lookup. `served_canonical_frozen_corpus_matches_value_reference` covers the frozen corpus.

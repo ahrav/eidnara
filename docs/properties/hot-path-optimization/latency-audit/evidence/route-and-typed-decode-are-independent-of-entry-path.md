@@ -392,3 +392,13 @@ against those failures.
 [wire751]: https://github.com/ahrav/eidnara/blob/9132344/docs/host-wire-protocol.md#L440
 [mapinsert]: https://docs.rs/serde_json/1.0.151/src/serde_json/map.rs.html#127-129
 [derivedup]: https://docs.rs/serde_derive/1.0.229/src/serde_derive/de/struct_.rs.html#269
+
+## Typed-wire U1 execution, 2026-09-13
+
+The 46-body entry differential and the same-footprint test pass unchanged with
+owned typed wire envelopes; the direct-lane set is the pinned eleven bodies.
+`frozen_corpus_footprints_replay_with_only_string_charge_changes` adds a replay
+of every body at its frozen three-copy footprint and one byte under it through
+both lanes; unbounded terminals are unchanged and both lanes agree at every
+capacity. Duplicate recognized envelope keys inside a message still reach the
+tree lane with the last value.

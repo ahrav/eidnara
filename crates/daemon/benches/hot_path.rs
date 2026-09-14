@@ -65,34 +65,9 @@ fn bench_tokenizer(c: &mut Criterion) {
     group.finish();
 }
 
-/// Retained message JSON makes the benchmark input match decoded requests.
-fn decoded_messages(class: ContentClass, count: usize, bytes: usize) -> Vec<IngressMessage> {
-    let typed = corpus::messages(class, count, bytes, CORPUS_SEED);
-    let messages: Vec<IngressMessage> =
-        serde_json::from_value(serde_json::to_value(&typed).expect("bench corpus serializes"))
-            .expect("bench corpus decodes as a wire message array");
-    assert!(
-        messages
-            .iter()
-            .all(|message| message.ck.original().is_some()),
-        "bench ingress must carry retained message JSON like a request over the wire"
-    );
-    messages
-}
-
 fn ingress_messages(class: ContentClass, count: usize, bytes: usize) -> IngressMessages {
-    decoded_messages(class, count, bytes).into_iter().collect()
-}
-
-/// Message-level retained JSON is cleared; block-level retained JSON stays, so a
-/// timed `flatten_block` replays each block's `Value` instead of cloning its payload.
-fn reattached_messages(class: ContentClass, count: usize, bytes: usize) -> IngressMessages {
-    decoded_messages(class, count, bytes)
+    corpus::messages(class, count, bytes, CORPUS_SEED)
         .into_iter()
-        .map(|mut message| {
-            message.ck.mark_modified();
-            message
-        })
         .collect()
 }
 
@@ -119,7 +94,7 @@ fn bench_decode(c: &mut Criterion) {
         group.throughput(criterion::Throughput::Bytes(body.len() as u64));
         group.bench_with_input(
             BenchmarkId::new("typed_request", format!("{count}msgs_2KiB_mixed")),
-            &body,
+            body,
             |b, body| {
                 b.iter_with_large_drop(|| {
                     serde_json::from_slice::<TransformRequest>(black_box(body)).expect("decode")
@@ -131,7 +106,7 @@ fn bench_decode(c: &mut Criterion) {
                 "typed_request_plus_projection",
                 format!("{count}msgs_2KiB_mixed"),
             ),
-            &body,
+            body,
             |b, body| {
                 b.iter_with_large_drop(|| {
                     let request = serde_json::from_slice::<TransformRequest>(black_box(body))
@@ -149,49 +124,6 @@ fn bench_projection(c: &mut Criterion) {
     let mut group = c.benchmark_group("projection/full");
     for &count in MESSAGE_COUNTS {
         let messages = ingress_messages(ContentClass::Mixed, count, 2_048);
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{count}msgs_2KiB_mixed")),
-            &messages,
-            |b, messages| {
-                b.iter_batched(
-                    || (),
-                    |()| project_messages(black_box(messages)).expect("projection"),
-                    criterion::BatchSize::PerIteration,
-                )
-            },
-        );
-    }
-    group.finish();
-}
-
-fn bench_projection_reattached(c: &mut Criterion) {
-    let mut group = c.benchmark_group("projection/reattached_prefix");
-    for &count in MESSAGE_COUNTS {
-        let messages = reattached_messages(ContentClass::Mixed, count, 2_048);
-        assert!(
-            messages.iter().all(|message| {
-                message.ck.original().is_none()
-                    && message
-                        .ck
-                        .content()
-                        .iter()
-                        .all(|block| block.original().is_some())
-            }),
-            "reattached bench shells must drop only the message original and keep every block original"
-        );
-        let projection = project_messages(&messages).expect("projection");
-        assert!(
-            projection
-                .blocks
-                .iter()
-                .all(|block| messages.iter().any(|message| {
-                    std::ptr::eq(
-                        block.wire.as_ref(),
-                        &message.ck.content()[block.block_index],
-                    )
-                })),
-            "canonical bench shells must be shared into the projection, not copied"
-        );
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{count}msgs_2KiB_mixed")),
             &messages,
@@ -468,7 +400,6 @@ criterion_group!(
     bench_tokenizer,
     bench_decode,
     bench_projection,
-    bench_projection_reattached,
     bench_tail_hygiene,
     bench_m0_trim_memories,
     bench_e2e_first_hard,
