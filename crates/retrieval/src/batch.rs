@@ -111,7 +111,7 @@ pub fn dense_eligible(class: OccurrenceClass) -> bool {
 
 /// The job identity for one occurrence in one generation, so the same work
 /// can never be queued twice.
-fn job_id(occurrence_id: &str, generation_id: &str) -> String {
+pub(crate) fn job_id(occurrence_id: &str, generation_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(occurrence_id.as_bytes());
     hasher.update([0x1f]);

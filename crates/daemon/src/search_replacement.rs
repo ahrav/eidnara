@@ -32,6 +32,8 @@ use crate::search_catchup::{
 use crate::search_projection::SearchProjection;
 use crate::search_seed::{self, ClosedSeed, SeedBounds, StagedSeed};
 
+pub mod selection;
+
 #[derive(Debug, Clone)]
 pub struct ReplacementSpec {
     pub identity: ProjectionIdentity,

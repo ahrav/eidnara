@@ -138,6 +138,35 @@ pub struct LifecycleIntent {
 }
 
 impl LifecycleIntent {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != SCHEMA {
+            return Err(format!("schema {}", self.schema));
+        }
+        check_invariants(
+            &self.consumer.consumer_id,
+            self.transition,
+            self.authorization_ref.as_deref(),
+            self.cause,
+        )
+        .map_err(|refusal| refusal.to_string())?;
+        // `record` admits only a positive allowance and a deadline at or after `recorded_at`,
+        // and `consume_episode` never passes the allowance, so other accounting is corruption.
+        if self.episodes.allowance == 0
+            || self.episodes.consumed > self.episodes.allowance
+            || self.episodes.deadline < self.recorded_at
+        {
+            return Err("impossible episode accounting".to_owned());
+        }
+        if !self
+            .replacement_capture
+            .as_deref()
+            .is_none_or(ReplacementCapture::stage_is_bound)
+        {
+            return Err("certificate names another capture".to_owned());
+        }
+        Ok(())
+    }
+
     /// Whether `request` is a replay of this record: the same intent in every field the caller supplies.
     fn is_replay_of(&self, request: &LifecycleRequest) -> bool {
         self.transition == request.transition
@@ -380,25 +409,9 @@ impl ProjectionLifecycle {
             return ControlState::Unavailable(error.kind().to_string());
         }
         match serde_json::from_slice::<LifecycleIntent>(&bytes) {
-            Ok(intent) if intent.schema != SCHEMA => {
-                ControlState::Unavailable(format!("schema {}", intent.schema))
-            }
-            Ok(intent) => match check_invariants(
-                &intent.consumer.consumer_id,
-                intent.transition,
-                intent.authorization_ref.as_deref(),
-                intent.cause,
-            ) {
-                Ok(())
-                    if !intent
-                        .replacement_capture
-                        .as_deref()
-                        .is_none_or(ReplacementCapture::stage_is_bound) =>
-                {
-                    ControlState::Unavailable("certificate names another capture".to_owned())
-                }
+            Ok(intent) => match intent.validate() {
                 Ok(()) => ControlState::Intent(intent),
-                Err(refusal) => ControlState::Unavailable(refusal.to_string()),
+                Err(reason) => ControlState::Unavailable(reason),
             },
             Err(_) => ControlState::Unavailable("malformed record".to_owned()),
         }
@@ -848,7 +861,7 @@ impl Drop for FlockRelease<'_> {
     }
 }
 
-fn open_directory(dir: &Path) -> io::Result<File> {
+pub(crate) fn open_directory(dir: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
         .custom_flags((OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC).bits() as i32)

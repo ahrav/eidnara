@@ -53,6 +53,16 @@ pub struct ProjectionIdentity {
     pub generation_epoch: u64,
 }
 
+impl ProjectionIdentity {
+    pub fn require_compatible(&self, expected: &Self) -> Result<(), ProjectionError> {
+        if self.schema_version == SCHEMA_VERSION && self == expected {
+            Ok(())
+        } else {
+            Err(ProjectionError::IdentityMismatch)
+        }
+    }
+}
+
 /// The text a record carries: either the whole buffer the span selects from,
 /// or the selection itself when the producer already cut it out.
 #[derive(Clone, Copy)]
@@ -308,11 +318,7 @@ pub fn install_identity(
         return Err(ProjectionError::IdentityMismatch);
     }
     if let Some(stored) = read_identity(conn)? {
-        return if stored == *identity {
-            Ok(())
-        } else {
-            Err(ProjectionError::IdentityMismatch)
-        };
+        return stored.require_compatible(identity);
     }
     conn.execute(
         "INSERT INTO projection_identity(

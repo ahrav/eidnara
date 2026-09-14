@@ -40,6 +40,15 @@ use crate::store_fs::{
 pub const GENERATIONS_DIR_NAME: &str = "generations";
 
 pub const CURRENT_PROFILE_NAME: &str = "current-profile.json";
+pub const SEARCH_PROFILE_NAME: &str = "search-profile.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileEvent {
+    BeforeRename,
+    AfterRename,
+    BeforeDirectorySync,
+    AfterDirectorySync,
+}
 
 /// The `files` array excludes `manifest.json` because its bytes produce the generation digest.
 pub const GENERATION_MANIFEST_NAME: &str = "manifest.json";
@@ -264,6 +273,11 @@ pub struct ValidatedGeneration {
 }
 
 impl ValidatedGeneration {
+    pub fn pin(&self) -> Result<(), GenerationError> {
+        rustix::fs::flock(&self.dir, rustix::fs::FlockOperation::NonBlockingLockShared)
+            .map_err(|_| invalid("generation is being reclaimed"))
+    }
+
     /// In-process loaders may use the descriptor-rooted path only while `ValidatedGeneration` remains alive.
     ///
     /// The retained descriptor pins the validated directory inode against pathname replacement.
@@ -448,9 +462,17 @@ impl GenerationStore {
     }
 
     pub fn read_current(&self) -> Result<CurrentProfile, GenerationError> {
+        self.read_profile(CURRENT_PROFILE_NAME)
+    }
+
+    pub fn read_search_current(&self) -> Result<CurrentProfile, GenerationError> {
+        self.read_profile(SEARCH_PROFILE_NAME)
+    }
+
+    fn read_profile(&self, name: &str) -> Result<CurrentProfile, GenerationError> {
         let fd = match openat(
             &self.root_fd,
-            CURRENT_PROFILE_NAME,
+            name,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         ) {
@@ -771,6 +793,17 @@ impl GenerationStore {
         if protected.contains(digest) {
             return Err(invalid("corrupt digest target is protected"));
         }
+        match self.read_search_current()? {
+            CurrentProfile::Current(current) if current == digest => {
+                return Err(invalid("corrupt search selection is protected"));
+            }
+            CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
+            _ => {}
+        }
+        let _pin = lock_for_reclamation(&self.generations_fd, digest).map_err(|err| match err {
+            Reclamation::Pinned => invalid("corrupt generation is pinned"),
+            Reclamation::Unopenable(err) => err,
+        })?;
         exchange_dirs(&self.generations_fd, temp_name, digest)?;
         fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
         self.validate(digest)?;
@@ -782,6 +815,40 @@ impl GenerationStore {
     /// `sweep_stale_profile_temps`. A failed post-rename `fsync` returns after the selector
     /// has already been renamed; its durability is unproven.
     fn replace_profile(&self, digest: &str) -> Result<(), GenerationError> {
+        self.replace_profile_at(CURRENT_PROFILE_NAME, digest, &mut |_| Ok(()))
+    }
+
+    pub fn select_search(
+        &self,
+        digest: &str,
+        _transaction: &LifecycleTransactionLock,
+        observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
+    ) -> Result<(), GenerationError> {
+        self.verify_named_identity()?;
+        if self.read_search_current()? == CurrentProfile::Quarantined {
+            return Err(GenerationError::UnsupportedStateSchema);
+        }
+        self.validate(digest)?;
+        self.replace_profile_at(SEARCH_PROFILE_NAME, digest, observer)?;
+        self.verify_named_identity()
+    }
+
+    pub fn reconcile_search(
+        &self,
+        _transaction: &LifecycleTransactionLock,
+    ) -> Result<CurrentProfile, GenerationError> {
+        self.verify_named_identity()?;
+        let current = self.read_search_current()?;
+        fsync_preserving_storage(&self.root_fd, "lifecycle root fsync failed")?;
+        Ok(current)
+    }
+
+    fn replace_profile_at(
+        &self,
+        name: &str,
+        digest: &str,
+        observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
+    ) -> Result<(), GenerationError> {
         let profile = WireProfile {
             schema: 1,
             current: digest.to_owned(),
@@ -792,13 +859,8 @@ impl GenerationStore {
             .map_err(|_| GenerationError::Instance(InstanceError::Random))?;
         let temp_name = format!("{PROFILE_TEMP_PREFIX}{}{PROFILE_TEMP_SUFFIX}", hex(&suffix));
         let result = write_new_file(&self.root_fd, &temp_name, &bytes, 0o600).and_then(|()| {
-            renameat(
-                &self.root_fd,
-                temp_name.as_str(),
-                &self.root_fd,
-                CURRENT_PROFILE_NAME,
-            )
-            .map_err(|e| match e {
+            observer(ProfileEvent::BeforeRename)?;
+            renameat(&self.root_fd, temp_name.as_str(), &self.root_fd, name).map_err(|e| match e {
                 rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT => {
                     GenerationError::InsufficientStorage
                 }
@@ -809,7 +871,10 @@ impl GenerationStore {
             let _ = unlinkat(&self.root_fd, temp_name.as_str(), AtFlags::empty());
         }
         result?;
+        observer(ProfileEvent::AfterRename)?;
+        observer(ProfileEvent::BeforeDirectorySync)?;
         fsync_preserving_storage(&self.root_fd, "lifecycle root fsync failed")?;
+        observer(ProfileEvent::AfterDirectorySync)?;
         Ok(())
     }
 
@@ -885,6 +950,13 @@ impl GenerationStore {
             CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
             _ => {}
         }
+        match self.read_search_current()? {
+            CurrentProfile::Current(current) if current == digest => {
+                return Err(invalid("search generation is selected"));
+            }
+            CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
+            _ => {}
+        }
         match rustix::fs::statat(
             &self.generations_fd,
             digest.as_str(),
@@ -893,7 +965,13 @@ impl GenerationStore {
             Err(rustix::io::Errno::NOENT) => {}
             Err(_) => return Err(invalid("generation lookup failed")),
             Ok(_) => {
-                if self.validate(&digest)?.manifest != *expected {
+                let validated = self.validate(&digest)?;
+                rustix::fs::flock(
+                    &validated.dir,
+                    rustix::fs::FlockOperation::NonBlockingLockExclusive,
+                )
+                .map_err(|_| invalid("generation is pinned"))?;
+                if validated.manifest != *expected {
                     return Err(invalid("generation does not match owned manifest"));
                 }
                 remove_tree(&self.generations_fd, &digest)?;
@@ -909,10 +987,24 @@ impl GenerationStore {
     /// The protected digests include the active candidate.
     /// `prune` preserves entries with unknown manifest schemas or foreign names.
     /// `prune` returns `UnsupportedStateSchema` when the current profile is quarantined.
+    /// A quarantined search profile may name any digest, so `prune` then counts it as quarantined
+    /// and removes only temps, which no selector can reference.
     /// One unremovable entry does not stop the sweep: every reclaimable entry is removed first,
     /// then the first removal error is returned.
     pub fn prune(&self, protected: &BTreeSet<String>) -> Result<PruneReport, GenerationError> {
         let mut protected = protected.clone();
+        let mut report = PruneReport::default();
+        let search_quarantined = match self.read_search_current()? {
+            CurrentProfile::Current(digest) => {
+                protected.insert(digest);
+                false
+            }
+            CurrentProfile::Quarantined => {
+                report.quarantined += 1;
+                true
+            }
+            CurrentProfile::Absent => false,
+        };
         match self.read_current()? {
             CurrentProfile::Absent => {}
             CurrentProfile::Current(digest) => {
@@ -920,7 +1012,6 @@ impl GenerationStore {
             }
             CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
         }
-        let mut report = PruneReport::default();
         let mut first_error = None;
         // `prune` enumerates `generations_fd` instead of its pathname so a replacement directory cannot select retained-store deletions.
         // `prune` removes through `generations_fd` so a replaced pathname cannot redirect deletions.
@@ -942,9 +1033,17 @@ impl GenerationStore {
                 report.quarantined += 1;
                 continue;
             }
-            if protected.contains(&name) {
+            if search_quarantined || protected.contains(&name) {
                 continue;
             }
+            let _pin = match lock_for_reclamation(&self.generations_fd, &name) {
+                Ok(pin) => pin,
+                Err(Reclamation::Pinned) => continue,
+                Err(Reclamation::Unopenable(err)) => {
+                    first_error.get_or_insert(err);
+                    continue;
+                }
+            };
             // An unprotected generation's contents affect pruning only through its manifest schema.
             if self.is_quarantined_schema(&name) {
                 report.quarantined += 1;
@@ -1164,6 +1263,35 @@ fn open_child_dir(parent: &OwnedFd, name: &str) -> Option<OwnedFd> {
         return None;
     }
     Some(fd)
+}
+
+/// Why an existing generation could not be locked for reclamation.
+enum Reclamation {
+    /// A reader holds the shared pin; the entry is retained without error.
+    Pinned,
+    /// The entry could not be opened for locking; `prune` reports it as its first failure.
+    Unopenable(GenerationError),
+}
+
+/// Takes the exclusive reclamation lock on `name` whatever its mode bits, so a reader's shared
+/// pin is honored on a directory whose mode no longer validates. `Ok(None)` when `name` is
+/// absent or is not a directory: a file or symlink cannot hold a reader's directory pin, and
+/// `remove_tree` checks its ownership before unlinking it.
+fn lock_for_reclamation(parent: &OwnedFd, name: &str) -> Result<Option<OwnedFd>, Reclamation> {
+    let fd = match crate::store_fs::open_dir_for_removal(parent, name) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => {
+            return Ok(None);
+        }
+        Err(_) => {
+            return Err(Reclamation::Unopenable(invalid(
+                "generation cannot be opened for reclamation",
+            )));
+        }
+    };
+    rustix::fs::flock(&fd, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| Reclamation::Pinned)?;
+    Ok(Some(fd))
 }
 
 /// `open_child_dir_existing` returns `Ok(None)` only when `name` is absent; it returns `Err` when an existing entry fails the directory trust predicate.
@@ -2442,5 +2570,225 @@ mod tests {
             store.read_current().expect("read"),
             CurrentProfile::Current(_)
         ));
+    }
+
+    #[test]
+    fn search_profile_does_not_repoint_host_and_pins_exclude_prune_and_exchange() {
+        let root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        let host = stage_default(&store, src.path());
+        let host_bytes = std::fs::read(store.root().join(CURRENT_PROFILE_NAME)).unwrap();
+        let sources = [SourceSpec {
+            rel_path: "search.sqlite".to_owned(),
+            source: write_source(src.path(), "search", b"seed"),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        let search = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        let transaction = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+        store
+            .select_search(&search, &transaction, &mut |_| Ok(()))
+            .unwrap();
+        assert_eq!(
+            std::fs::read(store.root().join(CURRENT_PROFILE_NAME)).unwrap(),
+            host_bytes
+        );
+        assert_eq!(store.read_current().unwrap(), CurrentProfile::Current(host));
+        let pin = store.validate(&search).unwrap();
+        pin.pin().unwrap();
+        store
+            .select_search(&pin.digest, &transaction, &mut |_| Ok(()))
+            .unwrap();
+        store.prune(&BTreeSet::new()).unwrap();
+        assert!(
+            store
+                .discard_unselected(&pin.manifest, &transaction, &BTreeSet::new())
+                .is_err()
+        );
+        std::fs::remove_file(store.root().join(SEARCH_PROFILE_NAME)).unwrap();
+        store.prune(&BTreeSet::new()).unwrap();
+        assert!(
+            store
+                .discard_unselected(&pin.manifest, &transaction, &BTreeSet::new())
+                .is_err()
+        );
+        std::fs::write(
+            store
+                .root()
+                .join(GENERATIONS_DIR_NAME)
+                .join(&search)
+                .join("search.sqlite"),
+            b"bad",
+        )
+        .unwrap();
+        assert!(store.stage(&sources, &meta(), &BTreeSet::new()).is_err());
+        drop(pin);
+        assert_eq!(
+            store.prune(&BTreeSet::new()).unwrap().removed_generations,
+            1
+        );
+    }
+
+    #[test]
+    fn prune_removes_an_owned_file_or_symlink_occupying_a_generation_name() {
+        let root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        stage_default(&store, src.path());
+        let generations = store.root().join(GENERATIONS_DIR_NAME);
+        let file = generations.join("a".repeat(64));
+        let link = generations.join("b".repeat(64));
+        std::fs::write(&file, b"not a directory").unwrap();
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        store.prune(&BTreeSet::new()).unwrap();
+        assert!(!file.exists());
+        assert!(std::fs::symlink_metadata(&link).is_err());
+    }
+
+    #[test]
+    fn prune_reports_an_unopenable_generation_and_still_removes_the_others() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        stage_default(&store, src.path());
+        let mut staged = Vec::new();
+        for (name, bytes) in [("first", b"one".as_slice()), ("second", b"two".as_slice())] {
+            let sources = [SourceSpec {
+                rel_path: "search.sqlite".to_owned(),
+                source: write_source(src.path(), name, bytes),
+                executable: false,
+                expected_size: None,
+                expected_sha256: None,
+            }];
+            staged.push(store.stage(&sources, &meta(), &BTreeSet::new()).unwrap());
+        }
+        let generations = store.root().join(GENERATIONS_DIR_NAME);
+        // `prune` visits entries in enumeration order; the unopenable one must come first.
+        let (names, _) =
+            crate::store_fs::read_dir_names_partitioned(&store.generations_fd).unwrap();
+        let first = names.iter().find(|name| staged.contains(name)).unwrap();
+        let later = staged.iter().find(|name| *name != first).unwrap();
+        let unopenable = generations.join(first);
+        std::fs::set_permissions(&unopenable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = store.prune(&BTreeSet::new());
+        std::fs::set_permissions(&unopenable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err(), "{result:?}");
+        assert!(unopenable.join("search.sqlite").is_file());
+        assert!(!generations.join(later).exists());
+    }
+
+    #[test]
+    fn directory_mode_corruption_does_not_bypass_live_generation_pins() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        stage_default(&store, src.path());
+        let sources = [SourceSpec {
+            rel_path: "search.sqlite".to_owned(),
+            source: write_source(src.path(), "search", b"seed"),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        let search = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        let pin = store.validate(&search).unwrap();
+        pin.pin().unwrap();
+        let home = store.root().join(GENERATIONS_DIR_NAME).join(&search);
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o1700)).unwrap();
+        assert_eq!(
+            store.prune(&BTreeSet::new()).unwrap().removed_generations,
+            0
+        );
+        assert!(home.join("search.sqlite").is_file());
+        assert!(store.stage(&sources, &meta(), &BTreeSet::new()).is_err());
+        assert!(home.join("search.sqlite").is_file());
+        drop(pin);
+        assert_eq!(
+            store.prune(&BTreeSet::new()).unwrap().removed_generations,
+            1
+        );
+    }
+
+    #[test]
+    fn unknown_search_selector_schema_blocks_selection_and_reclamation() {
+        let root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let other = store
+            .stage(
+                &[SourceSpec {
+                    rel_path: "other".to_owned(),
+                    source: write_source(src.path(), "other", b"other"),
+                    executable: false,
+                    expected_size: None,
+                    expected_sha256: None,
+                }],
+                &meta(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        let profile = std::fs::read(store.root().join(CURRENT_PROFILE_NAME)).unwrap();
+        write_new_file(
+            &store.root_fd,
+            SEARCH_PROFILE_NAME,
+            br#"{"schema":999,"current":"unknown"}"#,
+            0o600,
+        )
+        .unwrap();
+        let transaction = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+        assert_eq!(
+            store.read_search_current().unwrap(),
+            CurrentProfile::Quarantined
+        );
+        assert!(matches!(
+            store.select_search(&digest, &transaction, &mut |_| Ok(())),
+            Err(GenerationError::UnsupportedStateSchema)
+        ));
+        let staging_temp = store
+            .root()
+            .join(GENERATIONS_DIR_NAME)
+            .join(format!("{STAGING_TEMP_PREFIX}0011223344556677"));
+        std::fs::create_dir(&staging_temp).unwrap();
+        let profile_temp = store.root().join(format!(
+            "{PROFILE_TEMP_PREFIX}0011223344556677{PROFILE_TEMP_SUFFIX}"
+        ));
+        std::fs::write(&profile_temp, b"{\"torn\":true}").unwrap();
+        age_past_stale_threshold(&profile_temp);
+        assert_eq!(
+            store.prune(&BTreeSet::new()).unwrap(),
+            PruneReport {
+                quarantined: 1,
+                removed_temps: 1,
+                removed_profile_temps: 1,
+                removed_generations: 0,
+            }
+        );
+        assert!(!staging_temp.exists());
+        assert!(!profile_temp.exists());
+        assert_eq!(
+            std::fs::read(store.root().join(CURRENT_PROFILE_NAME)).unwrap(),
+            profile
+        );
+        store.validate(&other).unwrap();
+        store.validate(&digest).unwrap();
+        std::fs::write(
+            store.root().join(CURRENT_PROFILE_NAME),
+            br#"{"schema":999,"current":"unknown"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            store.prune(&BTreeSet::new()),
+            Err(GenerationError::UnsupportedStateSchema)
+        ));
+        store.validate(&other).unwrap();
+        store.validate(&digest).unwrap();
     }
 }

@@ -2,6 +2,10 @@
 mod source_fixture;
 mod support;
 
+#[path = "search_replacement/selection.rs"]
+mod selection;
+use selection::selection_child;
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -2087,6 +2091,10 @@ fn expected_pending(rows: &Rows) -> Vec<String> {
 fn replacement_child() {
     let root = std::path::PathBuf::from(std::env::var("REPLACEMENT_CHILD_ROOT").unwrap());
     let cut = std::env::var("REPLACEMENT_CHILD_CUT").unwrap();
+    if cut.starts_with("select-") || cut.starts_with("active-") {
+        selection_child(&root, &cut);
+        return;
+    }
     let kernel_root = tempfile::Builder::new()
         .prefix("kernel")
         .rand_bytes(0)
@@ -2314,6 +2322,123 @@ fn assert_hold_released(root: &Path, hold: &str) {
         )
         .unwrap();
     assert!(released, "old hold {hold} must be released");
+}
+
+#[test]
+fn a_same_process_failure_before_recording_the_capture_still_cleans_up_and_retries() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let config = spec(root.path());
+    record(root.path(), &gate, None, &config.identity);
+    let identity = config.identity.clone();
+    let mut held = None;
+    let failure = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, config)
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |event| {
+            if let BuildEvent::CaptureHeld { hold_id, .. } = event {
+                held = Some(hold_id);
+                gate.install(support::projection_gate::passing_evaluator(
+                    &identity,
+                    0,
+                    &[],
+                ));
+            }
+        })
+        .err()
+        .expect("a revoked gate refuses the capture record");
+    assert!(
+        matches!(
+            failure.error,
+            BuildError::Intent(daemon::projection_lifecycle::IntentRefusal::Denied(_))
+        ),
+        "{:?}",
+        failure.error
+    );
+    assert!(control(root.path()).replacement_capture.is_none());
+    let mut failure = failure;
+    gate.install(support::projection_gate::passing_evaluator(
+        &identity,
+        0,
+        &daemon::projection_gates::ProjectionHook::ALL,
+    ));
+    failure.cleanup(&budget(Duration::from_secs(30))).unwrap();
+    assert_hold_released(root.path(), held.as_deref().unwrap());
+    assert!(control(root.path()).replacement_capture.is_none());
+    let candidate = failure
+        .retry(&budget(Duration::from_secs(30)), &mut |_| {})
+        .unwrap();
+    candidate.revalidate().unwrap();
+}
+
+#[test]
+fn a_same_lineage_restore_from_before_the_capture_lets_cleanup_release_the_missing_hold() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(backup.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let config = spec(root.path());
+    record(root.path(), &gate, None, &config.identity);
+    let saved = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup.path().to_path_buf(),
+            deadline: std::time::Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let mut held = None;
+    let mut failure = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, config)
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |event| {
+            if let BuildEvent::Captured { hold_id, .. } = event {
+                held = Some(hold_id);
+                corpus.kernel.restore(&saved.destination_path).unwrap();
+            }
+        })
+        .err()
+        .expect("a restored kernel aborts construction");
+    assert!(
+        matches!(
+            failure.error,
+            BuildError::Blocked(daemon::search_catchup::Blocked::Read(
+                kernel::CommitReadError::IncarnationMismatch
+            ))
+        ),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(
+        kernel_incarnation_id(root.path()),
+        control(root.path()).kernel_incarnation_id
+    );
+    assert!(
+        failure.cleanup_error.is_none(),
+        "{:?}",
+        failure.cleanup_error
+    );
+    failure.cleanup(&budget(Duration::from_secs(30))).unwrap();
+    assert!(control(root.path()).replacement_capture.is_none());
+    let hold = held.unwrap();
+    let present: bool = Connection::open(root.path().join("kernel/kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM capture_pins WHERE capture_pin_id=?1)",
+            [&hold],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!present, "the restored kernel predates hold {hold}");
+    let candidate = failure
+        .retry(&budget(Duration::from_secs(30)), &mut |_| {})
+        .unwrap();
+    candidate.revalidate().unwrap();
 }
 
 #[test]
