@@ -83,6 +83,23 @@ already collapsed it to `1`. Acceptance still agrees, but sizes for non-integer
 numeric content can differ by a few bytes, so a caller must not treat the two
 measurements as interchangeable at the exact limit.
 
+## Building a recipe
+
+The daemon builds a recipe from the final approved array after every policy,
+codec, healing, and cleanup pass. Provenance keys (cache keys, fingerprints,
+message identities) only nominate candidates; every keep is confirmed by full
+value equality of the selected representation. For each output message the
+builder prefers an equal `previous` message, then an equal `input` message, and
+otherwise inserts the complete value. Cursors advance independently per source,
+so a message that repeats or moves backward relative to its source's last keep
+becomes a literal. Each output message compares against at most
+`MAX_CONFIRM_PROBES` (8) same-key candidates at or after the cursor; a match
+further out also becomes a literal. That bound holds for any key distribution,
+so a key shared by many differing messages costs a longer recipe, never a
+quadratic build. Near-unique keys keep every reachable match. Adjacent keeps of
+one source and adjacent inserts coalesce. The recipe names
+`previous_output_revision` only when a `previous` keep was used.
+
 ## Shared fixtures
 
 `crates/daemon/tests/fixtures/transform-edit-recipe-v1.json` holds the cases
@@ -92,4 +109,5 @@ file. Each case states whether the recipe is accepted and, when it is, the exact
 reconstructed output and its canonical length. Rejection reasons are not
 standardized across languages; the TypeScript test pins its own code per case.
 `crates/daemon/tests/edit_recipe_generated.rs` adds seeded generated valid plans
-and single-fault mutations against an independent model.
+and single-fault mutations against an independent model, and checks that a
+built recipe round-trips through the applier with coalesced operations.

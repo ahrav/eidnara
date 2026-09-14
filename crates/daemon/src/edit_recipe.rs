@@ -8,7 +8,9 @@
 //! sizes the result with checked arithmetic, and only then builds a new vector of shared handles.
 //! It never edits a source.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::hash::Hash;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -22,6 +24,8 @@ pub const MAX_REVISION_BYTES: usize = 128;
 pub const MAX_RECONSTRUCTED_BYTES: usize = crate::dispatch::MAX_WIRE_BODY_BYTES;
 /// Largest integer both languages read exactly; JavaScript indexes above it lose precision.
 pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+/// Bounds equality tests per output message to prevent shared keys from making a build quadratic.
+pub const MAX_CONFIRM_PROBES: usize = 8;
 const MAX_JSON_NESTING: usize = 127;
 
 /// Opaque, nonempty, at most [`MAX_REVISION_BYTES`] UTF-8 bytes. Neither a hash nor authorization.
@@ -507,6 +511,128 @@ impl Recipe {
             lengths,
             bytes,
         })
+    }
+}
+
+/// One whole message of a source or of the final output, with the provenance key that nominates
+/// it as a candidate. Keys only nominate; the builder confirms every keep by full value equality.
+#[derive(Debug, Clone)]
+pub struct Keyed<'a, K> {
+    pub key: K,
+    pub value: &'a Arc<Value>,
+}
+
+/// Ascending positions per key within one source, so a nomination at or after the cursor is one
+/// binary search rather than a scan.
+struct KeyIndex<K> {
+    positions: HashMap<K, Vec<usize>>,
+}
+
+impl<K: Hash + Eq + Clone> KeyIndex<K> {
+    fn new(entries: &[Keyed<'_, K>]) -> Self {
+        let mut positions: HashMap<K, Vec<usize>> = HashMap::with_capacity(entries.len());
+        for (position, entry) in entries.iter().enumerate() {
+            positions
+                .entry(entry.key.clone())
+                .or_default()
+                .push(position);
+        }
+        Self { positions }
+    }
+
+    /// The shared `remaining` budget bounds probes across previous and input lookups.
+    fn confirm(
+        &self,
+        entries: &[Keyed<'_, K>],
+        cursor: usize,
+        wanted: &Keyed<'_, K>,
+        remaining: &mut usize,
+    ) -> Option<usize> {
+        let positions = self.positions.get(&wanted.key)?;
+        let first = positions.partition_point(|position| *position < cursor);
+        for position in positions[first..].iter().take(*remaining).copied() {
+            *remaining -= 1;
+            let candidate = entries[position].value;
+            if Arc::ptr_eq(candidate, wanted.value) || candidate == wanted.value {
+                return Some(position);
+            }
+        }
+        None
+    }
+}
+
+/// Builds the recipe that reconstructs `output` from `input` and, when present, `previous`.
+///
+/// Each output entry prefers an equal `previous` message, then an equal `input` message.
+/// Anything else becomes a literal: an unmatched message, a message that repeats or moves backward
+/// relative to its source cursor, or a match beyond [`MAX_CONFIRM_PROBES`] same-key candidates.
+/// Source cursors advance independently. Adjacent keeps of one source and adjacent inserts coalesce.
+pub fn build_recipe<K: Hash + Eq + Clone>(
+    output: &[Keyed<'_, K>],
+    input: (&Revision, &[Keyed<'_, K>]),
+    previous: Option<(&Revision, &[Keyed<'_, K>])>,
+    output_revision: Revision,
+) -> Recipe {
+    let input_index = KeyIndex::new(input.1);
+    let previous_index = previous.map(|(_, entries)| KeyIndex::new(entries));
+    let mut cursors = [0usize; 2];
+    let mut operations: Vec<Operation> = Vec::new();
+    let mut used_previous = false;
+    for entry in output {
+        let mut remaining = MAX_CONFIRM_PROBES;
+        let previous_hit = previous.and_then(|(_, entries)| {
+            previous_index
+                .as_ref()?
+                .confirm(
+                    entries,
+                    cursors[Source::Previous as usize],
+                    entry,
+                    &mut remaining,
+                )
+                .map(|position| (Source::Previous, position))
+        });
+        let hit = previous_hit.or_else(|| {
+            input_index
+                .confirm(
+                    input.1,
+                    cursors[Source::Input as usize],
+                    entry,
+                    &mut remaining,
+                )
+                .map(|position| (Source::Input, position))
+        });
+        match hit {
+            Some((source, position)) => {
+                cursors[source as usize] = position + 1;
+                used_previous |= source == Source::Previous;
+                match operations.last_mut() {
+                    Some(Operation::Keep {
+                        source: last,
+                        start,
+                        count,
+                    }) if *last == source && *start + *count == position as u64 => *count += 1,
+                    _ => operations.push(Operation::Keep {
+                        source,
+                        start: position as u64,
+                        count: 1,
+                    }),
+                }
+            }
+            None => match operations.last_mut() {
+                Some(Operation::Insert { values }) => values.push(Arc::clone(entry.value)),
+                _ => operations.push(Operation::Insert {
+                    values: vec![Arc::clone(entry.value)],
+                }),
+            },
+        }
+    }
+    Recipe {
+        base_revision: input.0.clone(),
+        output_revision,
+        previous_output_revision: previous
+            .filter(|_| used_previous)
+            .map(|(revision, _)| revision.clone()),
+        operations,
     }
 }
 
@@ -1111,6 +1237,232 @@ mod tests {
         });
         let decoded: Recipe = serde_json::from_value(mixed.clone()).expect("deserializes");
         assert_eq!(serde_json::to_value(&decoded).expect("serializes"), mixed);
+    }
+
+    fn keyed<'a>(values: &'a [Arc<Value>]) -> Vec<Keyed<'a, u64>> {
+        // Provenance here is the message id; repeated ids nominate several positions.
+        values
+            .iter()
+            .map(|value| Keyed {
+                key: value["id"].as_u64().unwrap_or(u64::MAX),
+                value,
+            })
+            .collect()
+    }
+
+    fn rendered(recipe: &Recipe) -> Value {
+        serde_json::to_value(recipe).expect("serializes")
+    }
+
+    #[test]
+    fn builder_prefers_previous_then_input_and_inserts_the_rest() {
+        // AE2: a large transformed prefix already applied, plus one new unchanged input message.
+        let input = shared(&[
+            json!({"id": 1}),
+            json!({"id": 2}),
+            json!({"id": 3}),
+            json!({"id": 4}),
+        ]);
+        let previous = shared(&[json!({"id": 1}), json!({"id": 20, "summary": true})]);
+        let output = shared(&[
+            json!({"id": 1}),
+            json!({"id": 20, "summary": true}),
+            json!({"id": 4}),
+            json!({"id": 99, "instruction": true}),
+        ]);
+        let base = revision("base");
+        let prev = revision("prev");
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            Some((&prev, &keyed(&previous))),
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe),
+            json!({
+                "base_revision": "base",
+                "output_revision": "out",
+                "previous_output_revision": "prev",
+                "operations": [
+                    {"op": "keep", "source": "previous", "start": 0, "count": 2},
+                    {"op": "keep", "source": "input", "start": 3, "count": 1},
+                    {"op": "insert", "values": [{"id": 99, "instruction": true}]},
+                ],
+            })
+        );
+        // The recipe reconstructs the output through the applier, sharing every kept handle.
+        let AppliedRecipe {
+            values: applied, ..
+        } = recipe
+            .apply(
+                SourceBase {
+                    revision: &base,
+                    values: &input,
+                    lengths: &lengths(&input),
+                },
+                Some(SourceBase {
+                    revision: &prev,
+                    values: &previous,
+                    lengths: &lengths(&previous),
+                }),
+            )
+            .expect("applies");
+        let applied: Vec<Value> = applied.iter().map(|value| (**value).clone()).collect();
+        let expected: Vec<Value> = output.iter().map(|value| (**value).clone()).collect();
+        assert_eq!(applied, expected);
+    }
+
+    #[test]
+    fn builder_confirms_by_equality_not_by_key() {
+        let input = shared(&[json!({"id": 1, "text": "old"})]);
+        let output = shared(&[json!({"id": 1, "text": "new"})]);
+        let base = revision("base");
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "insert", "values": [{"id": 1, "text": "new"}]}])
+        );
+        assert_eq!(recipe.previous_output_revision, None);
+    }
+
+    #[test]
+    fn builder_keeps_cursors_monotone_and_uses_each_candidate_at_most_once() {
+        // Output repeats message 1 and moves 3 before 2; only forward matches become keeps.
+        let input = shared(&[json!({"id": 1}), json!({"id": 2}), json!({"id": 3})]);
+        let output = shared(&[
+            json!({"id": 1}),
+            json!({"id": 3}),
+            json!({"id": 2}),
+            json!({"id": 1}),
+        ]);
+        let base = revision("base");
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([
+                {"op": "keep", "source": "input", "start": 0, "count": 1},
+                {"op": "keep", "source": "input", "start": 2, "count": 1},
+                {"op": "insert", "values": [{"id": 2}, {"id": 1}]},
+            ])
+        );
+        // Duplicate provenance: two input entries share a key; each is used at most once, in order.
+        let duplicated = shared(&[json!({"id": 7}), json!({"id": 7}), json!({"id": 7})]);
+        let recipe = build_recipe(
+            &keyed(&duplicated),
+            (&base, &keyed(&duplicated[..2])),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([
+                {"op": "keep", "source": "input", "start": 0, "count": 2},
+                {"op": "insert", "values": [{"id": 7}]},
+            ])
+        );
+    }
+
+    #[test]
+    fn builder_tests_at_most_max_confirm_probes_candidates_per_nomination() {
+        assert_eq!(MAX_CONFIRM_PROBES, 8);
+        // One key nominates MAX_CONFIRM_PROBES + 1 input positions; only the last equals the
+        // output. The scan stops after MAX_CONFIRM_PROBES candidates and emits a literal.
+        let bucket = MAX_CONFIRM_PROBES + 1;
+        let input = shared(
+            &(0..bucket)
+                .map(|n| json!({"id": 7, "n": n}))
+                .collect::<Vec<_>>(),
+        );
+        let output = shared(&[json!({"id": 7, "n": bucket - 1})]);
+        let base = revision("base");
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "insert", "values": [{"id": 7, "n": bucket - 1}]}])
+        );
+        // With exactly MAX_CONFIRM_PROBES candidates the last one is still tested and kept.
+        let recipe = build_recipe(
+            &keyed(&output[..]),
+            (&base, &keyed(&input[1..])),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "keep", "source": "input", "start": 7, "count": 1}])
+        );
+        // Spent positions do not count against the budget.
+        let output = shared(&[json!({"id": 7, "n": 1}), json!({"id": 7, "n": bucket - 1})]);
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            None,
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([
+                {"op": "keep", "source": "input", "start": 1, "count": 1},
+                {"op": "keep", "source": "input", "start": bucket - 1, "count": 1},
+            ])
+        );
+    }
+
+    #[test]
+    fn builder_shares_confirm_probe_budget_across_sources() {
+        let previous = shared(
+            &(0..MAX_CONFIRM_PROBES)
+                .map(|n| json!({"id": 7, "n": n}))
+                .collect::<Vec<_>>(),
+        );
+        let input = shared(&[json!({"id": 7, "n": 99})]);
+        let output = shared(&[json!({"id": 7, "n": 99})]);
+        let base = revision("base");
+        let prev = revision("prev");
+        let recipe = build_recipe(
+            &keyed(&output),
+            (&base, &keyed(&input)),
+            Some((&prev, &keyed(&previous))),
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe)["operations"],
+            json!([{"op": "insert", "values": [{"id": 7, "n": 99}]}])
+        );
+    }
+
+    #[test]
+    fn builder_emits_empty_operations_for_empty_output_and_omits_unused_previous() {
+        let input = shared(&[json!({"id": 1})]);
+        let previous = shared(&[json!({"id": 2})]);
+        let base = revision("base");
+        let prev = revision("prev");
+        let recipe = build_recipe(
+            &[],
+            (&base, &keyed(&input)),
+            Some((&prev, &keyed(&previous))),
+            revision("out"),
+        );
+        assert_eq!(
+            rendered(&recipe),
+            json!({"base_revision": "base", "output_revision": "out", "operations": []})
+        );
     }
 
     #[test]
