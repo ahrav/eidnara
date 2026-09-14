@@ -306,6 +306,22 @@ export function parseRecipe(value: unknown): RecipeParse {
     if (invalidJson !== undefined) return { ok: false, rejection: invalidJson };
     const operationsValue = ownDataProperty(value, "operations")?.value;
     if (!Array.isArray(operationsValue)) return reject("malformed", "operations is not an array");
+    let usesPrevious = false;
+    for (let index = 0; index < operationsValue.length; index += 1) {
+        const entry = Object.getOwnPropertyDescriptor(operationsValue, index);
+        if (!entry || !("value" in entry))
+            return reject("malformed", `operation ${index} is not a data property`);
+        const operation = parseOperation(entry.value, index);
+        if (isRecipeRejection(operation)) return { ok: false, rejection: operation };
+        if (operation.op === "keep" && operation.source === "previous") usesPrevious = true;
+    }
+    if (usesPrevious && previousOutputRevision === undefined)
+        return reject("missing_previous_base", "a previous keep has no previous_output_revision");
+    if (!usesPrevious && previousOutputRevision !== undefined)
+        return reject(
+            "unused_previous_revision",
+            "previous_output_revision without a previous keep",
+        );
     const operations: RecipeOperation[] = [];
     for (let index = 0; index < operationsValue.length; index += 1) {
         const entry = Object.getOwnPropertyDescriptor(operationsValue, index);
@@ -315,21 +331,6 @@ export function parseRecipe(value: unknown): RecipeParse {
         if (isRecipeRejection(operation)) return { ok: false, rejection: operation };
         operations[operations.length] = operation;
     }
-    let usesPrevious = false;
-    for (let index = 0; index < operations.length; index += 1) {
-        const operation = operations[index] as RecipeOperation;
-        if (operation.op === "keep" && operation.source === "previous") {
-            usesPrevious = true;
-            break;
-        }
-    }
-    if (usesPrevious && previousOutputRevision === undefined)
-        return reject("missing_previous_base", "a previous keep has no previous_output_revision");
-    if (!usesPrevious && previousOutputRevision !== undefined)
-        return reject(
-            "unused_previous_revision",
-            "previous_output_revision without a previous keep",
-        );
     return {
         ok: true,
         recipe:
@@ -422,19 +423,20 @@ export function applyRecipe(
     // Brackets first; each entry then pays its bytes plus one comma after the first.
     let bytes = 2;
     const insertedLengths: number[] = [];
-    const addEntry = (length: number): boolean => {
-        if (!Number.isSafeInteger(length) || length < 0) return false;
+    const addEntry = (length: number): RecipeRejectionCode | undefined => {
+        if (!Number.isSafeInteger(length) || length < 0) return "overflow";
         bytes += length + (entries > 0 ? 1 : 0);
         entries += 1;
-        return Number.isSafeInteger(bytes);
+        if (!Number.isSafeInteger(bytes)) return "overflow";
+        return bytes > MAX_RECONSTRUCTED_BYTES ? "output_too_large" : undefined;
     };
     for (let index = 0; index < recipe.operations.length; index += 1) {
         const operation = recipe.operations[index] as RecipeOperation;
         if (operation.op === "insert") {
             for (let valueIndex = 0; valueIndex < operation.values.length; valueIndex += 1) {
                 const length = canonicalJsonLength(operation.values[valueIndex]);
-                if (!addEntry(length))
-                    return reject("overflow", `operation ${index} overflowed the size sum`);
+                const failure = addEntry(length);
+                if (failure) return reject(failure, `operation ${index} exceeded the size bound`);
                 insertedLengths[insertedLengths.length] = length;
             }
             continue;
@@ -467,8 +469,8 @@ export function applyRecipe(
             );
         cursors[operation.source] = end;
         for (let position = operation.start; position < end; position += 1) {
-            if (!addEntry(base.lengths[position] as number))
-                return reject("overflow", `operation ${index} overflowed the size sum`);
+            const failure = addEntry(base.lengths[position] as number);
+            if (failure) return reject(failure, `operation ${index} exceeded the size bound`);
         }
     }
     if (bytes > MAX_RECONSTRUCTED_BYTES)

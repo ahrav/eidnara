@@ -512,10 +512,14 @@ impl Recipe {
 
 fn add_entry(bytes: usize, entries: usize, length: usize) -> Result<usize, RecipeError> {
     let separator = usize::from(entries > 0);
-    bytes
+    let sum = bytes
         .checked_add(length)
         .and_then(|sum| sum.checked_add(separator))
-        .ok_or(RecipeError::Overflow)
+        .ok_or(RecipeError::Overflow)?;
+    if sum > MAX_RECONSTRUCTED_BYTES {
+        return Err(RecipeError::OutputTooLarge { bytes: sum });
+    }
+    Ok(sum)
 }
 
 /// Compact `serde_json` length, the same rule the client's `serdeJsonCompact` follows. A value
@@ -1115,6 +1119,16 @@ mod tests {
         assert_eq!(
             canonical_len(&value).expect("measures"),
             serde_json::to_vec(&value).expect("serializes").len()
+        );
+    }
+
+    #[test]
+    fn size_accumulator_rejects_the_first_byte_over_the_cap() {
+        assert_eq!(
+            add_entry(MAX_RECONSTRUCTED_BYTES, 1, 4),
+            Err(RecipeError::OutputTooLarge {
+                bytes: MAX_RECONSTRUCTED_BYTES + 5,
+            }),
         );
     }
 

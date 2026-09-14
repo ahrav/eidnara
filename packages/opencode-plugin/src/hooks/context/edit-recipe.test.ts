@@ -473,6 +473,59 @@ describe("edit recipe bounds", () => {
         expect(heapAtFinalOperation - heapBefore).toBeLessThan(8 * 1024 * 1024);
     });
 
+    it("stops at the size cap before inspecting later literals", () => {
+        const result = applyRecipe(
+            {
+                baseRevision: "b",
+                outputRevision: "o",
+                operations: [
+                    { op: "keep", source: "input", start: 0, count: 1 },
+                    { op: "insert", values: [null, 1n] },
+                ],
+            },
+            { revision: "b", values: [null], lengths: [MAX_RECONSTRUCTED_BYTES - 2] },
+        );
+        expect(result).toMatchObject({ ok: false, rejection: { code: "output_too_large" } });
+    });
+
+    it("does not retain parsed operations before rejecting unused previous revision", () => {
+        const operations = Array.from({ length: 1_000 }, () => ({
+            op: "insert",
+            values: [null],
+        }));
+        const original = Object.getOwnPropertyDescriptor(Array.prototype, "999");
+        let copied = false;
+        let result: ReturnType<typeof parseRecipe> | undefined;
+        try {
+            Object.defineProperty(Array.prototype, "999", {
+                configurable: true,
+                set(value: unknown) {
+                    copied = true;
+                    Object.defineProperty(this, "999", {
+                        value,
+                        writable: true,
+                        enumerable: true,
+                        configurable: true,
+                    });
+                },
+            });
+            result = parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                previous_output_revision: "unused",
+                operations,
+            });
+        } finally {
+            if (original) Object.defineProperty(Array.prototype, "999", original);
+            else Reflect.deleteProperty(Array.prototype, "999");
+        }
+        expect(result).toMatchObject({
+            ok: false,
+            rejection: { code: "unused_previous_revision" },
+        });
+        expect(copied).toBe(false);
+    });
+
     it("rejects oversized kept ranges before slicing sources", () => {
         const values = new Proxy([1, 2], {
             get(target, property, receiver) {
