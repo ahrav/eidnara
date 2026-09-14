@@ -25,8 +25,9 @@ Revision: the #533 change on `fix/client-transform-owner` after merging
   (`:1087`, `:1096`), and inside every recheck (`:985`); `run` releases only
   in `.finally` after `execute` settles (`:1529`). On success the publication
   block has already transferred the retained state to `wireCaches` and
-  `states` (`:1479-1486`) before that release; the transferred state is
-  count-bounded and its byte budget is TE25 in #538.
+  `states` (`:1479-1486`) before that release; the `wireCaches` half is
+  count-bounded and its byte budget is TE25 in #538, while `states` is
+  unbounded until `clearSession` (`:788`, `:1541`).
 - Reachability is `explicit-config-only`: the Rust-mode
   [hook](../../../../../packages/opencode-plugin/src/hooks/context/hook.ts)
   calls the owner and routes lifecycle events;

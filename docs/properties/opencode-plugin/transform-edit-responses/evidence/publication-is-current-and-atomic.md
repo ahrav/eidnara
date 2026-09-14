@@ -32,9 +32,10 @@ Revision: the #533 change on `fix/client-transform-owner` after merging
   Successful publication transfers the candidate array and
   `captured.snapshots` (through the pending wire cache's
   `rawContentSnapshots`, `:285`) to the 64-session `wireCaches` owner
-  (`:122`, `:789`) and the promoted memo to `states`; the lease releases in
-  `.finally` after that block (`:1529`). This count-bounded retention is the
-  current boundary; the separate optional-output byte budget is TE25 in #538.
+  (`:122`, `:789`) and the promoted memo to `state.ordinals` in `states`
+  (`:788`, unbounded; only `clearSession` deletes, `:1541`); the lease
+  releases in `.finally` after that block (`:1529`). The wire-cache half is
+  count-bounded; the separate optional-output byte budget is TE25 in #538.
 - [messages-transform.ts](../../../../../packages/opencode-plugin/src/plugin/messages-transform.ts)
   catches hook errors, logs them, and returns the current `output.messages`
   after a root-only `rootArrayRejection` check (`:65-82`); it never assigns

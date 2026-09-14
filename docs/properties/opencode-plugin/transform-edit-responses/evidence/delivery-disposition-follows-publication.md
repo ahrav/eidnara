@@ -78,8 +78,9 @@ Use per-identity assertions; aggregate counts can hide swapped dispositions.
   source changed between pages reports deliveries on every page, completes,
   and is refused at publication; the between-pages witness asserts that the
   NACK list equals every ID the fake reported and that no ACK occurs. The
-  reconnect witness's mutation case restarts the series once and NACKs both
-  series' IDs.
+  restart witness refuses the restart at `recheckCapture("series-restart")`
+  for mutation and accessor and at the fence for invalidation, so only the
+  first series' `page-zero` is NACKed.
 - Missing evidence: Daemon-side receipt is not observed; the fake client
   records attempted dispositions only.
 - Conclusion (2026-09-13, revision-bound run at `d5a525e8`, after merging

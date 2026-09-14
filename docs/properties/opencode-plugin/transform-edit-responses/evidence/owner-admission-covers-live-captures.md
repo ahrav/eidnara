@@ -27,12 +27,16 @@ Revision: the #533 change on `fix/client-transform-owner` after merging
   no length argument and applies no cap.
 - The lease releases in `.finally` after `execute` settles and before
   `deliverTransformNotes` (`:1529-1530`). By then the publication block has
-  transferred the candidate array, `captured.snapshots` (as the wire cache's
-  `rawContentSnapshots`, `:285`), and the promoted memo to the 64-session
-  `wireCaches` owner (`:122`, `:789`, `:1485`) and to `states` (`:1481`).
-  That retention is count-bounded by session, not byte-bounded. The separate
-  64 MiB optional-output byte budget with byte-triggered LRU eviction is TE25
-  and belongs to #538. This is the current boundary, not a defect.
+  transferred the candidate array and `captured.snapshots` (as the wire
+  cache's `rawContentSnapshots`, `:285`) to the 64-session `wireCaches`
+  owner (`:122`, `:789`, `:1485`), and the promoted memo to `state.ordinals`
+  in `states` (`:1481`). Only the `wireCaches` half is count-bounded.
+  `states` is a plain `Map` (`:788`); `BoundedSessionMap.set` has no eviction
+  callback into it and only `clearSession` deletes from it (`:1541`), so more
+  than 64 distinct undeleted sessions evict wire caches while every session's
+  ordinal memo stays resident. The separate 64 MiB optional-output byte budget
+  with byte-triggered LRU eviction is TE25 and belongs to #538; the missing
+  `states` bound is a gap this supplement records, not part of that budget.
 - In [transform-capture.ts](../../../../../packages/opencode-plugin/src/hooks/context/transform-capture.ts),
   the walk charges `TAPE_SLOT_BYTES` (8, `:9`) plus two bytes per UTF-16 unit
   of a retained string or symbol description (`:151-182`), one slot per

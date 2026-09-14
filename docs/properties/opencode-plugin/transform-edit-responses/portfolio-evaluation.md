@@ -55,10 +55,12 @@ inherits its evaluation. Missing companion records are not reconstructed.
 - TE19 gains the built-in prototype scan witnesses and the wrapper's
   warn-level polluted-prototype witness.
 - TE25 stays outside this supplement. Successful publication transfers the
-  candidate array, `captured.snapshots`, and the promoted memo to the
-  64-session `wireCaches` owner and `states`; that retention is count-bounded.
-  The separate 64 MiB optional-output byte budget with byte-triggered LRU
-  eviction is #538. This is the current boundary, stated as such.
+  candidate array and `captured.snapshots` to the 64-session `wireCaches`
+  owner, which is count-bounded, and the promoted memo to `state.ordinals`
+  in `states`, which is an unbounded `Map` that only `clearSession` deletes
+  from. The separate 64 MiB optional-output byte budget with byte-triggered
+  LRU eviction is #538; the `states` bound is a gap recorded in the catalog's
+  open questions, not covered by that budget.
 - TE30 stays partial. Two-pass witnesses dispatch a delta after changed
   output; the forced full resend shows realignment after a source-declined
   dispatch; no delta-versus-full control exists.

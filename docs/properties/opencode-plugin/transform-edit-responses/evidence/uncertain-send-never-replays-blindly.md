@@ -22,11 +22,13 @@ Revision: the #533 change on `fix/client-transform-owner` after merging
   true` precedes the first send (`:1363`), so a pass that dispatched and then
   failed or declined sends the full history next time rather than a delta
   against a snapshot the daemon may have committed.
-- Each page is preceded by `assertCurrentPass()` only (`:1299`). A content
-  change before a mid-series reconnect therefore does not stop the single
-  restart; the restart runs over the same frozen pages and publication
-  refuses it. Invalidation, clear, and supersession do stop the restart at
-  the next page.
+- Each page is preceded by `assertCurrentPass()` only (`:1299`), so a
+  content change between pages of one series lets the series complete and
+  is refused at publication. A restart does not continue the frozen pages: it
+  calls `sendTransformSeries` again, which rebuilds the series from the
+  payload (`:1286`), so `recheckCapture("series-restart")` (`:1353`) runs
+  first and a content change or accessor installed before the restart refuses
+  it. Invalidation, clear, and supersession stop the restart at the fence.
 - Reachability is `explicit-config-only`: the Rust-mode
   [hook](../../../../../packages/opencode-plugin/src/hooks/context/hook.ts)
   calls the transform series path;
@@ -74,10 +76,11 @@ resend, recording attempted and acknowledged effects by identity.
 - Sources examined: `rust-mode-transform.ts:1282-1361`, `:1363`, `:1494`,
   `:1509`; the witnesses below.
 - Findings: Generic errors are rethrown and the restart wrapper permits one
-  restart. In the reconnect witness's mutation case the restart runs (two
-  page-zero bodies) because pages are ownership fences only, and publication
-  refuses the restarted series; the invalidation case stops the restart at
-  the fence (one page-zero body). Neither case ACKs. The forced full send
+  restart, preceded by `recheckCapture("series-restart")` because the restart
+  rebuilds the series rather than continuing frozen pages. In the restart
+  witness, mutation and accessor cases are refused by that recheck and the
+  invalidation case by the fence; every case sends one page-zero body,
+  invokes no getter, and NACKs `["page-zero"]`. No case ACKs. The forced full send
   after a dispatched pass is set before the first send, not only on
   `need_full_sync`.
 - Missing evidence: A real transport that writes the request and loses the
