@@ -498,19 +498,7 @@ pub fn verify_active(
             return Err(ProjectionError::CorruptRow);
         }
         let ledger = crate::dispatch::job_ledger(conn, &id)?.ok_or(ProjectionError::CorruptRow)?;
-        let has_episode = ledger.episode()?.is_some();
-        if (ledger.state == "pending"
-            && ((has_episode
-                && (ledger.attempts >= ledger.episode_allowance
-                    || ledger
-                        .episode_deadline
-                        .is_some_and(|deadline| deadline <= now)))
-                || (!has_episode && ledger.attempts != 0)))
-            || (ledger.state == "admitted"
-                && (!has_episode
-                    || ledger.attempts == 0
-                    || ledger.attempts > ledger.episode_allowance))
-        {
+        if invalid_episode_state(&ledger, now)? {
             return Err(ProjectionError::CorruptRow);
         }
     }
@@ -533,4 +521,50 @@ pub fn verify_active(
         return Err(ProjectionError::CorruptRow);
     }
     Ok(report)
+}
+
+fn invalid_episode_state(
+    ledger: &crate::dispatch::JobLedger,
+    now: i64,
+) -> Result<bool, ProjectionError> {
+    let has_episode = ledger.episode()?.is_some();
+    Ok((ledger.state == "pending"
+        && ((has_episode
+            && (ledger.attempts >= ledger.episode_allowance
+                || ledger
+                    .episode_deadline
+                    .is_some_and(|deadline| deadline < now)))
+            || (!has_episode && ledger.attempts != 0)))
+        || (ledger.state == "admitted"
+            && (!has_episode
+                || ledger.attempts == 0
+                || ledger.attempts > ledger.episode_allowance)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invalid_episode_state;
+    use crate::dispatch::JobLedger;
+
+    fn pending(deadline: i64) -> JobLedger {
+        JobLedger {
+            state: "pending".to_owned(),
+            attempts: 0,
+            episode_id: Some("episode".to_owned()),
+            episode_allowance: 1,
+            episode_deadline: Some(deadline),
+            host_job_id: None,
+            host_incarnation: None,
+            last_failure_kind: None,
+            stop_reason: None,
+            authorization_ref: None,
+        }
+    }
+
+    #[test]
+    fn active_verification_uses_the_dispatchers_inclusive_episode_deadline() {
+        let ledger = pending(100);
+        assert!(!invalid_episode_state(&ledger, 100).unwrap());
+        assert!(invalid_episode_state(&ledger, 101).unwrap());
+    }
 }
