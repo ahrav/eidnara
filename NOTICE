@@ -2,9 +2,8 @@
 
 Eidnara is licensed under the MIT License (see `LICENSE`).
 
-Retained fork-derived portions originate from cortexkit/magic-context at
-`2de3dfe1bfce1cee15c305c560f8aaa3402ad2a8`, licensed MIT,
-Copyright (c) 2025 Ufuk Altinok. The original notice is retained in `LICENSE`.
+Retained fork-derived portions are licensed MIT, Copyright (c) 2025 Ufuk
+Altinok. The original copyright and permission notice is retained in `LICENSE`.
 
 This file indexes third-party notices that ship inside the repository. Each
 migration wave that carries a third-party component adds a row here and keeps

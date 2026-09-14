@@ -56,7 +56,7 @@ function header(length = 0): Uint8Array {
     const bytes = new Uint8Array(21);
     const view = new DataView(bytes.buffer);
     view.setUint32(0, length, true);
-    view.setUint8(4, 2);
+    view.setUint8(4, 3);
     view.setUint8(5, 3);
     view.setUint16(7, 1, true);
     view.setUint32(9, 1, true);
