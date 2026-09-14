@@ -12,7 +12,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
-use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -22,6 +22,7 @@ pub const MAX_REVISION_BYTES: usize = 128;
 pub const MAX_RECONSTRUCTED_BYTES: usize = crate::dispatch::MAX_WIRE_BODY_BYTES;
 /// Largest integer both languages read exactly; JavaScript indexes above it lose precision.
 pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+const MAX_JSON_NESTING: usize = 127;
 
 /// Opaque, nonempty, at most [`MAX_REVISION_BYTES`] UTF-8 bytes. Neither a hash nor authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -102,17 +103,6 @@ pub struct AppliedRecipe {
     pub lengths: Vec<usize>,
     /// Canonical JSON size of the array, including brackets and commas.
     pub bytes: usize,
-}
-
-enum ValidatedSegment<'a> {
-    Kept {
-        values: &'a [Arc<Value>],
-        lengths: &'a [usize],
-    },
-    Inserted {
-        values: &'a [Arc<Value>],
-        lengths: Vec<usize>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,7 +289,6 @@ impl<'a> Iterator for ContainerChildren<'a> {
 
 /// Validates the depth bound and returns the maximum pending container frames.
 fn validate_json_nesting(value: &Value) -> Result<usize, RecipeError> {
-    const MAX_JSON_NESTING: usize = 127;
     let Some(children) = ContainerChildren::new(value) else {
         return Ok(0);
     };
@@ -399,7 +388,7 @@ impl Recipe {
         let mut entries = 0usize;
         // Brackets first; each entry then pays its bytes plus one comma after the first.
         let mut bytes = 2usize;
-        let mut segments = Vec::with_capacity(self.operations.len());
+        let mut inserted_lengths = Vec::new();
         for (index, operation) in self.operations.iter().enumerate() {
             match operation {
                 Operation::Keep {
@@ -432,24 +421,18 @@ impl Recipe {
                     *cursor = end;
                     // `end <= len <= usize::MAX`, so both casts are exact.
                     let range: Range<usize> = *start as usize..end as usize;
-                    for length in &base.lengths[range.clone()] {
+                    for length in &base.lengths[range] {
                         bytes = add_entry(bytes, entries, *length)?;
                         entries += 1;
                     }
-                    segments.push(ValidatedSegment::Kept {
-                        values: &base.values[range.clone()],
-                        lengths: &base.lengths[range],
-                    });
                 }
                 Operation::Insert { values } => {
-                    let mut lengths = Vec::with_capacity(values.len());
                     for value in values {
                         let length = canonical_len(value)?;
                         bytes = add_entry(bytes, entries, length)?;
                         entries += 1;
-                        lengths.push(length);
+                        inserted_lengths.push(length);
                     }
-                    segments.push(ValidatedSegment::Inserted { values, lengths });
                 }
             }
         }
@@ -458,21 +441,28 @@ impl Recipe {
         }
         let mut output = Vec::with_capacity(entries);
         let mut lengths = Vec::with_capacity(entries);
-        for segment in segments {
-            match segment {
-                ValidatedSegment::Kept {
-                    values,
-                    lengths: segment_lengths,
+        let mut inserted_index = 0usize;
+        for operation in &self.operations {
+            match operation {
+                Operation::Keep {
+                    source,
+                    start,
+                    count,
                 } => {
-                    output.extend(values.iter().cloned());
-                    lengths.extend_from_slice(segment_lengths);
+                    let base = match source {
+                        Source::Input => input,
+                        Source::Previous => previous.ok_or(RecipeError::MissingPreviousBase)?,
+                    };
+                    let end = start.checked_add(*count).ok_or(RecipeError::Overflow)?;
+                    let range: Range<usize> = *start as usize..end as usize;
+                    output.extend(base.values[range.clone()].iter().cloned());
+                    lengths.extend_from_slice(&base.lengths[range]);
                 }
-                ValidatedSegment::Inserted {
-                    values,
-                    lengths: segment_lengths,
-                } => {
+                Operation::Insert { values } => {
+                    let end = inserted_index + values.len();
                     output.extend(values.iter().cloned());
-                    lengths.extend(segment_lengths);
+                    lengths.extend_from_slice(&inserted_lengths[inserted_index..end]);
+                    inserted_index = end;
                 }
             }
         }
@@ -507,70 +497,96 @@ pub fn canonical_len(value: &Value) -> Result<usize, RecipeError> {
 
 struct PreservedValue(Value);
 
+#[derive(Clone, Copy)]
+struct PreservedValueSeed {
+    depth: usize,
+}
+
+struct PreservedValueVisitor {
+    depth: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for PreservedValueSeed {
+    type Value = PreservedValue;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(PreservedValueVisitor { depth: self.depth })
+    }
+}
+
+impl<'de> Visitor<'de> for PreservedValueVisitor {
+    type Value = PreservedValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .map(PreservedValue)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(PreservedValue(Value::Null))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        if self.depth >= MAX_JSON_NESTING {
+            return Err(de::Error::custom("recipe exceeds the JSON nesting limit"));
+        }
+        let mut values = Vec::new();
+        while let Some(value) = seq.next_element_seed(PreservedValueSeed {
+            depth: self.depth + 1,
+        })? {
+            values.push(value.0);
+        }
+        Ok(PreservedValue(Value::Array(values)))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        if self.depth >= MAX_JSON_NESTING {
+            return Err(de::Error::custom("recipe exceeds the JSON nesting limit"));
+        }
+        let mut values = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let value = map.next_value_seed(PreservedValueSeed {
+                depth: self.depth + 1,
+            })?;
+            values.insert(key, value.0);
+        }
+        Ok(PreservedValue(Value::Object(values)))
+    }
+}
+
 impl<'de> Deserialize<'de> for PreservedValue {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct ValueVisitor;
-
-        impl<'de> Visitor<'de> for ValueVisitor {
-            type Value = PreservedValue;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a JSON value")
-            }
-
-            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
-                Ok(PreservedValue(Value::Bool(value)))
-            }
-
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(PreservedValue(Value::Number(value.into())))
-            }
-
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(PreservedValue(Value::Number(value.into())))
-            }
-
-            fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
-                serde_json::Number::from_f64(value)
-                    .map(Value::Number)
-                    .map(PreservedValue)
-                    .ok_or_else(|| E::custom("non-finite JSON number"))
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(PreservedValue(Value::String(value.to_owned())))
-            }
-
-            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-                Ok(PreservedValue(Value::String(value)))
-            }
-
-            fn visit_none<E>(self) -> Result<Self::Value, E> {
-                Ok(PreservedValue(Value::Null))
-            }
-
-            fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(PreservedValue(Value::Null))
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                let mut values = Vec::new();
-                while let Some(value) = seq.next_element::<PreservedValue>()? {
-                    values.push(value.0);
-                }
-                Ok(PreservedValue(Value::Array(values)))
-            }
-
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut values = serde_json::Map::new();
-                while let Some((key, value)) = map.next_entry::<String, PreservedValue>()? {
-                    values.insert(key, value.0);
-                }
-                Ok(PreservedValue(Value::Object(values)))
-            }
-        }
-
-        deserializer.deserialize_any(ValueVisitor)
+        PreservedValueSeed { depth: 0 }.deserialize(deserializer)
     }
 }
 
@@ -584,7 +600,56 @@ impl<'de> Deserialize<'de> for Recipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::de::DeserializeSeed;
     use serde_json::json;
+
+    struct NestedArray {
+        remaining: usize,
+    }
+
+    struct OneElement {
+        remaining: usize,
+        emitted: bool,
+    }
+
+    impl<'de> Deserializer<'de> for NestedArray {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            if self.remaining == 0 {
+                visitor.visit_unit()
+            } else {
+                visitor.visit_seq(OneElement {
+                    remaining: self.remaining,
+                    emitted: false,
+                })
+            }
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+            byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map struct enum
+            identifier ignored_any
+        }
+    }
+
+    impl<'de> SeqAccess<'de> for OneElement {
+        type Error = serde::de::value::Error;
+
+        fn next_element_seed<T: DeserializeSeed<'de>>(
+            &mut self,
+            seed: T,
+        ) -> Result<Option<T::Value>, Self::Error> {
+            if self.emitted {
+                return Ok(None);
+            }
+            self.emitted = true;
+            seed.deserialize(NestedArray {
+                remaining: self.remaining - 1,
+            })
+            .map(Some)
+        }
+    }
 
     fn shared(values: &[Value]) -> Vec<Arc<Value>> {
         values.iter().cloned().map(Arc::new).collect()
@@ -1026,6 +1091,11 @@ mod tests {
             "padding": vec![Value::Null; 10_000],
         });
         assert!(validate_json_nesting(&recipe).expect("valid depth") <= 127);
+    }
+
+    #[test]
+    fn preserved_value_rejects_depth_before_deserializing_the_full_tree() {
+        assert!(PreservedValue::deserialize(NestedArray { remaining: 140 }).is_err());
     }
 
     #[test]
