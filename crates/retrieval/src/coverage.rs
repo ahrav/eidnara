@@ -443,6 +443,7 @@ pub fn verify_active(
     expected: &ProjectionIdentity,
     generation: &VectorGeneration,
     bounds: CoverageBounds,
+    now: i64,
 ) -> Result<CoverageReport, ProjectionError> {
     read_identity(conn)?
         .ok_or(ProjectionError::IdentityMismatch)?
@@ -498,7 +499,13 @@ pub fn verify_active(
         }
         let ledger = crate::dispatch::job_ledger(conn, &id)?.ok_or(ProjectionError::CorruptRow)?;
         let has_episode = ledger.episode()?.is_some();
-        if (ledger.state == "pending" && has_episode && ledger.attempts >= ledger.episode_allowance)
+        if (ledger.state == "pending"
+            && ((has_episode
+                && (ledger.attempts >= ledger.episode_allowance
+                    || ledger
+                        .episode_deadline
+                        .is_some_and(|deadline| deadline <= now)))
+                || (!has_episode && ledger.attempts != 0)))
             || (ledger.state == "admitted"
                 && (!has_episode
                     || ledger.attempts == 0

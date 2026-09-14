@@ -18,7 +18,7 @@ use retrieval::{ProjectionError, ProjectionIdentity};
 use serde::{Deserialize, Serialize};
 use storage::GuardedConn;
 
-use super::{BuildError, VerifiedReplacement};
+use super::{BuildError, VerifiedReplacement, wall_ms};
 use crate::projection_gates::{
     Admission, EntryPoint, HookGate, InvalidationIdentity, ProjectionHook,
 };
@@ -460,8 +460,9 @@ impl SearchSelection {
         budget: &EvalBudget,
     ) -> Result<(), BuildError> {
         family.check_kernel(kernel, budget)?;
+        let now = wall_ms()?;
         let report = family.projection.read_within(deadline(budget)?, |conn| {
-            verify_active(conn, &self.identity, &family.generation(), self.bounds).map_err(
+            verify_active(conn, &self.identity, &family.generation(), self.bounds, now).map_err(
                 |error| {
                     match error {
                         // `check_kernel` excludes a kernel change, so the stored identity row itself is corrupt.

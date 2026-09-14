@@ -283,6 +283,8 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
         "UPDATE embedding_jobs SET state='admitted',host_job_id='host' WHERE state='pending'",
         "UPDATE embedding_jobs SET episode_id='episode',episode_allowance=0,episode_deadline=9223372036854775807 WHERE state='pending'",
         "UPDATE embedding_jobs SET attempts=1,episode_id='episode',episode_allowance=1,episode_deadline=9223372036854775807 WHERE state='pending'",
+        "UPDATE embedding_jobs SET attempts=0,episode_id='episode',episode_allowance=1,episode_deadline=0 WHERE state='pending'",
+        "UPDATE embedding_jobs SET attempts=1 WHERE state='pending'",
         "UPDATE embedding_jobs SET job_id='wrong-job'",
     ] {
         let root = tempfile::tempdir().unwrap();
