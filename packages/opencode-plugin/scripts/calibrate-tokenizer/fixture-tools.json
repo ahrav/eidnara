@@ -566,29 +566,6 @@
     "eager_input_streaming": true
   },
   {
-    "name": "mcp_eidnara_expand",
-    "description": "Decompress a history_segment range to see the original conversation transcript. Use start/end from <history_segment start=\"N\" end=\"M\"> attributes. Returns the compacted U:/A: transcript for that message range, capped at ~15K tokens.",
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "start": {
-          "description": "Start message ordinal (from history_segment start attribute)",
-          "type": "number"
-        },
-        "end": {
-          "description": "End message ordinal (from history_segment end attribute)",
-          "type": "number"
-        }
-      },
-      "required": [
-        "start",
-        "end"
-      ]
-    },
-    "eager_input_streaming": true
-  },
-  {
     "name": "mcp_eidnara_note",
     "description": "Save or inspect durable session notes that persist for this session.\nUse this for short goals, constraints, decisions, or reminders worth carrying forward.\n\nActions:\n- `write`: Append one note. Optionally provide `surface_condition` to create a conditional note.\n- `read`: Show current notes. Defaults to active session notes + ready conditional notes; use `filter` to inspect all, pending, ready, active, or dismissed notes.\n- `dismiss`: Dismiss a note by `note_id`.\n- `update`: Update a note by `note_id`.\n\n**Conditional Notes**: When `surface_condition` is provided with `write`, the note becomes a project-scoped conditional note.\nThe memory_classifier evaluates conditional note conditions during nightly runs and surfaces them when conditions are met.\nExample: `eidnara_note(action=\"write\", content=\"Implement X because Y\", surface_condition=\"When PR #42 is merged in this repo\")`\n\nHistorySummarizer reads these notes, deduplicates them, and rewrites the remaining useful notes over time.",
     "input_schema": {

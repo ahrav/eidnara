@@ -797,7 +797,7 @@ Prefer many small targeted operations over one large blanket operation. Compress
 
 **Tool surface:**
 - Purpose: Expose agent tools with validated schemas and storage-backed execution.
-- Location: `src/tools/eidnara-reduce/tools.ts`, `src/tools/ctx-expand/tools.ts`, `src/tools/eidnara-note/tools.ts`, `src/tools/eidnara-memory/tools.ts`
+- Location: `src/tools/eidnara-reduce/tools.ts`, `src/tools/eidnara-search/tools.ts`, `src/tools/eidnara-note/tools.ts`, `src/tools/eidnara-memory/tools.ts`
 - Contains: Tool definitions, argument schemas, action gating, user-facing result formatting.
 - Depends on: `src/features/context/` and `src/hooks/context/read-session-chunk.ts`.
 - Used by: `src/plugin/tool-registry.ts`.
@@ -1029,7 +1029,7 @@ Eidnara runs in two effective modes: primary sessions and subagents. The mode de
 **`src/tools/`:**
 - Purpose: Define the agent-facing tool surface.
 - Contains: One directory per tool with constants, types, implementation, and tests.
-- Key files: `src/tools/eidnara-reduce/tools.ts`, `src/tools/ctx-expand/tools.ts`, `src/tools/eidnara-note/tools.ts`, `src/tools/eidnara-memory/tools.ts`
+- Key files: `src/tools/eidnara-reduce/tools.ts`, `src/tools/eidnara-search/tools.ts`, `src/tools/eidnara-note/tools.ts`, `src/tools/eidnara-memory/tools.ts`
 
 **`src/shared/`:**
 - Purpose: Keep cross-feature utilities small and dependency-light.

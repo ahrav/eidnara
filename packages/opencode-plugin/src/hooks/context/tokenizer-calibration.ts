@@ -3,7 +3,7 @@
  * ai-tokenizer encodings drift from API token counts by model-specific amounts.
  * Calibration ratios are empirically measured and model-specific.
  * `scripts/calibrate-tokenizer/` measures ratios against provider-reported `usage.input_tokens`.
- * The calibration sweep uses a production system prompt, 39 MCP-style tools, and a minimal conversation.
+ * The calibration sweep uses a production system prompt, 38 MCP-style tools, and a minimal conversation.
  * The calibration sweep compares local counts with each provider's `usage.input_tokens`.
  *
  * `system_ratio = api_tokens / local_raw_tokens` for plain-text system prompts

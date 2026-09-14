@@ -12,6 +12,12 @@ Every line reference below was produced by a brace-balanced scan of the file at
 `HEAD` and the region endpoints were then read back individually. Where a
 reference is approximate it says so.
 
+Staleness note: the line ranges and symbol inventory still describe `dde0c051`.
+Only terminology was renamed afterward; the ranges were not re-measured, and
+symbols retired since then (the `ctx_expand` facade and schema) still appear
+where that commit had them. Re-measure against the current `lib.rs` before
+citing any range below as a HEAD reference.
+
 ## Size accounting, corrected
 
 The 102,515-line figure in the task is right, and it hides the single most
