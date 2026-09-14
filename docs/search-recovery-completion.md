@@ -20,9 +20,13 @@ operation. Missing or stale gate evidence cannot authorize that transition.
 The disabled handoff supplies the predecessor's deregistration evidence when
 the old consumer has already left.
 An authorized recovery keeps one level of prior handoff. The handoff it embeds
-has its own `prior_disabled` cleared, so repeated aborted recoveries do not
-nest older control records, and completed cleanup drops the level it kept.
-Retirement reads only that one level.
+has its own `prior_disabled` cleared unless that level is a deregistration
+proof for the requested selection, so repeated aborted recoveries do not nest
+older control records while a deregistered predecessor stays retirable across
+an aborted follow-up. Completed cleanup drops every level it kept. Retirement
+reads at most those two levels, and the record reader rejects any other nesting.
+Authorization refuses a disabled record whose deregistration committed in the
+kernel but was never recorded; `reconcile_disabled` repairs that record first.
 
 A disabled handoff may be the operation that produced the live selection, or an
 unfinished follow-up recorded above it whose `selected_generation` names that
@@ -31,9 +35,11 @@ certified predecessor's, the request must name a different consumer, and a
 follow-up consumer that already registered must be reused so its checkpoint
 does not stay behind.
 
-Construction registers its consumer unless the intent inherits the disabled
-handoff's consumer. A request that names any other registered consumer fails
-with the kernel's `Conflict` rather than adopting that consumer's checkpoint.
+Construction registers its consumer unless the disabled handoff holds its own
+registration receipt for that consumer; every attempt commits under its own key
+so a retry replays its receipt. A request that names any other registered
+consumer fails with the kernel's `Conflict` rather than adopting that
+consumer's checkpoint.
 
 ## Record compatibility
 

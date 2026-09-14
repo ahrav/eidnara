@@ -1,6 +1,8 @@
 use super::*;
 use daemon::projection_gates::ProjectionHook;
-use daemon::search_replacement::selection::recovery::{RecoveryEvent, RecoveryProgress};
+use daemon::search_replacement::selection::recovery::{
+    RecoveryEvent, RecoveryFailure, RecoveryProgress,
+};
 
 fn home_gate(root: &Path, config: &ReplacementSpec) -> HookGate {
     let gate = HookGate::for_home(root);
@@ -334,7 +336,7 @@ fn completion_decoder_rejects_ambiguous_schema_and_invalid_accounting() {
 #[tokio::test]
 async fn immutable_binding_and_local_prefix_refuse_before_retiring_old_bytes() {
     for surface in ["recovery", "disable"] {
-        for damage in ["digest", "target", "local-prefix"] {
+        for damage in ["digest", "target", "deadline", "local-prefix"] {
             if surface == "disable" && damage == "local-prefix" {
                 continue;
             }
@@ -372,6 +374,9 @@ async fn immutable_binding_and_local_prefix_refuse_before_retiring_old_bytes() {
                 };
                 if damage == "digest" {
                     operation["staged_seed_digest"] = serde_json::json!("0".repeat(64));
+                } else if damage == "deadline" {
+                    operation["episodes"]["deadline"] =
+                        serde_json::json!(expected.episodes.deadline + 1_000_000);
                 } else {
                     operation["recovery_target"]["commit_seq"] =
                         serde_json::json!(expected.recovery_target.unwrap().commit_seq + 1);
@@ -1724,4 +1729,454 @@ fn repeated_aborted_recoveries_keep_one_prior_handoff_and_a_fixed_record_size() 
             .digest(),
         live_digest
     );
+}
+
+fn recovery_request(
+    config: &ReplacementSpec,
+    selected_generation: &str,
+    consumer_id: &str,
+    attempt_id: &str,
+) -> LifecycleRequest {
+    let mut next = request(None, &config.identity);
+    next.transition = Transition::AuthorizedRecovery;
+    next.cause = Cause::DisabledRecovery;
+    next.selected_generation = selected_generation.to_owned();
+    next.consumer.consumer_id = consumer_id.to_owned();
+    next.consumer.generation_id = config.generation.generation_id.clone();
+    next.attempt_id = attempt_id.to_owned();
+    next.authorization_ref = Some("operator:fixture-recovery".to_owned());
+    next
+}
+
+#[test]
+fn an_inherited_handoff_consumer_must_have_registered_before_construction_adopts_it() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "base bytes");
+    let foreign = "foreign-consumer";
+    corpus
+        .kernel
+        .commit(intent("register-foreign"), |envelope| {
+            envelope.register_outbox_consumer(foreign, now())?;
+            Ok(String::new())
+        })
+        .unwrap();
+    corpus.publish("later", "rows the foreign consumer has not processed");
+    let before = corpus.kernel.outbox_consumer_checkpoint(foreign).unwrap();
+    let config = spec(root.path());
+    let gate = home_gate(root.path(), &config);
+    let mut first = request(None, &config.identity);
+    first.consumer.consumer_id = foreign.to_owned();
+    ProjectionLifecycle::open(root.path())
+        .unwrap()
+        .record(&gate, &first, now())
+        .unwrap();
+    let failure = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, config.clone())
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .err()
+        .unwrap();
+    assert!(matches!(
+        failure.error,
+        BuildError::Kernel(kernel::KernelError::Conflict)
+    ));
+    drop(failure);
+    let mut selection = selector(root.path());
+    gate.install(disable::cleanup_evaluator(root.path()));
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    gate.install(support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &ProjectionHook::ALL,
+    ));
+    let next = recovery_request(&config, "old-selection", foreign, "recovery-foreign");
+    selection
+        .begin_authorized_recovery(
+            &corpus.kernel,
+            &gate,
+            &next,
+            &budget(Duration::from_secs(20)),
+        )
+        .unwrap();
+    let result = selection.recover_slice(
+        &corpus.kernel,
+        &gate,
+        &config,
+        &budget(Duration::from_secs(20)),
+        &mut |_| {},
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(RecoveryFailure::Build(failure))
+                if matches!(failure.error, BuildError::Kernel(kernel::KernelError::Conflict))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(foreign).unwrap(),
+        before
+    );
+    assert!(control(root.path()).replacement_capture.is_none());
+}
+
+#[test]
+fn an_inherited_registration_does_not_recreate_a_deregistered_consumer_on_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "base bytes");
+    let config = spec(root.path());
+    let gate = home_gate(root.path(), &config);
+    record(root.path(), &gate, None, &config.identity);
+    let first = budget(Duration::from_secs(30));
+    let failure = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, config.clone())
+        .unwrap()
+        .build(&first, &mut |event| {
+            if matches!(event, BuildEvent::Captured { .. }) {
+                first.cancel();
+            }
+        })
+        .err()
+        .unwrap();
+    drop(failure);
+    let mut selection = selector(root.path());
+    gate.install(disable::cleanup_evaluator(root.path()));
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    gate.install(support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &ProjectionHook::ALL,
+    ));
+    let next = recovery_request(&config, "old-selection", CONSUMER, "recovery-inherited");
+    selection
+        .begin_authorized_recovery(
+            &corpus.kernel,
+            &gate,
+            &next,
+            &budget(Duration::from_secs(20)),
+        )
+        .unwrap();
+    let second = budget(Duration::from_secs(30));
+    let Err(RecoveryFailure::Build(failure)) =
+        selection.recover_slice(&corpus.kernel, &gate, &config, &second, &mut |event| {
+            if matches!(event, RecoveryEvent::Build(BuildEvent::Captured { .. })) {
+                second.cancel();
+            }
+        })
+    else {
+        panic!("construction was not cancelled at Captured");
+    };
+    corpus
+        .kernel
+        .acknowledge_outbox(CONSUMER, corpus.tip(), now())
+        .unwrap();
+    corpus
+        .kernel
+        .commit(intent("deregister"), |envelope| {
+            envelope.deregister_outbox_consumer(CONSUMER, now())?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let failure = failure
+        .retry(&budget(Duration::from_secs(30)), &mut |_| {})
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            failure.error,
+            BuildError::Hold(kernel::SourceHoldError::UnknownConsumer)
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_deregistered_predecessor_stays_retirable_across_an_aborted_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "canonical truth");
+    let mut config = spec(root.path());
+    let gate = home_gate(root.path(), &config);
+    record(root.path(), &gate, None, &config.identity);
+    let mut selection = selector(root.path());
+    finish(&mut selection, &corpus, &gate, &config);
+    let live_digest = current(root.path()).staged_seed_digest.unwrap();
+    // A is disabled and its consumer deregistered; the proof lives only in the Disabled record.
+    gate.install(disable::cleanup_evaluator(root.path()));
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let done = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &config,
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(done.deregistered);
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        None
+    );
+    for cycle in ["b", "c"] {
+        gate.install(support::projection_gate::passing_evaluator(
+            &config.identity,
+            0,
+            &ProjectionHook::ALL,
+        ));
+        config.generation.generation_id = format!("generation-{cycle}");
+        let next = recovery_request(
+            &config,
+            &live_digest,
+            &format!("consumer-{cycle}"),
+            &format!("recovery-{cycle}"),
+        );
+        selection
+            .begin_authorized_recovery(
+                &corpus.kernel,
+                &gate,
+                &next,
+                &budget(Duration::from_secs(20)),
+            )
+            .unwrap();
+        if cycle == "b" {
+            // B is abandoned before it selects anything.
+            gate.install(disable::cleanup_evaluator(root.path()));
+            selection.begin_disable(&gate, &mut |_| {}).unwrap();
+        }
+    }
+    finish(&mut selection, &corpus, &gate, &config);
+    let done = current(root.path());
+    assert_eq!(done.attempt_id, "recovery-c");
+    assert!(
+        !root
+            .path()
+            .join("search-families")
+            .join(&live_digest)
+            .join("search/search.sqlite")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn authorization_waits_for_an_unrecorded_disable_deregistration() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "canonical truth");
+    let mut config = spec(root.path());
+    let gate = home_gate(root.path(), &config);
+    record(root.path(), &gate, None, &config.identity);
+    let mut selection = selector(root.path());
+    finish(&mut selection, &corpus, &gate, &config);
+    let live_digest = current(root.path()).staged_seed_digest.unwrap();
+    gate.install(disable::cleanup_evaluator(root.path()));
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &config,
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    // The cut after `Deregistered`: the kernel holds the receipt, the record does not.
+    let path = root.path().join("search-lifecycle/intent.json");
+    let mut cut: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    cut["deregistered"] = serde_json::Value::Bool(false);
+    std::fs::write(&path, serde_json::to_vec(&cut).unwrap()).unwrap();
+    gate.install(support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &ProjectionHook::ALL,
+    ));
+    config.generation.generation_id = "generation-b".to_owned();
+    let next = recovery_request(&config, &live_digest, "consumer-b", "recovery-b");
+    let refused = selection.begin_authorized_recovery(
+        &corpus.kernel,
+        &gate,
+        &next,
+        &budget(Duration::from_secs(20)),
+    );
+    assert!(
+        matches!(refused, Err(BuildError::Invalid(_))),
+        "{refused:?}"
+    );
+    assert!(matches!(
+        ProjectionLifecycle::open(root.path()).unwrap().read(),
+        ControlState::Disabled(disabled) if !disabled.deregistered
+    ));
+    gate.install(disable::cleanup_evaluator(root.path()));
+    assert!(
+        selection
+            .reconcile_disabled(
+                &corpus.kernel,
+                &gate,
+                &config,
+                &budget(Duration::from_secs(20)),
+                &mut |_| {},
+            )
+            .await
+            .unwrap()
+            .deregistered
+    );
+    gate.install(support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &ProjectionHook::ALL,
+    ));
+    selection
+        .begin_authorized_recovery(
+            &corpus.kernel,
+            &gate,
+            &next,
+            &budget(Duration::from_secs(20)),
+        )
+        .unwrap();
+    finish(&mut selection, &corpus, &gate, &config);
+    assert_eq!(current(root.path()).attempt_id, "recovery-b");
+}
+
+#[test]
+fn an_active_record_with_corrupt_prior_disabled_evidence_is_unavailable() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "canonical truth");
+    let mut config = spec(root.path());
+    let gate = home_gate(root.path(), &config);
+    record(root.path(), &gate, None, &config.identity);
+    let mut selection = selector(root.path());
+    finish(&mut selection, &corpus, &gate, &config);
+    let live_digest = current(root.path()).staged_seed_digest.unwrap();
+    gate.install(disable::cleanup_evaluator(root.path()));
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    gate.install(support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &ProjectionHook::ALL,
+    ));
+    config.generation.generation_id = "generation-b".to_owned();
+    let next = recovery_request(&config, &live_digest, "consumer-b", "recovery-b");
+    selection
+        .begin_authorized_recovery(
+            &corpus.kernel,
+            &gate,
+            &next,
+            &budget(Duration::from_secs(20)),
+        )
+        .unwrap();
+    let path = root.path().join("search-lifecycle/intent.json");
+    let valid: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(matches!(
+        ProjectionLifecycle::open(root.path()).unwrap().read(),
+        ControlState::Intent(_)
+    ));
+    type Damage = fn(&mut serde_json::Value);
+    let damages: [(&str, Damage); 5] = [
+        ("schema", |v| {
+            v["prior_disabled"]["schema"] = serde_json::json!(999)
+        }),
+        ("deregistered without through", |v| {
+            v["prior_disabled"]["deregistered"] = serde_json::json!(true);
+            v["prior_disabled"]["through"] = serde_json::Value::Null;
+        }),
+        ("negative through", |v| {
+            v["prior_disabled"]["through"] = serde_json::json!(-1)
+        }),
+        ("handoff schema", |v| {
+            v["prior_disabled"]["handoff"]["schema"] = serde_json::json!(999)
+        }),
+        ("deeper nesting", |v| {
+            let prior = v["prior_disabled"].clone();
+            v["prior_disabled"]["handoff"]["prior_disabled"] = prior;
+        }),
+    ];
+    for (name, damage) in damages {
+        let mut damaged = valid.clone();
+        damage(&mut damaged);
+        std::fs::write(&path, serde_json::to_vec(&damaged).unwrap()).unwrap();
+        assert!(
+            matches!(
+                ProjectionLifecycle::open(root.path()).unwrap().read(),
+                ControlState::Unavailable(_)
+            ),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_stop_observed_before_authorization_does_not_close_the_recovered_gate() {
+    use daemon::projection_gates::{Denial, EntryPoint};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "canonical truth");
+    let mut config = spec(root.path());
+    let gate = Arc::new(home_gate(root.path(), &config));
+    record(root.path(), &gate, None, &config.identity);
+    let mut selection = selector(root.path());
+    finish(&mut selection, &corpus, &gate, &config);
+    let live_digest = current(root.path()).staged_seed_digest.unwrap();
+    gate.install(disable::cleanup_evaluator(root.path()));
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    gate.install(support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &ProjectionHook::ALL,
+    ));
+    assert!(matches!(
+        gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload),
+        Err(Denial::RecoveryRequired)
+    ));
+    // An admitter that observed the Disabled record while authorization holds the gate.
+    let observer = Arc::new(std::sync::Mutex::new(None));
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut selection = selection.with_recovery_write_barrier_for_test({
+        let gate = Arc::clone(&gate);
+        let observer = Arc::clone(&observer);
+        let armed = Arc::clone(&armed);
+        move |event| {
+            if event != daemon::projection_lifecycle::WriteBarrier::BeforeRename
+                || !armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                return;
+            }
+            let gate = Arc::clone(&gate);
+            *observer.lock().unwrap() = Some(std::thread::spawn(move || {
+                gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+            }));
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    });
+    config.generation.generation_id = "generation-b".to_owned();
+    let next = recovery_request(&config, &live_digest, "consumer-b", "recovery-b");
+    selection
+        .begin_authorized_recovery(
+            &corpus.kernel,
+            &gate,
+            &next,
+            &budget(Duration::from_secs(20)),
+        )
+        .unwrap();
+    // The observer probes under the gate lock, after the recovered record is persisted.
+    let observed = observer.lock().unwrap().take().unwrap().join().unwrap();
+    assert!(observed.is_ok(), "{observed:?}");
+    assert_eq!(control(root.path()).attempt_id, "recovery-b");
+    gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+        .unwrap();
+    finish(&mut selection, &corpus, &gate, &config);
+    assert_eq!(current(root.path()).attempt_id, "recovery-b");
 }

@@ -598,26 +598,27 @@ impl<'a> ReplacementBuilder<'a> {
             actor: "daemon".to_owned(),
             cause: "replacement capture".to_owned(),
         };
-        // An inherited disabled-handoff consumer is already registered by design. Every other registered
-        // consumer belongs to another operation, so the registration commit runs and the kernel's
-        // Conflict refuses the takeover.
+        // Only a handoff that holds its own registration receipt hands the consumer over. The
+        // registration attempt still commits under its own key so retries replay its receipt.
         let inherited = intent
             .prior_disabled
             .as_deref()
             .and_then(|disabled| disabled.handoff.as_deref())
-            .is_some_and(|handoff| handoff.consumer.consumer_id == binding.consumer_id);
-        if !inherited
-            || self
-                .kernel
-                .outbox_consumer_checkpoint_within_budget(&run.budget, &binding.consumer_id)?
-                .is_none()
-        {
-            self.kernel
-                .commit_within_budget(&run.budget, registration, |envelope| {
-                    envelope.register_outbox_consumer(&binding.consumer_id, run.now())?;
-                    Ok(String::new())
-                })?;
-        }
+            .filter(|handoff| handoff.consumer.consumer_id == binding.consumer_id)
+            .map(|handoff| CommitIntent {
+                operation_key: handoff.attempt_id.clone(),
+                ..registration.clone()
+            });
+        self.kernel
+            .commit_within_budget(&run.budget, registration, |envelope| {
+                if let Some(prior) = inherited.clone()
+                    && envelope.stored_receipt(prior)?.is_some()
+                {
+                    return Ok(String::new());
+                }
+                envelope.register_outbox_consumer(&binding.consumer_id, run.now())?;
+                Ok(String::new())
+            })?;
         if self
             .kernel
             .outbox_consumer_checkpoint_within_budget(&run.budget, &binding.consumer_id)?

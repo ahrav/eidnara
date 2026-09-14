@@ -161,6 +161,22 @@ impl LifecycleIntent {
         {
             return Err("certificate names another capture".to_owned());
         }
+        if let Some(prior) = self.prior_disabled.as_deref() {
+            prior.validate()?;
+            // `authorize_recovery` retains a second level only as a deregistration proof.
+            if let Some(inner) = prior
+                .handoff
+                .as_deref()
+                .and_then(|handoff| handoff.prior_disabled.as_deref())
+                && (!inner.deregistered
+                    || inner
+                        .handoff
+                        .as_deref()
+                        .is_some_and(|handoff| handoff.prior_disabled.is_some()))
+            {
+                return Err("nested prior handoff".to_owned());
+            }
+        }
         Ok(())
     }
 
@@ -228,6 +244,25 @@ pub struct DisabledIntent {
     pub episodes: Option<EpisodeAccounting>,
     pub through: Option<i64>,
     pub deregistered: bool,
+}
+
+impl DisabledIntent {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != DISABLED_SCHEMA
+            || self.recorded_at < 0
+            || self.through.is_some_and(|n| n < 0)
+            || (self.deregistered && self.through.is_none())
+            || (self.through.is_some() && self.handoff.is_none())
+            || self.episodes.is_some_and(|e| {
+                e.allowance == 0 || e.consumed > e.allowance || e.deadline <= self.recorded_at
+            })
+        {
+            return Err("invalid disabled record".to_owned());
+        }
+        self.handoff
+            .as_deref()
+            .map_or(Ok(()), LifecycleIntent::validate)
+    }
 }
 
 #[derive(Deserialize)]
@@ -479,33 +514,17 @@ impl ProjectionLifecycle {
                         .as_deref()
                         .is_none_or(|d| !is_canonical_payload_digest(d))
                     || intent.replacement_capture.is_some()
+                    || intent.prior_disabled.is_some()
                 {
                     ControlState::Unavailable("invalid completion record".to_owned())
                 } else {
                     ControlState::Current(intent)
                 }
             }
-            Ok(StoredIntent::Disabled(intent)) => {
-                if intent.schema != DISABLED_SCHEMA
-                    || intent.recorded_at < 0
-                    || intent.through.is_some_and(|n| n < 0)
-                    || (intent.deregistered && intent.through.is_none())
-                    || (intent.through.is_some() && intent.handoff.is_none())
-                    || intent.episodes.is_some_and(|e| {
-                        e.allowance == 0
-                            || e.consumed > e.allowance
-                            || e.deadline <= intent.recorded_at
-                    })
-                    || intent
-                        .handoff
-                        .as_deref()
-                        .is_some_and(|h| h.validate().is_err())
-                {
-                    ControlState::Unavailable("invalid disabled record".to_owned())
-                } else {
-                    ControlState::Disabled(intent)
-                }
-            }
+            Ok(StoredIntent::Disabled(intent)) => match intent.validate() {
+                Ok(()) => ControlState::Disabled(intent),
+                Err(_) => ControlState::Unavailable("invalid disabled record".to_owned()),
+            },
             Ok(StoredIntent::Active(intent)) => match intent.validate() {
                 Ok(()) => ControlState::Intent(intent),
                 Err(reason) => ControlState::Unavailable(reason),
@@ -991,9 +1010,17 @@ impl ProjectionLifecycle {
             return Err(IntentRefusal::Disabled);
         }
         let mut intent = new_intent(request, now);
-        // Only one predecessor level is read; deeper levels grow the record on each aborted recovery.
         let mut prior = expected.clone();
-        if let Some(handoff) = prior.handoff.as_deref_mut() {
+        if let Some(handoff) = prior.handoff.as_deref_mut()
+            && !handoff.prior_disabled.as_deref().is_some_and(|inner| {
+                inner.deregistered
+                    && inner
+                        .handoff
+                        .as_deref()
+                        .and_then(|h| h.staged_seed_digest.as_deref())
+                        == Some(request.selected_generation.as_str())
+            })
+        {
             handoff.prior_disabled = None;
         }
         intent.prior_disabled = Some(Box::new(prior));

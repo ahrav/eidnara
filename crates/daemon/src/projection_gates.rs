@@ -659,7 +659,8 @@ impl HookGate {
     }
 
     /// Consults the durable record before an admission. A `Disabled` record, or one that was read and refused, latches the gate closed; a record that could not be read denies only this call, since the next lifecycle open or write repairs it and no durable stop exists.
-    fn observe_stop(&self) -> Result<(), Denial> {
+    /// The caller holds `state` across the probe and the latch, so `authorized_recovery`, which persists the recovered record under the same lock, cannot interleave with a stale observation.
+    fn observe_stop(&self, state: Option<&mut GateState>) -> Result<(), Denial> {
         use crate::projection_lifecycle::{ControlState, ProjectionLifecycle, Unreadable};
         let Some(home) = &self.data_home else {
             return Ok(());
@@ -667,7 +668,10 @@ impl HookGate {
         match ProjectionLifecycle::probe_at(home) {
             Ok(ControlState::Absent | ControlState::Intent(_) | ControlState::Current(_)) => Ok(()),
             Ok(ControlState::Disabled(_) | ControlState::Unavailable(_)) => {
-                self.disable();
+                if let Some(state) = state {
+                    state.disabled = true;
+                    state.invalidated.cancel();
+                }
                 Ok(())
             }
             Err(Unreadable(reason)) => Err(Denial::ControlUnreadable(reason)),
@@ -796,8 +800,8 @@ impl HookGate {
         if hooks.is_empty() {
             return Err(Denial::NoManifest);
         }
-        let observed = self.observe_stop();
-        let state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
+        let mut state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
+        let observed = self.observe_stop(state.as_deref_mut());
         let verdicts: Vec<Result<Admission, Denial>> = hooks
             .iter()
             .map(|hook| {

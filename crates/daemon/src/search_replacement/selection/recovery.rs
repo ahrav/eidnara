@@ -72,10 +72,26 @@ impl SearchSelection {
         }
         let transaction = LifecycleTransactionLock::acquire_exclusive(Some(&self.data_home))?;
         let lifecycle = ProjectionLifecycle::open(&self.data_home)?;
+        #[cfg(feature = "test-support")]
+        let lifecycle = match self.recovery_barrier.clone() {
+            Some(barrier) => lifecycle.with_write_barrier_for_test(move |event| barrier(event)),
+            None => lifecycle,
+        };
         let disabled = match lifecycle.read() {
             ControlState::Disabled(disabled) => disabled,
             _ => return Err(IntentRefusal::Disabled.into()),
         };
+        if disabled.through.is_some()
+            && !disabled.deregistered
+            && let Some(handoff) = disabled.handoff.as_deref()
+            && kernel
+                .outbox_consumer_checkpoint_within_budget(budget, &handoff.consumer.consumer_id)?
+                .is_none()
+        {
+            return Err(BuildError::Invalid(
+                "disable deregistration is unreconciled",
+            ));
+        }
         if kernel.database_incarnation_id_within_budget(budget)? != request.kernel_incarnation_id
             || request.kernel_incarnation_id != self.identity.kernel_incarnation_id
         {

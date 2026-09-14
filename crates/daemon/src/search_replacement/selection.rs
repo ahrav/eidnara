@@ -777,12 +777,19 @@ fn certificate_bytes(home: &Path) -> Result<Vec<u8>, BuildError> {
 }
 
 impl SelectedFamily {
+    /// The record moves only its consumed episodes and its cleared construction history after selection.
     fn names_operation(&self, intent: &LifecycleIntent) -> bool {
         let bound = &self.certificate.intent;
-        bound.attempt_id == intent.attempt_id
-            && bound.consumer == intent.consumer
-            && bound.staged_seed_digest == intent.staged_seed_digest
-            && bound.recovery_target == intent.recovery_target
+        *bound
+            == LifecycleIntent {
+                episodes: crate::projection_lifecycle::EpisodeAccounting {
+                    consumed: bound.episodes.consumed,
+                    ..intent.episodes
+                },
+                replacement_capture: bound.replacement_capture.clone(),
+                prior_disabled: bound.prior_disabled.clone(),
+                ..intent.clone()
+            }
     }
 
     fn generation(&self) -> VectorGeneration {

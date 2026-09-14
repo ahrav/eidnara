@@ -192,11 +192,16 @@ impl SearchSelection {
         if recovered {
             self.remove_retiring_family(old, transaction)?;
         } else {
-            let retired = certificate
-                .intent
-                .prior_disabled
-                .as_deref()
-                .is_some_and(|disabled| {
+            // The proof is the immediate prior disable, or the one an aborted follow-up retained.
+            let prior = certificate.intent.prior_disabled.as_deref();
+            let retired = prior
+                .into_iter()
+                .chain(
+                    prior
+                        .and_then(|disabled| disabled.handoff.as_deref())
+                        .and_then(|handoff| handoff.prior_disabled.as_deref()),
+                )
+                .any(|disabled| {
                     disabled.deregistered
                         && disabled
                             .through
