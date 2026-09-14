@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/pool.rs:31`
 - `crates/host-runtime/src/ring_transport.rs:1176`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2313` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:2485` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return. Client publication selection belongs to #552 and #550.
+Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2313` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:2546` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return; `crates/host-runtime/src/client.rs:7564` shows the Rust client's `Pong` publishing from the control reserve while its data frame waits on ordinary headroom. Native/TypeScript publication selection belongs to #550.
 
 ## Failure scenario
 
@@ -43,5 +43,5 @@ Check semantics: `always` - `try_reserve_in(Inventory::Control | Terminal, ..)` 
   in `Exercised`, and the CI workflow where the record is a gate property.
 - Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #552, #550 for client publication selection.
+- Missing evidence: #550 for the native publisher.
 - Conclusion: unresolved, needs the named handoff.

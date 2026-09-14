@@ -13,7 +13,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/ring.rs:1587`
 - `crates/host-runtime/src/ring_transport.rs:1275`
 
-Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2545` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1235` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2236` covers abort and short commit.
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2606` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1235` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2236` covers abort and short commit.
 
 ## Failure scenario
 

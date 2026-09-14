@@ -33,7 +33,7 @@ use crate::{
     connection_file::{ConnectionInfo, DAEMON_ID_LEN, read_for_client},
     control::{OP_HOST_SHUTDOWN, OP_HOST_STATUS, OP_ROUTE_OPEN},
     handler::{HealthStatus, RouteHandle, RouteIdentity, RouteTarget, TargetKind},
-    ring_transport::SendFailure,
+    ring_transport::{SendFailure, TrySend},
     wire::{
         AdmissionClass, EnvelopeHeader, Flags, FrameId, FrameType, HEADER_LEN, MAX_BODY_LEN,
         MAX_CONTROL_BODY_LEN, PROTOCOL_VERSION, Priority, frame_header, pure_header_flags,
@@ -2131,10 +2131,10 @@ impl Inner {
             *slot = None;
         }
         // The bridge exits on its own once cancelled: the writer's dropped
-        // `RingWriteSender` wakes its poll, the reader's dropped receiver fails
-        // its `blocking_send`, and a capacity wait re-checks cancellation every
-        // `BRIDGE_RESERVE_SLICE`. Joining it here keeps the setup socket and
-        // mappings from outliving a successful `close`.
+        // `RingWriteSender` wakes its poll (every park, including one on the
+        // capacity doorbell, watches that eventfd) and the reader's dropped
+        // receiver fails its `blocking_send`. Joining it here keeps the setup
+        // socket and mappings from outliving a successful `close`.
         // The join task lives in the slot while it is awaited, so a `close` future dropped
         // mid-await leaves the next `close` waiting on the same join rather than on nothing.
         let join = {
@@ -2456,11 +2456,6 @@ struct RingBridge {
     thread: std::thread::JoinHandle<()>,
 }
 
-/// Upper bound on one uninterruptible capacity wait inside the bridge. A full
-/// outbound ring otherwise parks `reserve_until` until the frame deadline,
-/// which no cancellation can reach.
-const BRIDGE_RESERVE_SLICE: Duration = Duration::from_millis(50);
-
 async fn start_ring_bridge(
     descriptor: serde_json::Value,
     descriptors: [OwnedFd; crate::setup_socket::RING_DESCRIPTOR_COUNT],
@@ -2498,6 +2493,10 @@ async fn start_ring_bridge(
                 let _ = ready_tx.send(Err(()));
                 return;
             };
+            let Ok(capacity_ready) = endpoint.to_host.duplicate_capacity_ready() else {
+                let _ = ready_tx.send(Err(()));
+                return;
+            };
             if ready_tx.send(Ok(())).is_err() {
                 return;
             }
@@ -2511,9 +2510,10 @@ async fn start_ring_bridge(
             let setup_events = rustix::event::PollFlags::IN
                 | rustix::event::PollFlags::HUP
                 | rustix::event::PollFlags::ERR;
-            // A write waiting for peer-to-host capacity stays here across loop
-            // iterations so inbound frames keep draining between its slices. Controls
-            // have their own slot and are attempted first.
+            // A write whose inventory is exhausted stays here across loop iterations and
+            // retries when the host returns capacity; inbound frames keep draining meanwhile.
+            // Controls have their own slot and are attempted first because their reserve is
+            // independent of the ordinary classes a data backlog exhausts.
             let mut pending_control: Option<RingWrite> = None;
             let mut pending_data: Option<RingWrite> = None;
             while !cancel.is_cancelled() {
@@ -2545,73 +2545,57 @@ async fn start_ring_bridge(
                 if disconnected {
                     break;
                 }
-                let lane = if pending_control.is_some() {
-                    &mut pending_control
-                } else {
-                    &mut pending_data
-                };
-                if let Some(write) = lane.take() {
-                    // `reserve_until` parks on the peer's capacity doorbell, which
-                    // cancellation cannot ring, so the wait is taken in slices. The
-                    // host may itself be parked on host-to-client capacity that only
-                    // this thread's inbound drain frees, so one slice runs per
-                    // iteration and the drain below runs before the next. A dead host
-                    // never frees capacity, so the setup socket is probed between slices.
-                    let slice = StdInstant::now() + BRIDGE_RESERVE_SLICE;
-                    let result = match endpoint.send_bounded(
-                        write.header,
-                        &write.body,
-                        write.commit_by.min(slice),
-                        write.commit_by,
-                    ) {
-                        Err(SendFailure::Deadline)
-                            if StdInstant::now() < write.commit_by && !cancel.is_cancelled() =>
-                        {
-                            if setup_peer_closed(&setup) {
-                                Some(Err(SendFailure::Unreserved))
-                            } else {
-                                None
-                            }
-                        }
-                        result => Some(result),
+                // Each lane makes one nonblocking attempt. An exhausted inventory leaves the
+                // frame pending and the loop parks on the capacity doorbell below; a frame whose
+                // commit deadline passed while it waited fails without a further attempt.
+                let mut failed = false;
+                for lane in [&mut pending_control, &mut pending_data] {
+                    let Some(write) = lane.as_ref() else {
+                        continue;
                     };
-                    match result {
-                        None => *lane = Some(write),
-                        Some(result) => {
-                            // An operation that expired before its connection-scoped frame
-                            // deadline fails alone; the bridge keeps serving other frames.
-                            let result = match result {
-                                Ok(()) => Ok(Publication::Published),
-                                Err(SendFailure::Deadline)
-                                    if StdInstant::now() < write.deadline =>
-                                {
-                                    Ok(Publication::Expired)
-                                }
-                                Err(failure) => Err(failure),
-                            };
-                            if matches!(
-                                result,
-                                Ok(Publication::Expired)
-                                    | Err(SendFailure::Deadline | SendFailure::Unreserved)
-                            ) && let Some(state) = &write.publish
-                            {
-                                // Zero bytes were published; the state is restored before the
-                                // outcome is observable so a concurrent stop classifies `NotSent`.
-                                let _ = state.compare_exchange(
-                                    WRITING,
-                                    QUEUED,
-                                    Ordering::AcqRel,
-                                    Ordering::Acquire,
-                                );
-                            }
-                            let failed = result.is_err();
-                            let _ = write.completed.send(result);
-                            if failed {
-                                break;
-                            }
-                            wrote = true;
+                    let attempt =
+                        endpoint.try_send_bounded(write.header, &write.body, write.commit_by);
+                    let outcome = match attempt {
+                        Ok(TrySend::Published) => Ok(Publication::Published),
+                        Ok(TrySend::Exhausted) if StdInstant::now() < write.commit_by => {
+                            continue;
                         }
+                        Ok(TrySend::Exhausted) => Err(SendFailure::Deadline),
+                        Err(failure) => Err(failure),
+                    };
+                    let write = lane.take().expect("lane holds the attempted write");
+                    // An operation that expired before its connection-scoped frame
+                    // deadline fails alone; the bridge keeps serving other frames.
+                    let result = match outcome {
+                        Err(SendFailure::Deadline) if StdInstant::now() < write.deadline => {
+                            Ok(Publication::Expired)
+                        }
+                        other => other,
+                    };
+                    if matches!(
+                        result,
+                        Ok(Publication::Expired)
+                            | Err(SendFailure::Deadline | SendFailure::Unreserved)
+                    ) && let Some(state) = &write.publish
+                    {
+                        // Zero bytes were published; the state is restored before the
+                        // outcome is observable so a concurrent stop classifies `NotSent`.
+                        let _ = state.compare_exchange(
+                            WRITING,
+                            QUEUED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        );
                     }
+                    failed = result.is_err();
+                    let _ = write.completed.send(result);
+                    if failed {
+                        break;
+                    }
+                    wrote = true;
+                }
+                if failed {
+                    break;
                 }
                 // `endpoint.try_recv_with` advances the ring's consumed cursor,
                 // so refusing a charge would discard a valid response. Waiting
@@ -2669,8 +2653,7 @@ async fn start_ring_bridge(
                     Ok(None) => {}
                     Err(_) => break,
                 }
-                // A pending write retries its next slice rather than parking on the data doorbell.
-                if wrote || pending_control.is_some() || pending_data.is_some() {
+                if wrote {
                     continue;
                 }
                 if setup_peer_closed(&setup) {
@@ -2681,13 +2664,45 @@ async fn start_ring_bridge(
                     Ok(true) => {}
                     Err(_) => break,
                 }
+                // A blocked write parks on the host's capacity doorbell, armed with the same
+                // recheck as the data wait so a return between the attempt and the park is not
+                // missed. An unblocked bridge never arms it and does not wake on every return.
+                let blocked: Vec<&RingWrite> =
+                    pending_control.iter().chain(pending_data.iter()).collect();
+                let capacity_armed = if blocked.is_empty() {
+                    false
+                } else {
+                    match endpoint.to_host.arm_capacity_wait() {
+                        Ok(true) => true,
+                        Ok(false) => {
+                            // Capacity moved between the attempt and the arm; retry at once.
+                            let _ = endpoint.from_host.complete_data_wait();
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
+                };
+                // The earliest pending commit deadline bounds the park: a host that never
+                // returns capacity cannot hold a frame past its deadline, and the next attempt
+                // classifies the expiry.
+                let park_until = blocked.iter().map(|write| write.commit_by).min();
+                drop(blocked);
+                let timeout = park_until.map(|until| {
+                    let remaining = until.saturating_duration_since(StdInstant::now());
+                    rustix::event::Timespec {
+                        tv_sec: remaining.as_secs().try_into().unwrap_or(i64::MAX),
+                        tv_nsec: remaining.subsec_nanos().into(),
+                    }
+                });
                 let mut fds = [
                     rustix::event::PollFd::new(&*worker_wake, rustix::event::PollFlags::IN),
                     rustix::event::PollFd::new(&data_ready, rustix::event::PollFlags::IN),
                     rustix::event::PollFd::new(&setup, setup_events),
+                    rustix::event::PollFd::new(&capacity_ready, rustix::event::PollFlags::IN),
                 ];
+                let watched = if capacity_armed { 4 } else { 3 };
                 let poll_ready = loop {
-                    match rustix::event::poll(&mut fds, None) {
+                    match rustix::event::poll(&mut fds[..watched], timeout.as_ref()) {
                         Ok(_) => break true,
                         Err(rustix::io::Errno::INTR) if !cancel.is_cancelled() => continue,
                         Err(_) => break false,
@@ -2705,6 +2720,12 @@ async fn start_ring_bridge(
                     break;
                 }
                 if fds[2].revents().intersects(setup_events) {
+                    break;
+                }
+                if capacity_armed
+                    && fds[3].revents().contains(rustix::event::PollFlags::IN)
+                    && endpoint.to_host.complete_capacity_wait().is_err()
+                {
                     break;
                 }
             }
@@ -6986,6 +7007,44 @@ mod tests {
         assert_eq!(budget.used(), 0);
     }
 
+    /// Exact fit charges, one over refuses without charging, and a request that would overflow
+    /// the counter refuses as well instead of wrapping; every refusal leaves the budget intact
+    /// and the release of the exact charge recovers full capacity.
+    #[test]
+    fn client_budget_exact_fit_one_over_and_checked_overflow_are_bounded() {
+        let budget = Arc::new(ByteCounter::new(10));
+        let exact = budget.charge(10).expect("exact fit charges");
+        assert_eq!(budget.used(), 10);
+        assert!(budget.charge(1).is_none(), "one over the ceiling refuses");
+        assert!(
+            budget.charge(usize::MAX).is_none(),
+            "a charge that would overflow the counter refuses rather than wrapping"
+        );
+        assert_eq!(budget.used(), 10, "refusals charge nothing");
+        drop(exact);
+        assert_eq!(budget.used(), 0);
+        assert!(
+            budget.charge(11).is_none(),
+            "one over an empty budget still refuses"
+        );
+        assert!(
+            budget.charge_within(6, 5).is_none(),
+            "a class ceiling below cap binds"
+        );
+        let within = budget
+            .charge_within(5, 5)
+            .expect("exact class ceiling charges");
+        assert!(
+            budget.charge(6).is_none(),
+            "the shared cap counts every class"
+        );
+        assert!(
+            budget.charge(5).is_some(),
+            "the remaining headroom is exact"
+        );
+        drop(within);
+    }
+
     #[test]
     fn a_nonconforming_remote_code_never_aliases_a_reserved_one() {
         assert_eq!(bounded_code("unknown_module"), "unknown_module");
@@ -7423,5 +7482,251 @@ mod tests {
         drop(host_end);
         // A hang here means the bridge never observed the dead setup socket.
         assert!(read_rx.recv().await.is_none());
+    }
+
+    /// Attaches a bridge to `rings`, delivers its setup socket, and returns the pieces a test
+    /// drives. The host end of the setup socket is returned so the bridge never sees a closed
+    /// peer while the test holds it.
+    async fn attached_bridge(
+        rings: &shm_transport::backend::ring::DuplexRing,
+        cancel: CancellationToken,
+    ) -> (
+        RingWriteSender,
+        RingFrameReceiver,
+        std::thread::JoinHandle<()>,
+        StdUnixStream,
+    ) {
+        let (descriptor, descriptors) =
+            crate::ring_transport::worker_descriptor(rings).expect("descriptor");
+        let (client_end, host_end) = StdUnixStream::pair().expect("socket pair");
+        let RingBridge {
+            write,
+            read,
+            setup,
+            thread,
+        } = start_ring_bridge(
+            descriptor,
+            descriptors,
+            cancel,
+            Arc::new(ByteCounter::new(CLIENT_INBOUND_FRAME_BYTES)),
+            Instant::now() + CLIENT_HANDSHAKE_TIMEOUT,
+        )
+        .await
+        .expect("bridge");
+        setup
+            .send(client_end)
+            .expect("bridge awaits the setup socket");
+        (write, read, thread, host_end)
+    }
+
+    fn bridge_write(
+        ty: FrameType,
+        channel: u16,
+        corr: u64,
+        body: Vec<u8>,
+        commit_by: StdInstant,
+    ) -> (
+        RingWrite,
+        oneshot::Receiver<Result<Publication, SendFailure>>,
+    ) {
+        let (completed, rx) = oneshot::channel();
+        let flags = if body.is_empty() {
+            pure_header_flags()
+        } else {
+            Flags::new(false, Priority::Interactive, false)
+        };
+        let header = EnvelopeHeader {
+            len: body.len() as u32,
+            ver: PROTOCOL_VERSION,
+            ty,
+            flags,
+            channel,
+            epoch: 1,
+            corr,
+        };
+        (
+            RingWrite {
+                header,
+                body,
+                commit_by,
+                publish: None,
+                completed,
+                deadline: commit_by,
+            },
+            rx,
+        )
+    }
+
+    /// With ordinary descriptor headroom exhausted, a queued data frame waits on the host's
+    /// capacity doorbell, a `Pong` behind it publishes from the control reserve at once, and one
+    /// descriptor consumption by the host wakes the bridge without a timer or any inbound data.
+    #[tokio::test]
+    async fn ring_bridge_blocked_data_waits_for_capacity_while_controls_bypass() {
+        let rings = shm_transport::backend::ring::DuplexRing::create(
+            &crate::ring_transport::ring_profile(),
+        )
+        .expect("duplex ring");
+        let ordinary = rings.second.geometry().ordinary_descriptors() as usize;
+        let cancel = CancellationToken::new();
+        let (write, _read, _thread, _host_end) = attached_bridge(&rings, cancel.clone()).await;
+        let far = StdInstant::now() + Duration::from_secs(30);
+
+        // Ordinary descriptor headroom: the host consumes nothing, so the 33rd frame cannot
+        // reserve a slot however many 4 KiB blocks remain.
+        let mut published = Vec::new();
+        for corr in 1..=ordinary as u64 {
+            let (ring_write, rx) = bridge_write(FrameType::Request, 1, corr, vec![7], far);
+            write.try_send(ring_write).expect("queue");
+            published.push(rx);
+        }
+        for rx in published {
+            tokio::time::timeout(Duration::from_secs(5), rx)
+                .await
+                .expect("published within headroom")
+                .expect("bridge alive")
+                .expect("published");
+        }
+        let (blocked, blocked_rx) =
+            bridge_write(FrameType::Request, 1, ordinary as u64 + 1, vec![9], far);
+        write.try_send(blocked).expect("queue blocked");
+        let mut blocked_rx = blocked_rx;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut blocked_rx)
+                .await
+                .is_err(),
+            "the frame past ordinary headroom must wait, not fail"
+        );
+
+        // A control behind the blocked data uses the control reserve.
+        let (pong, pong_rx) = bridge_write(FrameType::Pong, 0, 77, Vec::new(), far);
+        write.try_send_control(pong).expect("queue pong");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), pong_rx)
+                .await
+                .expect("pong publishes past blocked data")
+                .expect("bridge alive"),
+            Ok(Publication::Published)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut blocked_rx)
+                .await
+                .is_err(),
+            "the control's publication frees no ordinary headroom"
+        );
+
+        // The host consumes descriptors: capacity readiness alone wakes the bridge. Ordinary
+        // headroom counts every outstanding descriptor, so with the Pong also outstanding two
+        // consumptions are needed before the 33rd ordinary frame fits; the first wakes the
+        // bridge for a retry that stays exhausted, the second admits it.
+        let first = rings
+            .second
+            .try_receive()
+            .expect("receive")
+            .expect("a published frame");
+        assert_eq!(first.to_vec().unwrap(), [7]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut blocked_rx)
+                .await
+                .is_err(),
+            "one consumption with the Pong outstanding leaves ordinary headroom exhausted"
+        );
+        let second = rings
+            .second
+            .try_receive()
+            .expect("receive")
+            .expect("a second published frame");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), blocked_rx)
+                .await
+                .expect("capacity return wakes the blocked write")
+                .expect("bridge alive"),
+            Ok(Publication::Published)
+        );
+        drop(first);
+        drop(second);
+        cancel.cancel();
+        signal_eventfd(&write.wake);
+    }
+
+    /// A frame the host never makes room for fails alone when its own operation deadline
+    /// passes, as `Expired` with nothing published, while the connection stays live; a frame
+    /// that also outlives the connection frame deadline retires the bridge as `Deadline`.
+    #[tokio::test]
+    async fn ring_bridge_blocked_write_expires_at_its_deadline_without_publishing() {
+        let rings = shm_transport::backend::ring::DuplexRing::create(
+            &crate::ring_transport::ring_profile(),
+        )
+        .expect("duplex ring");
+        let ordinary = rings.second.geometry().ordinary_descriptors() as usize;
+        let cancel = CancellationToken::new();
+        let (write, _read, thread, _host_end) = attached_bridge(&rings, cancel.clone()).await;
+        let far = StdInstant::now() + Duration::from_secs(30);
+        for corr in 1..=ordinary as u64 {
+            let (ring_write, rx) = bridge_write(FrameType::Request, 1, corr, vec![1], far);
+            write.try_send(ring_write).expect("queue");
+            tokio::time::timeout(Duration::from_secs(5), rx)
+                .await
+                .expect("published")
+                .expect("bridge alive")
+                .expect("published");
+        }
+
+        // Operation deadline before the connection deadline: `Expired`, bridge live.
+        let (completed, expiring_rx) = oneshot::channel();
+        let header = EnvelopeHeader {
+            len: 1,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 1,
+            epoch: 1,
+            corr: ordinary as u64 + 1,
+        };
+        write
+            .try_send(RingWrite {
+                header,
+                body: vec![2],
+                commit_by: StdInstant::now() + Duration::from_millis(150),
+                publish: None,
+                completed,
+                deadline: far,
+            })
+            .expect("queue");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), expiring_rx)
+                .await
+                .expect("the park ends at the operation deadline")
+                .expect("bridge alive"),
+            Ok(Publication::Expired)
+        );
+
+        // Connection frame deadline: `Deadline`, and the bridge retires.
+        let (frame_deadline, deadline_rx) = bridge_write(
+            FrameType::Request,
+            1,
+            ordinary as u64 + 2,
+            vec![3],
+            StdInstant::now() + Duration::from_millis(150),
+        );
+        write.try_send(frame_deadline).expect("queue");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), deadline_rx)
+                .await
+                .expect("the park ends at the frame deadline")
+                .expect("bridge alive"),
+            Err(SendFailure::Deadline)
+        );
+        tokio::task::spawn_blocking(move || thread.join())
+            .await
+            .expect("join task")
+            .expect("bridge thread exits after a frame-deadline failure");
+
+        // Nothing past headroom was published: exactly `ordinary` frames are consumable.
+        let mut consumed = 0;
+        while let Some(lease) = rings.second.try_receive().expect("receive") {
+            consumed += 1;
+            drop(lease);
+        }
+        assert_eq!(consumed, ordinary);
     }
 }

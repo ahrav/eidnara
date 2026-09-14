@@ -15,7 +15,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/host-runtime/src/ring_transport.rs:995`
 - `crates/host-runtime/src/ring_transport.rs:1019`
 
-Witness status: partial - `crates/host-runtime/src/ring_transport.rs:2485` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:2642` pins that a channel-0 Request is never a bypass control. Client publishers belong to #552 and #550.
+Witness status: partial - `crates/host-runtime/src/ring_transport.rs:2546` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:2703` pins that a channel-0 Request is never a bypass control. The Rust client keeps `Cancel` and `Goodbye` behind the requests they govern on the data lane and lets only `Pong` bypass (`crates/host-runtime/src/client.rs:2805`); `a_cancel_stays_behind_the_request_it_governs` and `cancels_cannot_exhaust_the_pong_reserve` in crates/host-runtime/src/client.rs cover it, and `RingClientEndpoint::try_send_bounded` (`crates/host-runtime/src/ring_transport.rs:1399`) classifies each client frame's inventory with the same `inventory_for`. The native publisher belongs to #550.
 
 ## Failure scenario
 
@@ -43,5 +43,5 @@ Check semantics: `always` - the sequence of published headers per direction sati
   in `Exercised`, and the CI workflow where the record is a gate property.
 - Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #552, #550 for client publishers.
+- Missing evidence: #550 for the native publisher.
 - Conclusion: unresolved, needs the named handoff.

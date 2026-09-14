@@ -77,7 +77,7 @@ A marker fires on a correct implementation; none asserts a violation.
 | `native-alias-closure-before-transfer` | safety | default-production | `always` | partial |
 | `partial-close-token-conservation` | safety | default-production | `always` | partial |
 | `environment-finalizer-confinement` | safety | default-production | `always` | partial |
-| `response-retention-isolation` | safety | default-production | `always` | not yet |
+| `response-retention-isolation` | safety | default-production | `always` | partial |
 | `complete-capacity-admission` | safety | default-production | `always` | yes |
 | `terminal-credit-follows-storage` | safety | default-production | `always` | yes |
 | `reserved-progress-under-data-exhaustion` | liveness | default-production | `always` | partial |
@@ -216,13 +216,13 @@ Open questions:
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2525`, `crates/shm-transport/src/backend/ring.rs:2565`, and both two-process tests in crates/shm-transport/tests/ring.rs.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2525`, `crates/shm-transport/src/backend/ring.rs:2565`, and both two-process tests in crates/shm-transport/tests/ring.rs; at the client, `crates/host-runtime/src/client.rs:7564` parks the managed bridge on the capacity doorbell with ordinary headroom exhausted and shows a host consumption alone, with no inbound data or timer, admits the blocked frame; `shared_memory_workers_have_no_periodic_polling` in crates/host-runtime/src/ring_transport.rs pins that the bridge has no reservation slice.
 Guarantee: Both capacity transitions, descriptor acknowledgement and final payload return, wake a producer parked on the capacity doorbell within the bounded `reserve_until` deadline, without incoming data or polling (KTD3).
 Check: `always` - a `reserve_until` parked on exhaustion returns `Ok` before its deadline once either transition happens, with `parks >= 1` in `syscall_counters`; bounded by the test deadline, never an open-ended eventually.
 Fault/timing angle: Return before arm, return after arm, and a coalesced token covering both transitions.
 Required faults and enabling state: Producer parked (`parked != 0`) when the transition happens; a transition landing between `try_reserve` and `ParkGuard::arm`. Markers: marker:`pool.producer_parked_on_capacity`, marker:`pool.transition_during_arm_window`.
-Confidence: high - [evidence](evidence/capacity-wake-progress.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1028`; `crates/shm-transport/src/backend/retained.rs:625`; `crates/shm-transport/src/backend/ring.rs:75`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2525`, `crates/shm-transport/src/backend/ring.rs:2565`, and both two-process tests in crates/shm-transport/tests/ring.rs.
+Confidence: high - [evidence](evidence/capacity-wake-progress.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1028`; `crates/shm-transport/src/backend/retained.rs:625`; `crates/shm-transport/src/backend/ring.rs:75`; `crates/host-runtime/src/client.rs:2675`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2525`, `crates/shm-transport/src/backend/ring.rs:2565`, and both two-process tests in crates/shm-transport/tests/ring.rs; at the client, `crates/host-runtime/src/client.rs:7564` parks the managed bridge on the capacity doorbell with ordinary headroom exhausted and shows a host consumption alone, with no inbound data or timer, admits the blocked frame; `shared_memory_workers_have_no_periodic_polling` in crates/host-runtime/src/ring_transport.rs pins that the bridge has no reservation slice.
 Impact: A lost wake leaves the producer parked to its deadline although capacity exists.
 Open questions:
 - Handoff: deterministic-simulation for controlled interleavings at the arm window.
@@ -285,7 +285,7 @@ Guarantee: Only descriptor schema 4, layout version 4, and profile `host-payload
 Check: `always` - every mismatch path returns an error before `Mapping::attach` or before `activate` commits, and no code path decodes another layout.
 Fault/timing angle: None; this is fail-closed identity checking.
 Required faults and enabling state: A grant with layout version 3; a setup message with schema 3; an eventfd in a doorbell position; a non-fresh pool at attach. Markers: marker:`setup.stale_identifier_presented`, marker:`setup.wrong_doorbell_type_presented`, marker:`setup.non_fresh_pool_presented`.
-Confidence: high - [evidence](evidence/sole-identifiers-before-activation.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:170`; `crates/shm-transport/src/backend/ring.rs:708`; `crates/host-runtime/src/ring_transport.rs:1335`; `packages/shm-native/src/lib.rs:307`.
+Confidence: high - [evidence](evidence/sole-identifiers-before-activation.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:170`; `crates/shm-transport/src/backend/ring.rs:708`; `crates/host-runtime/src/ring_transport.rs:1336`; `packages/shm-native/src/lib.rs:307`.
 Existing check: `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:2640`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.
 Impact: An accepted stale identifier would decode another layout's bytes as this one's.
 Open questions:
@@ -378,29 +378,29 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/host-runtime/src/ring_transport.rs:1698` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:532`) parses channel-0 bodies only from that private copy. Oversized channel-0 requests are refused before any lease (`crates/host-runtime/src/ring_transport.rs:929`).
+Exercised: yes - `crates/host-runtime/src/ring_transport.rs:1759` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:532`) parses channel-0 bodies only from that private copy. Oversized channel-0 requests are refused before any lease (`crates/host-runtime/src/ring_transport.rs:929`).
 Guarantee: Rust decoding reads only stable private bytes: routed and channel-0 bodies are copied out of the lease before any parser sees them, and the lease is released after the last copy (KTD4).
 Check: `always` - no `InboundFrame` or control decoder holds a `LeaseSpan`; `lease.release()` precedes `deliver`.
 Fault/timing angle: A peer rewriting a published block during the copy.
 Required faults and enabling state: A copy racing a peer write of the same block. Markers: marker:`host.copy_races_peer_write`.
 Confidence: high - [evidence](evidence/private-decode-input-stability.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/frame_channel.rs:107`; `crates/host-runtime/src/connection.rs:532`; `crates/host-runtime/src/dispatch.rs:993`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:1698` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:532`) parses channel-0 bodies only from that private copy. Oversized channel-0 requests are refused before any lease (`crates/host-runtime/src/ring_transport.rs:929`).
+Existing check: `crates/host-runtime/src/ring_transport.rs:1759` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:532`) parses channel-0 bodies only from that private copy. Oversized channel-0 requests are refused before any lease (`crates/host-runtime/src/ring_transport.rs:929`).
 Impact: Decoding shared bytes would let a peer change a message under the parser.
 Open questions:
-- Handoff: #552 and #550 for client-side decoding of host output.
+- Handoff: #550 for native/TypeScript decoding of host output; the Rust client copies in `try_recv_with`.
 
 ### request-conversion-completion-ownership
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/host-runtime/src/ring_transport.rs:2689` holds a real copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once; `crates/host-runtime/tests/dispatch.rs:725` and `crates/host-runtime/tests/dispatch.rs:781` cover the same barrier end to end.
+Exercised: yes - `crates/host-runtime/src/ring_transport.rs:2750` holds a real copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once; `crates/host-runtime/tests/dispatch.rs:725` and `crates/host-runtime/tests/dispatch.rs:781` cover the same barrier end to end.
 Guarantee: Cancellation, route close, and shutdown cannot return a block or its charge before the barrier-held copy/decode physically completes.
 Check: `always` - a lease moved into blocking work returns only after that work joins; `Cancel` observed mid-copy leaves `outstanding_returns` unchanged until the join.
 Fault/timing angle: Cancel, route close, and shutdown during copy.
 Required faults and enabling state: A barrier holding copy work while `Cancel` arrives. Markers: marker:`host.cancel_during_barrier_held_copy`.
 Confidence: high - [evidence](evidence/request-conversion-completion-ownership.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/handler.rs:617`; `crates/host-runtime/src/dispatch.rs:993`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:2689` holds a real copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once; `crates/host-runtime/tests/dispatch.rs:725` and `crates/host-runtime/tests/dispatch.rs:781` cover the same barrier end to end.
+Existing check: `crates/host-runtime/src/ring_transport.rs:2750` holds a real copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once; `crates/host-runtime/tests/dispatch.rs:725` and `crates/host-runtime/tests/dispatch.rs:781` cover the same barrier end to end.
 Impact: An early return would reuse a block a worker is still copying.
 Open questions:
 - Handoff: none for this task.
@@ -458,16 +458,16 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - retained binary unary quotas and stream private copies belong to #550 (native/TypeScript) and #552 (Rust client); the transport side is proved by `released-block-reuse-preserves-held-bytes`.
+Exercised: partial - Rust client: `RingClientEndpoint::try_recv_with` (`crates/host-runtime/src/ring_transport.rs:1444`) copies each body to private bytes and releases the lease before the frame leaves the bridge, and `crates/host-runtime/tests/client.rs:499` holds response A through more B responses than the 4 KiB class has blocks and past close; separate stream and unpolled-unary budgets are covered by `exhausted_retention_cancels_only_the_saturating_stream` in crates/host-runtime/src/client.rs. Native/TypeScript retained binary quotas belong to #550; the transport side is proved by `released-block-reuse-preserves-held-bytes`.
 Guarantee: A retained response A never pins B's block; retained binary responses consume a separate per-connection quota until native release; stream items are private copies.
 Check: `always` - holding A leaves `descriptors_outstanding` and B's class free count unaffected by A; retained-quota refusals recover independently.
 Fault/timing angle: Retention across close and reconnect.
 Required faults and enabling state: A retained after its connection closes while B cycles. Markers: marker:`client.retained_response_across_close`.
-Confidence: low - [evidence](evidence/response-retention-isolation.md). Verified against the tree of this catalog's introducing commit: `packages/opencode-plugin/src/shared/host-client/connection.ts:1057`; `packages/opencode-plugin/src/shared/host-client/connection.ts:1088`.
-Existing check: retained binary unary quotas and stream private copies belong to #550 (native/TypeScript) and #552 (Rust client); the transport side is proved by `released-block-reuse-preserves-held-bytes`.
+Confidence: medium - [evidence](evidence/response-retention-isolation.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/ring_transport.rs:1444`; `crates/host-runtime/src/client.rs:477`; `packages/opencode-plugin/src/shared/host-client/connection.ts:1057`; `packages/opencode-plugin/src/shared/host-client/connection.ts:1088`.
+Existing check: Rust client: `RingClientEndpoint::try_recv_with` (`crates/host-runtime/src/ring_transport.rs:1444`) copies each body to private bytes and releases the lease before the frame leaves the bridge, and `crates/host-runtime/tests/client.rs:499` holds response A through more B responses than the 4 KiB class has blocks and past close; separate stream and unpolled-unary budgets are covered by `exhausted_retention_cancels_only_the_saturating_stream` in crates/host-runtime/src/client.rs. Native/TypeScript retained binary quotas belong to #550; the transport side is proved by `released-block-reuse-preserves-held-bytes`.
 Impact: Retention that pinned unrelated storage would reintroduce the FIFO coupling at the client layer.
 Open questions:
-- Handoff: #550 and #552.
+- Handoff: #550 for native/TypeScript retention.
 
 ## Reserves, accounting, and publication
 
@@ -485,20 +485,20 @@ Confidence: high - [evidence](evidence/complete-capacity-admission.md). Verified
 Existing check: `crates/shm-transport/tests/profile.rs:261` checks the charge equals the created object size; `crates/shm-transport/tests/profile.rs:131` and `process_limits_reject_counts_above_the_resident_byte_ceiling` in crates/host-runtime/src/ring_transport.rs. On the host side, `HostLimits::checked_aggregate` (`crates/host-runtime/src/config.rs:207`) states transport, resident, and terminal ceilings as distinct checked quantities and `crates/host-runtime/src/config.rs:613` refuses an unstatable total; `host.status` exposes the aggregate (`crates/host-runtime/src/connection.rs:643`).
 Impact: An under-charged connection oversubscribes the process ceiling.
 Open questions:
-- Handoff: #552 for Rust-client retention; #550 for native/TypeScript retention.
+- Handoff: #550 for native/TypeScript retention.
 
 ### terminal-credit-follows-storage
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/host-runtime/src/ring_transport.rs:2597` publishes a terminal carrying a credit and shows the credit outstanding until `Ring::take_reclaimed` observes the block's return; `crates/host-runtime/tests/dispatch.rs:1571` admits 63 unsettled requests, refuses the 64th with `server_busy`/`terminal capacity exhausted` and zero dispatch while pending slots remain, then dispatches again only after the cancelled terminal's block is consumed.
+Exercised: yes - `crates/host-runtime/src/ring_transport.rs:2658` publishes a terminal carrying a credit and shows the credit outstanding until `Ring::take_reclaimed` observes the block's return; `crates/host-runtime/tests/dispatch.rs:1571` admits 63 unsettled requests, refuses the 64th with `server_busy`/`terminal capacity exhausted` and zero dispatch while pending slots remain, then dispatches again only after the cancelled terminal's block is consumed.
 Guarantee: One terminal credit is reserved before request admission and released only when its block returns or its generation retires, not when a callback completes.
 Check: `always` - the count of admitted requests never exceeds terminal credits, and a credit is released exactly once at the physical return point.
 Fault/timing angle: Cancellation and foreign retention of a terminal block.
 Required faults and enabling state: A cancelled request whose terminal block is still held by the peer. Markers: marker:`host.terminal_held_after_cancel`.
 Confidence: high - [evidence](evidence/terminal-credit-follows-storage.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/dispatch.rs:652`; `crates/host-runtime/src/connection.rs:98`; `crates/shm-transport/src/backend/ring.rs:1504`; `crates/host-runtime/src/ring_transport.rs:1221`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:2597` publishes a terminal carrying a credit and shows the credit outstanding until `Ring::take_reclaimed` observes the block's return; `crates/host-runtime/tests/dispatch.rs:1571` admits 63 unsettled requests, refuses the 64th with `server_busy`/`terminal capacity exhausted` and zero dispatch while pending slots remain, then dispatches again only after the cancelled terminal's block is consumed.
+Existing check: `crates/host-runtime/src/ring_transport.rs:2658` publishes a terminal carrying a credit and shows the credit outstanding until `Ring::take_reclaimed` observes the block's return; `crates/host-runtime/tests/dispatch.rs:1571` admits 63 unsettled requests, refuses the 64th with `server_busy`/`terminal capacity exhausted` and zero dispatch while pending slots remain, then dispatches again only after the cancelled terminal's block is consumed.
 Impact: A credit refunded on callback completion lets terminals exceed the reserved inventory.
 Open questions:
 - Handoff: none for this task.
@@ -508,45 +508,45 @@ Open questions:
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/shm-transport/src/backend/ring.rs:2313` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:2485` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return. Client publication selection belongs to #552 and #550.
+Exercised: partial - `crates/shm-transport/src/backend/ring.rs:2313` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:2546` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return; `crates/host-runtime/src/client.rs:7564` shows the Rust client's `Pong` publishing from the control reserve while its data frame waits on ordinary headroom. Native/TypeScript publication selection belongs to #550.
 Guarantee: With ordinary blocks and descriptors exhausted, eligible reserved control and terminal frames still publish within the bounded attempt, and returns still complete (R11).
 Check: `always` - `try_reserve_in(Inventory::Control | Terminal, ..)` succeeds while `try_reserve_in(Ordinary, ..)` is `Exhausted`, until the reserved depth itself is full.
 Fault/timing angle: Ordinary exhaustion by block class and by descriptor headroom, separately and together.
 Required faults and enabling state: Ordinary descriptors at 32 outstanding; every ordinary class empty; both at once. Markers: marker:`pool.ordinary_class_and_descriptors_exhausted_together`, marker:`pool.reserved_depth_exhausted`.
 Confidence: high - [evidence](evidence/reserved-progress-under-data-exhaustion.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:975`; `crates/shm-transport/src/pool.rs:31`; `crates/host-runtime/src/ring_transport.rs:1176`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2313` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:2485` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return. Client publication selection belongs to #552 and #550.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2313` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:2546` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return; `crates/host-runtime/src/client.rs:7564` shows the Rust client's `Pong` publishing from the control reserve while its data frame waits on ordinary headroom. Native/TypeScript publication selection belongs to #550.
 Impact: A draining peer that cannot exchange controls under data backpressure never recovers.
 Open questions:
-- Handoff: #552, #550 for client publication selection.
+- Handoff: #550 for the native publisher.
 
 ### reserved-publication-order
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/host-runtime/src/ring_transport.rs:2485` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:2642` pins that a channel-0 Request is never a bypass control. Client publishers belong to #552 and #550.
+Exercised: partial - `crates/host-runtime/src/ring_transport.rs:2546` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:2703` pins that a channel-0 Request is never a bypass control. The Rust client keeps `Cancel` and `Goodbye` behind the requests they govern on the data lane and lets only `Pong` bypass (`crates/host-runtime/src/client.rs:2805`); `a_cancel_stays_behind_the_request_it_governs` and `cancels_cannot_exhaust_the_pong_reserve` in crates/host-runtime/src/client.rs cover it, and `RingClientEndpoint::try_send_bounded` (`crates/host-runtime/src/ring_transport.rs:1399`) classifies each client frame's inventory with the same `inventory_for`. The native publisher belongs to #550.
 Guarantee: Cross-class bypass preserves increasing consumer Request correlations, ordinary FIFO, per-stream data before terminal, and drain before Goodbye; a channel-0 Request is not a bypass control.
 Check: `always` - the sequence of published headers per direction satisfies the four order predicates.
 Fault/timing angle: A blocked ordinary ticket first in queue with eligible Ping and unrelated terminal behind it.
 Required faults and enabling state: Ordinary exhaustion with a Ping and a terminal queued behind a data frame. Markers: marker:`host.bypass_eligible_frame_behind_blocked_data`.
 Confidence: medium - [evidence](evidence/reserved-publication-order.md). Verified against the tree of this catalog's introducing commit: docs/payload-pool-protocol.md section 11; `docs/host-wire-protocol.md:314`; `crates/host-runtime/src/ring_transport.rs:995`; `crates/host-runtime/src/ring_transport.rs:1019`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:2485` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:2642` pins that a channel-0 Request is never a bypass control. Client publishers belong to #552 and #550.
+Existing check: `crates/host-runtime/src/ring_transport.rs:2546` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:2703` pins that a channel-0 Request is never a bypass control. The Rust client keeps `Cancel` and `Goodbye` behind the requests they govern on the data lane and lets only `Pong` bypass (`crates/host-runtime/src/client.rs:2805`); `a_cancel_stays_behind_the_request_it_governs` and `cancels_cannot_exhaust_the_pong_reserve` in crates/host-runtime/src/client.rs cover it, and `RingClientEndpoint::try_send_bounded` (`crates/host-runtime/src/ring_transport.rs:1399`) classifies each client frame's inventory with the same `inventory_for`. The native publisher belongs to #550.
 Impact: A reordered terminal or correlation breaks the application contract.
 Open questions:
-- Handoff: #552, #550 for client publishers.
+- Handoff: #550 for the native publisher.
 
 ### partial-setup-reclaims-only-unexposed-resources
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `crates/host-runtime/src/ring_transport.rs:454` refunds on a pre-exposure failure, and `crates/host-runtime/src/ring_transport.rs:2810` shows a refused admission charges nothing and the released charge admits the next connection. A failure injected between descriptor duplication and grant transfer is not yet exercised.
+Exercised: partial - `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `crates/host-runtime/src/ring_transport.rs:454` refunds on a pre-exposure failure, and `crates/host-runtime/src/ring_transport.rs:2871` shows a refused admission charges nothing and the released charge admits the next connection. A failure injected between descriptor duplication and grant transfer is not yet exercised.
 Guarantee: Setup failure refunds only resources proved unexposed; a quarantine-accounting failure leaves the backing charge counted forever (KTD5, KTD7).
 Check: `always` - after a setup failure before the grant is sent, `snapshot().active` returns to its prior value; after a quarantine failure, `BackingAdmission::is_active()` is false and no refund occurs on drop.
 Fault/timing angle: Failure after ring creation before the grant is sent; quarantine accounting failure.
 Required faults and enabling state: A `DuplexRing::create` failure; a poisoned accounting lock at quarantine time. Markers: marker:`admission.setup_failed_before_exposure`, marker:`admission.quarantine_accounting_failed`.
 Confidence: medium - [evidence](evidence/partial-setup-reclaims-only-unexposed-resources.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/profile.rs:636`; `crates/host-runtime/src/ring_transport.rs:505`.
-Existing check: `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `crates/host-runtime/src/ring_transport.rs:454` refunds on a pre-exposure failure, and `crates/host-runtime/src/ring_transport.rs:2810` shows a refused admission charges nothing and the released charge admits the next connection. A failure injected between descriptor duplication and grant transfer is not yet exercised.
+Existing check: `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `crates/host-runtime/src/ring_transport.rs:454` refunds on a pre-exposure failure, and `crates/host-runtime/src/ring_transport.rs:2871` shows a refused admission charges nothing and the released charge admits the next connection. A failure injected between descriptor duplication and grant transfer is not yet exercised.
 Impact: Refunding storage a peer may have mapped lets a later connection map over it.
 Open questions:
 - Handoff: the last implementation task injects a descriptor-duplication failure in the combined matrix.
@@ -556,29 +556,29 @@ Open questions:
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2207` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:2810` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:2629` bounds a stalled peer by the frame deadline.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2207` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:2871` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:2690` bounds a stalled peer by the frame deadline; `crates/host-runtime/src/client.rs:7655` shows the client's parked write expiring alone at its operation deadline and retiring the bridge at the frame deadline with nothing published, and `crates/host-runtime/src/client.rs:7014` covers the client budget's exact-fit, one-over, and overflow cases.
 Guarantee: Every refusal is bounded and named by resource (class, descriptor headroom, admission field), and recovery follows the resource's own release within one reservation attempt.
 Check: `always` - after the exhausting resource is released, the next `try_reserve_in` or `admit` succeeds; refusals charge nothing.
 Fault/timing angle: Exhaustion of each resource in isolation.
 Required faults and enabling state: One class empty; descriptor headroom full; one admission field at its limit. Markers: marker:`pool.single_resource_exhausted`, marker:`admission.field_at_limit`.
 Confidence: high - [evidence](evidence/bounded-refusal-and-recovery.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:980`; `crates/shm-transport/src/profile.rs:416`; `crates/host-runtime/src/ring_transport.rs:260`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2207` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:2810` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:2629` bounds a stalled peer by the frame deadline.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2207` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:2871` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:2690` bounds a stalled peer by the frame deadline; `crates/host-runtime/src/client.rs:7655` shows the client's parked write expiring alone at its operation deadline and retiring the bridge at the frame deadline with nothing published, and `crates/host-runtime/src/client.rs:7014` covers the client budget's exact-fit, one-over, and overflow cases.
 Impact: An unbounded or unrecoverable refusal is a hang the peer cannot diagnose.
 Open questions:
-- Handoff: #552 for Rust-client refusal recovery; #550 for native.
+- Handoff: #550 for native refusal recovery.
 
 ### direct-serialization-commit-boundary
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/host-runtime/src/ring_transport.rs:2545` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1235` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2236` covers abort and short commit.
+Exercised: yes - `crates/host-runtime/src/ring_transport.rs:2606` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1235` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2236` covers abort and short commit.
 Guarantee: A direct serializer runs only into a reserved block whose span is the logical body bound, is never consumed without a reservation, and a short result keeps its block (KTD1).
 Check: `always` - `ProducerReservation::capacity()` equals the caller's bound, `segment(0)` has that length, and an unreserved `DirectFrame` is never invoked.
 Fault/timing angle: Reservation failure before serialization.
 Required faults and enabling state: `reserve_until` returning `Deadline` with a `DirectFrame` queued. Markers: marker:`host.direct_frame_unreserved_on_deadline`.
 Confidence: high - [evidence](evidence/direct-serialization-commit-boundary.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1587`; `crates/host-runtime/src/ring_transport.rs:1275`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:2545` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1235` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2236` covers abort and short commit.
+Existing check: `crates/host-runtime/src/ring_transport.rs:2606` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1235` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2236` covers abort and short commit.
 Impact: Serializing into class slack or without a reservation would write bytes no descriptor accounts for.
 Open questions:
 - Handoff: none for this task.
@@ -604,29 +604,29 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/host-runtime/src/ring_transport.rs:1446` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:2629` retires a host ticket that missed its deadline as `not_sent` with nothing published. Stop/restart witnesses for the clients belong to #552 and #550.
+Exercised: partial - `crates/host-runtime/src/ring_transport.rs:1502` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:2690` retires a host ticket that missed its deadline as `not_sent` with nothing published; `crates/host-runtime/src/client.rs:7655` shows the client's blocked write failing as `Expired`/`Deadline` with zero bytes on the ring, and `daemon_restart_discards_old_rings_and_accepts_fresh_client` in `crates/host-runtime/tests/shm_failure_modes.rs` covers restart. Native/TypeScript stop/restart witnesses belong to #550.
 Guarantee: Failure before publication is `not_sent`; failure after publication is `outcome_unknown`; no layer replays an uncertain request (R7).
 Check: `always` - every `SendFailure` maps to exactly one of the two outcomes and no code path resubmits a frame after `commit` returned `Err`.
 Fault/timing angle: Quarantine between the pre-commit check and `commit`.
 Required faults and enabling state: A quarantine landing after `write` and before `commit`. Markers: marker:`host.quarantine_between_write_and_commit`.
-Confidence: medium - [evidence](evidence/send-outcome-no-generic-replay.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/ring_transport.rs:1383`; `crates/shm-transport/src/backend/ring.rs:952`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:1446` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:2629` retires a host ticket that missed its deadline as `not_sent` with nothing published. Stop/restart witnesses for the clients belong to #552 and #550.
+Confidence: medium - [evidence](evidence/send-outcome-no-generic-replay.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/ring_transport.rs:1384`; `crates/shm-transport/src/backend/ring.rs:952`.
+Existing check: `crates/host-runtime/src/ring_transport.rs:1502` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:2690` retires a host ticket that missed its deadline as `not_sent` with nothing published; `crates/host-runtime/src/client.rs:7655` shows the client's blocked write failing as `Expired`/`Deadline` with zero bytes on the ring, and `daemon_restart_discards_old_rings_and_accepts_fresh_client` in `crates/host-runtime/tests/shm_failure_modes.rs` covers restart. Native/TypeScript stop/restart witnesses belong to #550.
 Impact: A replayed uncertain request executes twice.
 Open questions:
-- Handoff: #552, #550.
+- Handoff: #550.
 
 ### reclamation-diagnostics-meaning
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/host-runtime/src/ring_transport.rs:2856` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:229`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
+Exercised: yes - `crates/host-runtime/src/ring_transport.rs:2916` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:229`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
 Guarantee: Diagnostics report outstanding return obligations, quarantined commitment, and actually released backing as distinct, consistently snapshotted quantities.
 Check: `always` - `outstanding_returns` counts live leases exactly, and the host counter's meaning is corrected without changing wire names.
 Fault/timing angle: A held reader across a connection generation end.
 Required faults and enabling state: A generation ends while a lease is live. Markers: marker:`host.generation_ended_with_live_lease`.
 Confidence: high - [evidence](evidence/reclamation-diagnostics-meaning.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/retained.rs:344`; `crates/host-runtime/src/ring_transport.rs:229`; `crates/host-runtime/src/ring_transport.rs:359`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:2856` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:229`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
+Existing check: `crates/host-runtime/src/ring_transport.rs:2916` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:229`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
 Impact: A counter read as released storage misleads operators about reclaimable capacity.
 Open questions:
 - Handoff: none for this task.
@@ -702,16 +702,16 @@ Open questions:
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: partial - `crates/shm-transport/tests/ring.rs:317` records a completed real cross-process exchange at layout 4; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
+Exercised: partial - `crates/shm-transport/tests/ring.rs:317` records a completed real cross-process exchange at layout 4, and `crates/host-runtime/tests/client.rs:365` records, through the managed Rust client against a live host, the sole profile and layout identity from `host.status`, a completed daemon request in each direction at the 64 MiB maximum, the one-over local refusal, and the activation, reclamation, and released-backing counters across a controlled close and reconnect; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
 Guarantee: Every required real-process witness records current-layout activation and a completed daemon request on a supported runtime; a skip discharges nothing.
 Check: `reachable` - the code point that reports a completed real exchange (`EIDNARA_SHM_CHILD_DONE`) executes in the two-process job; `reachable` because a specific code location must execute.
 Fault/timing angle: None.
 Required faults and enabling state: A supported runtime. Markers: marker:`gate.supported_runtime_present`.
-Confidence: medium - [evidence](evidence/real-process-current-layout-witness.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/tests/ring.rs:396`; `packages/e2e-tests/src/rust-runner/hermetic-host.ts:275`.
-Existing check: `crates/shm-transport/tests/ring.rs:317` records a completed real cross-process exchange at layout 4; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
+Confidence: medium - [evidence](evidence/real-process-current-layout-witness.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/tests/ring.rs:396`; `crates/host-runtime/tests/client.rs:426`; `packages/e2e-tests/src/rust-runner/hermetic-host.ts:275`.
+Existing check: `crates/shm-transport/tests/ring.rs:317` records a completed real cross-process exchange at layout 4, and `crates/host-runtime/tests/client.rs:365` records, through the managed Rust client against a live host, the sole profile and layout identity from `host.status`, a completed daemon request in each direction at the 64 MiB maximum, the one-over local refusal, and the activation, reclamation, and released-backing counters across a controlled close and reconnect; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
 Impact: A skipped suite counted as passing hides an unexercised layout.
 Open questions:
-- Handoff: #548, #552, #550 add daemon-level real-process witnesses.
+- Handoff: #550 adds the native and TypeScript real-process witnesses.
 
 ### malformed-fixture-valid-baseline
 

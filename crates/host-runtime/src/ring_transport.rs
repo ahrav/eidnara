@@ -1290,7 +1290,8 @@ impl io::Write for ReservationWriter<'_, '_> {
     }
 }
 
-/// Thread-confined peer endpoint for integration tests.
+/// Thread-confined peer endpoint: the managed Rust client's bridge and the integration tests
+/// attach through it.
 pub struct RingClientEndpoint {
     /// Peer-to-host producer direction.
     pub to_host: Ring,
@@ -1389,6 +1390,52 @@ impl RingClientEndpoint {
         Ok(())
     }
 
+    /// Publishes one frame without waiting for capacity. The inventory follows the frame:
+    /// pure-header controls take the control reserve, terminals that fit take the terminal
+    /// reserve, everything else is ordinary. `Ok(TrySend::Exhausted)` means the inventory has
+    /// no block or descriptor headroom right now and nothing was charged; the caller parks on
+    /// the capacity doorbell (`to_host.arm_capacity_wait`) and retries. A frame whose deadline
+    /// has passed is refused before commit and publishes nothing.
+    pub fn try_send_bounded(
+        &self,
+        header: EnvelopeHeader,
+        body: &[u8],
+        frame_deadline: StdInstant,
+    ) -> Result<TrySend, SendFailure> {
+        let terminal_capacity = self
+            .to_host
+            .geometry()
+            .class(shm_transport::pool::BlockClass::Terminal)
+            .body_capacity();
+        let inventory = inventory_for(&header, body.len(), terminal_capacity);
+        if StdInstant::now() >= frame_deadline {
+            return Err(SendFailure::Deadline);
+        }
+        let mut reservation =
+            match self
+                .to_host
+                .try_reserve_in(inventory, body.len(), header.encode())
+            {
+                Ok(reservation) => reservation,
+                Err(ProducerError::Exhausted) => return Ok(TrySend::Exhausted),
+                Err(_) => return Err(SendFailure::Unreserved),
+            };
+        // A failed `write` aborts the reservation, so nothing was published.
+        reservation
+            .write(body)
+            .map_err(|_| SendFailure::Unreserved)?;
+        if StdInstant::now() >= frame_deadline {
+            return Err(SendFailure::Deadline);
+        }
+        if self.to_host.is_quarantined() {
+            return Err(SendFailure::Unreserved);
+        }
+        reservation
+            .commit(body.len())
+            .map_err(|_| SendFailure::Reserved)?;
+        Ok(TrySend::Published)
+    }
+
     pub fn try_recv(&self) -> Result<Option<(EnvelopeHeader, Vec<u8>)>, RingClientError> {
         self.try_recv_with(|_| Some(()))
             .map(|frame| frame.map(|(header, body, ())| (header, body)))
@@ -1441,6 +1488,15 @@ pub struct RingClientError;
 
 /// The stage at which [`RingClientEndpoint::send`] failed.
 ///
+/// Outcome of a nonblocking publication attempt that did not fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrySend {
+    /// The frame is committed and visible to the host.
+    Published,
+    /// The frame's inventory had no free block or descriptor headroom; nothing was charged.
+    Exhausted,
+}
+
 /// A frame that never obtained a reservation wrote zero bytes; after reservation, the host's view is unknown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendFailure {
@@ -1541,6 +1597,11 @@ mod tests {
         assert!(!endpoint.contains(micro_poll));
         assert!(!client.contains(micro_poll));
         assert!(!endpoint.contains(concat!("POLL_", "INTERVAL")));
+        // The client bridge parks on the capacity doorbell; it neither slices a blocking
+        // reservation nor retries on a timer.
+        assert!(!client.contains(concat!("BRIDGE_RESERVE", "_SLICE")));
+        assert!(!client.contains(concat!("reserve_", "until")));
+        assert!(!client.contains(concat!(".send_", "bounded(")));
     }
 
     #[tokio::test]
@@ -2827,8 +2888,7 @@ mod tests {
             "descriptors are the first limit checked, so the refusal is attributed there"
         );
         assert_eq!(
-            diagnostics["accounting"]["active"],
-            active_before,
+            diagnostics["accounting"]["active"], active_before,
             "a refusal charges nothing"
         );
 

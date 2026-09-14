@@ -13,7 +13,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/host-runtime/src/handler.rs:617`
 - `crates/host-runtime/src/dispatch.rs:993`
 
-Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2689` holds a real copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once; `crates/host-runtime/tests/dispatch.rs:725` and `crates/host-runtime/tests/dispatch.rs:781` cover the same barrier end to end.
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2750` holds a real copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once; `crates/host-runtime/tests/dispatch.rs:725` and `crates/host-runtime/tests/dispatch.rs:781` cover the same barrier end to end.
 
 ## Failure scenario
 

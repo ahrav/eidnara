@@ -13,8 +13,9 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/ring.rs:1028`
 - `crates/shm-transport/src/backend/retained.rs:625`
 - `crates/shm-transport/src/backend/ring.rs:75`
+- `crates/host-runtime/src/client.rs:2675`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2525`, `crates/shm-transport/src/backend/ring.rs:2565`, and both two-process tests in crates/shm-transport/tests/ring.rs.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2525`, `crates/shm-transport/src/backend/ring.rs:2565`, and both two-process tests in crates/shm-transport/tests/ring.rs; at the client, `crates/host-runtime/src/client.rs:7564` parks the managed bridge on the capacity doorbell with ordinary headroom exhausted and shows a host consumption alone, with no inbound data or timer, admits the blocked frame; `shared_memory_workers_have_no_periodic_polling` in crates/host-runtime/src/ring_transport.rs pins that the bridge has no reservation slice.
 
 ## Failure scenario
 

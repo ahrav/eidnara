@@ -111,35 +111,35 @@ An existing check does not remove a property from the catalog; each entry is
 
 | Test | Status |
 | --- | --- |
-| `process_limits_reject_counts_above_the_resident_byte_ceiling` (`:1509`) | unaudited |
-| `shared_memory_workers_have_no_periodic_polling` (`:1537`) | unaudited |
-| `finish_wakes_after_read_cancellation_with_unread_peer_data` (`:1547`) | unaudited |
-| `construction_has_no_ring_side_effects` (`:1589`) | unaudited |
-| `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts` (`:1597`) | unaudited |
-| `grant_hex_is_strict_lowercase_ascii_without_panics` (`:1646`) | unaudited |
-| `inbound_materialization_cannot_exceed_its_byte_budget` (`:1655`) | unaudited |
-| `control_frame_body_is_copied_out_of_the_ring` (`:1698`) | unaudited |
-| `budget_wait_observes_read_cancellation_without_retiring` (`:1754`) | unaudited |
-| `budget_wait_observes_discard_without_retiring` (`:1809`) | unaudited |
-| `read_cancellation_drains_frames_committed_before_it` (`:1860`) | unaudited |
-| `cancellation_reports_after_one_ring_depth_under_sustained_inbound` (`:1923`) | unaudited |
-| `root_cancellation_is_observed_under_sustained_inbound` (`:1991`) | unaudited |
-| `root_cancellation_is_observed_while_the_inbound_queue_is_full` (`:2058`) | unaudited |
-| `transport_fault_is_reported_while_the_inbound_queue_is_full` (`:2106`) | unaudited |
-| `endpoint_panic_is_reported_while_the_inbound_queue_is_full` (`:2151`) | unaudited |
-| `peer_close_refunds_admission_although_the_backend_quarantines_the_ring` (`:2217`) | unaudited |
-| `root_cancellation_ends_a_budget_wait` (`:2278`) | unaudited |
-| `a_commit_past_the_write_deadline_is_refused` (`:2324`) | unaudited |
-| `a_client_send_past_its_frame_deadline_publishes_nothing` (`:2360`) | unaudited |
-| `quarantined_ring_moves_its_charges_to_the_quarantined_bucket` (`:2391`) | unaudited |
-| `eligible_controls_and_unrelated_terminals_publish_past_a_blocked_ordinary_ticket` (`:2485`) | unaudited |
-| `an_unreserved_direct_serializer_never_runs_and_a_reserved_one_runs_once` (`:2545`) | unaudited |
-| `a_terminal_credit_returns_with_its_block_not_with_settlement` (`:2597`) | unaudited |
-| `a_pending_ticket_past_its_deadline_retires_instead_of_waiting` (`:2629`) | unaudited |
-| `inventory_classification_reserves_controls_and_small_terminals_only` (`:2642`) | unaudited |
-| `barrier_held_copy_returns_block_and_charge_once_after_physical_completion` (`:2689`) | unaudited |
-| `refusals_are_counted_by_exhausted_resource_and_charge_nothing` (`:2810`) | unaudited |
-| `return_snapshot_separates_outstanding_leases_from_released_backing` (`:2856`) | unaudited |
+| `process_limits_reject_counts_above_the_resident_byte_ceiling` (`:1565`) | unaudited |
+| `shared_memory_workers_have_no_periodic_polling` (`:1593`) | unaudited |
+| `finish_wakes_after_read_cancellation_with_unread_peer_data` (`:1608`) | unaudited |
+| `construction_has_no_ring_side_effects` (`:1650`) | unaudited |
+| `diagnostics_report_fixed_identity_bounds_accounting_and_lifecycle_counts` (`:1658`) | unaudited |
+| `grant_hex_is_strict_lowercase_ascii_without_panics` (`:1707`) | unaudited |
+| `inbound_materialization_cannot_exceed_its_byte_budget` (`:1716`) | unaudited |
+| `control_frame_body_is_copied_out_of_the_ring` (`:1759`) | unaudited |
+| `budget_wait_observes_read_cancellation_without_retiring` (`:1815`) | unaudited |
+| `budget_wait_observes_discard_without_retiring` (`:1870`) | unaudited |
+| `read_cancellation_drains_frames_committed_before_it` (`:1921`) | unaudited |
+| `cancellation_reports_after_one_ring_depth_under_sustained_inbound` (`:1984`) | unaudited |
+| `root_cancellation_is_observed_under_sustained_inbound` (`:2052`) | unaudited |
+| `root_cancellation_is_observed_while_the_inbound_queue_is_full` (`:2119`) | unaudited |
+| `transport_fault_is_reported_while_the_inbound_queue_is_full` (`:2167`) | unaudited |
+| `endpoint_panic_is_reported_while_the_inbound_queue_is_full` (`:2212`) | unaudited |
+| `peer_close_refunds_admission_although_the_backend_quarantines_the_ring` (`:2278`) | unaudited |
+| `root_cancellation_ends_a_budget_wait` (`:2339`) | unaudited |
+| `a_commit_past_the_write_deadline_is_refused` (`:2385`) | unaudited |
+| `a_client_send_past_its_frame_deadline_publishes_nothing` (`:2421`) | unaudited |
+| `quarantined_ring_moves_its_charges_to_the_quarantined_bucket` (`:2452`) | unaudited |
+| `eligible_controls_and_unrelated_terminals_publish_past_a_blocked_ordinary_ticket` (`:2546`) | unaudited |
+| `an_unreserved_direct_serializer_never_runs_and_a_reserved_one_runs_once` (`:2606`) | unaudited |
+| `a_terminal_credit_returns_with_its_block_not_with_settlement` (`:2658`) | unaudited |
+| `a_pending_ticket_past_its_deadline_retires_instead_of_waiting` (`:2690`) | unaudited |
+| `inventory_classification_reserves_controls_and_small_terminals_only` (`:2703`) | unaudited |
+| `barrier_held_copy_returns_block_and_charge_once_after_physical_completion` (`:2750`) | unaudited |
+| `refusals_are_counted_by_exhausted_resource_and_charge_nothing` (`:2871`) | unaudited |
+| `return_snapshot_separates_outstanding_leases_from_released_backing` (`:2916`) | unaudited |
 
 ## `crates/host-runtime/tests/dispatch.rs` - 29 tests (Host dispatch tests)
 
@@ -192,6 +192,22 @@ An existing check does not remove a property from the catalog; each entry is
 | `zero_durations_rejected` (`:738`) | unaudited |
 | `overflowing_durations_rejected` (`:748`) | unaudited |
 
+## `crates/host-runtime/tests/client.rs` - 11 tests (Managed Rust client tests)
+
+| Test | Status |
+| --- | --- |
+| `authenticates_attaches_ring_routes_unary_and_closes` (`:32`) | unaudited |
+| `ring_stream_and_control_traffic_share_one_live_generation` (`:63`) | unaudited |
+| `ring_terminal_is_typed_redacted_and_generation_remains_usable` (`:113`) | unaudited |
+| `host_terminal_codes_are_prefixed_and_local_codes_are_not` (`:152`) | unaudited |
+| `request_binary_flag_reaches_the_host_in_both_states` (`:190`) | unaudited |
+| `caller_cancellation_is_correlation_scoped` (`:223`) | unaudited |
+| `request_deadline_is_one_absolute_owner_and_honors_overrides` (`:263`) | unaudited |
+| `host_status_decodes_the_hosts_own_response_shape` (`:305`) | unaudited |
+| `close_rejects_new_sends` (`:343`) | unaudited |
+| `managed_client_witnesses_current_layout_maximum_bodies_and_controlled_recovery` (`:365`) | unaudited |
+| `a_retained_response_stays_private_while_transport_storage_is_reused_and_after_close` (`:499`) | unaudited |
+
 ## Native and TypeScript
 
 | Check | Status |
@@ -203,7 +219,7 @@ An existing check does not remove a property from the catalog; each entry is
 ## Suspiciously quiet areas
 
 - No test injects a detach or reference-deletion failure (F7); #550.
-- No test exercises client publisher selection under exhaustion (F10); #552, #550.
+- No test exercises the native publisher's selection under exhaustion (F10); #550.
 - No test injects a failure between descriptor duplication and grant transfer;
   the last implementation task's combined matrix.
 - No test runs the two-process exchange under Valgrind; the memcheck runner
