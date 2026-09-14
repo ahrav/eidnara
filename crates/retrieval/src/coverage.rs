@@ -548,7 +548,8 @@ fn invalid_episode_state(
     };
     let wrong_episode =
         has_episode && ledger.episode_id.as_deref() != Some(expected_episode.as_str());
-    let expired = has_episode
+    let expired = matches!(ledger.state.as_str(), "pending" | "admitted")
+        && has_episode
         && ledger
             .episode_deadline
             .is_some_and(|deadline| deadline < now);
@@ -594,5 +595,8 @@ mod tests {
         admitted.host_job_id = Some("host".to_owned());
         assert!(!invalid_episode_state(&admitted, "job", 100).unwrap());
         assert!(invalid_episode_state(&admitted, "job", 101).unwrap());
+        admitted.state = "embedded".to_owned();
+        admitted.host_job_id = None;
+        assert!(!invalid_episode_state(&admitted, "job", 101).unwrap());
     }
 }
