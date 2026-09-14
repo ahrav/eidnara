@@ -308,7 +308,8 @@ impl RuntimeManifest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CapabilityEvidence {
     Supported,
     Unsupported,
@@ -369,7 +370,8 @@ pub const HARNESSES: [&str; 2] = kernel::source_identity::HARNESSES;
 pub const APPROVED_OBSERVERS: [&str; 1] = ["rp2.9.decoded-heap-high-water"];
 
 /// A live decoded-heap high-water measurement and the observer that took it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceEvidence {
     pub observer: String,
     pub decoded_heap_high_water_bytes: u64,
@@ -434,6 +436,16 @@ pub struct Admission {
     pub hook: ProjectionHook,
     pub entry: EntryPoint,
     pub invalidated: CancellationToken,
+}
+
+/// Outcome of [`HookGate::renew`] for existing grants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum Renewal {
+    Kept,
+    Invalidated,
+    /// The gate is disabled: the evaluator is stored for cleanup and recovery, and nothing is admitted until authorized recovery.
+    Disabled,
 }
 
 /// One manifest, the projection identity the daemon runs with, and one evidence packet.
@@ -606,6 +618,14 @@ struct GateState {
     invalidated: CancellationToken,
 }
 
+impl GateState {
+    /// Cancels every outstanding grant and starts a token for the next ones. A disable cancels without starting one, which is what keeps the gate latched.
+    fn invalidate_grants(&mut self) {
+        self.invalidated.cancel();
+        self.invalidated = CancellationToken::new();
+    }
+}
+
 /// The shared gate every hook consults. It starts closed. `install` and `close` cancel the previous grant's token before the new state is visible, and a group of hooks is judged under one state, so no grant spans two manifests.
 pub struct HookGate {
     state: Mutex<GateState>,
@@ -642,8 +662,34 @@ impl HookGate {
         }
     }
 
+    /// Installs `evaluator` and cancels every grant issued before it. Product code renews through the admission owner, which cancels only what the new evidence withdraws.
+    #[cfg(feature = "test-support")]
     pub fn install(&self, evaluator: EvidenceEvaluator) {
         self.replace(Some(evaluator));
+    }
+
+    /// Installs `evaluator` without cancelling grants when the manifest and identity match and every hook the old evaluator admitted stays admitted. Any other change cancels as [`HookGate::close`] does. A disabled gate stores the evaluator and stays latched.
+    pub fn renew(&self, evaluator: EvidenceEvaluator) -> Renewal {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let renewal = if state.disabled {
+            Renewal::Disabled
+        } else if state.evaluator.as_ref().is_none_or(|old| {
+            old.manifest == evaluator.manifest
+                && old.current == evaluator.current
+                && ProjectionHook::ALL
+                    .iter()
+                    .all(|hook| old.judge(*hook).is_err() || evaluator.judge(*hook).is_ok())
+        }) {
+            Renewal::Kept
+        } else {
+            state.invalidate_grants();
+            Renewal::Invalidated
+        };
+        state.evaluator = Some(evaluator);
+        renewal
     }
 
     /// Removes the evaluator: nothing is admitted until another is installed.
@@ -703,8 +749,7 @@ impl HookGate {
             evaluator.judge(hook).map_err(IntentRefusal::Denied)?;
         }
         persist()?;
-        state.invalidated.cancel();
-        state.invalidated = CancellationToken::new();
+        state.invalidate_grants();
         state.disabled = false;
         Ok(())
     }
@@ -773,8 +818,7 @@ impl HookGate {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.invalidated.cancel();
-        state.invalidated = CancellationToken::new();
+        state.invalidate_grants();
         state.evaluator = evaluator;
     }
 

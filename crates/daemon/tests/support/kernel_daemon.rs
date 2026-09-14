@@ -164,6 +164,15 @@ impl KernelDaemon {
         self.store().tip().unwrap()
     }
 
+    pub fn handler(&self) -> &Handler {
+        &self.handler
+    }
+
+    /// Root path the store descriptor was composed from.
+    pub fn data_home(&self) -> &Path {
+        self._data.path()
+    }
+
     pub async fn shutdown(self) {
         self.handler.shutdown().await.unwrap();
     }

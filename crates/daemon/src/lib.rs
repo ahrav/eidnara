@@ -60,6 +60,7 @@ pub mod wire;
 pub mod transform;
 
 pub mod production_inputs;
+pub mod projection_admission;
 pub mod projection_gates;
 pub mod projection_lifecycle;
 pub mod release_contract;
@@ -112,7 +113,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use storage::StoreError;
-use storage::{Isolation, StorageBackend, StorageDescriptor, sqlite_store_path};
+use storage::{
+    Isolation, StorageBackend, StorageDescriptor, sqlite_store_data_home, sqlite_store_path,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment, RecipeSegment};
@@ -3000,6 +3003,8 @@ pub struct HandlerCore {
     publication_fence_write_hook: ConnectFailureCommitHook,
     /// A full route handle maps to its session binding and route root; epoch-scoped lookups and removals prevent channel reuse from accessing another incarnation's state.
     bindings: Arc<Mutex<RouteBindings>>,
+    /// Set once the SQLite store's data home is known; a deployment without a SQLite store has no projection to admit.
+    projection_admission: Arc<OnceLock<projection_admission::ProjectionAdmission>>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
     /// Evaluator registrations exist only in memory and are keyed by notes-authority project.
@@ -3848,6 +3853,7 @@ impl Handler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
+            projection_admission: Arc::new(OnceLock::new()),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -3931,6 +3937,7 @@ impl HandlerCore {
         let store_slot = Arc::clone(&self.store);
         let bindings = Arc::clone(&self.bindings);
         let memory_classifier = Arc::clone(&self.memory_classifier);
+        let projection_admission = Arc::clone(&self.projection_admission);
         if admission
             .spawn(async move {
                 let _guard = StoreOpenWaiterGuard {
@@ -3974,6 +3981,7 @@ impl HandlerCore {
                         {
                             task_admission.spawn(kernel.run_sampler(cancel));
                         }
+                        Self::open_projection_admission(&projection_admission, path);
                     }
                     (true, StorageBackend::Postgres { .. }) => {
                         kernel.mark_unavailable(kernel_routes::UnavailableKind::Unsupported)
@@ -4105,6 +4113,32 @@ impl HandlerCore {
         }
     }
 
+    /// Binds the admission owner to the store's data home. Nothing is selected at startup, so the gate stays closed; a refused record is reported now rather than at the first hook, while an absent one is the ordinary state of a host without approvals.
+    fn open_projection_admission(
+        slot: &OnceLock<projection_admission::ProjectionAdmission>,
+        sqlite_path: &str,
+    ) {
+        let Some(home) = sqlite_store_data_home(sqlite_path) else {
+            eprintln!(
+                "daemon: search admission stays closed: the store path is not under a data home"
+            );
+            return;
+        };
+        let home = Path::new(home);
+        slot.get_or_init(|| projection_admission::ProjectionAdmission::for_home(home));
+        if let Err(refusal) = projection_admission::AdmissionInputs::read(home)
+            && !matches!(refusal, projection_admission::InputRefusal::Missing(_))
+        {
+            eprintln!("daemon: search admission record refused: {refusal}");
+        }
+    }
+
+    /// The admission owner, once the SQLite store's data home is known.
+    #[cfg(feature = "test-support")]
+    pub fn projection_admission(&self) -> Option<&projection_admission::ProjectionAdmission> {
+        self.projection_admission.get()
+    }
+
     async fn open_store_once(
         descriptor: &StorageDescriptor,
     ) -> Result<MemoryStore, MemoryStoreError> {
@@ -4191,6 +4225,7 @@ impl Handler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
+            projection_admission: Arc::new(OnceLock::new()),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -12510,6 +12545,9 @@ impl CompositeComponent for Handler {
             let _gate = self.spawn_gate.lock().expect("module spawn gate mutex");
             self.cancel.cancel();
             self.tasks.close();
+        }
+        if let Some(admission) = self.projection_admission.get() {
+            admission.close();
         }
         self.tasks.wait().await;
 

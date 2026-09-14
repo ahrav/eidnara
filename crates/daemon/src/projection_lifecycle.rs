@@ -484,51 +484,11 @@ impl ProjectionLifecycle {
 
     /// Reads the record, keeping a record that could not be read apart from one that was read and rejected. `Err` is an I/O failure or a directory whose mode or owner is not the daemon's own; `open` or the next write repairs those, so a caller must not decide a durable stop from one. `Ok(Unavailable)` is a record whose bytes or own metadata were refused.
     pub(crate) fn probe_at(data_home: &Path) -> Result<ControlState, Unreadable> {
-        let dir = data_home.join(CONTROL_DIR);
-        let metadata = match open_directory(&dir).and_then(|fd| fd.metadata()) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(ControlState::Absent);
-            }
-            Err(error) => return Err(Unreadable(error.kind().to_string())),
+        let bytes = match read_owner_only_record(&data_home.join(CONTROL_DIR), CONTROL_RECORD)? {
+            RecordRead::Absent => return Ok(ControlState::Absent),
+            RecordRead::Refused(reason) => return Ok(ControlState::Unavailable(reason.to_owned())),
+            RecordRead::Bytes(bytes) => bytes,
         };
-        owner_only_directory(&metadata).map_err(|reason| Unreadable(reason.to_owned()))?;
-        let path = dir.join(CONTROL_RECORD);
-        let file = match OpenOptions::new()
-            .read(true)
-            .custom_flags((OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK).bits() as i32)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(ControlState::Absent);
-            }
-            // A directory without its owner's search bit opens but refuses its entries; `open` repairs that. Otherwise this is the record's own mode, which nothing repairs.
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                if metadata.mode() & 0o100 == 0 {
-                    return Err(Unreadable("directory not searchable".to_owned()));
-                }
-                return Ok(ControlState::Unavailable("record not readable".to_owned()));
-            }
-            Err(error) => return Err(Unreadable(error.kind().to_string())),
-        };
-        let metadata = match file.metadata() {
-            Ok(metadata) => metadata,
-            Err(error) => return Err(Unreadable(error.kind().to_string())),
-        };
-        // Nothing repairs the record's own mode or owner, unlike the directory's, so this is a refused record rather than a transient failure.
-        if !metadata.is_file() || metadata.mode() & 0o077 != 0 || !owned_by_caller(&metadata) {
-            return Ok(ControlState::Unavailable(
-                "not the caller's own owner-only regular file".to_owned(),
-            ));
-        }
-        if metadata.len() > MAX_RECORD_BYTES {
-            return Ok(ControlState::Unavailable("over the size cap".to_owned()));
-        }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        if let Err(error) = (&file).take(MAX_RECORD_BYTES).read_to_end(&mut bytes) {
-            return Err(Unreadable(error.kind().to_string()));
-        }
         Ok(match serde_json::from_slice::<StoredIntent>(&bytes) {
             Ok(StoredIntent::Current(record)) => {
                 let intent = record.current;
@@ -1294,6 +1254,61 @@ pub(crate) fn open_directory(dir: &Path) -> io::Result<File> {
 /// Why a record could not be read: an I/O failure or a failed owner-only check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Unreadable(pub(crate) String);
+
+/// What reading a record under an owner-only directory found. `Refused` names a durable defect of the record itself that no reopen repairs.
+pub(crate) enum RecordRead {
+    Absent,
+    Refused(&'static str),
+    Bytes(Vec<u8>),
+}
+
+/// Reads `record` under `dir` without following symlinks. The directory must be the caller's own and owner-only; the record must be the caller's own owner-only regular file under [`MAX_RECORD_BYTES`].
+///
+/// # Errors
+///
+/// An I/O failure, or a directory whose mode or owner is not the caller's own, is [`Unreadable`]: the directory's opener or next write repairs those, so a caller must not decide a durable stop from one.
+pub(crate) fn read_owner_only_record(dir: &Path, record: &str) -> Result<RecordRead, Unreadable> {
+    let metadata = match open_directory(dir).and_then(|fd| fd.metadata()) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(RecordRead::Absent),
+        Err(error) => return Err(Unreadable(error.kind().to_string())),
+    };
+    owner_only_directory(&metadata).map_err(|reason| Unreadable(reason.to_owned()))?;
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK).bits() as i32)
+        .open(dir.join(record))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(RecordRead::Absent),
+        // A directory without its owner's search bit opens but refuses its entries; `open` repairs that. Otherwise this is the record's own mode, which nothing repairs.
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            if metadata.mode() & 0o100 == 0 {
+                return Err(Unreadable("directory not searchable".to_owned()));
+            }
+            return Ok(RecordRead::Refused("record not readable"));
+        }
+        Err(error) => return Err(Unreadable(error.kind().to_string())),
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => return Err(Unreadable(error.kind().to_string())),
+    };
+    // Nothing repairs the record's own mode or owner, unlike the directory's, so this is a refused record rather than a transient failure.
+    if !metadata.is_file() || metadata.mode() & 0o077 != 0 || !owned_by_caller(&metadata) {
+        return Ok(RecordRead::Refused(
+            "not the caller's own owner-only regular file",
+        ));
+    }
+    if metadata.len() > MAX_RECORD_BYTES {
+        return Ok(RecordRead::Refused("over the size cap"));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    if let Err(error) = (&file).take(MAX_RECORD_BYTES).read_to_end(&mut bytes) {
+        return Err(Unreadable(error.kind().to_string()));
+    }
+    Ok(RecordRead::Bytes(bytes))
+}
 
 /// Requires the caller's own directory with no group or other permission bits; every reader and the opener judge the directory by this one predicate.
 fn owner_only_directory(metadata: &fs::Metadata) -> Result<(), &'static str> {
