@@ -326,6 +326,11 @@ impl SearchSelection {
             },
         )?;
         observer(DisableEvent::Deregistered);
+        if registered_again(&disabled)? {
+            return Err(BuildError::Invalid(
+                "deregistered consumer is registered again",
+            ));
+        }
         let mut next = disabled.clone();
         next.deregistered = true;
         lifecycle.update_disabled(&disabled, &next)?;

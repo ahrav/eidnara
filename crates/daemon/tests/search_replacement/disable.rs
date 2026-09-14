@@ -1314,6 +1314,57 @@ async fn a_deregistration_committed_on_the_last_attempt_completes_without_a_new_
     }
 }
 
+/// A kernel restored after the deregistration commit but before the record is updated holds the consumer again. Completion is not persisted over it.
+#[tokio::test]
+async fn a_restore_before_the_completion_write_refuses_to_persist_deregistration() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(backup.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let saved = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup.path().to_path_buf(),
+            deadline: std::time::Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let checkpoint = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    assert!(checkpoint.is_some());
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let result = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| {
+                if event == DisableEvent::Deregistered {
+                    corpus.kernel.restore(&saved.destination_path).unwrap();
+                }
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Invalid(
+                "deregistered consumer is registered again"
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(!disabled(root.path()).deregistered);
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        checkpoint
+    );
+}
+
 /// A slice held inside a projection write past the grace is reported once, not once more for the tracked task that pins the reader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn grace_expiry_counts_only_the_held_slice_for_pinned_maintenance() {
