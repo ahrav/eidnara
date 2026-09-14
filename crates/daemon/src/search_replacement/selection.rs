@@ -138,6 +138,7 @@ impl SearchSelection {
         if family.projection.quarantine().is_some() {
             return Err(BuildError::Invalid("search quarantined; rebuild required"));
         }
+        admit_transition_hook(gate, &family.certificate)?;
         Ok(SearchReader { family, grant })
     }
 
@@ -322,11 +323,16 @@ impl SearchSelection {
                     .filter(|family| family._seed_pin.digest == digest)
                 {
                     Some(family) => {
-                        // The cached family gets the same page scan a fresh open would run.
-                        if let Err(error) = family
-                            .projection
-                            .read_within(deadline(budget)?, verify_pages)
-                            .map_err(BuildError::from)
+                        // The cached family gets the same certificate check and page scan a
+                        // fresh open would run.
+                        if let Err(error) = self
+                            .revalidate_certificate(&digest, &family.certificate)
+                            .and_then(|()| {
+                                family
+                                    .projection
+                                    .read_within(deadline(budget)?, verify_pages)
+                                    .map_err(BuildError::from)
+                            })
                             .and_then(|()| self.validate_family(&family, kernel, budget))
                         {
                             if let Some(kind) = family_damage(&error) {
@@ -345,15 +351,22 @@ impl SearchSelection {
                     }
                 };
                 self.admit(gate, budget)?;
-                // Authorized recovery also needs the hook its transition names, as construction did.
-                let hook = family.certificate.intent.transition.hook();
-                if hook != ProjectionHook::EmbeddingBootstrap {
-                    gate.admit(hook, EntryPoint::Reload)?;
-                }
+                admit_transition_hook(gate, &family.certificate)?;
                 self.selected.store(Some(family));
                 Ok(())
             }
         }
+    }
+
+    /// The durable certificate must still be the one the cached family was opened from.
+    fn revalidate_certificate(&self, digest: &str, cached: &Bootstrap) -> Result<(), BuildError> {
+        let found = certificate_bytes(&self.family_home(digest)?)?;
+        let expected =
+            serde_json::to_vec(cached).map_err(|_| BuildError::Invalid("bootstrap encoding"))?;
+        if found != expected {
+            return Err(BuildError::Invalid("bootstrap certificate changed"));
+        }
+        Ok(())
     }
 
     fn family_home(&self, digest: &str) -> Result<PathBuf, BuildError> {
@@ -563,8 +576,14 @@ impl SearchSelection {
 
     fn reclaim_locked(&self, digest: &str) -> Result<Reclaimed, BuildError> {
         let home = self.family_home(digest)?;
-        if !home.try_exists()? {
-            return Ok(Reclaimed::Absent);
+        // Non-following, so a dangling symlink is a retained entry rather than an absent one.
+        match fs::symlink_metadata(&home) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Ok(Reclaimed::Residual),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Reclaimed::Absent);
+            }
+            Err(error) => return Err(error.into()),
         }
         if !home.join(CERTIFICATE).try_exists()? {
             if home.join("search").join(SEED_FILE).try_exists()? {
@@ -856,6 +875,15 @@ fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
         BuildError::Invalid(_) => Some(QuarantineKind::Integrity),
         _ => None,
     }
+}
+
+/// Authorized recovery also needs the hook its transition names, as construction did.
+fn admit_transition_hook(gate: &HookGate, certificate: &Bootstrap) -> Result<(), BuildError> {
+    let hook = certificate.intent.transition.hook();
+    if hook != ProjectionHook::EmbeddingBootstrap {
+        gate.admit(hook, EntryPoint::Reload)?;
+    }
+    Ok(())
 }
 
 /// The lease store names its sidecar `<16 lowercase hex digits>.lease`; any other `.lease`

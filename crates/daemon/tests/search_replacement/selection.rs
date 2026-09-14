@@ -1363,6 +1363,10 @@ fn reopen_admits_the_hook_named_by_the_certificate_transition() {
         .insert(ProjectionHook::EmbeddingBackfill, false);
     gate.install(evaluator);
     assert!(matches!(
+        selection.pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10))),
+        Err(BuildError::Denied(_))
+    ));
+    assert!(matches!(
         selection.reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10))),
         Err(BuildError::Denied(_))
     ));
@@ -1372,6 +1376,52 @@ fn reopen_admits_the_hook_named_by_the_certificate_transition() {
         selector(root.path()).reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10))),
         Err(BuildError::Denied(_))
     ));
+}
+
+#[test]
+fn same_manager_reopen_revalidates_the_durable_certificate() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let certificate = root
+        .path()
+        .join("search-families")
+        .join(old.digest())
+        .join("bootstrap.json");
+    let bytes = std::fs::read(&certificate).unwrap();
+    std::fs::write(&certificate, &bytes[..bytes.len() / 2]).unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    std::fs::remove_file(&certificate).unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
+fn sweep_retains_a_dangling_symlink_under_a_family_name() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let link = root.path().join("search-families").join("c".repeat(64));
+    std::os::unix::fs::symlink(root.path().join("missing"), &link).unwrap();
+    let report = selection.sweep().unwrap();
+    assert_eq!((report.removed, report.retained), (0, 1));
+    assert!(std::fs::symlink_metadata(&link).is_ok());
 }
 
 #[test]
