@@ -286,6 +286,7 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
         "UPDATE embedding_jobs SET attempts=0,episode_id='episode',episode_allowance=1,episode_deadline=0 WHERE state='pending'",
         "UPDATE embedding_jobs SET attempts=1 WHERE state='pending'",
         "UPDATE embedding_jobs SET episode_id='bogus',episode_allowance=1,episode_deadline=9223372036854775807 WHERE state='pending'",
+        "UPDATE embedding_jobs SET episode_id=job_id||'/1',episode_allowance=2,episode_deadline=9223372036854775806,next_attempt_at=9223372036854775807 WHERE state='pending'",
         "UPDATE embedding_jobs SET job_id='wrong-job'",
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -1023,6 +1024,30 @@ fn a_umask_that_masks_owner_bits_does_not_break_family_creation() {
 }
 
 #[test]
+fn selection_accepts_an_owner_owned_nonwritable_standard_data_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let config = spec(root.path());
+    record(root.path(), &gate, None, &config.identity);
+    let candidate = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, config)
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let selection = selector(root.path());
+    selection.select(candidate, &mut |_| Ok(())).unwrap();
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_ok()
+    );
+}
+
+#[test]
 fn selection_refuses_to_reuse_a_family_with_residual_entries() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
@@ -1444,6 +1469,36 @@ fn reopen_admits_the_hook_named_by_the_certificate_transition() {
         selector(root.path()).reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10))),
         Err(BuildError::Denied(_))
     ));
+}
+
+#[test]
+fn same_manager_reopen_revalidates_the_retained_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let store = GenerationStore::open(Some(root.path())).unwrap();
+    let manifest = store
+        .root()
+        .join(host_runtime::generation::GENERATIONS_DIR_NAME)
+        .join(old.digest())
+        .join(host_runtime::generation::GENERATION_MANIFEST_NAME);
+    std::fs::write(manifest, b"{}").unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
 }
 
 #[test]

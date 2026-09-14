@@ -485,20 +485,22 @@ pub fn verify_active(
          FROM occurrence_vectors v JOIN vector_generations g USING(generation_id)
          WHERE v.vector_dimension=g.vector_dimension AND v.generation_id=?1"
     )?;
-    let mut jobs = conn.prepare("SELECT job_id,occurrence_id,generation_id FROM embedding_jobs")?;
+    let mut jobs = conn
+        .prepare("SELECT job_id,occurrence_id,generation_id,next_attempt_at FROM embedding_jobs")?;
     for row in jobs.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
+            row.get::<_, Option<i64>>(3)?,
         ))
     })? {
-        let (id, occurrence, generation) = row?;
+        let (id, occurrence, generation, next_attempt_at) = row?;
         if id != crate::batch::job_id(&occurrence, &generation) {
             return Err(ProjectionError::CorruptRow);
         }
         let ledger = crate::dispatch::job_ledger(conn, &id)?.ok_or(ProjectionError::CorruptRow)?;
-        if invalid_episode_state(&ledger, &id, now)? {
+        if invalid_episode_state(&ledger, &id, next_attempt_at, now)? {
             return Err(ProjectionError::CorruptRow);
         }
         if let Some(reference) = ledger.authorization_ref.as_deref() {
@@ -536,6 +538,7 @@ pub fn verify_active(
 fn invalid_episode_state(
     ledger: &crate::dispatch::JobLedger,
     job_id: &str,
+    next_attempt_at: Option<i64>,
     now: i64,
 ) -> Result<bool, ProjectionError> {
     let has_episode = ledger.episode()?.is_some();
@@ -555,13 +558,21 @@ fn invalid_episode_state(
         && ledger
             .episode_deadline
             .is_some_and(|deadline| deadline < now);
+    let retry_after_expiry = has_episode
+        && next_attempt_at.is_some_and(|retry| {
+            ledger
+                .episode_deadline
+                .is_some_and(|deadline| retry > deadline)
+        });
     Ok(wrong_episode
         || expired
+        || retry_after_expiry
         || (ledger.state == "pending"
             && ((has_episode && ledger.attempts >= ledger.episode_allowance)
                 || (!has_episode && ledger.attempts != 0)))
         || (ledger.state == "admitted"
             && (!has_episode
+                || ledger.host_job_id.is_none()
                 || ledger.attempts == 0
                 || ledger.attempts > ledger.episode_allowance)))
 }
@@ -589,21 +600,24 @@ mod tests {
     #[test]
     fn active_verification_uses_the_dispatchers_inclusive_episode_deadline() {
         let ledger = pending(100);
-        assert!(!invalid_episode_state(&ledger, "job", 100).unwrap());
-        assert!(invalid_episode_state(&ledger, "job", 101).unwrap());
+        assert!(!invalid_episode_state(&ledger, "job", None, 100).unwrap());
+        assert!(invalid_episode_state(&ledger, "job", None, 101).unwrap());
+        assert!(invalid_episode_state(&ledger, "job", Some(101), 50).unwrap());
         let mut admitted = pending(100);
         admitted.state = "admitted".to_owned();
         admitted.attempts = 1;
         admitted.host_job_id = Some("host".to_owned());
-        assert!(!invalid_episode_state(&admitted, "job", 100).unwrap());
-        assert!(invalid_episode_state(&admitted, "job", 101).unwrap());
+        assert!(!invalid_episode_state(&admitted, "job", None, 100).unwrap());
+        assert!(invalid_episode_state(&admitted, "job", None, 101).unwrap());
+        admitted.host_job_id = None;
+        assert!(invalid_episode_state(&admitted, "job", None, 100).unwrap());
         admitted.state = "embedded".to_owned();
         admitted.host_job_id = None;
-        assert!(!invalid_episode_state(&admitted, "job", 101).unwrap());
+        assert!(!invalid_episode_state(&admitted, "job", None, 101).unwrap());
         admitted.episode_id = None;
         admitted.episode_allowance = 0;
         admitted.episode_deadline = None;
         admitted.authorization_ref = Some("operator:recovery".to_owned());
-        assert!(invalid_episode_state(&admitted, "job", 101).unwrap());
+        assert!(invalid_episode_state(&admitted, "job", None, 101).unwrap());
     }
 }

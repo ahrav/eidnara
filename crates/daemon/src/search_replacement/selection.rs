@@ -332,6 +332,10 @@ impl SearchSelection {
                     .filter(|family| family._seed_pin.digest == digest)
                 {
                     Some(family) => {
+                        if let Err(error) = store.validate(&digest) {
+                            self.selected.store(None);
+                            return Err(error.into());
+                        }
                         // Certificate loss withdraws the selection but does not damage the open
                         // database or invalidate readers that already hold it.
                         if let Err(error) =
