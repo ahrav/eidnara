@@ -2,8 +2,8 @@
 
 Status here is per METHOD: `unaudited` means the check exists and ran green
 on the revision-bound run (the #533 change on `fix/client-transform-owner`
-after merging `origin/main` at `5def3c71`, 2026-09-13, 1107 pass, 0 fail, 34
-files) but has not had an independent adequacy review. Adequacy belongs to
+at `d5a525e8`, after merging `origin/main` at `5def3c71`, 2026-09-13, 1122
+pass, 0 fail, 34 files) but has not had an independent adequacy review. Adequacy belongs to
 `/testing:invariant-test-review`; production guard adequacy belongs to
 `/low-level-systems:defensive-assertions-and-invariant-guards`. The catalog's
 `Existing check` fields name the individual `it(` titles, lines, and markers;
@@ -26,7 +26,7 @@ covers the client supplement only, not the unavailable 30-record companion.
 | Capture snapshots and rechecks | Same file, `:591-777` | Tape bounds, root bookkeeping, membership and content edits | unaudited |
 | Host array replacement contract | Same file, `:779-886` | Container rejection reasons, built-in numeric accessor refusal, in-place replacement | unaudited |
 | Capture admission | Same file, `:888-1067` | Model-based lease sequences, per-session lease, count and byte limits, exact-once release | unaudited |
-| Bounded capture sizing | Same file, `:1069-1202` | Reservation before capture, exact byte charge, traversal bounds | unaudited |
+| Bounded capture sizing | Same file, `:1069-1221` | Reservation before capture, exact byte charge, traversal bounds | unaudited |
 | primeOrdinalMemo bounded staging | `hooks/context/module-wire.test.ts:879-1171` | Supplied map untouched on every fault; byte boundaries; restart | unaudited |
 | Hook and wrapper entries | `hooks/context/hook.test.ts:169-448` | Unsupported sources at the real entries, identity, warn-level byte decline, single capture per pass, directory-await mutation and admission | unaudited |
 | Wrapper contract | `plugin/messages-transform.test.ts:60-351` | `then`, proxy, and polluted-prototype refusal with log level, return container, no rollback after a throwing hook | unaudited |

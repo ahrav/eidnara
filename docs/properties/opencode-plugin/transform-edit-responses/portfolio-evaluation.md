@@ -14,16 +14,16 @@ inherits its evaluation. Missing companion records are not reconstructed.
 
 ## Executed state
 
-- Revision: the #533 change on `fix/client-transform-owner` after merging
-  `origin/main` at `5def3c71`. The merge brought in #565's follow-up commits
+- Revision: the #533 change on `fix/client-transform-owner` at `d5a525e8`,
+  after merging `origin/main` at `5def3c71`. The merge brought in #565's follow-up commits
   (built-in prototype accessor scan, boxed-primitive rejection, null-prototype
   tape marker, `Object.hasOwn` descriptor checks, warn-level logging for
   polluted prototypes). `client.ts` is unchanged from `origin/main`.
 - Command, from `packages/opencode-plugin` with Node 24.18.0 first on PATH:
   `bun test src/hooks/context/ src/plugin/messages-transform.test.ts
   src/shared/host-client/client.test.ts`.
-- Result: 1107 pass, 0 fail, 31,373 `expect()` calls, 34 files, Bun 1.3.14,
-  2026-09-13. The "bounded transform ownership" block alone runs 52 cases.
+- Result: 1122 pass, 0 fail, 31,659 `expect()` calls, 34 files, Bun 1.3.14,
+  2026-09-13. The "bounded transform ownership" block alone runs 60 cases.
 - Nine records are `Exercised: yes` (TE17, TE18, TE19, TE20, TE22, TE23,
   TE24, TE26, TE27). Two remain `partial` (TE21, TE30) because their missing
   oracles are #538 work, not because a witness failed.
@@ -34,8 +34,8 @@ inherits its evaluation. Missing companion records are not reconstructed.
   in this tree and the marker assertion that proves the enabling state was
   reached before the fault.
 - Recheck boundaries are stated per site. `recheckCapture` runs after each
-  ordinal prime, before a full-sync retry re-serializes an unchanged body, and
-  at publication. The directory await, the permission await, and each
+  ordinal prime, before the wire is built, before a series restart, before a
+  full-sync retry rebuilds or re-serializes its body, and at publication. The directory await, the permission await, and each
   transport page are `assertCurrentPass()` fences only. A content change
   between pages is refused at publication and every reported delivery is
   NACKed; the series is not stopped at the next page. The witness is
