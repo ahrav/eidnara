@@ -7,6 +7,7 @@ import {
     MAX_RECONSTRUCTED_BYTES,
     MAX_REVISION_BYTES,
     parseRecipe,
+    type RecipeOperation,
     type RecipeRejectionCode,
     type RecipeSourceBase,
 } from "./edit-recipe";
@@ -331,6 +332,47 @@ describe("edit recipe bounds", () => {
                 operations: [{ op: "insert", values: [nested] }],
             }),
         ).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+    });
+
+    it("does not use inherited array methods while parsing", () => {
+        let methodRead = false;
+        const operations = new Proxy([{ op: "insert", values: [null] }], {
+            get(target, property, receiver) {
+                if (property === "entries" || property === "some") {
+                    methodRead = true;
+                    throw new Error(`inherited ${String(property)} read`);
+                }
+                return Reflect.get(target, property, receiver);
+            },
+        });
+        expect(() =>
+            parseRecipe({ base_revision: "b", output_revision: "o", operations }),
+        ).not.toThrow();
+        expect(methodRead).toBe(false);
+    });
+
+    it("does not retain metadata per rejected operation", () => {
+        const operations: RecipeOperation[] = Array.from({ length: 100_000 }, () => ({
+            op: "insert",
+            values: [null],
+        }));
+        let heapAtFinalOperation = 0;
+        operations.push(
+            new Proxy({ op: "keep", source: "input", start: 1, count: 1 } as RecipeOperation, {
+                get(target, property, receiver) {
+                    if (property === "op") heapAtFinalOperation = process.memoryUsage().heapUsed;
+                    return Reflect.get(target, property, receiver);
+                },
+            }),
+        );
+        Bun.gc(true);
+        const heapBefore = process.memoryUsage().heapUsed;
+        const result = applyRecipe(
+            { baseRevision: "b", outputRevision: "o", operations },
+            base("b", []),
+        );
+        expect(result).toMatchObject({ ok: false, rejection: { code: "out_of_bounds" } });
+        expect(heapAtFinalOperation - heapBefore).toBeLessThan(8 * 1024 * 1024);
     });
 
     it("rejects oversized kept ranges before slicing sources", () => {

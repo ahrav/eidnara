@@ -24,7 +24,8 @@ export interface EditRecipe {
 
 /**
  * One captured source: its revision, its whole-message values, and each value's canonical JSON
- * length measured at capture or serialization time. The applier never re-serializes a kept value.
+ * length measured at capture or serialization time. The caller must keep the values and their
+ * nested objects unchanged while the base is usable; the applier never re-serializes kept values.
  */
 export interface RecipeSourceBase {
     revision: string;
@@ -147,16 +148,17 @@ function validateJsonValue(value: unknown): RecipeRejection | undefined {
     const work: (ValueWork | ChildrenWork)[] = [{ value, depth: 0 }];
     const active = new WeakSet<object>();
     while (work.length > 0) {
-        const item = work.pop() as ValueWork | ChildrenWork;
+        const item = work[work.length - 1] as ValueWork | ChildrenWork;
+        work.length -= 1;
         if ("children" in item) {
             const next = item.children.next();
             if (next.done) {
                 active.delete(item.owner);
                 continue;
             }
-            work.push(item);
+            work[work.length] = item;
             if ("code" in next.value) return next.value;
-            work.push({ value: next.value.value, depth: item.depth + 1 });
+            work[work.length] = { value: next.value.value, depth: item.depth + 1 };
             continue;
         }
         const current = item.value;
@@ -179,7 +181,11 @@ function validateJsonValue(value: unknown): RecipeRejection | undefined {
             return { code: "malformed", detail: "recipe contains a cyclic value" };
         const container = current as JsonContainer;
         active.add(container);
-        work.push({ owner: container, depth: item.depth, children: dataChildren(container) });
+        work[work.length] = {
+            owner: container,
+            depth: item.depth,
+            children: dataChildren(container),
+        };
     }
     return undefined;
 }
@@ -275,14 +281,22 @@ export function parseRecipe(value: unknown): RecipeParse {
     const operationsValue = ownDataProperty(value, "operations")?.value;
     if (!Array.isArray(operationsValue)) return reject("malformed", "operations is not an array");
     const operations: RecipeOperation[] = [];
-    for (const [index, entry] of operationsValue.entries()) {
-        const operation = parseOperation(entry, index);
+    for (let index = 0; index < operationsValue.length; index += 1) {
+        const entry = Object.getOwnPropertyDescriptor(operationsValue, index);
+        if (!entry || !("value" in entry))
+            return reject("malformed", `operation ${index} is not a data property`);
+        const operation = parseOperation(entry.value, index);
         if (!("op" in operation)) return { ok: false, rejection: operation };
-        operations.push(operation);
+        operations[operations.length] = operation;
     }
-    const usesPrevious = operations.some(
-        (operation) => operation.op === "keep" && operation.source === "previous",
-    );
+    let usesPrevious = false;
+    for (let index = 0; index < operations.length; index += 1) {
+        const operation = operations[index] as RecipeOperation;
+        if (operation.op === "keep" && operation.source === "previous") {
+            usesPrevious = true;
+            break;
+        }
+    }
     if (usesPrevious && previousOutputRevision === undefined)
         return reject("missing_previous_base", "a previous keep has no previous_output_revision");
     if (!usesPrevious && previousOutputRevision !== undefined)
@@ -374,28 +388,22 @@ export function applyRecipe(
     let entries = 0;
     // Brackets first; each entry then pays its bytes plus one comma after the first.
     let bytes = 2;
-    const segments: {
-        values: readonly unknown[];
-        lengths: readonly number[];
-        start: number;
-        end: number;
-    }[] = [];
+    const insertedLengths: number[] = [];
     const addEntry = (length: number): boolean => {
         if (!Number.isSafeInteger(length) || length < 0) return false;
         bytes += length + (entries > 0 ? 1 : 0);
         entries += 1;
         return Number.isSafeInteger(bytes);
     };
-    for (const [index, operation] of recipe.operations.entries()) {
+    for (let index = 0; index < recipe.operations.length; index += 1) {
+        const operation = recipe.operations[index] as RecipeOperation;
         if (operation.op === "insert") {
-            const lengths: number[] = [];
-            for (const value of operation.values) {
-                const length = canonicalJsonLength(value);
+            for (let valueIndex = 0; valueIndex < operation.values.length; valueIndex += 1) {
+                const length = canonicalJsonLength(operation.values[valueIndex]);
                 if (!addEntry(length))
                     return reject("overflow", `operation ${index} overflowed the size sum`);
-                lengths.push(length);
+                insertedLengths[insertedLengths.length] = length;
             }
-            segments.push({ values: operation.values, lengths, start: 0, end: lengths.length });
             continue;
         }
         let base: RecipeSourceBase;
@@ -429,16 +437,35 @@ export function applyRecipe(
             if (!addEntry(base.lengths[position] as number))
                 return reject("overflow", `operation ${index} overflowed the size sum`);
         }
-        segments.push({ values: base.values, lengths: base.lengths, start: operation.start, end });
     }
     if (bytes > MAX_RECONSTRUCTED_BYTES)
         return reject("output_too_large", `reconstructed array is ${bytes} bytes`);
-    const values: unknown[] = [];
-    const lengths: number[] = [];
-    for (const segment of segments) {
-        for (let index = segment.start; index < segment.end; index += 1) {
-            values.push(segment.values[index]);
-            lengths.push(segment.lengths[index] as number);
+    const values = new Array<unknown>(entries);
+    const lengths = new Array<number>(entries);
+    let outputIndex = 0;
+    let insertedIndex = 0;
+    for (let index = 0; index < recipe.operations.length; index += 1) {
+        const operation = recipe.operations[index] as RecipeOperation;
+        if (operation.op === "insert") {
+            for (let valueIndex = 0; valueIndex < operation.values.length; valueIndex += 1) {
+                values[outputIndex] = operation.values[valueIndex];
+                lengths[outputIndex] = insertedLengths[insertedIndex] as number;
+                outputIndex += 1;
+                insertedIndex += 1;
+            }
+            continue;
+        }
+        const base = operation.source === "input" ? input : previous;
+        if (!base)
+            return reject(
+                "missing_previous_base",
+                `operation ${index} keeps from an absent previous output`,
+            );
+        const end = operation.start + operation.count;
+        for (let position = operation.start; position < end; position += 1) {
+            values[outputIndex] = base.values[position];
+            lengths[outputIndex] = base.lengths[position] as number;
+            outputIndex += 1;
         }
     }
     return { ok: true, values, lengths, bytes };
