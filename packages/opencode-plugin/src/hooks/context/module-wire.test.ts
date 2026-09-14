@@ -6,14 +6,46 @@ import { join } from "node:path";
 import { isRecord } from "../../shared/record-type-guard";
 import {
     __moduleWireTest,
+    annotateOrdinals,
     buildPagedModuleTransformPayloads,
     encodeOpenCodeMessagesToCk,
     MODULE_ITEM_CONTINUATION_KEY,
+    MODULE_ORDINAL_PAGE_SIZE,
     MODULE_PAGE_MAX_BYTES,
-    resolveOrdinalsForModule,
+    type ModuleOrdinalMemo,
+    ORDINAL_ENTRY_RETAINED_BYTES,
+    type OrdinalResolution,
+    type OrdinalScanBudget,
+    type PrimedOrdinalMemo,
+    primeOrdinalMemo,
 } from "./module-wire";
 import { setRawMessageProvider } from "./read-session-chunk";
 import type { MessageLike } from "./tag-content-primitives";
+
+/** The owner refuses a reservation by throwing; the scan surfaces that error unchanged. */
+class ScanBudgetRefused extends Error {}
+
+function unboundedScanBudget(signal = new AbortController().signal): OrdinalScanBudget {
+    return { signal, reserve: () => {} };
+}
+
+/** Test-only composition of the two resolver halves. */
+async function resolveOrdinalsForModule(args: {
+    sessionId: string;
+    messages: MessageLike[];
+    memo: ModuleOrdinalMemo;
+    provisionalBase?: number;
+}): Promise<
+    | OrdinalResolution
+    | (Extract<OrdinalResolution, { ok: true }> & PrimedOrdinalMemo & { memoGeneration: number })
+> {
+    const primed = await primeOrdinalMemo({ ...args, budget: unboundedScanBudget() });
+    if (!primed.ok) return primed;
+    const resolved = annotateOrdinals({ ...args, primed: primed.primed });
+    return resolved.ok
+        ? { ...resolved, ...primed.primed, memoGeneration: args.memo.generation }
+        : resolved;
+}
 
 describe("encodeOpenCodeMessagesToCk", () => {
     it("marks a collapsed synthetic todo pair as synthetic CK ingress", () => {
@@ -842,6 +874,300 @@ describe("resolveOrdinalsForModule message identity", () => {
             }
         }
     });
+});
+
+describe("primeOrdinalMemo bounded staging", () => {
+    for (const fault of [
+        "already-aborted",
+        "page-abort",
+        "page-boundary-abort",
+        "page-throw",
+        "reserve-abort",
+        "reserve-throw",
+        "reserve-refuse",
+        "count-abort",
+        "scan-return-abort",
+    ] as const) {
+        for (const mode of ["generation-reset", "unprimed", "incremental"] as const) {
+            it(`keeps the supplied map untouched on ${fault} during ${mode}`, async () => {
+                const sessionId = `ordinal-${fault}-${mode}`;
+                const controller = new AbortController();
+                const failure = new Error(fault);
+                const rows = Array.from({ length: MODULE_ORDINAL_PAGE_SIZE + 1 }, (_, index) => ({
+                    id: `m-${index + 1}`,
+                    timeCreated: index + 1,
+                    contributesOrdinal: true,
+                    hasValidInfo: true,
+                }));
+                const entries = new Map([["prior", 1]]);
+                const set = spyOn(entries, "set");
+                const clear = spyOn(entries, "clear");
+                const pageSizes: number[] = [];
+                const charges: number[] = [];
+                let countReads = 0;
+                const unregister = setRawMessageProvider(sessionId, {
+                    readMessages: () => {
+                        throw new Error("ordinal scans must use the paged provider");
+                    },
+                    readMessageOrdinalPage: (after, limit) => {
+                        const start = after?.timeCreated ?? 0;
+                        const page = rows.slice(start, start + limit);
+                        pageSizes.push(page.length);
+                        if (fault === "page-throw") throw failure;
+                        if (fault === "page-abort") controller.abort(failure);
+                        if (fault === "page-boundary-abort") {
+                            queueMicrotask(() => controller.abort(failure));
+                        }
+                        return page;
+                    },
+                    getStoredMessageCount: () => {
+                        countReads += 1;
+                        if (fault === "count-abort") controller.abort(failure);
+                        if (fault === "scan-return-abort") {
+                            queueMicrotask(() => controller.abort(failure));
+                        }
+                        return rows.length + (mode === "incremental" ? 1 : 0);
+                    },
+                });
+                try {
+                    if (fault === "already-aborted") controller.abort(failure);
+                    const pending = primeOrdinalMemo({
+                        sessionId,
+                        memo: {
+                            generation: 2,
+                            memoGeneration: mode === "generation-reset" ? 1 : 2,
+                            entries,
+                            anchor: { timeCreated: 0, id: "prior" },
+                            storedCount: mode === "unprimed" ? null : 1,
+                            canonicalCount: 1,
+                        },
+                        budget: {
+                            signal: controller.signal,
+                            reserve: (bytes) => {
+                                charges.push(bytes);
+                                if (fault === "reserve-throw") throw failure;
+                                if (fault === "reserve-abort") controller.abort(failure);
+                                if (fault === "reserve-refuse") throw new ScanBudgetRefused();
+                            },
+                        },
+                    });
+                    if (fault === "reserve-refuse") {
+                        await expect(pending).rejects.toBeInstanceOf(ScanBudgetRefused);
+                    } else {
+                        await expect(pending).rejects.toBe(failure);
+                    }
+                    const completedScan = fault === "count-abort" || fault === "scan-return-abort";
+                    expect(pageSizes).toEqual(
+                        fault === "already-aborted"
+                            ? []
+                            : completedScan
+                              ? [MODULE_ORDINAL_PAGE_SIZE, 1]
+                              : [MODULE_ORDINAL_PAGE_SIZE],
+                    );
+                    expect(countReads).toBe(completedScan ? 1 : 0);
+                    expect(charges).toHaveLength(
+                        fault === "already-aborted" ||
+                            fault === "page-throw" ||
+                            fault === "page-abort"
+                            ? 0
+                            : completedScan
+                              ? 2
+                              : 1,
+                    );
+                    expect(entries).toEqual(new Map([["prior", 1]]));
+                    expect(set).not.toHaveBeenCalled();
+                    expect(clear).not.toHaveBeenCalled();
+                } finally {
+                    unregister();
+                    set.mockRestore();
+                    clear.mockRestore();
+                }
+            });
+        }
+    }
+
+    for (const idPrefix of ["short", "é😀".repeat(4096)]) {
+        it(`charges row and memo storage plus ${idPrefix.length > 5 ? "long" : "short"} IDs at exact byte boundaries`, async () => {
+            const sessionId = `ordinal-byte-boundary-${idPrefix.length}`;
+            const rows = Array.from({ length: MODULE_ORDINAL_PAGE_SIZE + 1 }, (_, index) => ({
+                id: `${index === 0 ? idPrefix : "m"}-${index}`,
+                timeCreated: index + 1,
+                contributesOrdinal: index !== 0,
+                hasValidInfo: true,
+            }));
+            // A row and its eventual memo slot share the ID string; even summary IDs stay live during the scan.
+            const pageBytes = [
+                rows.slice(0, MODULE_ORDINAL_PAGE_SIZE),
+                rows.slice(MODULE_ORDINAL_PAGE_SIZE),
+            ].map((page) =>
+                page.reduce(
+                    (sum, row) => sum + 2 * ORDINAL_ENTRY_RETAINED_BYTES + 2 * row.id.length,
+                    0,
+                ),
+            );
+            const totalBytes = pageBytes[0] + pageBytes[1];
+            for (const limitBytes of [pageBytes[0] - 1, pageBytes[0], totalBytes - 1, totalBytes]) {
+                const original = new Map([[rows.at(-1)!.id, 97]]);
+                const entries = new Map(original);
+                const set = spyOn(entries, "set");
+                const clear = spyOn(entries, "clear");
+                const charges: number[] = [];
+                let retainedBytes = 0;
+                let pageReads = 0;
+                let countReads = 0;
+                const unregister = setRawMessageProvider(sessionId, {
+                    readMessages: () => {
+                        throw new Error("ordinal scans must use the paged provider");
+                    },
+                    readMessageOrdinalPage: (after, limit) => {
+                        pageReads += 1;
+                        const start = after?.timeCreated ?? 0;
+                        return rows.slice(start, start + limit);
+                    },
+                    getStoredMessageCount: () => {
+                        countReads += 1;
+                        return rows.length;
+                    },
+                });
+                try {
+                    const pending = primeOrdinalMemo({
+                        sessionId,
+                        memo: { generation: 2, memoGeneration: 1, entries, continuationBase: 97 },
+                        budget: {
+                            signal: new AbortController().signal,
+                            reserve: (bytes) => {
+                                charges.push(bytes);
+                                if (bytes > limitBytes - retainedBytes)
+                                    throw new ScanBudgetRefused();
+                                retainedBytes += bytes;
+                            },
+                        },
+                    });
+                    if (limitBytes === totalBytes) {
+                        expect(await pending).toEqual({
+                            ok: true,
+                            primed: {
+                                memoAnchor: { timeCreated: rows.length, id: rows.at(-1)!.id },
+                                memoStoredCount: rows.length,
+                                memoCanonicalCount: 97 + MODULE_ORDINAL_PAGE_SIZE,
+                            },
+                        });
+                        expect(entries).toEqual(
+                            new Map(rows.slice(1).map((row, index) => [row.id, 98 + index])),
+                        );
+                        expect(retainedBytes).toBe(totalBytes);
+                    } else {
+                        await expect(pending).rejects.toBeInstanceOf(ScanBudgetRefused);
+                        expect(entries).toEqual(original);
+                        expect(set).not.toHaveBeenCalled();
+                        expect(clear).not.toHaveBeenCalled();
+                        expect(retainedBytes).toBe(limitBytes < pageBytes[0] ? 0 : pageBytes[0]);
+                    }
+                    expect(pageReads).toBe(limitBytes < pageBytes[0] ? 1 : 2);
+                    expect(charges).toEqual(limitBytes < pageBytes[0] ? [pageBytes[0]] : pageBytes);
+                    expect(countReads).toBe(limitBytes === totalBytes ? 1 : 0);
+                } finally {
+                    unregister();
+                    set.mockRestore();
+                    clear.mockRestore();
+                }
+            }
+        });
+    }
+
+    for (const outcome of [
+        "valid",
+        "count-mismatch",
+        "ordinal-mismatch",
+        "abort-boundary",
+        "abort-return",
+    ] as const) {
+        it(`preserves the memo through a full restart ending in ${outcome}`, async () => {
+            const sessionId = `ordinal-restart-${outcome}`;
+            const controller = new AbortController();
+            const failure = new Error(outcome);
+            const rows = Array.from({ length: MODULE_ORDINAL_PAGE_SIZE + 1 }, (_, index) => ({
+                id: `m-${index}`,
+                timeCreated: index + 1,
+                contributesOrdinal: index !== 0 || outcome === "ordinal-mismatch",
+                hasValidInfo: true,
+            }));
+            const last = rows.at(-1)!;
+            const original = new Map([[last.id, MODULE_ORDINAL_PAGE_SIZE]]);
+            const entries = new Map(original);
+            const set = spyOn(entries, "set");
+            const clear = spyOn(entries, "clear");
+            const pageStarts: number[] = [];
+            let countReads = 0;
+            const unregister = setRawMessageProvider(sessionId, {
+                readMessages: () => {
+                    throw new Error("ordinal scans must use the paged provider");
+                },
+                readMessageOrdinalPage: (after, limit) => {
+                    expect(entries).toEqual(original);
+                    expect(set).not.toHaveBeenCalled();
+                    expect(clear).not.toHaveBeenCalled();
+                    const start = after?.timeCreated ?? 0;
+                    pageStarts.push(start);
+                    if (start === 0 && outcome === "abort-boundary") {
+                        queueMicrotask(() => controller.abort(failure));
+                    }
+                    return rows.slice(start, start + limit);
+                },
+                getStoredMessageCount: () => {
+                    countReads += 1;
+                    expect(entries).toEqual(original);
+                    if (countReads === 2 && outcome === "abort-return") {
+                        queueMicrotask(() => controller.abort(failure));
+                    }
+                    return rows.length + (outcome === "count-mismatch" ? 1 : 0);
+                },
+            });
+            try {
+                const pending = primeOrdinalMemo({
+                    sessionId,
+                    memo: {
+                        generation: 1,
+                        memoGeneration: 1,
+                        entries,
+                        anchor: { timeCreated: last.timeCreated, id: last.id },
+                        storedCount: MODULE_ORDINAL_PAGE_SIZE,
+                        canonicalCount: MODULE_ORDINAL_PAGE_SIZE,
+                    },
+                    budget: unboundedScanBudget(controller.signal),
+                });
+                if (outcome === "abort-boundary" || outcome === "abort-return") {
+                    await expect(pending).rejects.toBe(failure);
+                } else if (outcome === "valid") {
+                    expect((await pending).ok).toBe(true);
+                    expect(entries).toEqual(
+                        new Map(rows.slice(1).map((row, index) => [row.id, index + 1])),
+                    );
+                } else {
+                    expect(await pending).toEqual({
+                        ok: false,
+                        reason: "mismatch",
+                        ...(outcome === "ordinal-mismatch" ? { messageId: last.id } : {}),
+                    });
+                }
+                if (outcome !== "valid") {
+                    expect(entries).toEqual(original);
+                    expect(set).not.toHaveBeenCalled();
+                    expect(clear).not.toHaveBeenCalled();
+                }
+                expect(pageStarts).toEqual(
+                    outcome === "abort-boundary"
+                        ? [rows.length, 0]
+                        : [rows.length, 0, MODULE_ORDINAL_PAGE_SIZE],
+                );
+                expect(countReads).toBe(outcome === "abort-boundary" ? 1 : 2);
+            } finally {
+                unregister();
+                set.mockRestore();
+                clear.mockRestore();
+            }
+        });
+    }
 });
 
 describe("resolveOrdinalsForModule stored-count races", () => {

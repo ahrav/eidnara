@@ -167,8 +167,13 @@ required marker checks; a hit for one cannot satisfy the other.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - HEAD retains both envelopes; the accepted replacement
-and its structural check are absent.
+Exercised: yes - `WireMessage` and `WireBlock` derive serde and hold no
+envelope `Value`; `source_has_no_envelope_tree_or_replay_entry` in
+`crates/daemon/tests/typed_wire_decode_allocations.rs` checks the struct
+definitions and the crate-wide absence of the replay entries, and
+`message_decode_stays_within_the_allocation_budget` measures the decode
+(434 events, peak 1.46 J) against a restored-envelope control (2,185 events,
+peak 4.2 J).
 Guarantee: WireMessage and WireBlock decode and serialize from owned typed
 fields without constructing or retaining full Value envelopes.
 Check: `always` - Inspect both definitions and serde paths for derived
@@ -198,8 +203,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - no baseline/final nested-envelope corpus or final handler
-execution exists.
+Exercised: yes - `unpaged_transform_bodies_reach_the_same_outcome_through_both_entry_paths`
+and `both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies` pass
+unchanged over the 46-body corpus, and
+`frozen_corpus_footprints_replay_with_only_string_charge_changes` replays every
+body against its frozen terminals (see the resources catalog); the direct-lane
+set is unchanged. Duplicate recognized envelope keys still fall to the tree lane
+with the last value.
 Guarantee: Replacing envelope serde preserves A2's routing, acceptance, and
 semantic outcomes through invalid-typed-decode fallback, subject only to the
 plan's explicit representation changes.
@@ -235,8 +245,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - final derived structs and placement-sensitive payload
-witnesses are absent.
+Exercised: partial - `a_block_edit_leaves_its_sibling_unchanged_and_envelope_unknowns_are_discarded`
+(memory-store), `reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded`
+(wire.rs), `overlay_canonicalizes_only_the_mutated_block` (transform.rs), and
+`decoded_envelope_charges_only_typed_fields` (retained_size.rs) show message- and
+block-level unknown fields discarded while payload values survive; a
+placement-sensitive witness with unknown keys nested inside a retained payload
+`Value` is not added.
 Guarantee: Typed conversion discards unknown wire-envelope fields while
 preserving the decoded values of every accepted payload Value field.
 Check: `always` - After either lane accepts, compare each kept field with an
@@ -271,8 +286,9 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - page and non-transform preservation are not run against
-the replacement.
+Exercised: partial - the existing page-assembly and route tests pass unchanged
+(`transform_decode_corpus` page cases and `assemble_transform_pages`); no new
+page-digest witness was added, and paging code did not change.
 Guarantee: Paging and non-transform routes retain their Value-tree behavior
 and pages validate the original array digest before typed envelope normalization.
 Check: `always` - For well-formed bodies that pass admission, any present page
@@ -304,8 +320,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - no final decode owner-drop and prefix-retention sequence
-is run.
+Exercised: partial - `wire.rs` sharing tests pass with the owned model
+(`reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded` and
+the shared-shell checks at `wire.rs:1749-1814`), and
+`decode_and_projection_fit_the_declared_pool` checks every projection block
+points into the request's shells; the projection now shares the shell whenever
+the effective synthetic flag matches (`wire.rs` `project_messages_from_state`).
+No input-drop sequence was added.
 Guarantee: Decoded requests and retained projections own their data, remain
 Send plus static, and share unchanged prefix shells without depending on the
 body buffer's lifetime.
@@ -337,8 +358,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - HEAD deliberately replays stale public-field edits and
-includes originals in equality.
+Exercised: yes - serialization walks the typed fields, so public-field edits
+reach the wire without `mark_modified`; equality and `block_identity_digest`
+cover `(kind, provider_extras)`; `a_block_edit_leaves_its_sibling_unchanged_and_envelope_unknowns_are_discarded`,
+`overlay_canonicalizes_only_the_mutated_block`, `one_edited_block_message` in the
+served-output fixtures, and the receipt-reuse test in `transform.rs` (blocks
+differing only in discarded envelope fields are equal with equal digests) pass.
 Guarantee: Serialization and equality reflect current typed fields, while
 edits to one owned or copy-on-write shell leave retained peers and untouched
 siblings unchanged.
@@ -372,8 +397,12 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet - the corpus has duplicate ingress mid, but no post-KTD1
-CK/message/block fallback witness runs.
+Exercised: partial - `parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback`
+constructs a duplicate `mid` in the last message after a 4 MiB prefix and
+asserts the walk accepts, the typed decode refuses, and the tree conversion
+succeeds in one trace; the corpus's `duplicate nested key` body reaches the tree
+lane with its last value. A duplicate key inside a block envelope is not
+constructed.
 Guarantee: The compatibility campaign constructs successful tree recovery
 from duplicate recognized fields inside message and block envelopes after
 the typed attempt fails.

@@ -1,4 +1,4 @@
-//! Canonical served serialization of a passthrough shell must not pay per-key heap work,
+//! Canonical served serialization of a decoded shell must not pay per-key heap work,
 //! and every declared served-output population must have an absolute allocation ledger.
 //!
 //! The recorder is thread-owned, so harness threads never enter the ledger.
@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use alloc_recorder::{BufferProvenance, Event, Ledger, record_window};
 use memory_store::WireMessage;
 use served_output_fixtures::{
-    BLOCK_COUNTS, KEYS_PER_ASCII_BLOCK, declaration_order_equals_canonical, populations,
-    reference_bytes, serialization_buffer_root_bytes,
+    BLOCK_COUNTS, KEYS_PER_ASCII_BLOCK, Population, declaration_order_equals_canonical,
+    populations, reference_bytes, serialization_buffer_root_bytes,
 };
 
 #[global_allocator]
@@ -28,17 +28,17 @@ fn canonicalize_recorded(message: &WireMessage) -> (Vec<u8>, Ledger) {
 }
 
 /// A cap below the per-block key count rejects one allocation per decoded key.
-const MAX_EVENTS_PER_BLOCK: usize = KEYS_PER_ASCII_BLOCK - 4;
+const MAX_EVENTS_PER_BLOCK: usize = 8;
 const _: () = assert!(MAX_EVENTS_PER_BLOCK < KEYS_PER_ASCII_BLOCK);
 const ARC_HEADER_BYTES: usize = 2 * std::mem::size_of::<usize>();
 /// Lowercase hex of a SHA-256 digest.
 const HEX_DIGEST_BYTES: usize = 64;
 
 #[test]
-fn passthrough_shell_canonicalization_allocates_independently_of_key_count() {
+fn decoded_shell_canonicalization_allocates_independently_of_key_count() {
     let [small_blocks, large_blocks] = BLOCK_COUNTS;
-    let small = served_output_fixtures::retained_ascii_message(small_blocks);
-    let large = served_output_fixtures::retained_ascii_message(large_blocks);
+    let small = served_output_fixtures::decoded_ascii_message(small_blocks);
+    let large = served_output_fixtures::decoded_ascii_message(large_blocks);
     let (small_bytes, small_ledger) = canonicalize_recorded(&small);
     let (large_bytes, large_ledger) = canonicalize_recorded(&large);
     assert_eq!(small_bytes, reference_bytes(&small));
@@ -50,25 +50,29 @@ fn passthrough_shell_canonicalization_allocates_independently_of_key_count() {
         / (large_blocks - small_blocks);
     assert!(
         per_block <= MAX_EVENTS_PER_BLOCK,
-        "{per_block} allocation events per passthrough block (small {}, large {})",
+        "{per_block} allocation events per decoded block (small {}, large {})",
         small_ledger.allocation_events,
         large_ledger.allocation_events
     );
 }
 
+/// Every owned typed shell serializes `role` before `content` and each block's tag before its payload, so the canonicalizer takes the reorder-copy path for all of them.
 #[test]
-fn canonical_miss_return_buffer_provenance_is_classified() {
-    for population in populations() {
+fn every_population_takes_the_reorder_copy_path() {
+    let populations: Vec<_> = populations().collect();
+    let messages: Vec<WireMessage> = populations.iter().map(Population::build).collect();
+    let references: Vec<Vec<u8>> = messages.iter().map(reference_bytes).collect();
+    assert!(
+        messages
+            .iter()
+            .zip(&references)
+            .all(|(message, reference)| !declaration_order_equals_canonical(message, reference)),
+        "an owned typed shell never serializes in canonical order"
+    );
+    for ((population, message), reference) in populations.iter().zip(&messages).zip(&references) {
         let label = population.label();
-        let message = population.build();
-        let reference = reference_bytes(&message);
-        assert_eq!(
-            declaration_order_equals_canonical(&message, &reference),
-            population.expects_canonical_miss(),
-            "{label}: canonicality oracle disagrees with the declared population"
-        );
-        let (bytes, ledger) = canonicalize_recorded(&message);
-        assert_eq!(bytes, reference, "{label}");
+        let (bytes, ledger) = canonicalize_recorded(message);
+        assert_eq!(&bytes, reference, "{label}");
         assert!(!ledger.overflow, "{label}: ledger overflow");
         let ptr = bytes.as_ptr() as usize;
         assert_eq!(
@@ -76,51 +80,24 @@ fn canonical_miss_return_buffer_provenance_is_classified() {
             bytes.capacity() as isize,
             "{label}: only the returned buffer survives the canonicalizer"
         );
-        let provenance = ledger.buffer_provenance(ptr, bytes.len(), bytes.capacity());
-        let expected = if population.expects_serialization_buffer_return() {
-            BufferProvenance::GrowthChain
-        } else {
-            BufferProvenance::FreshExactSizeAllocation
-        };
-        assert_eq!(provenance, expected, "{label}: return-buffer provenance");
-        match provenance {
-            BufferProvenance::FreshExactSizeAllocation => {
-                assert_eq!(
-                    ledger
-                        .allocations_of_size(bytes.len())
-                        .iter()
-                        .filter(|event| matches!(event, Event::Alloc { .. }))
-                        .count(),
-                    1,
-                    "{label}: exactly one exact output-sized allocation"
-                );
-                assert!(
-                    ledger.was_released(serialization_buffer(&ledger, bytes.len(), ptr)),
-                    "{label}: the serialization buffer is released after the copy"
-                );
-            }
-            BufferProvenance::GrowthChain => {
-                let chain = ledger.growth_chain(ptr);
-                assert!(
-                    ledger
-                        .grown_from_root_outside(
-                            serialization_buffer_root_bytes(),
-                            bytes.len(),
-                            ptr
-                        )
-                        .is_empty(),
-                    "{label}: no second serialization buffer reaches N outside the returned chain"
-                );
-                assert!(
-                    ledger
-                        .allocations_of_size(bytes.len())
-                        .iter()
-                        .all(|event| chain.contains(event)),
-                    "{label}: no exact-size reorder buffer beside the returned chain"
-                );
-            }
-            BufferProvenance::Unattributed => unreachable!("asserted above"),
-        }
+        assert_eq!(
+            ledger.buffer_provenance(ptr, bytes.len(), bytes.capacity()),
+            BufferProvenance::FreshExactSizeAllocation,
+            "{label}: return-buffer provenance"
+        );
+        assert_eq!(
+            ledger
+                .allocations_of_size(bytes.len())
+                .iter()
+                .filter(|event| matches!(event, Event::Alloc { .. }))
+                .count(),
+            1,
+            "{label}: exactly one exact output-sized allocation"
+        );
+        assert!(
+            ledger.was_released(serialization_buffer(&ledger, bytes.len(), ptr)),
+            "{label}: the serialization buffer is released after the copy"
+        );
         drop(bytes);
     }
 }
@@ -165,23 +142,24 @@ fn serialization_buffer(ledger: &Ledger, output_len: usize, returned_ptr: usize)
     }
 }
 
-/// The constructor hashes each block through `canonical_block_bytes`, whose span
-/// tracking allocates beside the text, so the oracle records that same call.
-fn largest_receipt_peak(population: &served_output_fixtures::Population) -> usize {
+/// The largest peak the receipt serializer reaches for one block of the population, measured
+/// through the same canonical producer the constructor calls.
+fn largest_receipt_peak(population: &Population) -> usize {
     population
         .build()
         .content()
         .iter()
         .map(|block| {
-            record_window(|| daemon::served_json::canonical_block_bytes_for_test(block))
-                .1
-                .peak_live_bytes
+            let (receipt, ledger) =
+                record_window(|| daemon::served_json::canonical_block_bytes_for_test(block));
+            drop(receipt);
+            ledger.peak_live_bytes
         })
         .max()
         .unwrap_or(0)
 }
 
-fn message_blocks(population: &served_output_fixtures::Population) -> usize {
+fn message_blocks(population: &Population) -> usize {
     population.build().content().len()
 }
 

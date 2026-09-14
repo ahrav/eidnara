@@ -96,3 +96,7 @@ wire rows. No supplied artifact proves old stamped rows cannot exist.
 - Conclusion: needs human input before implementation. A process-local cache
   rationale cannot authorize changed native output or assume durable stamps
   away. This is a supplied fresh-review refinement verified against HEAD.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`; replay envelopes removed. `tests/block_bases_agree.rs` and `fresh_block_byte_consumers_call_the_canonical_producer` pass; `decoded_block_fingerprint` hashes the canonical bytes of the typed block with `_eidnara_codec` removed and no envelope step.
