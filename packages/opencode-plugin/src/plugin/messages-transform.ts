@@ -1,9 +1,8 @@
 import type { ResolvedTransformMode as TransformMode } from "../config/transform-mode";
 import {
-    assertReferenceableMessages,
+    type ReferenceableRejection,
     readOwnDataProperty,
     rootArrayRejection,
-    SourceRejected,
 } from "../hooks/context/transform-capture";
 import { log } from "../shared/logger";
 
@@ -14,13 +13,16 @@ type MessageWithParts = {
 
 type MessagesTransformOutput = { messages: MessageWithParts[] };
 
-function logSourceDecline(error: SourceRejected, stage: string): void {
-    log[error.logLevel](`[eidnara] transform declined ${error.name}: ${error.message} (${stage})`);
+/** A polluted built-in prototype affects every session, so that refusal is logged for operators. */
+function logRootDecline(rejection: ReferenceableRejection, stage: string): void {
+    log[rejection.reason === "prototype_accessor" ? "warn" : "debug"](
+        `[eidnara] transform declined: ${rejection.reason} at ${rejection.path || "/"} (${stage})`,
+    );
 }
 
 /**
- * The hook publishes its result by replacing entries of `output.messages`, never by editing a
- * message's `info` or `parts` in place: the handler's rollback restores array membership only.
+ * The hook publishes its result by replacing entries of `output.messages` in one synchronous
+ * all-or-none step, never by editing a message's `info` or `parts` in place.
  */
 type EidnaraTransformHooks = {
     "experimental.chat.messages.transform"?: (
@@ -31,7 +33,9 @@ type EidnaraTransformHooks = {
 
 /**
  * `ts` mode returns messages unchanged because this plugin has no TypeScript transform.
- * If the hook throws, the handler restores the pre-hook message array.
+ * The hook owns publication. The wrapper never restores captured contents after an error.
+ * Unsupported containers stay on the host output object but are not returned: promise resolution
+ * reads `then`, which could invoke a proxy trap or a getter.
  */
 export function createMessagesTransformHandler(args: {
     eidnara: EidnaraTransformHooks;
@@ -51,35 +55,28 @@ export function createMessagesTransformHandler(args: {
     }
 
     return async (input, output): Promise<MessageWithParts[] | undefined> => {
-        const messages = readOwnDataProperty(output, "messages") as MessageWithParts[];
-        try {
-            assertReferenceableMessages(messages);
-        } catch (error) {
-            if (!(error instanceof SourceRejected)) throw error;
-            logSourceDecline(error, "entry");
+        // Only the root is checked here: nested data is the hook's concern, and this check guards promise assimilation of the return value.
+        const entryRejection = rootArrayRejection(readOwnDataProperty(output, "messages"));
+        if (entryRejection) {
+            logRootDecline(entryRejection, "entry");
             return;
         }
-        // A throw after the hook has replaced some entries would otherwise send that partial history to the model.
-        const snapshot = messages.slice();
         const eidnara = args.getEidnara ? args.getEidnara() : args.eidnara;
         try {
             await eidnara?.["experimental.chat.messages.transform"]?.(input, output);
         } catch (error) {
-            output.messages = snapshot;
             const code = (error as { code?: string } | null)?.code;
             const name = (error as { name?: string } | null)?.name;
             const message = error instanceof Error ? error.message : String(error);
             log(
-                `[eidnara] transform FAILED code=${code ?? "none"} name=${name ?? "none"}: ${message}. Continuing with unmodified messages for this pass.`,
+                `[eidnara] transform FAILED code=${code ?? "none"} name=${name ?? "none"}: ${message}. Keeping current host messages for this pass.`,
                 error,
             );
         }
-        // Only the root is rechecked here: nested data is the hook's published output, and this check
-        // guards promise assimilation of the return value, not publication.
         const result = readOwnDataProperty(output, "messages") as MessageWithParts[];
-        const rejection = rootArrayRejection(result);
-        if (rejection !== undefined) {
-            logSourceDecline(rejection, "return");
+        const returnRejection = rootArrayRejection(result);
+        if (returnRejection) {
+            logRootDecline(returnRejection, "return");
             return;
         }
         return result;
