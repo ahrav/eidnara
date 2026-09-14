@@ -384,6 +384,7 @@ impl SearchSelection {
         if end > Instant::now() + Duration::from_millis(remaining) {
             return Err(BuildError::Invalid("cleanup exceeds original deadline"));
         }
+        let (retirement_rows, retirement_bytes) = retirement::retirement_transaction_charges(spec)?;
         let mut requested = vec![
             ("physical_drain_ms", remaining),
             (
@@ -403,12 +404,7 @@ impl SearchSelection {
                         self.bounds.max_tombstoned_per_class.get().saturating_mul(5),
                     ) as u64)
                     .max(spec.episode.commits.max_rows.get() as u64)
-                    .max(
-                        u64::try_from(spec.retirement.max_obligations.get())
-                            .ok()
-                            .and_then(|rows| rows.checked_add(1))
-                            .ok_or(BuildError::InventoryBound)?,
-                    ),
+                    .max(retirement_rows),
             ),
             (
                 "export_page_rows",
@@ -419,9 +415,9 @@ impl SearchSelection {
                 spec.episode
                     .max_source_encoded_bytes
                     .get()
-                    .max(spec.retirement.max_obligation_bytes.get())
                     .checked_add(MAX_RECORD_BYTES)
-                    .ok_or(BuildError::InventoryBound)?,
+                    .ok_or(BuildError::InventoryBound)?
+                    .max(retirement_bytes),
             ),
         ];
         requested.extend(spec.catchup_page_charges());

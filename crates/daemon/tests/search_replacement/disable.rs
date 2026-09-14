@@ -1365,6 +1365,73 @@ async fn a_restore_before_the_completion_write_refuses_to_persist_deregistration
     );
 }
 
+/// Maintenance pins the selected family; publishing another family under it would leave the pin on the old one, so selection is refused until the owner stops maintenance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selecting_a_replacement_is_refused_while_maintenance_is_bound() {
+    use daemon::embedding_supervisor::{Maintained, SliceBounds};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let engine = fixtures::TestEngine::new();
+    let synapse = Arc::new(fixtures::component(
+        &engine,
+        host_runtime::synapse::SynapseLimits::default(),
+    ));
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    selection
+        .start_maintenance(
+            Maintained {
+                gate: Arc::clone(&gate),
+                kernel: Arc::clone(&corpus.kernel),
+                projection: Arc::clone(reader.projection()),
+                synapse,
+                project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+                destination: kernel::ArtifactDestination::Remote,
+            },
+            SliceBounds {
+                dispatch: fixtures::bounds(),
+                sweep_candidates: NonZeroUsize::new(16).unwrap(),
+                slice: Duration::from_millis(200),
+                idle: Duration::from_millis(20),
+            },
+            Arc::new(|| fixtures::NOW),
+            events,
+        )
+        .unwrap();
+    let selected = reader.digest().to_owned();
+    drop(reader);
+    corpus.publish("late", "late bytes");
+    let candidate = next_candidate(root.path(), &corpus, &gate);
+    let failure = selection.select(candidate, &mut |_| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            failure.error,
+            BuildError::Invalid("maintenance is bound to the selected family")
+        ),
+        "{:?}",
+        failure.error
+    );
+    assert_eq!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .unwrap()
+            .digest(),
+        selected
+    );
+    selection
+        .maintenance_supervisor_for_test()
+        .unwrap()
+        .shutdown(Duration::from_secs(10))
+        .await
+        .unwrap();
+}
+
 /// A slice held inside a projection write past the grace is reported once, not once more for the tracked task that pins the reader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn grace_expiry_counts_only_the_held_slice_for_pinned_maintenance() {

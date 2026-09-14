@@ -24,6 +24,23 @@ pub(super) struct RetirementRun<'a> {
     pub check: &'a dyn Fn() -> Result<(), BuildError>,
 }
 
+/// The `(local_transaction_rows, local_transaction_bytes)` a retirement transaction charges: one receipt plus every obligation disposition, and the censused bytes plus each row's fixed width and one record. Every path that runs `retire_bound` charges these.
+pub(super) fn retirement_transaction_charges(
+    spec: &super::super::ReplacementSpec,
+) -> Result<(u64, u64), BuildError> {
+    let rows = u64::try_from(spec.retirement.max_obligations.get())
+        .map_err(|_| BuildError::InventoryBound)?;
+    let bytes = rows
+        .checked_mul(DISPOSITION_ROW_BYTES)
+        .and_then(|rows| rows.checked_add(spec.retirement.max_obligation_bytes.get()))
+        .and_then(|bytes| bytes.checked_add(MAX_RECORD_BYTES))
+        .ok_or(BuildError::InventoryBound)?;
+    Ok((
+        rows.checked_add(1).ok_or(BuildError::InventoryBound)?,
+        bytes,
+    ))
+}
+
 impl SearchSelection {
     pub(super) fn predecessor(
         &self,
@@ -78,23 +95,14 @@ impl SearchSelection {
                 "retirement budget exceeds original deadline",
             ));
         }
-        let rows = u64::try_from(spec.retirement.max_obligations.get())
-            .map_err(|_| BuildError::InventoryBound)?;
-        let transaction_bytes = rows
-            .checked_mul(DISPOSITION_ROW_BYTES)
-            .and_then(|rows| rows.checked_add(spec.retirement.max_obligation_bytes.get()))
-            .and_then(|bytes| bytes.checked_add(MAX_RECORD_BYTES))
-            .ok_or(BuildError::InventoryBound)?;
+        let (transaction_rows, transaction_bytes) = retirement_transaction_charges(spec)?;
         for grant in &grants {
             gate.check_limits(
                 grant,
                 &InvalidationIdentity::from(&self.identity),
                 &[
                     ("physical_drain_ms", remaining),
-                    (
-                        "local_transaction_rows",
-                        rows.checked_add(1).ok_or(BuildError::InventoryBound)?,
-                    ),
+                    ("local_transaction_rows", transaction_rows),
                     ("local_transaction_bytes", transaction_bytes),
                 ],
             )?;

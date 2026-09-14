@@ -219,6 +219,7 @@ impl SearchSelection {
                 "candidate belongs to another data home",
             ));
         }
+        self.require_unpinned()?;
         candidate
             .owner
             .spec
@@ -341,6 +342,16 @@ impl SearchSelection {
         Ok(())
     }
 
+    /// The owned supervisor pins the family it was started on; replacing that family would leave the pin on the old one and refuse the new one's maintenance, so the owner stops maintenance first.
+    fn require_unpinned(&self) -> Result<(), BuildError> {
+        if self.maintenance.is_some() {
+            return Err(BuildError::Invalid(
+                "maintenance is bound to the selected family",
+            ));
+        }
+        Ok(())
+    }
+
     /// Reopen recovers the selected database's own WAL without reinstalling its identity or copying its seed.
     pub fn reopen(
         &self,
@@ -391,6 +402,7 @@ impl SearchSelection {
                     None => {
                         // The durable pointer names a family this manager does not hold, so
                         // whatever is cached is stale whether or not the open succeeds.
+                        self.require_unpinned()?;
                         self.selected.store(None);
                         Arc::new(self.open_family(&digest, kernel, budget)?)
                     }

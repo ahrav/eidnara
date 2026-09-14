@@ -258,9 +258,10 @@ async fn disabled_cleanup_charges_the_retirement_bounds_before_retiring() {
         let mut config = spec(root.path());
         config.retirement.max_obligations = NonZeroUsize::new(10_000).unwrap();
         config.retirement.max_obligation_bytes = NonZeroU64::new(8 << 20).unwrap();
+        let per_row = (PAYLOAD_MANIFEST_DIGEST_LEN + "removed".len()) as u64;
         let expected = match name {
             "local_transaction_rows" => 10_001,
-            _ => (8 << 20) + MAX_RECORD_BYTES,
+            _ => 10_000 * per_row + (8 << 20) + MAX_RECORD_BYTES,
         };
         let old_path = case.old.as_ref().unwrap().projection().path().to_owned();
         let selected_path = case
