@@ -138,7 +138,10 @@ function validateJsonValue(value: unknown): RecipeRejection | undefined {
         for (const key of Object.keys(record)) {
             if (!isWellFormed(key))
                 return { code: "malformed", detail: "recipe contains an unpaired surrogate key" };
-            work.push({ value: record[key], depth: item.depth + 1 });
+            const property = Object.getOwnPropertyDescriptor(record, key);
+            if (!property || !("value" in property))
+                return { code: "malformed", detail: `recipe field ${key} is not a data property` };
+            work.push({ value: property.value, depth: item.depth + 1 });
         }
     }
     return undefined;
@@ -158,25 +161,40 @@ function unknownField(
     return Object.keys(record).find((key) => !known.includes(key));
 }
 
+interface DataProperty {
+    value: unknown;
+}
+
+function ownDataProperty(record: Record<string, unknown>, key: string): DataProperty | undefined {
+    const property = Object.getOwnPropertyDescriptor(record, key);
+    return property && "value" in property ? { value: property.value as unknown } : undefined;
+}
+
 function parseOperation(value: unknown, index: number): RecipeOperation | RecipeRejection {
     if (!isRecord(value))
         return { code: "malformed", detail: `operation ${index} is not an object` };
-    const op = value.op;
+    const op = ownDataProperty(value, "op")?.value;
     if (typeof op !== "string")
         return { code: "malformed", detail: `operation ${index} op is not a string` };
     if (op === "keep") {
         const extra = unknownField(value, ["op", "source", "start", "count"]);
         if (extra !== undefined)
             return { code: "malformed", detail: `operation ${index} has unknown field ${extra}` };
-        const source = value.source;
+        const source = ownDataProperty(value, "source")?.value;
         if (source !== "input" && source !== "previous") {
             return typeof source === "string"
                 ? { code: "unknown_source", detail: `operation ${index} source ${source}` }
                 : { code: "malformed", detail: `operation ${index} source is not a string` };
         }
-        const start = safeInteger(value.start, `operation ${index} start`);
+        const start = safeInteger(
+            ownDataProperty(value, "start")?.value,
+            `operation ${index} start`,
+        );
         if (typeof start !== "number") return start;
-        const count = safeInteger(value.count, `operation ${index} count`);
+        const count = safeInteger(
+            ownDataProperty(value, "count")?.value,
+            `operation ${index} count`,
+        );
         if (typeof count !== "number") return count;
         if (count === 0) return { code: "zero_count", detail: `operation ${index} count is zero` };
         return { op: "keep", source, start, count };
@@ -185,11 +203,12 @@ function parseOperation(value: unknown, index: number): RecipeOperation | Recipe
         const extra = unknownField(value, ["op", "values"]);
         if (extra !== undefined)
             return { code: "malformed", detail: `operation ${index} has unknown field ${extra}` };
-        if (!Array.isArray(value.values))
+        const values = ownDataProperty(value, "values")?.value;
+        if (!Array.isArray(values))
             return { code: "malformed", detail: `operation ${index} values is not an array` };
-        if (value.values.length === 0)
+        if (values.length === 0)
             return { code: "empty_insert", detail: `operation ${index} inserts nothing` };
-        return { op: "insert", values: value.values };
+        return { op: "insert", values };
     }
     return { code: "unknown_operation", detail: `operation ${index} op ${op}` };
 }
@@ -197,21 +216,29 @@ function parseOperation(value: unknown, index: number): RecipeOperation | Recipe
 /** Structural validation of a decoded response body. Base-relative checks run in `applyRecipe`. */
 export function parseRecipe(value: unknown): RecipeParse {
     if (!isRecord(value)) return reject("malformed", "recipe is not an object");
-    const baseRevision = parseRevision(value.base_revision, "base_revision");
+    const baseRevision = parseRevision(
+        ownDataProperty(value, "base_revision")?.value,
+        "base_revision",
+    );
     if (typeof baseRevision !== "string") return { ok: false, rejection: baseRevision };
-    const outputRevision = parseRevision(value.output_revision, "output_revision");
+    const outputRevision = parseRevision(
+        ownDataProperty(value, "output_revision")?.value,
+        "output_revision",
+    );
     if (typeof outputRevision !== "string") return { ok: false, rejection: outputRevision };
     let previousOutputRevision: string | undefined;
-    if (value.previous_output_revision !== undefined) {
-        const parsed = parseRevision(value.previous_output_revision, "previous_output_revision");
+    const previousRevisionValue = ownDataProperty(value, "previous_output_revision")?.value;
+    if (previousRevisionValue !== undefined) {
+        const parsed = parseRevision(previousRevisionValue, "previous_output_revision");
         if (typeof parsed !== "string") return { ok: false, rejection: parsed };
         previousOutputRevision = parsed;
     }
     const invalidJson = validateJsonValue(value);
     if (invalidJson !== undefined) return { ok: false, rejection: invalidJson };
-    if (!Array.isArray(value.operations)) return reject("malformed", "operations is not an array");
+    const operationsValue = ownDataProperty(value, "operations")?.value;
+    if (!Array.isArray(operationsValue)) return reject("malformed", "operations is not an array");
     const operations: RecipeOperation[] = [];
-    for (const [index, entry] of value.operations.entries()) {
+    for (const [index, entry] of operationsValue.entries()) {
         const operation = parseOperation(entry, index);
         if (!("op" in operation)) return { ok: false, rejection: operation };
         operations.push(operation);
@@ -285,7 +312,12 @@ export function applyRecipe(
     let entries = 0;
     // Brackets first; each entry then pays its bytes plus one comma after the first.
     let bytes = 2;
-    const segments: { values: readonly unknown[]; lengths: readonly number[] }[] = [];
+    const segments: {
+        values: readonly unknown[];
+        lengths: readonly number[];
+        start: number;
+        end: number;
+    }[] = [];
     const addEntry = (length: number): boolean => {
         if (!Number.isSafeInteger(length) || length < 0) return false;
         bytes += length + (entries > 0 ? 1 : 0);
@@ -301,7 +333,7 @@ export function applyRecipe(
                     return reject("overflow", `operation ${index} overflowed the size sum`);
                 lengths.push(length);
             }
-            segments.push({ values: operation.values, lengths });
+            segments.push({ values: operation.values, lengths, start: 0, end: lengths.length });
             continue;
         }
         let base: RecipeSourceBase;
@@ -335,18 +367,17 @@ export function applyRecipe(
             if (!addEntry(base.lengths[position] as number))
                 return reject("overflow", `operation ${index} overflowed the size sum`);
         }
-        segments.push({
-            values: base.values.slice(operation.start, end),
-            lengths: base.lengths.slice(operation.start, end),
-        });
+        segments.push({ values: base.values, lengths: base.lengths, start: operation.start, end });
     }
     if (bytes > MAX_RECONSTRUCTED_BYTES)
         return reject("output_too_large", `reconstructed array is ${bytes} bytes`);
     const values: unknown[] = [];
     const lengths: number[] = [];
     for (const segment of segments) {
-        for (const value of segment.values) values.push(value);
-        for (const length of segment.lengths) lengths.push(length);
+        for (let index = segment.start; index < segment.end; index += 1) {
+            values.push(segment.values[index]);
+            lengths.push(segment.lengths[index] as number);
+        }
     }
     return { ok: true, values, lengths, bytes };
 }

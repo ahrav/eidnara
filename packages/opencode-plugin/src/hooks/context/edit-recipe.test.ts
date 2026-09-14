@@ -207,6 +207,37 @@ describe("edit recipe bounds", () => {
         ).toBe(true);
     });
 
+    it("requires own data properties without invoking accessors", () => {
+        const inherited = Object.assign(Object.create({ base_revision: "b" }) as object, {
+            output_revision: "o",
+            operations: [],
+        });
+        expect(parseRecipe(inherited)).toMatchObject({
+            ok: false,
+            rejection: { code: "malformed" },
+        });
+
+        let accessed = false;
+        const operation = {};
+        Object.defineProperty(operation, "op", {
+            enumerable: true,
+            get() {
+                accessed = true;
+                throw new Error("accessor invoked");
+            },
+        });
+        let parsed: ReturnType<typeof parseRecipe> | undefined;
+        expect(() => {
+            parsed = parseRecipe({
+                base_revision: "b",
+                output_revision: "o",
+                operations: [operation],
+            });
+        }).not.toThrow();
+        expect(accessed).toBe(false);
+        expect(parsed).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+    });
+
     it("rejects recipes outside serde_json's value domain", () => {
         const loneSurrogate = String.fromCharCode(0xd800);
         expect(
@@ -250,6 +281,29 @@ describe("edit recipe bounds", () => {
                 operations: [{ op: "insert", values: [nested] }],
             }),
         ).toMatchObject({ ok: false, rejection: { code: "malformed" } });
+    });
+
+    it("rejects oversized kept ranges before slicing sources", () => {
+        const values = new Proxy([1, 2], {
+            get(target, property, receiver) {
+                if (property === "slice") throw new Error("values sliced before validation");
+                return Reflect.get(target, property, receiver);
+            },
+        });
+        const lengths = new Proxy([MAX_RECONSTRUCTED_BYTES, 1], {
+            get(target, property, receiver) {
+                if (property === "slice") throw new Error("lengths sliced before validation");
+                return Reflect.get(target, property, receiver);
+            },
+        });
+        let result: ReturnType<typeof applyRecipe> | undefined;
+        expect(() => {
+            result = applyRecipe(recipe, { revision: "b", values, lengths });
+        }).not.toThrow();
+        expect(result).toMatchObject({
+            ok: false,
+            rejection: { code: "output_too_large" },
+        });
     });
 
     it("rejects a mismatched length table without reading values", () => {
