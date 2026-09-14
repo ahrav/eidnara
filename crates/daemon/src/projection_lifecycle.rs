@@ -1027,7 +1027,6 @@ impl ProjectionLifecycle {
         identity: &crate::projection_gates::InvalidationIdentity,
         now: i64,
     ) -> Result<(), IntentRefusal> {
-        check_request(request, now)?;
         if request.transition != Transition::AuthorizedRecovery
             || expected
                 .handoff
@@ -1038,7 +1037,9 @@ impl ProjectionLifecycle {
         }
         let _lock = self.lock().map_err(io_refusal)?;
         match self.read() {
-            ControlState::Disabled(disabled) if disabled == *expected => {}
+            ControlState::Disabled(disabled) if disabled == *expected => {
+                check_request(request, now)?;
+            }
             // A prior write renamed this authorization into place but its directory sync did not return; the replay syncs it and reopens admission.
             ControlState::Intent(existing)
                 if existing.prior_disabled.is_some() && existing.is_replay_of(request) =>

@@ -2218,7 +2218,8 @@ fn a_matching_authorization_reconciles_a_recovered_record_whose_sync_failed() {
         })
         .with_recovery_directory_sync_failure_for_test(Arc::clone(&fail));
     config.generation.generation_id = "generation-b".to_owned();
-    let next = recovery_request(&config, &live_digest, "consumer-b", "recovery-b");
+    let mut next = recovery_request(&config, &live_digest, "consumer-b", "recovery-b");
+    next.deadline = now() + 2_000;
     let unknown = selection.begin_authorized_recovery(
         &corpus.kernel,
         &gate,
@@ -2237,6 +2238,9 @@ fn a_matching_authorization_reconciles_a_recovered_record_whose_sync_failed() {
         gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload),
         Err(Denial::RecoveryRequired)
     ));
+    while now() <= next.deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     // The same request reconciles the visible record and reopens admission.
     selection
         .begin_authorized_recovery(
@@ -2248,8 +2252,17 @@ fn a_matching_authorization_reconciles_a_recovered_record_whose_sync_failed() {
         .unwrap();
     gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
         .unwrap();
-    finish(&mut selection, &corpus, &gate, &config);
-    let done = current(root.path());
-    assert_eq!(done.attempt_id, "recovery-b");
-    assert_eq!(done.authorization_ref, next.authorization_ref);
+    let reconciled = control(root.path());
+    assert_eq!(reconciled.attempt_id, "recovery-b");
+    assert_eq!(reconciled.authorization_ref, next.authorization_ref);
+    assert!(matches!(
+        selection.recover_slice(
+            &corpus.kernel,
+            &gate,
+            &config,
+            &budget(Duration::from_secs(20)),
+            &mut |_| {}
+        ),
+        Err(RecoveryFailure::Blocked(BuildError::Expired))
+    ));
 }

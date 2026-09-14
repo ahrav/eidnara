@@ -81,9 +81,6 @@ impl SearchSelection {
         {
             return Err(IntentRefusal::MissingAuthorization.into());
         }
-        // Refusing the request before any construction state is released keeps a rejected
-        // authorization side-effect free.
-        crate::projection_lifecycle::check_request(request, wall_ms()?)?;
         if self.maintenance.is_some() {
             return Err(IntentRefusal::FamilyHeld.into());
         }
@@ -97,7 +94,10 @@ impl SearchSelection {
         #[cfg(feature = "test-support")]
         let lifecycle = self.recovery_lifecycle(lifecycle);
         let disabled = match lifecycle.read() {
-            ControlState::Disabled(disabled) => disabled,
+            ControlState::Disabled(disabled) => {
+                crate::projection_lifecycle::check_request(request, wall_ms()?)?;
+                disabled
+            }
             // The record already carries this authorization; only its sync and the gate remain.
             ControlState::Intent(existing)
                 if existing.transition == Transition::AuthorizedRecovery
