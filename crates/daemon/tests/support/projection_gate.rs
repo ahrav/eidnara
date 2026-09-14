@@ -186,7 +186,7 @@ pub fn campaign_json(identity: &ProjectionIdentity) -> Value {
         .collect();
     let harness_runs: serde_json::Map<String, Value> = HARNESSES
         .iter()
-        .map(|harness| ((*harness).to_owned(), json!("passed")))
+        .map(|harness| ((*harness).to_owned(), passed_run_json(identity)))
         .collect();
     json!({
         "invalidation_identity": invalidation_json(identity),
@@ -220,4 +220,12 @@ pub fn write_records(home: &Path, manifest: &Value, campaign: &Value) {
         EVIDENCE_RECORD,
         &serde_json::to_vec_pretty(campaign).unwrap(),
     );
+}
+
+/// A passed harness run recorded under `identity`.
+pub fn passed_run_json(identity: &ProjectionIdentity) -> Value {
+    json!({
+        "outcome": "passed",
+        "invalidation_identity": invalidation_json(identity),
+    })
 }

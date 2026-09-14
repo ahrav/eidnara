@@ -144,16 +144,14 @@ fn is_single_path_component(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 
-/// Inverse of [`sqlite_store_path`].
+/// Inverse of [`sqlite_store_path`]. A data home of `/` composes to
+/// `/eidnara/<module_id>/store.db`, so that prefix inverts to `/`.
 pub fn sqlite_store_data_home(path: &str) -> Option<&str> {
     let (rest, file) = path.rsplit_once('/')?;
     let (rest, module_id) = rest.rsplit_once('/')?;
     let (data_home, managed) = rest.rsplit_once('/')?;
-    (file == "store.db"
-        && is_single_path_component(module_id)
-        && managed == "eidnara"
-        && !data_home.is_empty())
-    .then_some(data_home)
+    (file == "store.db" && is_single_path_component(module_id) && managed == "eidnara")
+        .then_some(if data_home.is_empty() { "/" } else { data_home })
 }
 
 /// FNV-1a 64-bit, hex: a dependency-free deterministic hash for name disambiguation.
@@ -188,7 +186,11 @@ mod tests {
 
     #[test]
     fn sqlite_store_data_home_inverts_the_convention() {
-        for (home, module) in [("/home/u/.local/share", "module-a"), ("/data", "a.b")] {
+        for (home, module) in [
+            ("/home/u/.local/share", "module-a"),
+            ("/data", "a.b"),
+            ("/", "m"),
+        ] {
             assert_eq!(
                 sqlite_store_data_home(&sqlite_store_path(home, module)),
                 Some(home)
@@ -197,7 +199,7 @@ mod tests {
         for other in [
             "/data/eidnara/m/other.db",
             "/data/other/m/store.db",
-            "/eidnara/m/store.db",
+            "eidnara/m/store.db",
             "store.db",
             "",
         ] {

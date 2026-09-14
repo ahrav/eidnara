@@ -3997,12 +3997,15 @@ impl HandlerCore {
                         kernel
                             .open(kernel_routes::kernel_root_for(path), policy, cancel.clone())
                             .await;
-                        if let Some(owner) = Self::open_search_lifecycle(
-                            &search_lifecycle,
-                            &kernel,
-                            local_embeddings,
-                            path,
-                        ) {
+                        // `kernel.open` returns on cancellation too; an owner bound then would read records during shutdown for a gate nothing can consult.
+                        if !cancel.is_cancelled()
+                            && let Some(owner) = Self::open_search_lifecycle(
+                                &search_lifecycle,
+                                &kernel,
+                                local_embeddings,
+                                path,
+                            )
+                        {
                             task_admission
                                 .spawn(search_lifecycle_owner::run_slices(owner, cancel.clone()));
                         }
@@ -12597,7 +12600,7 @@ impl CompositeComponent for Handler {
             self.cancel.cancel();
             self.tasks.close();
         }
-        // Closing admission cancels every grant, so a slice in flight ends at its next check; the owner itself is released once no slice can run.
+        // Closing admission before the join cancels every grant so a slice holding one can exit; the owner itself is released after the join, when no slice can run and an owner bound during the join is visible too.
         if let Some(owner) = self.search_lifecycle.get() {
             owner.admission().close();
         }
@@ -19194,6 +19197,52 @@ mod tests {
 
         assert!(observed.load(Ordering::SeqCst));
         assert!(handler.tasks.is_empty());
+    }
+
+    /// The tracked task binds the lifecycle owner after cancellation, so the owner exists only once shutdown is already joining its tasks.
+    #[tokio::test]
+    async fn shutdown_closes_a_lifecycle_owner_bound_during_the_join() {
+        use projection_admission::{Closed, Refresh};
+        use search_lifecycle_owner::{SearchLifecycleOwner, SliceOutcome};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_owned();
+        let kernel = Arc::new(kernel::KernelStore::open(home.join("kernel")).unwrap());
+        let handler = Handler::new();
+        let slot = Arc::clone(&handler.search_lifecycle);
+        let cancel = handler.cancel.clone();
+        handler
+            .spawn_tracked_task(async move {
+                cancel.cancelled().await;
+                slot.get_or_init(|| {
+                    Arc::new(SearchLifecycleOwner::for_home(
+                        &home,
+                        kernel,
+                        host_runtime::local_embeddings::LocalEmbeddingsComponent::unsupported(
+                            "no lane",
+                        ),
+                    ))
+                });
+            })
+            .expect("late binder admitted");
+
+        <Handler as CompositeComponent>::shutdown(&handler)
+            .await
+            .unwrap();
+
+        let owner = handler
+            .search_lifecycle
+            .get()
+            .expect("the owner was bound during the join");
+        assert_eq!(
+            owner.admission().refresh(None),
+            Refresh::Closed(Closed::ShutDown),
+            "no refresh reopens a gate after shutdown"
+        );
+        assert!(matches!(
+            owner.run_slice(&kernel::applicability::EvalBudget::unbounded()),
+            SliceOutcome::Disabled
+        ));
     }
 
     fn handler_with_blocking_lifecycle(

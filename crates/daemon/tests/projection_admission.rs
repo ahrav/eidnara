@@ -30,7 +30,7 @@ use support::embedding_fixtures::{
 use support::kernel_daemon::KernelDaemon;
 use support::projection_gate::{
     HEAP_BYTES, LAG_LIMIT, LIMIT, campaign_json, empty_coverage, fixture_limit, identity,
-    manifest_json, passing_evaluator, write_record, write_records,
+    manifest_json, passed_run_json, passing_evaluator, write_record, write_records,
 };
 
 /// Refreshes `admission` for `identity` with an empty projection's coverage observed at `tip`.
@@ -209,21 +209,38 @@ fn records_must_be_the_callers_own_regular_files_of_their_schemas() {
         "campaign provenance stays outside the record"
     );
     let mut bad_outcome = campaign.clone();
-    bad_outcome["harness_runs"]["pi"] = json!("skipped");
+    bad_outcome["harness_runs"]["pi"] = json!({ "outcome": "skipped" });
     write_records(home, &manifest, &bad_outcome);
     assert_eq!(
         AdmissionInputs::read(home).unwrap_err(),
         InputRefusal::Malformed(EVIDENCE_RECORD)
     );
+    let mut unbound_pass = campaign.clone();
+    unbound_pass["harness_runs"]["pi"] = json!({ "outcome": "passed" });
+    write_records(home, &manifest, &unbound_pass);
+    assert_eq!(
+        AdmissionInputs::read(home).unwrap_err(),
+        InputRefusal::Malformed(EVIDENCE_RECORD),
+        "a passed run names the identity it ran under"
+    );
+    let mut annotated_run = campaign.clone();
+    annotated_run["harness_runs"]["pi"]["run_id"] = json!("r1");
+    write_records(home, &manifest, &annotated_run);
+    assert_eq!(
+        AdmissionInputs::read(home).unwrap_err(),
+        InputRefusal::Malformed(EVIDENCE_RECORD),
+        "run provenance stays outside the record"
+    );
     let mut unknown_harness = campaign.clone();
-    unknown_harness["harness_runs"]["cursor"] = json!("passed");
+    unknown_harness["harness_runs"]["cursor"] = passed_run_json(&identity);
     write_records(home, &manifest, &unknown_harness);
     assert_eq!(
         AdmissionInputs::read(home).unwrap_err(),
         InputRefusal::UnknownHarness("cursor".to_owned())
     );
     let mut long_harness = campaign.clone();
-    long_harness["harness_runs"][format!("{}\n{}", "h".repeat(70), "tail")] = json!("passed");
+    long_harness["harness_runs"][format!("{}\n{}", "h".repeat(70), "tail")] =
+        passed_run_json(&identity);
     write_records(home, &manifest, &long_harness);
     assert_eq!(
         AdmissionInputs::read(home).unwrap_err(),
@@ -265,6 +282,35 @@ fn records_must_be_the_callers_own_regular_files_of_their_schemas() {
             identity: "limits.v1".to_owned(),
         }),
         "a changed limit ships under a new protocol version on both records"
+    );
+
+    let mut long_protocol = manifest.clone();
+    long_protocol["protocol_version"] = json!(format!("{}\n{}", "v".repeat(70), "tail"));
+    write_records(home, &long_protocol, &campaign);
+    assert_eq!(
+        AdmissionInputs::read(home).unwrap_err(),
+        InputRefusal::Manifest(ManifestRefusal::ProtocolMismatch {
+            manifest: "v".repeat(64),
+            identity: "limits.v1".to_owned(),
+        }),
+        "a manifest refusal echoes the same bounded prefix a campaign refusal does"
+    );
+    let mut unknown_hook = manifest.clone();
+    unknown_hook["hooks"]["hook\nname\u{1b}[31m"] = json!({ "enabled": true });
+    write_records(home, &unknown_hook, &campaign);
+    assert_eq!(
+        AdmissionInputs::read(home).unwrap_err(),
+        InputRefusal::Manifest(ManifestRefusal::UnknownHook(
+            "hook\\nname\\u{1b}[31m".to_owned()
+        )),
+        "a manifest key is escaped before it reaches a log line"
+    );
+    let mut unknown_limit = manifest.clone();
+    unknown_limit["limits"][format!("{}\n", "l".repeat(70))] = json!(1);
+    write_records(home, &unknown_limit, &campaign);
+    assert_eq!(
+        AdmissionInputs::read(home).unwrap_err(),
+        InputRefusal::Manifest(ManifestRefusal::UnknownLimit("l".repeat(64)))
     );
 }
 
@@ -341,7 +387,7 @@ fn refresh_installs_only_for_valid_records_and_a_selected_projection() {
     all_denied(&gate, Denial::Disabled);
 
     let mut failed_run = campaign_json(&current);
-    failed_run["harness_runs"]["pi"] = json!("failed");
+    failed_run["harness_runs"]["pi"] = json!({ "outcome": "failed" });
     write_records(
         home,
         &manifest_json(&current, &ProjectionHook::ALL),
@@ -351,6 +397,20 @@ fn refresh_installs_only_for_valid_records_and_a_selected_projection() {
     all_denied(&gate, |_| {
         Denial::Failed(Gate::BothHarness, "pi".to_owned())
     });
+
+    let mut earlier_run = campaign_json(&current);
+    earlier_run["harness_runs"]["pi"] = passed_run_json(&{
+        let mut earlier = current.clone();
+        earlier.generation_epoch -= 1;
+        earlier
+    });
+    write_records(
+        home,
+        &manifest_json(&current, &ProjectionHook::ALL),
+        &earlier_run,
+    );
+    let _ = refresh_at(&admission, &current, 10);
+    all_denied(&gate, |_| Denial::EvidenceIdentity);
 
     let mut unmeasured = campaign_json(&current);
     unmeasured["resource"] = Value::Null;
@@ -386,6 +446,19 @@ fn refresh_installs_only_for_valid_records_and_a_selected_projection() {
     let _ = refresh_at(&admission, &current, 10);
     all_denied(&gate, |_| {
         Denial::UnapprovedObserver("logical-admission-charges".to_owned())
+    });
+
+    let mut long_observer = campaign_json(&current);
+    long_observer["resource"]["observer"] =
+        json!(format!("{}\n{}", "o".repeat(60), "x".repeat(200)));
+    write_records(
+        home,
+        &manifest_json(&current, &ProjectionHook::ALL),
+        &long_observer,
+    );
+    let _ = refresh_at(&admission, &current, 10);
+    all_denied(&gate, |_| {
+        Denial::UnapprovedObserver(format!("{}\\n{}", "o".repeat(60), "x".repeat(3)))
     });
 
     let mut unproved = campaign_json(&current);
