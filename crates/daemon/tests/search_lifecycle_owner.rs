@@ -1321,6 +1321,51 @@ async fn a_manifest_that_changes_the_maintenance_bounds_rotates_the_supervisor()
     owner.shutdown().await.unwrap();
 }
 
+/// A manifest that lowers `B_recovery_ms` alone hands the running supervisor back: its episode grant would otherwise keep the older, later deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_manifest_that_lowers_the_recovery_bound_rotates_the_supervisor() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+        .with_roster(Arc::new(|| {
+            vec![("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap())]
+        }));
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    drive(&owner, 40, || published(&owner).len() == 1).await;
+    assert!(owner.maintenance().is_some());
+
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("B_recovery_ms", 500_000)],
+        ),
+        &campaign_json(&identity),
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    let SliceOutcome::RotateMaintenance(handle) = outcome else {
+        panic!("a lowered recovery bound hands the supervisor back: {outcome:?}");
+    };
+    owner.stop_maintenance(&handle).await.unwrap();
+    owner.shutdown().await.unwrap();
+}
+
 /// Holds the selected family's projection connection on another thread for `hold`, so anything reading the projection waits.
 fn hold_projection<'scope>(
     scope: &'scope std::thread::Scope<'scope, '_>,
@@ -2525,7 +2570,7 @@ fn a_scheduled_slice_waits_for_the_manager_within_the_slice_bound() {
     );
 }
 
-/// The slice bound runs from the slice's start: time spent waiting for a held manager is not granted again to the work that follows.
+/// The slice bound runs from the slice's start: the deadline fixed before the wait for a held manager is the one the work runs under, and a reload during the wait cannot move it later.
 #[test]
 fn the_slice_bound_covers_the_wait_for_the_manager_and_the_work() {
     let root = tempfile::tempdir().unwrap();
@@ -2543,14 +2588,17 @@ fn the_slice_bound_covers_the_wait_for_the_manager_and_the_work() {
         &campaign_json(&identity),
     );
     let owner = owner(home, &corpus.kernel);
-    // The first slice pauses at its preparation tap, holding the manager, and is released 300 ms after the second slice starts waiting; the tap reports every slice's deadline.
-    let (deadlines_tx, deadlines) = std::sync::mpsc::channel();
+    // The first slice pauses at its preparation tap, holding the manager, until the second slice has fixed its deadline and the test releases it; the tap reports each slice's pre-lock and prepared deadlines.
+    let (events_tx, events) = std::sync::mpsc::channel();
     let (release, release_rx) = std::sync::mpsc::channel::<()>();
     let release_rx = std::sync::Mutex::new(release_rx);
     let paused = std::sync::atomic::AtomicBool::new(false);
-    owner.tap_slice_events_for_test(move |event| {
-        if let SliceEvent::Prepared { deadline } = event {
-            let _ = deadlines_tx.send(*deadline);
+    owner.tap_slice_events_for_test(move |event| match event {
+        SliceEvent::Waiting { deadline } => {
+            let _ = events_tx.send(("waiting", *deadline));
+        }
+        SliceEvent::Prepared { deadline } => {
+            let _ = events_tx.send(("prepared", *deadline));
             if !paused.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 let _ = release_rx
                     .lock()
@@ -2558,28 +2606,41 @@ fn the_slice_bound_covers_the_wait_for_the_manager_and_the_work() {
                     .recv_timeout(Duration::from_secs(10));
             }
         }
+        _ => {}
     });
+    let next = |label: &str| loop {
+        let (kind, deadline) = events
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a slice event");
+        if kind == label {
+            return deadline.expect("a slice budget carries a deadline");
+        }
+    };
     std::thread::scope(|scope| {
         let holder = scope.spawn(|| owner.run_slice(&slice_budget()));
-        let _first = deadlines
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the first slice reaches its pause");
-        let started = Instant::now();
-        let releaser = scope.spawn(move || {
-            std::thread::sleep(Duration::from_millis(300));
-            release.send(()).unwrap();
-        });
-        let _ = owner.run_slice(&slice_budget());
-        let second = deadlines
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the second slice prepares once the manager is released")
-            .expect("a slice budget carries a deadline");
+        next("waiting");
+        next("prepared");
+        let second = scope.spawn(|| owner.run_slice(&slice_budget()));
+        let fixed = next("waiting");
+        // A reload raising the bound while the second slice waits does not extend the deadline it fixed.
+        write_records(
+            home,
+            &manifest_json_with(
+                &identity,
+                &ProjectionHook::ALL,
+                &[("supervisor_slice_ms", 5_000)],
+            ),
+            &campaign_json(&identity),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        release.send(()).unwrap();
+        let prepared = next("prepared");
         let _ = holder.join().unwrap();
-        releaser.join().unwrap();
-        let bound = second.saturating_duration_since(started);
+        let _ = second.join().unwrap();
         assert!(
-            bound <= Duration::from_millis(1_000) + Duration::from_millis(100),
-            "the second slice's deadline lies {bound:?} after it started, past its 1 s bound"
+            prepared <= fixed,
+            "the prepared deadline moved {:?} past the one fixed before the wait",
+            prepared.saturating_duration_since(fixed)
         );
     });
 }

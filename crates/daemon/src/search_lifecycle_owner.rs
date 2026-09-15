@@ -133,7 +133,8 @@ pub struct SearchLifecycleOwner {
     /// Woken when a disable hands the manager back, so a shutdown that found the manager disabling can retry.
     disabled: tokio::sync::Notify,
     /// The project digest whose supervisor ran last, how many slices it has had, and the bounds it started under; `None` before the first tenure.
-    tenure: Mutex<Option<(String, u32, SliceBounds)>>,
+    /// The tenant, its slice count, the bounds its supervisor runs under, and the `B_recovery_ms` those bounds were derived from.
+    tenure: Mutex<Option<(String, u32, SliceBounds, u64)>>,
     #[cfg(feature = "test-support")]
     drain_grace_override: Mutex<Option<Duration>>,
     #[cfg(feature = "test-support")]
@@ -150,6 +151,10 @@ type SliceTap = Arc<dyn Fn(&SliceEvent) + Send + Sync>;
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, Copy)]
 pub enum SliceEvent {
+    /// The slice is about to take the manager under this deadline, fixed before the wait.
+    Waiting {
+        deadline: Option<Instant>,
+    },
     /// The records and identity are read and the manager synced; admission is not yet refreshed. Carries the slice budget's deadline.
     Prepared {
         deadline: Option<Instant>,
@@ -340,7 +345,7 @@ impl SearchLifecycleOwner {
                     )?
                     .get(),
                 );
-                // The bound runs from the slice's start, so time spent waiting for the manager is not granted again here.
+                // The bound runs from the slice's start, so time spent waiting for the manager is not granted again here, and it only shortens the deadline fixed before the manager was taken.
                 let budget = budget.bounded_by(slice_started + slice);
                 let identity = self.identity(inputs.manifest(), &budget)?;
                 let bounds = coverage_bounds(inputs.manifest())?;
@@ -391,6 +396,10 @@ impl SearchLifecycleOwner {
             .filter(|slice_ms| *slice_ms > 0)
             .map_or(SLICE_IDLE, Duration::from_millis);
         let wait = budget.bounded_by(slice_started + slice);
+        #[cfg(feature = "test-support")]
+        self.tap(SliceEvent::Waiting {
+            deadline: wait.deadline(),
+        });
         let mut managed = match self.lock_within(&wait) {
             Ok(managed) => managed,
             Err(_) => return SliceOutcome::Blocked("the manager is held".to_owned()),
@@ -398,7 +407,7 @@ impl SearchLifecycleOwner {
         if matches!(*managed, Managed::Disabling | Managed::ShutDown(_)) {
             return SliceOutcome::Disabled;
         }
-        let (inputs, identity, budget) = match self.prepare(&mut managed, budget, slice_started) {
+        let (inputs, identity, budget) = match self.prepare(&mut managed, &wait, slice_started) {
             Ok(prepared) => prepared,
             Err(Unprepared::Rotate(handle)) => {
                 let _ = self.admission.refresh(None);
@@ -630,20 +639,20 @@ impl SearchLifecycleOwner {
         let roster: BTreeMap<String, ProjectScope> = (self.roster)().into_iter().collect();
         let mut tenure = self.tenure.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(live) = selection.maintenance() {
-            let Some((tenant, slices, started)) = tenure.as_mut() else {
+            let Some((tenant, slices, started, recovery_ms)) = tenure.as_mut() else {
                 return Ok(Some(live));
             };
             *slices += 1;
-            // A lone project keeps its supervisor; rotating it would only pay a restart. An expired episode grant, or bounds the manifest no longer yields, restarts its supervisor regardless of roster membership.
+            // A lone project keeps its supervisor; rotating it would only pay a restart. An expired episode grant, or bounds the manifest no longer yields, restarts its supervisor regardless of roster membership. The grant's deadline is an instant derived from `B_recovery_ms` at the start, so that limit is compared on its own.
             let over = *slices >= MAINTENANCE_TENURE_SLICES && roster.len() > 1;
             let expired = crate::now_ms() >= started.dispatch.grant.deadline;
             let changed = !maintenance_bounds(manifest, spec).is_ok_and(|fresh| {
                 without_grant_deadline(fresh) == without_grant_deadline(*started)
-            });
+            }) || limit(manifest, "B_recovery_ms").ok() != Some(*recovery_ms);
             let bound = roster.get(tenant.as_str()) == Some(&*live.scope);
             return Ok((over || expired || changed || !bound).then_some(live));
         }
-        let last = tenure.as_ref().map(|(tenant, _, _)| tenant.as_str());
+        let last = tenure.as_ref().map(|(tenant, _, _, _)| tenant.as_str());
         let Some((next, scope)) = last
             .and_then(|last| {
                 roster
@@ -675,7 +684,9 @@ impl SearchLifecycleOwner {
             tokio::sync::mpsc::unbounded_channel().0,
             budget,
         )?;
-        *tenure = Some((next.clone(), 0, bounds));
+        let recovery_ms = limit(manifest, "B_recovery_ms")
+            .map_err(|_| BuildError::Invalid("manifest limits cannot bound maintenance"))?;
+        *tenure = Some((next.clone(), 0, bounds, recovery_ms));
         Ok(None)
     }
 
