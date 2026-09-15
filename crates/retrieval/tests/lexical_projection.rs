@@ -12,7 +12,7 @@ use retrieval::batch::{
 };
 use retrieval::coverage::verify_pages;
 use retrieval::lexical::{
-    AnalysisIdentity, LexicalBounds, analyze, compile, probe_engine, rowid, verify_rows,
+    AnalysisIdentity, LexicalBounds, analyze, compile, probe_engine, rowid, rowids, verify_rows,
 };
 use retrieval::{
     OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity, Tombstone,
@@ -1114,13 +1114,45 @@ fn probe_engine_reports_the_linked_engine_and_classifies_a_missing_module() {
 }
 
 #[test]
-fn rowids_are_deterministic_and_a_collision_is_refused_before_anything_persists() {
-    assert_eq!(rowid("0000000000000000ff"), Some(0));
-    assert_eq!(rowid("ffffffffffffffff00"), Some(i64::MAX));
-    assert_eq!(rowid("0123456789abcdef"), Some(0x0123_4567_89ab_cdef));
-    assert_eq!(rowid("not-hex-at-all-xx"), None);
+fn rowids_are_the_four_masked_words_of_the_identifier() {
+    let id = "0000000000000000ff00000000000000ffffffffffffffff0123456789abcdef";
+    assert_eq!(
+        rowids(id),
+        Some([0, 0x7f00_0000_0000_0000, i64::MAX, 0x0123_4567_89ab_cdef])
+    );
+    assert_eq!(rowid(id), Some(0));
+    assert_eq!(
+        rowids("0123456789abcdef"),
+        None,
+        "sixteen digits are one word"
+    );
+    assert_eq!(rowids(&"g".repeat(64)), None);
+    assert_eq!(rowids(&"0".repeat(65)), None);
     assert_eq!(rowid("abc"), None);
+}
 
+fn squat(dir: &Path, id: &str, slots: &[usize]) {
+    let raw = Connection::open(dir.join("search").join("search.sqlite")).unwrap();
+    for slot in slots {
+        raw.execute(
+            "INSERT INTO lexical(rowid, original, parts, occurrence_id) VALUES (?1, 'squatter', '', ?2)",
+            params![rowids(id).unwrap()[*slot], format!("squatter-{slot}")],
+        )
+        .unwrap();
+    }
+}
+
+fn collision_batch<'a>(records: &[OccurrenceRecord<'a>]) -> ProjectionBatch<'a> {
+    ProjectionBatch {
+        identity: mutation(0, 1),
+        records: records.to_vec(),
+        invalidations: Vec::new(),
+        generation_id: Some(GENERATION),
+    }
+}
+
+#[test]
+fn a_held_rowid_moves_the_row_to_the_next_word_without_refusing_the_batch() {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());
     let sources = [Source {
@@ -1135,24 +1167,64 @@ fn rowids_are_deterministic_and_a_collision_is_refused_before_anything_persists(
     let borrowed = borrow(&arena);
     let records = records(&sources, &borrowed);
     let id = occurrence_id(&records[0]);
+    squat(dir.path(), &id, &[0, 1]);
+    let batch = collision_batch(&records);
+    apply(&store, &batch, None).unwrap();
+    with_conn(&store, |conn| {
+        let mine: Vec<i64> = conn
+            .prepare("SELECT rowid FROM lexical WHERE occurrence_id=?1")
+            .unwrap()
+            .query_map([&id], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(mine, [rowids(&id).unwrap()[2]], "the first free word");
+        assert_eq!(batch_status(conn, &batch), Ok(BatchStatus::Applied));
+        assert_eq!(matches(conn, "collides"), [[id.clone()]]);
+    });
+    // A replay finds the row where it sits and stores no second one.
+    apply(&store, &batch, None).unwrap();
     let raw = Connection::open(dir.path().join("search").join("search.sqlite")).unwrap();
     raw.execute(
-        "INSERT INTO lexical(rowid, original, parts, occurrence_id) VALUES (?1, 'squatter', '', 'another-occurrence')",
-        params![rowid(&id).unwrap()],
+        "DELETE FROM lexical WHERE occurrence_id LIKE 'squatter-%'",
+        [],
     )
     .unwrap();
     drop(raw);
-    let batch = ProjectionBatch {
-        identity: mutation(0, 1),
-        records: records.clone(),
-        invalidations: Vec::new(),
-        generation_id: Some(GENERATION),
+    with_conn(&store, |conn| {
+        assert_eq!(lexical_rows(conn).len(), 1);
+        assert_eq!(
+            verify_rows(conn),
+            Ok(()),
+            "a row at any of its words verifies"
+        );
+        assert_eq!(batch_status(conn, &batch), Ok(BatchStatus::Applied));
+    });
+}
+
+#[test]
+fn a_collision_on_every_word_is_refused_before_anything_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    let sources = [Source {
+        class: "messages",
+        key: "m1",
+        text: "collides",
+        created: 1,
+    }];
+    let arena = Arena {
+        identities: sources.iter().map(Source::identity).collect(),
     };
+    let borrowed = borrow(&arena);
+    let records = records(&sources, &borrowed);
+    let id = occurrence_id(&records[0]);
+    squat(dir.path(), &id, &[0, 1, 2, 3]);
+    let batch = collision_batch(&records);
     assert_eq!(
         apply(&store, &batch, None),
         Err(ProjectionError::LexicalRowidCollision {
             occurrence_id: id,
-            holder: "another-occurrence".to_string(),
+            holders: (0..4).map(|slot| format!("squatter-{slot}")).collect(),
         })
     );
     with_conn(&store, |conn| {
@@ -1160,5 +1232,52 @@ fn rowids_are_deterministic_and_a_collision_is_refused_before_anything_persists(
             .query_row("SELECT count(*) FROM occurrences", [], |row| row.get(0))
             .unwrap();
         assert_eq!(stored, 0, "the refused batch persisted nothing");
+    });
+}
+
+#[test]
+fn tombstone_occurrence_itself_removes_the_lexical_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    let sources = [
+        Source {
+            class: "messages",
+            key: "m1",
+            text: "retired soon",
+            created: 1,
+        },
+        Source {
+            class: "messages",
+            key: "m2",
+            text: "stays live",
+            created: 1,
+        },
+    ];
+    let arena = Arena {
+        identities: sources.iter().map(Source::identity).collect(),
+    };
+    let borrowed = borrow(&arena);
+    let records = records(&sources, &borrowed);
+    let ids: Vec<String> = records.iter().map(occurrence_id).collect();
+    apply(&store, &collision_batch(&records), None).unwrap();
+    let stone = Tombstone {
+        invalidated_commit_seq: 2,
+        reason: TombstoneReason::Retired,
+    };
+    store
+        .with_conn_fenced(|conn| {
+            let first = retrieval::tombstone_occurrence(conn, &ids[0], stone, 5).unwrap();
+            assert!(first.recorded);
+            assert_eq!(first.lexical_rows_deleted, 1);
+            let again = retrieval::tombstone_occurrence(conn, &ids[0], stone, 6).unwrap();
+            assert!(!again.recorded);
+            assert_eq!(again.lexical_rows_deleted, 0);
+            Ok(())
+        })
+        .unwrap();
+    with_conn(&store, |conn| {
+        let remaining: Vec<String> = lexical_rows(conn).into_iter().map(|row| row.3).collect();
+        assert_eq!(remaining, [ids[1].clone()]);
+        assert_eq!(verify_rows(conn), Ok(()));
     });
 }

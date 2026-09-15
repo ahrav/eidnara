@@ -16,7 +16,9 @@ mod retrieve;
 pub use analysis::{Analysis, LexicalBounds, LexicalRefusal, analyze, analyze_segments};
 pub use compile::{Probe, compile};
 pub use identity::AnalysisIdentity;
-pub use index::{EngineIdentity, OCCURRENCE_ID_COLUMN, probe_engine, rowid, verify_rows};
+pub use index::{
+    EngineIdentity, OCCURRENCE_ID_COLUMN, ROWID_WORDS, probe_engine, rowid, rowids, verify_rows,
+};
 pub use retrieve::{
     Authority, Completion, Consumed, Contribution, IncompleteReason, Retrieval, RetrievalBounds,
     RetrievalRefusal, retrieve,

@@ -135,19 +135,25 @@ tokenizes. The index stores these two strings in the two columns.
 ## The index row
 
 `search.sqlite` holds one `lexical` row per live occurrence, written in the
-same transaction as the occurrence and deleted in the transaction that records
-its tombstone. The rowid is `lexical::rowid(occurrence_id)`: the leading
-sixty-four bits of the occurrence identifier with the sign bit cleared. It
-depends on the identifier alone, so a rebuild from fenced input and incremental
-application store equal rows whatever order they see the occurrences in. Two
-live occurrences whose identifiers share a rowid are refused as
-`ProjectionError::LexicalRowidCollision`, which names both occurrences; the
-batch that would have stored the second one persists nothing. Identifiers are
-SHA-256 digests, so a collision among N live occurrences has probability near
-N squared over 2 to the 64th. A collision is deterministic: rebuilding replays
-it, so the projection stays unavailable until an operator retires one of the
-two occurrences. This is a known limitation of deriving the rowid from the
-identifier rather than from insertion order.
+same transaction as the occurrence and deleted by
+`retrieval::tombstone_occurrence` in the transaction that records its
+tombstone; the primitive owns that deletion, so every tombstone path keeps the
+invariant. The rowid is one of `lexical::rowids(occurrence_id)`: the four
+sixty-four-bit words of the occurrence identifier with the sign bit cleared, in
+identifier order. The row sits at the first word no other occurrence holds, so a
+rebuild from fenced input and incremental application store equal rows whatever
+order they see the occurrences in, unless two live occurrences share a word; then
+the one stored second takes its next word, and the two orders may place the pair
+differently. Identifiers are SHA-256 digests, so among N live occurrences a
+shared first word has probability near N squared over 2 to the 64th, and an
+adversary who can choose identifiers can produce a shared word with about 2 to
+the 32nd trials but cannot exhaust another occurrence's four words without a
+preimage. An occurrence whose four words are all held by other live occurrences
+is refused as `ProjectionError::LexicalRowidCollision`, which names every
+holder; the batch that would have stored it persists nothing. That refusal is
+deterministic: rebuilding replays it, so the projection stays unavailable until
+an operator retires one of the occurrences involved. `lexical::verify_rows`
+accepts a row at any of its occurrence's words.
 
 The lexical row follows liveness rather than the batch that stores the
 occurrence: a record whose occurrence is live and has no row gains one, and a

@@ -102,10 +102,12 @@ pub struct ReplacementCapture {
 }
 
 impl ReplacementCapture {
-    /// A stage certificate must name this capture's hold and snapshot.
+    /// A stage certificate must be well formed and name this capture's hold and snapshot.
     fn stage_is_bound(&self) -> bool {
         self.stage.as_deref().is_none_or(|stage| {
-            stage.hold_id == self.hold_id && stage.snapshot_commit_seq == self.snapshot
+            stage.shape_matches_schema()
+                && stage.hold_id == self.hold_id
+                && stage.snapshot_commit_seq == self.snapshot
         })
     }
 }
