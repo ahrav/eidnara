@@ -346,17 +346,17 @@ impl SearchLifecycleOwner {
             ControlState::Intent(intent) => (intent, false),
             ControlState::Current(intent) => (intent, true),
         };
-        // Work on an active record ends within the record's own deadline, which no slice renews; a completed record is revalidated under the slice's bound alone.
-        let remaining = (!completed).then(|| {
-            u64::try_from(intent.episodes.deadline.saturating_sub(crate::now_ms()))
-                .unwrap_or(0)
-                .saturating_sub(DEADLINE_MARGIN_MS)
+        // Work on an active record ends within the record's own deadline, which no slice renews, and starts only outside the margin before it; a completed record is revalidated under the slice's bound alone. A record whose deadline has passed is observed under nothing: the gate closes and the record is refused.
+        let until_deadline = (!completed).then(|| {
+            u64::try_from(intent.episodes.deadline.saturating_sub(crate::now_ms())).unwrap_or(0)
         });
-        let budget = match remaining {
-            Some(remaining) if remaining > 0 => {
-                budget.bounded_by(Instant::now() + Duration::from_millis(remaining))
+        let budget = match until_deadline {
+            Some(0) => {
+                let _ = self.admission.refresh(None);
+                return SliceOutcome::Blocked("the record's deadline has passed".to_owned());
             }
-            _ => budget,
+            Some(until) => budget.bounded_by(Instant::now() + Duration::from_millis(until)),
+            None => budget,
         };
         let spec = match replacement_spec(
             inputs.manifest(),
@@ -389,9 +389,14 @@ impl SearchLifecycleOwner {
                 Err(error) => SliceOutcome::Blocked(error.to_string()),
             };
         }
-        if remaining == Some(0) {
-            return SliceOutcome::Blocked("the record's deadline has passed".to_owned());
-        }
+        let budget = match until_deadline {
+            Some(until) if until <= DEADLINE_MARGIN_MS => {
+                return SliceOutcome::Blocked("the record's deadline has passed".to_owned());
+            }
+            Some(until) => budget
+                .bounded_by(Instant::now() + Duration::from_millis(until - DEADLINE_MARGIN_MS)),
+            None => budget,
+        };
         if let Some(handle) = selection.maintenance() {
             return SliceOutcome::RotateMaintenance(handle);
         }
@@ -699,10 +704,11 @@ impl SearchLifecycleOwner {
         match request.transition {
             Transition::Rebuilding => {
                 let lifecycle = ProjectionLifecycle::open(&self.home)?;
-                Ok(Some(lifecycle.record(
+                Ok(Some(lifecycle.record_at(
                     self.admission.gate(),
                     request,
                     now,
+                    EntryPoint::Explicit,
                 )?))
             }
             Transition::AuthorizedRecovery => {

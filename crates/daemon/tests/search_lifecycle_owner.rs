@@ -460,10 +460,11 @@ async fn slices_are_bounded_by_the_records_deadline_and_a_restart_renews_nothing
     let mut short = rebuild(home);
     short.deadline = now() + 8_000;
     owner.request(&short, now(), &slice_budget()).unwrap();
-    assert!(matches!(
-        owner.run_slice(&EvalBudget::unbounded()),
-        SliceOutcome::Advanced(RecoveryProgress::Selected)
-    ));
+    let outcome = owner.run_slice(&EvalBudget::unbounded());
+    assert!(
+        matches!(outcome, SliceOutcome::Advanced(RecoveryProgress::Selected)),
+        "{outcome:?}"
+    );
     let ControlState::Intent(selected) = control(home) else {
         panic!("one slice selects only");
     };
@@ -1431,6 +1432,70 @@ async fn catch_up_progress_is_reported_when_maintenance_cannot_start() {
     );
     assert!(owner.maintenance().is_none(), "backfill is disabled");
     owner.shutdown().await.unwrap();
+}
+
+/// A slice on a record with 600 ms remaining returns a deadline block while a projection connection is held.
+#[test]
+fn a_slice_inside_the_deadline_margin_is_bounded_by_the_record_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let ControlState::Current(current) = control(home) else {
+        panic!("the rebuild reached Current");
+    };
+    let mut again = rebuild(home);
+    again.selected_generation = current.staged_seed_digest.clone().unwrap();
+    again.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    again.attempt_id = "rebuild-again".to_owned();
+    again.deadline = now() + 600;
+    owner.request(&again, now(), &slice_budget()).unwrap();
+
+    let reader = owner.pin(&slice_budget()).unwrap();
+    let held = std::sync::Barrier::new(2);
+    let (waited, outcome) = std::thread::scope(|scope| {
+        hold_projection(scope, &reader, &held, Duration::from_secs(5));
+        held.wait();
+        let started = Instant::now();
+        let outcome = owner.run_slice(&slice_budget());
+        (started.elapsed(), outcome)
+    });
+    assert!(
+        waited < Duration::from_secs(2),
+        "the slice ran {waited:?} on a record with 600 ms left: {outcome:?}"
+    );
+    assert!(
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline")),
+        "{outcome:?}"
+    );
+}
+
+/// A rebuild request records an `Explicit` admission entry.
+#[test]
+fn a_rebuild_request_is_admitted_as_an_explicit_action() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let entries: Vec<EntryPoint> = owner
+        .admission()
+        .gate()
+        .ledger()
+        .iter()
+        .filter(|entry| entry.hook == ProjectionHook::EmbeddingBootstrap && entry.verdict.is_ok())
+        .map(|entry| entry.entry)
+        .collect();
+    assert!(
+        entries.contains(&EntryPoint::Explicit),
+        "the request's admission is recorded as explicit: {entries:?}"
+    );
 }
 
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.

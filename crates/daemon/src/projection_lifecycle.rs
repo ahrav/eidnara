@@ -584,9 +584,24 @@ impl ProjectionLifecycle {
         request: &LifecycleRequest,
         now: i64,
     ) -> Result<Recorded, IntentRefusal> {
+        self.record_at(gate, request, now, EntryPoint::Reload)
+    }
+
+    /// [`Self::record`] with the hook admitted at `entry`: an operator's request is an [`EntryPoint::Explicit`] action.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::record`].
+    pub fn record_at(
+        &self,
+        gate: &HookGate,
+        request: &LifecycleRequest,
+        now: i64,
+        entry: EntryPoint,
+    ) -> Result<Recorded, IntentRefusal> {
         check_request(request, now)?;
         let admission = gate
-            .admit(request.transition.hook(), EntryPoint::Reload)
+            .admit(request.transition.hook(), entry)
             .map_err(IntentRefusal::Denied)?;
         let _lock = self.lock().map_err(io_refusal)?;
         match self.read() {
