@@ -35,6 +35,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `a_lineage_disposition_binds_like_the_own_row` | same | every lineage disposition over an active own row, and a lineage row more restrictive than the own row | unaudited |
 | `a_row_outside_the_live_descriptor_inventory_is_retracted` | same | `Retracted` when no live descriptor matches the row's id, class, and representation; a successor still wins | unaudited |
 | `live_rows::a_row_whose_columns_disagree_with_its_tuple_is_refused` | same | `CorruptRow` when the revision column or the occurrence id disagrees with the stored tuple | unaudited |
+| `live_rows::an_association_created_in_another_commit_than_its_row_is_refused` | same | `CorruptRow` when the association's `created_commit_seq` differs from its occurrence's | unaudited |
 | `live_rows::a_second_canonical_object_association_on_one_row_is_refused` | same | `CorruptRow` for a second `canonical_object` association on one occurrence | unaudited |
 | `a_candidate_from_another_batch_reads_no_facts` | same | `ClaimCandidateBatch::claim` returns `None` for a candidate whose index is out of range or names another object | unaudited |
 | `live_rows::an_association_whose_target_disagrees_with_its_key_or_row_is_refused` | same | `CorruptRow` when the association target, its key, or the occurrence tuple name different objects | unaudited |

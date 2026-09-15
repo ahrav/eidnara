@@ -147,7 +147,8 @@ fn claim_classes() -> &'static [OccurrenceClass] {
 /// association family keyword, `?5` the association namespace.
 const LIVE_CLAIM_ROWS_SQL: &str =
     "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision,
-            a.key,o.tuple,o.lineage_id,o.span_start,o.span_end,o.source_artifact_digest
+            a.key,o.tuple,o.lineage_id,o.span_start,o.span_end,a.created_commit_seq,
+            o.created_commit_seq,o.source_artifact_digest
      FROM occurrences o
      LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
      LEFT JOIN exact_associations a
@@ -168,6 +169,8 @@ struct LiveRow {
     lineage_id: String,
     span_start: Option<i64>,
     span_end: Option<i64>,
+    association_commit_seq: Option<i64>,
+    created_commit_seq: i64,
     source_artifact_digest: String,
 }
 
@@ -178,10 +181,10 @@ struct LiveRow {
 ///
 /// `TooManyRecords` past `max`; `CorruptRow` for a stored class outside the
 /// contract, a claim row with no `canonical_object` association, an
-/// association whose key, target, and occurrence tuple do not name one object,
-/// or a row whose id, revision, representation, span, or lineage disagree with
-/// its tuple; `ExtractionVersionMismatch` for an association from another
-/// extractor.
+/// association written in another commit than its row or whose key, target,
+/// and occurrence tuple do not name one object, or a row whose id, revision,
+/// representation, span, or lineage disagree with its tuple;
+/// `ExtractionVersionMismatch` for an association from another extractor.
 pub fn live_claim_candidates(
     conn: &GuardedConn<'_>,
     max: NonZeroUsize,
@@ -219,7 +222,9 @@ pub fn live_claim_candidates(
                     lineage_id: row.get(8)?,
                     span_start: row.get(9)?,
                     span_end: row.get(10)?,
-                    source_artifact_digest: row.get(11)?,
+                    association_commit_seq: row.get(11)?,
+                    created_commit_seq: row.get(12)?,
+                    source_artifact_digest: row.get(13)?,
                 })
             },
         )?
@@ -231,12 +236,16 @@ pub fn live_claim_candidates(
 }
 
 /// The same row checks `exact::lookup::AssociationRow::decode` makes: the
-/// association names the object the tuple's identity names, and the id,
-/// revision, representation, span, and lineage columns are the tuple's own.
+/// association was written in the row's commit and names the object the
+/// tuple's identity names, and the id, revision, representation, span, and
+/// lineage columns are the tuple's own.
 fn candidate_row(row: LiveRow) -> Result<ClaimCandidateRow, ProjectionError> {
     let corrupt = || ProjectionError::CorruptRow;
     let class = OccurrenceClass::from_code(&row.class).ok_or_else(corrupt)?;
     let object_id = row.target_id.ok_or_else(corrupt)?;
+    if row.association_commit_seq != Some(row.created_commit_seq) {
+        return Err(corrupt());
+    }
     // The `id` family derives the target from the key, and the extractor
     // takes both from the occurrence's identity field, so the three must name
     // one object.
