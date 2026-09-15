@@ -498,8 +498,9 @@ Status: active
 Exercised: yes - `causal_class_changes_no_state` runs every state-relevant
 fact combination under `Unknown`, `DirectObservation`, and
 `DerivedReinjection` and asserts equal states; `classify` takes no causal
-class by signature; the daemon test shows a `DirectObservation` record
-leaving Current unchanged.
+class by signature; the daemon test classifies the caught-up projection,
+records a `DirectObservation` on the successor, classifies again, and asserts
+the two maps are equal.
 Guarantee: The causal class of a claim never changes its candidate state, and
 no field of a candidate carries a score, boost, corroboration count, or
 suppression flag derived from it.

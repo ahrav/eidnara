@@ -23,8 +23,9 @@ use crate::ProjectionError;
 use crate::exact::selector::Family;
 use crate::exact::{CANONICAL_OBJECT_NAMESPACE, Coverage, EXTRACTION_VERSION, coverage};
 
-/// Precedence when more than one applies: `Retracted`, `Superseded`, `Stale`,
-/// `Hidden`, then `Current`.
+/// Variant order is precedence order: restrictive states sort first, so a
+/// classified claim is never more visible than the kernel's serving view of the
+/// claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CandidateState {
     /// The claim object has no registry row at the snapshot or was invalidated
@@ -33,15 +34,15 @@ pub enum CandidateState {
     /// The claim object was replaced by a successor, or its own admission
     /// disposition is `Superseded`.
     Superseded,
+    /// The own admission disposition is `Rejected`, `Contradicted`, or
+    /// `Quarantined`, or the serving view lists no row for the object or lists
+    /// it hidden on the widest surface.
+    Hidden,
     /// The own admission disposition is `Stale`, or the occurrence carries a
     /// revision other than the object's canonical one. The registry never
     /// changes an object's revision, so the second input can only come from a
     /// corrupt projection row and is kept as a guard.
     Stale,
-    /// The own admission disposition is `Rejected`, `Contradicted`, or
-    /// `Quarantined`, or the serving view lists no row for the object or lists
-    /// it hidden on the widest surface.
-    Hidden,
     /// Served on the widest surface with an `Active` or `Disputed` disposition;
     /// a disputed claim serves labeled, and the label travels with the served
     /// facts rather than as a state.
@@ -206,11 +207,11 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
     let Some(facts) = facts else {
         return CandidateState::Retracted;
     };
+    if facts.object.superseded_by.is_some() {
+        return CandidateState::Superseded;
+    }
     if facts.object.invalidated_commit_seq.is_some() {
-        return match facts.object.superseded_by {
-            Some(_) => CandidateState::Superseded,
-            None => CandidateState::Retracted,
-        };
+        return CandidateState::Retracted;
     }
     let disposition = facts
         .own_admission
@@ -218,21 +219,21 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
         .map(|admission| admission.disposition);
     match disposition {
         Some(Disposition::Superseded) => return CandidateState::Superseded,
-        _ if row.revision != facts.object.source_revision => return CandidateState::Stale,
-        Some(Disposition::Stale) => return CandidateState::Stale,
         Some(Disposition::Rejected | Disposition::Contradicted | Disposition::Quarantined) => {
             return CandidateState::Hidden;
         }
-        Some(Disposition::Active | Disposition::Disputed) | None => {}
+        Some(Disposition::Stale | Disposition::Active | Disposition::Disputed) | None => {}
     }
     match &facts.served {
-        ServedStanding::Served(served) if served.explicit_search != SurfaceVisibility::Hidden => {
-            CandidateState::Current
-        }
+        ServedStanding::Served(served) if served.explicit_search != SurfaceVisibility::Hidden => {}
         ServedStanding::Served(_)
         | ServedStanding::NotLiveAtSnapshot
-        | ServedStanding::NeverAdmitted => CandidateState::Hidden,
+        | ServedStanding::NeverAdmitted => return CandidateState::Hidden,
     }
+    if disposition == Some(Disposition::Stale) || row.revision != facts.object.source_revision {
+        return CandidateState::Stale;
+    }
+    CandidateState::Current
 }
 
 /// Reads every live claim row, then the kernel's facts for the objects they

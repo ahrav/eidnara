@@ -1662,6 +1662,38 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
             })
             .unwrap();
     }
+    assert_eq!(live_rows(dir.path()), live, "the projection has not moved");
+    assert_eq!(
+        classified(&projection, &corpus.kernel),
+        expected_states(&[
+            (rule, CandidateState::Superseded),
+            (anti, CandidateState::Retracted),
+            (quiet, CandidateState::Hidden),
+            (aging, CandidateState::Stale),
+        ])
+    );
+
+    // Catch-up tombstones the corrected and retired rows. Quarantine and stale
+    // marks are admission-only dispositions: the materializer leaves those rows
+    // live and the classifier keeps hiding or staling them from canonical facts.
+    corpus.materialize();
+    let through = corpus.kernel.tip().unwrap();
+    corpus
+        .kernel
+        .extend_source_hold(&corpus.binding(), &hold.hold_id, through, hold_admission())
+        .unwrap();
+    let delta = corpus.export_window(&hold, ExportWindow::CatchUp { through });
+    corpus.apply(&projection, &hold, &delta, through);
+    let caught_up = classified(&projection, &corpus.kernel);
+    assert_eq!(
+        caught_up,
+        expected_states(&[
+            (successor, CandidateState::Current),
+            (quiet, CandidateState::Hidden),
+            (aging, CandidateState::Stale),
+        ])
+    );
+
     let (evidence_id, digest) = {
         let handle = corpus
             .kernel
@@ -1702,36 +1734,10 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
             Ok(String::new())
         })
         .unwrap();
-    assert_eq!(live_rows(dir.path()), live, "the projection has not moved");
     assert_eq!(
         classified(&projection, &corpus.kernel),
-        expected_states(&[
-            (rule, CandidateState::Superseded),
-            (anti, CandidateState::Retracted),
-            (quiet, CandidateState::Hidden),
-            (aging, CandidateState::Stale),
-        ])
-    );
-
-    // Catch-up tombstones the corrected and retired rows. Quarantine and stale
-    // marks are admission-only dispositions: the materializer leaves those rows
-    // live and the classifier keeps hiding or staling them from canonical facts.
-    corpus.materialize();
-    let through = corpus.kernel.tip().unwrap();
-    corpus
-        .kernel
-        .extend_source_hold(&corpus.binding(), &hold.hold_id, through, hold_admission())
-        .unwrap();
-    let delta = corpus.export_window(&hold, ExportWindow::CatchUp { through });
-    corpus.apply(&projection, &hold, &delta, through);
-    let caught_up = classified(&projection, &corpus.kernel);
-    assert_eq!(
         caught_up,
-        expected_states(&[
-            (successor, CandidateState::Current),
-            (quiet, CandidateState::Hidden),
-            (aging, CandidateState::Stale),
-        ])
+        "a causality record changes no state"
     );
     let mut bounds = candidate_bounds();
     bounds.facts.max_claims = NonZeroUsize::new(3).unwrap();

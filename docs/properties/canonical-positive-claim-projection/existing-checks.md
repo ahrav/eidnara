@@ -25,9 +25,9 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
-| `state_follows_the_documented_precedence` | `crates/retrieval/tests/claims.rs` | the full state table with precedence, written by hand | unaudited |
+| `state_follows_the_documented_precedence` | `crates/retrieval/tests/claims.rs` | the full state table with precedence, written by hand, including a successor recorded without invalidation and every Hidden-over-Stale conflict pair | unaudited |
 | `causal_class_changes_no_state` | same | Unknown neutrality across every state-relevant fact combination | unaudited |
-| `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees` | `crates/daemon/tests/claim_sources.rs` | lagging rows classify Superseded, Retracted, Hidden from canonical facts against an independent oracle; catch-up tombstones; quarantine stays live and Hidden; a causality record changes no state; a fresh rebuild classifies identically | unaudited |
+| `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees` | `crates/daemon/tests/claim_sources.rs` | lagging rows classify Superseded, Retracted, Hidden from canonical facts against an independent oracle; catch-up tombstones; quarantine stays live and Hidden; the classified map is equal before and after a causality record on the successor; a fresh rebuild classifies identically | unaudited |
 
 ## Adjacent kernel checks the records rely on
 

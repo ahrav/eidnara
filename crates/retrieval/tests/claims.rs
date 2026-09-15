@@ -130,6 +130,14 @@ fn state_follows_the_documented_precedence() {
             CandidateState::Superseded,
         ),
         (
+            "successor recorded without invalidation",
+            Some(Facts {
+                superseded_by: Some("decision-object-2"),
+                ..Facts::current()
+            }),
+            CandidateState::Superseded,
+        ),
+        (
             "superseded disposition on a live object",
             Some(Facts {
                 disposition: Some(Disposition::Superseded),
@@ -223,40 +231,49 @@ fn state_follows_the_documented_precedence() {
             CandidateState::Superseded,
         ),
         (
-            "stale wins over hidden",
+            "hidden serving wins over stale revision",
             Some(Facts {
                 revision: 2,
                 served: served(SurfaceVisibility::Hidden),
                 ..Facts::current()
             }),
-            CandidateState::Stale,
+            CandidateState::Hidden,
         ),
         (
-            "stale revision wins over rejected admission",
+            "hidden serving wins over stale disposition",
+            Some(Facts {
+                disposition: Some(Disposition::Stale),
+                served: served(SurfaceVisibility::Hidden),
+                ..Facts::current()
+            }),
+            CandidateState::Hidden,
+        ),
+        (
+            "rejected admission wins over stale revision",
             Some(Facts {
                 revision: 2,
                 disposition: Some(Disposition::Rejected),
                 ..Facts::current()
             }),
-            CandidateState::Stale,
+            CandidateState::Hidden,
         ),
         (
-            "stale revision wins over contradicted admission",
+            "contradicted admission wins over stale revision",
             Some(Facts {
                 revision: 2,
                 disposition: Some(Disposition::Contradicted),
                 ..Facts::current()
             }),
-            CandidateState::Stale,
+            CandidateState::Hidden,
         ),
         (
-            "stale revision wins over quarantined admission",
+            "quarantined admission wins over stale revision",
             Some(Facts {
                 revision: 2,
                 disposition: Some(Disposition::Quarantined),
                 ..Facts::current()
             }),
-            CandidateState::Stale,
+            CandidateState::Hidden,
         ),
         ("current", Some(Facts::current()), CandidateState::Current),
         (
@@ -277,10 +294,15 @@ fn state_follows_the_documented_precedence() {
             CandidateState::Hidden,
         ),
     ];
-    for (name, facts, expected) in cases {
-        let facts = facts.map(Facts::build);
-        assert_eq!(classify(&occurrence(1), facts.as_ref()), expected, "{name}");
-    }
+    let mismatches: Vec<String> = cases
+        .into_iter()
+        .filter_map(|(name, facts, expected)| {
+            let facts = facts.map(Facts::build);
+            let actual = classify(&occurrence(1), facts.as_ref());
+            (actual != expected).then(|| format!("{name}: expected {expected:?}, got {actual:?}"))
+        })
+        .collect();
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
 /// Unknown neutrality: for every state, the class is the only field that

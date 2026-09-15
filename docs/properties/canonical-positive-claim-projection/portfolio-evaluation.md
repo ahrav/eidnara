@@ -53,6 +53,19 @@ reviews found and how each finding was dispositioned.
 | `max_rows` is a result bound, not a work bound: the live-claim query sorts before it limits | bias | kept, documented on the bound; the sibling `live_candidates` shares the plan |
 | Near-duplicate of `eligibility::live_candidates` | bias | kept: the claim read needs the association join and both claim classes; widening the sibling's class filter is a follow-up for its own owner |
 
+## Post-review pass
+
+Findings from the six-track review of the projection change and how each was
+dispositioned. Every code fix landed behind a test that failed first.
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| `classify` read `superseded_by` only under `invalidated_commit_seq`, while the kernel's `judge` and `token_check` read `superseded_by` first; the registry trigger admits a successor without an invalidation, so that shape classified `Current` here and `Superseded` in the kernel | gap | fixed: `superseded_by` is checked first; `successor recorded without invalidation` pins it |
+| The enum doc ranked `Stale` above `Hidden` while the code hid a rejected, contradicted, or quarantined admission before the revision guard; the kernel's `visibility_row` serves `Stale` labeled and those three on no surface, so `Hidden` is the more restrictive state and must win | gap | fixed: precedence is `Retracted`, `Superseded`, `Hidden`, `Stale`, `Current`, with variant order as the source of truth; every Hidden-over-Stale conflict pair is pinned |
+| `claims` was documented as first-seen order but a `BTreeSet` sorted the ids | refinement | fixed: dedup preserves first-seen order; the daemon test asserts a nonlexical witness |
+| `kernel.tip()` ran before `max_claims` was enforced, so the bound test named a guarantee the code lacked | refinement | fixed: the bound is checked before any kernel read; the test proves it with a failing tip |
+| The catalog credited the daemon test with showing a causality record leaves a state unchanged, but the record was committed before the successor had any projection rows | gap | fixed: the test classifies after catch-up, records causality, classifies again, and asserts equality; the record wording follows the test |
+
 ## Biases for a human
 
 - Every record is `test-only` because no production path calls the reader or
