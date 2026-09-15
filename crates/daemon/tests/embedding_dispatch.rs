@@ -687,6 +687,52 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
     assert_eq!(engine.calls(), 1, "no second inference");
 }
 
+/// A held job is polled only until its episode deadline, the persisted one once the job carries it, rather than for the whole result wait, so a result that lands after the deadline is left for a pass that stops the row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_job_is_polled_only_until_its_episode_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("m0", "held message");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+
+    // The grant ends 300 ms after now while the result wait is five seconds.
+    let near = DispatchBounds {
+        grant: grant(3, NOW + 300),
+        ..bounds()
+    };
+    let started = std::time::Instant::now();
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &near, NOW);
+    assert_eq!(end, None);
+    assert_eq!(admitted(&events).len(), 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the poll ran {:?} past a 300 ms deadline",
+        started.elapsed()
+    );
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (held.state.as_str(), held.deadline),
+        ("admitted", Some(NOW + 300))
+    );
+
+    // A later pass under a grant that ends a day out still polls only until the job's own persisted deadline.
+    let started = std::time::Instant::now();
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
+    assert_eq!(end, None);
+    assert!(admitted(&events).is_empty(), "{events:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the poll ran {:?} past the job's 300 ms deadline",
+        started.elapsed()
+    );
+    TestEngine::release(&gate.0);
+}
+
 /// AC2, AC4, AC6: a new host incarnation cannot satisfy work the old one admitted; rebinding returns it to pending with its attempt kept, a lane with a different fingerprint blocks admission, and the stored binding follows the host that actually serves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {

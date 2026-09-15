@@ -239,7 +239,7 @@ impl EmbeddingSupervisor {
                 self.stop_with(Stop::Shutdown);
                 return;
             }
-            // A slice that would straddle the episode grant's deadline ends there instead, so no pass awaits and publishes a result past the episode; a slice begun after the deadline keeps the slice bound, since its passes only refuse and stop expired rows.
+            // A slice that would straddle the episode grant's deadline ends there instead, so no pass awaits and publishes a result past the episode; a slice begun after the deadline keeps the slice bound, since its passes only refuse and stop expired rows; one begun at the deadline gets no time, since a row is still completable then and no result may be awaited past it.
             let until_grant = self
                 .bounds
                 .dispatch
@@ -247,10 +247,8 @@ impl EmbeddingSupervisor {
                 .deadline
                 .saturating_sub((self.now)());
             let slice = match u64::try_from(until_grant) {
-                Ok(remaining) if remaining > 0 => {
-                    self.bounds.slice.min(Duration::from_millis(remaining))
-                }
-                _ => self.bounds.slice,
+                Ok(remaining) => self.bounds.slice.min(Duration::from_millis(remaining)),
+                Err(_) => self.bounds.slice,
             };
             let budget = EvalBudget::new(
                 Some(Instant::now() + slice),

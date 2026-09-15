@@ -578,6 +578,11 @@ impl<'a> EmbeddingDispatcher<'a> {
             }
         };
         pass.stage(job, Stage::Poll, observer);
+        // The wait for a result ends at the row's episode deadline, measured from this pass's clock reading, so a result that lands after the deadline is left for a pass that stops the row.
+        let until_deadline = u64::try_from(job.episode_deadline(pass.bounds.grant) - pass.now)
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::ZERO);
+        let result_wait = pass.bounds.result_wait.min(until_deadline);
         let mut readmitted = false;
         let mut started = Instant::now();
         loop {
@@ -589,7 +594,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                 PollOutcome::Pending { .. } if pass.budget.is_exhausted() => {
                     return Ok(Some(Blocked::BudgetExhausted));
                 }
-                PollOutcome::Pending { .. } if started.elapsed() < pass.bounds.result_wait => {
+                PollOutcome::Pending { .. } if started.elapsed() < result_wait => {
                     std::thread::sleep(POLL_INTERVAL);
                 }
                 // This job's wait is over; the pass moves on and a later pass polls the held job.
