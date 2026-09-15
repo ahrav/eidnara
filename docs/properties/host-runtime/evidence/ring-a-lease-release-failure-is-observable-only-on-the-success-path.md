@@ -256,8 +256,8 @@ the host's handling of it on the drop paths.
   `read_loop`) and `:547-553` (`decode_control_frame`),
   `dispatch.rs:848-858` (`release_before_copy`) and `:1047-1080` (the routed
   copy under `WorkLedgers::run_blocking`).
-- Findings: yes, on the success path, and on every host exit that holds a
-  frame. `receive_one` does not copy or release on the delivery path; it hands
+- Findings: yes, on the success path, and on the host exits that release
+  explicitly. `receive_one` does not copy or release on the delivery path; it hands
   the `PayloadLease` to the connection engine inside the frame. The release
   happens in `InboundFrame::into_private` as
   `lease.release().map_err(|_| PrivateCopyError::Transport)?`
@@ -272,15 +272,21 @@ the host's handling of it on the drop paths.
   cancellation, and the closed-route exit, retiring the generation when the
   return fails. The oversize channel-0 rejection still routes its release
   error at `ring_transport.rs:1029-1031`. The paths that drop the lease without
-  a report are now only `receive_one`'s own exits inside the charge wait: the
-  `Ok(false)` returns on `read_cancel` and `discard` (`:1075`, `:1077`), the
-  `Overloaded` returns (`:1072`, `:1082`), and the `Cancelled` return when the
-  sender queue closes (`:1091`).
+  a report are `receive_one`'s exits inside the charge wait, the `Ok(false)`
+  returns on `read_cancel` and `discard` (`:1075`, `:1077`), the `Overloaded`
+  returns (`:1072`, `:1082`), and the `Cancelled` return when the sender queue
+  closes (`:1091`); the `deliver` exits after the charge succeeded, where a
+  closed inbound channel or a `discard`, `root`, or pending-deadline win
+  (`:995-1002`) drops the event with the lease inside it; and the read loop's
+  request-watermark rejection (`connection.rs:426-428`), which returns
+  `ReadExit::Peer` with the frame still held. Every one of them retires the
+  generation, so they are lost diagnostics, not a new leak.
 - Missing evidence: whether the routed copy running on a blocking worker
   changes what a release failure could mean there; the block returns from a
   thread that holds no `Ring`.
-- Conclusion: the success path reports again, and so do the host's pre-copy
-  exits. `into_private` propagates the release failure and a test exercises
-  it, so the `Guarantee:` and `Check:` fields describe a path HEAD has; the
-  asymmetry the record names has narrowed to `receive_one`'s charge-wait exits,
-  which drop the lease and discard the `Result`.
+- Conclusion: the success path reports again, and so do the host's explicit
+  pre-copy releases. `into_private` propagates the release failure and a test
+  exercises it, so the `Guarantee:` and `Check:` fields describe a path HEAD
+  has; the asymmetry the record names has narrowed to the drop exits listed
+  above, `receive_one`'s charge-wait and `deliver` exits and the read loop's
+  watermark rejection, which drop the lease and discard the `Result`.
