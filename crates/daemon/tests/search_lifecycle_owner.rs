@@ -2139,6 +2139,72 @@ async fn a_drain_after_the_records_vanish_keeps_the_approved_grace() {
     );
 }
 
+/// Cancelling the loop while it drains a handed-back supervisor leaves that drain to the owner's shutdown, so the two together spend one grace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_cancelled_loop_leaves_the_drain_to_shutdown() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let engine = TestEngine::new();
+    let held = engine.block_calls();
+    let _release_on_unwind = support::embedding_fixtures::GateGuard(Arc::clone(&held));
+    let roster = Arc::new(std::sync::Mutex::new(vec![(
+        "project:a".to_owned(),
+        ProjectScope::new(support::embedding_fixtures::PROJECT).unwrap(),
+    )]));
+    corpus.publish("held-row", "held text");
+    records(home);
+    let owner = {
+        let roster = Arc::clone(&roster);
+        Arc::new(
+            SearchLifecycleOwner::for_home(
+                home,
+                Arc::clone(&corpus.kernel),
+                component(&engine, LocalEmbeddingsLimits::default()),
+            )
+            .with_roster(Arc::new(move || roster.lock().unwrap().clone())),
+        )
+    };
+    owner.set_drain_grace_for_test(Duration::from_millis(1_500));
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let started = Instant::now();
+    while engine.calls() == 0 {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // An emptied roster makes the next slice hand the supervisor back, and the loop begins draining it.
+    roster.lock().unwrap().clear();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let loop_task = tokio::spawn(daemon::search_lifecycle_owner::run_slices(
+        Arc::clone(&owner),
+        cancel.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let cancelled = Instant::now();
+    cancel.cancel();
+    loop_task.await.unwrap();
+    let shut = owner.shutdown().await;
+    let waited = cancelled.elapsed();
+    TestEngine::release(&held);
+    let _ = owner.shutdown().await;
+    assert!(shut.is_err(), "the held call outlives the grace: {shut:?}");
+    assert!(
+        waited < Duration::from_millis(2_200),
+        "cancellation and shutdown spent {waited:?} against a 1.5 s grace"
+    );
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

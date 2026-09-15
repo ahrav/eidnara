@@ -1170,7 +1170,7 @@ fn replacement_spec(
     })
 }
 
-/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first. A panicking slice closes admission and ends the loop, since its state is no longer known.
+/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first. A supervisor a slice hands back is drained here unless `cancel` fires first, in which case the drain is left to [`SearchLifecycleOwner::shutdown`] so one grace covers it. A panicking slice closes admission and ends the loop, since its state is no longer known.
 pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
     let mut reporter = SliceReporter::default();
     loop {
@@ -1188,13 +1188,14 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
         };
         let outcome = match outcome {
             Ok(SliceOutcome::RotateMaintenance(handle)) => {
-                match owner.stop_maintenance(&handle).await {
-                    Ok(_) => {
-                        if !cancel.is_cancelled() {
-                            continue;
-                        }
-                        return;
-                    }
+                // Once cancelled, the drain is left to `shutdown`, whose grace then covers it alone.
+                let stopped = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return,
+                    stopped = owner.stop_maintenance(&handle) => stopped,
+                };
+                match stopped {
+                    Ok(_) => continue,
                     Err(unresolved) => {
                         SliceOutcome::Blocked(format!("maintenance did not drain: {unresolved}"))
                     }
