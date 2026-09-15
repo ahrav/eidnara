@@ -202,7 +202,7 @@ impl LifecycleIntent {
     }
 
     /// Whether `request` is a replay of this record: the same intent in every field the caller supplies.
-    fn is_replay_of(&self, request: &LifecycleRequest) -> bool {
+    pub(crate) fn is_replay_of(&self, request: &LifecycleRequest) -> bool {
         self.transition == request.transition
             && self.selected_generation == request.selected_generation
             && self.kernel_incarnation_id == request.kernel_incarnation_id

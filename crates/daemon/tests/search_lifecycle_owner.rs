@@ -3025,6 +3025,65 @@ fn a_request_with_no_remaining_duration_is_refused() {
     assert!(matches!(control(home), ControlState::Absent));
 }
 
+/// A replay of an authorized recovery whose record was renamed into place but whose directory sync failed reconciles that record even after its deadline: it records nothing new and asks for no time, so no time is required of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replay_after_the_deadline_still_reconciles_the_record() {
+    use daemon::projection_lifecycle::IntentRefusal;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let outcome = owner.run_slice(&slice_budget());
+        assert!(matches!(outcome, SliceOutcome::Advanced(_)), "{outcome:?}");
+    }
+    let staged = match control(home) {
+        ControlState::Current(intent) => intent.staged_seed_digest.unwrap(),
+        state => panic!("not Current: {state:?}"),
+    };
+    owner.disable(&slice_budget(), &mut |_| {}).await.unwrap();
+    assert!(matches!(control(home), ControlState::Disabled(_)));
+
+    // The recovery's record is renamed into place, then its directory sync fails once: durability is unknown.
+    owner.fail_next_recovery_directory_sync_for_test();
+    let at = now();
+    let mut recovery = rebuild(home);
+    recovery.transition = Transition::AuthorizedRecovery;
+    recovery.cause = Cause::DisabledRecovery;
+    recovery.selected_generation = staged;
+    recovery.attempt_id = "recovery-attempt".to_owned();
+    recovery.consumer.consumer_id = "search-recovered".to_owned();
+    recovery.consumer.generation_id = "gen-2".to_owned();
+    recovery.authorization_ref = Some("operator:recovery-ticket".to_owned());
+    recovery.deadline = at + 200;
+    let unknown = owner.request(&recovery, at, &slice_budget());
+    assert!(
+        matches!(
+            unknown,
+            Err(BuildError::Intent(IntentRefusal::DurabilityUnknown(_)))
+        ),
+        "{unknown:?}"
+    );
+    assert!(
+        matches!(control(home), ControlState::Intent(intent) if intent.attempt_id == "recovery-attempt")
+    );
+
+    // The same request after the deadline reconciles the visible record without a fresh deadline or allowance.
+    let replayed = owner.request(&recovery, at + 250, &slice_budget());
+    assert!(replayed.is_ok(), "{replayed:?}");
+    assert!(matches!(
+        control(home),
+        ControlState::Intent(intent) if intent.attempt_id == "recovery-attempt" && intent.episodes.deadline == at + 200
+    ));
+}
+
 /// A refused request made while the lifecycle record is unreadable leaves admission closed, as the next slice would.
 #[test]
 fn a_refused_request_over_an_unreadable_record_closes_admission() {

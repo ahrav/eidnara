@@ -142,6 +142,10 @@ pub struct SearchLifecycleOwner {
     /// The drain grace the last readable manifest approved, kept for a stop whose records are gone.
     /// The `physical_drain_ms` last read from records that named the identity they were read under, with that identity.
     last_grace: Mutex<Option<(ProjectionIdentity, Duration)>>,
+    /// Makes the directory sync after the next authorized recovery's record rename fail once, on every selection this owner creates.
+    #[cfg(feature = "test-support")]
+    /// `(armed, _)`: while armed, the directory sync after the next record rename in a recovery write fails once, on whichever selection this owner created.
+    recovery_sync_failure: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(feature = "test-support")]
@@ -210,6 +214,8 @@ impl SearchLifecycleOwner {
             #[cfg(feature = "test-support")]
             slice_tap: Mutex::new(None),
             last_grace: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            recovery_sync_failure: Arc::default(),
         }
     }
 
@@ -217,6 +223,41 @@ impl SearchLifecycleOwner {
     #[cfg(feature = "test-support")]
     pub fn tap_slice_events_for_test(&self, tap: impl Fn(&SliceEvent) + Send + Sync + 'static) {
         *self.slice_tap.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(tap));
+    }
+
+    /// The directory sync after the next authorized recovery's record rename fails once, leaving that record's durability unknown for a replay to reconcile.
+    /// Arms one failure of the directory sync after the next record rename in a recovery write, leaving that record's durability unknown for a replay to reconcile.
+    #[cfg(feature = "test-support")]
+    pub fn fail_next_recovery_directory_sync_for_test(&self) {
+        self.recovery_sync_failure
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// A new selection manager for `identity` under `bounds`, carrying this owner's test hooks.
+    fn new_selection(
+        &self,
+        identity: ProjectionIdentity,
+        bounds: CoverageBounds,
+    ) -> SearchSelection {
+        let selection = SearchSelection::new(&self.home, identity, bounds);
+        #[cfg(feature = "test-support")]
+        {
+            // The barrier after a rename moves an armed failure into the sync's own flag, once.
+            let armed = Arc::clone(&self.recovery_sync_failure);
+            let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = Arc::clone(&fail);
+            return selection
+                .with_recovery_write_barrier_for_test(move |event| {
+                    if event == crate::projection_lifecycle::WriteBarrier::AfterRename
+                        && armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        fail.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                })
+                .with_recovery_directory_sync_failure_for_test(flag);
+        }
+        #[cfg(not(feature = "test-support"))]
+        selection
     }
 
     #[cfg(feature = "test-support")]
@@ -376,11 +417,7 @@ impl SearchLifecycleOwner {
             *managed = Managed::None;
         }
         if matches!(*managed, Managed::None) {
-            *managed = Managed::Selection(Box::new(SearchSelection::new(
-                &self.home,
-                identity.clone(),
-                bounds,
-            )));
+            *managed = Managed::Selection(Box::new(self.new_selection(identity.clone(), bounds)));
         }
         Ok((inputs, identity, budget))
     }
@@ -840,7 +877,8 @@ impl SearchLifecycleOwner {
             }));
         }
         // Whether the manifest still bounds the operation already recorded, as its next slice would check. A replacement that fits the reduced limits may replace what no longer does; a request that does not fit either leaves the gate closed, as that slice would.
-        let current_fits = match ProjectionLifecycle::read_at(&self.home) {
+        let recorded = ProjectionLifecycle::read_at(&self.home);
+        let current_fits = match &recorded {
             ControlState::Intent(current) | ControlState::Current(current) => replacement_spec(
                 inputs.manifest(),
                 identity.clone(),
@@ -853,6 +891,9 @@ impl SearchLifecycleOwner {
             ControlState::Unavailable(_) => false,
             _ => true,
         };
+        // A replay of the recorded intent reconciles that record's durability rather than recording anything new, so its time left is not judged here.
+        let replay =
+            matches!(&recorded, ControlState::Intent(existing) if existing.is_replay_of(request));
         // The replacement bounds depend on this request's allowance and generation, so their refusal is the request's alone.
         if replacement_spec(
             inputs.manifest(),
@@ -874,7 +915,7 @@ impl SearchLifecycleOwner {
         let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
         let bound = limit(inputs.manifest(), request.transition.duration_limit())
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
-        if duration == 0 {
+        if duration == 0 && !replay {
             if !current_fits {
                 let _ = self.admission.refresh(None);
             }
