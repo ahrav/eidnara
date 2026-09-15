@@ -78,6 +78,8 @@ pub enum SeedRefusal {
     Baseline(String),
     #[error("{0} foreign-key violations")]
     ForeignKeys(u64),
+    #[error("lexical rows do not correspond to live occurrences")]
+    LexicalRows,
     #[error("the projection identity row is missing or corrupt")]
     Identity,
     #[error("the projection identity does not match the identity the seed was requested for")]
@@ -445,7 +447,7 @@ fn closed_bytes(path: &Path, max_bytes: u64, ended: &Ended) -> Result<(u64, Stri
     Ok((bytes, file_sha256(path, ended)?))
 }
 
-/// Verifies a closed database file on its own connection: no sidecar, `integrity_check` ok, the projection's storage baseline, no foreign-key violations, the identity `expected`, exactly one live generation of that identity, a checkpoint row, no work admitted to a worker, every completed job with its vector, and every vector of its generation's dimension. Returns the report with the file's digest. The hash and every statement poll `budget`, so cancellation or the deadline ends verification instead of holding the closed file.
+/// Verifies a closed database file on its own connection: no sidecar, `integrity_check` ok, the projection's storage baseline, no foreign-key violations, one lexical row per live occurrence, the identity `expected`, exactly one live generation of that identity, a checkpoint row, no work admitted to a worker, every completed job with its vector, and every vector of its generation's dimension. Returns the report with the file's digest. The hash and every statement poll `budget`, so cancellation or the deadline ends verification instead of holding the closed file.
 ///
 /// # Errors
 ///
@@ -520,6 +522,15 @@ fn verify_closed_until(
     if violations > 0 {
         return Err(SeedRefusal::ForeignKeys(violations));
     }
+    retrieval::lexical::verify_rows(&conn).map_err(|error| {
+        if ended() {
+            SeedRefusal::Cancelled
+        } else if error == retrieval::ProjectionError::CorruptRow {
+            SeedRefusal::LexicalRows
+        } else {
+            SeedRefusal::Store(error.to_string())
+        }
+    })?;
     // The projection's own readers define the identity and checkpoint rows, so the certifier and the writer read them by one rule.
     // A statement the handler interrupted is the cancellation, not a corrupt control row.
     let interrupted = |refusal: SeedRefusal| {

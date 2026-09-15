@@ -1,7 +1,7 @@
 //! Indexing and querying share one identifier analyzer and one literal MATCH compiler.
 //! The engine tokenizes analyzer output on both sides, so a probe and the indexed text of the same identifier always reach the engine in the same form.
 //!
-//! [`AnalysisIdentity`] changes whenever the contract epoch, the `char::UNICODE_VERSION` of the toolchain, the tokenizer, the detail mode, or the indexed columns change.
+//! [`AnalysisIdentity`] changes whenever the contract epoch, the `char::UNICODE_VERSION` of the toolchain, the tokenizer, the detail mode, the indexed columns, or the linked SQLite version change.
 //! Changes to analysis or compilation rules not represented by another identity component require a new [`ANALYSIS_CONTRACT_EPOCH`].
 //!
 //! Folded FTS terms are recall candidates only; they are never byte identity or authorization evidence.

@@ -387,6 +387,11 @@ pub trait QueryRow {
     where
         P: rusqlite::Params,
         F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+
+    /// # Errors
+    ///
+    /// Returns the SQLite error from preparing `sql`.
+    fn prepare(&self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'_>>;
 }
 
 impl QueryRow for GuardedConn<'_> {
@@ -397,6 +402,10 @@ impl QueryRow for GuardedConn<'_> {
     {
         GuardedConn::query_row(self, sql, params, f)
     }
+
+    fn prepare(&self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'_>> {
+        GuardedConn::prepare(self, sql)
+    }
 }
 
 impl QueryRow for rusqlite::Connection {
@@ -406,6 +415,10 @@ impl QueryRow for rusqlite::Connection {
         F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     {
         rusqlite::Connection::query_row(self, sql, params, f)
+    }
+
+    fn prepare(&self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'_>> {
+        rusqlite::Connection::prepare(self, sql)
     }
 }
 

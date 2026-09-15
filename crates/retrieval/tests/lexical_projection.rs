@@ -1281,3 +1281,42 @@ fn tombstone_occurrence_itself_removes_the_lexical_row() {
         assert_eq!(verify_rows(conn), Ok(()));
     });
 }
+
+#[test]
+fn a_row_storing_other_text_is_corrupt_on_replay_and_in_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    let sources = [Source {
+        class: "messages",
+        key: "m1",
+        text: "genuine text",
+        created: 1,
+    }];
+    let arena = Arena {
+        identities: sources.iter().map(Source::identity).collect(),
+    };
+    let borrowed = borrow(&arena);
+    let records = records(&sources, &borrowed);
+    let batch = collision_batch(&records);
+    apply(&store, &batch, None).unwrap();
+    let raw = Connection::open(dir.path().join("search").join("search.sqlite")).unwrap();
+    raw.execute(
+        "UPDATE lexical SET original='forged text' WHERE occurrence_id=?1",
+        [&occurrence_id(&records[0])],
+    )
+    .unwrap();
+    assert_eq!(
+        raw.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok",
+        "a coherent update keeps the inverted index consistent"
+    );
+    drop(raw);
+    with_conn(&store, |conn| {
+        assert_eq!(batch_status(conn, &batch), Err(ProjectionError::CorruptRow));
+    });
+    assert_eq!(
+        apply(&store, &batch, None),
+        Err(ProjectionError::CorruptRow)
+    );
+}

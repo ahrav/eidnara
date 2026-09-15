@@ -238,19 +238,24 @@ creates or renews one for analysis.
 
 `AnalysisIdentity::current()` is the SHA-256 of a length-delimited manifest:
 the contract epoch, the toolchain's `char::UNICODE_VERSION`, the tokenizer
-string, the detail mode, and the column names in order. Changing any of them
-changes the identity, even when a given fixture still analyzes to the same
-terms. The Unicode version is included because atom and part boundaries come
-from the toolchain's character classification tables, so a toolchain upgrade
-that changes those tables changes what the analyzer emits.
+string, the detail mode, the column names in order, and the linked SQLite
+version. Changing any of them changes the identity, even when a given fixture
+still analyzes to the same terms. The Unicode version is included because atom
+and part boundaries come from the toolchain's character classification tables,
+so a toolchain upgrade that changes those tables changes what the analyzer
+emits. The SQLite version is included because `unicode61` folds and splits
+analyzer output with the engine's own tables, so an engine upgrade can change
+the effective terms of rows already indexed.
 
 Every other rule in this document is covered by the epoch. A change to the atom
 rule, the part rules, multiplicity, or the grammar requires a new epoch in the
 same change as the code, the updated goldens, and the updated pinned digest in
 `crates/retrieval/tests/lexical_analysis.rs`.
 
-The identity does not include the SQLite build. Engine skew is a projection
-concern and is detected by the projection's own identity, not by this one.
+Because the projection identity pins `analysis_identity` to the running build,
+a projection indexed under another SQLite version is incompatible and is
+rebuilt; `EngineIdentity` from `probe_engine` reports the engine but is not a
+second pin.
 
 ## Known behaviour to keep in mind
 

@@ -265,7 +265,18 @@ pub fn batch_status(
         )? {
             return Ok(BatchStatus::NotApplied);
         }
-        if stored.tombstone.is_none() != crate::lexical::index::present(conn, &occurrence_id)? {
+        // Every atom has at least one byte, so `selected.len()` bounds the analysis.
+        let lexical = if stored.tombstone.is_none() {
+            crate::lexical::index::stores(
+                conn,
+                &occurrence_id,
+                std::str::from_utf8(selected).map_err(|_| ProjectionError::CorruptRow)?,
+                NonZeroUsize::new(selected.len()).unwrap_or(NonZeroUsize::MIN),
+            )?
+        } else {
+            !crate::lexical::index::present(conn, &occurrence_id)?
+        };
+        if !lexical {
             return Ok(BatchStatus::NotApplied);
         }
         if let Some(generation) = batch.generation_id

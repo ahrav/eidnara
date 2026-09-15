@@ -799,7 +799,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     };
-    let cases: [(&str, &str, SeedRefusal); 15] = [
+    let cases: [(&str, &str, SeedRefusal); 17] = [
         (
             "corrupt identity",
             "UPDATE projection_identity SET embedding_model='other'",
@@ -881,6 +881,17 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
             "orphan vector",
             "PRAGMA foreign_keys=OFF; INSERT INTO occurrence_vectors(occurrence_id,generation_id,vector,vector_dimension,input_bytes,input_tokens,completed_at) VALUES('ghost','gen-1',zeroblob(32),8,1,1,1)",
             SeedRefusal::ForeignKeys(1),
+        ),
+        // `integrity_check` verifies the inverted index, not its correspondence with live occurrences; `verify_pages` refuses these at reopen, so the certifier refuses them first.
+        (
+            "live occurrence without its lexical row",
+            "DELETE FROM lexical",
+            SeedRefusal::LexicalRows,
+        ),
+        (
+            "orphan lexical row",
+            "INSERT INTO lexical(rowid, original, parts, occurrence_id) VALUES (7, 'ghost', '', 'ghost')",
+            SeedRefusal::LexicalRows,
         ),
     ];
     for (name, sql, refusal) in cases {

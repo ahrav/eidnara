@@ -359,6 +359,7 @@ fn identity_pins_the_manifest() {
         ORIGINAL_COLUMN,
         PARTS_COLUMN,
         &format!("{major}.{minor}.{update}"),
+        rusqlite::version(),
     ] {
         assert!(
             preimage.contains(&format!("{}:{field}\n", field.len())),
@@ -368,7 +369,7 @@ fn identity_pins_the_manifest() {
     assert_eq!(ANALYSIS_CONTRACT_EPOCH, "identifier-analysis.v1");
     assert_eq!(
         AnalysisIdentity::current().as_str(),
-        "29e6e69b2af079ae3e2c2eb273f74e82f74d473dae4e4959fc2b1310037bc43a",
-        "a changed epoch, Unicode version, tokenizer, detail, or column changes the identity; update the epoch and this digest together"
+        "57af4df18acff278c20e862624655c72ba9c54aeaeaa2d9a5b0326948d869698",
+        "a changed epoch, Unicode version, tokenizer, detail, column, or SQLite version changes the identity; update the epoch and this digest together"
     );
 }

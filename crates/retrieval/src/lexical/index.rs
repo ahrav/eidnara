@@ -3,10 +3,10 @@
 
 use std::num::NonZeroUsize;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use storage::GuardedConn;
 
-use super::{LexicalBounds, analyze};
+use super::{Analysis, LexicalBounds, analyze};
 use crate::{ProjectionError, QueryRow};
 
 pub const OCCURRENCE_ID_COLUMN: &str = "occurrence_id";
@@ -44,13 +44,27 @@ fn keyed(occurrence_id: &str) -> Result<[i64; ROWID_WORDS], ProjectionError> {
 
 const WORDS_IN: &str = "rowid IN (?1,?2,?3,?4)";
 
-/// Stores the row at the first of its rowids no other occurrence holds, unless the occurrence already has a row; returns whether a row was written.
 /// Every atom has at least one byte, so `max_payload_bytes` also bounds `max_atoms`.
 /// NUL is replaced with a space before analysis because the analyzer refuses it.
+fn analyzed(payload: &str, max_payload_bytes: NonZeroUsize) -> Result<Analysis, ProjectionError> {
+    Ok(analyze(
+        &payload.replace('\0', " "),
+        LexicalBounds {
+            max_input_bytes: max_payload_bytes,
+            max_atoms: max_payload_bytes,
+        },
+    )?)
+}
+
+fn same_text(analysis: &Analysis, original: &str, parts: &str) -> bool {
+    analysis.original_text() == original && analysis.parts_text() == parts
+}
+
+/// Stores the row at the first of its rowids no other occurrence holds, unless the occurrence already has a row storing the text `payload` analyzes to; returns whether a row was written.
 ///
 /// # Errors
 ///
-/// Every rowid held by another occurrence is [`ProjectionError::LexicalRowidCollision`]; an analyzer refusal is [`ProjectionError::Lexical`].
+/// If no keyed rowid is free, returns [`ProjectionError::LexicalRowidCollision`] listing the holders; an analyzer refusal is [`ProjectionError::Lexical`]; an existing row storing other text is [`ProjectionError::CorruptRow`].
 pub(crate) fn insert(
     conn: &GuardedConn<'_>,
     occurrence_id: &str,
@@ -58,19 +72,29 @@ pub(crate) fn insert(
     max_payload_bytes: NonZeroUsize,
 ) -> Result<bool, ProjectionError> {
     let words = keyed(occurrence_id)?;
+    let analysis = analyzed(payload, max_payload_bytes)?;
     let mut held = conn.prepare_cached(&format!(
-        "SELECT rowid, occurrence_id FROM lexical WHERE {WORDS_IN}"
+        "SELECT rowid, occurrence_id, original, parts FROM lexical WHERE {WORDS_IN}"
     ))?;
-    let holders: Vec<(i64, String)> = held
-        .query_map(words, |row| Ok((row.get(0)?, row.get(1)?)))?
+    let holders: Vec<(i64, String, String, String)> = held
+        .query_map(words, |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
-    if holders.iter().any(|(_, holder)| holder == occurrence_id) {
-        return Ok(false);
+    if let Some((_, _, original, parts)) = holders
+        .iter()
+        .find(|(_, holder, _, _)| holder == occurrence_id)
+    {
+        return if same_text(&analysis, original, parts) {
+            Ok(false)
+        } else {
+            Err(ProjectionError::CorruptRow)
+        };
     }
     let Some(rowid) = words
         .iter()
         .copied()
-        .find(|word| holders.iter().all(|(held, _)| held != word))
+        .find(|word| holders.iter().all(|(held, ..)| held != word))
     else {
         return Err(ProjectionError::LexicalRowidCollision {
             occurrence_id: occurrence_id.to_string(),
@@ -79,20 +103,12 @@ pub(crate) fn insert(
                 .filter_map(|word| {
                     holders
                         .iter()
-                        .find(|(held, _)| held == word)
-                        .map(|(_, holder)| holder.clone())
+                        .find(|(held, ..)| held == word)
+                        .map(|(_, holder, ..)| holder.clone())
                 })
                 .collect(),
         });
     };
-    let text = payload.replace('\0', " ");
-    let analysis = analyze(
-        &text,
-        LexicalBounds {
-            max_input_bytes: max_payload_bytes,
-            max_atoms: max_payload_bytes,
-        },
-    )?;
     conn.prepare_cached(
         "INSERT INTO lexical(rowid, original, parts, occurrence_id) VALUES (?1,?2,?3,?4)",
     )?
@@ -138,13 +154,44 @@ pub(crate) fn present(
         )?)
 }
 
+/// Whether the occurrence's row exists and stores the text `payload` analyzes to.
+///
+/// # Errors
+///
+/// A row storing other text is [`ProjectionError::CorruptRow`]; an analyzer refusal is [`ProjectionError::Lexical`].
+pub(crate) fn stores(
+    conn: &GuardedConn<'_>,
+    occurrence_id: &str,
+    payload: &str,
+    max_payload_bytes: NonZeroUsize,
+) -> Result<bool, ProjectionError> {
+    let words = keyed(occurrence_id)?;
+    let stored: Option<(String, String)> = conn
+        .prepare_cached(&format!(
+            "SELECT original, parts FROM lexical WHERE {WORDS_IN} AND occurrence_id=?5"
+        ))?
+        .query_row(
+            params![words[0], words[1], words[2], words[3], occurrence_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((original, parts)) = stored else {
+        return Ok(false);
+    };
+    if same_text(&analyzed(payload, max_payload_bytes)?, &original, &parts) {
+        Ok(true)
+    } else {
+        Err(ProjectionError::CorruptRow)
+    }
+}
+
 /// Every live occurrence has exactly one lexical row, and every lexical row sits at one of its occurrence's rowids and names a live occurrence.
 /// `PRAGMA integrity_check` verifies the inverted index itself; this check covers the join the engine cannot see.
 ///
 /// # Errors
 ///
 /// A missing, orphaned, duplicated, or misplaced row is [`ProjectionError::CorruptRow`].
-pub fn verify_rows(conn: &GuardedConn<'_>) -> Result<(), ProjectionError> {
+pub fn verify_rows(conn: &impl QueryRow) -> Result<(), ProjectionError> {
     let (live, rows, distinct): (i64, i64, i64) = conn.query_row(
         "SELECT (SELECT count(*) FROM occurrences o
                  WHERE NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id)),
