@@ -11,7 +11,7 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/profile.rs:636`
-- `crates/host-runtime/src/ring_transport.rs:520`
+- `crates/host-runtime/src/ring_transport.rs:521`
 
 Witness status: partial - `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `crates/host-runtime/src/ring_transport.rs:473` refunds on a pre-exposure failure, and `crates/host-runtime/src/ring_transport.rs:3276` shows a refused admission charges nothing and the released charge admits the next connection. A failure injected between descriptor duplication and grant transfer is not yet exercised.
 
