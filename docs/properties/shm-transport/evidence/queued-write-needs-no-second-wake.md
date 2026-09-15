@@ -37,7 +37,7 @@ rest wait for the next unrelated event — an inbound frame, a capacity signal,
 or peer death. Writes complete with unbounded latency or time out at their
 deadlines (`endpoint.send(header, body, deadline)`, `:2561-2566`), reported
 as transport failures on a healthy channel.
-At HEAD: The bridge calls `RingClientEndpoint::try_send_bounded` (`crates/host-runtime/src/ring_transport.rs:1433`, from `attempt_pending_writes`, `client.rs:2511`), which never blocks; an `Exhausted` result leaves the write in its lane slot (`:2515`), the bridge arms the capacity doorbell with that write's inventory and bound (`:2711-2718`), polls it beside the worker wake, data readiness, and the setup socket with the earliest `commit_by` as the timeout (`:2753-2765`), and re-attempts on the next pass.
+At HEAD: The bridge calls `RingClientEndpoint::try_send_bounded` (`crates/host-runtime/src/ring_transport.rs:1465`, from `attempt_pending_writes`, `client.rs:2511`), which never blocks; an `Exhausted` result leaves the write in its lane slot (`:2515`), the bridge arms the capacity doorbell with that write's inventory and bound (`:2711-2718`), polls it beside the worker wake, data readiness, and the setup socket with the earliest `commit_by` as the timeout (`:2753-2765`), and re-attempts on the next pass.
 
 ## Timing windows and dependencies
 
@@ -100,7 +100,7 @@ frame at all would isolate the `wrote` path).
 ### Q: What changed when #552 replaced the sliced send with the capacity arm?
 
 - Sources examined: `crates/host-runtime/src/client.rs:2499-2803` and
-  `crates/host-runtime/src/ring_transport.rs:1433` at HEAD.
+  `crates/host-runtime/src/ring_transport.rs:1465` at HEAD.
 - Findings: `RingClientEndpoint::send_bounded` and `BRIDGE_RESERVE_SLICE` no
   longer exist. The bridge reserves with the non-blocking `try_send_bounded`,
   keeps an exhausted write in its lane, arms the capacity doorbell for the
