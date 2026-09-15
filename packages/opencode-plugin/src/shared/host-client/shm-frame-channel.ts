@@ -384,11 +384,16 @@ export class ShmFrameChannel implements SetupFrameChannel {
         return false;
     }
 
-    /** `true` when the capacity wait is armed; `false` when capacity is already visible. */
+    /** `true` when the capacity wait is armed; `false` when the head's reservation may now succeed. */
     private armForCapacity(): boolean {
         if (this.closed || !this.readinessStarted) return true;
+        const head = this.pendingPublications[0];
+        if (!head) return true;
         try {
-            return this.attached().armCapacity();
+            return this.attached().armCapacity(
+                encodeHeader({ ...head.header, len: head.body.byteLength }),
+                head.body.byteLength,
+            );
         } catch (error) {
             this.failClose("protocol_violation", error);
             return true;

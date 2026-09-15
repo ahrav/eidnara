@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/host-runtime/src/connection.rs:532`
 - `crates/host-runtime/src/dispatch.rs:993`
 
-Witness status: yes - `crates/host-runtime/src/ring_transport.rs:1986` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:532`) parses channel-0 bodies only from that private copy. Oversized channel-0 requests are refused before any lease (`crates/host-runtime/src/ring_transport.rs:948`).
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2082` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:532`) parses channel-0 bodies only from that private copy. Oversized channel-0 requests are refused before any lease (`crates/host-runtime/src/ring_transport.rs:954`).
 
 ## Failure scenario
 

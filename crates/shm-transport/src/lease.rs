@@ -369,10 +369,11 @@ impl Drop for PayloadLease {
     }
 }
 
-/// Test-only observers for the five operations a final drop must never perform: a `Ring`
-/// call, a completion-node allocation, a queue-slot wait, an N-API call, and a free-list
-/// mutation. `enter_final_drop` marks the window; each forbidden entry point calls its
-/// observer, which records a violation when the window is open.
+/// Test-only observers for the three operations a final drop must never perform: a `Ring`
+/// call, a queue-slot wait, and a free-list mutation. `enter_final_drop` marks the window;
+/// each forbidden entry point calls its observer, which records a violation when the window
+/// is open. Completion-node allocation and the N-API boundary have no code point in this
+/// crate: the pool publishes into a fixed cell, and the boundary lives in the native addon.
 #[cfg(test)]
 pub mod observers {
     use std::cell::Cell;
@@ -384,12 +385,8 @@ pub mod observers {
 
     /// `Ring` entry points reached inside a final drop.
     pub static RING_CALL: AtomicU64 = AtomicU64::new(0);
-    /// Completion-node allocations reached inside a final drop.
-    pub static NODE_ALLOCATION: AtomicU64 = AtomicU64::new(0);
     /// Descriptor-slot parks reached inside a final drop.
     pub static SLOT_WAIT: AtomicU64 = AtomicU64::new(0);
-    /// N-API boundaries reached inside a final drop.
-    pub static NAPI_CALL: AtomicU64 = AtomicU64::new(0);
     /// Free-list pushes or pops reached inside a final drop.
     pub static FREE_LIST_MUTATION: AtomicU64 = AtomicU64::new(0);
 
@@ -417,20 +414,9 @@ pub mod observers {
         observe(&RING_CALL);
     }
 
-    /// Called when a completion node would be allocated.
-    pub fn node_allocation() {
-        observe(&NODE_ALLOCATION);
-    }
-
     /// Called before parking for a descriptor slot.
     pub fn slot_wait() {
         observe(&SLOT_WAIT);
-    }
-
-    /// Called at an N-API boundary; no such boundary exists in this crate, so the counter can
-    /// only stay zero here and is exported for the native addon's observer.
-    pub fn napi_call() {
-        observe(&NAPI_CALL);
     }
 
     /// Called at every free-list push or pop.
@@ -439,12 +425,10 @@ pub mod observers {
     }
 
     /// Every counter, in the order above.
-    pub fn snapshot() -> [u64; 5] {
+    pub fn snapshot() -> [u64; 3] {
         [
             RING_CALL.load(Ordering::Relaxed),
-            NODE_ALLOCATION.load(Ordering::Relaxed),
             SLOT_WAIT.load(Ordering::Relaxed),
-            NAPI_CALL.load(Ordering::Relaxed),
             FREE_LIST_MUTATION.load(Ordering::Relaxed),
         ]
     }
@@ -462,13 +446,10 @@ pub enum LeaseError {
     /// The same payload was returned twice.
     #[error("release is duplicated")]
     DuplicateRelease,
-    /// The completion was published but the capacity doorbell could not be rung; the
-    /// backing latches the failure and no storage is reused on its account.
+    /// The completion was published but the capacity doorbell could not be rung. The block is
+    /// returned regardless; only the wake is lost.
     #[error("payload completion could not wake the producer")]
     WakeFailed,
-    /// The transport storage was quarantined; no return can complete.
-    #[error("transport storage is quarantined")]
-    Quarantined,
 }
 
 impl fmt::Debug for LeaseError {

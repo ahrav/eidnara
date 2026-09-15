@@ -10,12 +10,12 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `packages/shm-native/src/lib.rs:356`
+- `packages/shm-native/src/lib.rs:354`
 - `packages/shm-native/src/napi_buffers.rs:149`
 - `packages/shm-native/src/napi_buffers.rs:248`
 - `packages/shm-native/tests/runtime.ts:135`
 
-Witness status: yes - producer aliases detach before commit (`packages/shm-native/src/lib.rs:383`) and consumer aliases detach before return (`packages/shm-native/src/lib.rs:356`); `runNativeLifecycle` in packages/shm-native/tests/runtime.ts asserts subarray, DataView, and Buffer aliases read zero after release, but only when the runtime reports the detachment capability; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts runs against the raw addon on every runtime and shows a refused detach leaving the alias attached, the token registered, the block held, and the ring quarantined, with a cooperating retry detaching and returning exactly once.
+Witness status: yes - producer aliases detach before commit (`packages/shm-native/src/lib.rs:381`) and consumer aliases detach before return (`packages/shm-native/src/lib.rs:354`); `runNativeLifecycle` in packages/shm-native/tests/runtime.ts asserts subarray, DataView, and Buffer aliases read zero after release, but only when the runtime reports the detachment capability; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts runs against the raw addon on every runtime and shows a refused detach leaving the alias attached, the token registered, the block held, and the ring quarantined, with a cooperating retry detaching and returning exactly once.
 
 ## Failure scenario
 

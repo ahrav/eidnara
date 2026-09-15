@@ -2,6 +2,7 @@
 //! attachment, and the two-process exchange that proves independent reuse, descriptor wakes,
 //! maximum frames, and owned returns across a process boundary.
 #![deny(clippy::undocumented_unsafe_blocks)]
+use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::process::{Child, Command, Stdio};
@@ -14,7 +15,7 @@ use shm_transport::backend::ring::{
 };
 use shm_transport::descriptor::HardwareProfileId;
 use shm_transport::lease::PayloadLease;
-use shm_transport::pool::{ClassSpec, PoolGeometry};
+use shm_transport::pool::{ClassSpec, Inventory, PoolGeometry};
 use shm_transport::profile::{TargetProfile, host_payload_pool_profile, pool_profile};
 
 /// Two ordinary descriptors and three 4 KiB blocks, so laps and class exhaustion are cheap.
@@ -177,6 +178,19 @@ fn artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected() {
 }
 
 #[test]
+fn attachment_object_must_carry_exactly_the_owner_read_write_mode() {
+    let ring = Ring::create(&profile(), 43).unwrap();
+    let [object, data_ready, capacity_ready] = ring.attachment().unwrap().into_parts().0;
+    // SAFETY: `object` is open for the call; fchmod takes no pointers.
+    let owner_read_only = unsafe { libc::fchmod(object.as_raw_fd(), 0o400) };
+    assert_eq!(owner_read_only, 0);
+    assert!(matches!(
+        Ring::attach([object, data_ready, capacity_ready], ring.grant()),
+        Err(RingError::ObjectValidationFailed)
+    ));
+}
+
+#[test]
 fn non_regular_attachment_object_is_rejected_before_mapping() {
     let ring = Ring::create(&profile(), 41).unwrap();
     let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
@@ -298,6 +312,22 @@ fn child_attach(prefix: &str) -> Ring {
     Ring::attach(descriptors, grant).unwrap()
 }
 
+fn poll_readable(fd: &OwnedFd, timeout_ms: libc::c_int) -> bool {
+    let mut descriptor = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `descriptor` is one initialized pollfd and the count passed is one.
+    let ready = unsafe { libc::poll(&raw mut descriptor, 1, timeout_ms) };
+    assert!(
+        ready >= 0,
+        "poll failed: {}",
+        std::io::Error::last_os_error()
+    );
+    ready > 0
+}
+
 fn two_process_skipped() -> bool {
     if std::env::var_os("EIDNARA_SHM_SKIP_TWO_PROCESS").is_some() {
         eprintln!("skipped: EIDNARA_SHM_SKIP_TWO_PROCESS is set");
@@ -350,7 +380,10 @@ fn two_process_exchange_holds_a_reuses_b_and_wakes_on_return() {
         b_blocks.push(reservation.commit(b_bytes.len()).unwrap().block());
     }
     assert!(b_blocks.iter().all(|block| *block != a_block));
-    assert!(b_blocks.iter().skip(1).any(|block| *block == b_blocks[0]));
+    assert!(
+        (1..b_blocks.len()).any(|index| b_blocks[..index].contains(&b_blocks[index])),
+        "a B block is reused while A is held; the LIFO free list picks which one: {b_blocks:?}"
+    );
     let max: Vec<u8> = (0..MAX_FRAME_BYTES)
         .map(|index| (index % 251) as u8)
         .collect();
@@ -448,6 +481,7 @@ fn ring_child_exchange() {
 
 /// One ordinary descriptor: the parent's second reservation parks solely on descriptor
 /// exhaustion and is woken by the child's consumption while the child still holds the payload.
+/// The child consumes only after the parent writes `b"go"` to its stdin.
 #[test]
 fn two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return() {
     if two_process_skipped() {
@@ -475,10 +509,12 @@ fn two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return()
     let to_child = Ring::create(&profile, 0).unwrap();
     let from_child = Ring::create(&profile, 1).unwrap();
     let mut command = child_command("ring_child_hold");
+    command.stdin(Stdio::piped());
     let to_child_fds = export_attachment(&mut command, "TO_CHILD", to_child.attachment().unwrap());
     let from_child_fds =
         export_attachment(&mut command, "FROM_CHILD", from_child.attachment().unwrap());
-    let child = ChildGuard(Some(command.spawn().unwrap()));
+    let mut child = ChildGuard(Some(command.spawn().unwrap()));
+    let mut go = child.0.as_mut().unwrap().stdin.take().unwrap();
     drop(to_child_fds);
     drop(from_child_fds);
     let deadline = Instant::now() + CHILD_DEADLINE;
@@ -488,21 +524,33 @@ fn two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return()
         to_child.try_reserve(4, wire_v3_header(4).unwrap()),
         Err(ProducerError::Exhausted)
     ));
-    let before = to_child.syscall_counters();
-    let reservation = to_child
-        .reserve_until(4, wire_v3_header(4).unwrap(), deadline)
-        .unwrap();
-    assert!(
-        to_child.syscall_counters().since(before).parks >= 1,
-        "the producer parked"
+    assert_eq!(
+        to_child.arm_capacity_wait(Inventory::Ordinary, 4),
+        Ok(true),
+        "the producer parks on the one ordinary descriptor"
     );
-    // The wake came from consumption: the child's report arrives only after it releases.
+    let ready = to_child.duplicate_capacity_ready().unwrap();
+    assert!(
+        !poll_readable(&ready, 0),
+        "no token before the child consumes"
+    );
+    go.write_all(b"go").unwrap();
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    assert!(
+        poll_readable(&ready, remaining.as_millis().try_into().unwrap()),
+        "the child's consumption rang the capacity doorbell"
+    );
     assert_eq!(
         to_child.inventory().classes[0].published,
         1,
         "the held payload is still outstanding at the wake"
     );
-    reservation.abort();
+    to_child.complete_capacity_wait().unwrap();
+    to_child
+        .try_reserve(4, wire_v3_header(4).unwrap())
+        .unwrap()
+        .abort();
+    publish(&to_child, b"release");
     let report = receive(&from_child, deadline);
     assert_eq!(report.to_vec().unwrap(), b"EIDNARA_SHM_CHILD_RELEASED");
     report.release().unwrap();
@@ -522,9 +570,14 @@ fn ring_child_hold() {
     let from_parent = child_attach("TO_CHILD");
     let to_parent = child_attach("FROM_CHILD");
     let deadline = Instant::now() + CHILD_DEADLINE;
+    let mut go = [0u8; 2];
+    std::io::stdin().read_exact(&mut go).unwrap();
+    assert_eq!(&go, b"go");
     let held = receive(&from_parent, deadline);
     assert_eq!(held.to_vec().unwrap(), b"held");
-    std::thread::sleep(Duration::from_millis(300));
+    let release = receive(&from_parent, deadline);
+    assert_eq!(release.to_vec().unwrap(), b"release");
+    release.release().unwrap();
     held.release().unwrap();
     publish(&to_parent, b"EIDNARA_SHM_CHILD_RELEASED");
     let bye = receive(&from_parent, deadline);

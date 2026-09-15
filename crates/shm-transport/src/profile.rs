@@ -528,12 +528,6 @@ pub struct Admission {
 }
 
 impl Admission {
-    /// Refunds every charge. Equivalent to dropping; exists so call sites can name the intent.
-    pub fn release(mut self) {
-        self.controller.release(self.charges);
-        self.state = AdmissionState::Released;
-    }
-
     /// Moves descriptors, bytes, leases, mappings, file descriptors, wake handles, and the
     /// client instance to the quarantined bucket, where they stay until the process exits.
     /// Worker charges are refunded because the threads do exit.
@@ -579,14 +573,6 @@ pub struct WorkerAdmission {
     controller: Arc<AdmissionController>,
     charges: ResourceCharges,
     released: bool,
-}
-
-impl WorkerAdmission {
-    /// Refunds the worker charge. Equivalent to dropping.
-    pub fn release(mut self) {
-        self.controller.release(self.charges);
-        self.released = true;
-    }
 }
 
 crate::redacted_debug!(WorkerAdmission);
@@ -647,11 +633,6 @@ impl BackingAdmission {
         {
             *state = BackingState::RetainedUncertain;
         }
-    }
-
-    /// The charges this admission holds.
-    pub const fn charges(&self) -> ResourceCharges {
-        self.charges
     }
 
     /// Whether the charge is still counted as an active admission that a drop would refund.

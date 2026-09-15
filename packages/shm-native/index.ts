@@ -114,8 +114,6 @@ export interface NativeTestPair {
     second: NativeChannel;
     /** Ordinary descriptor slots per direction: frames a producer can publish before the consumer acknowledges any. */
     descriptorDepth: number;
-    /** Blocks per direction across every class: the bound on live leases. */
-    blockCount: number;
     /** Largest body one block of the smallest ordinary class carries. */
     smallestBodyCapacity: number;
     /** Blocks in the smallest ordinary class. */
@@ -147,7 +145,6 @@ interface NativeAddon {
         first: number;
         second: number;
         descriptorDepth: number;
-        blockCount: number;
         smallestBodyCapacity: number;
         smallestClassCount: number;
     };
@@ -164,7 +161,7 @@ interface NativeAddon {
         capacity: number,
         deliver: (token: number, segments: Uint8Array[]) => void,
     ): void;
-    armCapacity(channel: number): boolean;
+    armCapacity(channel: number, header: Uint8Array, capacity: number): boolean;
     commitReservation(
         channel: number,
         token: number,
@@ -817,7 +814,6 @@ export class NativeChannel {
             first: new NativeChannel(native, pair.first),
             second: new NativeChannel(native, pair.second),
             descriptorDepth: pair.descriptorDepth,
-            blockCount: pair.blockCount,
             smallestBodyCapacity: pair.smallestBodyCapacity,
             smallestClassCount: pair.smallestClassCount,
         };
@@ -881,13 +877,15 @@ export class NativeChannel {
 
     /**
      * Parks the outbound side on the host's capacity doorbell after a `RING_FULL_MESSAGE`
-     * refusal. `true` means the readiness handler registered with `startReadiness` runs when
-     * the host consumes a descriptor or returns a block; `false` means capacity became visible
-     * while arming, so the caller retries at once. Requires `startReadiness`.
+     * refusal of the frame `header` and `capacity` describe. `true` means the readiness
+     * handler registered with `startReadiness` runs when the host consumes a descriptor or
+     * returns a block; `false` means that frame's reservation may now succeed, so the caller
+     * retries at once. Requires `startReadiness`.
      */
-    armCapacity(): boolean {
+    armCapacity(header: Uint8Array, capacity: number): boolean {
         this.assertOpen();
-        return this.native.armCapacity(this.id);
+        assertUint32Argument("capacity", capacity);
+        return this.native.armCapacity(this.id, privateBytes(header), capacity);
     }
 
     startReadiness(handler: () => void, onDropped?: (error: unknown) => void): void {

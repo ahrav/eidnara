@@ -192,9 +192,10 @@ function runNativeLifecycle(): void {
     assert.equal(arenaLease.byteLength, MAX_BODY);
     fill(arena.first, 1, 2);
     receive(arena.second).release();
-    assert.throws(() => fill(arena.first, MAX_BODY, 1));
-    assert.throws(() => fill(arena.first, MAX_BODY + 1, 1));
+    assert.throws(() => fill(arena.first, MAX_BODY, 1), /ring is full/);
     arenaLease.release();
+    // After arenaLease.release(), MAX_BODY + 1 fails the size bound rather than ring exhaustion.
+    assert.throws(() => fill(arena.first, MAX_BODY + 1, 1), /reservation failed/);
     fill(arena.first, MAX_BODY, 2);
     receive(arena.second).release();
     arena.first.close();

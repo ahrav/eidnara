@@ -2705,14 +2705,21 @@ async fn start_ring_bridge(
                     Ok(true) => {}
                     Err(_) => break,
                 }
-                let capacity_armed = if pending_control.is_none() && pending_data.is_none() {
-                    false
-                } else {
+                // The ring re-checks one reservation while arming; the control lane's is used
+                // when both lanes are blocked because its reserve is the one a data backlog
+                // cannot exhaust, and the recheck below covers the other lane.
+                let armed_lane = pending_control.as_ref().or(pending_data.as_ref());
+                let capacity_armed = if let Some(write) = armed_lane {
+                    let inventory = endpoint.inventory_for_frame(&write.header, write.body.len());
                     #[cfg(test)]
                     bridge_hooks::before_capacity_arm(&worker_wake);
-                    match endpoint.to_host.arm_capacity_wait() {
+                    match endpoint
+                        .to_host
+                        .arm_capacity_wait(inventory, write.body.len())
+                    {
                         Ok(true) => {
-                            // A return that landed before `parked` was set rang no doorbell.
+                            // The arm re-checked one lane; the other lane's return also rang no
+                            // doorbell if it landed before `parked` was set.
                             let recheck = attempt_pending_writes(
                                 &endpoint,
                                 [&mut pending_control, &mut pending_data],
@@ -2737,6 +2744,8 @@ async fn start_ring_bridge(
                         }
                         Err(_) => break,
                     }
+                } else {
+                    false
                 };
                 // The earliest pending commit deadline bounds the park: a host that never
                 // returns capacity cannot hold a frame past its deadline, and the next attempt
@@ -2790,6 +2799,8 @@ async fn start_ring_bridge(
                     break;
                 }
             }
+            // Clear `parked` before the bridge drops its doorbell fd.
+            let _ = endpoint.to_host.complete_capacity_wait();
             if let Ok(goodbye) = crate::setup_socket::encoded_goodbye() {
                 let _ = setup.write_all(&goodbye);
             }
