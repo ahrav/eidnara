@@ -6,7 +6,7 @@
 
 use std::num::{NonZeroU64, NonZeroUsize};
 
-use kernel::source_identity::Occurrence;
+use kernel::source_identity::{Occurrence, Span};
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CausalClass, CausalEvidence,
     CausalReading, ClaimCausalityError, ClaimCausalityRequest, CommitIntent, DecisionPayload,
@@ -123,6 +123,12 @@ impl Fixture {
     }
 
     pub fn retain(&self, key: &str, text: &str) -> (String, String) {
+        self.retain_as(key, text, Sensitivity::Normal)
+    }
+
+    /// Repeating a key with the same bytes replays the ingest and folds the
+    /// asserted class into the stored evidence rows.
+    pub fn retain_as(&self, key: &str, text: &str, sensitivity: Sensitivity) -> (String, String) {
         let handle = self
             .store
             .ingest_exact_artifact(ArtifactIngestRequest {
@@ -138,7 +144,7 @@ impl Fixture {
                 media_type: "text/plain".to_string(),
                 retention_class: "canonical".to_string(),
                 retain_until: None,
-                asserted_sensitivity: Sensitivity::Normal,
+                asserted_sensitivity: sensitivity,
                 provider_egress: ProviderEgress::RemoteAllowed,
                 provenance: Some(RepositoryProvenance {
                     repository_id: "repo".to_string(),
@@ -176,9 +182,23 @@ impl Fixture {
         revision: i64,
         text: &str,
     ) -> Published {
+        self.publish_span(class, representation, index, revision, text, None)
+    }
+
+    /// `span` distinguishes intent and evidence keys from whole-buffer publications.
+    pub fn publish_span(
+        &self,
+        class: &str,
+        representation: &str,
+        index: i64,
+        revision: i64,
+        text: &str,
+        span: Option<(u64, u64)>,
+    ) -> Published {
         let object_id = format!("decision-object-{index}");
+        let span_key = span.map_or(String::new(), |(start, end)| format!("-{start}-{end}"));
         let (evidence_id, digest) = self.retain(
-            &format!("{class}-{representation}-{index}-{revision}"),
+            &format!("{class}-{representation}-{index}-{revision}{span_key}"),
             text,
         );
         let field = if class == "promoted_memory" {
@@ -192,7 +212,7 @@ impl Fixture {
         self.store
             .commit(
                 intent(&format!(
-                    "publish-{class}-{representation}-{index}-{revision}"
+                    "publish-{class}-{representation}-{index}-{revision}{span_key}"
                 )),
                 |envelope| {
                     let outcome = envelope
@@ -202,7 +222,7 @@ impl Fixture {
                                 identity: &identity,
                                 revision: &revision_text,
                                 representation,
-                                span: None,
+                                span: span.map(|(start, end)| Span { start, end }),
                             },
                             source_policy: SourceDescriptorPolicy::Native,
                             domain_id: DOMAIN,

@@ -5,7 +5,7 @@
 | Class | Available today | How |
 | --- | --- | --- |
 | Process restart | yes | `Fixture::reopen` in `crates/kernel/tests/kernel_claim_facts.rs` |
-| Out-of-band row corruption | yes | direct SQLite writes to `observations` and `admission_decisions` (the registry is append-only) |
+| Out-of-band row corruption | yes | direct SQLite writes to `observations` and `admission_decisions`; direct inserts into `object_registry` and `decisions` (the registry forbids updates) |
 | Evidence retirement | yes | `Envelope::retire_evidence` |
 | Object retirement and correction | yes | `retire_observation`, `retire_decision`, `correct_decision` |
 | Duplicate commit | yes | repeated `CommitIntent` |
@@ -25,8 +25,8 @@
 | `claim-format-rollback-preserves-canonical-state` | higher detail version | yes |
 | `claim-replay-preserves-newest-canonical-state` | duplicate commit; replacement record | yes |
 | `echo-classification-requires-canonical-causality` | forgery; evidence retirement; parent retirement; record retirement | yes |
-| `malformed-required-field-stops-projection-progress` | corrupted enum column | yes |
-| `occurrence-identity-is-not-payload-or-source-triple` | one of three representations published | yes |
+| `malformed-required-field-stops-projection-progress` | corrupted enum column; unreadable registry class | yes |
+| `occurrence-identity-is-not-payload-or-source-triple` | one of three representations published; detail rewritten to name other rows | yes |
 | `projection-has-no-second-truth-or-policy-authority` | none | yes |
 | `retrieved-content-cannot-upgrade-write-authority` | forged kind, id, and object prefixes | yes |
 | `revision-domains-remain-distinct-and-supported` | higher detail version | yes |

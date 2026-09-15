@@ -70,12 +70,16 @@ Ticket numbers here are tracking metadata, not names of anything in the tree.
 
 ## Design decisions carried by the projection side
 
-- The projection stores no claim state. `retrieval::claims::classify` derives
-  Current, Superseded, Retracted, Hidden, or Stale from `claim_facts_as_of`
-  at the kernel tip on every read, so a lagging projection cannot revive a
-  claim the kernel withdrew and a rebuild cannot disagree with the projection
-  it replaces. `classify` takes no causal class; Unknown neutrality is a
-  property of its signature.
+- The projection stores no claim state. `retrieval::claims::classify_live_claims`
+  is the snapshot-bound read: it checks the projection identity against the
+  kernel's incarnation, reads the live rows, captures `kernel.tip()`, reads
+  `claim_facts_as_of` at that tip, and maps each row through `classify`, so a
+  lagging projection cannot revive a claim the kernel withdrew and a rebuild
+  cannot disagree with the projection it replaces. `classify` is the state
+  mapping over already-loaded facts: Current, Superseded, Retracted, Hidden, or
+  Stale from the registry row, the own and lineage admission rows, the served
+  surface, and the live descriptor inventory. It takes no causal class;
+  Unknown neutrality is a property of its signature.
 - Materialization, tombstones, checkpoints, pending work, acknowledgement,
   retention fences, and recovery reuse the RP2.1 shared paths unchanged. The
   claim-specific checks prove classification and parity over those paths; the

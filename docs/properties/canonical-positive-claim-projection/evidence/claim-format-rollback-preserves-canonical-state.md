@@ -7,7 +7,7 @@ Specification 'Failure and rollback': no rollback mutates canonical truth to mat
 ## Evidence trail
 
 - `crates/kernel/src/claim_causality.rs`: `decode_detail` reads `causality_version` before the rest and maps a mismatch to `UnknownReason::UnsupportedVersion`.
-- `crates/kernel/tests/kernel_claim_facts.rs`: the version branch of `replay_is_effect_free_and_conflicting_or_unsupported_records_are_unknown` rewrites the stored version to 2 and asserts `Unknown(UnsupportedVersion)`.
+- `crates/kernel/tests/kernel_claim_causality.rs`: the version branch of `replay_is_effect_free_and_conflicting_or_unsupported_records_are_unknown` rewrites the stored version to 2 and asserts `Unknown(UnsupportedVersion)`.
 
 ## Failure scenario
 

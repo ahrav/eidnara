@@ -38,6 +38,15 @@ reviews found and how each finding was dispositioned.
 | `NotAClaim` overstated the check | refinement | fixed: `NotADecision` |
 | The catalog said no summary is returned for an oversized payload while the code returns an identity-only summary | gap | fixed in the record; the code was kept |
 
+A post-commit review of the facts change through the security, business-logic,
+duplication, and dead-code lenses added three findings:
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The occurrence inventory reported `evidence_id`, `artifact_digest`, `payload_id`, and `lineage_id` from the JSON detail while liveness was judged on the joined evidence row; `live_source_descriptors` and `source_export::preflight` refuse that disagreement | gap | fixed: `load_occurrences` compares the detail with the joined columns and the registry with the observation timestamps, `CorruptCanonicalRow` on disagreement; test rewrites each field out of band |
+| The descriptor liveness predicate was restated by hand rather than taken from `Descriptors::LiveAtEnd`, the export's single definition | refinement | fixed: `load_descriptor` formats `Descriptors::LiveAtEnd.predicate` into its statement |
+| `load_decision` compared the decision class with the registry class after `ObjectRow` had decoded an unreadable registry value as `Secret`, so a `secret` decision row masked the unreadable registry row | gap | fixed: the stored class texts are compared, then decoded strictly; test inserts unreadable registry rows |
+
 ## Projection change
 
 | Finding | Class | Disposition |
@@ -52,6 +61,31 @@ reviews found and how each finding was dispositioned.
 | `created_commit_seq` selected and never read | refinement | fixed: removed |
 | `max_rows` is a result bound, not a work bound: the live-claim query sorts before it limits | bias | kept, documented on the bound; the sibling `live_candidates` shares the plan |
 | Near-duplicate of `eligibility::live_candidates` | bias | kept: the claim read needs the association join and both claim classes; widening the sibling's class filter is a follow-up for its own owner |
+
+## Post-review pass
+
+Findings from the six-track review of the projection change and how each was
+dispositioned. Every code fix landed behind a test that failed first.
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| `classify` read `superseded_by` only under `invalidated_commit_seq`, while the kernel's `judge` and `token_check` read `superseded_by` first; the registry trigger admits a successor without an invalidation, so that shape classified `Current` here and `Superseded` in the kernel | gap | fixed: `superseded_by` is checked first; `successor recorded without invalidation` pins it |
+| The enum doc ranked `Stale` above `Hidden` while the code hid a rejected, contradicted, or quarantined admission before the revision guard; the kernel's `visibility_row` serves `Stale` labeled and those three on no surface, so `Hidden` is the more restrictive state and must win | gap | fixed: precedence is `Retracted`, `Superseded`, `Hidden`, `Stale`, `Current`, with variant order as the source of truth; every Hidden-over-Stale conflict pair is pinned |
+| `claims` was documented as first-seen order but a `BTreeSet` sorted the ids | refinement | fixed: dedup preserves first-seen order; the daemon test asserts a nonlexical witness |
+| `kernel.tip()` ran before `max_claims` was enforced, so the bound test named a guarantee the code lacked | refinement | fixed: the bound is checked before any kernel read; the test proves it with a failing tip |
+| The catalog credited the daemon test with showing a causality record leaves a state unchanged, but the record was committed before the successor had any projection rows | gap | fixed: the test classifies after catch-up, records causality, classifies again, and asserts equality; the record wording follows the test |
+
+Codex review of the pushed branch added three findings:
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The live-claim query trusted the association's `target_id` alone, so an association whose key and occurrence tuple named claim A while its target named claim B classified A from B's facts; `exact::lookup::AssociationRow::decode` checks the same agreement | gap | fixed: the query also selects the key and the tuple, and refuses `CorruptRow` unless key, target, and the tuple's identity field name one object; `an_association_whose_target_disagrees_with_its_key_or_row_is_refused` pins both disagreements |
+| `classify_live_claims` read the kernel's tip and facts without comparing the projection identity's `kernel_incarnation_id` to the kernel it was given, unlike `coverage::observe` and the exact lookup, so a reused object id in another incarnation could classify from an unrelated history | gap | fixed: the caller names the kernel's incarnation as the sibling readers do; `NoIdentity` and `ForeignKernel` refuse before any row is read |
+| `ClaimCandidateBatch::claim` indexed `claims` unchecked, so a candidate from another batch read another object's facts or panicked from a method returning `Option` | gap | fixed: checked index and the facts must name the candidate's object; `a_candidate_from_another_batch_reads_no_facts` |
+| `classify` read only `own_admission`, while the serving view folds the lineage row into every surface; a lineage-scoped `MarkStale` served labeled and classified `Current` here | gap | fixed: own and lineage dispositions are read with one precedence; `a_lineage_disposition_binds_like_the_own_row` |
+| `classify` never consulted `facts.occurrences`, so a row whose descriptor lost its evidence (an artifact deletion under an active decision) classified `Current` until catch-up tombstoned it | gap | fixed: a row absent from the live descriptor inventory is `Retracted`; `a_row_outside_the_live_descriptor_inventory_is_retracted`; the daemon test's `Current` rows prove the projection ids match the inventory |
+| A second `canonical_object` association on one occurrence would have doubled its candidate rows | gap | covered by the key and tuple check above: the second row's key cannot match the tuple; `a_second_canonical_object_association_on_one_row_is_refused` pins it |
+| `spec-integration.md` attributed the snapshot read to `classify` | refinement | fixed in the record: `classify_live_claims` is the snapshot-bound read, `classify` the mapping over loaded facts |
 
 ## Final-use gate change
 
@@ -77,7 +111,7 @@ failed first.
 | Finding | Class | Disposition |
 | --- | --- | --- |
 | The row's `artifact_digest` was submitted as read from the projection, so a corrupt or forged row digest with no evidence rows passed the local artifact gate | gap | fixed: a permitted row is reclassified against the kernel's occurrence inventory from the same snapshot; a digest the inventory does not list for the occurrence is `Stale` |
-| A descriptor retired between classification and validation left the row `Current` and the decision object `Ok`, so the withdrawn representation was permitted | gap | fixed: `judge_surface_eligibility_with_claims` returns the claim facts with the verdicts from one snapshot, and the reclassification denies a row whose occurrence is no longer listed |
+| A descriptor retired between classification and validation left the row `Current` and the decision object `Ok`, so the withdrawn representation was permitted | gap | fixed: `judge_surface_eligibility_with_claims` returns the claim facts with the verdicts from one snapshot, and the reclassification denies a row whose occurrence is no longer listed (`Retracted`, the projection side's rule) |
 | `unknown_objects` came from the classification batch while the verdicts came from the fresh snapshot | refinement | fixed: the accounting reads causality from the validation snapshot; `validate_for_surface` no longer takes the batch |
 
 ## Biases for a human

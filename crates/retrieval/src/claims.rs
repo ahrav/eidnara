@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::OccurrenceClass;
+use kernel::source_identity::{OccurrenceClass, occurrence_identity_matches};
 use kernel::{
     ArtifactDestination, ClaimFactBounds, ClaimFacts, ClaimFactsError, CommitReadIncarnation,
     Disposition, EgressSnapshot, EligibilityCandidate, EligibilityVerdict, KernelError,
@@ -27,32 +27,34 @@ use kernel::{
 use rusqlite::params;
 use storage::GuardedConn;
 
-use crate::ProjectionError;
 use crate::exact::selector::Family;
 use crate::exact::{CANONICAL_OBJECT_NAMESPACE, Coverage, EXTRACTION_VERSION, coverage};
+use crate::{ProjectionError, read_identity};
 
-/// Precedence when more than one applies: `Retracted`, `Superseded`, `Stale`,
-/// `Hidden`, then `Current`.
+/// Variant order is precedence order: restrictive states sort first, so a
+/// classified claim is never more visible than the kernel's serving view of the
+/// claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CandidateState {
-    /// The claim object has no registry row at the snapshot or was invalidated
-    /// without a successor.
+    /// The claim object has no registry row at the snapshot, was invalidated
+    /// without a successor, or no longer lists this row's descriptor as live
+    /// (the export's rule: descriptor and evidence both live), so catch-up will
+    /// tombstone the row.
     Retracted,
-    /// The claim object was replaced by a successor, or its own admission
-    /// disposition is `Superseded`.
+    /// The claim object was replaced by a successor, or its own or lineage
+    /// admission disposition is `Superseded`.
     Superseded,
-    /// The own admission disposition is `Stale`, the occurrence carries a
-    /// revision other than the object's canonical one, or the kernel's
-    /// occurrence inventory at the snapshot does not list the row's occurrence
-    /// with the row's artifact behind it: the representation was retired, or
-    /// the projection row is corrupt. The registry never changes an object's
-    /// revision, so the revision input can only come from a corrupt row and is
-    /// kept as a guard.
-    Stale,
-    /// The own admission disposition is `Rejected`, `Contradicted`, or
-    /// `Quarantined`, or the serving view lists no row for the object or lists
-    /// it hidden on the widest surface.
+    /// The own or lineage admission disposition is `Rejected`, `Contradicted`,
+    /// or `Quarantined`, or the serving view lists no row for the object or
+    /// lists it hidden on the widest surface.
     Hidden,
+    /// The own or lineage admission disposition is `Stale`, the occurrence
+    /// carries a revision other than the object's canonical one, or the kernel
+    /// lists the row's occurrence with an artifact other than the row's. The
+    /// registry never changes an object's revision or an occurrence's artifact,
+    /// so the last two inputs can only come from a corrupt projection row and
+    /// are kept as guards.
+    Stale,
     /// Served on the widest surface with an `Active` or `Disputed` disposition;
     /// a disputed claim serves labeled, and the label travels with the served
     /// facts rather than as a state.
@@ -96,8 +98,12 @@ pub struct ClaimCandidateBatch {
 }
 
 impl ClaimCandidateBatch {
+    /// `None` when the object has no registry row at the snapshot, or when
+    /// `candidate` came from another batch and its index names another object.
     pub fn claim(&self, candidate: &ClaimCandidate) -> Option<&ClaimFacts> {
-        candidate.claim.map(|index| &self.claims[index])
+        self.claims
+            .get(candidate.claim?)
+            .filter(|claim| claim.object.object_id == candidate.row.object_id)
     }
 }
 
@@ -111,6 +117,10 @@ pub struct ClaimCandidateBounds {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClaimCandidateError {
+    #[error("the projection has no identity")]
+    NoIdentity,
+    #[error("the projection was built for kernel incarnation {kernel_incarnation_id}")]
+    ForeignKernel { kernel_incarnation_id: String },
     #[error(transparent)]
     Projection(#[from] ProjectionError),
     #[error(transparent)]
@@ -132,7 +142,7 @@ fn claim_classes() -> &'static [OccurrenceClass] {
 /// association family keyword, `?5` the association namespace.
 const LIVE_CLAIM_ROWS_SQL: &str =
     "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision,
-            o.source_artifact_digest
+            o.source_artifact_digest,a.key,o.tuple
      FROM occurrences o
      LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
      LEFT JOIN exact_associations a
@@ -149,6 +159,8 @@ type LiveRow = (
     Option<u32>,
     i64,
     String,
+    Option<Vec<u8>>,
+    Vec<u8>,
 );
 
 /// Live claim rows in `(class, occurrence_id)` order. A set larger than `max`
@@ -157,7 +169,8 @@ type LiveRow = (
 /// # Errors
 ///
 /// `TooManyRecords` past `max`; `CorruptRow` for a stored class outside the
-/// contract or a claim row with no `canonical_object` association;
+/// contract, a claim row with no `canonical_object` association, or an
+/// association whose key, target, and occurrence tuple do not name one object;
 /// `ExtractionVersionMismatch` for an association from another extractor.
 pub fn live_claim_candidates(
     conn: &GuardedConn<'_>,
@@ -192,6 +205,8 @@ pub fn live_claim_candidates(
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
                 ))
             },
         )?
@@ -201,10 +216,31 @@ pub fn live_claim_candidates(
     }
     rows.into_iter()
         .map(
-            |(occurrence_id, class, representation, object_id, version, revision, digest)| {
+            |(
+                occurrence_id,
+                class,
+                representation,
+                object_id,
+                version,
+                revision,
+                digest,
+                key,
+                tuple,
+            )| {
                 let class =
                     OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?;
                 let object_id = object_id.ok_or(ProjectionError::CorruptRow)?;
+                // The `id` family derives the target from the key, and the
+                // extractor takes both from the occurrence's identity field, so
+                // the three must name one object.
+                let [field] = class.identity_fields() else {
+                    return Err(ProjectionError::CorruptRow);
+                };
+                if key.as_deref() != Some(object_id.as_bytes())
+                    || !occurrence_identity_matches(&tuple, class, &[(field, &object_id)])
+                {
+                    return Err(ProjectionError::CorruptRow);
+                }
                 match version {
                     Some(stored) if stored != EXTRACTION_VERSION => {
                         return Err(ProjectionError::ExtractionVersionMismatch {
@@ -234,68 +270,83 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
     let Some(facts) = facts else {
         return CandidateState::Retracted;
     };
-    if facts.object.invalidated_commit_seq.is_some() {
-        return match facts.object.superseded_by {
-            Some(_) => CandidateState::Superseded,
-            None => CandidateState::Retracted,
-        };
+    if facts.object.superseded_by.is_some() {
+        return CandidateState::Superseded;
     }
-    let disposition = facts
-        .own_admission
-        .as_ref()
-        .map(|admission| admission.disposition);
-    match disposition {
-        Some(Disposition::Superseded) => return CandidateState::Superseded,
-        Some(Disposition::Stale) => return CandidateState::Stale,
-        Some(Disposition::Rejected | Disposition::Contradicted | Disposition::Quarantined) => {
-            return CandidateState::Hidden;
-        }
-        Some(Disposition::Active | Disposition::Disputed) | None => {}
+    let listed = facts.occurrences.iter().find(|occurrence| {
+        occurrence.occurrence_id == row.occurrence_id
+            && occurrence.class == row.class
+            && occurrence.representation == row.representation
+    });
+    let Some(listed) = listed.filter(|_| facts.object.invalidated_commit_seq.is_none()) else {
+        return CandidateState::Retracted;
+    };
+    // The serving view folds the lineage row into every surface, so its
+    // disposition binds the row like the own row's does.
+    let dispositions = [&facts.own_admission, &facts.lineage_admission]
+        .map(|admission| admission.as_ref().map(|admission| admission.disposition));
+    if dispositions.contains(&Some(Disposition::Superseded)) {
+        return CandidateState::Superseded;
     }
-    if row.revision != facts.object.source_revision || !is_canonical_occurrence(row, facts) {
-        return CandidateState::Stale;
+    if dispositions.iter().flatten().any(|disposition| {
+        matches!(
+            disposition,
+            Disposition::Rejected | Disposition::Contradicted | Disposition::Quarantined
+        )
+    }) {
+        return CandidateState::Hidden;
     }
     match &facts.served {
-        ServedStanding::Served(served) if served.explicit_search != SurfaceVisibility::Hidden => {
-            CandidateState::Current
-        }
+        ServedStanding::Served(served) if served.explicit_search != SurfaceVisibility::Hidden => {}
         ServedStanding::Served(_)
         | ServedStanding::NotLiveAtSnapshot
-        | ServedStanding::NeverAdmitted => CandidateState::Hidden,
+        | ServedStanding::NeverAdmitted => return CandidateState::Hidden,
     }
-}
-
-/// The occurrence id encodes class, identity, revision, and representation,
-/// so it and the digest together pin the row to one canonical occurrence.
-fn is_canonical_occurrence(row: &ClaimCandidateRow, facts: &ClaimFacts) -> bool {
-    facts.occurrences.iter().any(|occurrence| {
-        occurrence.occurrence_id == row.occurrence_id
-            && occurrence.artifact_digest == row.artifact_digest
-    })
+    if dispositions.contains(&Some(Disposition::Stale))
+        || row.revision != facts.object.source_revision
+        || row.artifact_digest != listed.artifact_digest
+    {
+        return CandidateState::Stale;
+    }
+    CandidateState::Current
 }
 
 /// Reads every live claim row, then the kernel's facts for the objects they
 /// name at the kernel tip observed before the facts read, and classifies each.
+/// `kernel_incarnation_id` names the incarnation of `kernel`; a projection
+/// built for another incarnation is refused before any row is read, since a
+/// reused object id there would classify from an unrelated history.
 ///
 /// # Errors
 ///
-/// Projection refusals from [`live_claim_candidates`]; facts refusals from
-/// `claim_facts_as_of`, including `TooManyClaims` when the rows name more
-/// distinct objects than `bounds.facts.max_claims`; kernel errors as
-/// `Facts(Kernel(_))`.
+/// `NoIdentity` and `ForeignKernel` before any row is read; projection
+/// refusals from [`live_claim_candidates`]; `TooManyClaims` before kernel
+/// access when the rows name more distinct objects than
+/// `bounds.facts.max_claims`; other facts refusals from `claim_facts_as_of`;
+/// kernel errors as `Facts(Kernel(_))`.
 pub fn classify_live_claims(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
+    kernel_incarnation_id: &str,
     bounds: ClaimCandidateBounds,
 ) -> Result<ClaimCandidateBatch, ClaimCandidateError> {
+    let identity = read_identity(conn)?.ok_or(ClaimCandidateError::NoIdentity)?;
+    if identity.kernel_incarnation_id != kernel_incarnation_id {
+        return Err(ClaimCandidateError::ForeignKernel {
+            kernel_incarnation_id: identity.kernel_incarnation_id,
+        });
+    }
     let rows = live_claim_candidates(conn, bounds.max_rows)?;
+    let mut seen = BTreeSet::new();
     let object_ids: Vec<String> = rows
         .iter()
         .map(|row| row.object_id.as_str())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+        .filter(|id| seen.insert(*id))
         .map(str::to_string)
         .collect();
+    if object_ids.len() > bounds.facts.max_claims.get() {
+        return Err(ClaimFactsError::TooManyClaims.into());
+    }
     let known_as_of = kernel.tip().map_err(ClaimFactsError::from)?;
     let snapshot = kernel.claim_facts_as_of(&object_ids, known_as_of, bounds.facts)?;
     let index: HashMap<&str, usize> = snapshot

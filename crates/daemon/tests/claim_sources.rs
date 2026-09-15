@@ -1582,11 +1582,14 @@ fn candidate_bounds() -> ClaimCandidateBounds {
 fn classified(
     projection: &SearchProjection,
     kernel: &KernelStore,
+    kernel_incarnation_id: &str,
 ) -> BTreeMap<String, CandidateState> {
     let batch = projection
         .read(|conn| {
-            Ok(classify_live_claims(conn, kernel, candidate_bounds())
-                .unwrap_or_else(|error| panic!("{error}")))
+            Ok(
+                classify_live_claims(conn, kernel, kernel_incarnation_id, candidate_bounds())
+                    .unwrap_or_else(|error| panic!("{error}")),
+            )
         })
         .unwrap();
     batch
@@ -1631,10 +1634,11 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
     corpus.materialize();
     let hold = corpus.capture();
     let (projection, _) = corpus.bootstrap(dir.path(), &hold);
+    let kernel_incarnation_id = corpus.kernel_incarnation_id();
     let live = live_rows(dir.path());
     assert_eq!(live.len(), 9);
     assert_eq!(
-        classified(&projection, &corpus.kernel),
+        classified(&projection, &corpus.kernel, &kernel_incarnation_id),
         expected_states(&[
             (rule, CandidateState::Current),
             (anti, CandidateState::Current),
@@ -1668,6 +1672,38 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
             })
             .unwrap();
     }
+    assert_eq!(live_rows(dir.path()), live, "the projection has not moved");
+    assert_eq!(
+        classified(&projection, &corpus.kernel, &kernel_incarnation_id),
+        expected_states(&[
+            (rule, CandidateState::Superseded),
+            (anti, CandidateState::Retracted),
+            (quiet, CandidateState::Hidden),
+            (aging, CandidateState::Stale),
+        ])
+    );
+
+    // Catch-up tombstones the corrected and retired rows. Quarantine and stale
+    // marks are admission-only dispositions: the materializer leaves those rows
+    // live and the classifier keeps hiding or staling them from canonical facts.
+    corpus.materialize();
+    let through = corpus.kernel.tip().unwrap();
+    corpus
+        .kernel
+        .extend_source_hold(&corpus.binding(), &hold.hold_id, through, hold_admission())
+        .unwrap();
+    let delta = corpus.export_window(&hold, ExportWindow::CatchUp { through });
+    corpus.apply(&projection, &hold, &delta, through);
+    let caught_up = classified(&projection, &corpus.kernel, &kernel_incarnation_id);
+    assert_eq!(
+        caught_up,
+        expected_states(&[
+            (successor, CandidateState::Current),
+            (quiet, CandidateState::Hidden),
+            (aging, CandidateState::Stale),
+        ])
+    );
+
     let (evidence_id, digest) = {
         let handle = corpus
             .kernel
@@ -1708,42 +1744,40 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
             Ok(String::new())
         })
         .unwrap();
-    assert_eq!(live_rows(dir.path()), live, "the projection has not moved");
     assert_eq!(
-        classified(&projection, &corpus.kernel),
-        expected_states(&[
-            (rule, CandidateState::Superseded),
-            (anti, CandidateState::Retracted),
-            (quiet, CandidateState::Hidden),
-            (aging, CandidateState::Stale),
-        ])
-    );
-
-    // Catch-up tombstones the corrected and retired rows. Quarantine and stale
-    // marks are admission-only dispositions: the materializer leaves those rows
-    // live and the classifier keeps hiding or staling them from canonical facts.
-    corpus.materialize();
-    let through = corpus.kernel.tip().unwrap();
-    corpus
-        .kernel
-        .extend_source_hold(&corpus.binding(), &hold.hold_id, through, hold_admission())
-        .unwrap();
-    let delta = corpus.export_window(&hold, ExportWindow::CatchUp { through });
-    corpus.apply(&projection, &hold, &delta, through);
-    let caught_up = classified(&projection, &corpus.kernel);
-    assert_eq!(
+        classified(&projection, &corpus.kernel, &kernel_incarnation_id),
         caught_up,
-        expected_states(&[
-            (successor, CandidateState::Current),
-            (quiet, CandidateState::Hidden),
-            (aging, CandidateState::Stale),
-        ])
+        "a causality record changes no state"
     );
+    let mut bounds = candidate_bounds();
+    bounds.facts.max_claims = NonZeroUsize::new(3).unwrap();
     let batch = projection
-        .read(|conn| Ok(classify_live_claims(conn, &corpus.kernel, candidate_bounds()).unwrap()))
+        .read(|conn| {
+            Ok(classify_live_claims(conn, &corpus.kernel, &kernel_incarnation_id, bounds).unwrap())
+        })
         .unwrap();
     assert_eq!(batch.known_as_of, corpus.kernel.tip().unwrap());
+    assert!(batch.candidates.len() > 3, "multiple rows share an object");
     assert_eq!(batch.claims.len(), 3, "one facts entry per distinct object");
+    let mut first_seen = Vec::new();
+    for candidate in &batch.candidates {
+        let id = candidate.row.object_id.as_str();
+        if !first_seen.contains(&id) {
+            first_seen.push(id);
+        }
+    }
+    assert!(
+        !first_seen.is_sorted(),
+        "fixture must distinguish first-seen order from lexical order"
+    );
+    assert_eq!(
+        batch
+            .claims
+            .iter()
+            .map(|claim| claim.object.object_id.as_str())
+            .collect::<Vec<_>>(),
+        first_seen
+    );
     for candidate in &batch.candidates {
         let facts = batch
             .claim(candidate)
@@ -1779,7 +1813,10 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
     let rebuilt_dir = tempfile::tempdir().unwrap();
     let rebuilt_hold = corpus.capture();
     let (rebuilt, _) = corpus.bootstrap(rebuilt_dir.path(), &rebuilt_hold);
-    assert_eq!(classified(&rebuilt, &corpus.kernel), caught_up);
+    assert_eq!(
+        classified(&rebuilt, &corpus.kernel, &kernel_incarnation_id),
+        caught_up
+    );
     assert_eq!(
         live_rows(rebuilt_dir.path()).len(),
         live_rows(dir.path()).len()
@@ -1794,7 +1831,15 @@ fn validate_scoped(
     surface: Surface,
 ) -> (ClaimCandidateBatch, SurfaceValidation) {
     let batch = projection
-        .read(|conn| Ok(classify_live_claims(conn, &corpus.kernel, candidate_bounds()).unwrap()))
+        .read(|conn| {
+            Ok(classify_live_claims(
+                conn,
+                &corpus.kernel,
+                &corpus.kernel_incarnation_id(),
+                candidate_bounds(),
+            )
+            .unwrap())
+        })
         .unwrap();
     let validation = validate_for_surface(
         &corpus.kernel,
@@ -2287,7 +2332,7 @@ fn a_descriptor_retired_after_classification_is_denied_at_the_fresh_snapshot() {
     let labeled = UseVerdict::Permitted(kernel::SurfaceVisibility::Labeled);
     for validated in &after.candidates {
         let expected = if validated.candidate.row.occurrence_id == retired.row.occurrence_id {
-            UseVerdict::Denied(UseDenial::State(CandidateState::Stale))
+            UseVerdict::Denied(UseDenial::State(CandidateState::Retracted))
         } else {
             labeled
         };

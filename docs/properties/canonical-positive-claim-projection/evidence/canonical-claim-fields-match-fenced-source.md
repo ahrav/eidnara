@@ -9,6 +9,8 @@ Specification constraint 'Canonical facts and identity' and acceptance A1: the p
 - `crates/kernel/src/claim_facts.rs`: `KernelStore::claim_facts_as_of` reads registry, decision, own and lineage admission rows, and served visibility inside one `read_snapshot` transaction bound to `requested`.
 - `crates/kernel/src/claim_facts.rs`: `load_admission` selects the latest row at or before the snapshot with the same lineage predicate the serving query uses.
 - `crates/kernel/tests/kernel_claim_facts.rs`: `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot` compares every own-admission field with the `AdmissionDecision` the writer returned and re-reads the same snapshot after later commits.
+- `crates/kernel/src/admission.rs`: `served_classes` folds the cited evidence's current `sensitivity_class` into the served class, and `supporting_approval_valid_sql` requires the approval's cited evidence to read `normal` today; `crates/kernel/src/cas/ingest.rs`: `MergedClassification::apply` rewrites `evidence_meta.sensitivity_class` in place. `served` and `valid_at_snapshot` therefore follow the current classification and are outside the repeatability guarantee.
+- `crates/kernel/tests/kernel_claim_facts.rs`: `served_facts_follow_the_cited_evidence_class_read_today` re-ingests the cited artifact as secret after S and asserts that only `served` changes on a reread of S.
 
 ## Failure scenario
 
@@ -20,7 +22,7 @@ A commit landing between two reads of S; a request for S before the object's cre
 
 ## What a test must construct
 
-Write a decision and admission, publish one descriptor, capture S, read facts, commit unrelated and related writes, read S again and assert equality; read S-1 and assert the id is in `missing`.
+Write a decision and admission, publish one descriptor, capture S, read facts, commit unrelated and related writes, read S again and assert equality; read S-1 and assert the id is in `missing`. Re-ingest the cited artifact as secret and read S again: the revisioned fields are equal and `served` reports the tightened class.
 
 ## Investigation log
 

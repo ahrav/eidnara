@@ -6,9 +6,9 @@ Specification 'Bounds, capabilities and stop conditions': bound rows, provenance
 
 ## Evidence trail
 
-- `crates/kernel/src/claim_facts.rs`: `claim_facts_as_of` returns `TooManyClaims` before opening a transaction when the request exceeds `max_claims`.
+- `crates/kernel/src/claim_facts.rs`: `claim_facts_as_of` returns `TooManyClaims` before opening a transaction when the request exceeds `max_claims`, and `InvalidInput` for an empty id or one longer than `MAX_CLAIM_OBJECT_ID_BYTES`, so no identifier reaches `load_served`'s JSON encoding or a pooled reader unbounded.
 - `crates/kernel/src/claim_causality.rs`: `check_parents` refuses more than `MAX_DERIVATION_PARENTS` before any parent row is read; the refusal poisons the envelope through `guarded_typed`.
-- `crates/kernel/tests/kernel_claim_facts.rs`: `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly` and the `too-many` case of `derived_reinjection_rests_on_exact_live_parents`.
+- `crates/kernel/tests/kernel_claim_facts.rs`: `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`; `crates/kernel/tests/kernel_claim_causality.rs`: the `too-many` case of `derived_reinjection_rests_on_exact_live_parents`.
 
 ## Failure scenario
 

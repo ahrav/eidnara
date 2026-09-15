@@ -8,7 +8,9 @@ use kernel::{
     EventKind, Maturity, ObjectRow, Outcome, Sensitivity, ServedFacts, ServedStanding, SourceClass,
     SurfaceVisibility, TaintClass, UnknownReason, VisibilityRow,
 };
-use retrieval::claims::{CandidateState, ClaimCandidateRow, classify};
+use retrieval::claims::{
+    CandidateState, ClaimCandidate, ClaimCandidateBatch, ClaimCandidateRow, classify,
+};
 
 fn occurrence(revision: i64) -> ClaimCandidateRow {
     ClaimCandidateRow {
@@ -56,11 +58,13 @@ struct Facts {
     superseded_by: Option<&'static str>,
     revision: i64,
     disposition: Option<Disposition>,
+    lineage: Option<Disposition>,
     served: ServedStanding,
+    /// Whether the kernel's live descriptor inventory lists the row `occurrence` builds.
+    listed: bool,
+    /// The artifact the listed descriptor names.
+    listed_digest: String,
     causality: CausalClass,
-    /// The `(occurrence_id, artifact_digest)` pairs the kernel lists for the
-    /// object at the snapshot.
-    occurrences: Vec<(&'static str, String)>,
 }
 
 impl Facts {
@@ -70,9 +74,11 @@ impl Facts {
             superseded_by: None,
             revision: 1,
             disposition: Some(Disposition::Active),
+            lineage: None,
             served: served(SurfaceVisibility::Labeled),
+            listed: true,
+            listed_digest: "0".repeat(64),
             causality: CausalClass::Unknown(UnknownReason::NoRecord),
-            occurrences: vec![("occ", "0".repeat(64))],
         }
     }
 
@@ -99,23 +105,23 @@ impl Facts {
                 evidence_id: None,
             },
             own_admission: self.disposition.map(admission),
-            lineage_admission: None,
+            lineage_admission: self.lineage.map(admission),
             served: self.served,
-            occurrences: self
-                .occurrences
-                .into_iter()
-                .map(|(occurrence_id, artifact_digest)| ClaimOccurrence {
+            occurrences: if self.listed {
+                vec![ClaimOccurrence {
                     class: OccurrenceClass::CanonicalClaims,
                     representation: "decision_summary",
-                    descriptor_object_id: format!("descriptor:{occurrence_id}"),
-                    occurrence_id: occurrence_id.to_string(),
+                    descriptor_object_id: "descriptor".to_string(),
+                    occurrence_id: "occ".to_string(),
                     lineage_id: "lineage".to_string(),
                     payload_id: "payload".to_string(),
-                    artifact_digest,
+                    artifact_digest: self.listed_digest,
                     evidence_id: "evidence".to_string(),
                     descriptor_commit_seq: 3,
-                })
-                .collect(),
+                }]
+            } else {
+                Vec::new()
+            },
             excluded_representations: Vec::new(),
             causality: self.causality,
             causal_record: None,
@@ -143,6 +149,14 @@ fn state_follows_the_documented_precedence() {
             "invalidated with successor",
             Some(Facts {
                 invalidated: Some(9),
+                superseded_by: Some("decision-object-2"),
+                ..Facts::current()
+            }),
+            CandidateState::Superseded,
+        ),
+        (
+            "successor recorded without invalidation",
+            Some(Facts {
                 superseded_by: Some("decision-object-2"),
                 ..Facts::current()
             }),
@@ -232,8 +246,9 @@ fn state_follows_the_documented_precedence() {
             CandidateState::Retracted,
         ),
         (
-            "superseded wins over hidden",
+            "superseded wins over stale and hidden",
             Some(Facts {
+                revision: 2,
                 disposition: Some(Disposition::Superseded),
                 served: served(SurfaceVisibility::Hidden),
                 ..Facts::current()
@@ -241,26 +256,54 @@ fn state_follows_the_documented_precedence() {
             CandidateState::Superseded,
         ),
         (
-            "stale wins over hidden",
+            "hidden serving wins over stale revision",
             Some(Facts {
                 revision: 2,
                 served: served(SurfaceVisibility::Hidden),
                 ..Facts::current()
             }),
-            CandidateState::Stale,
+            CandidateState::Hidden,
         ),
         (
-            "occurrence not in the inventory is stale",
+            "hidden serving wins over stale disposition",
             Some(Facts {
-                occurrences: vec![("other", "0".repeat(64))],
+                disposition: Some(Disposition::Stale),
+                served: served(SurfaceVisibility::Hidden),
                 ..Facts::current()
             }),
-            CandidateState::Stale,
+            CandidateState::Hidden,
         ),
         (
-            "occurrence listed with another artifact is stale",
+            "rejected admission wins over stale revision",
             Some(Facts {
-                occurrences: vec![("occ", "1".repeat(64))],
+                revision: 2,
+                disposition: Some(Disposition::Rejected),
+                ..Facts::current()
+            }),
+            CandidateState::Hidden,
+        ),
+        (
+            "contradicted admission wins over stale revision",
+            Some(Facts {
+                revision: 2,
+                disposition: Some(Disposition::Contradicted),
+                ..Facts::current()
+            }),
+            CandidateState::Hidden,
+        ),
+        (
+            "quarantined admission wins over stale revision",
+            Some(Facts {
+                revision: 2,
+                disposition: Some(Disposition::Quarantined),
+                ..Facts::current()
+            }),
+            CandidateState::Hidden,
+        ),
+        (
+            "listed with another artifact is stale",
+            Some(Facts {
+                listed_digest: "1".repeat(64),
                 ..Facts::current()
             }),
             CandidateState::Stale,
@@ -284,14 +327,138 @@ fn state_follows_the_documented_precedence() {
             CandidateState::Hidden,
         ),
     ];
-    for (name, facts, expected) in cases {
-        let facts = facts.map(Facts::build);
-        assert_eq!(classify(&occurrence(1), facts.as_ref()), expected, "{name}");
-    }
+    let mismatches: Vec<String> = cases
+        .into_iter()
+        .filter_map(|(name, facts, expected)| {
+            let facts = facts.map(Facts::build);
+            let actual = classify(&occurrence(1), facts.as_ref());
+            (actual != expected).then(|| format!("{name}: expected {expected:?}, got {actual:?}"))
+        })
+        .collect();
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
 /// Unknown neutrality: for every state, the class is the only field that
 /// differs between an otherwise identical genuine and unknown claim.
+/// The serving view folds a lineage decision into every surface, so the
+/// classifier reads the lineage row's disposition with the same precedence as
+/// the own row's.
+#[test]
+fn a_lineage_disposition_binds_like_the_own_row() {
+    let cases = [
+        (Disposition::Stale, CandidateState::Stale),
+        (Disposition::Superseded, CandidateState::Superseded),
+        (Disposition::Rejected, CandidateState::Hidden),
+        (Disposition::Contradicted, CandidateState::Hidden),
+        (Disposition::Quarantined, CandidateState::Hidden),
+        (Disposition::Disputed, CandidateState::Current),
+        (Disposition::Active, CandidateState::Current),
+    ];
+    for (lineage, expected) in cases {
+        let facts = Facts {
+            lineage: Some(lineage),
+            ..Facts::current()
+        }
+        .build();
+        assert_eq!(
+            classify(&occurrence(1), Some(&facts)),
+            expected,
+            "lineage {lineage:?} over an active own row"
+        );
+    }
+    // The own row's disposition does not shadow a more restrictive lineage row.
+    let facts = Facts {
+        disposition: Some(Disposition::Rejected),
+        lineage: Some(Disposition::Superseded),
+        ..Facts::current()
+    }
+    .build();
+    assert_eq!(
+        classify(&occurrence(1), Some(&facts)),
+        CandidateState::Superseded
+    );
+    let facts = Facts {
+        disposition: Some(Disposition::Stale),
+        lineage: Some(Disposition::Quarantined),
+        served: served(SurfaceVisibility::Hidden),
+        ..Facts::current()
+    }
+    .build();
+    assert_eq!(
+        classify(&occurrence(1), Some(&facts)),
+        CandidateState::Hidden
+    );
+}
+
+/// A row whose descriptor the kernel no longer lists as live, for example after
+/// the artifact behind its evidence was deleted while the decision stayed
+/// active, is Retracted: catch-up will tombstone it, and a lagging projection
+/// must not serve it first.
+#[test]
+fn a_row_outside_the_live_descriptor_inventory_is_retracted() {
+    let facts = Facts {
+        listed: false,
+        ..Facts::current()
+    }
+    .build();
+    assert_eq!(
+        classify(&occurrence(1), Some(&facts)),
+        CandidateState::Retracted
+    );
+    // A successor still wins, as it does over an invalidated registry row.
+    let facts = Facts {
+        listed: false,
+        superseded_by: Some("decision-object-2"),
+        ..Facts::current()
+    }
+    .build();
+    assert_eq!(
+        classify(&occurrence(1), Some(&facts)),
+        CandidateState::Superseded
+    );
+    // The inventory entry must match the row's class and representation, not only its id.
+    let mut facts = Facts::current().build();
+    facts.occurrences[0].class = OccurrenceClass::PromotedMemory;
+    facts.occurrences[0].representation = "summary";
+    assert_eq!(
+        classify(&occurrence(1), Some(&facts)),
+        CandidateState::Retracted
+    );
+}
+
+#[test]
+fn a_candidate_from_another_batch_reads_no_facts() {
+    let mut other = Facts::current().build();
+    other.object.object_id = "decision-object-2".to_string();
+    let batch = ClaimCandidateBatch {
+        known_as_of: 7,
+        claims: vec![other],
+        candidates: Vec::new(),
+    };
+    let mut foreign = ClaimCandidate {
+        row: occurrence(1),
+        state: CandidateState::Current,
+        claim: Some(0),
+    };
+    // In range, but the facts at that index belong to another object.
+    assert_eq!(batch.claim(&foreign), None);
+    foreign.claim = Some(1);
+    assert_eq!(
+        batch.claim(&foreign),
+        None,
+        "an out-of-range index reads no facts"
+    );
+    let own = ClaimCandidate {
+        row: ClaimCandidateRow {
+            object_id: "decision-object-2".to_string(),
+            ..occurrence(1)
+        },
+        state: CandidateState::Current,
+        claim: Some(0),
+    };
+    assert_eq!(batch.claim(&own), Some(&batch.claims[0]));
+}
+
 #[test]
 fn causal_class_changes_no_state() {
     for served_visibility in [SurfaceVisibility::Labeled, SurfaceVisibility::Hidden] {
@@ -341,9 +508,32 @@ fn causal_class_changes_no_state() {
 mod live_rows {
     use std::num::NonZeroUsize;
 
-    use retrieval::ProjectionError;
-    use retrieval::claims::{ClaimCandidateBounds, classify_live_claims, live_claim_candidates};
+    use kernel::source_identity::{Occurrence, OccurrenceClass, encode};
+    use retrieval::claims::{
+        ClaimCandidateBounds, ClaimCandidateError, classify_live_claims, live_claim_candidates,
+    };
+    use retrieval::{ProjectionError, ProjectionIdentity, install_identity};
+    use rusqlite::params;
     use storage::{Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite};
+
+    const KERNEL: &str = "kernel-incarnation-a";
+
+    fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
+        ProjectionIdentity {
+            schema_version: retrieval::SCHEMA_VERSION,
+            kernel_incarnation_id: kernel_incarnation_id.to_string(),
+            projection_policy_version: "policy".to_string(),
+            identity_contract_version: "search-projection-identity-v3".to_string(),
+            limit_manifest_protocol_version: "limits.v1".to_string(),
+            embedding_model: "model".to_string(),
+            tokenizer_fingerprint: "fingerprint".to_string(),
+            analysis_identity: retrieval::lexical::AnalysisIdentity::current()
+                .as_str()
+                .to_string(),
+            vector_dimension: 8,
+            generation_epoch: 1,
+        }
+    }
 
     fn open(dir: &std::path::Path) -> SqliteStore {
         open_sqlite(
@@ -364,30 +554,50 @@ mod live_rows {
         .unwrap()
     }
 
-    /// `count` live claim rows with associations, plus one message row that must
-    /// never appear, written straight into the baseline schema.
     fn seed(store: &SqliteStore, count: usize) {
         store
             .with_conn_unfenced(|conn| {
-                conn.execute_batch(&format!(
+                conn.execute_batch(
                     "INSERT INTO payloads(payload_id,bytes,byte_length,created_at) VALUES ('p',x'00',1,0);
-                     WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<{count})
                      INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
                          payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
                          source_artifact_digest,created_commit_seq,persisted_at)
-                     SELECT printf('occ-%08d',n),x'00','l',
-                         CASE n%2 WHEN 0 THEN 'canonical_claims' ELSE 'promoted_memory' END,
-                         1,'decision_summary','p','d','normal','srcdesc:s','e','digest',1,0 FROM ids;
-                     WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<{count})
-                     INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
-                         extraction_version,created_commit_seq)
-                     SELECT 'id','canonical_object',CAST(printf('obj-%08d',n) AS BLOB),printf('occ-%08d',n),
-                         printf('obj-%08d',n),1,1 FROM ids;
-                     INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
-                         payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
-                         source_artifact_digest,created_commit_seq,persisted_at)
-                     VALUES ('msg',x'01','m','messages',1,'text','p','d','normal','srcdesc:m','e','digest',1,0);"
-                ))
+                     VALUES ('msg',x'01','m','messages',1,'text','p','d','normal','srcdesc:m','e','digest',1,0);",
+                )?;
+                for n in 1..=count {
+                    let (class, field, representation) = if n % 2 == 0 {
+                        (OccurrenceClass::CanonicalClaims, "object_id", "decision_summary")
+                    } else {
+                        (OccurrenceClass::PromotedMemory, "decision_object_id", "summary")
+                    };
+                    let object_id = format!("obj-{n:08}");
+                    let tuple = encode(
+                        &Occurrence {
+                            class: class.code(),
+                            identity: &[(field, object_id.as_str())],
+                            revision: "1",
+                            representation,
+                            span: None,
+                        },
+                        "",
+                    )
+                    .unwrap()
+                    .tuple;
+                    conn.execute(
+                        "INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
+                             payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
+                             source_artifact_digest,created_commit_seq,persisted_at)
+                         VALUES (?1,?2,'l',?3,1,?4,'p','d','normal','srcdesc:s','e','digest',1,0)",
+                        params![format!("occ-{n:08}"), tuple, class.code(), representation],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
+                             extraction_version,created_commit_seq)
+                         VALUES ('id','canonical_object',CAST(?1 AS BLOB),?2,?1,1,1)",
+                        params![object_id, format!("occ-{n:08}")],
+                    )?;
+                }
+                Ok(())
             })
             .unwrap();
     }
@@ -466,11 +676,132 @@ mod live_rows {
     }
 
     #[test]
+    fn an_association_whose_target_disagrees_with_its_key_or_row_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        seed(&store, 2);
+        // The key and the row still identify obj-1; the target names obj-2.
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE exact_associations SET target_id='obj-00000002' WHERE occurrence_id='occ-00000001'",
+                    [],
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(live_claim_candidates(conn, bound(8))))
+                .unwrap(),
+            Err(ProjectionError::CorruptRow)
+        ));
+        // Key and target agree on obj-2, but the row's tuple identifies obj-1.
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE exact_associations SET key=CAST('obj-00000002' AS BLOB)
+                     WHERE occurrence_id='occ-00000001'",
+                    [],
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(live_claim_candidates(conn, bound(8))))
+                .unwrap(),
+            Err(ProjectionError::CorruptRow)
+        ));
+    }
+
+    #[test]
+    fn a_second_canonical_object_association_on_one_row_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        seed(&store, 2);
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
+                         extraction_version,created_commit_seq)
+                     VALUES ('id','canonical_object',CAST('obj-00000002' AS BLOB),'occ-00000001',
+                         'obj-00000002',1,1)",
+                    [],
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(live_claim_candidates(conn, bound(8))))
+                .unwrap(),
+            Err(ProjectionError::CorruptRow)
+        ));
+    }
+
+    #[test]
+    fn a_projection_from_another_kernel_incarnation_is_refused_before_any_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        seed(&store, 2);
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        let bounds = ClaimCandidateBounds {
+            max_rows: bound(1),
+            facts: kernel::ClaimFactBounds {
+                max_claims: bound(1),
+                max_causal_payload_bytes: std::num::NonZeroU64::new(1 << 16).unwrap(),
+            },
+        };
+        // No identity: refused before the row bound, which two rows would also trip.
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, bounds)))
+                .unwrap(),
+            Err(ClaimCandidateError::NoIdentity)
+        ));
+        store
+            .with_conn_fenced(|conn| Ok(install_identity(conn, &identity(KERNEL), 1)))
+            .unwrap()
+            .unwrap();
+        let refused = store
+            .with_conn(|conn| {
+                Ok(classify_live_claims(
+                    conn,
+                    &kernel,
+                    "kernel-incarnation-b",
+                    bounds,
+                ))
+            })
+            .unwrap();
+        match refused {
+            Err(ClaimCandidateError::ForeignKernel {
+                kernel_incarnation_id,
+            }) => assert_eq!(kernel_incarnation_id, KERNEL),
+            other => panic!("expected ForeignKernel, got {other:?}"),
+        }
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, bounds)))
+                .unwrap(),
+            Err(ClaimCandidateError::Projection(
+                ProjectionError::TooManyRecords { count: 2 }
+            ))
+        ));
+    }
+
+    #[test]
     fn distinct_objects_past_the_facts_bound_are_refused_before_the_kernel_is_read() {
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
         seed(&store, 3);
+        store
+            .with_conn_fenced(|conn| Ok(install_identity(conn, &identity(KERNEL), 1)))
+            .unwrap()
+            .unwrap();
         let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        // Renaming commit_log makes tip reads fail; TooManyClaims must win over Io.
+        let raw = rusqlite::Connection::open(dir.path().join("kernel/kernel.sqlite")).unwrap();
+        raw.execute_batch("ALTER TABLE commit_log RENAME TO unavailable_commit_log")
+            .unwrap();
+        assert_eq!(kernel.tip(), Err(kernel::KernelError::Io));
         let bounds = ClaimCandidateBounds {
             max_rows: bound(8),
             facts: kernel::ClaimFactBounds {
@@ -479,12 +810,27 @@ mod live_rows {
             },
         };
         let refused = store
-            .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, bounds)))
+            .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, bounds)))
             .unwrap();
         assert!(matches!(
             refused,
             Err(retrieval::claims::ClaimCandidateError::Facts(
                 kernel::ClaimFactsError::TooManyClaims
+            ))
+        ));
+        let at_bound = ClaimCandidateBounds {
+            facts: kernel::ClaimFactBounds {
+                max_claims: bound(3),
+                ..bounds.facts
+            },
+            ..bounds
+        };
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, at_bound)))
+                .unwrap(),
+            Err(retrieval::claims::ClaimCandidateError::Facts(
+                kernel::ClaimFactsError::Kernel(kernel::KernelError::Io)
             ))
         ));
     }

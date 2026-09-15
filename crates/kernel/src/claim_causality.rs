@@ -6,7 +6,8 @@
 //! The write path checks each named fact against the store inside the commit.
 //! Request text, roles, and producer strings grant nothing.
 //! Generic observation writers reject `CLAIM_CAUSALITY_KIND` as kind or source kind.
-//! Generic observation writers reject the `claimcause:` and `claimcauseobj:` ids.
+//! Generic observation writers reject the `claimcause:` and `claimcauseobj:` ids;
+//! commit validation refuses a `claimcauseobj:` registry row from any other writer.
 //! Retirement stays open through `retire_observation`: withdrawing lineage
 //! yields `Unknown`, which grants nothing.
 //! A reader returns `Unknown` when a named fact is missing or malformed.
@@ -22,7 +23,9 @@ use serde::{Deserialize, Serialize};
 
 use super::envelope::{Envelope, ObjectRow};
 use super::redaction::identity;
-use super::slice::{ObservationDependencySpec, ObservationPayload, ObservationSpec};
+use super::slice::{
+    DECISION_INSERT_KIND, ObservationDependencySpec, ObservationPayload, ObservationSpec,
+};
 use super::{
     CachedSql, KernelError, KernelStore,
     cas::{ExactEvidence, exact_evidence, is_artifact_digest},
@@ -159,7 +162,8 @@ impl CausalClass {
 }
 
 /// `producer` is the commit log's producer for the record's commit.
-/// `operation` is `None` when the detail did not decode.
+/// `operation` is `None` unless the detail decoded, names this subject, and
+/// agrees with the subject's succession.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CausalRecord {
     pub observation_id: String,
@@ -191,6 +195,12 @@ fn record_object_id(subject: &str, commit_seq: i64) -> String {
 }
 
 impl Envelope<'_> {
+    /// Registry inserts use several writers; commit validation admits
+    /// `claimcauseobj:` ids only when this envelope's causality writer owns them.
+    pub(super) fn check_causality_ownership(&self) -> Result<(), KernelError> {
+        self.check_reserved_ownership(OBJECT_ID_PREFIX, &self.causality_objects)
+    }
+
     /// The subject must be a live decision at `subject_revision`.
     /// `DirectObservation` cites live exact-retained evidence at `artifact_digest`.
     /// `DerivedReinjection` names 1..=[`MAX_DERIVATION_PARENTS`] distinct live parents.
@@ -214,19 +224,7 @@ impl Envelope<'_> {
         if subject.object.source_revision != request.subject_revision {
             return Err(ClaimCausalityError::SubjectRevisionMismatch);
         }
-        let replaced_predecessor: bool = self
-            .tx
-            .query_row_cached(
-                "SELECT EXISTS(SELECT 1 FROM object_registry WHERE superseded_by=?1)",
-                [&subject_id],
-                |row| row.get(0),
-            )
-            .map_err(map_sqlite)?;
-        let operation = if replaced_predecessor {
-            CausalOperation::Correct
-        } else {
-            CausalOperation::Insert
-        };
+        let operation = self.subject_operation(&subject.object)?;
         let (evidence_id, dependencies) = match &request.evidence {
             CausalEvidence::DirectObservation {
                 acquisition_evidence_id,
@@ -247,7 +245,11 @@ impl Envelope<'_> {
             operation,
             evidence: request.evidence.clone(),
         };
-        let detail_json = serde_json::to_string(&detail).map_err(|_| KernelError::InvalidInput)?;
+        // The observation writer redacts the detail again; a serialization the
+        // redactor would rewrite is refused here so the stored text equals the
+        // parents the dependency rows name.
+        let detail_json =
+            identity(&serde_json::to_string(&detail).map_err(|_| KernelError::InvalidInput)?)?;
         let object_id = record_object_id(&subject_id, self.commit_seq);
         let observation_id = format!("{OBSERVATION_ID_PREFIX}{subject_id}:{}", self.commit_seq);
         let predecessor = self.live_record(&subject_id)?;
@@ -289,11 +291,29 @@ impl Envelope<'_> {
                 self.correct_observation_inner(replaced, spec)?;
             }
         }
+        self.causality_objects
+            .insert(detail.subject_object_id, object_id.clone());
         Ok(ClaimCausalityOutcome {
             observation_id,
             object_id,
             operation,
             replaced_object_id: predecessor,
+        })
+    }
+
+    /// This commit's change events are written after the operation closure
+    /// returns, so a subject created in it is judged from the pending list.
+    fn subject_operation(&self, subject: &ObjectRow) -> Result<CausalOperation, KernelError> {
+        if subject.created_commit_seq != self.commit_seq {
+            return creation_operation(self.tx, subject);
+        }
+        let inserted = self.changes.iter().any(|change| {
+            change.kind == DECISION_INSERT_KIND && change.object.object_id == subject.object_id
+        });
+        Ok(if inserted {
+            CausalOperation::Insert
+        } else {
+            CausalOperation::Correct
         })
     }
 
@@ -410,6 +430,34 @@ struct SubjectRow {
     scope_id: Option<String>,
 }
 
+/// The operation is how the subject came to be: `Insert` when its creation
+/// commit logged a `decision_insert` for it, `Correct` when it was created as
+/// a replacement. Succession attached later, such as a predecessor folded into
+/// an already-live survivor by `correct_decision`, is not creation and leaves
+/// the operation unchanged at every snapshot.
+fn creation_operation(
+    tx: &Transaction<'_>,
+    subject: &ObjectRow,
+) -> Result<CausalOperation, KernelError> {
+    let inserted: bool = tx
+        .query_row_cached(
+            "SELECT EXISTS(SELECT 1 FROM change_event
+                           WHERE commit_seq=?1 AND object_id=?2 AND change_kind=?3)",
+            params![
+                subject.created_commit_seq,
+                subject.object_id,
+                DECISION_INSERT_KIND
+            ],
+            |row| row.get(0),
+        )
+        .map_err(map_sqlite)?;
+    Ok(if inserted {
+        CausalOperation::Insert
+    } else {
+        CausalOperation::Correct
+    })
+}
+
 /// Writer and reader select records through this one statement so they agree
 /// on what a record is: a `claimcauseobj:` registry row of the causality
 /// source kind whose observation carries the causality kind.
@@ -439,13 +487,7 @@ struct StoredRecord {
 
 impl KernelStore {
     /// Reads the causal class of `object_id` at `requested` from one snapshot.
-    ///
-    /// # Errors
-    ///
-    /// `NotFound` when no registry row for `object_id` exists by the snapshot;
-    /// `FutureSnapshot` when `requested` exceeds the tip; `InvalidInput` for a
-    /// negative sequence; `CorruptCanonicalRow` for an undecodable descriptor
-    /// row; `Busy`, `Deadline`, or `Io` from the reader.
+    /// This call has no deadline for reader acquisition or query execution.
     pub fn causal_class_as_of(
         &self,
         object_id: &str,
@@ -561,7 +603,6 @@ pub(crate) fn causal_class_at(
         Ok(detail) => detail,
         Err(reason) => return Ok((CausalClass::Unknown(reason), Some(summary))),
     };
-    summary.operation = Some(detail.operation);
     if detail.subject_object_id != subject.object_id
         || detail.subject_revision != subject.source_revision
     {
@@ -570,10 +611,19 @@ pub(crate) fn causal_class_at(
             Some(summary),
         ));
     }
-    // The detail is the one column without an immutability guard, so each
-    // class is accepted only where the guarded columns agree with it: the
-    // cited `evidence_id` for an acquisition, the `derived_from` rows for a
-    // derivation.
+    if detail.operation != creation_operation(tx, subject)? {
+        return Ok((
+            CausalClass::Unknown(UnknownReason::Malformed),
+            Some(summary),
+        ));
+    }
+    summary.operation = Some(detail.operation);
+    // The detail is producer text. A class is accepted only where the columns
+    // the writer set from store-verified facts agree with it: the cited
+    // `evidence_id` for an acquisition, the `derived_from` rows for a
+    // derivation. No table here carries an immutability trigger; this binds
+    // the detail to those facts and to the live evidence, it does not defend
+    // against an editor with write access to the whole file.
     let class = match detail.evidence {
         CausalEvidence::DirectObservation {
             acquisition_evidence_id,
@@ -660,7 +710,7 @@ fn dependencies_match(
         .iter()
         .map(|parent| (parent.object_id.clone(), Some(parent.revision.to_string())))
         .collect();
-    Ok(stored == named)
+    Ok(named.len() == parents.len() && stored == named)
 }
 
 // A parent invalidated after the derivation was observed does not erase the

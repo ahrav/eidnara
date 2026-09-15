@@ -80,23 +80,35 @@ Exercised: partial - the kernel reader is compared with the writer's reported
 admission and with the serving route at one snapshot; comparison of projected
 rows against this reader at a fenced export snapshot belongs to the
 materialization ticket.
-Guarantee: Every field `claim_facts_as_of` returns for a claim at snapshot S
-equals the stored canonical row at S, and a later commit does not change the
-answer for S.
+Guarantee: Every revisioned field `claim_facts_as_of` returns for a claim at
+snapshot S (registry, decision, own and lineage admission rows, occurrences,
+causality) equals the stored canonical row at S, and a later commit does not
+change those fields for S. `served` and `supporting_approval.valid_at_snapshot`
+are excluded: they read the cited evidence's class as it is today
+(`admission.rs` `served_classes` and `supporting_approval_valid_sql`), and
+classification merging rewrites `evidence_meta.sensitivity_class` in place
+(`cas/ingest.rs` `MergedClassification::apply`), so a later tightening changes
+them for an older S. That is fail-closed serving, not a snapshot fact.
 Check: `always` - for each returned claim, own and lineage admission fields,
 decision fields, and registry fields equal the rows selected at S by an
-independent query; re-reading S after further commits yields an equal value.
+independent query; re-reading S after further commits yields an equal value
+for the revisioned fields; re-reading S after the cited evidence is tightened
+may change `served` and `supporting_approval.valid_at_snapshot`, but no
+revisioned field.
 Fault/timing angle: a write between two reads of the same S; a snapshot before
-the object existed.
+the object existed; evidence reclassified after S.
 Required faults and enabling state: at least one later commit after S touching
-the same lineage; one request naming an id created after S.
+the same lineage; one request naming an id created after S; the same artifact
+re-ingested as secret after S.
 Confidence: medium - [evidence](evidence/canonical-claim-fields-match-fenced-source.md).
 Verified `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot` in
 `crates/kernel/tests/kernel_claim_facts.rs` writes through the public API and
-compares field by field.
-Existing check: `crates/kernel/tests/kernel_claim_facts.rs` - `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot`; status unaudited.
+compares field by field, and `served_facts_follow_the_cited_evidence_class_read_today`
+rereads S after tightening.
+Existing check: `crates/kernel/tests/kernel_claim_facts.rs` - `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot`, `served_facts_follow_the_cited_evidence_class_read_today`; status unaudited.
 Impact: a projection built from drifting facts serves approval or maturity the
-kernel never granted.
+kernel never granted; a cache or fenced comparison that treats `served` as
+fixed at S misses a later tightening.
 Open questions:
 - The fenced export comparison at S is the materialization ticket's oracle; this
   record covers the reader only.
@@ -147,7 +159,7 @@ derivation naming `MAX_DERIVATION_PARENTS + 1` parents.
 Confidence: medium - [evidence](evidence/claim-capacity-failure-is-atomic.md).
 Verified `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`
 and the `too-many` case of `derived_reinjection_rests_on_exact_live_parents`.
-Existing check: `crates/kernel/tests/kernel_claim_facts.rs`; status unaudited.
+Existing check: `crates/kernel/tests/kernel_claim_facts.rs`; `crates/kernel/tests/kernel_claim_causality.rs`; status unaudited.
 Impact: a partially applied over-limit request leaves the store or its readers
 with an inventory that never corresponds to one bound.
 Open questions: None.
@@ -287,13 +299,17 @@ materialization ticket.
 Guarantee: A required claim field that does not decode is an explicit error,
 never a default that implies approval, and never a silently skipped claim.
 Check: `always` - `Err(MalformedRequiredField)` when any required enum or
-sensitivity column of a returned admission row is unrecognized.
+sensitivity column of a returned admission row is unrecognized, or when the
+registry class of a returned decision is unrecognized; `Err(CorruptCanonicalRow)`
+when the decision row's stored class or creation commit differs from the
+registry row's.
 Fault/timing angle: none.
 Required faults and enabling state: corrupted `maturity`, `disposition`, and
 `sensitivity_class` columns; a decision row whose class differs from its
-registry row.
+registry row; a registry row whose class no build reads.
 Confidence: medium - [evidence](evidence/malformed-required-field-stops-projection-progress.md).
-Verified `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`.
+Verified `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`
+and `a_registry_class_this_build_cannot_read_is_an_error_not_a_secret_default`.
 Existing check: `crates/kernel/tests/kernel_claim_facts.rs`; status unaudited.
 Impact: a decode failure read as a default admits or hides a claim by accident.
 Open questions: None.
@@ -304,24 +320,42 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: partial - the inventory keys each representation by the kernel's
-encoded occurrence tuple, lists absent representations as exclusions, and
-keeps equal bytes under `canonical_claims` and `promoted_memory` as two
-occurrences; existing `source_identity` tests cover tuple inequality.
+encoded whole-buffer occurrence tuple, lists absent representations as
+exclusions, keeps equal bytes under `canonical_claims` and `promoted_memory`
+as two occurrences, and reports a partial-span publication as `NoDescriptor`;
+existing `source_identity` tests cover tuple inequality.
 Guarantee: The occurrence inventory of a claim has one entry per published
-(class, representation) at the claim's revision, each identified by the
-encoded tuple, and a representation without a descriptor is an explicit
-exclusion rather than a missing entry.
+whole-buffer (class, representation) at the claim's revision, each identified
+by the encoded tuple, and a representation without a whole-buffer descriptor
+is an explicit exclusion rather than a missing entry. Every id the entry
+reports equals the joined registry, observation, and evidence column it was
+judged live by. Partial-span descriptors are outside the inventory: the span
+is hashed into the lineage id (`source_identity.rs` `finish`), so the reader
+cannot derive their object ids from the claim, and the kernel's own claim
+producer (`crates/daemon/src/claim_sources.rs`) publishes `span: None` only.
 Check: `always` - occurrence ids equal the descriptor outcomes the test wrote;
-the exclusion list names every unpublished representation.
+the exclusion list names every representation without a whole-buffer
+descriptor; a stored detail whose `lineage_id`, `evidence_id`,
+`artifact_digest`, or `payload_id` differs from the joined columns, or a
+registry `source_kind`, `source_revision`, or observation `sensitivity_class`
+that disagrees with the row it was admitted with, fails the request with
+`CorruptCanonicalRow`.
 Fault/timing angle: none.
 Required faults and enabling state: a claim with two of three representations
-published under two classes with equal bytes.
+published under two classes with equal bytes; a descriptor detail rewritten
+out of band to name other rows; a guarded column rewritten out of band; a
+partial-span publication of a claim representation.
 Confidence: medium - [evidence](evidence/occurrence-identity-is-not-payload-or-source-triple.md).
-Verified `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot`.
+Verified `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot`,
+`occurrence_facts_refuse_a_detail_that_disagrees_with_its_guarded_rows`, and
+`a_partial_span_publication_is_outside_the_whole_buffer_inventory`.
 Existing check: `crates/kernel/tests/kernel_source_descriptors.rs`, `crates/kernel/tests/kernel_claim_facts.rs`; status unaudited.
 Impact: collapsing occurrences by payload or source triple merges independent
 observations into one.
-Open questions: None.
+Open questions:
+- A claim-scoped inventory of partial-span descriptors needs an identity index
+  the kernel does not have; the export's class-wide page is the only reader of
+  them today (needs human input if a producer starts publishing spans).
 
 ### projection-has-no-second-truth-or-policy-authority
 
@@ -329,13 +363,15 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: partial - the reader copies stored rows and derives visibility
-through the serving query itself; no production identifier check runs.
+through the serving query itself; the `Retired memory-plane identifiers` CI
+step in `.github/workflows/ci.yml` rejects the deleted machinery's names in
+production content.
 Guarantee: The facts reader evaluates no admission policy and restates no
 selection rule: the own and lineage rows are chosen by the serving view's own
 SQL (`served_own_decision_sql`, `served_lineage_decision_sql`), their fields
 are copied, served visibility comes from `admission::served_classes`, and the
-occurrence inventory applies the export's liveness rule (registry timestamps
-plus live evidence).
+occurrence inventory selects descriptors through `Descriptors::LiveAtEnd`, the
+export's own liveness predicate.
 Check: `always` - own and lineage admission fields equal the writer's
 `AdmissionDecision`; served visibility equals `visible_as_of` on every surface
 at the same snapshot; the served standing distinguishes a retired object from
@@ -346,11 +382,11 @@ Confidence: medium - [evidence](evidence/projection-has-no-second-truth-or-polic
 Verified `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot`,
 `a_lineage_admission_binds_every_object_on_the_lineage`, and
 `corrected_claims_report_succession_and_serving_standing_at_the_snapshot`.
-Existing check: `crates/kernel/tests/kernel_claim_facts.rs`; status unaudited.
+Existing check: `crates/kernel/tests/kernel_claim_facts.rs`; `.github/workflows/ci.yml` `Retired memory-plane identifiers` step for A4; status unaudited.
 Impact: a second evaluator drifts from the kernel and grants what it denies.
 Open questions:
-- The A4 production identifier check (no `claim_mirror`, `claim_operation`)
-  needs a repository-level test.
+- The A4 identifier gate is a fixed token list in the workflow; whether that
+  list covers every deleted claim-machinery name is unaudited.
 
 ### retrieved-content-cannot-upgrade-write-authority
 
@@ -370,7 +406,7 @@ kind, id prefix, or object prefix.
 Confidence: medium - [evidence](evidence/retrieved-content-cannot-upgrade-write-authority.md).
 Verified `forged_records_and_copied_strings_grant_nothing` in
 `crates/kernel/tests/kernel_claim_causality.rs`.
-Existing check: `crates/kernel/tests/kernel_claim_facts.rs`; status unaudited.
+Existing check: `crates/kernel/tests/kernel_claim_causality.rs`; status unaudited.
 Impact: poisoned content escalates into write or edit authority.
 Open questions: None.
 
@@ -500,8 +536,9 @@ Status: active
 Exercised: yes - `causal_class_changes_no_state` runs every state-relevant
 fact combination under `Unknown`, `DirectObservation`, and
 `DerivedReinjection` and asserts equal states; `classify` takes no causal
-class by signature; the daemon test shows a `DirectObservation` record
-leaving Current unchanged.
+class by signature; the daemon test classifies the caught-up projection,
+records a `DirectObservation` on the successor, classifies again, and asserts
+the two maps are equal.
 Guarantee: The causal class of a claim never changes its candidate state, and
 no field of a candidate carries a score, boost, corroboration count, or
 suppression flag derived from it.
@@ -706,19 +743,20 @@ Exercised: yes - after a quarantine and a correction the projection has not
 caught up with, both the classification snapshot and the fresh revalidation of
 a subset of earlier survivors deny the restricted objects; the unaffected
 claims stay permitted. A representation whose descriptor was retired after
-classification, and a row whose artifact digest disagrees with the kernel's
-occurrence inventory, are denied `Stale` at the validation snapshot while the
-kernel still permits the object; the accounting's lineage is read at that
-snapshot too.
+classification is denied `Retracted`, and a row whose artifact digest
+disagrees with the kernel's occurrence inventory is denied `Stale`, both at the
+validation snapshot while the kernel still permits the object; the accounting's
+lineage is read at that snapshot too.
 Guarantee: A projection row that was Current at an earlier snapshot grants
 nothing at a later one; every use is judged against the kernel at a fresh
 snapshot, and a restriction completed before that snapshot denies the use.
 The row itself is judged there as well: only a row the kernel's occurrence
 inventory lists with the row's artifact can be permitted.
 Check: `always` - `validate_for_surface` over survivors selected earlier returns
-`Denied(Verdict(_))` for every object the kernel restricted since, and
-`Denied(State(Stale))` for a row whose occurrence the kernel no longer lists or
-lists with another artifact; its `snapshot.tip` exceeds the earlier snapshot's,
+`Denied(Verdict(_))` for every object the kernel restricted since,
+`Denied(State(Retracted))` for a row whose occurrence the kernel no longer
+lists, and `Denied(State(Stale))` for one it lists with another artifact; its
+`snapshot.tip` exceeds the earlier snapshot's,
 and `unknown_objects` follows causality recorded since.
 Fault/timing angle: the window between selection and handoff.
 Required faults and enabling state: approve-then-quarantine and correction landing between two validations; a descriptor retirement, a forged row digest, and a causality record landing between classification and validation.
