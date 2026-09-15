@@ -554,6 +554,48 @@ mod live_rows {
         .unwrap()
     }
 
+    /// Row `n` as the extractor would encode it: even rows are canonical claims,
+    /// odd rows promoted memory, all for object `obj-n` at revision 1.
+    fn encoded(
+        n: usize,
+    ) -> (
+        OccurrenceClass,
+        &'static str,
+        String,
+        kernel::source_identity::EncodedOccurrence,
+    ) {
+        let (class, field, representation) = if n.is_multiple_of(2) {
+            (
+                OccurrenceClass::CanonicalClaims,
+                "object_id",
+                "decision_summary",
+            )
+        } else {
+            (
+                OccurrenceClass::PromotedMemory,
+                "decision_object_id",
+                "summary",
+            )
+        };
+        let object_id = format!("obj-{n:08}");
+        let encoded = encode(
+            &Occurrence {
+                class: class.code(),
+                identity: &[(field, object_id.as_str())],
+                revision: "1",
+                representation,
+                span: None,
+            },
+            "",
+        )
+        .unwrap();
+        (class, representation, object_id, encoded)
+    }
+
+    fn occ(n: usize) -> String {
+        encoded(n).3.occurrence_id
+    }
+
     fn seed(store: &SqliteStore, count: usize) {
         store
             .with_conn_unfenced(|conn| {
@@ -565,36 +607,25 @@ mod live_rows {
                      VALUES ('msg',x'01','m','messages',1,'text','p','d','normal','srcdesc:m','e','digest',1,0);",
                 )?;
                 for n in 1..=count {
-                    let (class, field, representation) = if n % 2 == 0 {
-                        (OccurrenceClass::CanonicalClaims, "object_id", "decision_summary")
-                    } else {
-                        (OccurrenceClass::PromotedMemory, "decision_object_id", "summary")
-                    };
-                    let object_id = format!("obj-{n:08}");
-                    let tuple = encode(
-                        &Occurrence {
-                            class: class.code(),
-                            identity: &[(field, object_id.as_str())],
-                            revision: "1",
-                            representation,
-                            span: None,
-                        },
-                        "",
-                    )
-                    .unwrap()
-                    .tuple;
+                    let (class, representation, object_id, encoded) = encoded(n);
                     conn.execute(
                         "INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
                              payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
                              source_artifact_digest,created_commit_seq,persisted_at)
-                         VALUES (?1,?2,'l',?3,1,?4,'p','d','normal','srcdesc:s','e','digest',1,0)",
-                        params![format!("occ-{n:08}"), tuple, class.code(), representation],
+                         VALUES (?1,?2,?3,?4,1,?5,'p','d','normal','srcdesc:s','e','digest',1,0)",
+                        params![
+                            encoded.occurrence_id,
+                            encoded.tuple,
+                            encoded.lineage_id,
+                            class.code(),
+                            representation
+                        ],
                     )?;
                     conn.execute(
                         "INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
                              extraction_version,created_commit_seq)
                          VALUES ('id','canonical_object',CAST(?1 AS BLOB),?2,?1,1,1)",
-                        params![object_id, format!("occ-{n:08}")],
+                        params![object_id, encoded.occurrence_id],
                     )?;
                 }
                 Ok(())
@@ -615,20 +646,17 @@ mod live_rows {
             .with_conn(|conn| Ok(live_claim_candidates(conn, bound(4))))
             .unwrap()
             .unwrap();
+        // Canonical claims sort before promoted memory, then by occurrence id.
+        let mut claims = [occ(2), occ(4)];
+        claims.sort();
+        let mut memory = [occ(1), occ(3)];
+        memory.sort();
         let ids: Vec<&str> = rows.iter().map(|row| row.occurrence_id.as_str()).collect();
-        assert_eq!(
-            ids,
-            [
-                "occ-00000002",
-                "occ-00000004",
-                "occ-00000001",
-                "occ-00000003"
-            ]
-        );
-        assert!(
+        assert_eq!(ids, [&claims[0], &claims[1], &memory[0], &memory[1]]);
+        assert!((1..=4).all(|n| {
             rows.iter()
-                .all(|row| row.object_id == row.occurrence_id.replace("occ", "obj"))
-        );
+                .any(|row| row.occurrence_id == occ(n) && row.object_id == format!("obj-{n:08}"))
+        }));
         assert!(matches!(
             store
                 .with_conn(|conn| Ok(live_claim_candidates(conn, bound(3))))
@@ -645,8 +673,8 @@ mod live_rows {
         store
             .with_conn_fenced(|conn| {
                 conn.execute(
-                    "UPDATE exact_associations SET extraction_version=7 WHERE occurrence_id='occ-00000001'",
-                    [],
+                    "UPDATE exact_associations SET extraction_version=7 WHERE occurrence_id=?1",
+                    [occ(1)],
                 )
             })
             .unwrap();
@@ -662,8 +690,8 @@ mod live_rows {
         store
             .with_conn_fenced(|conn| {
                 conn.execute(
-                    "DELETE FROM exact_associations WHERE occurrence_id='occ-00000001'",
-                    [],
+                    "DELETE FROM exact_associations WHERE occurrence_id=?1",
+                    [occ(1)],
                 )
             })
             .unwrap();
@@ -684,8 +712,8 @@ mod live_rows {
         store
             .with_conn_fenced(|conn| {
                 conn.execute(
-                    "UPDATE exact_associations SET target_id='obj-00000002' WHERE occurrence_id='occ-00000001'",
-                    [],
+                    "UPDATE exact_associations SET target_id='obj-00000002' WHERE occurrence_id=?1",
+                    [occ(1)],
                 )
             })
             .unwrap();
@@ -700,8 +728,57 @@ mod live_rows {
             .with_conn_fenced(|conn| {
                 conn.execute(
                     "UPDATE exact_associations SET key=CAST('obj-00000002' AS BLOB)
-                     WHERE occurrence_id='occ-00000001'",
-                    [],
+                     WHERE occurrence_id=?1",
+                    [occ(1)],
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(live_claim_candidates(conn, bound(8))))
+                .unwrap(),
+            Err(ProjectionError::CorruptRow)
+        ));
+    }
+
+    /// `occurrence_identity_matches` checks the tuple's identity prefix only; the
+    /// stored id and the revision, representation, and span columns are checked
+    /// against the tuple with `identity_digest` and `derived_lineage_id`.
+    #[test]
+    fn a_row_whose_columns_disagree_with_its_tuple_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        seed(&store, 2);
+        // The tuple encodes revision 1; the column now says 2.
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE occurrences SET revision=2 WHERE occurrence_id=?1",
+                    [occ(1)],
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(live_claim_candidates(conn, bound(8))))
+                .unwrap(),
+            Err(ProjectionError::CorruptRow)
+        ));
+        // Row 2 keeps a consistent tuple and columns but carries row 1's id.
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE occurrences SET revision=1, tuple=(SELECT tuple FROM occurrences WHERE occurrence_id=?2),
+                         lineage_id=(SELECT lineage_id FROM occurrences WHERE occurrence_id=?2),
+                         class=(SELECT class FROM occurrences WHERE occurrence_id=?2),
+                         representation=(SELECT representation FROM occurrences WHERE occurrence_id=?2)
+                     WHERE occurrence_id=?1",
+                    [occ(1), occ(2)],
+                )?;
+                conn.execute(
+                    "UPDATE exact_associations SET key=CAST('obj-00000002' AS BLOB), target_id='obj-00000002'
+                     WHERE occurrence_id=?1",
+                    [occ(1)],
                 )
             })
             .unwrap();
@@ -723,9 +800,9 @@ mod live_rows {
                 conn.execute(
                     "INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
                          extraction_version,created_commit_seq)
-                     VALUES ('id','canonical_object',CAST('obj-00000002' AS BLOB),'occ-00000001',
+                     VALUES ('id','canonical_object',CAST('obj-00000002' AS BLOB),?1,
                          'obj-00000002',1,1)",
-                    [],
+                    [occ(1)],
                 )
             })
             .unwrap();

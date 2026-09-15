@@ -87,6 +87,9 @@ Codex review of the pushed branch added three findings:
 | A second `canonical_object` association on one occurrence would have doubled its candidate rows | gap | covered by the key and tuple check above: the second row's key cannot match the tuple; `a_second_canonical_object_association_on_one_row_is_refused` pins it |
 | `spec-integration.md` attributed the snapshot read to `classify` | refinement | fixed in the record: `classify_live_claims` is the snapshot-bound read, `classify` the mapping over loaded facts |
 | `classify_live_claims` read `kernel.tip()` and then `claim_facts_as_of` as two unguarded calls, so a restore between them paired one history's tip with another's rows; the incarnation check compared only the projection identity with the caller's string | gap | fixed: `KernelStore::claim_facts_at` reads at a `CommitReadTarget` and refuses `IncarnationMismatch` under the reader guard; the classifier captures the target with `capture_commit_read_target`, as the materializer does; `facts_at_a_target_refuse_another_incarnation` |
+| `live_claim_candidates` checked the tuple's identity prefix only, so a row whose id, revision, representation, span, or lineage column disagreed with its tuple still classified | gap | fixed: `identity_digest` and `derived_lineage_id` are checked as `AssociationRow::decode` does; `a_row_whose_columns_disagree_with_its_tuple_is_refused`; the seed now writes the extractor's ids |
+| `spec-integration.md` still described the removed `kernel.tip()` then `claim_facts_as_of` sequence | refinement | fixed in the record: `capture_commit_read_target` then `claim_facts_at` |
+| No byte bound on the tuple and key blobs the live-claim read selects | bias | kept: `exact::lookup::page` reads the same `o.tuple` and `a.key` columns without one, and both are bounded at write time by `MAX_IDENTITY_VALUE_BYTES` and `MAX_CLAIM_OBJECT_ID_BYTES`; a projection-wide blob preflight is its own change |
 
 ## Final-use gate change
 
