@@ -1594,7 +1594,7 @@ mod tests {
     fn production_profile_affords_five_connections_under_the_byte_ceiling() {
         let one = per_connection_limits();
         assert_eq!(one.mapping_bytes, 2 * 95_825_920);
-        assert_eq!(one.ledger_bytes, 2 * 187 * 40);
+        assert_eq!(one.ledger_bytes, 2 * 187 * 44);
         assert_eq!(MAX_RING_RESIDENT_BYTES, 1 << 30);
         assert_eq!(affordable_connections(), 5);
         assert_eq!(crate::config::HostLimits::default().max_connections, 5);

@@ -518,11 +518,11 @@ pub fn align_up(value: usize, alignment: usize) -> Result<usize, GeometryError> 
 /// Bytes the private producer ledger and receiver records occupy for `geometry`, charged
 /// beside the mapping so admission counts every allocation activation performs.
 pub fn ledger_bytes(geometry: &PoolGeometry) -> u64 {
-    // Producer: per block one state word and one generation, one free-list entry and one
-    // outstanding-list entry. Receiver: per block one live generation and one last-seen
-    // generation.
+    // Producer: per block one state word and one generation, one free-list entry, one
+    // outstanding-list entry, and one reclaimed-list entry. Receiver: per block one live
+    // generation and one last-seen generation.
     let blocks = u64::from(geometry.block_count());
-    let per_block = (4 * size_of::<u64>() + 2 * size_of::<u32>()) as u64;
+    let per_block = (4 * size_of::<u64>() + 3 * size_of::<u32>()) as u64;
     blocks.saturating_mul(per_block)
 }
 
