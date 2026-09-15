@@ -1006,7 +1006,7 @@ impl<'a> EmbeddingDispatcher<'a> {
         pass: &Pass<'_>,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Option<Blocked>, DispatchError> {
-        let retry_at = pass.now + pass.bounds.retry_after;
+        let retry_at = pass.now.saturating_add(pass.bounds.retry_after);
         let job_id = job.job_id.clone();
         match self.write(|conn| record_retry(conn, &job.job_id, kind, retry_at, pass.now))? {
             Disposition::Retry => observer(DispatchEvent::Retried { job_id, kind }),

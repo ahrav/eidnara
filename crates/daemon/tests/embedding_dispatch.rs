@@ -900,6 +900,28 @@ fn scenario(
     )
 }
 
+/// A retry delay that would exceed `i64::MAX` saturates `next_attempt_at` at `i64::MAX`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_delay_at_the_clock_limit_saturates() {
+    let mut far = bounds();
+    far.retry_after = i64::MAX;
+    let (dir, _, _, occurrence, _, _, events, end) = scenario(
+        "retry me",
+        LocalEmbeddingsLimits::default(),
+        far,
+        |_, _, engine, _, _| {
+            engine.fail_next(InferenceError::Execution("transient".to_owned()));
+        },
+    );
+    assert_eq!(end, None);
+    let job = ledger(dir.path(), &occurrence);
+    assert_eq!(
+        retried(&events),
+        vec![(job.job_id.clone(), "execution_failure")]
+    );
+    assert_eq!(job.next_attempt_at, Some(i64::MAX));
+}
+
 /// AC5, AC6: a transient failure keeps the row pending under the same episode with its attempt charged, and it is eligible again only when its retry time comes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transient_failure_retries_under_the_same_episode() {

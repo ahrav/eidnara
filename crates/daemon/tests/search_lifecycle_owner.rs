@@ -1023,6 +1023,30 @@ fn a_rebuild_request_under_unboundable_limits_records_nothing() {
     assert!(matches!(control(home), ControlState::Intent(_)));
 }
 
+/// Disabling a home that has run a slice but registered no family persists the stop and completes; there is no family to reconcile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabling_an_unregistered_home_completes() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Unregistered
+    ));
+    owner
+        .disable(&slice_budget(), &mut |_| {})
+        .await
+        .expect("nothing to reconcile");
+    assert!(matches!(control(home), ControlState::Disabled(_)));
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Disabled
+    ));
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

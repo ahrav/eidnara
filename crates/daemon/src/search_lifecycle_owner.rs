@@ -671,7 +671,7 @@ impl SearchLifecycleOwner {
         selection.pin(&self.kernel, self.admission.gate(), budget)
     }
 
-    /// Closes admission, persists the disabled intent, then reconciles the disabled family within the manifest's cleanup envelope. Admission is closed before any filesystem write. A dropped future leaves the persisted intent for a later disable to reconcile.
+    /// Closes admission, persists the disabled intent, then reconciles the disabled family within the manifest's cleanup envelope; a home with no lifecycle record has no family, so its persisted stop completes the disable. Admission is closed before any filesystem write. A dropped future leaves the persisted intent for a later disable to reconcile.
     ///
     /// # Errors
     ///
@@ -704,10 +704,9 @@ impl SearchLifecycleOwner {
         let ControlState::Disabled(disabled) = ProjectionLifecycle::open(&self.home)?.read() else {
             return Err(BuildError::Invalid("disable did not persist"));
         };
-        let intent = disabled
-            .handoff
-            .as_deref()
-            .ok_or(BuildError::Invalid("disabled record names no operation"))?;
+        let Some(intent) = disabled.handoff.as_deref() else {
+            return Ok(());
+        };
         let spec = replacement_spec(
             inputs.manifest(),
             selection.identity().clone(),
@@ -785,6 +784,10 @@ fn maintenance_bounds(
 ) -> Result<SliceBounds, SpecRefusal> {
     let slice_ms = limit(manifest, "supervisor_slice_ms")?;
     let lease_ms = limit(manifest, "lease_duration_ms")?;
+    let retry_after =
+        i64::try_from(lease_ms).map_err(|_| SpecRefusal::LimitRange("lease_duration_ms"))?;
+    let recovery_ms = i64::try_from(limit(manifest, "B_recovery_ms")?)
+        .map_err(|_| SpecRefusal::LimitRange("B_recovery_ms"))?;
     Ok(SliceBounds {
         dispatch: DispatchBounds {
             max_jobs: spec.episode.batch.max_pending,
@@ -793,11 +796,9 @@ fn maintenance_bounds(
                     .ok()
                     .and_then(NonZeroU32::new)
                     .ok_or(SpecRefusal::TooSmall("embedding_recovery_attempts"))?,
-                deadline: crate::now_ms().saturating_add(
-                    i64::try_from(limit(manifest, "B_recovery_ms")?).unwrap_or(i64::MAX),
-                ),
+                deadline: crate::now_ms().saturating_add(recovery_ms),
             },
-            retry_after: i64::try_from(lease_ms).unwrap_or(i64::MAX),
+            retry_after,
             result_wait: Duration::from_millis(lease_ms.min(slice_ms / 2)),
         },
         sweep_candidates: nonzero_usize(
@@ -1145,6 +1146,21 @@ mod tests {
         identity: ProjectionIdentity,
     ) -> Result<ReplacementSpec, SpecRefusal> {
         replacement_spec(manifest, identity, Transition::Rebuilding, 3, "generation")
+    }
+
+    #[test]
+    fn maintenance_limits_that_do_not_fit_the_clock_refuse_the_bounds() {
+        for name in ["lease_duration_ms", "B_recovery_ms"] {
+            let identity = test_identity();
+            let mut manifest = manifest(&identity);
+            manifest.limits.insert(name.to_owned(), u64::MAX);
+            let spec = spec(&manifest, identity).unwrap();
+            assert_eq!(
+                maintenance_bounds(&manifest, &spec).err(),
+                Some(SpecRefusal::LimitRange(name)),
+                "{name}"
+            );
+        }
     }
 
     #[test]
