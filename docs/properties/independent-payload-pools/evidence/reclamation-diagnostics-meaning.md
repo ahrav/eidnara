@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-Diagnostics report outstanding return obligations, quarantined commitment, and actually released backing as distinct, consistently snapshotted quantities. The specification (#524) names this record under its
+Diagnostics report outstanding return obligations, quarantined commitment, and actually released backing as distinct quantities, each sampled independently rather than as one atomic snapshot. The specification (#524) names this record under its
 acceptance section and ties it to the requirements and decisions the
 `catalog.md` relationship map lists.
 
@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/host-runtime/src/ring_transport.rs:261`
 - `crates/host-runtime/src/ring_transport.rs:377`
 
-Witness status: yes - `crates/host-runtime/src/ring_transport.rs:3298` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:261`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:3348` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:262`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
 
 ## Failure scenario
 

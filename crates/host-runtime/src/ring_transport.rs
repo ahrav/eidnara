@@ -254,10 +254,11 @@ impl RingTransport {
         }
     }
 
-    /// Return obligations and released backing, snapshotted together under one lock so the
-    /// two quantities describe the same instant: `outstanding` counts live owned leases across
-    /// every backing still mapped; `released_backings` counts backings whose last holder has
-    /// dropped, each of which returned `mapping_bytes_per_direction` bytes.
+    /// Return obligations and released backing, read in one pass over the backing registry:
+    /// `outstanding` counts live owned leases across every backing still mapped;
+    /// `released_backings` counts backings whose last holder has dropped, each of which
+    /// returned `mapping_bytes_per_direction` bytes. Leases return on other threads while the
+    /// pass runs, so the two counts are independent samples, not one atomic snapshot.
     pub fn return_snapshot(&self) -> ReturnSnapshot {
         let mut outstanding = 0u64;
         let mut live = 0u64;
@@ -1095,7 +1096,7 @@ impl Publisher {
         let mut credits = Vec::with_capacity(geometry.block_count() as usize);
         credits.resize_with(geometry.block_count() as usize, || None);
         Self {
-            pending: VecDeque::with_capacity(capacity.max(1)),
+            pending: VecDeque::new(),
             capacity: capacity.max(1),
             frame_deadline,
             terminal_capacity: geometry
@@ -2817,6 +2818,55 @@ mod tests {
                 consumer.try_receive().unwrap().expect("filled frame")
             })
             .collect()
+    }
+
+    /// A valid `writer_queue_frames` may be as large as `Semaphore::MAX_PERMITS`; the pending
+    /// set must not allocate that depth up front.
+    #[test]
+    fn a_publisher_does_not_preallocate_its_configured_depth() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let publisher = Publisher::new(
+            &rings.first,
+            tokio::sync::Semaphore::MAX_PERMITS,
+            Duration::from_secs(1),
+            None,
+        );
+        assert!(publisher.can_accept());
+        assert_eq!(publisher.pending.capacity(), 0);
+    }
+
+    /// A failed return doorbell makes `into_private` return `PrivateCopyError::Transport`.
+    #[test]
+    fn into_private_reports_a_failed_return_wake_as_a_transport_error() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let mut held = exhaust_smallest_class(&rings.first, &consumer);
+        let lease = held.pop().unwrap();
+        assert_eq!(
+            rings.first.arm_capacity_wait(),
+            Ok(true),
+            "the producer parks, so the return must ring the doorbell"
+        );
+        // Dropping the producer closes its doorbell ends; the return's wake now fails.
+        drop(rings);
+        let header = EnvelopeHeader {
+            len: lease.len() as u32,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 0,
+            epoch: 0,
+            corr: 1,
+        };
+        let budget = ByteBudget::new(16);
+        let charge = budget.try_charge(lease.len()).unwrap();
+        let frame = InboundFrame::new(header, lease, charge);
+        assert_eq!(
+            frame.into_private().err(),
+            Some(crate::frame_channel::PrivateCopyError::Transport),
+            "a failed return wake is a transport failure, not a private frame"
+        );
+        drop(held);
     }
 
     #[test]

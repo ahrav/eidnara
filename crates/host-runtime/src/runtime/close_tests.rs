@@ -213,13 +213,17 @@ async fn post_abort_emission_shares_the_close_deadline() {
     let CloseFixture {
         shared,
         generation,
+        queue,
         route,
         decision,
         aborted,
         physical_work,
         ..
     } = fixture();
-    let _egress = shared.egress_budget.try_charge(4096).unwrap();
+    // The fallback terminal encodes from the terminal reserve; holding every byte of it, with
+    // the writer's queue still open, makes the budget wait the only reason emission cannot
+    // finish, so the shared post-abort deadline must be what ends it.
+    let _terminal = shared.terminal_budget.try_charge(1 << 20).unwrap();
     let started = Instant::now();
     let close = tokio::spawn(async move { settle_route_work(&shared, route, decision).await });
     aborted.await.unwrap();
@@ -234,6 +238,7 @@ async fn post_abort_emission_shares_the_close_deadline() {
         generation.token.is_cancelled(),
         "undeliverable terminal must retire the generation"
     );
+    drop(queue);
 }
 
 #[tokio::test(start_paused = true)]
