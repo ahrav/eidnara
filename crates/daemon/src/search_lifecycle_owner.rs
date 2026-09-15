@@ -150,8 +150,10 @@ type SliceTap = Arc<dyn Fn(&SliceEvent) + Send + Sync>;
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, Copy)]
 pub enum SliceEvent {
-    /// The records and identity are read and the manager synced; admission is not yet refreshed.
-    Prepared,
+    /// The records and identity are read and the manager synced; admission is not yet refreshed. Carries the slice budget's deadline.
+    Prepared {
+        deadline: Option<Instant>,
+    },
     Episode(EpisodeEvent),
     /// A handed-back supervisor's drain begins under the grace given.
     Draining(Duration),
@@ -322,6 +324,7 @@ impl SearchLifecycleOwner {
         &self,
         managed: &mut Managed,
         budget: &EvalBudget,
+        slice_started: Instant,
     ) -> Result<(AdmissionInputs, ProjectionIdentity, EvalBudget), Unprepared> {
         let prepared = AdmissionInputs::read(&self.home)
             .map_err(SpecRefusal::from)
@@ -333,7 +336,8 @@ impl SearchLifecycleOwner {
                     )?
                     .get(),
                 );
-                let budget = budget.bounded_by(Instant::now() + slice);
+                // The bound runs from the slice's start, so time spent waiting for the manager is not granted again here.
+                let budget = budget.bounded_by(slice_started + slice);
                 let identity = self.identity(inputs.manifest(), &budget)?;
                 let bounds = coverage_bounds(inputs.manifest())?;
                 Ok((inputs, identity, bounds, budget))
@@ -374,17 +378,13 @@ impl SearchLifecycleOwner {
 
     /// Refreshes admission from the records and the daemon's current observation, then advances the lifecycle record one step. The slice ends within the manifest's `supervisor_slice_ms`, within `budget`, and, for an active record, within that record's own deadline.
     pub fn run_slice(&self, budget: &EvalBudget) -> SliceOutcome {
-        // A reader or request holding the manager is waited for only within the slice's budget, so a cancelled slice returns rather than outliving its caller's cancellation. A scheduled slice's budget carries no deadline, so its wait is bounded by the manifest's slice bound, read before the manager is held.
-        let wait = match budget.deadline() {
-            Some(_) => budget.clone(),
-            None => {
-                let slice = AdmissionInputs::read(&self.home)
-                    .ok()
-                    .and_then(|inputs| limit(inputs.manifest(), "supervisor_slice_ms").ok())
-                    .map_or(SLICE_IDLE, Duration::from_millis);
-                budget.bounded_by(Instant::now() + slice)
-            }
-        };
+        // The manifest's slice bound runs from here, across the wait for the manager and the slice's work, and within the caller's budget; a cancelled slice returns rather than outliving its caller's cancellation. The bound is read before the manager is held, so a held manager cannot delay reading it.
+        let slice_started = Instant::now();
+        let slice = AdmissionInputs::read(&self.home)
+            .ok()
+            .and_then(|inputs| limit(inputs.manifest(), "supervisor_slice_ms").ok())
+            .map_or(SLICE_IDLE, Duration::from_millis);
+        let wait = budget.bounded_by(slice_started + slice);
         let mut managed = match self.lock_within(&wait) {
             Ok(managed) => managed,
             Err(_) => return SliceOutcome::Blocked("the manager is held".to_owned()),
@@ -392,7 +392,7 @@ impl SearchLifecycleOwner {
         if matches!(*managed, Managed::Disabling | Managed::ShutDown(_)) {
             return SliceOutcome::Disabled;
         }
-        let (inputs, identity, budget) = match self.prepare(&mut managed, budget) {
+        let (inputs, identity, budget) = match self.prepare(&mut managed, budget, slice_started) {
             Ok(prepared) => prepared,
             Err(Unprepared::Rotate(handle)) => {
                 let _ = self.admission.refresh(None);
@@ -404,7 +404,9 @@ impl SearchLifecycleOwner {
             }
         };
         #[cfg(feature = "test-support")]
-        self.tap(SliceEvent::Prepared);
+        self.tap(SliceEvent::Prepared {
+            deadline: budget.deadline(),
+        });
         let Managed::Selection(selection) = &mut *managed else {
             return SliceOutcome::Disabled;
         };

@@ -1654,7 +1654,7 @@ fn a_slice_installs_the_manifest_it_derived_its_bounds_from() {
     let release_rx = std::sync::Mutex::new(release_rx);
     let paused = std::sync::atomic::AtomicBool::new(false);
     owner.tap_slice_events_for_test(move |event| {
-        if matches!(event, SliceEvent::Prepared)
+        if matches!(event, SliceEvent::Prepared { .. })
             && !paused.swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             let _ = reached_tx.send(());
@@ -2346,7 +2346,7 @@ fn a_request_waiting_for_a_running_slice_ends_with_its_budget() {
     let (release, release_rx) = std::sync::mpsc::channel::<()>();
     let release_rx = std::sync::Mutex::new(release_rx);
     owner.tap_slice_events_for_test(move |event| {
-        if matches!(event, SliceEvent::Prepared) {
+        if matches!(event, SliceEvent::Prepared { .. }) {
             let _ = reached_tx.send(());
             let _ = release_rx
                 .lock()
@@ -2392,7 +2392,7 @@ fn a_slice_waiting_for_the_manager_ends_with_its_budget() {
     let (release, release_rx) = std::sync::mpsc::channel::<()>();
     let release_rx = std::sync::Mutex::new(release_rx);
     owner.tap_slice_events_for_test(move |event| {
-        if matches!(event, SliceEvent::Prepared) {
+        if matches!(event, SliceEvent::Prepared { .. }) {
             let _ = reached_tx.send(());
             let _ = release_rx
                 .lock()
@@ -2440,7 +2440,7 @@ async fn a_disable_waiting_for_the_manager_ends_with_its_budget() {
     let (release, release_rx) = std::sync::mpsc::channel::<()>();
     let release_rx = std::sync::Mutex::new(release_rx);
     owner.tap_slice_events_for_test(move |event| {
-        if matches!(event, SliceEvent::Prepared) {
+        if matches!(event, SliceEvent::Prepared { .. }) {
             let _ = reached_tx.send(());
             let _ = release_rx
                 .lock()
@@ -2492,7 +2492,7 @@ fn a_scheduled_slice_waits_for_the_manager_within_the_slice_bound() {
     let (release, release_rx) = std::sync::mpsc::channel::<()>();
     let release_rx = std::sync::Mutex::new(release_rx);
     owner.tap_slice_events_for_test(move |event| {
-        if matches!(event, SliceEvent::Prepared) {
+        if matches!(event, SliceEvent::Prepared { .. }) {
             let _ = reached_tx.send(());
             let _ = release_rx
                 .lock()
@@ -2523,6 +2523,65 @@ fn a_scheduled_slice_waits_for_the_manager_within_the_slice_bound() {
         "the scheduled slice waited {:?} against a 300 ms slice bound",
         outcome.1
     );
+}
+
+/// The slice bound runs from the slice's start: time spent waiting for a held manager is not granted again to the work that follows.
+#[test]
+fn the_slice_bound_covers_the_wait_for_the_manager_and_the_work() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("supervisor_slice_ms", 1_000)],
+        ),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    // The first slice pauses at its preparation tap, holding the manager, and is released 300 ms after the second slice starts waiting; the tap reports every slice's deadline.
+    let (deadlines_tx, deadlines) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let paused = std::sync::atomic::AtomicBool::new(false);
+    owner.tap_slice_events_for_test(move |event| {
+        if let SliceEvent::Prepared { deadline } = event {
+            let _ = deadlines_tx.send(*deadline);
+            if !paused.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let _ = release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
+            }
+        }
+    });
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(|| owner.run_slice(&slice_budget()));
+        let _first = deadlines
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first slice reaches its pause");
+        let started = Instant::now();
+        let releaser = scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            release.send(()).unwrap();
+        });
+        let _ = owner.run_slice(&slice_budget());
+        let second = deadlines
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the second slice prepares once the manager is released")
+            .expect("a slice budget carries a deadline");
+        let _ = holder.join().unwrap();
+        releaser.join().unwrap();
+        let bound = second.saturating_duration_since(started);
+        assert!(
+            bound <= Duration::from_millis(1_000) + Duration::from_millis(100),
+            "the second slice's deadline lies {bound:?} after it started, past its 1 s bound"
+        );
+    });
 }
 
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
