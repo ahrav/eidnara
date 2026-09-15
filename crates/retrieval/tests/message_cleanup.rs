@@ -124,6 +124,9 @@ fn seed(store: &SqliteStore, sources: &[Source], tombstoned: &[&Source], through
                     limit_manifest_protocol_version: "limits.v1".to_string(),
                     embedding_model: "model-a".to_string(),
                     tokenizer_fingerprint: "fp-a".to_string(),
+                    analysis_identity: retrieval::lexical::AnalysisIdentity::current()
+                        .as_str()
+                        .to_string(),
                     vector_dimension: 8,
                     generation_epoch: 1,
                 },
@@ -425,4 +428,22 @@ fn candidates_page_in_order_and_reclaim_rechecks_every_row_inside_the_transactio
     assert_eq!(payloads, 3, "shared, live, and claim");
     assert!(present(&store).contains(&occurrence_id(live)));
     assert!(present(&store).contains(&occurrence_id(claim)));
+    let lexical: BTreeSet<String> = store
+        .with_conn(|conn| {
+            conn.prepare("SELECT occurrence_id FROM lexical")?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()
+        })
+        .unwrap();
+    assert_eq!(
+        lexical,
+        [occurrence_id(live)].into_iter().collect(),
+        "reclaimed rows and the tombstoned claim have no lexical row; the live row keeps its own"
+    );
+    store
+        .with_conn(|conn| {
+            retrieval::lexical::verify_rows(conn).unwrap();
+            Ok(())
+        })
+        .unwrap();
 }

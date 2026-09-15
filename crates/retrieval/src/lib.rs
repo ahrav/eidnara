@@ -39,7 +39,7 @@ use storage::{CachedStatement, GuardedConn};
 pub const BASELINE: &str = include_str!("../baseline.sql");
 
 /// A schema mismatch requires a rebuild from canonical state.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Connection opening does not compare projection identities.
 /// A matching identity does not establish completeness or authorize search.
@@ -52,13 +52,19 @@ pub struct ProjectionIdentity {
     pub limit_manifest_protocol_version: String,
     pub embedding_model: String,
     pub tokenizer_fingerprint: String,
+    /// [`lexical::AnalysisIdentity`] the lexical rows were built under; a different current identity means the rows were analyzed by other rules and the projection is rebuilt.
+    pub analysis_identity: String,
     pub vector_dimension: u32,
     pub generation_epoch: u64,
 }
 
 impl ProjectionIdentity {
+    /// The schema version and analysis identity are pinned to this build, so a stored identity that equals the caller's expectation still fails when either was produced by another build.
     pub fn require_compatible(&self, expected: &Self) -> Result<(), ProjectionError> {
-        if self.schema_version == SCHEMA_VERSION && self == expected {
+        if self.schema_version == SCHEMA_VERSION
+            && self.analysis_identity == lexical::AnalysisIdentity::current().as_str()
+            && self == expected
+        {
             Ok(())
         } else {
             Err(ProjectionError::IdentityMismatch)
@@ -282,8 +288,26 @@ pub enum ProjectionError {
     InvalidVector { reason: &'static str },
     #[error("occurrence {occurrence_id} already has a different vector under the generation")]
     VectorConflict { occurrence_id: String },
+    #[error("lexical analysis refused: {0}")]
+    Lexical(lexical::LexicalRefusal),
+    #[error(
+        "occurrence {occurrence_id} derives only lexical rowids held by other occurrences: {holders:?}"
+    )]
+    LexicalRowidCollision {
+        occurrence_id: String,
+        /// The holder of each of the occurrence's rowids, in rowid order.
+        holders: Vec<String>,
+    },
+    #[error("the linked engine is unsupported: {reason}")]
+    Unsupported { reason: &'static str },
     #[error("sqlite: {0}")]
     Sqlite(String),
+}
+
+impl From<lexical::LexicalRefusal> for ProjectionError {
+    fn from(refusal: lexical::LexicalRefusal) -> Self {
+        Self::Lexical(refusal)
+    }
 }
 
 impl From<rusqlite::Error> for ProjectionError {
@@ -323,7 +347,9 @@ pub fn install_identity(
     identity: &ProjectionIdentity,
     installed_at: i64,
 ) -> Result<(), ProjectionError> {
-    if identity.schema_version != SCHEMA_VERSION {
+    if identity.schema_version != SCHEMA_VERSION
+        || identity.analysis_identity != lexical::AnalysisIdentity::current().as_str()
+    {
         return Err(ProjectionError::IdentityMismatch);
     }
     if let Some(stored) = read_identity(conn)? {
@@ -333,8 +359,8 @@ pub fn install_identity(
         "INSERT INTO projection_identity(
              singleton,schema_version,kernel_incarnation_id,projection_policy_version,
              identity_contract_version,limit_manifest_protocol_version,embedding_model,
-             tokenizer_fingerprint,vector_dimension,generation_epoch,installed_at
-         ) VALUES (1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+             tokenizer_fingerprint,analysis_identity,vector_dimension,generation_epoch,installed_at
+         ) VALUES (1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             identity.schema_version,
             identity.kernel_incarnation_id,
@@ -343,6 +369,7 @@ pub fn install_identity(
             identity.limit_manifest_protocol_version,
             identity.embedding_model,
             identity.tokenizer_fingerprint,
+            identity.analysis_identity,
             identity.vector_dimension,
             i64::try_from(identity.generation_epoch).map_err(|_| ProjectionError::CorruptRow)?,
             installed_at,
@@ -360,6 +387,11 @@ pub trait QueryRow {
     where
         P: rusqlite::Params,
         F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+
+    /// # Errors
+    ///
+    /// Returns the SQLite error from preparing `sql`.
+    fn prepare(&self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'_>>;
 }
 
 impl QueryRow for GuardedConn<'_> {
@@ -369,6 +401,10 @@ impl QueryRow for GuardedConn<'_> {
         F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     {
         GuardedConn::query_row(self, sql, params, f)
+    }
+
+    fn prepare(&self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'_>> {
+        GuardedConn::prepare(self, sql)
     }
 }
 
@@ -380,6 +416,10 @@ impl QueryRow for rusqlite::Connection {
     {
         rusqlite::Connection::query_row(self, sql, params, f)
     }
+
+    fn prepare(&self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'_>> {
+        rusqlite::Connection::prepare(self, sql)
+    }
 }
 
 pub fn read_identity(conn: &impl QueryRow) -> Result<Option<ProjectionIdentity>, ProjectionError> {
@@ -387,7 +427,7 @@ pub fn read_identity(conn: &impl QueryRow) -> Result<Option<ProjectionIdentity>,
         .query_row(
             "SELECT schema_version,kernel_incarnation_id,projection_policy_version,
                     identity_contract_version,limit_manifest_protocol_version,embedding_model,
-                    tokenizer_fingerprint,vector_dimension,generation_epoch
+                    tokenizer_fingerprint,analysis_identity,vector_dimension,generation_epoch
              FROM projection_identity WHERE singleton=1",
             [],
             |row| {
@@ -400,10 +440,11 @@ pub fn read_identity(conn: &impl QueryRow) -> Result<Option<ProjectionIdentity>,
                         limit_manifest_protocol_version: row.get(4)?,
                         embedding_model: row.get(5)?,
                         tokenizer_fingerprint: row.get(6)?,
-                        vector_dimension: row.get(7)?,
+                        analysis_identity: row.get(7)?,
+                        vector_dimension: row.get(8)?,
                         generation_epoch: 0,
                     },
-                    row.get(8)?,
+                    row.get(9)?,
                 ))
             },
         )
@@ -761,16 +802,23 @@ fn persist_with_digests<'c>(
         .collect())
 }
 
-/// Records that an occurrence stopped being live. Recording the same
-/// tombstone again is a no-op; a different one for the same occurrence is a
-/// collision, because an invalidation fact never changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tombstoned {
+    /// Whether the tombstone row was written; `false` when the same tombstone was already recorded.
+    pub recorded: bool,
+    pub lexical_rows_deleted: usize,
+}
+
+/// Records an occurrence tombstone and removes its lexical row. Recording the
+/// same tombstone again is a no-op; a different one for the same occurrence is
+/// a collision, because an invalidation fact never changes.
 /// The invalidation commit must be strictly after the stored creation commit.
 pub fn tombstone_occurrence(
     conn: &GuardedConn<'_>,
     occurrence_id: &str,
     tombstone: Tombstone,
     recorded_at: i64,
-) -> Result<bool, ProjectionError> {
+) -> Result<Tombstoned, ProjectionError> {
     if tombstone.invalidated_commit_seq <= 0 {
         return Err(ProjectionError::NonPositiveTombstoneSequence {
             occurrence_id: occurrence_id.to_string(),
@@ -800,15 +848,17 @@ pub fn tombstone_occurrence(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    match stored {
+    let recorded = match stored {
         Some((at, reason))
             if at == tombstone.invalidated_commit_seq && reason == tombstone.reason.as_str() =>
         {
-            Ok(false)
+            false
         }
-        Some(_) => Err(ProjectionError::TombstoneCollision {
-            occurrence_id: occurrence_id.to_string(),
-        }),
+        Some(_) => {
+            return Err(ProjectionError::TombstoneCollision {
+                occurrence_id: occurrence_id.to_string(),
+            });
+        }
         None => {
             conn.execute(
                 "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
@@ -820,9 +870,13 @@ pub fn tombstone_occurrence(
                     recorded_at,
                 ],
             )?;
-            Ok(true)
+            true
         }
-    }
+    };
+    Ok(Tombstoned {
+        recorded,
+        lexical_rows_deleted: lexical::index::delete(conn, occurrence_id)?,
+    })
 }
 
 /// The schema requires both span bounds or neither; half-present pairs and

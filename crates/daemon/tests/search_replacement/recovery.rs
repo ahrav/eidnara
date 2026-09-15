@@ -658,12 +658,14 @@ fn every_identity_mismatch_and_each_class_corruption_rebuilds_to_current() {
     let cases = [
         ("schema_version", Cause::SchemaMismatch),
         ("tokenizer_fingerprint", Cause::TokenizerMismatch),
+        ("analysis_identity", Cause::AnalysisMismatch),
         ("embedding_model", Cause::EmbeddingModelMismatch),
         ("projection_policy_version", Cause::ProjectionPolicyMismatch),
         ("identity_contract_version", Cause::IdentityContractMismatch),
     ]
     .into_iter()
-    .chain(CLASSES.map(|class| (class, Cause::Corruption)));
+    .chain(CLASSES.map(|class| (class, Cause::Corruption)))
+    .chain([("lexical", Cause::Corruption)]);
     for (damage, cause) in cases {
         let root = tempfile::tempdir().unwrap();
         let mut source = source_at(root.path());
@@ -685,7 +687,17 @@ fn every_identity_mismatch_and_each_class_corruption_rebuilds_to_current() {
             .to_owned();
         drop(selection);
         let raw = Connection::open(path).unwrap();
-        if cause == Cause::Corruption {
+        if damage == "lexical" {
+            assert_eq!(
+                raw.execute(
+                    "DELETE FROM lexical WHERE rowid=(SELECT min(rowid) FROM lexical)",
+                    []
+                )
+                .unwrap(),
+                1,
+                "a live occurrence loses its lexical row"
+            );
+        } else if cause == Cause::Corruption {
             assert_eq!(raw.execute("UPDATE payloads SET bytes=zeroblob(length(bytes)) WHERE payload_id IN (SELECT payload_id FROM occurrences WHERE class=?1)", [damage]).unwrap(), 1);
         } else {
             let value = if damage == "schema_version" {

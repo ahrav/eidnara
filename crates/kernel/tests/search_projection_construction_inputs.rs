@@ -54,9 +54,10 @@ const GATES: [&str; 5] = [
     "capability",
     "both_harness",
 ];
-const INVALIDATION_IDENTITY: [&str; 8] = [
+const INVALIDATION_IDENTITY: [&str; 9] = [
     "schema_version",
     "tokenizer_fingerprint",
+    "analysis_identity",
     "embedding_model",
     "projection_policy_version",
     "identity_contract_version",

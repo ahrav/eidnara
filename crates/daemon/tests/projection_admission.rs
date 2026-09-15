@@ -68,6 +68,7 @@ fn invalidation_json(identity: &ProjectionIdentity) -> Value {
     json!({
         "schema_version": identity.schema_version,
         "tokenizer_fingerprint": identity.tokenizer_fingerprint,
+        "analysis_identity": identity.analysis_identity,
         "embedding_model": identity.embedding_model,
         "projection_policy_version": identity.projection_policy_version,
         "identity_contract_version": identity.identity_contract_version,

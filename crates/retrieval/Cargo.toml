@@ -34,3 +34,7 @@ harness = false
 [[bench]]
 name = "lexical_analysis"
 harness = false
+
+[[bench]]
+name = "lexical_index"
+harness = false

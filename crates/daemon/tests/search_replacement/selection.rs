@@ -98,6 +98,8 @@ struct Observation {
 
 fn observe(reader: &SearchReader) -> Observation {
     reader.read(&budget(Duration::from_secs(10)), |conn| {
+        // Every pinned reader also proves the lexical invariant the writer maintains, so a reopened cut that split an occurrence from its lexical row is visible here.
+        retrieval::lexical::verify_rows(conn).map_err(|_| rusqlite::Error::QueryReturnedNoRows)?;
         let rows = conn.prepare("SELECT o.source_object_id,o.class,p.bytes,t.invalidated_commit_seq FROM occurrences o JOIN payloads p USING(payload_id) LEFT JOIN occurrence_tombstones t USING(occurrence_id) ORDER BY o.source_object_id")?
             .query_map([], |row| Ok((row.get(0)?, (row.get(1)?,row.get(2)?,row.get(3)?))))?.collect::<rusqlite::Result<_>>()?;
         let checkpoint = conn.query_row("SELECT checkpoint_commit_seq FROM projection_checkpoint", [], |row| row.get(0))?;

@@ -395,6 +395,8 @@ fn identity_pins_the_manifest() {
         ORIGINAL_COLUMN,
         PARTS_COLUMN,
         &format!("{major}.{minor}.{update}"),
+        rusqlite::version(),
+        rusqlite::ffi::SQLITE_SOURCE_ID.to_str().unwrap(),
     ] {
         assert!(
             preimage.contains(&format!("{}:{field}\n", field.len())),
@@ -404,7 +406,7 @@ fn identity_pins_the_manifest() {
     assert_eq!(ANALYSIS_CONTRACT_EPOCH, "identifier-analysis.v1");
     assert_eq!(
         AnalysisIdentity::current().as_str(),
-        "29e6e69b2af079ae3e2c2eb273f74e82f74d473dae4e4959fc2b1310037bc43a",
-        "a changed epoch, Unicode version, tokenizer, detail, or column changes the identity; update the epoch and this digest together"
+        "b624de2ef523ed1b8a78f6a30fd80cf425f7563b94201887814886cd9b62ba83",
+        "a changed manifest field changes the identity; update the contract and digest together"
     );
 }

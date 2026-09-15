@@ -1,6 +1,6 @@
 # Retrieval
 
-The search projection uses schema version 5. Rebuild incompatible databases;
+The search projection uses schema version 6. Rebuild incompatible databases;
 do not migrate them. Keep `baseline.sql`, `SCHEMA_VERSION`, and
 `docs/properties/search-projection/projection-schema.md` consistent.
 

@@ -44,6 +44,8 @@ pub struct ConnectionFacts {
     /// Negative: KiB of page cache.
     pub cache_size: i64,
     pub temp_store: i64,
+    /// The engine that answered the FTS5 probe; a build without FTS5 or without the lexical tokenizer never reaches this.
+    pub engine: retrieval::lexical::EngineIdentity,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -262,6 +264,9 @@ impl SearchProjection {
     /// Reads the connection state and refuses anything but a crash-safe,
     /// constraint-enforcing, bounded connection.
     pub fn verify_connection(&self) -> Result<ConnectionFacts, SearchProjectionError> {
+        let engine = self
+            .store
+            .with_conn(|conn| Ok(retrieval::lexical::probe_engine(conn)))??;
         let facts = self.store.with_conn_unfenced(|conn| {
             Ok(ConnectionFacts {
                 journal_mode: conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?,
@@ -269,6 +274,7 @@ impl SearchProjection {
                 foreign_keys: conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?,
                 cache_size: conn.query_row("PRAGMA cache_size", [], |row| row.get(0))?,
                 temp_store: conn.query_row("PRAGMA temp_store", [], |row| row.get(0))?,
+                engine,
             })
         })?;
         // 2 is FULL for synchronous and MEMORY for temp_store.

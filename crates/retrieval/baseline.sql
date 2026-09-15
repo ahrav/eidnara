@@ -18,6 +18,7 @@ CREATE TABLE projection_identity(
     limit_manifest_protocol_version TEXT NOT NULL,
     embedding_model TEXT NOT NULL,
     tokenizer_fingerprint TEXT NOT NULL,
+    analysis_identity TEXT NOT NULL,
     vector_dimension INTEGER NOT NULL CHECK(vector_dimension>0),
     generation_epoch INTEGER NOT NULL CHECK(generation_epoch>=0),
     installed_at INTEGER NOT NULL
@@ -84,6 +85,13 @@ CREATE TABLE exact_associations(
     PRIMARY KEY(family,namespace,key,occurrence_id)
 ) STRICT;
 CREATE INDEX idx_exact_associations_occurrence ON exact_associations(occurrence_id);
+
+-- One row per live occurrence: the analyzer's original atoms and conservative
+-- parts under the versioned analysis identity. The rowid is derived from the
+-- occurrence identifier, so rebuild and incremental application store equal
+-- rows. Tombstoning an occurrence deletes its row; the shadow tables this
+-- virtual table creates are engine-owned and outside the frozen inventory.
+CREATE VIRTUAL TABLE lexical USING fts5(original, parts, occurrence_id UNINDEXED, tokenize = 'unicode61 remove_diacritics 2 tokenchars ''_''', detail = full);
 
 -- The fixed S the projection was built at and the canonical commit it has
 -- applied through. The canonical consumer checkpoint never moves ahead of this.
