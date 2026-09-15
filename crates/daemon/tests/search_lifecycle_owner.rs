@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,7 +13,9 @@ use daemon::projection_gates::{Denial, EntryPoint, ProjectionHook};
 use daemon::projection_lifecycle::{
     Cause, ConsumerBinding, ControlState, LifecycleRequest, ProjectionLifecycle, Transition,
 };
-use daemon::search_catchup::{Blocked, EpisodeEnd};
+use daemon::search_catchup::{
+    Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeEvent, SearchCatchUp,
+};
 use daemon::search_lifecycle_owner::{
     IDENTITY_CONTRACT_VERSION, PROJECTION_POLICY_VERSION, SearchLifecycleOwner, SliceOutcome,
     SpecRefusal,
@@ -24,7 +27,12 @@ use host_runtime::lifecycle::LifecycleTransactionLock;
 use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsLimits};
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
-use kernel::{KernelStore, ProjectScope};
+use kernel::{
+    CommitPageBounds, KernelStore, ProjectScope, SourceHoldAdmission, SourceHoldBinding,
+    SourcePageBounds,
+};
+use retrieval::PersistBounds;
+use retrieval::batch::BatchBounds;
 use serde_json::Value;
 use support::embedding_fixtures::{
     Corpus, GENERATION, TestEngine, budget, component, identity, kernel_incarnation_id,
@@ -619,6 +627,367 @@ fn a_rebuild_request_naming_another_kernel_incarnation_records_nothing() {
         .request(&rebuild(home), now(), &slice_budget())
         .expect("the refused request left nothing to conflict with");
     assert!(matches!(control(home), ControlState::Intent(_)));
+}
+
+/// With an unbounded caller budget, `supervisor_slice_ms` bounds the slice's wait for a kernel reader.
+#[test]
+fn a_slice_bounds_its_kernel_reader_wait_by_the_manifest_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("supervisor_slice_ms", 500)],
+        ),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    let held = std::sync::Barrier::new(2);
+    let waited = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            corpus
+                .kernel
+                .hold_readers_for_test(&held, Duration::from_secs(4))
+        });
+        held.wait();
+        let started = Instant::now();
+        let outcome = owner.run_slice(&EvalBudget::unbounded());
+        (started.elapsed(), outcome)
+    });
+    let (waited, outcome) = waited;
+    assert!(
+        waited < Duration::from_secs(2),
+        "the slice waited {waited:?} for a kernel reader: {outcome:?}"
+    );
+    assert!(
+        matches!(outcome, SliceOutcome::Closed(SpecRefusal::Kernel(_))),
+        "{outcome:?}"
+    );
+}
+
+/// A second handler on the same data home opens the kernel once the first one shuts down, while the first handler stays alive with a lifecycle owner bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn shutdown_releases_the_owners_kernel_lease_to_a_successor() {
+    use daemon::kernel_routes::KernelState;
+    use host_runtime::{CompositeComponent, HostInit, PrimaryComponent};
+
+    let first = KernelDaemon::start().await;
+    let started = Instant::now();
+    while first.handler().search_lifecycle().is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no owner bound"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let descriptor = daemon::dev_descriptor_at(first.data_home().to_str().unwrap());
+    let second = daemon::Handler::new();
+    second.disable_kernel_sampler_for_test();
+    PrimaryComponent::initialize(
+        &second,
+        HostInit {
+            host_capabilities: Vec::new(),
+            storage: Some(serde_json::to_value(&descriptor).unwrap()),
+        },
+    )
+    .await
+    .unwrap();
+    PrimaryComponent::activate(&second).await.unwrap();
+
+    CompositeComponent::shutdown(first.handler()).await.unwrap();
+    let started = Instant::now();
+    while second.kernel_state() != KernelState::Ready {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the successor stayed {:?} while the first handler is alive",
+            second.kernel_state()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    CompositeComponent::shutdown(&second).await.unwrap();
+    drop(first);
+}
+
+fn episode_bounds() -> EpisodeBounds {
+    let admission = SourceHoldAdmission {
+        max_references: NonZeroUsize::new(64).unwrap(),
+        max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+    };
+    EpisodeBounds {
+        commits: CommitPageBounds {
+            max_commits: NonZeroUsize::new(64).unwrap(),
+            max_rows: NonZeroUsize::new(64).unwrap(),
+            max_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
+        },
+        hold_admission: admission,
+        source_page: SourcePageBounds {
+            max_rows: NonZeroUsize::new(64).unwrap(),
+            max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+            max_decoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+            max_row_bytes: NonZeroU64::new(1 << 16).unwrap(),
+        },
+        max_source_pages: NonZeroUsize::new(8).unwrap(),
+        max_source_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+        batch: BatchBounds {
+            persist: PersistBounds {
+                max_records: NonZeroUsize::new(64).unwrap(),
+                max_payload_bytes: NonZeroUsize::new(1 << 16).unwrap(),
+                max_tuple_bytes: NonZeroUsize::new(2048).unwrap(),
+            },
+            max_source_bytes: NonZeroUsize::new(1 << 16).unwrap(),
+            max_local_mutations: NonZeroUsize::new(64).unwrap(),
+            max_pending: NonZeroUsize::new(64).unwrap(),
+        },
+    }
+}
+
+fn current_owner(home: &Path, corpus: &Corpus) -> SearchLifecycleOwner {
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    owner
+}
+
+/// An at-tip family whose kernel acknowledgement trails its local prefix is acknowledged by the next slice even with no new commits.
+#[test]
+fn an_at_tip_family_still_reconciles_a_lost_acknowledgement() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+
+    corpus.publish("later", "later text");
+    // The window commits locally and the budget ends before the acknowledgement.
+    {
+        let budget = slice_budget();
+        let reader = owner.pin(&budget).unwrap();
+        let checkpoint = reader.coverage(&budget).unwrap().checkpoint;
+        let consumer = CatchUpConsumer {
+            binding: SourceHoldBinding {
+                consumer_id: reader.consumer().consumer_id.clone(),
+                lease_epoch: corpus.kernel.lease_epoch(),
+                source_policy_version: PROJECTION_POLICY_VERSION.to_owned(),
+            },
+            hold_id: checkpoint.hold_id,
+            kernel_incarnation_id: kernel_incarnation_id(home),
+            generation_id: Some(reader.consumer().generation_id.clone()),
+        };
+        let report = SearchCatchUp::new(&corpus.kernel, reader.projection())
+            .with_budget(budget.clone())
+            .run_episode(&consumer, &episode_bounds(), now(), &mut |event| {
+                if matches!(event, EpisodeEvent::LocalReleased { .. }) {
+                    budget.cancel();
+                }
+            })
+            .unwrap();
+        assert_eq!(report.end, EpisodeEnd::Blocked(Blocked::Cancelled));
+    }
+    let local = owner
+        .pin(&slice_budget())
+        .unwrap()
+        .coverage(&slice_budget())
+        .unwrap()
+        .checkpoint
+        .checkpoint_commit_seq;
+    assert_eq!(local, corpus.tip());
+    let acknowledged = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    assert!(acknowledged < Some(local), "{acknowledged:?} >= {local}");
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::CaughtUp(report) if report.acknowledged_through == local),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        Some(local)
+    );
+}
+
+/// A rebuild recorded over a Current family whose supervisor runs hands that supervisor back before the replacement is built, and then completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_rebuild_over_a_maintained_family_stops_maintenance_first() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+        .with_roster(Arc::new(|| {
+            vec![("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap())]
+        }));
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    drive(&owner, 40, || published(&owner).len() == 1).await;
+    assert!(
+        owner.maintenance().is_some(),
+        "the lone project is maintained"
+    );
+    let ControlState::Current(current) = control(home) else {
+        panic!("the first rebuild reached Current");
+    };
+
+    let mut again = rebuild(home);
+    again.selected_generation = current.staged_seed_digest.clone().unwrap();
+    again.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    again.attempt_id = "rebuild-again".to_owned();
+    owner.request(&again, now(), &slice_budget()).unwrap();
+    let slices = drive(&owner, 12, || {
+        matches!(control(home), ControlState::Current(done) if done.attempt_id == "rebuild-again")
+    })
+    .await;
+    assert!(slices < 12, "the second rebuild reached Current");
+    owner.shutdown().await.unwrap();
+}
+
+/// A lone project's supervisor is handed back once its episode grant expires, so a row created after `B_recovery_ms` is still embedded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_lone_supervisor_is_renewed_when_its_grant_expires() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("B_recovery_ms", 3_000)]),
+        &campaign_json(&identity),
+    );
+    let owner = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+        .with_roster(Arc::new(|| {
+            vec![("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap())]
+        }));
+    let _ = owner.run_slice(&slice_budget());
+    let mut short = rebuild(home);
+    short.deadline = now() + 3_000;
+    owner.request(&short, now(), &slice_budget()).unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    drive(&owner, 40, || published(&owner).len() == 1).await;
+    let first = owner.maintenance().expect("the lone project is maintained");
+
+    tokio::time::sleep(Duration::from_millis(3_200)).await;
+    let later = corpus.publish("later", "later text");
+    let slices = drive(&owner, 30, || published(&owner).len() == 2).await;
+    assert!(
+        slices < 30,
+        "the later row was embedded: {:?}",
+        published(&owner)
+    );
+    assert!(published(&owner).contains(&later));
+    let renewed = owner.maintenance().expect("a supervisor is running");
+    assert_eq!(renewed.scope, first.scope);
+    owner.shutdown().await.unwrap();
+}
+
+/// Closing the gate cancels a running catch-up episode before it acknowledges every pending window.
+#[test]
+fn a_revoked_grant_stops_a_running_catch_up_episode() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("catchup_batch_commits", 1), ("catchup_lag_commits", 1_000)],
+        ),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let before = corpus
+        .kernel
+        .outbox_consumer_checkpoint(CONSUMER)
+        .unwrap()
+        .unwrap();
+    for index in 0..40 {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
+    let tip = corpus.tip();
+
+    let outcome = std::thread::scope(|scope| {
+        let slice = scope.spawn(|| owner.run_slice(&slice_budget()));
+        let started = Instant::now();
+        loop {
+            let acknowledged = corpus
+                .kernel
+                .outbox_consumer_checkpoint(CONSUMER)
+                .unwrap()
+                .unwrap();
+            if acknowledged > before {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the episode never acknowledged a window"
+            );
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        owner.admission().gate().close();
+        slice.join().unwrap()
+    });
+    let SliceOutcome::CaughtUp(report) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(
+        report.end,
+        EpisodeEnd::Blocked(Blocked::Cancelled),
+        "{report:?}"
+    );
+    assert!(report.acknowledged_through < tip, "{report:?}");
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        Some(report.acknowledged_through),
+        "nothing was acknowledged after the revocation"
+    );
 }
 
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.

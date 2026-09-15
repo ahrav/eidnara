@@ -3015,8 +3015,8 @@ pub struct HandlerCore {
     publication_fence_write_hook: ConnectFailureCommitHook,
     /// A full route handle maps to its session binding and route root; epoch-scoped lookups and removals prevent channel reuse from accessing another incarnation's state.
     bindings: Arc<Mutex<RouteBindings>>,
-    /// Set once the SQLite store's data home is known and a local-embeddings lane is attached; a deployment without either has no projection to own.
-    search_lifecycle: Arc<OnceLock<Arc<search_lifecycle_owner::SearchLifecycleOwner>>>,
+    /// The lifecycle owner exists only when the SQLite store has a data home, the kernel is available, and local embeddings are attached. Cleared after a successful shutdown joins the owner's supervisor.
+    search_lifecycle: Arc<Mutex<Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>>>>,
     /// The lane the projection's identity and embedding work come from; attached by the daemon binary before activation.
     local_embeddings: Mutex<Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
@@ -3879,7 +3879,7 @@ impl Handler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
-            search_lifecycle: Arc::new(OnceLock::new()),
+            search_lifecycle: Arc::new(Mutex::new(None)),
             local_embeddings: Mutex::new(None),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
@@ -4159,7 +4159,7 @@ impl HandlerCore {
 
     /// Binds the lifecycle owner to the store's data home once the kernel is ready and a lane is attached, and returns it only on the first binding so exactly one slice loop runs. Nothing is selected at startup, so admission stays closed until the first slice; a refused admission record is reported now rather than at that slice, while an absent one is the ordinary state of a host without approvals.
     fn open_search_lifecycle(
-        slot: &OnceLock<Arc<search_lifecycle_owner::SearchLifecycleOwner>>,
+        slot: &Mutex<Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>>>,
         kernel: &kernel_routes::KernelOpenCoordinator,
         local_embeddings: Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>,
         bindings: &Arc<Mutex<RouteBindings>>,
@@ -4172,7 +4172,10 @@ impl HandlerCore {
         let (Ok(kernel), Some(local_embeddings)) = (kernel.kernel_store(), local_embeddings) else {
             return None;
         };
-        if slot.get().is_some() {
+        let mut slot = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_some() {
             return None;
         }
         let home = Path::new(home);
@@ -4181,37 +4184,27 @@ impl HandlerCore {
         {
             eprintln!("daemon: search admission record refused: {refusal}");
         }
-        let mut bound = false;
-        let owner = slot.get_or_init(|| {
-            bound = true;
-            let roster = Arc::clone(bindings);
-            Arc::new(
-                search_lifecycle_owner::SearchLifecycleOwner::for_home(
-                    home,
-                    kernel,
-                    local_embeddings,
-                )
+        let roster = Arc::clone(bindings);
+        let owner = Arc::new(
+            search_lifecycle_owner::SearchLifecycleOwner::for_home(home, kernel, local_embeddings)
                 .with_roster(Arc::new(move || {
                     roster
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .bound_projects()
                 })),
-            )
-        });
-        bound.then(|| Arc::clone(owner))
+        );
+        *slot = Some(Arc::clone(&owner));
+        Some(owner)
     }
 
     /// The lifecycle owner, once the kernel is ready under a SQLite store with a lane attached.
     #[cfg(feature = "test-support")]
     pub fn search_lifecycle(&self) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
-        self.search_lifecycle.get().cloned()
-    }
-
-    /// The admission owner, once the lifecycle owner exists.
-    #[cfg(feature = "test-support")]
-    pub fn projection_admission(&self) -> Option<&projection_admission::ProjectionAdmission> {
-        self.search_lifecycle.get().map(|owner| owner.admission())
+        self.search_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     async fn open_store_once(
@@ -4300,7 +4293,7 @@ impl Handler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
-            search_lifecycle: Arc::new(OnceLock::new()),
+            search_lifecycle: Arc::new(Mutex::new(None)),
             local_embeddings: Mutex::new(None),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
@@ -12623,14 +12616,24 @@ impl CompositeComponent for Handler {
             self.tasks.close();
         }
         // Closing admission before the join cancels every grant so a slice holding one can exit; the owner itself is released after the join, when no slice can run and an owner bound during the join is visible too.
-        if let Some(owner) = self.search_lifecycle.get() {
+        let owner = self.search_lifecycle();
+        if let Some(owner) = &owner {
             owner.admission().close();
         }
         self.tasks.wait().await;
-        if let Some(owner) = self.search_lifecycle.get()
-            && let Err(unresolved) = owner.shutdown().await
-        {
-            eprintln!("daemon: search maintenance did not drain at shutdown: {unresolved}");
+        let owner = self.search_lifecycle().or(owner);
+        if let Some(owner) = owner {
+            match owner.shutdown().await {
+                Ok(()) => {
+                    *self
+                        .search_lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                }
+                Err(unresolved) => {
+                    eprintln!("daemon: search maintenance did not drain at shutdown: {unresolved}");
+                }
+            }
         }
 
         self.bindings.lock().expect("bindings mutex").clear();
@@ -19235,18 +19238,16 @@ mod tests {
         let handler = Handler::new();
         let slot = Arc::clone(&handler.search_lifecycle);
         let cancel = handler.cancel.clone();
+        let owner = Arc::new(SearchLifecycleOwner::for_home(
+            &home,
+            kernel,
+            host_runtime::local_embeddings::LocalEmbeddingsComponent::unsupported("no lane"),
+        ));
+        let bound = Arc::clone(&owner);
         handler
             .spawn_tracked_task(async move {
                 cancel.cancelled().await;
-                slot.get_or_init(|| {
-                    Arc::new(SearchLifecycleOwner::for_home(
-                        &home,
-                        kernel,
-                        host_runtime::local_embeddings::LocalEmbeddingsComponent::unsupported(
-                            "no lane",
-                        ),
-                    ))
-                });
+                *slot.lock().unwrap() = Some(bound);
             })
             .expect("late binder admitted");
 
@@ -19254,10 +19255,10 @@ mod tests {
             .await
             .unwrap();
 
-        let owner = handler
-            .search_lifecycle
-            .get()
-            .expect("the owner was bound during the join");
+        assert!(
+            handler.search_lifecycle().is_none(),
+            "a joined owner is released with the store"
+        );
         assert_eq!(
             owner.admission().refresh(None),
             Refresh::Closed(Closed::ShutDown),

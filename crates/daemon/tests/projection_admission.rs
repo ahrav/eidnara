@@ -720,9 +720,9 @@ async fn a_restart_reopens_the_gate_closed_until_it_refreshes() {
     let data_home = daemon.data_home().to_owned();
     // The owner binds after the kernel reports ready, so the accessor may trail the start by a moment.
     let started = std::time::Instant::now();
-    let admission = loop {
-        if let Some(admission) = daemon.handler().projection_admission() {
-            break admission;
+    let owner = loop {
+        if let Some(owner) = daemon.handler().search_lifecycle() {
+            break owner;
         }
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -730,6 +730,7 @@ async fn a_restart_reopens_the_gate_closed_until_it_refreshes() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
+    let admission = owner.admission();
     all_denied(admission.gate(), |_| Denial::NoManifest);
     write_records(
         &data_home,

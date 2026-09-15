@@ -124,8 +124,8 @@ pub struct SearchLifecycleOwner {
     admission: ProjectionAdmission,
     managed: Mutex<Managed>,
     roster: ProjectRoster,
-    /// The project digest whose supervisor ran last and how many slices it has had; `None` before the first tenure.
-    tenure: Mutex<Option<(String, u32)>>,
+    /// The project digest whose supervisor ran last, how many slices it has had, and the deadline of the episode grant it started with; `None` before the first tenure.
+    tenure: Mutex<Option<(String, u32, i64)>>,
     #[cfg(feature = "test-support")]
     drain_grace_override: Mutex<Option<Duration>>,
 }
@@ -231,16 +231,17 @@ impl SearchLifecycleOwner {
         let prepared = AdmissionInputs::read(&self.home)
             .map_err(SpecRefusal::from)
             .and_then(|inputs| {
-                let identity = self.identity(inputs.manifest(), budget)?;
-                let bounds = coverage_bounds(inputs.manifest())?;
                 let slice = Duration::from_millis(limit(inputs.manifest(), "supervisor_slice_ms")?);
-                Ok((inputs, identity, bounds, slice))
+                let budget = budget.bounded_by(Instant::now() + slice);
+                let identity = self.identity(inputs.manifest(), &budget)?;
+                let bounds = coverage_bounds(inputs.manifest())?;
+                Ok((inputs, identity, bounds, budget))
             });
         let live = match &mut *managed {
             Managed::Selection(current) => current.maintenance(),
             _ => None,
         };
-        let (inputs, identity, bounds, slice) = match prepared {
+        let (inputs, identity, bounds, budget) = match prepared {
             Ok(prepared) => prepared,
             Err(refusal) => {
                 if let Some(handle) = live {
@@ -263,7 +264,7 @@ impl SearchLifecycleOwner {
                 bounds,
             )));
         }
-        Ok((inputs, identity, budget.bounded_by(Instant::now() + slice)))
+        Ok((inputs, identity, budget))
     }
 
     /// Refreshes admission from the records and the daemon's current observation, then advances the lifecycle record one step. The slice ends within the manifest's `supervisor_slice_ms`, within `budget`, and, for an active record, within that record's own deadline.
@@ -320,9 +321,14 @@ impl SearchLifecycleOwner {
         if completed && selection.holds_operation(&intent) {
             // The family was reopened and revalidated when this owner first held it; a later slice judges it on its coverage and kernel without reopening it.
             return match selection.check_selected(&self.kernel, self.admission.gate(), &budget) {
-                Ok(()) => {
-                    self.settle_current(selection, inputs.manifest(), &spec, &identity, &budget)
-                }
+                Ok(()) => self.settle_current(
+                    selection,
+                    inputs.manifest(),
+                    &spec,
+                    &intent,
+                    &identity,
+                    &budget,
+                ),
                 Err(error) => SliceOutcome::Blocked(error.to_string()),
             };
         }
@@ -338,6 +344,9 @@ impl SearchLifecycleOwner {
             }
             budget.bounded_by(Instant::now() + Duration::from_millis(remaining))
         };
+        if let Some(handle) = selection.maintenance() {
+            return SliceOutcome::RotateMaintenance(handle);
+        }
         let progress = selection.recover_slice(
             &self.kernel,
             self.admission.gate(),
@@ -352,7 +361,14 @@ impl SearchLifecycleOwner {
                 if !(completed && progress == RecoveryProgress::Current) {
                     return SliceOutcome::Advanced(progress);
                 }
-                self.settle_current(selection, inputs.manifest(), &spec, &identity, &budget)
+                self.settle_current(
+                    selection,
+                    inputs.manifest(),
+                    &spec,
+                    &intent,
+                    &identity,
+                    &budget,
+                )
             }
             Err(RecoveryFailure::Build(mut failure)) => {
                 // Cleanup runs under the same budget; a deferred cleanup keeps its owner's locks until the next slice retries.
@@ -374,10 +390,17 @@ impl SearchLifecycleOwner {
         selection: &mut SearchSelection,
         manifest: &RuntimeManifest,
         spec: &ReplacementSpec,
+        intent: &LifecycleIntent,
         identity: &ProjectionIdentity,
         budget: &EvalBudget,
     ) -> SliceOutcome {
-        match self.catch_up(selection, spec, identity, budget) {
+        match self.catch_up(
+            selection,
+            spec,
+            &intent.consumer.consumer_id,
+            identity,
+            budget,
+        ) {
             Ok(None) => match self.maintain(selection, manifest, spec, budget) {
                 Ok(None) => SliceOutcome::Current,
                 Ok(Some(handle)) => SliceOutcome::RotateMaintenance(handle),
@@ -391,16 +414,23 @@ impl SearchLifecycleOwner {
         }
     }
 
-    /// Applies the commits since the selected family's checkpoint under the hold that checkpoint names, one episode toward the tip, and acknowledges them. Returns `None` when the family is already at the tip, decided from the family's own coverage before it is pinned so an idle slice hashes nothing. The hold binding is the running lease, so a family built in an earlier incarnation reports its dead hold as a blocked episode.
+    /// Applies the commits since the selected family's checkpoint under the hold that checkpoint names, one episode toward the tip, and acknowledges them. Returns `None` only when the selected checkpoint is at the kernel tip and the consumer has acknowledged that checkpoint; an unacknowledged prefix runs the episode, whose reconciliation acknowledges it. The hold binding is the running lease, so a family built in an earlier incarnation reports its dead hold as a blocked episode.
     fn catch_up(
         &self,
         selection: &SearchSelection,
         spec: &ReplacementSpec,
+        consumer_id: &str,
         identity: &ProjectionIdentity,
         budget: &EvalBudget,
     ) -> Result<Option<EpisodeReport>, BuildError> {
         let checkpoint = selection.observe_selected(budget)?.checkpoint;
-        if checkpoint.checkpoint_commit_seq >= self.kernel.tip_within_budget(budget)? {
+        let local = checkpoint.checkpoint_commit_seq;
+        if local >= self.kernel.tip_within_budget(budget)?
+            && self
+                .kernel
+                .outbox_consumer_checkpoint_within_budget(budget, consumer_id)?
+                .is_some_and(|acknowledged| acknowledged >= local)
+        {
             return Ok(None);
         }
         let reader = selection.pin(&self.kernel, self.admission.gate(), budget)?;
@@ -427,13 +457,24 @@ impl SearchLifecycleOwner {
             kernel_incarnation_id: identity.kernel_incarnation_id.clone(),
             generation_id: Some(reader.consumer().generation_id.clone()),
         };
+        // The callback cancels only `episode`, leaving the caller's `budget` unmodified.
+        let episode = EvalBudget::new(
+            budget.deadline(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let revoked =
+            || budget.is_exhausted() || grants.iter().any(|grant| grant.invalidated.is_cancelled());
         let report = SearchCatchUp::new(&self.kernel, reader.projection())
-            .with_budget(budget.clone())
-            .run_episode(&consumer, &spec.episode, crate::now_ms(), &mut |_| {})?;
+            .with_budget(episode.clone())
+            .run_episode(&consumer, &spec.episode, crate::now_ms(), &mut |_| {
+                if revoked() {
+                    episode.cancel();
+                }
+            })?;
         Ok(Some(report))
     }
 
-    /// Keeps one supervisor maintaining the selected family for the current tenant. A running tenant within its tenure and still on the roster is left alone; one past its tenure or off the roster is handed back for joining; with none running, the next roster project in sorted order after the last tenant starts through [`SearchSelection::start_maintenance`], which admits and charges it. No roster means no maintenance.
+    /// Keeps one supervisor maintaining the selected family for the current tenant. A running tenant within its tenure and still on the roster is left alone; one past its tenure or off the roster, or whose episode grant has expired, is handed back for joining; with none running, the next roster project in sorted order after the last tenant starts through [`SearchSelection::start_maintenance`], which admits and charges it. No roster means no maintenance.
     fn maintain(
         &self,
         selection: &mut SearchSelection,
@@ -444,16 +485,17 @@ impl SearchLifecycleOwner {
         let roster: BTreeMap<String, ProjectScope> = (self.roster)().into_iter().collect();
         let mut tenure = self.tenure.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(live) = selection.maintenance() {
-            let Some((tenant, slices)) = tenure.as_mut() else {
+            let Some((tenant, slices, grant_deadline)) = tenure.as_mut() else {
                 return Ok(Some(live));
             };
             *slices += 1;
-            // A lone project keeps its supervisor; rotating it would only pay a restart.
+            // A lone project keeps its supervisor; rotating it would only pay a restart. An expired episode grant restarts its supervisor regardless of roster membership.
             let over = *slices >= MAINTENANCE_TENURE_SLICES && roster.len() > 1;
+            let expired = crate::now_ms() >= *grant_deadline;
             let bound = roster.get(tenant.as_str()) == Some(&*live.scope);
-            return Ok((over || !bound).then_some(live));
+            return Ok((over || expired || !bound).then_some(live));
         }
-        let last = tenure.as_ref().map(|(tenant, _)| tenant.as_str());
+        let last = tenure.as_ref().map(|(tenant, _, _)| tenant.as_str());
         let Some((next, scope)) = last
             .and_then(|last| {
                 roster
@@ -465,6 +507,13 @@ impl SearchLifecycleOwner {
             return Ok(None);
         };
         let reader = selection.pin(&self.kernel, self.admission.gate(), budget)?;
+        let bounds = maintenance_bounds(manifest, spec).map_err(|refusal| {
+            BuildError::Invalid(match refusal {
+                SpecRefusal::TooSmall(_) => "manifest limits cannot bound maintenance",
+                _ => "maintenance bounds",
+            })
+        })?;
+        let grant_deadline = bounds.dispatch.grant.deadline;
         selection.start_maintenance(
             Maintained {
                 gate: Arc::clone(self.admission.gate()),
@@ -474,16 +523,11 @@ impl SearchLifecycleOwner {
                 project: scope.clone(),
                 destination: MAINTENANCE_DESTINATION,
             },
-            maintenance_bounds(manifest, spec).map_err(|refusal| {
-                BuildError::Invalid(match refusal {
-                    SpecRefusal::TooSmall(_) => "manifest limits cannot bound maintenance",
-                    _ => "maintenance bounds",
-                })
-            })?,
+            bounds,
             Arc::new(crate::now_ms),
             tokio::sync::mpsc::unbounded_channel().0,
         )?;
-        *tenure = Some((next.clone(), 0));
+        *tenure = Some((next.clone(), 0, grant_deadline));
         Ok(None)
     }
 
