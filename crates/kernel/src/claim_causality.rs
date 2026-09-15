@@ -222,7 +222,7 @@ impl Envelope<'_> {
         if subject.object.source_revision != request.subject_revision {
             return Err(ClaimCausalityError::SubjectRevisionMismatch);
         }
-        let operation = derived_operation(self.tx, &subject_id)?;
+        let operation = derived_operation(self.tx, &subject.object)?;
         let (evidence_id, dependencies) = match &request.evidence {
             CausalEvidence::DirectObservation {
                 acquisition_evidence_id,
@@ -408,17 +408,20 @@ struct SubjectRow {
     scope_id: Option<String>,
 }
 
-/// A subject that replaced a predecessor was corrected; one without was
-/// inserted. Succession is written in the subject's own commit, so the answer
-/// is the same at every snapshot that holds the subject.
+/// A subject that replaced a predecessor when it was created was corrected;
+/// one created without a predecessor was inserted. A predecessor folded into
+/// an already-live subject later (`correct_decision` naming a live survivor)
+/// is invalidated at the fold's commit, not the subject's, so it leaves the
+/// operation unchanged at every snapshot.
 fn derived_operation(
     tx: &Transaction<'_>,
-    subject_id: &str,
+    subject: &ObjectRow,
 ) -> Result<CausalOperation, KernelError> {
     let replaced_predecessor: bool = tx
         .query_row_cached(
-            "SELECT EXISTS(SELECT 1 FROM object_registry WHERE superseded_by=?1)",
-            [subject_id],
+            "SELECT EXISTS(SELECT 1 FROM object_registry
+                           WHERE superseded_by=?1 AND invalidated_commit_seq=?2)",
+            params![subject.object_id, subject.created_commit_seq],
             |row| row.get(0),
         )
         .map_err(map_sqlite)?;
@@ -582,7 +585,7 @@ pub(crate) fn causal_class_at(
             Some(summary),
         ));
     }
-    if detail.operation != derived_operation(tx, &subject.object_id)? {
+    if detail.operation != derived_operation(tx, subject)? {
         return Ok((
             CausalClass::Unknown(UnknownReason::Malformed),
             Some(summary),

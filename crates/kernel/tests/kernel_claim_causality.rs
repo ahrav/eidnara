@@ -778,3 +778,47 @@ fn causality_object_ids_are_reserved_across_every_registry_writer() {
         .unwrap();
     assert_eq!(recorded.object_id, squat);
 }
+
+#[test]
+fn a_predecessor_folded_in_later_keeps_the_subjects_insert_operation() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 2);
+    fixture.admit_decision(2, 1);
+    let recorded = fixture
+        .record(
+            "derived",
+            request("decision-object-1", 2, derived(&[("domain-object", 1)])),
+        )
+        .unwrap();
+    assert_eq!(recorded.operation, CausalOperation::Insert);
+    let before = fixture.tip();
+
+    // Folding decision 2 into the already-live decision 1 gives the subject a
+    // predecessor after its creation; the operation is about how the subject
+    // came to be, so it does not change.
+    fixture
+        .store
+        .commit(intent("fold"), |envelope| {
+            envelope.correct_decision("decision-object-2", decision(1, 2))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let expected = CausalClass::DerivedReinjection {
+        parents: parents(&[("domain-object", 1)]),
+    };
+    for as_of in [before, fixture.tip()] {
+        let reading = fixture.reading("decision-object-1", as_of);
+        assert_eq!(reading.class, expected, "snapshot {as_of}");
+        assert_eq!(
+            reading.record.unwrap().operation,
+            Some(CausalOperation::Insert)
+        );
+    }
+    let again = fixture
+        .record(
+            "derived-again",
+            request("decision-object-1", 2, derived(&[("domain-object", 1)])),
+        )
+        .unwrap();
+    assert_eq!(again.operation, CausalOperation::Insert);
+}
