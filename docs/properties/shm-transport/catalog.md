@@ -3965,8 +3965,9 @@ receives keep running while a frame waits for capacity, and a frame that
 outlives `frame_deadline` fails the generation from `Publisher::pump`
 (`:1168-1171`) or the deadline arm (`:867-877`) instead of parking the thread.
 The parked `Ring::reserve_until` wait this record was written against has no
-host caller; `reserve_until` remains for `RingClientEndpoint::send_bounded`
-(`:1412`). Inbound blocks outbound: the inbound send is
+host caller, and the Rust client bridge arms the capacity wake directly
+(`client.rs:2716`); `reserve_until` remains for the native addon
+(`packages/shm-native/src/lib.rs:1046`). Inbound blocks outbound: the inbound send is
 awaited with no timeout and no enclosing select
 (`ring_transport.rs:737-745`), so it parks until the application drains.
 **These are not symmetric in boundedness.** The outbound stall ends in an
@@ -4348,33 +4349,31 @@ Open questions:
 
 Type: liveness
 Reachability: default-production — `start_ring_bridge`
-(`crates/host-runtime/src/client.rs:2464`) is the client's ring worker, spawned for
+(`crates/host-runtime/src/client.rs:2547`) is the client's ring worker, spawned for
 every shm-negotiated connection; the ring transport itself is built
-unconditionally (`crates/host-runtime/src/runtime.rs:794`).
+unconditionally (`crates/host-runtime/src/runtime.rs:804`).
 Status: active
 Exercised: yes — `ring_bridge_drains_inbound_and_queued_writes`
-(`client.rs:7597-7681`) queues eight writes with zero per-write wakes,
+(`client.rs:7443-7526`) queues eight writes with zero per-write wakes,
 delivers one edge, and bounds every completion at 250 ms.
 Guarantee: once the bridge wakes, every write already queued completes without
 any further **worker-queue** wake — k queued writes drain in k loop passes.
 Scoped to the private `worker_wake` descriptor, and conditional on the
 host-to-peer ring having descriptor and arena capacity for each write. Without
-that capacity the bridge blocks inside `endpoint.send_bounded`
-(`client.rs:2561-2566`) → `reserve_until` (`ring_transport.rs:910`,
-`ring.rs:1345`), which waits on the peer's `capacity_ready` doorbell
-(`ring.rs:1379-1382`). The bridge does not park once until the write's deadline:
-it passes `write.commit_by.min(slice)` with `slice` fifty milliseconds out
-(`BRIDGE_RESERVE_SLICE`, `client.rs:2462`, `:2560-2564`), keeps the write in
-its lane slot on a premature `Deadline` (`:2567-2579`), probes the setup
-socket between slices (`:2570`), and drains inbound frames before retrying.
-The wait is still a *peer* wake, and it is required before `wrote` is ever set
-at `client.rs:2612`, so neither the k-passes bound nor "no further wake" holds
-across a capacity stall. The re-poll guard at `:2673-2675` is
-`if wrote || pending_control.is_some() || pending_data.is_some() { continue; }`,
-so it also skips arming while either lane still holds an unfinished write.
+that capacity `RingClientEndpoint::try_send_bounded`
+(`ring_transport.rs:1433`) returns `Exhausted` without blocking, the write
+stays in its lane slot (`client.rs:2515`), and the bridge arms the peer's
+capacity doorbell for that lane through `Ring::arm_capacity_wait`
+(`ring.rs:903`, `client.rs:2711-2718`), then parks in one `poll` on the
+doorbell beside the worker wake, data readiness, and the setup socket, bounded
+by the earliest pending `commit_by` (`client.rs:2753-2765`); inbound frames
+drain before every retry. The wait is still a *peer* wake, and it is required
+before `wrote` is ever set at `client.rs:2640`, so neither the k-passes bound
+nor "no further wake" holds across a capacity stall. A pass that publishes
+continues at `:2697` without arming anything.
 Check: `always` — a bridge loop pass that completed a write re-polls the write
-queue without arming or blocking (`wrote` at `:2520`/`:2612`, checked at
-`:2673-2675`), so per-write completion latency is bounded in loop passes, not
+queue without arming or blocking (`wrote` set at `:2640`, checked at
+`:2697`), so per-write completion latency is bounded in loop passes, not
 in external events, **given ring capacity**. `always` because the property must
 hold on every pass; the bound (k passes, no second worker signal) is what a
 finite test asserts, and the test must provision enough ring capacity for the
@@ -4396,7 +4395,7 @@ Confidence: high — [evidence](evidence/queued-write-needs-no-second-wake.md).
 The loop order (one write, inbound drain, `wrote` check, arm, block) was read
 directly, as was the test's deliberate bypass of the signaling sender.
 Existing check: `ring_bridge_drains_inbound_and_queued_writes`
-(`client.rs:7597-7681`); status unaudited.
+(`client.rs:7443-7526`); status unaudited.
 Impact: burst writes complete with unbounded latency or expire at their
 deadlines on a healthy channel; the host attributes the timeout to the
 transport and cancels work the peer would have absorbed.
@@ -5739,7 +5738,8 @@ Open questions: None.
 Type: liveness
 Reachability: default-production - every host publish that finds the ring full
 enters `reserve_until` (`crates/shm-transport/src/backend/ring.rs:1345-1390`,
-reached from `ring_transport.rs:910` and the bridge's `send_bounded`); each
+reached at HEAD from the native addon, `packages/shm-native/src/lib.rs:1046`;
+the Rust host and client bridge arm the wake directly instead); each
 iteration arms the capacity wake through `ParkGuard::arm` (`:1359`) and the
 guard's `Drop` clears `parked` on every exit from the iteration, including the
 `?` returns (`:653-657`, comment at `:1358`).

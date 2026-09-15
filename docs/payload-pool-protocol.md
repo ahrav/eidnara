@@ -259,8 +259,8 @@ quarantined bucket. If quarantine accounting itself fails, the charge stays
 counted as active for the process lifetime; nothing refunds storage whose
 release is unproved.
 
-One connection commits 191,666,800 bytes: two mappings of 95,825,920 bytes and
-two ledgers of 7,480 bytes (187 blocks at 40 bytes). The host admits
+One connection commits 191,668,296 bytes: two mappings of 95,825,920 bytes and
+two ledgers of 8,228 bytes (187 blocks at 44 bytes). The host admits
 connections under a fixed ceiling of 1 GiB (`MAX_RING_RESIDENT_BYTES` in
 `crates/host-runtime/src/ring_transport.rs`), so the default and maximum
 `max_connections` is 5. The FIFO ring this layout replaced charged 64 MiB per

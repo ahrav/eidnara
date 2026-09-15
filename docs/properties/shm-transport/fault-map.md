@@ -52,7 +52,7 @@ nothing. That is the failure mode this file exists to prevent.
 | release-authority-bound-to-lease-ownership | A live lease **and** a release issued from the producer side with the identity `commit` returned | No |
 | release-exactly-once-per-sequence | Two or more release attempts for one sequence, ideally concurrent (F4) | Partial — sequential duplicate and stale-lap cases are covered well |
 | receive-failure-leaves-no-wedged-slot | F3 at lease or span construction, after the receive compare-exchange succeeds | No — and physical faults alone will not construct it |
-| release-failure-is-observable | F3: a release that fails while the surrounding operation is otherwise clean | No - `mismatched_release_identity_names_the_field_and_quarantines` does not exist at HEAD; the return path is `PayloadLease::return_once` (`crates/shm-transport/src/lease.rs:346-355`) into `Retained::complete` (`crates/shm-transport/src/backend/retained.rs:588-619`), whose failure latches `wake_failed` (`:629`, `:647`, `:656`) with no reader, and neither the `PayloadLease` drop path (`lease.rs:364-370`) nor the host's `let _ = lease.release()` in `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:119`) has a failing-return test |
+| release-failure-is-observable | F3: a release that fails while the surrounding operation is otherwise clean | Partial - `mismatched_release_identity_names_the_field_and_quarantines` does not exist at HEAD; the return path is `PayloadLease::return_once` (`crates/shm-transport/src/lease.rs:346-355`) into `Retained::complete` (`crates/shm-transport/src/backend/retained.rs:584-623`), which reports the doorbell failure to the caller as `WakeFailed`. The host's explicit release in `InboundFrame::into_private` propagates it as `PrivateCopyError::Transport` (`crates/host-runtime/src/frame_channel.rs:118`) and `into_private_reports_a_failed_return_wake_as_a_transport_error` (`crates/host-runtime/src/ring_transport.rs:2900`) drives that failing return; the `PayloadLease` drop path (`crates/shm-transport/src/lease.rs:364-370`) still discards it, and the pre-copy `drop(frame)` branches in `dispatch_request` (`crates/host-runtime/src/dispatch.rs:963`, `:995`) have no failing-return test |
 | attach-reconciles-or-refuses-stale-shared-cursors | F1 killing a receiver holding leases, then an attach | No — was "Partial, F1 exists"; the kill harness that made it partial was deleted by `ed487e11` and the surviving inline primitive cannot kill a lease-holding receiver |
 | crashed-producer-does-not-wedge-the-sequence | F1 between reserve and commit | No — was "Partial, F1 exists"; same cause, and this injection point was already unused |
 | dead-peer-charges-are-reclaimed-or-declared | F1 on a committed peer without a goodbye | Partial (revised 2026-09-05) - `setup_active_and_idle_sigkill_each_return_exact_capacity` (`crates/host-runtime/tests/shm_failure_modes.rs:214`) kills setup, active, and idle victims and witnesses readmission at a one-connection cap; no per-identity ledger and no declared-exception arm |
@@ -214,7 +214,7 @@ Ranked by how many catalog records it unblocks:
 ## Citation sweep, 2026-08-30
 
 A citation sweep ran over this file against
-`the `host` source checkout at `e447c927`. No fault class, required
+the `host` source checkout at `e447c927`. No fault class, required
 fault, or leverage ranking was re-derived; only references moved.
 
 What changed: F1's availability now records that

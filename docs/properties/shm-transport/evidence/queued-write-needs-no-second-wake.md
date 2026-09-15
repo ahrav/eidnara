@@ -37,7 +37,7 @@ rest wait for the next unrelated event — an inbound frame, a capacity signal,
 or peer death. Writes complete with unbounded latency or time out at their
 deadlines (`endpoint.send(header, body, deadline)`, `:2561-2566`), reported
 as transport failures on a healthy channel.
-At HEAD: The bridge calls `endpoint.send_bounded` with a `BRIDGE_RESERVE_SLICE` reserve deadline and the frame's own commit deadline, so one pass takes one capacity slice.
+At HEAD: The bridge calls `RingClientEndpoint::try_send_bounded` (`crates/host-runtime/src/ring_transport.rs:1433`, from `attempt_pending_writes`, `client.rs:2511`), which never blocks; an `Exhausted` result leaves the write in its lane slot (`:2515`), the bridge arms the capacity doorbell with that write's inventory and bound (`:2711-2718`), polls it beside the worker wake, data readiness, and the setup socket with the earliest `commit_by` as the timeout (`:2753-2765`), and re-attempts on the next pass.
 
 ## Timing windows and dependencies
 
@@ -45,8 +45,9 @@ The window opens when more than one write is queued before the bridge drains
 `worker_wake`, and closes only on the next external edge. Bounded liveness
 claim at HEAD: k queued writes complete in k loop passes with no signal after
 the first, because every pass that writes continues and every continue
-re-polls the queue. The bound is in loop passes, not wall time; a pass can
-still block inside `endpoint.send`'s own capacity wait, which is
+re-polls the queue. The bound is in loop passes, not wall time; a pass whose
+write finds the ring exhausted parks in `poll` on the capacity doorbell until
+the peer returns capacity or the write's `commit_by` passes, which is
 `capacity-recheck-after-a-wake-race`'s territory.
 
 ## What a test must construct
@@ -95,3 +96,18 @@ frame at all would isolate the `wrote` path).
   - line 19, `:1858` (a second wrote = true site): One `wrote = true` at `client.rs:2612` covers both lanes at HEAD; there is no second set site, and `let mut wrote = false;` is at `:2520`.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+### Q: What changed when #552 replaced the sliced send with the capacity arm?
+
+- Sources examined: `crates/host-runtime/src/client.rs:2499-2803` and
+  `crates/host-runtime/src/ring_transport.rs:1433` at HEAD.
+- Findings: `RingClientEndpoint::send_bounded` and `BRIDGE_RESERVE_SLICE` no
+  longer exist. The bridge reserves with the non-blocking `try_send_bounded`,
+  keeps an exhausted write in its lane, arms the capacity doorbell for the
+  blocked lane, and waits in one `poll` bounded by the earliest `commit_by`
+  (`client.rs:2711-2765`); a pass that publishes still sets `wrote`
+  (`:2640`) and continues (`:2697`), so the k-passes bound is unchanged.
+  The bridge clears `parked` before it exits (`:2803`).
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: the "At HEAD" sentences above describe this mechanism; the
+  earlier post-merge entry is retained as history.
