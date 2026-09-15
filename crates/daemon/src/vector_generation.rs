@@ -141,15 +141,15 @@ impl VectorSidecar {
     }
 }
 
-/// The compatibility identity every layer and composition carries: what must agree before two artifacts share a metric space.
-#[derive(Debug, Clone, PartialEq)]
+/// The compatibility identity every layer and composition carries: what must agree before two artifacts share a metric space. Metric and recipe are their textual names, which `Metric::name` and `ScalarRecipe::id` map to one to one.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VectorIdentity {
     pub embedding_model: String,
     pub tokenizer_fingerprint: String,
     pub vector_dimension: u32,
-    pub metric: Option<Metric>,
+    pub metric: String,
     pub unit_norm_tolerance_bits: u64,
-    pub recipe: Option<ScalarRecipe>,
+    pub quantizer_recipe: String,
     pub generation_epoch: u64,
     pub kernel_incarnation_id: String,
 }
@@ -160,9 +160,9 @@ impl VectorIdentity {
             embedding_model: expected.generation.embedding_model.clone(),
             tokenizer_fingerprint: expected.generation.tokenizer_fingerprint.clone(),
             vector_dimension: expected.generation.vector_dimension,
-            metric: Some(expected.metric),
+            metric: expected.metric.name().to_owned(),
             unit_norm_tolerance_bits: expected.unit_norm_tolerance.to_bits(),
-            recipe: Some(expected.recipe),
+            quantizer_recipe: expected.recipe.id().to_owned(),
             generation_epoch: expected.generation.generation_epoch,
             kernel_incarnation_id: expected.kernel_incarnation_id.to_owned(),
         }
@@ -173,9 +173,9 @@ impl VectorIdentity {
             embedding_model: sidecar.embedding_model.clone(),
             tokenizer_fingerprint: sidecar.tokenizer_fingerprint.clone(),
             vector_dimension: sidecar.vector_dimension,
-            metric: Metric::from_name(&sidecar.metric),
+            metric: sidecar.metric.clone(),
             unit_norm_tolerance_bits: sidecar.unit_norm_tolerance.to_bits(),
-            recipe: ScalarRecipe::from_id(&sidecar.quantizer_recipe),
+            quantizer_recipe: sidecar.quantizer_recipe.clone(),
             generation_epoch: sidecar.generation_epoch,
             kernel_incarnation_id: sidecar.kernel_incarnation_id.clone(),
         }
@@ -196,17 +196,14 @@ impl VectorIdentity {
                 "vector_dimension",
                 self.vector_dimension == other.vector_dimension,
             ),
-            (
-                "metric",
-                self.metric.is_some() && self.metric == other.metric,
-            ),
+            ("metric", self.metric == other.metric),
             (
                 "unit_norm_tolerance",
                 self.unit_norm_tolerance_bits == other.unit_norm_tolerance_bits,
             ),
             (
                 "quantizer_recipe",
-                self.recipe.is_some() && self.recipe == other.recipe,
+                self.quantizer_recipe == other.quantizer_recipe,
             ),
             (
                 "generation_epoch",
@@ -229,9 +226,9 @@ impl VectorIdentity {
             serde_json::Value::from(self.embedding_model.as_str()),
             serde_json::Value::from(self.tokenizer_fingerprint.as_str()),
             serde_json::Value::from(self.vector_dimension),
-            serde_json::Value::from(self.metric.map(Metric::name).unwrap_or_default()),
+            serde_json::Value::from(self.metric.as_str()),
             serde_json::Value::from(self.unit_norm_tolerance_bits),
-            serde_json::Value::from(self.recipe.map(ScalarRecipe::id).unwrap_or_default()),
+            serde_json::Value::from(self.quantizer_recipe.as_str()),
             serde_json::Value::from(self.generation_epoch),
         ])
         .expect("identity serialization cannot fail");
@@ -339,7 +336,11 @@ pub fn build(
     {
         return Err(VectorRefusal::RowOrder { index });
     }
-
+    if export.checkpoint.snapshot_commit_seq > export.checkpoint.checkpoint_commit_seq {
+        return Err(VectorRefusal::Identity {
+            field: "checkpoint",
+        });
+    }
     let layout = RowLayout {
         dimension: expected.generation.vector_dimension,
         metric: expected.metric,
@@ -403,7 +404,7 @@ pub struct Staging<'a> {
     pub admission: &'a Admission,
     pub identity: &'a ProjectionIdentity,
     /// Digests a corrupt same-digest target may never be exchange-repaired over.
-    pub protected: BTreeSet<String>,
+    pub protected: &'a BTreeSet<String>,
 }
 
 impl Staging<'_> {
@@ -428,7 +429,7 @@ impl Staging<'_> {
             .map_err(VectorRefusal::Admission)?;
         let sources = manifest_sources(manifest, |path| Some(resolve(path)))
             .expect("every manifest path resolves under the work directory");
-        let digest = self.store.stage(&sources, meta, &self.protected)?;
+        let digest = self.store.stage(&sources, meta, self.protected)?;
         // The store checked every source against the manifest's size and hash, so the digest it returns is the manifest's.
         debug_assert_eq!(digest, manifest.digest());
         Ok(digest)
@@ -480,7 +481,7 @@ pub fn verify(
     if manifest.target != VECTOR_TARGET {
         return Err(VectorRefusal::NotVectors("manifest target"));
     }
-    let sidecar_bytes = read_verified(&generation, SIDECAR_FILE)?;
+    let sidecar_bytes = generation.read_verified_file(SIDECAR_FILE)?;
     let sidecar: VectorSidecar =
         serde_json::from_slice(&sidecar_bytes).map_err(|_| VectorRefusal::NotVectors("sidecar"))?;
     if sidecar.schema != SIDECAR_SCHEMA {
@@ -499,7 +500,7 @@ pub fn verify(
     let layout = sidecar
         .layout()
         .ok_or(VectorRefusal::NotVectors("metric"))?;
-    let rows = codec::decode_rows(&read_verified(&generation, ROWS_FILE)?, &layout)
+    let rows = codec::decode_rows(&generation.read_verified_file(ROWS_FILE)?, &layout)
         .map_err(VectorRefusal::Rows)?;
     let fault = |path, fault| VectorRefusal::File { path, fault };
     if rows.rows.len() as u64 != sidecar.rows {
@@ -508,21 +509,21 @@ pub fn verify(
     let vectors = rows.rows.iter().map(Vec::as_slice);
     let calibration =
         scalar::calibrate(&layout, vectors.clone()).map_err(VectorRefusal::Calibration)?;
-    let scales_bytes = read_verified(&generation, SCALES_FILE)?;
+    let scales_bytes = generation.read_verified_file(SCALES_FILE)?;
     if calibration.scales.encode() != scales_bytes
         || calibration.identity.calibrated_rows != sidecar.calibrated_rows
         || sha256_hex(&scales_bytes) != sidecar.scales_sha256
     {
         return Err(fault(SCALES_FILE, FileFault::Calibration));
     }
-    let ids: Vec<String> = serde_json::from_slice(&read_verified(&generation, ROW_IDS_FILE)?)
+    let ids: Vec<String> = serde_json::from_slice(&generation.read_verified_file(ROW_IDS_FILE)?)
         .map_err(|_| fault(ROW_IDS_FILE, FileFault::Identifiers))?;
     if ids.len() != rows.rows.len() || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(fault(ROW_IDS_FILE, FileFault::Identifiers));
     }
     let codes = encode_all(&layout, &calibration.scales, vectors)
         .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
-    if read_verified(&generation, CODES_FILE)? != codes {
+    if generation.read_verified_file(CODES_FILE)? != codes {
         return Err(fault(CODES_FILE, FileFault::Codes));
     }
     Ok(VerifiedVectors {
@@ -578,37 +579,6 @@ fn encode_all<'a>(
     Ok(codes)
 }
 
-/// Why a verified read did not return bytes: the store refused the file, or the read itself failed.
-#[derive(Debug)]
-pub(crate) enum ReadFault {
-    Store(GenerationError),
-    Io(String),
-}
-
-impl From<ReadFault> for VectorRefusal {
-    fn from(fault: ReadFault) -> Self {
-        match fault {
-            ReadFault::Store(error) => error.into(),
-            ReadFault::Io(detail) => Self::Io(detail),
-        }
-    }
-}
-
-/// Reads one manifest-listed file through the retained descriptor after rehashing it.
-pub(crate) fn read_verified(
-    generation: &ValidatedGeneration,
-    path: &str,
-) -> Result<Vec<u8>, ReadFault> {
-    let fd = generation
-        .open_verified_file(path)
-        .map_err(ReadFault::Store)?;
-    let mut file = fs::File::from(fd);
-    let mut bytes = Vec::new();
-    io::Read::read_to_end(&mut file, &mut bytes)
-        .map_err(|error| ReadFault::Io(error.kind().to_string()))?;
-    Ok(bytes)
-}
-
 /// `O_EXCL` so a build never overwrites a file another build left behind.
 pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), VectorRefusal> {
     let io = |error: io::Error| VectorRefusal::Io(error.kind().to_string());
@@ -622,6 +592,6 @@ pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), VectorRefusal> 
     file.write_all(bytes).map_err(io)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }

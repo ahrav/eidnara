@@ -91,6 +91,7 @@ struct Fixture {
     admission: Admission,
     identity: ProjectionIdentity,
     generation: VectorGeneration,
+    protected: BTreeSet<String>,
     work_dirs: std::cell::Cell<usize>,
 }
 
@@ -114,6 +115,7 @@ impl Fixture {
             admission,
             identity,
             generation,
+            protected: BTreeSet::new(),
             work_dirs: std::cell::Cell::new(0),
         }
     }
@@ -158,7 +160,7 @@ impl Fixture {
                 gate: &self.gate,
                 admission,
                 identity: &self.identity,
-                protected: BTreeSet::new(),
+                protected: &self.protected,
             },
         )
     }

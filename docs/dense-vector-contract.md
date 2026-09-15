@@ -269,17 +269,18 @@ at an equal dimension.
 The vector selector is `vector-profile.json`, beside the host and search
 selectors. It names a composition, never a layer. A layer's manifest target
 is `vector-generation`; a composition's is `vector-composition`, and
-`select_vector` refuses any other. Any generation an owner selector names or
-a reader pins may list `members.json`, digests the store must retain with it:
-pruning retains every selected or pinned generation and every member it
-lists, discard refuses one, and exchange repair refuses to replace one. The
-store reads only a generation's manifest and members file for this, never
-its payload, so a corrupt payload of a selected generation does not stop
-pruning; a manifest or members file that cannot be read makes the members
-unknown, and the store then behaves as with a quarantined selector: temps
-only are reclaimed and discard refuses. The search selector keeps its
-existing behavior apart from this shared members rule, which no search seed
-exercises. The store's selection primitive checks inventory, sizes, modes,
+`select_vector` refuses any other. Any generation may list `members.json`, digests the store must retain with
+it: pruning retains every member named by any complete generation in the
+store, so a member outlives every record that names it by one prune pass;
+discard refuses a member of any record; exchange repair refuses to replace a
+selected record. The store reads only a generation's manifest and members
+file for this, never its payload, so a corrupt payload of a selected
+generation does not stop pruning; a selected generation whose manifest or
+members file cannot be read, or any generation of unknown schema, makes the
+members unknown, and the store then behaves as with a quarantined selector:
+temps only are reclaimed and discard refuses. The members rule is owner
+agnostic: a search seed that lists members retains them the same way, though
+no search seed does. The store's selection primitive checks inventory, sizes, modes,
 hashes, the target, and that every listed member validates; the daemon's
 semantic verification of the composition and its members precedes selection.
 
@@ -335,6 +336,7 @@ never displaced by a newer composition that was staged but not selected, and
 no verifying composition means explicit unavailability.
 
 Readers hold a composition the way the store expects: pin the composition
-generation, then open every member, then re-read the selector. While the pin
-is held the composition's members stay retained even after a later
-publication moves the selector.
+generation, then open every member, then re-read the selector. While the
+composition record exists, whether pinned or merely not yet reclaimed, its
+members stay retained, so a reader that pinned a superseded composition keeps
+its members after a later publication moves the selector.

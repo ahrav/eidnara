@@ -348,6 +348,19 @@ impl ValidatedGeneration {
         crate::harness_closure::descriptor_path(self.dir.as_raw_fd())
     }
 
+    /// The bytes of one manifest-listed file, read through [`Self::open_verified_file`]; the manifest cap bounds the read because every listed file's size was checked against it.
+    pub fn read_verified_file(&self, rel_path: &str) -> Result<Vec<u8>, GenerationError> {
+        let fd = self.open_verified_file(rel_path)?;
+        let size = self
+            .manifest
+            .files
+            .iter()
+            .find(|file| file.path == rel_path)
+            .map_or(0, |file| file.size);
+        let cap = usize::try_from(size).map_err(|_| invalid("file too large to read"))?;
+        read_all_fd(&fd, cap).map_err(|_| invalid("verified file read failed"))
+    }
+
     /// `open_verified_file` opens a manifest-listed file through the retained directory descriptor and rechecks its shape and hash.
     pub fn open_verified_file(&self, rel_path: &str) -> Result<OwnedFd, GenerationError> {
         let entry = self
@@ -553,26 +566,19 @@ impl GenerationStore {
 
     /// The members `digest` requires retained, from its manifest and members file alone; the other listed files are not opened.
     fn members_of(&self, digest: &str) -> Result<Vec<String>, GenerationError> {
-        let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
-            return Err(invalid("generation directory is missing or insecure"));
-        };
-        let manifest = Self::read_manifest_in_dir(&dir, digest)?;
+        let (dir, manifest) = self.open_manifest(digest)?;
         read_members(&dir, &manifest)
     }
 
-    /// Members of every pinned generation, so a reader that holds a superseded composition keeps its members too; a pinned generation whose members cannot be read counts as quarantined.
-    fn pinned_members(&self, digests: &[String]) -> (BTreeSet<String>, bool) {
+    /// Members named by any complete generation in `digests`, so a member is never reclaimed before every record that names it is; a record of unknown schema may name members this build cannot read, so it counts as quarantined.
+    fn named_members(&self, digests: &[String]) -> (BTreeSet<String>, bool) {
         let mut members = BTreeSet::new();
         let mut quarantined = false;
         for digest in digests {
-            if matches!(
-                lock_for_reclamation(&self.generations_fd, digest),
-                Err(Reclamation::Pinned)
-            ) {
-                match self.members_of(digest) {
-                    Ok(found) => members.extend(found),
-                    Err(_) => quarantined = true,
-                }
+            match self.members_of(digest) {
+                Ok(found) => members.extend(found),
+                Err(GenerationError::UnsupportedStateSchema) => quarantined = true,
+                Err(_) => {}
             }
         }
         (members, quarantined)
@@ -630,13 +636,21 @@ impl GenerationStore {
 
     /// The manifest alone: its bytes hash to `digest` and are canonical, but the files it lists are not opened. Cheap enough to run on every prune.
     pub fn manifest(&self, digest: &str) -> Result<GenerationManifest, GenerationError> {
+        self.open_manifest(digest).map(|(_, manifest)| manifest)
+    }
+
+    fn open_manifest(
+        &self,
+        digest: &str,
+    ) -> Result<(OwnedFd, GenerationManifest), GenerationError> {
         if !is_canonical_payload_digest(digest) {
             return Err(invalid("generation digest is noncanonical"));
         }
         let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
             return Err(invalid("generation directory is missing or insecure"));
         };
-        Self::read_manifest_in_dir(&dir, digest)
+        let manifest = Self::read_manifest_in_dir(&dir, digest)?;
+        Ok((dir, manifest))
     }
 
     fn read_manifest_in_dir(
@@ -998,12 +1012,7 @@ impl GenerationStore {
     pub fn digests(&self) -> Result<Vec<String>, GenerationError> {
         let (entries, _) = read_dir_names_partitioned(&self.generations_fd)
             .map_err(|_| invalid("directory listing failed"))?;
-        let mut digests: Vec<String> = entries
-            .into_iter()
-            .filter(|name| is_canonical_payload_digest(name))
-            .collect();
-        digests.sort();
-        Ok(digests)
+        Ok(canonical_digests(&entries))
     }
 
     pub fn reconcile_search(
@@ -1142,12 +1151,12 @@ impl GenerationStore {
         if selected.contains(&digest) {
             return Err(invalid("owner generation is selected"));
         }
-        let (held, held_quarantined) = self.pinned_members(&self.digests()?);
-        if held_quarantined {
+        let (named, named_quarantined) = self.named_members(&self.digests()?);
+        if named_quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
         }
-        if held.contains(&digest) {
-            return Err(invalid("generation is a member of a pinned composition"));
+        if named.contains(&digest) {
+            return Err(invalid("generation is a member of a retained composition"));
         }
         match rustix::fs::statat(
             &self.generations_fd,
@@ -1180,9 +1189,10 @@ impl GenerationStore {
     /// `prune` preserves entries with unknown manifest schemas or foreign names.
     /// `prune` returns `UnsupportedStateSchema` when the current profile is quarantined.
     /// A quarantined owner profile may name any digest, so `prune` then counts it as quarantined
-    /// and removes only temps, which no selector can reference; a selected or pinned generation
-    /// whose members cannot be read is treated the same way. Every owner selector gates every
-    /// caller, as the search selector already did.
+    /// and removes only temps, which no selector can reference; a selected generation whose members
+    /// cannot be read, or any generation of unknown schema, is treated the same way. A member named
+    /// by any complete record survives the pass its record is reclaimed in. Every owner selector
+    /// gates every caller, as the search selector already did.
     /// One unremovable entry does not stop the sweep: every reclaimable entry is removed first,
     /// then the first removal error is returned.
     pub fn prune(&self, protected: &BTreeSet<String>) -> Result<PruneReport, GenerationError> {
@@ -1207,15 +1217,10 @@ impl GenerationStore {
         let (entries, unnamed) = read_dir_names_partitioned(&self.generations_fd)
             .map_err(|_| invalid("directory listing failed"))?;
         report.quarantined += unnamed;
-        let digests: Vec<String> = entries
-            .iter()
-            .filter(|name| is_canonical_payload_digest(name))
-            .cloned()
-            .collect();
-        let (held, held_quarantined) = self.pinned_members(&digests);
-        protected.extend(held);
-        let owner_quarantined = owner_quarantined || held_quarantined;
-        if held_quarantined {
+        let (named, named_quarantined) = self.named_members(&canonical_digests(&entries));
+        protected.extend(named);
+        let owner_quarantined = owner_quarantined || named_quarantined;
+        if named_quarantined {
             report.quarantined += 1;
         }
         for name in entries {
@@ -1266,6 +1271,16 @@ impl GenerationStore {
             None => Ok(report),
         }
     }
+}
+
+fn canonical_digests(entries: &[String]) -> Vec<String> {
+    let mut digests: Vec<String> = entries
+        .iter()
+        .filter(|name| is_canonical_payload_digest(name))
+        .cloned()
+        .collect();
+    digests.sort();
+    digests
 }
 
 fn validate_rel_path(rel: &str) -> Result<(), GenerationError> {
