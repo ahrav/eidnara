@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/retained.rs:354`
 - `crates/shm-transport/src/lease.rs:21`
 
-Witness status: yes - compile-time: the `compile_fail` doctests at the top of crates/shm-transport/src/backend/ring.rs and the `assert_send::<PayloadLease>` in crates/shm-transport/src/lease.rs; runtime: `crates/shm-transport/src/lease.rs:573` and `crates/shm-transport/src/backend/ring.rs:3260`.
+Witness status: yes - compile-time: the `compile_fail` doctests at the top of crates/shm-transport/src/backend/ring.rs and the `assert_send::<PayloadLease>` in crates/shm-transport/src/lease.rs; runtime: `crates/shm-transport/src/lease.rs:573` and `crates/shm-transport/src/backend/ring.rs:3262`.
 
 ## Failure scenario
 

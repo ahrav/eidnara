@@ -13,11 +13,11 @@ column as each task lands. Status values: `landed` (every named record is
 | R4 | `retained-mapping-lifetime`, `wake-failure-preserves-published-ownership`, `request-conversion-completion-ownership` | - | landed |
 | R5 | `owned-lease-thread-boundary` | - | landed |
 | R6 | `shared-copy-source-access`, `private-decode-input-stability` | - | landed |
-| R7 | `application-frame-interoperability`, `send-outcome-no-generic-replay` | #552, #550 | partial |
+| R7 | `application-frame-interoperability`, `send-outcome-no-generic-replay` | #550 | partial |
 | R8 | `sole-identifiers-before-activation`, `validated-setup-geometry` | - | landed |
 | R9 | `native-alias-closure-before-transfer`, `partial-close-token-conservation`, `environment-finalizer-confinement` | #550 | partial |
-| R10 | `complete-capacity-admission`, `bounded-refusal-and-recovery`, `response-retention-isolation` | #552, #550 | partial |
-| R11 | `reserved-progress-under-data-exhaustion`, `capacity-wake-progress` | #552, #550 | partial |
+| R10 | `complete-capacity-admission`, `bounded-refusal-and-recovery`, `response-retention-isolation` | #550 | partial |
+| R11 | `reserved-progress-under-data-exhaustion`, `capacity-wake-progress` | #550 | partial |
 | R12 | `capacity-model-conservation` | - | landed |
 | R13 | `single-replacement-surface` | last task reruns | landed at this revision |
 | KTD1 | `class-allocation-conservation`, `direct-serialization-commit-boundary` | - | landed |
@@ -26,13 +26,13 @@ column as each task lands. Status values: `landed` (every named record is
 | KTD4 | `owned-lease-thread-boundary`, `shared-copy-source-access`, `private-decode-input-stability`, `request-conversion-completion-ownership` | - | landed |
 | KTD5 | `retained-mapping-lifetime`, `partial-setup-reclaims-only-unexposed-resources` | last task (descriptor-duplication failure injection) | partial |
 | KTD6 | `native-alias-closure-before-transfer`, `partial-close-token-conservation`, `environment-finalizer-confinement`, `response-retention-isolation` | #550 | partial |
-| KTD7 | `complete-capacity-admission`, `terminal-credit-follows-storage`, `reserved-publication-order`, `terminal-encoding-reserve-bound`, `reclamation-diagnostics-meaning` | #552, #550 for client publishers | partial |
+| KTD7 | `complete-capacity-admission`, `terminal-credit-follows-storage`, `reserved-publication-order`, `terminal-encoding-reserve-bound`, `reclamation-diagnostics-meaning` | #550 for the native publisher | partial |
 | KTD8 | `sole-identifiers-before-activation`, `single-replacement-surface` | - | landed |
 | U1 contract | `docs/payload-pool-protocol.md`, `sole-identifiers-before-activation`, `structural-rejection-before-dispatch` | - | landed |
 | U2 allocation | `class-allocation-conservation`, `descriptor-capacity-independent-of-payload`, `released-block-reuse-preserves-held-bytes` | - | landed |
 | U3 owned leases | `completion-cell-final-owner-once`, `retained-mapping-lifetime`, `owned-lease-thread-boundary`, `worker-drop-forbidden-operations` | - | landed |
-| U4 runtime input | `private-decode-input-stability`, `request-conversion-completion-ownership`, `reserved-publication-order` | #552, #550 for client publishers | partial |
+| U4 runtime input | `private-decode-input-stability`, `request-conversion-completion-ownership`, `reserved-publication-order` | #550 for the native publisher | partial |
 | U5 native and TypeScript | `native-alias-closure-before-transfer`, `partial-close-token-conservation`, `environment-finalizer-confinement`, `response-retention-isolation` | #550 | open |
-| U6 Rust client and accounting | `response-retention-isolation`, `bounded-refusal-and-recovery`, `reclamation-diagnostics-meaning` | #552 | partial |
+| U6 Rust client and accounting | `response-retention-isolation`, `bounded-refusal-and-recovery`, `reclamation-diagnostics-meaning` | #550 for native retention | partial |
 | U7 validation and deletion | `single-replacement-surface`, `fuzz-adapter-current-contract`, `malformed-fixture-valid-baseline`, `real-process-current-layout-witness` | last task | partial |
 | Gate integrity | `integration-gate-dependency-selection`, `unsafe-witness-selection`, `acceptance-artifact-provenance` | #550 for artifact identity | partial |

@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/ring.rs:1288`
 - `crates/shm-transport/src/backend/ring.rs:555`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2360`, `crates/shm-transport/src/backend/ring.rs:2389`, and `crates/shm-transport/src/backend/ring.rs:2424`.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2362`, `crates/shm-transport/src/backend/ring.rs:2391`, and `crates/shm-transport/src/backend/ring.rs:2426`.
 
 ## Failure scenario
 

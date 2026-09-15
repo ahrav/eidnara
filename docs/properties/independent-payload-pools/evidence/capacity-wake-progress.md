@@ -11,10 +11,11 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/backend/ring.rs:1111`
-- `crates/shm-transport/src/backend/retained.rs:623`
+- `crates/shm-transport/src/backend/retained.rs:629`
 - `crates/shm-transport/src/backend/ring.rs:95`
+- `crates/host-runtime/src/client.rs:2718`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2837`, `crates/shm-transport/src/backend/ring.rs:2877`, and both two-process tests in crates/shm-transport/tests/ring.rs.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2839`, `crates/shm-transport/src/backend/ring.rs:2879`, and both two-process tests in crates/shm-transport/tests/ring.rs; at the client, `crates/host-runtime/src/client.rs:7637` parks the managed bridge on the capacity doorbell with ordinary headroom exhausted (the bridge reaches its capacity arm, observed through the `before_capacity_arm` hook), and shows host consumptions alone, with no inbound data or timer, admit the blocked frame: with a Pong also outstanding the first consumption wakes the bridge for a retry that stays exhausted and the second admits the frame, and `crates/host-runtime/src/client.rs:7843` lands that consumption between the bridge's exhausted attempt and its capacity arm, where no doorbell token is sent, and shows the post-arm attempt publishes the frame within 2 s of a 30 s deadline; `shared_memory_workers_have_no_periodic_polling` in crates/host-runtime/src/ring_transport.rs pins that the bridge has no reservation slice.
 
 ## Failure scenario
 

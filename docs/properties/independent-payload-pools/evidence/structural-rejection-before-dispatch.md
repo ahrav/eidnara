@@ -13,7 +13,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/ring.rs:1487`
 - `crates/host-runtime/src/ring_transport.rs:1027`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2613` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
+Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2615` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
 
 ## Failure scenario
 

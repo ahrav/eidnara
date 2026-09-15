@@ -362,7 +362,7 @@ and `n/a - invalidated` for an invalidated record.
 | [foreign-slot-state-on-reserve-is-a-fault-not-backpressure](#foreign-slot-state-on-reserve-is-a-fault-not-backpressure) | safety | high | yes |
 | [failed-publication-wake-leaves-the-slot-published](#failed-publication-wake-leaves-the-slot-published) | safety | high | yes |
 | [release-leaves-the-consumer-parked-marker-intact](#release-leaves-the-consumer-parked-marker-intact) | liveness | high | yes |
-| [capacity-wait-unparks-on-exit-and-survives-a-stale-token](#capacity-wait-unparks-on-exit-and-survives-a-stale-token) | liveness | high | yes |
+| [capacity-wait-unparks-on-exit-and-survives-a-stale-token](#capacity-wait-unparks-on-exit-and-survives-a-stale-token) | liveness | medium | yes |
 
 ---
 
@@ -3965,8 +3965,9 @@ receives keep running while a frame waits for capacity, and a frame that
 outlives `frame_deadline` fails the generation from `Publisher::pump`
 (`:1168-1171`) or the deadline arm (`:867-877`) instead of parking the thread.
 The parked `Ring::reserve_until` wait this record was written against has no
-host caller; `reserve_until` remains for `RingClientEndpoint::send_bounded`
-(`:1412`). Inbound blocks outbound: the inbound send is
+host caller, and the Rust client bridge arms the capacity wake directly
+(`client.rs:2718`); `reserve_until` remains for the native addon
+(`packages/shm-native/src/lib.rs:1046`). Inbound blocks outbound: the inbound send is
 awaited with no timeout and no enclosing select
 (`ring_transport.rs:737-745`), so it parks until the application drains.
 **These are not symmetric in boundedness.** The outbound stall ends in an
@@ -4348,33 +4349,31 @@ Open questions:
 
 Type: liveness
 Reachability: default-production — `start_ring_bridge`
-(`crates/host-runtime/src/client.rs:2464`) is the client's ring worker, spawned for
+(`crates/host-runtime/src/client.rs:2547`) is the client's ring worker, spawned for
 every shm-negotiated connection; the ring transport itself is built
-unconditionally (`crates/host-runtime/src/runtime.rs:794`).
+unconditionally (`crates/host-runtime/src/runtime.rs:804`).
 Status: active
 Exercised: yes — `ring_bridge_drains_inbound_and_queued_writes`
-(`client.rs:7597-7681`) queues eight writes with zero per-write wakes,
+(`client.rs:7444-7527`) queues eight writes with zero per-write wakes,
 delivers one edge, and bounds every completion at 250 ms.
 Guarantee: once the bridge wakes, every write already queued completes without
 any further **worker-queue** wake — k queued writes drain in k loop passes.
 Scoped to the private `worker_wake` descriptor, and conditional on the
 host-to-peer ring having descriptor and arena capacity for each write. Without
-that capacity the bridge blocks inside `endpoint.send_bounded`
-(`client.rs:2561-2566`) → `reserve_until` (`ring_transport.rs:910`,
-`ring.rs:1345`), which waits on the peer's `capacity_ready` doorbell
-(`ring.rs:1379-1382`). The bridge does not park once until the write's deadline:
-it passes `write.commit_by.min(slice)` with `slice` fifty milliseconds out
-(`BRIDGE_RESERVE_SLICE`, `client.rs:2462`, `:2560-2564`), keeps the write in
-its lane slot on a premature `Deadline` (`:2567-2579`), probes the setup
-socket between slices (`:2570`), and drains inbound frames before retrying.
-The wait is still a *peer* wake, and it is required before `wrote` is ever set
-at `client.rs:2612`, so neither the k-passes bound nor "no further wake" holds
-across a capacity stall. The re-poll guard at `:2673-2675` is
-`if wrote || pending_control.is_some() || pending_data.is_some() { continue; }`,
-so it also skips arming while either lane still holds an unfinished write.
+that capacity `RingClientEndpoint::try_send_bounded`
+(`ring_transport.rs:1543`) returns `Exhausted` without blocking, the write
+stays in its lane slot (`client.rs:2515`), and the bridge arms the peer's
+capacity doorbell for that lane through `Ring::arm_capacity_wait`
+(`ring.rs:903`, `client.rs:2711-2718`), then parks in one `poll` on the
+doorbell beside the worker wake, data readiness, and the setup socket, bounded
+by the earliest pending `commit_by` (`client.rs:2753-2775`); inbound frames
+drain before every retry. The wait is still a *peer* wake, and it is required
+before `wrote` is ever set at `client.rs:2640`, so neither the k-passes bound
+nor "no further wake" holds across a capacity stall. A pass that publishes
+continues at `:2697` without arming anything.
 Check: `always` — a bridge loop pass that completed a write re-polls the write
-queue without arming or blocking (`wrote` at `:2520`/`:2612`, checked at
-`:2673-2675`), so per-write completion latency is bounded in loop passes, not
+queue without arming or blocking (`wrote` set at `:2640`, checked at
+`:2697`), so per-write completion latency is bounded in loop passes, not
 in external events, **given ring capacity**. `always` because the property must
 hold on every pass; the bound (k passes, no second worker signal) is what a
 finite test asserts, and the test must provision enough ring capacity for the
@@ -4396,7 +4395,7 @@ Confidence: high — [evidence](evidence/queued-write-needs-no-second-wake.md).
 The loop order (one write, inbound drain, `wrote` check, arm, block) was read
 directly, as was the test's deliberate bypass of the signaling sender.
 Existing check: `ring_bridge_drains_inbound_and_queued_writes`
-(`client.rs:7597-7681`); status unaudited.
+(`client.rs:7444-7527`); status unaudited.
 Impact: burst writes complete with unbounded latency or expire at their
 deadlines on a healthy channel; the host attributes the timeout to the
 transport and cancels work the peer would have absorbed.
@@ -4476,15 +4475,37 @@ Open questions:
 ### capacity-recheck-after-a-wake-race
 
 Type: liveness
-Reachability: default-production — `reserve_until` is the blocking send path
-for every ring producer (`endpoint.send` from the bridge,
-`crates/host-runtime/src/client.rs:2561-2566`), on the unconditionally built ring
-transport (`crates/host-runtime/src/runtime.rs:792-796`).
+Reachability: default-production — the Rust host and client no longer block in
+`reserve_until`; both arm the capacity doorbell through
+`Ring::arm_capacity_wait` (`ring.rs:903`), whose ladder re-checks the blocked
+reservation after `parked` is set: the client bridge arms it for a blocked
+lane (`crates/host-runtime/src/client.rs:2718`) and the host publisher for its
+blocked head (`crates/host-runtime/src/ring_transport.rs:1229`), on the
+unconditionally built ring transport (`crates/host-runtime/src/runtime.rs:804`).
+`reserve_until` / `reserve_until_in` (`ring.rs:1101`, `:1111`) keep the same
+ladder for the native addon (`packages/shm-native/src/lib.rs:1046`) and the
+test-only `RingClientEndpoint::send` (`ring_transport.rs:1520`).
 Status: active
-Exercised: partial — `two_process_zero_copy_exchange_uses_authenticated_grant`
-(`crates/shm-transport/tests/ring.rs:489-543`) parks a `reserve_until`
-behind a child's held lease and converges after the release, exercising the
-block-then-wake path; nothing lands a release inside the arm window itself.
+Exercised: partial — `two_process_exchange_holds_a_reuses_b_and_wakes_on_return`
+(`crates/shm-transport/tests/ring.rs:347-439`) drives `reserve_until` through a
+child's held lease and returns, which is cross-process reuse and progress
+evidence only: the child's returns at `:455-459` can land before the parent's
+next reservation at `:372-380`, and nothing asserts a park.
+`two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return`
+(`:486-562`) establishes the blocked state first — `try_reserve` returns
+`Exhausted`, `arm_capacity_wait` returns `Ok(true)`, and no doorbell token is
+readable — then has the child consume and requires the token, which is the
+cross-process block-then-wake witness. The arm window itself is covered at the
+API and at both producers: `arm_capacity_wait_refuses_to_park_over_a_return_that_landed_before_arming`
+(`ring.rs:2921`) returns capacity between the failed reservation and the arm
+and requires `Ok(false)`; `arming_against_the_blocked_head_refuses_to_park_over_a_return_before_arming`
+(`ring_transport.rs:2235`) does the same for the host publisher; and
+`ring_bridge_capacity_returned_in_the_arm_window_is_not_a_lost_wake`
+(`client.rs:7843-7897`) blocks the bridge in a hook immediately before its arm,
+has the host consume one descriptor there, and requires the blocked frame to
+publish within 2 s of a 30 s deadline. These land the release deterministically
+in the window; no instruction-level interleaving across the generation read
+and the doorbell drain is constructed.
 Guarantee: capacity freed at any point after a producer's failed reservation is
 consumed without waiting out the deadline — before blocking by the in-loop
 rechecks, during blocking by the doorbell. "Consumed" means the freed capacity is
@@ -4525,8 +4546,12 @@ Confidence: medium —
 both publisher orderings were read and the interleaving case analysis is
 recorded, but it is a hand proof over atomics with no loom or Miri backing.
 Existing check: partial —
-`two_process_zero_copy_exchange_uses_authenticated_grant`
-(`tests/ring.rs:489-543`), block-then-wake only; status unaudited.
+`two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return`
+(`tests/ring.rs:486-562`), block-then-wake across processes;
+`two_process_exchange_holds_a_reuses_b_and_wakes_on_return` (`:347-439`),
+reuse and progress with parking unverified; `ring.rs:2921`,
+`ring_transport.rs:2235`, and `client.rs:7843-7897` for a release landed in the
+arm window; status unaudited.
 Impact: `ProducerError::Deadline` on a ring with free capacity — a stranded
 full ring, reported as a transport failure on a channel whose receiver was
 draining correctly. Intermittent, load-dependent, and unreproducible by any
@@ -5738,59 +5763,96 @@ Open questions: None.
 ### capacity-wait-unparks-on-exit-and-survives-a-stale-token
 
 Type: liveness
-Reachability: default-production - every host publish that finds the ring full
-enters `reserve_until` (`crates/shm-transport/src/backend/ring.rs:1345-1390`,
-reached from `ring_transport.rs:910` and the bridge's `send_bounded`); each
-iteration arms the capacity wake through `ParkGuard::arm` (`:1359`) and the
-guard's `Drop` clears `parked` on every exit from the iteration, including the
-`?` returns (`:653-657`, comment at `:1358`).
+Reachability: default-production - two producer paths arm the capacity wake.
+`reserve_until_in` (`crates/shm-transport/src/backend/ring.rs:1111-1162`) is the
+blocking path for the native addon (`packages/shm-native/src/lib.rs:1046`) and
+the test-only `RingClientEndpoint::send`
+(`crates/host-runtime/src/ring_transport.rs:1520`); each iteration arms through
+`ParkGuard::arm` (`ring.rs:1131`, `arm` at `:99`) and the guard's `Drop`
+(`:108-110`) clears `parked` on every exit from the iteration, including the
+`?` returns. The Rust host and client bridge arm through `arm_capacity_wait`
+(`ring.rs:903-920`), which forgets its guard on `Ok(true)` (`:918`) and relies
+on `complete_capacity_wait` (`:974`) to clear `parked`. The client bridge calls
+it on the capacity wake (`crates/host-runtime/src/client.rs:2731`, `:2797`) and
+before the bridge thread exits (`:2803`). The host publisher calls it on
+readiness and publication progress (`ring_transport.rs:930`, `:1098`, `:1237`)
+but not on exit: `run_endpoint`'s frame-deadline branch (`:941-950`) and its
+cancellation returns (`:886`, `:952`) leave an armed marker behind, and `fail`
+(`:971-982`) closes the inbound channel without touching it.
 Status: active
-Exercised: partial - `reserve_until_deadline_leaves_the_capacity_wake_unparked`
-(`ring.rs:4189-4210`) fills the arena, lets `reserve_until` expire on a 30 ms
-deadline, asserts `Deadline` within 2 s, and asserts the capacity wake's
-`parked` is zero afterwards (`:4205-4209`);
-`stale_capacity_token_after_a_drain_does_not_deadlock_the_next_park`
-(`:4213-4240`) has a spawned consumer thread signal the capacity doorbell before
-any capacity exists, sleep 100 ms, then receive and release, while the test
-thread blocks in `reserve_until` with a 10 s deadline and must return inside
-5 s. The first is single-threaded; the second is the file's one two-thread test
-and bounds progress at the mid-block scale only, with no instruction-scale race
-constructed.
-Guarantee: A producer that leaves `reserve_until` by any exit (a successful
-reservation, `Deadline`, or an error) leaves the capacity wake's `parked`
-marker at zero, so the next consumer release does not send a doorbell byte that
-nobody is waiting for; and a stale capacity token already queued on the doorbell
-when the producer parks costs at most one spurious wake, never a missed one:
-`reserve_until` drains and re-checks (`:1368-1371`, `:1385-1388`) and returns
-within the deadline once capacity exists.
-Check: `always` - after `reserve_until` returns `Err(Deadline)`,
-`capacity_wake().parked == 0` and the call returned no later than the deadline
-plus scheduling slack; with a token queued before the park and capacity released
-from another thread, `reserve_until` returns `Ok` strictly before its deadline.
+Exercised: partial - `arm_capacity_wait_refuses_to_park_over_a_return_that_landed_before_arming`
+(`ring.rs:2921`) shows a return that lands before the arm leaves `parked` at zero
+with no token queued, so the arm reports `Ok(false)` instead of parking;
+`ring_bridge_blocked_write_expires_at_its_deadline_without_publishing`
+(`client.rs:7738-7836`) retires the bridge on a frame deadline while it is parked
+and then observes each marker through the host's outcome: the host consumes the
+published frames (`:7809-7812`), which quarantines the host consumer and fails
+the loop's `expect` if the capacity marker was left set (`ring.rs:1497-1500`),
+and a host publish must commit without quarantining (`:7834`), which fails if
+the data marker was left set (`publish_commit`, `:1365-1367`). Neither marker is
+read directly. The
+stale-token half is read, not tested: no test queues a doorbell byte before a
+park and releases from another thread.
+Guarantee: A producer that leaves `reserve_until_in` by any exit (a successful
+reservation, `Deadline`, or an error) leaves the capacity wake's `parked` marker
+at zero, so the next consumer release does not send a doorbell byte that nobody
+is waiting for; a caller of `arm_capacity_wait` owes the same clear on every
+exit, which the client bridge meets and the host's deadline and cancellation
+exits do not (see Open questions); and a stale capacity token already
+queued on the doorbell when the producer parks costs at most one spurious wake,
+never a missed one: both paths drain and re-check (`reserve_until_in` at
+`:1141-1148` and `:1159`; `arm_capacity_wait` at `:913-916`) and return within
+the deadline once capacity exists.
+Check: `always` - after `reserve_until_in` returns `Err(Deadline)`, and after
+the client bridge that armed through `arm_capacity_wait` exits its park,
+`capacity_wake().parked == 0`; with a token queued before the park and capacity
+released from another thread, the waiter returns `Ok` strictly before its
+deadline.
 Fault/timing angle: this is the producer-side mirror of
 `release-leaves-the-consumer-parked-marker-intact` with the polarity flipped.
-A leftover non-zero `parked` after an abandoned park makes the next release
-swap it and send a byte with no waiter, and a later genuine park can consume
-that stale byte through `drain` and then wait on an empty doorbell for a
-release that already happened; `reserve_until` defends against the second half
-by re-checking capacity after every drain (`:1371-1375`) and comparing the
-wake generation before it blocks (`:1364-1366`, `:1376-1378`). The hazard is a
-refactor that returns from an iteration without running the guard's `Drop`
-(moving the arm outside the loop, or holding the guard across iterations), or
-one that blocks without the post-drain re-check.
+A leftover non-zero `parked` after an abandoned park makes the next capacity
+signal swap it and send a byte with no waiter. When the waiter's doorbell end
+is already closed, the outcome depends on who signals: a payload release
+reports `LeaseError::WakeFailed` and quarantines nothing
+(`crates/shm-transport/src/lease.rs:342-354`;
+`a_failed_return_wake_reports_wake_failed_and_keeps_the_completion`,
+`ring.rs:3003`), while descriptor consumption quarantines the consumer
+(`ring.rs:1497-1500`). The data-doorbell mirror, a publisher whose failed data
+wake quarantines it inside `Ring::publish_commit` (`:1365-1367`, reached from
+`ProducerReservation::commit` at `:1878`), is the
+other outcome the bridge's exit test observes and belongs to the data-wake
+side of the protocol. A later genuine park can consume a stale byte through
+`drain` and then wait on an empty doorbell for a release that already happened;
+both paths defend against that by re-checking capacity after every drain and
+comparing the wake generation before they block (`:1137`, `:1148`; `:909-916`).
+The hazard is a refactor that returns from a `reserve_until_in` iteration
+without running the guard's `Drop`, or an `arm_capacity_wait` caller that exits
+without `complete_capacity_wait`.
 Required faults and enabling state: a full ring and an expiring deadline for the
 unpark half; a queued doorbell byte plus a release from another thread for the
 stale-token half (F4 at the mid-block scale).
-Confidence: high - [evidence](evidence/capacity-wait-unparks-on-exit-and-survives-a-stale-token.md).
-`reserve_until`'s arm ladder, `ParkGuard`'s `Drop`, and both tests were read
-directly.
-Existing check: the two tests named above, unaudited.
+Confidence: medium - [evidence](evidence/capacity-wait-unparks-on-exit-and-survives-a-stale-token.md).
+Both arm ladders, `ParkGuard`'s `Drop`, every `complete_capacity_wait` caller,
+`run_endpoint`'s exits, and the two tests were read directly; the stale-token
+half has no test and the host's exit clear has no implementation.
+Existing check: `ring.rs:2921` and `client.rs:7738-7836`, unaudited; the two
+tests this record previously named do not exist in the tree. The bridge test
+observes both markers through the host's quarantine outcomes, not by reading
+them.
 Impact: a producer that parks for capacity after an earlier timeout either wakes
 spuriously (cost: one extra loop) or, if the stale token is consumed before the
 real release lands and no re-check follows, sleeps until its deadline while
 capacity sits free; the host's publish path then reports `Deadline` on a ring
-that could have taken the frame.
+that could have taken the frame, or a consumer that quarantines on a capacity
+signal to a publisher that has already left.
 Open questions:
 
+- The host publisher's frame-deadline exit (`ring_transport.rs:941-950`) and
+  cancellation exits (`:886`, `:952`) return after `arm_capacity_wait` without
+  `complete_capacity_wait`, so the marker outlives the waiter; the host's peer
+  then sends a byte with no waiter on its next capacity signal, and
+  descriptor consumption quarantines that peer if the doorbell end is already
+  closed (`ring.rs:1497-1500`). That code is the host publish path, not touched
+  by #552. (needs human input)
 - Should the capacity-wake and data-wake marker records be one two-sided
   wake-protocol property rather than two mirrors? (needs human input)
