@@ -176,7 +176,9 @@ pub(crate) struct PreparedRing {
 /// Return obligations and released backing at one instant; see `RingTransport::return_snapshot`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReturnSnapshot {
-    /// Live owned leases across every mapped backing.
+    /// Payload leases this host holds across every mapped backing: the host's own return
+    /// obligations to the peer. Leases the peer holds live in the peer's process and are not
+    /// counted here.
     pub outstanding: u64,
     /// Backings still mapped by an endpoint handle or a lease.
     pub live_backings: u64,
@@ -221,6 +223,20 @@ impl BackingRegistry {
             Arc::downgrade(rings.second.retained()),
         ]);
     }
+
+    /// Removes both of `rings`' backings without counting them released. A quarantined
+    /// connection's peer still maps the pools, so the host-side handles unmapping later proves
+    /// nothing about the storage.
+    fn forget(&self, rings: &DuplexRing) {
+        let quarantined = [
+            Arc::downgrade(rings.first.retained()),
+            Arc::downgrade(rings.second.retained()),
+        ];
+        self.entries
+            .lock()
+            .expect("backing registry lock")
+            .retain(|weak| !quarantined.iter().any(|gone| weak.ptr_eq(gone)));
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -255,7 +271,8 @@ impl RingTransport {
     }
 
     /// Return obligations and released backing, read in one pass over the backing registry:
-    /// `outstanding` counts live owned leases across every backing still mapped;
+    /// `outstanding` counts the leases this host holds across every backing still mapped, not
+    /// the leases the peer holds, which live in the peer's process;
     /// `released_backings` counts backings whose last holder has dropped, each of which
     /// returned `mapping_bytes_per_direction` bytes. Leases return on other threads while the
     /// pass runs, so the two counts are independent samples, not one atomic snapshot.
@@ -515,9 +532,12 @@ impl RingTransport {
                 // after Goodbye, so the wait is short; a peer that keeps a mapping past the grace
                 // moves the charge to the quarantined bucket rather than refunding storage it holds.
                 let quarantined = !peer_released_ring(&rings, PEER_RELEASE_GRACE);
+                if quarantined {
+                    backing_registry.forget(&rings);
+                }
                 drop(rings);
-                // A backing with no lease in flight unmaps here; one still leased is pruned by
-                // a later registration or snapshot.
+                // A released backing with no lease in flight unmaps here; one still leased is
+                // pruned by a later registration or snapshot.
                 backing_registry.prune(|_| {});
                 if quarantined && backing_admission.quarantine().is_err() {
                     // Quarantine accounting failed: the charge stays counted rather than falling
@@ -2911,6 +2931,46 @@ mod tests {
             ResourceCharges::ZERO,
             "the peer still maps both pools, so nothing is proved released"
         );
+        drop(peer);
+    }
+
+    /// A backing whose charge moved to quarantine was not proved released, so the released
+    /// counters must not count it when the host-side handles unmap.
+    #[tokio::test]
+    async fn a_quarantined_backing_is_not_counted_as_released() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            io,
+            root,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        root.cancel();
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits")
+            .expect("endpoint task joins");
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.quarantined != ResourceCharges::ZERO
+        })
+        .await;
+        assert_ne!(accounting.quarantined, ResourceCharges::ZERO);
+        let snapshot = transport.return_snapshot();
+        assert_eq!(
+            snapshot.released_backings, 0,
+            "a quarantined backing is still mapped by the peer and was never proved released"
+        );
+        assert_eq!(
+            snapshot.live_backings, 0,
+            "the registry no longer tracks it either"
+        );
+        assert_eq!(transport.diagnostics()["returns"]["released_backings"], 0);
         drop(peer);
     }
 

@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1736`
-- `crates/host-runtime/src/ring_transport.rs:1406`
+- `crates/shm-transport/src/backend/ring.rs:1738`
+- `crates/host-runtime/src/ring_transport.rs:1426`
 
-Witness status: yes - `crates/host-runtime/src/ring_transport.rs:3432` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1366` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2385` covers abort and short commit.
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:3492` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1386` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2387` covers abort and short commit.
 
 ## Failure scenario
 

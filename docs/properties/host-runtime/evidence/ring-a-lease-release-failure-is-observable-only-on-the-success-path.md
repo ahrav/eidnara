@@ -236,21 +236,25 @@ the host's handling of it on the drop paths.
   `crates/shm-transport/src/lease.rs:342-355` (`release` and `return_once`) and
   `:364-370` (`Drop`), `connection.rs:532-543` (`decode_control_frame`),
   `dispatch.rs:993-1027` (the routed copy under `WorkLedgers::run_blocking`).
-- Findings: no. `receive_one` does not copy or release on the delivery
-  path; it hands the `PayloadLease` to the connection engine inside the frame.
-  The release happens in `InboundFrame::into_private` as
-  `let _ = lease.release();` (`frame_channel.rs:119`), which discards the
-  `Result` exactly as `Drop` does, and `into_private` reports only a copy
-  failure or a length mismatch (`PrivateCopyError`, `:73-78`). The one host
-  release that still routes its error is the oversize channel-0 rejection at
-  `ring_transport.rs:948-950`. The paths that drop the lease are also more
-  numerous: the `Ok(false)` exits on `read_cancel` and `discard` (`:991`,
-  `:993`) join the `Overloaded` (`:988`, `:998`) and `Cancelled` (`:1007`)
-  returns.
+- Findings: yes, on the success path. `receive_one` does not copy or release
+  on the delivery path; it hands the `PayloadLease` to the connection engine
+  inside the frame. The release happens in `InboundFrame::into_private` as
+  `lease.release().map_err(|_| PrivateCopyError::Transport)?`
+  (`frame_channel.rs:118`), so a failed return doorbell is reported to both
+  callers as `PrivateCopyError::Transport` (`:71-78`) and each ends the
+  generation (`connection.rs:419-422`, `dispatch.rs:1006-1011`);
+  `into_private_reports_a_failed_return_wake_as_a_transport_error`
+  (`ring_transport.rs:3240`) drives that failing return. The oversize
+  channel-0 rejection still routes its release error at
+  `ring_transport.rs:986-988`. The paths that drop the lease without a report
+  remain: the `Ok(false)` exits on `read_cancel` and `discard` (`:1032`,
+  `:1034`), the `Overloaded` (`:1029`, `:1039`) and `Cancelled` (`:1048`)
+  returns, and the pre-copy `drop(frame)` branches in `dispatch_request`
+  (`dispatch.rs:963`, `:995`).
 - Missing evidence: whether the routed copy running on a blocking worker
   (`dispatch.rs:1002`) changes what a release failure could mean there; the
   block returns from a thread that holds no `Ring`.
-- Conclusion: unresolved, needs the record re-derived. The asymmetry this
-  record names has collapsed into a uniform silence: no host path other than
-  the oversize rejection reports a release failure, so the `Guarantee:` and
-  `Check:` fields describe a reporting success path that HEAD does not have.
+- Conclusion: the success path reports again. `into_private` propagates the
+  release failure and a test exercises it, so the `Guarantee:` and `Check:`
+  fields describe a path HEAD has; the failure paths that drop the lease
+  still discard the `Result`, which is the asymmetry the record names.

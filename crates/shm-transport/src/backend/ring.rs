@@ -1647,9 +1647,11 @@ impl Ring {
     }
 
     /// Drains the return summary now and hands every block returned since the previous call to
-    /// `settle`, in return order. A caller that ties a credit or record to a published block
-    /// releases it here, at the physical return, not when a callback finishes. `try_reserve_in`
-    /// removes a returned block it reuses, so `settle` never sees a block the peer holds again.
+    /// `settle`. The order is unspecified: one drain visits the summary words and their set bits
+    /// in block-id order, not in the order the peer returned them. A caller that ties a credit or
+    /// record to a published block releases it here, at the physical return, not when a callback
+    /// finishes. `try_reserve_in` removes a returned block it reuses, so `settle` never sees a
+    /// block the peer holds again.
     pub fn take_reclaimed(&self, mut settle: impl FnMut(u32)) -> Result<(), RingError> {
         if self.ledger.borrow().allowed && !self.is_quarantined() {
             self.reclaim_completions()?;
