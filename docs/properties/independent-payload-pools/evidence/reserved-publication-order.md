@@ -12,10 +12,10 @@ Resolved against the tree of this catalog's introducing commit:
 
 - docs/payload-pool-protocol.md section 11
 - `docs/host-wire-protocol.md:314`
-- `crates/host-runtime/src/ring_transport.rs:1075`
-- `crates/host-runtime/src/ring_transport.rs:1102`
+- `crates/host-runtime/src/ring_transport.rs:1088`
+- `crates/host-runtime/src/ring_transport.rs:1115`
 
-Witness status: partial - `crates/host-runtime/src/ring_transport.rs:3181` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:3415` pins that a channel-0 Request is never a bypass control. Client publishers belong to #552 and #550.
+Witness status: partial - `crates/host-runtime/src/ring_transport.rs:3263` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:3497` pins that a channel-0 Request is never a bypass control. Client publishers belong to #552 and #550.
 
 ## Failure scenario
 

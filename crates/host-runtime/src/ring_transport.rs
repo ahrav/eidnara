@@ -507,10 +507,8 @@ impl RingTransport {
                         .try_send(Err(ReadClose::Corrupt("shared-memory endpoint panicked")));
                 }
                 drop(panic_inbound);
-                // The endpoint has exited; the worker charge refunds with it. The backing charge
-                // settles below, after the peer-release wait, so `io` completion never waits on
-                // the peer.
-                drop(worker_admission);
+                // The endpoint has exited, so `io` completes now; the charges settle below, after
+                // the peer-release wait, without delaying the caller.
                 let _ = done_tx.send(());
                 // The backing refunds only once both doorbells read end-of-file, which proves the
                 // peer dropped its rings and every lease. An orderly peer tears its rings down right
@@ -526,8 +524,10 @@ impl RingTransport {
                     // through to a refund of storage nobody proved released.
                     backing_admission.retain_uncertain();
                 }
-                // The backing charge refunds when the last lease returns and this clone drops.
+                // The backing charge refunds when the last lease returns and this clone drops;
+                // the worker charge refunds with the thread.
                 drop(backing_admission);
+                drop(worker_admission);
             });
         if spawned.is_err() {
             return Err(RingUnavailable);
@@ -2843,10 +2843,16 @@ mod tests {
             .await
             .expect("endpoint exits")
             .expect("endpoint task joins");
+        assert_eq!(
+            transport.accounting().unwrap().active.workers,
+            1,
+            "the worker thread is still alive while it waits for the peer to release"
+        );
         let accounting = settled_accounting(&transport, |accounting| {
-            accounting.quarantined != ResourceCharges::ZERO
+            accounting.active == ResourceCharges::ZERO
         })
         .await;
+        assert_eq!(accounting.active, ResourceCharges::ZERO);
         assert_ne!(
             accounting.quarantined,
             ResourceCharges::ZERO,
