@@ -134,13 +134,13 @@ An existing check does not remove a property from the catalog; each entry is
 | `transport_fault_is_reported_while_the_inbound_queue_is_full` (`:1789`) | unaudited |
 | `endpoint_panic_is_reported_while_the_inbound_queue_is_full` (`:1834`) | unaudited |
 | `a_peer_still_attached_after_an_orderly_close_keeps_the_backing_charge_in_quarantine` (`:1899`) | unaudited |
-| `a_doorbell_with_a_queued_token_ahead_of_end_of_file_still_reads_as_released` (`:1933`) | unaudited |
-| `a_lease_the_peer_keeps_after_closing_holds_the_backing_charge_in_quarantine` (`:1950`) | unaudited |
-| `peer_close_refunds_admission_although_the_backend_quarantines_the_ring` (`:2015`) | unaudited |
-| `root_cancellation_ends_a_budget_wait` (`:2079`) | unaudited |
-| `a_commit_past_the_write_deadline_is_refused` (`:2127`) | unaudited |
-| `a_client_send_past_its_frame_deadline_publishes_nothing` (`:2159`) | unaudited |
-| `quarantined_ring_moves_its_charges_to_the_quarantined_bucket` (`:2190`) | unaudited |
+| `a_doorbell_with_a_queued_token_ahead_of_end_of_file_still_reads_as_released` (`:1939`) | unaudited |
+| `a_lease_the_peer_keeps_after_closing_holds_the_backing_charge_in_quarantine` (`:1956`) | unaudited |
+| `peer_close_refunds_admission_although_the_backend_quarantines_the_ring` (`:2021`) | unaudited |
+| `root_cancellation_ends_a_budget_wait` (`:2085`) | unaudited |
+| `a_commit_past_the_write_deadline_is_refused` (`:2133`) | unaudited |
+| `a_client_send_past_its_frame_deadline_publishes_nothing` (`:2165`) | unaudited |
+| `quarantined_ring_moves_its_charges_to_the_quarantined_bucket` (`:2196`) | unaudited |
 
 ## Native and TypeScript
 
