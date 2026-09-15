@@ -17,15 +17,17 @@ use retrieval::batch::{
 };
 use retrieval::exact::{
     Authority, CertificateRefusal, CompletenessCertificate, Completion, Disqualification,
-    ExactProof, ExactQuery, HexPrefix, IncompleteReason, LookupRefusal, ObjectFormat,
-    ProofInvalidation, Resolution, ResolveBounds, ResolveRefusal, ResolveRequest, ShaPrefixQuery,
+    ExactProof, ExactQuery, HexPrefix, IncompleteReason, ObjectFormat, ProofInvalidation,
+    RequestIntent, Resolution, ResolveBounds, ResolveRefusal, ResolveRequest, ShaPrefixQuery,
     resolve, validate_for_use,
 };
 use retrieval::{
-    OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity, Tombstone,
-    TombstoneReason, install_identity,
+    OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, Tombstone, TombstoneReason,
+    install_identity,
 };
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use storage::{Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite};
 
 const DOMAIN: &str = "domain";
@@ -166,6 +168,7 @@ enum Row {
         object: &'static str,
         revision: i64,
         representation: &'static str,
+        payload: &'static str,
     },
     Commit {
         object: &'static str,
@@ -236,6 +239,7 @@ fn claim(object: &'static str, revision: i64, representation: &'static str) -> R
         object,
         revision,
         representation,
+        payload: object,
     }
 }
 
@@ -245,11 +249,20 @@ fn alias(key: &'static str, object: &'static str, representation: &'static str) 
         object,
         revision: 1,
         representation,
+        payload: object,
     }
 }
 
 fn oid(prefix: &str, fill: char) -> String {
     format!("{prefix}{}", fill.to_string().repeat(40 - prefix.len()))
+}
+
+fn intent_of(whole_request: bool) -> RequestIntent {
+    if whole_request {
+        RequestIntent::WholeRequest
+    } else {
+        RequestIntent::Mention
+    }
 }
 
 fn object_query(object: &str) -> ExactQuery<'_> {
@@ -341,7 +354,13 @@ impl Fixture {
         let through = self.tip();
         let identities: Vec<Vec<(String, String)>> = rows.iter().map(Row::identity).collect();
         let revisions: Vec<String> = rows.iter().map(|row| row.revision().to_string()).collect();
-        let texts: Vec<String> = rows.iter().map(|row| format!("{row:?}")).collect();
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|row| match row {
+                Row::Claim { payload, .. } => (*payload).to_string(),
+                Row::Commit { oid, .. } => oid.clone(),
+            })
+            .collect();
         let borrowed: Vec<Vec<(&str, &str)>> = identities
             .iter()
             .map(|f| f.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect())
@@ -421,12 +440,12 @@ impl Fixture {
         self.resolve_with(
             ResolveRequest {
                 query,
-                whole_request,
+                intent: intent_of(whole_request),
                 certificate,
-                inventory_epoch: EPOCH,
                 authority: Authority {
                     project: &self.project,
                     destination: ArtifactDestination::Local,
+                    inventory_epoch: EPOCH,
                 },
                 bounds,
             },
@@ -444,6 +463,7 @@ impl Fixture {
         let authority = Authority {
             project,
             destination,
+            inventory_epoch: EPOCH,
         };
         self.store
             .with_conn(|conn| {
@@ -483,7 +503,10 @@ fn a_healthy_explicit_singleton_proves_and_validates_while_an_always_refuse_cont
         .unwrap();
     assert_eq!(resolution.completion, Completion::Complete);
     assert_eq!(resolution.disqualified, None);
-    assert_eq!(resolution.targets, BTreeSet::from(["obj-1".to_string()]));
+    assert_eq!(
+        resolution.observed_targets,
+        BTreeSet::from(["obj-1".to_string()])
+    );
     assert_eq!(
         resolution.retained.len(),
         2,
@@ -495,8 +518,8 @@ fn a_healthy_explicit_singleton_proves_and_validates_while_an_always_refuse_cont
         .proof
         .clone()
         .expect("a healthy singleton proves");
-    assert_eq!(proof.target_id, "obj-1");
-    assert_eq!(proof.occurrences.len(), 2);
+    assert_eq!(proof.target_id(), "obj-1");
+    assert_eq!(proof.occurrences().len(), 2);
     assert_eq!(fixture.validate(&proof, &budget), Ok(()));
 
     let hybrid = fixture
@@ -531,12 +554,12 @@ fn a_healthy_explicit_singleton_proves_and_validates_while_an_always_refuse_cont
         .resolve_with(
             ResolveRequest {
                 query: object_query("obj-1"),
-                whole_request: true,
+                intent: RequestIntent::WholeRequest,
                 certificate: &certificate,
-                inventory_epoch: EPOCH,
                 authority: Authority {
                     project: &foreign,
                     destination: ArtifactDestination::Local,
+                    inventory_epoch: EPOCH,
                 },
                 bounds: bounds(),
             },
@@ -594,7 +617,7 @@ fn eligible_targets_after_many_rejected_rows_are_retained_without_renewing_bypas
         )
         .unwrap();
     assert_eq!(shared.completion, Completion::Complete);
-    assert_eq!(shared.observations.rows, 2);
+    assert_eq!(shared.consumed.rows, 2);
     assert_eq!(shared.observations.retracted, 1);
     assert_eq!(shared.observations.hidden, 1);
     assert!(shared.retained.is_empty());
@@ -646,6 +669,7 @@ fn eligible_targets_after_many_rejected_rows_are_retained_without_renewing_bypas
             object: ["r0", "r1", "r2", "r3", "r4", "r5", "r6"][index],
             revision: index as i64 + 1,
             representation: "decision_summary",
+            payload: "crowd",
         })
         .collect();
     rejected.push(alias("crowd", "late", "rationale"));
@@ -656,10 +680,13 @@ fn eligible_targets_after_many_rejected_rows_are_retained_without_renewing_bypas
         .unwrap();
     assert_eq!(crowd.completion, Completion::Complete);
     assert_eq!(crowd.consumed.pages, 4);
-    assert_eq!(crowd.observations.rows, 8);
+    assert_eq!(crowd.consumed.rows, 8);
     assert_eq!(crowd.retained.len(), 1);
     assert_eq!(crowd.retained[0].source_object_id, "late");
-    assert_eq!(crowd.targets, BTreeSet::from(["crowd".to_string()]));
+    assert_eq!(
+        crowd.observed_targets,
+        BTreeSet::from(["crowd".to_string()])
+    );
     assert!(matches!(
         crowd.disqualified,
         Some(Disqualification::Verdict(EligibilityVerdict::Retracted))
@@ -703,6 +730,30 @@ fn eligible_targets_after_many_rejected_rows_are_retained_without_renewing_bypas
         "the kernel still holds revision one, so revision two is stale"
     );
     assert!(resolution.retained.is_empty());
+
+    let revisions = Fixture::new();
+    revisions.decide("objects", &[ok("dup")]);
+    revisions.project(
+        &[
+            claim("dup", 1, "decision_summary"),
+            claim("dup", 2, "decision_summary"),
+        ],
+        vec![],
+    );
+    let certificate = revisions.certificate();
+    let resolution = revisions
+        .resolve(object_query("dup"), true, &certificate, bounds(), &budget)
+        .unwrap();
+    assert_eq!(resolution.observations.eligible, 1);
+    assert_eq!(resolution.observations.stale, 1);
+    assert_eq!(resolution.retained.len(), 1);
+    assert_eq!(resolution.retained[0].revision, 1);
+    assert_eq!(
+        resolution.disqualified,
+        Some(Disqualification::Verdict(EligibilityVerdict::Stale)),
+        "a live row at another revision cannot borrow the current one's authorization"
+    );
+    assert!(resolution.proof.is_none());
 }
 
 #[test]
@@ -798,6 +849,8 @@ fn bounds_before_exhaustion_yield_incomplete_and_never_uniqueness() {
         Completion::Incomplete(IncompleteReason::RetentionExhausted)
     );
     assert!(resolution.retained.is_empty());
+    assert_eq!(resolution.observations.eligible, 0);
+    assert_eq!(resolution.consumed.retained_bytes, 0);
 
     let cancelled = EvalBudget::unbounded();
     cancelled.cancel();
@@ -845,7 +898,10 @@ fn bounds_before_exhaustion_yield_incomplete_and_never_uniqueness() {
 #[test]
 fn sha_prefix_proof_requires_one_complete_oid_and_distinct_targets_stay_ambiguous() {
     let fixture = Fixture::new();
-    fixture.decide("objects", &[ok("c1"), ok("c2"), ok("twin-a"), ok("twin-b")]);
+    fixture.decide(
+        "objects",
+        &[ok("c1"), ok("c2"), ok("c3"), ok("twin-a"), ok("twin-b")],
+    );
     fixture.project(
         &[
             Row::Commit {
@@ -856,8 +912,24 @@ fn sha_prefix_proof_requires_one_complete_oid_and_distinct_targets_stay_ambiguou
                 object: "c2",
                 oid: oid("abc2", '0'),
             },
-            claim("twin-a", 1, "decision_summary"),
-            claim("twin-b", 1, "decision_summary"),
+            Row::Commit {
+                object: "c3",
+                oid: oid("abc3", '0'),
+            },
+            Row::Claim {
+                key: "twin-a",
+                object: "twin-a",
+                revision: 1,
+                representation: "decision_summary",
+                payload: "same words",
+            },
+            Row::Claim {
+                key: "twin-b",
+                object: "twin-b",
+                revision: 1,
+                representation: "decision_summary",
+                payload: "same words",
+            },
         ],
         vec![],
     );
@@ -878,26 +950,30 @@ fn sha_prefix_proof_requires_one_complete_oid_and_distinct_targets_stay_ambiguou
     };
     let colliding = sha("abc");
     assert_eq!(colliding.completion, Completion::Complete);
-    assert_eq!(colliding.distinct_keys, 2);
+    assert_eq!(colliding.distinct_keys, 3);
     assert_eq!(
-        colliding.targets.len(),
-        2,
-        "two eligible commits are ambiguous"
+        colliding.consumed.rows, 3,
+        "enumeration does not stop at the second target"
+    );
+    assert_eq!(
+        colliding.observed_targets.len(),
+        3,
+        "several eligible commits are ambiguous"
     );
     assert!(colliding.proof.is_none());
-    assert_eq!(colliding.retained.len(), 2, "both stay as hybrid evidence");
+    assert_eq!(colliding.retained.len(), 3, "all stay as hybrid evidence");
 
     let unique = sha("abc1");
     assert_eq!(unique.distinct_keys, 1);
-    assert_eq!(unique.targets.len(), 1);
+    assert_eq!(unique.observed_targets.len(), 1);
     let proof = unique.proof.expect("one complete oid proves");
-    assert_eq!(proof.occurrences[0].key, oid("abc1", '0').into_bytes());
+    assert_eq!(proof.occurrences()[0].key, oid("abc1", '0').into_bytes());
     assert_eq!(fixture.validate(&proof, &budget), Ok(()));
 
     let none = sha("e");
     assert_eq!(none.completion, Completion::NoMatch);
 
-    let twins = fixture
+    let twin_a = fixture
         .resolve(
             object_query("twin-a"),
             true,
@@ -906,10 +982,27 @@ fn sha_prefix_proof_requires_one_complete_oid_and_distinct_targets_stay_ambiguou
             &budget,
         )
         .unwrap();
-    assert_eq!(twins.targets, BTreeSet::from(["twin-a".to_string()]));
-    assert!(
-        twins.proof.is_some(),
-        "equal payload bytes do not merge distinct targets"
+    let twin_b = fixture
+        .resolve(
+            object_query("twin-b"),
+            true,
+            &certificate,
+            bounds(),
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(
+        twin_a.retained[0].payload_id, twin_b.retained[0].payload_id,
+        "equal payload bytes share one payload row"
+    );
+    assert_ne!(
+        twin_a.proof.as_ref().unwrap().target_id(),
+        twin_b.proof.as_ref().unwrap().target_id(),
+        "but each key proves its own canonical target"
+    );
+    assert_eq!(
+        twin_a.observed_targets,
+        BTreeSet::from(["twin-a".to_string()])
     );
 }
 
@@ -925,12 +1018,12 @@ fn certificates_must_name_this_projection_and_kernel_and_lag_defeats_proof() {
             .resolve_with(
                 ResolveRequest {
                     query: object_query("obj-1"),
-                    whole_request: true,
+                    intent: RequestIntent::WholeRequest,
                     certificate,
-                    inventory_epoch: epoch,
                     authority: Authority {
                         project: &fixture.project,
                         destination: ArtifactDestination::Local,
+                        inventory_epoch: epoch,
                     },
                     bounds: bounds(),
                 },
@@ -1019,24 +1112,23 @@ fn certificates_must_name_this_projection_and_kernel_and_lag_defeats_proof() {
         .resolve_with(
             ResolveRequest {
                 query: object_query("obj-1"),
-                whole_request: true,
+                intent: RequestIntent::WholeRequest,
                 certificate: &fresh,
-                inventory_epoch: EPOCH,
                 authority: Authority {
                     project: &empty.project,
                     destination: ArtifactDestination::Local,
+                    inventory_epoch: EPOCH,
                 },
                 bounds: bounds(),
             },
             &budget,
         )
         .unwrap_err();
-    assert!(matches!(
+    assert_eq!(
         refused,
-        ResolveRefusal::Certificate(CertificateRefusal::IncarnationMismatch)
-            | ResolveRefusal::Lookup(LookupRefusal::NoCheckpoint)
-            | ResolveRefusal::Lookup(LookupRefusal::Projection(ProjectionError::IdentityMismatch))
-    ));
+        ResolveRefusal::Certificate(CertificateRefusal::IncarnationMismatch),
+        "a certificate for another kernel never reaches the rows"
+    );
 }
 
 #[test]
@@ -1063,6 +1155,25 @@ fn final_use_revalidation_defeats_every_later_change() {
     assert_eq!(
         fixture.validate_with(&proof, &other, ArtifactDestination::Local, &budget),
         Err(ProofInvalidation::AuthorityMismatch)
+    );
+    let moved = Authority {
+        project: &fixture.project,
+        destination: ArtifactDestination::Local,
+        inventory_epoch: "inventory-epoch-2",
+    };
+    assert_eq!(
+        fixture
+            .store
+            .with_conn(|conn| Ok(validate_for_use(
+                conn,
+                &fixture.kernel,
+                &proof,
+                moved,
+                &budget
+            )))
+            .unwrap()
+            .unwrap(),
+        Err(ProofInvalidation::InventoryEpochChanged)
     );
     assert_eq!(
         fixture.validate_with(
@@ -1146,5 +1257,165 @@ fn final_use_revalidation_defeats_every_later_change() {
         rollback.validate(&proof, &budget),
         Err(ProofInvalidation::IncarnationChanged),
         "a restore invalidates every proof captured before it"
+    );
+}
+
+#[test]
+fn authority_churn_and_cancellation_during_enumeration_keep_progress_and_never_prove() {
+    let fixture = Fixture::new();
+    let objects: Vec<&'static str> = vec![
+        "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "b0", "b1", "b2", "b3", "b4",
+        "b5", "b6", "b7", "b8", "b9", "c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9",
+        "d0", "d1",
+    ];
+    fixture
+        .kernel
+        .commit(intent("objects"), |envelope| {
+            for (index, object) in objects.iter().enumerate() {
+                let mut spec = decision(object, Some(SCOPE_A), Sensitivity::Normal);
+                spec.source_revision = (index / 2) as i64 + 1;
+                envelope.insert_decision(spec)?;
+                envelope.record_admission(admission(object))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    let rows: Vec<Row> = objects
+        .iter()
+        .enumerate()
+        .map(|(index, object)| Row::Claim {
+            key: "churned",
+            object,
+            revision: 1,
+            representation: ["decision_summary", "rationale"][index % 2],
+            payload: object,
+        })
+        .collect();
+    let rows: Vec<Row> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| match row {
+            Row::Claim {
+                key,
+                object,
+                representation,
+                payload,
+                ..
+            } => Row::Claim {
+                key,
+                object,
+                revision: (index / 2) as i64 + 1,
+                representation,
+                payload,
+            },
+            other => other,
+        })
+        .collect();
+    fixture.project(&rows, vec![]);
+    let one_row = ResolveBounds {
+        page_rows: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    };
+
+    let mut snapshot_changed = false;
+    let mut cancelled_midway = false;
+    let mut iteration = 0;
+    while !(snapshot_changed && cancelled_midway) {
+        assert!(
+            iteration < 200,
+            "authority churn never overlapped an attempt"
+        );
+        iteration += 1;
+        fixture.project(&[], vec![]);
+        let certificate = fixture.certificate();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let budget = EvalBudget::new(None, Arc::clone(&interrupt));
+        let cancel = iteration % 3 == 2;
+        let resolution = std::thread::scope(|scope| {
+            let kernel = &fixture.kernel;
+            let stop = Arc::new(AtomicBool::new(false));
+            let writer_stop = Arc::clone(&stop);
+            let writer_interrupt = Arc::clone(&interrupt);
+            let writer = scope.spawn(move || {
+                let mut commits = 0;
+                while !writer_stop.load(Ordering::Relaxed) && commits < 64 {
+                    kernel
+                        .commit(
+                            intent(&format!("churn-{iteration}-{commits}")),
+                            |envelope| {
+                                envelope.insert_decision(decision(
+                                    &format!("churn-{iteration}-{commits}"),
+                                    Some(SCOPE_A),
+                                    Sensitivity::Normal,
+                                ))?;
+                                Ok(String::new())
+                            },
+                        )
+                        .unwrap();
+                    commits += 1;
+                    if cancel && commits == 3 {
+                        writer_interrupt.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+            let resolution = fixture.resolve(
+                object_query("churned"),
+                true,
+                &certificate,
+                one_row,
+                &budget,
+            );
+            stop.store(true, Ordering::Relaxed);
+            writer.join().unwrap();
+            resolution
+        });
+        match resolution {
+            Err(ResolveRefusal::BudgetExhausted) => {
+                assert!(cancel, "only a cancelled budget refuses at entry");
+            }
+            Err(other) => panic!("{other:?}"),
+            Ok(resolution) => {
+                if let Some(proof) = &resolution.proof {
+                    assert_eq!(
+                        proof.snapshot().tip,
+                        certificate.complete_through_commit_seq,
+                        "a proof never covers a snapshot past the certified horizon"
+                    );
+                    assert_eq!(resolution.disqualified, None);
+                }
+                if resolution.disqualified == Some(Disqualification::SnapshotChanged)
+                    || matches!(
+                        resolution.disqualified,
+                        Some(Disqualification::ProjectionLag { .. })
+                    )
+                {
+                    snapshot_changed = true;
+                    assert!(resolution.proof.is_none());
+                }
+                if resolution.completion
+                    == Completion::Incomplete(IncompleteReason::BudgetExhausted)
+                {
+                    assert!(cancel);
+                    cancelled_midway = true;
+                    assert!(resolution.proof.is_none());
+                }
+                assert!(
+                    resolution.retained.len() <= resolution.consumed.rows,
+                    "retained progress never exceeds the rows read"
+                );
+                assert_eq!(resolution.retained.len(), resolution.observations.eligible);
+                if resolution.completion == Completion::Complete {
+                    assert_eq!(resolution.consumed.rows, rows.len());
+                }
+            }
+        }
+    }
+    assert!(
+        snapshot_changed,
+        "the writer must have moved authority mid-attempt"
+    );
+    assert!(
+        cancelled_midway,
+        "cancellation must have landed mid-attempt"
     );
 }

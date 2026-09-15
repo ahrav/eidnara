@@ -2,8 +2,6 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
-
-use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactDestination, CommitReadTarget, EgressSnapshot, EligibilityCandidate,
     EligibilityVerdict, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES, ProjectScope,
@@ -32,6 +30,7 @@ pub struct CompletenessCertificate {
 pub struct Authority<'a> {
     pub project: &'a ProjectScope,
     pub destination: ArtifactDestination,
+    pub inventory_epoch: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,72 +42,18 @@ pub struct ResolveBounds {
     pub max_retained_bytes: NonZeroUsize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestIntent {
+    WholeRequest,
+    Mention,
+}
+
 pub struct ResolveRequest<'a> {
     pub query: ExactQuery<'a>,
-    pub whole_request: bool,
+    pub intent: RequestIntent,
     pub certificate: &'a CompletenessCertificate,
-    pub inventory_epoch: &'a str,
     pub authority: Authority<'a>,
     pub bounds: ResolveBounds,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetainedOccurrence {
-    pub key: Vec<u8>,
-    pub target_id: String,
-    pub occurrence_id: String,
-    pub lineage_id: String,
-    pub class: OccurrenceClass,
-    pub revision: i64,
-    pub representation: String,
-    pub span: Option<(u64, u64)>,
-    pub payload_id: String,
-    pub source_object_id: String,
-    pub source_evidence_id: String,
-    pub source_artifact_digest: String,
-}
-
-impl RetainedOccurrence {
-    fn from_row(row: &AssociationRow) -> Self {
-        Self {
-            key: row.key.clone(),
-            target_id: row.target_id.clone(),
-            occurrence_id: row.occurrence_id.clone(),
-            lineage_id: row.lineage_id.clone(),
-            class: row.class,
-            revision: row.revision,
-            representation: row.representation.clone(),
-            span: row.span,
-            payload_id: row.payload_id.clone(),
-            source_object_id: row.source_object_id.clone(),
-            source_evidence_id: row.source_evidence_id.clone(),
-            source_artifact_digest: row.source_artifact_digest.clone(),
-        }
-    }
-
-    fn retained_bytes(&self) -> usize {
-        self.key.len()
-            + self.target_id.len()
-            + self.occurrence_id.len()
-            + self.lineage_id.len()
-            + self.representation.len()
-            + self.payload_id.len()
-            + self.source_object_id.len()
-            + self.source_evidence_id.len()
-            + self.source_artifact_digest.len()
-    }
-
-    fn candidate(&self) -> OccurrenceCandidate {
-        OccurrenceCandidate {
-            occurrence_id: self.occurrence_id.clone(),
-            class: self.class,
-            candidate: EligibilityCandidate {
-                object_id: self.source_object_id.clone(),
-                source_revision: self.revision,
-                artifact_digest: Some(self.source_artifact_digest.clone()),
-            },
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +62,7 @@ pub enum IncompleteReason {
     PageBound,
     RetentionExhausted,
     BudgetExhausted,
+    ProjectionAdvanced,
     KernelIncarnationChanged,
 }
 
@@ -138,7 +84,6 @@ pub enum Disqualification {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Observations {
-    pub rows: usize,
     pub eligible: usize,
     pub tombstoned: usize,
     pub retracted: usize,
@@ -172,27 +117,52 @@ pub struct Consumed {
     pub retained_bytes: usize,
 }
 
+/// Egress eligibility only; surface permission and checkout applicability
+/// are judged elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExactProof {
-    pub target_id: String,
-    pub occurrences: Vec<RetainedOccurrence>,
-    pub certificate: CompletenessCertificate,
-    pub project: ProjectScope,
-    pub destination: ArtifactDestination,
-    pub snapshot: EgressSnapshot,
-    pub kernel: CommitReadTarget,
+    target_id: String,
+    occurrences: Vec<AssociationRow>,
+    certificate: CompletenessCertificate,
+    project: ProjectScope,
+    destination: ArtifactDestination,
+    snapshot: EgressSnapshot,
+    kernel: CommitReadTarget,
+}
+
+impl ExactProof {
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
+
+    pub fn occurrences(&self) -> &[AssociationRow] {
+        &self.occurrences
+    }
+
+    pub fn certificate(&self) -> &CompletenessCertificate {
+        &self.certificate
+    }
+
+    pub fn snapshot(&self) -> EgressSnapshot {
+        self.snapshot
+    }
+
+    pub fn kernel(&self) -> CommitReadTarget {
+        self.kernel
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
     pub completion: Completion,
+    /// The first observation that bars bypass; later eligible rows never clear it.
     pub disqualified: Option<Disqualification>,
-    pub targets: BTreeSet<String>,
-    pub retained: Vec<RetainedOccurrence>,
+    /// Targets among the retained rows, whatever the completion.
+    pub observed_targets: BTreeSet<String>,
+    pub retained: Vec<AssociationRow>,
     pub observations: Observations,
     pub consumed: Consumed,
     pub distinct_keys: usize,
-    pub snapshot: Option<EgressSnapshot>,
     pub proof: Option<ExactProof>,
 }
 
@@ -218,24 +188,40 @@ pub enum ResolveRefusal {
     BudgetExhausted,
     #[error("page rows exceed the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate bound")]
     PageOverBound,
+    #[error("the kernel returned {verdicts} verdicts for {candidates} candidates")]
+    VerdictMismatch { candidates: usize, verdicts: usize },
     #[error(transparent)]
     Certificate(#[from] CertificateRefusal),
     #[error(transparent)]
     Lookup(#[from] LookupRefusal),
+    #[error(transparent)]
+    Projection(#[from] ProjectionError),
     #[error("kernel: {0}")]
-    Kernel(KernelError),
+    Kernel(#[from] KernelError),
 }
 
-impl From<KernelError> for ResolveRefusal {
-    fn from(error: KernelError) -> Self {
-        Self::Kernel(error)
+fn candidate(row: &AssociationRow) -> OccurrenceCandidate {
+    OccurrenceCandidate {
+        occurrence_id: row.occurrence_id.clone(),
+        class: row.class,
+        candidate: EligibilityCandidate {
+            object_id: row.source_object_id.clone(),
+            source_revision: row.revision,
+            artifact_digest: Some(row.source_artifact_digest.clone()),
+        },
     }
 }
 
-impl From<ProjectionError> for ResolveRefusal {
-    fn from(error: ProjectionError) -> Self {
-        Self::Lookup(error.into())
-    }
+fn retained_bytes(row: &AssociationRow) -> usize {
+    row.key.len()
+        + row.target_id.len()
+        + row.occurrence_id.len()
+        + row.lineage_id.len()
+        + row.representation.len()
+        + row.payload_id.len()
+        + row.source_object_id.len()
+        + row.source_evidence_id.len()
+        + row.source_artifact_digest.len()
 }
 
 struct Attempt<'a> {
@@ -243,6 +229,8 @@ struct Attempt<'a> {
     kernel: &'a KernelStore,
     budget: &'a EvalBudget,
     initial: CommitReadTarget,
+    snapshot: Option<EgressSnapshot>,
+    stopped: Option<IncompleteReason>,
     resolution: Resolution,
 }
 
@@ -270,15 +258,16 @@ pub fn resolve(
         kernel,
         budget,
         initial,
+        snapshot: None,
+        stopped: None,
         resolution: Resolution {
             completion: Completion::Complete,
             disqualified: None,
-            targets: BTreeSet::new(),
+            observed_targets: BTreeSet::new(),
             retained: Vec::new(),
             observations: Observations::default(),
             consumed: Consumed::default(),
             distinct_keys: 0,
-            snapshot: None,
             proof: None,
         },
     };
@@ -304,10 +293,10 @@ fn admit_certificate(
         }
         .into());
     }
-    if request.inventory_epoch != certificate.inventory_epoch {
+    if request.authority.inventory_epoch != certificate.inventory_epoch {
         return Err(CertificateRefusal::InventoryEpochMismatch {
             certified: certificate.inventory_epoch.clone(),
-            current: request.inventory_epoch.to_string(),
+            current: request.authority.inventory_epoch.to_string(),
         }
         .into());
     }
@@ -335,13 +324,33 @@ impl Attempt<'_> {
     }
 
     fn stop(&mut self, reason: IncompleteReason) {
-        self.resolution.completion = Completion::Incomplete(reason);
+        self.stopped.get_or_insert(reason);
+    }
+
+    fn late_failure(&mut self, refusal: ResolveRefusal) -> Result<(), ResolveRefusal> {
+        let reason = match &refusal {
+            ResolveRefusal::Lookup(LookupRefusal::BudgetExhausted)
+            | ResolveRefusal::Kernel(KernelError::Deadline) => IncompleteReason::BudgetExhausted,
+            ResolveRefusal::Lookup(LookupRefusal::StaleCursor { .. })
+            | ResolveRefusal::Certificate(CertificateRefusal::ProjectionMismatch) => {
+                IncompleteReason::ProjectionAdvanced
+            }
+            _ => return Err(refusal),
+        };
+        if self.resolution.consumed.pages == 0 {
+            return Err(refusal);
+        }
+        self.stop(reason);
+        Ok(())
     }
 
     fn enumerate(&mut self, conn: &GuardedConn<'_>) -> Result<(), ResolveRefusal> {
         let bounds = self.request.bounds;
         let mut cursor: Option<Cursor> = None;
         loop {
+            if self.stopped.is_some() {
+                return Ok(());
+            }
             if self.budget.is_exhausted() {
                 self.stop(IncompleteReason::BudgetExhausted);
                 return Ok(());
@@ -361,16 +370,18 @@ impl Attempt<'_> {
                 page_rows,
                 budget: self.budget,
             };
-            let page = page(conn, &context, &self.request.query, cursor.as_ref())?;
+            let page = match page(conn, &context, &self.request.query, cursor.as_ref()) {
+                Ok(page) => page,
+                Err(refusal) => return self.late_failure(refusal.into()),
+            };
             if page.checkpoint != self.request.certificate.projection {
-                return Err(CertificateRefusal::ProjectionMismatch.into());
+                return self.late_failure(CertificateRefusal::ProjectionMismatch.into());
             }
             self.resolution.consumed.pages += 1;
             self.resolution.consumed.rows += page.rows.len();
-            self.resolution.observations.rows += page.rows.len();
             self.resolution.distinct_keys += page.distinct_keys;
-            if !self.judge(&page.rows)? {
-                return Ok(());
+            if let Err(refusal) = self.judge(&page.rows) {
+                return self.late_failure(refusal);
             }
             match page.next {
                 Some(next) => cursor = Some(next),
@@ -379,104 +390,107 @@ impl Attempt<'_> {
         }
     }
 
-    fn judge(&mut self, rows: &[AssociationRow]) -> Result<bool, ResolveRefusal> {
-        let live: Vec<&AssociationRow> = rows
-            .iter()
-            .filter(|row| match row.tombstone {
+    fn judge(&mut self, rows: &[AssociationRow]) -> Result<(), ResolveRefusal> {
+        let mut live = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row.tombstone {
                 Some(tombstone) => {
                     self.resolution.observations.tombstoned += 1;
                     self.disqualify(Disqualification::Tombstoned(tombstone.reason));
-                    false
                 }
-                None => true,
-            })
-            .collect();
-        if live.is_empty() {
-            return Ok(true);
+                None => live.push(row),
+            }
         }
-        let candidates: Vec<OccurrenceCandidate> = live
-            .iter()
-            .map(|row| RetainedOccurrence::from_row(row).candidate())
-            .collect();
+        if live.is_empty() {
+            return Ok(());
+        }
+        let candidates: Vec<OccurrenceCandidate> = live.iter().map(|row| candidate(row)).collect();
         let report = judge_occurrences(
             self.kernel,
             self.request.authority.project,
             self.request.authority.destination,
             &candidates,
         )?;
+        if report.occurrences.len() != live.len() {
+            return Err(ResolveRefusal::VerdictMismatch {
+                candidates: live.len(),
+                verdicts: report.occurrences.len(),
+            });
+        }
+        self.resolution.consumed.validated += candidates.len();
         let target = self
             .kernel
             .capture_commit_read_target_within_budget(self.budget)?;
         if target.incarnation != self.initial.incarnation {
             self.disqualify(Disqualification::SnapshotChanged);
             self.stop(IncompleteReason::KernelIncarnationChanged);
-            return Ok(false);
+            return Ok(());
         }
-        self.resolution.consumed.validated += candidates.len();
         if report.snapshot.classification_generation.is_none() {
             self.disqualify(Disqualification::ClassificationUnknown);
         }
-        match self.resolution.snapshot {
-            None => self.resolution.snapshot = Some(report.snapshot),
-            Some(previous) if previous != report.snapshot => {
-                self.disqualify(Disqualification::SnapshotChanged);
-            }
-            Some(_) => {}
+        if report.snapshot.tip != self.initial.through_commit
+            || self
+                .snapshot
+                .is_some_and(|previous| previous != report.snapshot)
+        {
+            self.disqualify(Disqualification::SnapshotChanged);
         }
+        self.snapshot.get_or_insert(report.snapshot);
         for (row, judged) in live.iter().zip(&report.occurrences) {
-            debug_assert_eq!(judged.occurrence_id, row.occurrence_id);
             match judged.disposition {
-                Disposition::Eligible => {
-                    self.resolution.observations.record(EligibilityVerdict::Ok);
-                    let retained = RetainedOccurrence::from_row(row);
-                    let bytes = retained.retained_bytes();
-                    let bounds = self.request.bounds;
-                    let consumed = self.resolution.consumed;
-                    if consumed.retained == bounds.max_retained.get()
-                        || consumed.retained_bytes + bytes > bounds.max_retained_bytes.get()
-                    {
-                        self.stop(IncompleteReason::RetentionExhausted);
-                        return Ok(false);
-                    }
-                    self.resolution.consumed.retained += 1;
-                    self.resolution.consumed.retained_bytes += bytes;
-                    self.resolution.targets.insert(retained.target_id.clone());
-                    self.resolution.retained.push(retained);
-                }
+                Disposition::Eligible => self.retain(row),
                 Disposition::PolicyExcluded(verdict) => {
                     self.resolution.observations.record(verdict);
                     self.disqualify(Disqualification::Verdict(verdict));
                 }
             }
         }
-        Ok(true)
+        Ok(())
+    }
+
+    fn retain(&mut self, row: &AssociationRow) {
+        if self.stopped.is_some() {
+            return;
+        }
+        let bounds = self.request.bounds;
+        let consumed = self.resolution.consumed;
+        let bytes = retained_bytes(row);
+        if consumed.retained == bounds.max_retained.get()
+            || consumed.retained_bytes + bytes > bounds.max_retained_bytes.get()
+        {
+            self.stop(IncompleteReason::RetentionExhausted);
+            return;
+        }
+        self.resolution.observations.record(EligibilityVerdict::Ok);
+        self.resolution.consumed.retained += 1;
+        self.resolution.consumed.retained_bytes += bytes;
+        self.resolution
+            .observed_targets
+            .insert(row.target_id.clone());
+        self.resolution.retained.push(row.clone());
     }
 
     fn finish(mut self) -> Resolution {
-        if self.resolution.completion == Completion::Complete
-            && self.resolution.observations.rows == 0
-        {
-            self.resolution.completion = Completion::NoMatch;
-        }
+        self.resolution.completion = match self.stopped {
+            Some(reason) => Completion::Incomplete(reason),
+            None if self.resolution.consumed.rows == 0 => Completion::NoMatch,
+            None => Completion::Complete,
+        };
         let sha_unique = match self.request.query {
             ExactQuery::Sha(_) => self.resolution.distinct_keys == 1,
             ExactQuery::CanonicalObject(_) => true,
         };
-        if self.request.whole_request
+        if self.request.intent == RequestIntent::WholeRequest
             && self.resolution.completion == Completion::Complete
             && self.resolution.disqualified.is_none()
-            && self.resolution.targets.len() == 1
+            && self.resolution.observed_targets.len() == 1
             && sha_unique
-            && let Some(snapshot) = self.resolution.snapshot
+            && let Some(snapshot) = self.snapshot
+            && let Some(target) = self.resolution.observed_targets.first()
         {
             self.resolution.proof = Some(ExactProof {
-                target_id: self
-                    .resolution
-                    .targets
-                    .iter()
-                    .next()
-                    .cloned()
-                    .unwrap_or_default(),
+                target_id: target.clone(),
                 occurrences: self.resolution.retained.clone(),
                 certificate: self.request.certificate.clone(),
                 project: self.request.authority.project.clone(),
@@ -492,6 +506,8 @@ impl Attempt<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofInvalidation {
     BudgetExhausted,
+    AuthorityMismatch,
+    InventoryEpochChanged,
     ProjectionChanged,
     IncarnationChanged,
     CanonicalChanged {
@@ -499,7 +515,6 @@ pub enum ProofInvalidation {
         current: i64,
     },
     SnapshotChanged,
-    AuthorityMismatch,
     Rejected {
         occurrence_id: String,
         verdict: EligibilityVerdict,
@@ -520,16 +535,26 @@ pub fn validate_for_use(
         return Ok(Err(ProofInvalidation::AuthorityMismatch));
     }
     let certificate = &proof.certificate;
+    if authority.inventory_epoch != certificate.inventory_epoch {
+        return Ok(Err(ProofInvalidation::InventoryEpochChanged));
+    }
     let checkpoint = read_checkpoint(conn, &certificate.canonical_incarnation_id)?;
     if checkpoint.as_ref() != Some(&certificate.projection) {
         return Ok(Err(ProofInvalidation::ProjectionChanged));
     }
-    if kernel.database_incarnation_id_within_budget(budget)? != certificate.canonical_incarnation_id
+    let kernel_state = (|| -> Result<_, KernelError> {
+        let incarnation = kernel.database_incarnation_id_within_budget(budget)?;
+        let target = kernel.capture_commit_read_target_within_budget(budget)?;
+        Ok((incarnation, target))
+    })();
+    let (incarnation, target) = match kernel_state {
+        Ok(state) => state,
+        Err(KernelError::Deadline) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
+        Err(error) => return Err(error.into()),
+    };
+    if incarnation != certificate.canonical_incarnation_id
+        || target.incarnation != proof.kernel.incarnation
     {
-        return Ok(Err(ProofInvalidation::IncarnationChanged));
-    }
-    let target = kernel.capture_commit_read_target_within_budget(budget)?;
-    if target.incarnation != proof.kernel.incarnation {
         return Ok(Err(ProofInvalidation::IncarnationChanged));
     }
     if target.through_commit != proof.kernel.through_commit {
@@ -538,17 +563,17 @@ pub fn validate_for_use(
             current: target.through_commit,
         }));
     }
-    let candidates: Vec<OccurrenceCandidate> = proof
-        .occurrences
-        .iter()
-        .map(RetainedOccurrence::candidate)
-        .collect();
-    let report = judge_occurrences(
+    let candidates: Vec<OccurrenceCandidate> = proof.occurrences.iter().map(candidate).collect();
+    let report = match judge_occurrences(
         kernel,
         authority.project,
         authority.destination,
         &candidates,
-    )?;
+    ) {
+        Ok(report) => report,
+        Err(KernelError::Deadline) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
+        Err(error) => return Err(error.into()),
+    };
     if report.snapshot != proof.snapshot {
         return Ok(Err(ProofInvalidation::SnapshotChanged));
     }

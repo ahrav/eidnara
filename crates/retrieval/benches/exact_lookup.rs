@@ -18,8 +18,8 @@ use retrieval::batch::{
 };
 use retrieval::exact::{
     Authority, CompletenessCertificate, ExactQuery, HexPrefix, LookupContext, ObjectFormat,
-    ResolveBounds, ResolveRequest, SelectorBounds, ShaPrefixQuery, classify, page, resolve,
-    validate_for_use,
+    RequestIntent, ResolveBounds, ResolveRequest, SelectorBounds, ShaPrefixQuery, classify, page,
+    resolve, validate_for_use,
 };
 use retrieval::{OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, install_identity};
 use sha2::{Digest, Sha256};
@@ -63,7 +63,13 @@ fn bounds() -> BatchBounds {
     }
 }
 
-fn populate(store: &SqliteStore, kernel_incarnation_id: &str, commits: usize, claims: usize) {
+fn populate(
+    store: &SqliteStore,
+    kernel_incarnation_id: &str,
+    through: i64,
+    commits: usize,
+    claims: usize,
+) {
     store
         .with_conn_fenced(|conn| {
             install_identity(
@@ -136,7 +142,7 @@ fn populate(store: &SqliteStore, kernel_incarnation_id: &str, commits: usize, cl
             source_object_id: identity[identity.len() - 1].1,
             source_evidence_id: "evidence",
             source_artifact_digest: DIGEST,
-            created_commit_seq: 1,
+            created_commit_seq: through,
         })
         .collect();
     let batch = ProjectionBatch {
@@ -144,7 +150,7 @@ fn populate(store: &SqliteStore, kernel_incarnation_id: &str, commits: usize, cl
             kernel_incarnation_id: kernel_incarnation_id.to_string(),
             hold_id: "hold".to_string(),
             snapshot_commit_seq: 0,
-            through_commit_seq: 1,
+            through_commit_seq: through,
         },
         records,
         invalidations: vec![],
@@ -193,7 +199,7 @@ fn parse_benches(c: &mut Criterion) {
 fn page_benches(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());
-    populate(&store, KERNEL, 4_096, 4_096);
+    populate(&store, KERNEL, 1, 4_096, 4_096);
     let budget = EvalBudget::unbounded();
     let mut group = c.benchmark_group("exact_page");
     for page_rows in [16usize, 256] {
@@ -345,17 +351,7 @@ fn resolve_benches(c: &mut Criterion) {
         .database_incarnation_id_within_budget(&budget)
         .unwrap();
     let store = open(dir.path());
-    populate(&store, &incarnation, 0, 256);
-    let through = kernel.tip().unwrap();
-    store
-        .with_conn_fenced(|conn| {
-            conn.execute(
-                "UPDATE projection_checkpoint SET checkpoint_commit_seq=?1",
-                [through],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    populate(&store, &incarnation, kernel.tip().unwrap(), 0, 256);
     let checkpoint = store
         .with_conn(|conn| Ok(read_checkpoint(conn, &incarnation).unwrap().unwrap()))
         .unwrap();
@@ -371,6 +367,7 @@ fn resolve_benches(c: &mut Criterion) {
     let authority = Authority {
         project: &project,
         destination: ArtifactDestination::Local,
+        inventory_epoch: "bench-epoch",
     };
     let bounds = ResolveBounds {
         page_rows: NonZeroUsize::new(256).unwrap(),
@@ -381,9 +378,8 @@ fn resolve_benches(c: &mut Criterion) {
     };
     let request = ResolveRequest {
         query: ExactQuery::CanonicalObject(b"obj-00000128"),
-        whole_request: true,
+        intent: RequestIntent::WholeRequest,
         certificate: &certificate,
-        inventory_epoch: "bench-epoch",
         authority,
         bounds,
     };
