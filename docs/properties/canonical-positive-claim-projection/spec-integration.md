@@ -55,10 +55,15 @@ Ticket numbers here are tracking metadata, not names of anything in the tree.
   the descriptor object, because admission-only dispositions are recorded on
   the decision, and submits the row's artifact digest so the artifact egress
   gate applies at the requested destination. Only `Current` candidates reach
-  the kernel; the others are denied by their state. One `EvalBudget` bounds
-  the kernel read. The same call serves preselection admission and the
-  final revalidation of packed survivors; the second call reads a newer
-  snapshot and denies whatever was restricted since.
+  the kernel; the others are denied by their state. The kernel read
+  (`judge_surface_eligibility_with_claims`) returns the canonical claim facts
+  of every named object from the same snapshot as the verdicts, and each
+  permitted row is reclassified against them, so a projection digest is never
+  the authority for which artifact is judged, a representation retired since
+  classification is denied at the fresh tip, and the lineage accounting is the
+  snapshot's. One `EvalBudget` bounds the kernel read. The same call serves
+  preselection admission and the final revalidation of packed survivors; the
+  second call reads a newer snapshot and denies whatever was restricted since.
 - Not wired in this change: a daemon route or plugin path that calls the gate,
   checkout applicability for claim candidates, and the six harness delivery
   witnesses. Those remain open under the delivery ticket.

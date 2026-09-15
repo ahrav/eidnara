@@ -705,17 +705,25 @@ Status: active
 Exercised: yes - after a quarantine and a correction the projection has not
 caught up with, both the classification snapshot and the fresh revalidation of
 a subset of earlier survivors deny the restricted objects; the unaffected
-claims stay permitted.
+claims stay permitted. A representation whose descriptor was retired after
+classification, and a row whose artifact digest disagrees with the kernel's
+occurrence inventory, are denied `Stale` at the validation snapshot while the
+kernel still permits the object; the accounting's lineage is read at that
+snapshot too.
 Guarantee: A projection row that was Current at an earlier snapshot grants
 nothing at a later one; every use is judged against the kernel at a fresh
 snapshot, and a restriction completed before that snapshot denies the use.
+The row itself is judged there as well: only a row the kernel's occurrence
+inventory lists with the row's artifact can be permitted.
 Check: `always` - `validate_for_surface` over survivors selected earlier returns
-`Denied(Verdict(_))` for every object the kernel restricted since, and its
-`snapshot.tip` exceeds the earlier snapshot's.
+`Denied(Verdict(_))` for every object the kernel restricted since, and
+`Denied(State(Stale))` for a row whose occurrence the kernel no longer lists or
+lists with another artifact; its `snapshot.tip` exceeds the earlier snapshot's,
+and `unknown_objects` follows causality recorded since.
 Fault/timing angle: the window between selection and handoff.
-Required faults and enabling state: approve-then-quarantine and correction landing between two validations.
+Required faults and enabling state: approve-then-quarantine and correction landing between two validations; a descriptor retirement, a forged row digest, and a causality record landing between classification and validation.
 Confidence: high - [evidence](evidence/stale-projection-cannot-authorize-current-use.md).
-Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`; status unaudited.
+Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`, `a_descriptor_retired_after_classification_is_denied_at_the_fresh_snapshot`, `a_row_whose_digest_disagrees_with_its_canonical_occurrence_is_not_permitted`, `use_accounting_reads_causality_at_the_validation_snapshot`; `crates/retrieval/tests/claims.rs` - `state_follows_the_documented_precedence`; status unaudited.
 Impact: a selected claim is delivered after the kernel revoked it.
 Open questions: None.
 

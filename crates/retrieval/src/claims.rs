@@ -41,10 +41,13 @@ pub enum CandidateState {
     /// The claim object was replaced by a successor, or its own admission
     /// disposition is `Superseded`.
     Superseded,
-    /// The own admission disposition is `Stale`, or the occurrence carries a
-    /// revision other than the object's canonical one. The registry never
-    /// changes an object's revision, so the second input can only come from a
-    /// corrupt projection row and is kept as a guard.
+    /// The own admission disposition is `Stale`, the occurrence carries a
+    /// revision other than the object's canonical one, or the kernel's
+    /// occurrence inventory at the snapshot does not list the row's occurrence
+    /// with the row's artifact behind it: the representation was retired, or
+    /// the projection row is corrupt. The registry never changes an object's
+    /// revision, so the revision input can only come from a corrupt row and is
+    /// kept as a guard.
     Stale,
     /// The own admission disposition is `Rejected`, `Contradicted`, or
     /// `Quarantined`, or the serving view lists no row for the object or lists
@@ -249,7 +252,7 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
         }
         Some(Disposition::Active | Disposition::Disputed) | None => {}
     }
-    if row.revision != facts.object.source_revision {
+    if row.revision != facts.object.source_revision || !is_canonical_occurrence(row, facts) {
         return CandidateState::Stale;
     }
     match &facts.served {
@@ -260,6 +263,15 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
         | ServedStanding::NotLiveAtSnapshot
         | ServedStanding::NeverAdmitted => CandidateState::Hidden,
     }
+}
+
+/// The occurrence id encodes class, identity, revision, and representation,
+/// so it and the digest together pin the row to one canonical occurrence.
+fn is_canonical_occurrence(row: &ClaimCandidateRow, facts: &ClaimFacts) -> bool {
+    facts.occurrences.iter().any(|occurrence| {
+        occurrence.occurrence_id == row.occurrence_id
+            && occurrence.artifact_digest == row.artifact_digest
+    })
 }
 
 /// Reads every live claim row, then the kernel's facts for the objects they
@@ -377,29 +389,34 @@ impl SurfaceValidation {
 /// policy in one fresh snapshot bounded by `budget`. Only `Current` candidates
 /// are submitted to the kernel, judged by the decision object they name, its
 /// revision, and the artifact behind the row; the rest are denied by their
-/// state. A batch `Ok` permits the surface only when the serving view also
-/// shows the object there, so an `AutoInject` presentation needs `Visible` on
-/// `AutoInject`, never batch `Ok` alone. Call it before preselection admission
-/// and again on the exact survivors immediately before handoff; the second
-/// call reads a newer snapshot and denies anything restricted since the first.
-/// `batch` supplies the lineage facts for the accounting; candidates are
-/// matched to it by object id. Cancellation is cooperative: local loops poll
-/// between rows, but a single row copy and cleanup are not interruptible.
-/// Callers remain responsible for bounding total rows and their owned bytes.
+/// state. The same snapshot supplies the canonical facts of every object the
+/// candidates name, so a submitted row is reclassified there: a representation
+/// retired, or a row whose artifact the kernel does not list for its
+/// occurrence, is denied by that fresh state even though the kernel permitted
+/// the object, and the accounting's lineage is the snapshot's. A batch `Ok`
+/// permits the surface only when the serving view also shows the object there,
+/// so an `AutoInject` presentation needs `Visible` on `AutoInject`, never batch
+/// `Ok` alone. Call it before preselection admission and again on the exact
+/// survivors immediately before handoff; the second call reads a newer snapshot
+/// and denies anything restricted since the first. Cancellation is
+/// cooperative: local loops poll between rows, but a single row copy and
+/// cleanup are not interruptible. Callers remain responsible for bounding
+/// total rows and their owned bytes.
 ///
 /// # Errors
 ///
 /// `Eligibility(InvalidInput)` when more than `MAX_ELIGIBILITY_CANDIDATES`
 /// candidates are `Current` or a Current row's identity fields are invalid;
-/// `Eligibility(Deadline)` when the budget runs out; other kernel read errors
-/// as `Eligibility(_)`.
+/// `Facts(TooManyClaims)` when the candidates name more distinct objects than
+/// `bounds.max_claims`; `Eligibility(Deadline)` when the budget runs out;
+/// other kernel read errors as `Eligibility(_)`.
 pub fn validate_for_surface(
     kernel: &KernelStore,
-    batch: &ClaimCandidateBatch,
     candidates: &[ClaimCandidate],
     project: &ProjectScope,
     destination: ArtifactDestination,
     surface: Surface,
+    bounds: ClaimFactBounds,
     budget: &EvalBudget,
 ) -> Result<SurfaceValidation, ClaimCandidateError> {
     let check_budget = || {
@@ -409,8 +426,13 @@ pub fn validate_for_surface(
     };
     check_budget()?;
     let mut submitted = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut object_ids = Vec::new();
     for candidate in candidates {
         check_budget()?;
+        if seen.insert(candidate.row.object_id.as_str()) {
+            object_ids.push(candidate.row.object_id.clone());
+        }
         if candidate.state != CandidateState::Current {
             continue;
         }
@@ -431,8 +453,19 @@ pub fn validate_for_surface(
         submitted.push(candidate);
     }
     let judged = kernel
-        .judge_surface_eligibility_within_budget(project, destination, surface, &submitted, budget)
-        .map_err(ClaimCandidateError::Eligibility)?;
+        .judge_surface_eligibility_with_claims(
+            project,
+            destination,
+            surface,
+            &submitted,
+            &object_ids,
+            bounds,
+            budget,
+        )
+        .map_err(|error| match error {
+            ClaimFactsError::Kernel(error) => ClaimCandidateError::Eligibility(error),
+            other => ClaimCandidateError::Facts(other),
+        })?;
     #[cfg(test)]
     tests::CANCEL_AFTER_JUDGMENT.with(|slot| {
         if let Some(budget) = slot.take() {
@@ -440,25 +473,30 @@ pub fn validate_for_surface(
         }
     });
     check_budget()?;
-    let mut lineage: HashMap<&str, &ClaimFacts> = HashMap::new();
-    for claim in &batch.claims {
+    let mut facts: HashMap<&str, &ClaimFacts> = HashMap::new();
+    for claim in &judged.claims {
         check_budget()?;
-        lineage.insert(claim.object.object_id.as_str(), claim);
+        facts.insert(claim.object.object_id.as_str(), claim);
     }
     let mut accounting = UseAccounting {
         attempted_rows: candidates.len(),
         ..UseAccounting::default()
     };
-    let mut verdicts = judged.verdicts.iter();
+    let mut verdicts = judged.batch.verdicts.iter();
     let mut validated = Vec::new();
     for candidate in candidates {
         check_budget()?;
+        let object_id = candidate.row.object_id.as_str();
+        let fresh = facts.get(object_id).copied();
         let verdict = if candidate.state == CandidateState::Current {
             // `submitted` was filtered by the same predicate over the same
             // slice, so the kernel returned exactly one verdict per `Current`
             // candidate in order.
             match verdicts.next() {
-                Some(judged) if judged.permits() => UseVerdict::Permitted(judged.visibility),
+                Some(judged) if judged.permits() => match classify(&candidate.row, fresh) {
+                    CandidateState::Current => UseVerdict::Permitted(judged.visibility),
+                    state => UseVerdict::Denied(UseDenial::State(state)),
+                },
                 Some(judged) if judged.verdict == EligibilityVerdict::Ok => {
                     UseVerdict::Denied(UseDenial::SurfaceHidden)
                 }
@@ -468,16 +506,12 @@ pub fn validate_for_surface(
         } else {
             UseVerdict::Denied(UseDenial::State(candidate.state))
         };
-        let object_id = candidate.row.object_id.clone();
         match verdict {
-            UseVerdict::Permitted(_) => accounting.permitted_objects.insert(object_id.clone()),
-            UseVerdict::Denied(_) => accounting.rejected_objects.insert(object_id.clone()),
+            UseVerdict::Permitted(_) => accounting.permitted_objects.insert(object_id.to_owned()),
+            UseVerdict::Denied(_) => accounting.rejected_objects.insert(object_id.to_owned()),
         };
-        if lineage
-            .get(object_id.as_str())
-            .is_none_or(|claim| claim.causality.is_unknown())
-        {
-            accounting.unknown_objects.insert(object_id);
+        if fresh.is_none_or(|claim| claim.causality.is_unknown()) {
+            accounting.unknown_objects.insert(object_id.to_owned());
         }
         validated.push(ValidatedCandidate {
             candidate: candidate.clone(),
@@ -486,9 +520,9 @@ pub fn validate_for_surface(
     }
     check_budget()?;
     Ok(SurfaceValidation {
-        snapshot: judged.snapshot,
-        incarnation: judged.incarnation,
-        surface: judged.surface,
+        snapshot: judged.batch.snapshot,
+        incarnation: judged.batch.incarnation,
+        surface: judged.batch.surface,
         candidates: validated,
         accounting,
     })
@@ -503,6 +537,13 @@ mod tests {
 
     thread_local! {
         pub(super) static CANCEL_AFTER_JUDGMENT: Cell<Option<EvalBudget>> = const { Cell::new(None) };
+    }
+
+    fn bounds() -> ClaimFactBounds {
+        ClaimFactBounds {
+            max_claims: NonZeroUsize::new(8).unwrap(),
+            max_causal_payload_bytes: std::num::NonZeroU64::new(1 << 16).unwrap(),
+        }
     }
 
     fn fixture() -> (
@@ -549,11 +590,11 @@ mod tests {
             assert!(matches!(
                 validate_for_surface(
                     &kernel,
-                    &batch,
                     &batch.candidates,
                     &project,
                     ArtifactDestination::Local,
                     Surface::AutoInject,
+                    bounds(),
                     &budget,
                 ),
                 Err(ClaimCandidateError::Eligibility(KernelError::Deadline))
@@ -567,11 +608,11 @@ mod tests {
         let validate = |candidates: &[ClaimCandidate]| {
             validate_for_surface(
                 &kernel,
-                &batch,
                 candidates,
                 &project,
                 ArtifactDestination::Local,
                 Surface::AutoInject,
+                bounds(),
                 &EvalBudget::unbounded(),
             )
         };
@@ -635,11 +676,11 @@ mod tests {
             let budget = EvalBudget::unbounded();
             let control = validate_for_surface(
                 &kernel,
-                &batch,
                 candidates,
                 &project,
                 ArtifactDestination::Local,
                 Surface::AutoInject,
+                bounds(),
                 &budget,
             )
             .unwrap();
@@ -651,11 +692,11 @@ mod tests {
             CANCEL_AFTER_JUDGMENT.with(|slot| slot.set(Some(budget.clone())));
             let result = validate_for_surface(
                 &kernel,
-                &batch,
                 candidates,
                 &project,
                 ArtifactDestination::Local,
                 Surface::AutoInject,
+                bounds(),
                 &budget,
             );
             let unconsumed = CANCEL_AFTER_JUDGMENT.with(Cell::take);

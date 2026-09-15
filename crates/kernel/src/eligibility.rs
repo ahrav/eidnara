@@ -6,6 +6,9 @@ use rusqlite::Transaction;
 
 use crate::admission::{EgressCandidate, EgressSnapshot, Surface, egress_candidates_tx};
 use crate::cas::{ArtifactDestination, ArtifactEligibility, is_artifact_digest};
+use crate::claim_facts::{
+    ClaimFactBounds, ClaimFacts, ClaimFactsError, check_claim_bounds, load_claims_in_tx,
+};
 use crate::commit_read::CommitReadIncarnation;
 use crate::envelope::Sensitivity;
 use crate::scope::{
@@ -129,6 +132,18 @@ pub struct SurfaceEligibilityBatch {
     pub surface: Surface,
     /// `verdicts[i]` judges `candidates[i]`; duplicates and order are preserved.
     pub verdicts: Vec<SurfaceVerdict>,
+}
+
+/// [`SurfaceEligibilityBatch`] read together with the canonical claim facts
+/// of `object_ids`, so a caller can reclassify a projection row against the
+/// occurrence inventory and causality the same snapshot holds.
+#[derive(Debug)]
+pub struct SurfaceEligibilityWithClaims {
+    pub batch: SurfaceEligibilityBatch,
+    /// One entry per requested object id with a registry row at the snapshot,
+    /// in request order; the rest are `missing`.
+    pub claims: Vec<ClaimFacts>,
+    pub missing: Vec<String>,
 }
 
 impl SurfaceEligibilityBatch {
@@ -378,6 +393,48 @@ impl KernelStore {
             incarnation,
             surface,
             verdicts,
+        })
+    }
+
+    /// [`Self::judge_surface_eligibility_within_budget`] plus
+    /// [`Self::claim_facts_as_of`] for `object_ids` from the one snapshot the
+    /// verdicts come from, so a final-use gate can deny a row whose occurrence
+    /// the kernel no longer lists at the tip it judged.
+    ///
+    /// # Errors
+    ///
+    /// The facts request errors before any read; kernel errors as
+    /// `ClaimFactsError::Kernel`.
+    #[allow(clippy::too_many_arguments)] // Splitting the call would split the snapshot.
+    pub fn judge_surface_eligibility_with_claims(
+        &self,
+        project: &ProjectScope,
+        destination: ArtifactDestination,
+        surface: Surface,
+        candidates: &[EligibilityCandidate],
+        object_ids: &[String],
+        bounds: ClaimFactBounds,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<SurfaceEligibilityWithClaims, ClaimFactsError> {
+        check_bounds(candidates)?;
+        check_claim_bounds(object_ids, bounds)?;
+        let read = |tx: &Transaction<'_>, tip: i64| {
+            let verdicts = judge_surface_in_tx(tx, tip, project, destination, surface, candidates)?;
+            let claims = load_claims_in_tx(tx, tip, object_ids, bounds);
+            Ok((self.incarnation(), verdicts, claims))
+        };
+        let (snapshot, (incarnation, verdicts, claims)) =
+            self.egress_read_within(&budget.acquire_limit(), read)?;
+        let (claims, missing) = claims?;
+        Ok(SurfaceEligibilityWithClaims {
+            batch: SurfaceEligibilityBatch {
+                snapshot,
+                incarnation,
+                surface,
+                verdicts,
+            },
+            claims,
+            missing,
         })
     }
 

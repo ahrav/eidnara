@@ -4,9 +4,9 @@
 
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    AdmissionFacts, CausalClass, ClaimDecisionFacts, ClaimFacts, Disposition, EventKind, Maturity,
-    ObjectRow, Outcome, Sensitivity, ServedFacts, ServedStanding, SourceClass, SurfaceVisibility,
-    TaintClass, UnknownReason, VisibilityRow,
+    AdmissionFacts, CausalClass, ClaimDecisionFacts, ClaimFacts, ClaimOccurrence, Disposition,
+    EventKind, Maturity, ObjectRow, Outcome, Sensitivity, ServedFacts, ServedStanding, SourceClass,
+    SurfaceVisibility, TaintClass, UnknownReason, VisibilityRow,
 };
 use retrieval::claims::{CandidateState, ClaimCandidateRow, classify};
 
@@ -58,6 +58,9 @@ struct Facts {
     disposition: Option<Disposition>,
     served: ServedStanding,
     causality: CausalClass,
+    /// The `(occurrence_id, artifact_digest)` pairs the kernel lists for the
+    /// object at the snapshot.
+    occurrences: Vec<(&'static str, String)>,
 }
 
 impl Facts {
@@ -69,6 +72,7 @@ impl Facts {
             disposition: Some(Disposition::Active),
             served: served(SurfaceVisibility::Labeled),
             causality: CausalClass::Unknown(UnknownReason::NoRecord),
+            occurrences: vec![("occ", "0".repeat(64))],
         }
     }
 
@@ -97,7 +101,21 @@ impl Facts {
             own_admission: self.disposition.map(admission),
             lineage_admission: None,
             served: self.served,
-            occurrences: Vec::new(),
+            occurrences: self
+                .occurrences
+                .into_iter()
+                .map(|(occurrence_id, artifact_digest)| ClaimOccurrence {
+                    class: OccurrenceClass::CanonicalClaims,
+                    representation: "decision_summary",
+                    descriptor_object_id: format!("descriptor:{occurrence_id}"),
+                    occurrence_id: occurrence_id.to_string(),
+                    lineage_id: "lineage".to_string(),
+                    payload_id: "payload".to_string(),
+                    artifact_digest,
+                    evidence_id: "evidence".to_string(),
+                    descriptor_commit_seq: 3,
+                })
+                .collect(),
             excluded_representations: Vec::new(),
             causality: self.causality,
             causal_record: None,
@@ -227,6 +245,22 @@ fn state_follows_the_documented_precedence() {
             Some(Facts {
                 revision: 2,
                 served: served(SurfaceVisibility::Hidden),
+                ..Facts::current()
+            }),
+            CandidateState::Stale,
+        ),
+        (
+            "occurrence not in the inventory is stale",
+            Some(Facts {
+                occurrences: vec![("other", "0".repeat(64))],
+                ..Facts::current()
+            }),
+            CandidateState::Stale,
+        ),
+        (
+            "occurrence listed with another artifact is stale",
+            Some(Facts {
+                occurrences: vec![("occ", "1".repeat(64))],
                 ..Facts::current()
             }),
             CandidateState::Stale,

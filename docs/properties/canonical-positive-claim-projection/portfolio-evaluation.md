@@ -69,6 +69,17 @@ reviews found and how each finding was dispositioned.
 | `SurfaceHidden` is unreachable on `ExplicitSearch` | bias | kept, documented on `judge_surface_in_tx` |
 | `validate_for_surface` duplicates the shape of `eligibility::judge_occurrences`, which judges the descriptor object | bias | kept for this change: the two judge different objects on purpose; converging them belongs with the descriptor path's owner |
 
+### Review comments on the final-use gate
+
+Codex review of the pull request; each code fix landed behind a test that
+failed first.
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The row's `artifact_digest` was submitted as read from the projection, so a corrupt or forged row digest with no evidence rows passed the local artifact gate | gap | fixed: a permitted row is reclassified against the kernel's occurrence inventory from the same snapshot; a digest the inventory does not list for the occurrence is `Stale` |
+| A descriptor retired between classification and validation left the row `Current` and the decision object `Ok`, so the withdrawn representation was permitted | gap | fixed: `judge_surface_eligibility_with_claims` returns the claim facts with the verdicts from one snapshot, and the reclassification denies a row whose occurrence is no longer listed |
+| `unknown_objects` came from the classification batch while the verdicts came from the fresh snapshot | refinement | fixed: the accounting reads causality from the validation snapshot; `validate_for_surface` no longer takes the batch |
+
 ## Biases for a human
 
 - Every record is `test-only` because no production path calls the reader or
