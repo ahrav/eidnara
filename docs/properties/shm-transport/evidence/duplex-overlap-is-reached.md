@@ -82,8 +82,11 @@ the blocking path that record still carries, the inbound handoff in `deliver`
 (`crates/host-runtime/src/ring_transport.rs:911-923`), and the capacity park it
 replaces the outbound stall with, the `arm_capacity_wait` arm of `run_endpoint`
 (`:788`, `:845-866`) that is armed only while `Publisher` holds a pending frame,
-have never been observed in a test: neither can be entered while the other lane
-is idle. The synchronous `reserve_until` publish that record was written against
+have never been observed in a test, and the overlap test did not reach either:
+`deliver` blocks only under application backpressure on the inbound lane and
+`arm_capacity_wait` only with a pending outbound frame against exhausted
+capacity, conditions the test does not create, though neither requires the
+other lane to be active. The synchronous `reserve_until` publish that record was written against
 has no host caller at HEAD (`Publisher::try_publish`, `:1221`, reserves with
 `try_reserve_in`).
 

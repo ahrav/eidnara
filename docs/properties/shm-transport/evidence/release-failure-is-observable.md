@@ -17,18 +17,20 @@ no successor. See the refresh note in [../catalog.md](../catalog.md).
 
 ## Discovery trigger
 
-Two `let _ =` sites on completion paths. `PayloadLease::Drop` discards whatever
-`return_once` returns (`crates/shm-transport/src/lease.rs:367`), and the host's
-`InboundFrame::into_private` discards whatever `lease.release()` returns
-(`crates/host-runtime/src/frame_channel.rs:119`); in the source tree this record
-was written against, the second site was the clean-close branch discarding
-`custody.release()`. Both are on paths that only run when everything else
+One `let _ =` site on a completion path at HEAD. `PayloadLease::Drop` discards
+whatever `return_once` returns (`crates/shm-transport/src/lease.rs:367`); the
+host's `InboundFrame::into_private` propagates `lease.release()` as
+`PrivateCopyError::Transport` (`crates/host-runtime/src/frame_channel.rs:115-122`)
+and is no longer a discard. In the source tree this record was written against,
+the second site was the clean-close branch discarding `custody.release()`. Both
+were on paths that only run when everything else
 looked fine, which is exactly where a lost signal is least likely to be noticed by
 anything else.
 
 ## Evidence trail
 
 - `crates/shm-transport/src/lease.rs:364-370` — the drop-path discard:
+
   ```rust
   impl Drop for PayloadLease {
       fn drop(&mut self) {
@@ -38,6 +40,7 @@ anything else.
       }
   }
   ```
+
   `return_once` (`:346-355`) calls through to `Retained::complete`
   (`crates/shm-transport/src/backend/retained.rs:588-619`), so every error that
   path can produce - `DuplicateRelease` (`lease.rs:348`) and `WakeFailed`
@@ -47,10 +50,12 @@ anything else.
   silently dropped here. `complete` does not quarantine; a doorbell failure
   latches `Retained::wake_failed` (`:629`, `:647`, `:656`), which nothing
   outside `retained.rs` reads.
-- `crates/host-runtime/src/frame_channel.rs:119` - the host copy-path discard:
-  `InboundFrame::into_private` copies the body with `PayloadLease::to_vec`
-  (`:116`) and then runs `let _ = lease.release();`, so a failed return after a
-  successful copy is unreported and the frame proceeds to its decoder.
+- `crates/host-runtime/src/frame_channel.rs:115-122` - the host copy path, no
+  longer a discard: `InboundFrame::into_private` copies the body with
+  `PayloadLease::to_vec` and then propagates `lease.release()?` as
+  `PrivateCopyError::Transport`, so a failed return after a successful copy
+  retires the generation with `ReadClose::Corrupt("shared-memory completion
+  failed")` instead of reaching a decoder.
 - former `crates/host-runtime/src/shm_provider.rs:363-371` — the clean-close branch:
   `if clean && !quarantine_next_close.swap(false, Ordering::AcqRel) { let _ = custody.release(); } else { recovery.report_suspect(custody); }`. The suspect path
   is the `else`, so on a clean close no recovery record is created regardless of what
@@ -254,7 +259,7 @@ lease drop path, and no shipped configuration selects the shared-memory transpor
   control-cap branch of `receive_one` maps it to
   `ReadClose::Corrupt("shared-memory completion failed")`, and the addon's
   `detach_active` maps it to `consumed_error("receive completion failed")`. The
-  drop path and `InboundFrame::into_private` discard it. The quarantine-on-error
+  drop path discards it and `InboundFrame::into_private` propagates it. The quarantine-on-error
   wrapping the catalog record's Guarantee was verified against has no
   counterpart, so the documented guarantee and the code disagree at HEAD.
   Arm 1 of the test recipe above does not produce a failing return, because
@@ -262,7 +267,7 @@ lease drop path, and no shipped configuration selects the shared-memory transpor
   a closed capacity doorbell or an unaddressable completion cell.
 - Missing evidence: a test that drives `complete` into `WakeError::Doorbell` and
   observes anything other than the latch.
-- Conclusion: resolved with answer - the failure is dropped silently on both
-  discard paths; the catalog record's Confidence is medium and its Existing
+- Conclusion: resolved with answer - the failure is dropped silently on the
+  drop path and propagated on the host copy path; the catalog record's Confidence is medium and its Existing
   check is none. Whether the intended response is a quarantine, a counter, or
   the latch needs human input.

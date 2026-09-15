@@ -482,3 +482,51 @@ async fn a_rejected_request_whose_return_wake_fails_retires_the_generation() {
     );
     drop(leases);
 }
+
+/// A request whose route closes after registration is cancelled before its private copy runs;
+/// the lease returns explicitly, and a failed return doorbell retires the generation instead of
+/// queueing a cancellation terminal over a transport that cannot be woken.
+#[tokio::test]
+async fn a_request_cancelled_by_route_close_before_its_copy_retires_on_a_failed_return() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        ..
+    } = fixture();
+    let route = shared
+        .registry
+        .reserve(&generation, RouteClass::General)
+        .unwrap();
+    shared.registry.install_bound(route);
+    let mut leases = leases_whose_return_wake_fails();
+    let budget = crate::wire::ByteBudget::new(16);
+    let header = crate::wire::EnvelopeHeader {
+        len: 1,
+        ver: crate::wire::PROTOCOL_VERSION,
+        ty: crate::wire::FrameType::Request,
+        flags: crate::wire::response_flags(false, true),
+        channel: route.channel,
+        epoch: route.epoch,
+        corr: 7,
+    };
+    let frame = crate::frame_channel::InboundFrame::new(
+        header,
+        leases.pop().unwrap(),
+        budget.try_charge(1).unwrap(),
+    );
+    // Registration completes here; the copy runs on the spawned task, which has not been polled.
+    crate::dispatch::dispatch_request(&shared, &generation, frame).await;
+    let _decision = shared.registry.begin_close(route);
+    shared.tracker.close();
+    shared.tracker.wait().await;
+    assert!(
+        generation.token.is_cancelled(),
+        "the failed return is a transport fault, not a cancellable request"
+    );
+    assert!(
+        queue.try_recv().is_err(),
+        "no terminal is queued over a transport that cannot be woken"
+    );
+    drop(leases);
+}

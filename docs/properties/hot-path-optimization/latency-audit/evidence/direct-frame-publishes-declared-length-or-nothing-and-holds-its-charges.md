@@ -28,7 +28,7 @@ sender exercises today.
 - On the endpoint thread, [`Publisher::try_publish`][publish-one] reserves
   through `try_reserve_in`, wraps the publish in `catch_unwind`, returns
   `Err(())` unless the result is `Ok(Ok(()))`, and drops `charge` at
-  [`:1221-1277`][publish-one] only after success.
+  [`:1333-1389`][publish-one] only after success.
 - [`publish_direct`][publish-direct] takes the reservation `try_publish`
   made, runs the serializer into a
   [`ReservationWriter`][res-writer]
@@ -87,7 +87,7 @@ inbound receives blocked, between `try_reserve_in` returning and
 closure and its captures live in the queue; a retired or cancelled generation
 drops the `OutboundFrame` there, which must release both the egress charge
 and the captured source bytes. The egress charge's release is at
-[`:1221-1277`][publish-one] on success and at the `OutboundFrame` drop otherwise.
+[`:1333-1389`][publish-one] on success and at the `OutboundFrame` drop otherwise.
 
 ## What a test must construct
 
@@ -149,8 +149,8 @@ deadline arm and the owned `into_parts` cases only.
 [t-parts]: ../../../../../crates/host-runtime/src/handler.rs#L596-L673
 [direct-frame]: ../../../../../crates/host-runtime/src/frame_channel.rs#L166-L200
 [publish-fail]: ../../../../../crates/host-runtime/src/ring_transport.rs#L696-L704
-[publish-one]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1221-L1277
-[publish-direct]: ../../../../../crates/host-runtime/src/ring_transport.rs#L788-L800
+[publish-one]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1333-L1389
+[publish-direct]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1392-L1404
 [commit-before]: ../../../../../crates/host-runtime/src/ring_transport.rs#L814-L825
 [res-writer]: ../../../../../crates/host-runtime/src/ring_transport.rs#L827-L843
 [t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1849-L1879

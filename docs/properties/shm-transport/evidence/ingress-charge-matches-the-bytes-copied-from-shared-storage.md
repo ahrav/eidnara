@@ -46,8 +46,10 @@ does re-derive it: after `PayloadLease::to_vec` (`:116`) it returns
 (`crates/host-runtime/src/connection.rs:419-422`,
 `crates/host-runtime/src/dispatch.rs:1006-1011`). The charge is reserved from
 `header.len` before the copy (`ring_transport.rs:1004`) and travels with the frame
-(`frame_channel.rs:68`, `:125`), so it matches the copied body whenever the copy
-succeeds; the charge is what the budget later releases, so a divergence that
+(`frame_channel.rs:68`, `:125`), so it matches the copied body whenever
+`InboundFrame::into_private` succeeds; `PayloadLease::to_vec` can copy and still
+return `PrivateCopyError::LengthMismatch`, and that frame never reaches a
+decoder; the charge is what the budget later releases, so a divergence that
 escaped both checks would be a durable accounting error rather than a transient
 one.
 

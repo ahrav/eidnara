@@ -15,7 +15,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/host-runtime/src/ring_transport.rs:1114`
 - `crates/host-runtime/src/ring_transport.rs:1141`
 
-Witness status: partial - `crates/host-runtime/src/ring_transport.rs:3329` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:3563` pins that a channel-0 Request is never a bypass control. Client publishers belong to #552 and #550.
+Witness status: partial - `crates/host-runtime/src/ring_transport.rs:3339` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:3573` pins that a channel-0 Request is never a bypass control. Client publishers belong to #552 and #550.
 
 ## Failure scenario
 
