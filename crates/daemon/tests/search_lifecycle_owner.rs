@@ -1498,6 +1498,92 @@ fn a_rebuild_request_is_admitted_as_an_explicit_action() {
     );
 }
 
+/// A request made after the admission records are gone is refused and closes the gate, even though an earlier slice installed evidence.
+#[test]
+fn a_request_without_current_records_is_refused_and_closes_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let ControlState::Current(current) = control(home) else {
+        panic!("the rebuild reached Current");
+    };
+    let mut again = rebuild(home);
+    again.selected_generation = current.staged_seed_digest.clone().unwrap();
+    again.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    again.attempt_id = "rebuild-again".to_owned();
+
+    std::fs::remove_dir_all(home.join(ADMISSION_DIR)).unwrap();
+    assert!(
+        matches!(
+            owner.request(&again, now(), &slice_budget()),
+            Err(BuildError::Intent(_))
+        ),
+        "withdrawn records refuse the request"
+    );
+    assert!(
+        matches!(control(home), ControlState::Current(done) if done.attempt_id == current.attempt_id),
+        "nothing was recorded"
+    );
+    assert_eq!(
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+            .unwrap_err(),
+        Denial::NoManifest
+    );
+}
+
+/// A window whose rows were each created and invalidated inside it applies in one batch: two mutations per source row fit the mutation bound.
+#[test]
+fn a_window_of_rows_created_and_invalidated_within_it_catches_up() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[
+                ("local_transaction_bytes", 131_200),
+                ("catchup_lag_commits", 1_000),
+            ],
+        ),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+
+    // Five created-and-invalidated rows produce 10 mutations against an eight-row batch.
+    let objects: Vec<String> = (0..5)
+        .map(|index| corpus.publish(&format!("brief-{index}"), "brief text"))
+        .collect();
+    for object in &objects {
+        corpus.retire(object);
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::CaughtUp(report) if report.end == EpisodeEnd::ReachedTarget && report.acknowledged_through == corpus.tip()),
+        "{outcome:?}"
+    );
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

@@ -25,10 +25,12 @@ use crate::embedding_supervisor::{DrainReport, Maintained, SliceBounds, Unresolv
 use crate::projection_admission::{
     AdmissionInputs, Closed, InputRefusal, ProjectionAdmission, Refresh, SelectedProjection,
 };
-use crate::projection_gates::{EntryPoint, InvalidationIdentity, ProjectionHook, RuntimeManifest};
+use crate::projection_gates::{
+    Denial, EntryPoint, InvalidationIdentity, ProjectionHook, RuntimeManifest,
+};
 use crate::projection_lifecycle::{
-    ControlState, LifecycleIntent, LifecycleRequest, MAX_RECORD_BYTES, ProjectionLifecycle,
-    Recorded, Transition,
+    ControlState, IntentRefusal, LifecycleIntent, LifecycleRequest, MAX_RECORD_BYTES,
+    ProjectionLifecycle, Recorded, Transition,
 };
 #[cfg(feature = "test-support")]
 use crate::search_catchup::EpisodeEvent;
@@ -661,7 +663,7 @@ impl SearchLifecycleOwner {
         }))
     }
 
-    /// Records a rebuild request, or begins an authorized recovery, without running a slice. A request naming another kernel incarnation, or one the installed manifest's limits cannot bound, is refused before anything is recorded.
+    /// Records a rebuild request, or begins an authorized recovery, without running a slice. A request naming another kernel incarnation, one made while the admission records or the lane are unavailable, or one the installed manifest's limits cannot bound, is refused before anything is recorded.
     ///
     /// # Errors
     ///
@@ -680,26 +682,36 @@ impl SearchLifecycleOwner {
                 "the request names another kernel incarnation",
             ));
         }
-        // When admission inputs and identity are available, reject manifest limits that cannot bound a slice.
-        if let Ok(inputs) = AdmissionInputs::read(&self.home)
-            && let Ok(identity) = self.identity(inputs.manifest(), budget)
-        {
-            replacement_spec(
-                inputs.manifest(),
-                identity,
-                request.transition,
-                request.allowance,
-                &request.consumer.generation_id,
-            )
-            .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
-            let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
-            let bound = limit(inputs.manifest(), request.transition.duration_limit())
-                .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
-            if duration > bound {
-                return Err(BuildError::Invalid(
-                    "the request's deadline lies past its transition's bound",
-                ));
+        // The records and lane are read now rather than trusted from the evidence an earlier slice installed; unavailable ones close the gate and refuse the request.
+        let inputs = match AdmissionInputs::read(&self.home) {
+            Ok(inputs) => inputs,
+            Err(_) => {
+                let _ = self.admission.refresh(None);
+                return Err(IntentRefusal::Denied(Denial::NoManifest).into());
             }
+        };
+        let identity = match self.identity(inputs.manifest(), budget) {
+            Ok(identity) => identity,
+            Err(_) => {
+                let _ = self.admission.refresh(None);
+                return Err(IntentRefusal::Denied(Denial::EvidenceIdentity).into());
+            }
+        };
+        replacement_spec(
+            inputs.manifest(),
+            identity,
+            request.transition,
+            request.allowance,
+            &request.consumer.generation_id,
+        )
+        .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+        let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
+        let bound = limit(inputs.manifest(), request.transition.duration_limit())
+            .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+        if duration > bound {
+            return Err(BuildError::Invalid(
+                "the request's deadline lies past its transition's bound",
+            ));
         }
         match request.transition {
             Transition::Rebuilding => {
@@ -952,6 +964,10 @@ fn replacement_spec(
         (half_rows.get() as u64).min(quarter_local / tuple_bytes.get() as u64),
     )?;
     // The commit page's payload and the window's exported source are both charged against `catchup_batch_encoded_bytes`, so each takes half.
+    let two_per_row = nonzero_usize(
+        "local_transaction_rows",
+        (batch_rows.get() as u64).saturating_mul(2),
+    )?;
     let commit_bytes = nonzero_u64(
         "catchup_batch_encoded_bytes",
         limit(manifest, "catchup_batch_encoded_bytes")? / 2,
@@ -1041,7 +1057,8 @@ fn replacement_spec(
                     max_tuple_bytes: tuple_bytes,
                 },
                 max_source_bytes: source_bytes,
-                max_local_mutations: batch_rows,
+                // A row created and invalidated inside one window is two mutations.
+                max_local_mutations: two_per_row,
                 max_pending,
             },
         },
