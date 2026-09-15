@@ -923,15 +923,7 @@ impl SearchLifecycleOwner {
                 _ => "admission is closed",
             }));
         }
-        // Judged after the records are installed, so a request for another kernel still leaves the gate on the current records rather than on the evidence a reload replaced.
-        if self.kernel.database_incarnation_id_within_budget(budget)?
-            != request.kernel_incarnation_id
-        {
-            return Err(BuildError::Invalid(
-                "the request names another kernel incarnation",
-            ));
-        }
-        // Whether the manifest still bounds the operation already recorded, as its next slice would check. A replacement that fits the reduced limits may replace what no longer does; a request that does not fit either leaves the gate closed, as that slice would.
+        // Whether the manifest still bounds the operation already recorded, as its next slice would check. A replacement that fits the reduced limits may replace what no longer does; a request that does not fit either, or one refused for another reason, leaves the gate closed, as that slice would.
         let recorded = ProjectionLifecycle::read_at(&self.home);
         let current_fits = match &recorded {
             ControlState::Intent(current) | ControlState::Current(current) => replacement_spec(
@@ -946,6 +938,17 @@ impl SearchLifecycleOwner {
             ControlState::Unavailable(_) => false,
             _ => true,
         };
+        // Judged after the records are installed, so a request for another kernel still leaves the gate on the current records rather than on the evidence a reload replaced; over a recorded operation those records cannot bound, the gate the last slice closed stays closed.
+        if self.kernel.database_incarnation_id_within_budget(budget)?
+            != request.kernel_incarnation_id
+        {
+            if !current_fits {
+                let _ = self.admission.refresh(None);
+            }
+            return Err(BuildError::Invalid(
+                "the request names another kernel incarnation",
+            ));
+        }
         // A replay of the recorded intent reconciles that record's durability rather than recording anything new, so its time left is not judged here.
         let replay =
             matches!(&recorded, ControlState::Intent(existing) if existing.is_replay_of(request));

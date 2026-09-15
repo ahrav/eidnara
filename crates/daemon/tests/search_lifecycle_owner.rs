@@ -3026,6 +3026,51 @@ fn a_foreign_kernel_request_still_installs_the_reloaded_records() {
     assert!(matches!(control(home), ControlState::Absent));
 }
 
+/// A request for another kernel installs the reloaded records but does not reopen admission over a recorded operation those records can no longer bound: the gate a slice closed on that operation stays closed.
+#[test]
+fn a_foreign_kernel_request_keeps_an_unfit_operation_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    assert!(matches!(control(home), ControlState::Intent(_)));
+    // The recorded rebuild carries an allowance of 3; a reload lowers the attempts it may take to 2, so the next slice closes admission on it.
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("retry_attempts", 2)]),
+        &campaign_json(&identity),
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Closed(_)), "{outcome:?}");
+    let denied = || {
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .is_err()
+    };
+    assert!(denied(), "the slice closed admission on the unfit record");
+
+    let mut foreign = rebuild(home);
+    foreign.kernel_incarnation_id = "another-kernel".to_owned();
+    let outcome = owner.request(&foreign, now(), &slice_budget());
+    assert!(
+        matches!(&outcome, Err(BuildError::Invalid(reason)) if reason.contains("another kernel incarnation")),
+        "{outcome:?}"
+    );
+    assert!(
+        denied(),
+        "a refused foreign request must not reopen admission over an operation the records cannot bound"
+    );
+    assert!(owner.pin(&slice_budget()).is_err());
+}
+
 /// A reload that lowers the transition's duration bound below an active record's own duration stops that record's slices: the record's duration is charged against the bound at every admission.
 #[test]
 fn a_lowered_duration_bound_blocks_an_active_record() {
