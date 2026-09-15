@@ -426,7 +426,7 @@ impl Fixture {
 
     /// Snapshots the kernel so a later `restore` replaces its incarnation.
     fn backup(&self) -> std::path::PathBuf {
-        let backup_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir_in(self.root.path()).unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
@@ -440,7 +440,6 @@ impl Fixture {
                 capture_pin_expires_at: None,
             })
             .unwrap();
-        // The directory outlives the fixture; restore reads it after this function returns.
         let _ = backup_dir.keep();
         manifest.destination_path
     }
@@ -1409,6 +1408,43 @@ fn cancellation_stops_decoding_at_each_row_in_a_page() {
         assert_eq!(ranking.consumed.pages, 1);
         assert_eq!(ranking.consumed.batches, 0);
     }
+}
+
+#[test]
+fn cancellation_after_a_page_is_judged_keeps_every_exclusion_of_that_page() {
+    let admitted: Vec<&str> = OBJECTS
+        .iter()
+        .copied()
+        .filter(|object| *object != "alpha")
+        .collect();
+    let fixture = Fixture::new(&admitted, corpus());
+    let budget = EvalBudget::unbounded();
+    let ranking = fixture
+        .rank_with_hook(
+            &axis(0),
+            OracleBounds {
+                page_rows: NonZeroUsize::new(8).unwrap(),
+                ..bounds(3)
+            },
+            &budget,
+            |window| {
+                if window == Window::AfterJudgment {
+                    budget.cancel();
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        ranking.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert!(ranking.ranked.is_empty());
+    assert_eq!(ranking.consumed.judged, 8);
+    assert_eq!(
+        ranking.consumed.excluded,
+        vec![(EligibilityVerdict::Hidden, 1)],
+        "a judged exclusion counts whether or not its page was scored"
+    );
 }
 
 #[test]

@@ -107,7 +107,7 @@ generation inside the caller's read transaction:
   shortfall. It is counted as `missing_pending` when durable work for it is
   still open and `missing_without_pending` otherwise. It is never a policy
   exclusion and it never makes the result complete.
-- Lexical presence, dense coverage, pending work, and policy exclusions are
+- Dense coverage, pending work, and policy exclusions are
   reported in separate fields and never merged.
 - `max_rows` bounds the visit; reaching it with rows remaining yields
   `Incomplete(RowBound)`.

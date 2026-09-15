@@ -142,6 +142,7 @@ pub enum OracleRefusal {
 pub enum Window<'a> {
     /// A live required row is about to be decoded.
     Visited(&'a str),
+    AfterJudgment,
     AfterPage(usize),
     BeforeRevalidation,
 }
@@ -254,11 +255,11 @@ fn exhaustive_inner(
             let flow = judge_and_score(
                 kernel,
                 request,
-                &layout,
                 present,
                 budget,
                 &mut ranking,
                 &mut top,
+                &mut hook,
             )?;
             hook(Window::AfterPage(ranking.consumed.pages));
             match flow {
@@ -384,11 +385,11 @@ fn decode_page(
 fn judge_and_score(
     kernel: &KernelStore,
     request: &ExhaustiveQuery<'_>,
-    layout: &RowLayout,
     (candidates, vectors): DecodedPage,
     budget: &EvalBudget,
     ranking: &mut ExhaustiveRanking,
     top: &mut TopK<OccurrenceCandidate>,
+    hook: &mut impl FnMut(Window<'_>),
 ) -> Result<ControlFlow<Option<AuthorityMoved>>, OracleRefusal> {
     if candidates.is_empty() {
         return Ok(ControlFlow::Continue(()));
@@ -398,13 +399,15 @@ fn judge_and_score(
     else {
         return Ok(ControlFlow::Break(None));
     };
-    if let Some(moved) = moved {
-        // The moved batch's verdicts describe other facts, so none is admitted; its exclusions are still judged work.
-        for judged in report.occurrences {
-            if let Disposition::PolicyExcluded(verdict) = judged.disposition {
-                tally_exclusion(&mut ranking.consumed.excluded, verdict);
-            }
+    hook(Window::AfterJudgment);
+    // Exclusions are judged work whether the page is then scored, cancelled, or discarded for a moved authority.
+    for judged in &report.occurrences {
+        if let Disposition::PolicyExcluded(verdict) = judged.disposition {
+            tally_exclusion(&mut ranking.consumed.excluded, verdict);
         }
+    }
+    if let Some(moved) = moved {
+        // The moved batch's verdicts describe other facts, so none is admitted.
         return Ok(ControlFlow::Break(Some(moved)));
     }
     for ((candidate, vector), judged) in candidates.into_iter().zip(vectors).zip(report.occurrences)
@@ -412,18 +415,13 @@ fn judge_and_score(
         if budget.is_exhausted() {
             return Ok(ControlFlow::Break(None));
         }
-        match judged.disposition {
-            Disposition::Eligible => {
-                let ranked = Ranked {
-                    occurrence_id: candidate.occurrence_id.clone(),
-                    class: candidate.class,
-                    score: score(layout.metric, request.query, &vector),
-                };
-                top.offer(ranked, candidate);
-            }
-            Disposition::PolicyExcluded(verdict) => {
-                tally_exclusion(&mut ranking.consumed.excluded, verdict);
-            }
+        if judged.disposition == Disposition::Eligible {
+            let ranked = Ranked {
+                occurrence_id: candidate.occurrence_id.clone(),
+                class: candidate.class,
+                score: score(request.metric, request.query, &vector),
+            };
+            top.offer(ranked, candidate);
         }
     }
     Ok(ControlFlow::Continue(()))
