@@ -8,6 +8,8 @@ use rusqlite::{OptionalExtension, params};
 use storage::GuardedConn;
 
 use crate::batch::{VectorGeneration, registered_generation};
+pub use crate::dense::codec::encode;
+use crate::dense::codec::validate_shape;
 use crate::{ProjectionError, StoredOccurrence, read_occurrence};
 use kernel::CurrentInputDescriptor;
 
@@ -74,10 +76,11 @@ pub fn complete_embedding_observed(
     observer: &mut dyn FnMut(CompletionPhase),
 ) -> Result<CompletionOutcome, ProjectionError> {
     let generation = completion.generation;
-    validate_vector(
-        completion.vector.iter().copied(),
-        generation.vector_dimension,
-    )?;
+    validate_shape(completion.vector, generation.vector_dimension).map_err(|rejection| {
+        ProjectionError::InvalidVector {
+            reason: rejection.reason(),
+        }
+    })?;
     check_generation(conn, generation)?;
     let occurrence_id = &completion.input.detail.occurrence_id;
     let Some(stored_occurrence) = read_occurrence(conn, occurrence_id)? else {
@@ -300,7 +303,7 @@ fn occurrence_matches(stored: &StoredOccurrence, input: &CurrentInputDescriptor)
 }
 
 /// A retired generation's files may already be reclaimed, so it accepts no completion; the same rule keeps `apply_batch` from queuing new work for it.
-fn check_generation(
+pub(crate) fn check_generation(
     conn: &GuardedConn<'_>,
     generation: &VectorGeneration,
 ) -> Result<(), ProjectionError> {
@@ -315,31 +318,6 @@ fn check_generation(
     if registered.is_retired() {
         return Err(ProjectionError::RetiredGeneration {
             generation_id: generation.generation_id.clone(),
-        });
-    }
-    Ok(())
-}
-
-/// Little-endian f32 values, four bytes each, as the schema stores them.
-pub fn encode(vector: &[f32]) -> Vec<u8> {
-    vector
-        .iter()
-        .flat_map(|value| value.to_le_bytes())
-        .collect()
-}
-
-pub(crate) fn validate_vector(
-    mut vector: impl ExactSizeIterator<Item = f32>,
-    dimension: u32,
-) -> Result<(), ProjectionError> {
-    if vector.len() != dimension as usize {
-        return Err(ProjectionError::InvalidVector {
-            reason: "dimension",
-        });
-    }
-    if vector.any(|value| !value.is_finite()) {
-        return Err(ProjectionError::InvalidVector {
-            reason: "nonfinite",
         });
     }
     Ok(())

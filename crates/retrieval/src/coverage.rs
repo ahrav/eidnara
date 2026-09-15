@@ -171,7 +171,7 @@ const VALID_VECTOR: &str = "EXISTS(SELECT 1 FROM occurrence_vectors v
     WHERE v.occurrence_id=o.occurrence_id AND v.generation_id=?1 AND v.vector_dimension=?2)";
 
 /// Durable work the dispatcher would still hand out for the observed generation.
-const CURRENT_PENDING: &str = "EXISTS(SELECT 1 FROM embedding_jobs j
+pub(crate) const CURRENT_PENDING: &str = "EXISTS(SELECT 1 FROM embedding_jobs j
     WHERE j.occurrence_id=o.occurrence_id AND j.generation_id=?1 AND j.stop_reason IS NULL
       AND (j.state='pending' OR (j.state='admitted' AND j.host_job_id IS NOT NULL)))";
 
@@ -520,14 +520,11 @@ pub fn verify_active(
         Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?))
     })? {
         let (dimension, bytes) = row?;
-        crate::vectors::validate_vector(
-            bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|word| f32::from_le_bytes(*word)),
-            dimension,
-        )?;
+        crate::dense::codec::decode_shape(&bytes, dimension).map_err(|rejection| {
+            ProjectionError::InvalidVector {
+                reason: rejection.reason(),
+            }
+        })?;
         seen += 1;
     }
     if seen != all_vectors {

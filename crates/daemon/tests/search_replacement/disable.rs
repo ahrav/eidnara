@@ -321,8 +321,9 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
         }
         let before = selection.begin_disable(&gate, &mut |_| {}).unwrap();
         let mut entered_drain = false;
+        // Both waits only need to outlast the filesystem reads before the drain; the held native permit keeps the drain itself from resolving.
         let cancelled = tokio::time::timeout(
-            Duration::from_millis(20),
+            Duration::from_secs(1),
             selection.reconcile_disabled(
                 &corpus.kernel,
                 &gate,
@@ -343,7 +344,7 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
                 &corpus.kernel,
                 &gate,
                 &spec(root.path()),
-                &budget(Duration::from_millis(20)),
+                &budget(Duration::from_secs(1)),
                 &mut |_| {},
             )
             .await;
