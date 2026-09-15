@@ -3966,7 +3966,7 @@ outlives `frame_deadline` fails the generation from `Publisher::pump`
 (`:1168-1171`) or the deadline arm (`:867-877`) instead of parking the thread.
 The parked `Ring::reserve_until` wait this record was written against has no
 host caller, and the Rust client bridge arms the capacity wake directly
-(`client.rs:2716`); `reserve_until` remains for the native addon
+(`client.rs:2718`); `reserve_until` remains for the native addon
 (`packages/shm-native/src/lib.rs:1046`). Inbound blocks outbound: the inbound send is
 awaited with no timeout and no enclosing select
 (`ring_transport.rs:737-745`), so it parks until the application drains.
