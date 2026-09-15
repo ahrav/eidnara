@@ -22,6 +22,8 @@ import {
     probeCapabilities,
     QUALIFIED_TEST_PROFILE,
     RING_FULL_MESSAGE,
+    setDeleteFailpoint,
+    setDetachFailpoint,
 } from "../index.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "shm-native-"));
@@ -902,8 +904,6 @@ describe("raw N-API descriptor boundary", () => {
         const addon = loadRawAddon();
         if (!supportsMechanismTests(addon)) return;
         const raw = addon as RawAttachAddon & {
-            setDetachFailpoint(call: number): void;
-            setDeleteFailpoint(call: number): void;
             leaseRegistered(channel: number, token: number): boolean;
             channelRegistered(channel: number): boolean;
             peerClosed(channel: number): boolean;
@@ -947,7 +947,7 @@ describe("raw N-API descriptor boundary", () => {
         const detachPair = raw.createTestPair();
         publish(detachPair, 1);
         const held = receive(detachPair);
-        raw.setDetachFailpoint(1);
+        setDetachFailpoint(1);
         expect(() => raw.release(detachPair.second, held.token)).toThrow(
             /alias state is unknown; storage quarantined/,
         );
@@ -969,7 +969,7 @@ describe("raw N-API descriptor boundary", () => {
         const deletePair = raw.createTestPair();
         publish(deletePair, 2);
         const leaked = receive(deletePair);
-        raw.setDeleteFailpoint(1);
+        setDeleteFailpoint(1);
         expect(() => raw.release(deletePair.second, leaked.token)).toThrow(
             /native handle consumed: receive alias cleanup failed; storage quarantined/,
         );
@@ -988,7 +988,7 @@ describe("raw N-API descriptor boundary", () => {
         publish(sweepPair, 4);
         const first = receive(sweepPair);
         const second = receive(sweepPair);
-        raw.setDetachFailpoint(1);
+        setDetachFailpoint(1);
         expect(() => raw.close(sweepPair.second)).toThrow(/storage quarantined/);
         expect(raw.channelRegistered(sweepPair.second)).toBe(true);
         // Exactly one alias survived the sweep; the other detached.

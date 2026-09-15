@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/pool.rs:31`
 - `crates/host-runtime/src/ring_transport.rs:1176`
 - `packages/shm-native/src/lib.rs:1042`
-- `packages/opencode-plugin/src/shared/host-client/shm-frame-channel.ts:89`
+- `packages/opencode-plugin/src/shared/host-client/shm-frame-channel.ts:95`
 
 Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2313` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:2546` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return; `crates/host-runtime/src/client.rs:7564` shows the Rust client's `Pong` publishing from the control reserve while its data frame waits on ordinary headroom; at the native addon, `a pure-header control publishes from its reserve while ordinary headroom is exhausted, and a channel-0 Request does not` in packages/shm-native/tests/mechanism.ts publishes `Pong`, `Cancel`, and `Goodbye` with every ordinary descriptor outstanding, and `the pending publication queue is bounded and a liveness reply bypasses it` in packages/opencode-plugin/src/shared/host-client/shm-frame-channel.test.ts shows the TypeScript channel's `Pong` publishing past 64 waiting data frames.
 

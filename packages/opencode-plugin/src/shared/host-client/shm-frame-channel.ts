@@ -62,12 +62,16 @@ const DRAIN_BATCH_FRAMES = 64;
  */
 const DRAIN_MICROTASK_BUDGET = 16;
 
-/**
- * Frames waiting for outbound capacity. Each holds its budget charge, so the bound is a
- * frame count on top of the byte cap; a frame past this count is refused as `ring_full`
- * rather than queued, so a stalled host cannot grow the queue.
- */
+/** Data frames beyond this count are refused as `ring_full` so a stalled host cannot grow the queue. */
 const PENDING_PUBLICATION_FRAMES = 64;
+
+/**
+ * Control frames wait in a separate bounded reserve so a data backlog cannot refuse them.
+ * `Cancel` admits only up to `PENDING_CANCEL_FRAMES` so best-effort cleanup cannot exhaust
+ * the reserve a `Goodbye` needs.
+ */
+const PENDING_CONTROL_FRAMES = 32;
+const PENDING_CANCEL_FRAMES = PENDING_CONTROL_FRAMES / 2;
 
 /**
  * Consecutive immediate retries after `armCapacity` reports capacity already visible. A
@@ -82,12 +86,24 @@ interface PendingPublication {
     hooks?: FrameSendHooks;
     deadline?: Deadline;
     reservedBytes: number;
+    /** `true` for a frame admitted from the control reserve rather than the data queue. */
+    control: boolean;
     state: "queued" | "published" | "dropped";
 }
 
 /** A pure-header liveness reply; the only frame that publishes past queued data (§6.3). */
 function isLivenessControl(header: ProducerFrameHeader, byteLength: number): boolean {
     return byteLength === 0 && header.ty === FrameType.Pong;
+}
+
+/** Only pure-header `Cancel`, `Ping`, and `Goodbye` use the control reserve (wire doc §11). */
+function isReservedControl(header: ProducerFrameHeader, byteLength: number): boolean {
+    return (
+        byteLength === 0 &&
+        (header.ty === FrameType.Cancel ||
+            header.ty === FrameType.Ping ||
+            header.ty === FrameType.Goodbye)
+    );
 }
 
 /** A full ring is backpressure, so callers may retry rather than fail the route. */
@@ -128,6 +144,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
      * queue is non-empty, so a host return alone resumes publication.
      */
     private readonly pendingPublications: PendingPublication[] = [];
+    private queuedControlFrames = 0;
     private pumpScheduled = false;
     private quarantinedBytes = 0;
     private heldBytes = 0;
@@ -253,11 +270,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
         return published;
     }
 
-    /**
-     * Holds a frame whose inventory is exhausted. Its charge stays held until publication,
-     * cancellation, or expiry, and the outbound side parks on the host's capacity doorbell so
-     * a return wakes the retry without inbound data or a timer.
-     */
+    /** A queued frame retains `reservedBytes` until publication, cancellation, or expiry. */
     private enqueuePublication(
         header: ProducerFrameHeader,
         body: DirectFrameBody,
@@ -265,7 +278,16 @@ export class ShmFrameChannel implements SetupFrameChannel {
         deadline: Deadline | undefined,
         reservedBytes: number,
     ): FrameSendTicket {
-        if (this.pendingPublications.length >= PENDING_PUBLICATION_FRAMES) {
+        const control = isReservedControl(header, body.byteLength);
+        const bound = !control
+            ? PENDING_PUBLICATION_FRAMES
+            : header.ty === FrameType.Cancel
+              ? PENDING_CANCEL_FRAMES
+              : PENDING_CONTROL_FRAMES;
+        const queued = control
+            ? this.queuedControlFrames
+            : this.pendingPublications.length - this.queuedControlFrames;
+        if (queued >= bound) {
             this.releasePublication(reservedBytes);
             throw ringFullError(undefined);
         }
@@ -275,10 +297,13 @@ export class ShmFrameChannel implements SetupFrameChannel {
             hooks,
             deadline,
             reservedBytes,
+            control,
             state: "queued",
         };
         this.pendingPublications.push(pending);
-        this.armForCapacity();
+        if (control) this.queuedControlFrames += 1;
+        // Only the queue head arms for capacity; re-arming behind it can consume its host wake.
+        if (this.pendingPublications.length === 1) this.pumpPending();
         return {
             cancel: () => {
                 if (pending.state === "queued") {
@@ -293,49 +318,61 @@ export class ShmFrameChannel implements SetupFrameChannel {
     private dropPending(pending: PendingPublication): void {
         if (pending.state !== "queued") return;
         pending.state = "dropped";
-        const index = this.pendingPublications.indexOf(pending);
-        if (index >= 0) this.pendingPublications.splice(index, 1);
+        this.removePending(pending);
         this.releasePublication(pending.reservedBytes);
     }
 
-    /**
-     * Publishes queued frames in order until one is refused for capacity. A head whose
-     * deadline passed is dropped unpublished; a head refused for any other reason retires the
-     * channel, because nothing after it may publish ahead of it.
-     */
+    private removePending(pending: PendingPublication): void {
+        const index = this.pendingPublications.indexOf(pending);
+        if (index < 0) return;
+        this.pendingPublications.splice(index, 1);
+        if (pending.control) this.queuedControlFrames -= 1;
+    }
+
+    /** A host return that lands before the park is recorded rings no doorbell, so an armed park is rechecked once. */
     private pumpPending(): void {
         if (this.closed || !this.readinessStarted) return;
         for (let round = 0; round <= PUMP_REARM_ROUNDS; round += 1) {
-            while (this.pendingPublications.length > 0) {
-                const head = this.pendingPublications[0] as PendingPublication;
-                if (head.deadline?.isExpired()) {
+            if (!this.publishQueuedHeads()) return;
+            if (!this.armForCapacity()) continue;
+            this.publishQueuedHeads();
+            return;
+        }
+        this.schedulePump();
+    }
+
+    /**
+     * `true` when a head was refused for capacity and frames remain; `false` when the queue
+     * is empty or the channel closed. An expired head is dropped unpublished; any other
+     * refusal retires the channel, because admission order forbids publishing past the head.
+     */
+    private publishQueuedHeads(): boolean {
+        while (this.pendingPublications.length > 0) {
+            if (this.closed) return false;
+            const head = this.pendingPublications[0] as PendingPublication;
+            if (head.deadline?.isExpired()) {
+                this.dropPending(head);
+                continue;
+            }
+            try {
+                this.publishFrame(head.header, head.body, head.hooks, head.deadline);
+            } catch (error) {
+                if (error instanceof HostCallError && error.code === "ring_full") {
+                    return true;
+                }
+                if (error instanceof HostCallError && error.code === "deadline_expired") {
                     this.dropPending(head);
                     continue;
                 }
-                try {
-                    this.publishFrame(head.header, head.body, head.hooks, head.deadline);
-                } catch (error) {
-                    if (error instanceof HostCallError && error.code === "ring_full") {
-                        break;
-                    }
-                    if (error instanceof HostCallError && error.code === "deadline_expired") {
-                        this.dropPending(head);
-                        continue;
-                    }
-                    this.dropPending(head);
-                    this.failClose("protocol_violation", error);
-                    return;
-                }
-                head.state = "published";
-                this.pendingPublications.shift();
-                this.releasePublication(head.reservedBytes);
+                this.dropPending(head);
+                this.failClose("protocol_violation", error);
+                return false;
             }
-            if (this.pendingPublications.length === 0) return;
-            // Still blocked: park on capacity. `false` means capacity moved between the attempt
-            // and the arm, so the attempt is repeated at once.
-            if (this.armForCapacity()) return;
+            head.state = "published";
+            this.removePending(head);
+            this.releasePublication(head.reservedBytes);
         }
-        this.schedulePump();
+        return false;
     }
 
     /** `true` when the capacity wait is armed; `false` when capacity is already visible. */
@@ -468,14 +505,15 @@ export class ShmFrameChannel implements SetupFrameChannel {
 
     sendControl(header: EnvelopeHeader): void {
         if (this.closed) return;
-        // Control frames cannot wait in a queue; a full ring or an exhausted
-        // byte budget exhausts control capacity and closes the channel.
+        // A refused `Cancel` is reported to the caller without closing the channel; any other
+        // control refused for capacity or budget exhausts the control reserve.
         try {
             this.produce(header, { byteLength: 0, fill: () => {} });
         } catch (error) {
             if (
                 error instanceof HostCallError &&
-                (error.code === "ring_full" || error.code === "memory_cap")
+                (error.code === "ring_full" || error.code === "memory_cap") &&
+                header.ty !== FrameType.Cancel
             ) {
                 this.failClose("control_exhausted", error);
                 return;
@@ -541,12 +579,8 @@ export class ShmFrameChannel implements SetupFrameChannel {
         return {
             readerHeldBytes: 0,
             queueHeldBytes: this.heldBytes,
-            queuedDataFrames: this.pendingPublications.filter(
-                (pending) => pending.body.byteLength > 0,
-            ).length,
-            queuedControlFrames: this.pendingPublications.filter(
-                (pending) => pending.body.byteLength === 0,
-            ).length,
+            queuedDataFrames: this.pendingPublications.length - this.queuedControlFrames,
+            queuedControlFrames: this.queuedControlFrames,
             readPaused: false,
             activeTimers: 0,
             activeReceiveLeases: this.receiveLeases.size,

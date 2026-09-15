@@ -995,12 +995,13 @@ describe("mandatory shared-memory channel", () => {
         expect(budget.used).toBe(HEADER_LEN + 4);
         expect(channel.stats().queuedDataFrames).toBe(1);
         expect(arms).toBe(1);
-        // Admission order: a later frame waits behind the queued head even though the mock
-        // would now accept it, and a reservation refuses rather than jumping the queue.
+        // A re-arm drains the doorbell and could consume the wake the host sent for the head,
+        // so a frame queued behind a parked head leaves the existing park alone.
         full = false;
         const second = channel.produce(responseHeader(FrameType.Request, 2n, 4), body);
         expect(published).toEqual([]);
         expect(channel.stats().queuedDataFrames).toBe(2);
+        expect(arms).toBe(1);
         let refused: unknown;
         try {
             channel.reserve(responseHeader(FrameType.Request, 3n, 4), 4);
@@ -1072,6 +1073,176 @@ describe("mandatory shared-memory channel", () => {
         expect(controlPublished).toBe(1);
         expect(channel.isClosed()).toBe(false);
         channel.close();
+        expect(budget.used).toBe(0);
+    });
+
+    function parkingNative(state: { full: boolean; arm: () => boolean }): {
+        native: NativeChannel;
+        published: bigint[];
+        arms: () => number;
+        readiness: () => (() => void) | undefined;
+    } {
+        const published: bigint[] = [];
+        let arms = 0;
+        let readiness: (() => void) | undefined;
+        const native = {
+            produce: (
+                header: Uint8Array,
+                _capacity: number,
+                fill: (cursor: ProducerCursor) => void,
+                beforePublish: () => void,
+            ) => {
+                if (state.full) throw new Error(RING_FULL_MESSAGE);
+                fill({ write: () => {} } as unknown as ProducerCursor);
+                beforePublish();
+                published.push(decodeHeader(header).corr);
+            },
+            armCapacity: () => {
+                arms += 1;
+                return state.arm();
+            },
+            startReadiness: (handler: () => void) => {
+                readiness = handler;
+            },
+            drainOne: () => false,
+            close: () => {},
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        return { native, published, arms: () => arms, readiness: () => readiness };
+    }
+
+    test("an arm that finds capacity already visible retries the queued head at once", () => {
+        const budget = new ByteBudget(1 << 20);
+        const state = {
+            full: true,
+            arm: () => {
+                state.full = false;
+                return false;
+            },
+        };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        channel.beginFrames();
+        let publishHooks = 0;
+        const ticket = channel.produce(
+            responseHeader(FrameType.Request, 1n, 4),
+            { byteLength: 4, fill: (cursor: ProducerCursor) => cursor.write(new Uint8Array(4)) },
+            {
+                onPublish: () => {
+                    publishHooks += 1;
+                },
+            },
+        );
+        expect(mock.arms()).toBe(1);
+        expect(mock.published).toEqual([1n]);
+        expect(publishHooks).toBe(1);
+        expect(channel.stats().queuedDataFrames).toBe(0);
+        expect(budget.used).toBe(0);
+        expect(ticket.cancel()).toBe(false);
+        expect(mock.readiness()).toBeDefined();
+    });
+
+    test("a park is rechecked after arming so a return before the arm is not lost", () => {
+        const budget = new ByteBudget(1 << 20);
+        const state = {
+            full: true,
+            arm: () => {
+                state.full = false;
+                return true;
+            },
+        };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        channel.beginFrames();
+        const ticket = channel.produce(responseHeader(FrameType.Request, 1n, 4), {
+            byteLength: 4,
+            fill: (cursor: ProducerCursor) => cursor.write(new Uint8Array(4)),
+        });
+        expect(mock.arms()).toBe(1);
+        expect(mock.published).toEqual([1n]);
+        expect(channel.stats().queuedDataFrames).toBe(0);
+        expect(budget.used).toBe(0);
+        expect(ticket.cancel()).toBe(false);
+    });
+
+    test("queued data cannot refuse a Cancel or Goodbye, and control admission has its own bound", () => {
+        const budget = new ByteBudget(1 << 24);
+        const closes: FrameChannelCloseReason[] = [];
+        const state = { full: true, arm: () => true };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: (reason) => closes.push(reason) },
+        });
+        channel.beginFrames();
+        const body = {
+            byteLength: 4,
+            fill: (cursor: ProducerCursor) => cursor.write(new Uint8Array(4)),
+        };
+        for (let index = 0; index < 63; index += 1) {
+            channel.produce(responseHeader(FrameType.Request, BigInt(index + 1), 4), body);
+        }
+        channel.produce(responseHeader(FrameType.Request, 64n, 0), {
+            byteLength: 0,
+            fill: () => {},
+        });
+        expect(channel.stats().queuedDataFrames).toBe(64);
+        expect(channel.stats().queuedControlFrames).toBe(0);
+        expect(() => channel.produce(responseHeader(FrameType.Request, 65n, 4), body)).toThrow(
+            HostCallError,
+        );
+
+        for (let index = 0; index < 16; index += 1) {
+            channel.sendControl(responseHeader(FrameType.Cancel, BigInt(index + 1), 0));
+        }
+        expect(channel.isClosed()).toBe(false);
+        expect(channel.stats().queuedControlFrames).toBe(16);
+        let refusedCancel: unknown;
+        try {
+            channel.sendControl(responseHeader(FrameType.Cancel, 17n, 0));
+        } catch (error) {
+            refusedCancel = error;
+        }
+        expect((refusedCancel as HostCallError).code).toBe("ring_full");
+        expect(channel.isClosed()).toBe(false);
+        for (let index = 0; index < 16; index += 1) {
+            channel.sendControl(responseHeader(FrameType.Goodbye, 0n, 0));
+        }
+        expect(channel.stats().queuedControlFrames).toBe(32);
+        expect(channel.isClosed()).toBe(false);
+        expect(budget.used).toBe(63 * (HEADER_LEN + 4) + 33 * HEADER_LEN);
+
+        state.full = false;
+        mock.readiness()?.();
+        expect(mock.published.length).toBe(96);
+        expect(mock.published.slice(0, 64)).toEqual(
+            Array.from({ length: 64 }, (_, index) => BigInt(index + 1)),
+        );
+        expect(mock.published.slice(64, 80)).toEqual(
+            Array.from({ length: 16 }, (_, index) => BigInt(index + 1)),
+        );
+        expect(channel.stats().queuedControlFrames).toBe(0);
+        expect(budget.used).toBe(0);
+
+        state.full = true;
+        for (let index = 0; index < 32; index += 1) {
+            channel.sendControl(responseHeader(FrameType.Goodbye, 0n, 0));
+        }
+        expect(channel.isClosed()).toBe(false);
+        channel.sendControl(responseHeader(FrameType.Goodbye, 0n, 0));
+        expect(closes).toEqual(["control_exhausted"]);
         expect(budget.used).toBe(0);
     });
 
