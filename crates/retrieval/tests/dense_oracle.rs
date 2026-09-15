@@ -1250,6 +1250,22 @@ fn authority_moved_reports_an_incarnation_change_before_a_snapshot_change() {
         None
     );
 
+    // An unknown classification generation is a moved snapshot even against nothing or against itself.
+    let mut unknown = first.clone();
+    unknown.snapshot.classification_generation = None;
+    assert_eq!(
+        authority_moved(None, None, &unknown),
+        Some(AuthorityMoved::Snapshot)
+    );
+    assert_eq!(
+        authority_moved(
+            Some(&unknown.snapshot),
+            Some(&unknown.incarnation),
+            &unknown
+        ),
+        Some(AuthorityMoved::Snapshot)
+    );
+
     fixture.retire("theta");
     let after_commit = judge(&fixture.kernel);
     assert_ne!(after_commit.snapshot, first.snapshot);
