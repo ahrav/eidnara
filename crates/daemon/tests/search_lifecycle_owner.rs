@@ -2972,6 +2972,35 @@ fn a_refused_request_still_installs_the_records_it_read() {
     );
 }
 
+/// A reload that lowers the transition's duration bound below an active record's own duration stops that record's slices: the record's duration is charged against the bound at every admission.
+#[test]
+fn a_lowered_duration_bound_blocks_an_active_record() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    // Recorded with a minute's deadline under a generous bound; the reload allows one second.
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("B_recovery_ms", 1_000)]),
+        &campaign_json(&identity),
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("B_recovery_ms observed at 60000, above 1000")),
+        "{outcome:?}"
+    );
+    assert!(matches!(control(home), ControlState::Intent(_)));
+    assert!(owner.pin(&slice_budget()).is_err(), "no family was opened");
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

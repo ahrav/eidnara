@@ -2298,6 +2298,9 @@ const _: () = assert!(
 /// call sites against this constant.
 pub const STORAGE_CONNECTIONS: u64 = 2;
 
+/// Search projection connections open at once at the peak: the selected family's while a rebuild's staged replacement is built and verified beside it (`crates/daemon/src/search_lifecycle_owner.rs`). Each retains its own page cache and schema snapshot, so the declaration counts both.
+pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
+
 /// The component declares every resident byte it retains through [`ResourceDeclaration::retained_resident_bytes`].
 ///
 /// `max_resident_bytes` bounds process retention only when `retained_resident_bytes` is truthful.
@@ -2305,9 +2308,9 @@ pub const STORAGE_CONNECTIONS: u64 = 2;
 ///
 /// The declaration lists each retention class separately so a budget change cannot omit a cache from accounting.
 /// The seed and page coordinators hold request bytes across requests, after each ingress reservation has ended, so their staging caps count here.
-/// Each storage-backed connection retains one schema snapshot within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the daemon opens [`STORAGE_CONNECTIONS`] of them.
+/// Each storage-backed connection retains one schema snapshot within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the daemon opens [`STORAGE_CONNECTIONS`] kinds of them, and holds [`PEAK_SEARCH_CONNECTIONS`] search connections at the peak of a rebuild, so that many snapshots and search page caches are declared.
 /// The memory store's connection holds `memory_store::PAGE_CACHE_BUDGET_BYTES` of page cache and maps up to `memory_store::MMAP_BUDGET_BYTES` of its file; mapped pages are file-backed and reclaimable, and are counted so the ceiling stays conservative.
-/// The search projection's connection holds `search_projection::CACHE_KIB` of page cache.
+/// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
@@ -2321,10 +2324,11 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + ACTIVE_PROJECTION_LEASE_BUDGET_BYTES as u64
     + token_cache::RETAINED_BYTES_BOUND as u64
     + transform::TAG_CACHE_COMBINED_BUDGET_BYTES as u64
-    + storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND as u64 * STORAGE_CONNECTIONS
+    + storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND as u64
+        * (STORAGE_CONNECTIONS - 1 + PEAK_SEARCH_CONNECTIONS)
     + memory_store::PAGE_CACHE_BUDGET_BYTES as u64
     + memory_store::MMAP_BUDGET_BYTES as u64
-    + search_projection::CACHE_KIB as u64 * 1024
+    + search_projection::CACHE_KIB as u64 * 1024 * PEAK_SEARCH_CONNECTIONS
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX
