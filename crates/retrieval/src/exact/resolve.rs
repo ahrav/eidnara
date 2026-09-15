@@ -3,8 +3,8 @@ use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
 use kernel::{
-    ArtifactDestination, CommitReadTarget, EgressSnapshot, EligibilityCandidate,
-    EligibilityVerdict, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES, ProjectScope,
+    ArtifactDestination, CommitReadTarget, EgressSnapshot, EligibilityVerdict, KernelError,
+    KernelStore, MAX_ELIGIBILITY_CANDIDATES, ProjectScope,
 };
 use storage::GuardedConn;
 
@@ -62,7 +62,6 @@ pub enum IncompleteReason {
     PageBound,
     RetentionExhausted,
     BudgetExhausted,
-    ProjectionAdvanced,
     KernelIncarnationChanged,
 }
 
@@ -77,7 +76,14 @@ pub enum Completion {
 pub enum Disqualification {
     Verdict(EligibilityVerdict),
     Tombstoned(TombstoneReason),
-    ProjectionLag { tip: i64, complete_through: i64 },
+    /// The kernel tip and the certified horizon disagree in either direction:
+    /// a tip ahead of the horizon means an unprojected collision may exist,
+    /// and a tip behind it means the projection may describe history a
+    /// restore rolled back.
+    ProjectionLag {
+        tip: i64,
+        complete_through: i64,
+    },
     ClassificationUnknown,
     SnapshotChanged,
 }
@@ -188,6 +194,8 @@ pub enum ResolveRefusal {
     BudgetExhausted,
     #[error("page rows exceed the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate bound")]
     PageOverBound,
+    #[error("max retained exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate bound")]
+    RetainedOverBound,
     #[error("the kernel returned {verdicts} verdicts for {candidates} candidates")]
     VerdictMismatch { candidates: usize, verdicts: usize },
     #[error(transparent)]
@@ -201,15 +209,13 @@ pub enum ResolveRefusal {
 }
 
 fn candidate(row: &AssociationRow) -> OccurrenceCandidate {
-    OccurrenceCandidate {
-        occurrence_id: row.occurrence_id.clone(),
-        class: row.class,
-        candidate: EligibilityCandidate {
-            object_id: row.source_object_id.clone(),
-            source_revision: row.revision,
-            artifact_digest: Some(row.source_artifact_digest.clone()),
-        },
-    }
+    OccurrenceCandidate::new(
+        row.occurrence_id.clone(),
+        row.class,
+        row.source_object_id.clone(),
+        row.revision,
+        row.source_artifact_digest.clone(),
+    )
 }
 
 fn retained_bytes(row: &AssociationRow) -> usize {
@@ -234,6 +240,13 @@ struct Attempt<'a> {
     resolution: Resolution,
 }
 
+fn budget_refusal(error: KernelError) -> ResolveRefusal {
+    match error {
+        KernelError::Deadline => ResolveRefusal::BudgetExhausted,
+        other => ResolveRefusal::Kernel(other),
+    }
+}
+
 pub fn resolve(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
@@ -246,13 +259,22 @@ pub fn resolve(
     if request.bounds.page_rows.get() > MAX_ELIGIBILITY_CANDIDATES {
         return Err(ResolveRefusal::PageOverBound);
     }
+    // Final use re-judges every proof occurrence in one kernel batch, so
+    // retention past the batch bound could mint a proof no use can validate.
+    if request.bounds.max_retained.get() > MAX_ELIGIBILITY_CANDIDATES {
+        return Err(ResolveRefusal::RetainedOverBound);
+    }
     let certificate = request.certificate;
     admit_certificate(conn, request)?;
-    if kernel.database_incarnation_id_within_budget(budget)? != certificate.canonical_incarnation_id
-    {
+    let installed = kernel
+        .database_incarnation_id_within_budget(budget)
+        .map_err(budget_refusal)?;
+    if installed != certificate.canonical_incarnation_id {
         return Err(CertificateRefusal::IncarnationMismatch.into());
     }
-    let initial = kernel.capture_commit_read_target_within_budget(budget)?;
+    let initial = kernel
+        .capture_commit_read_target_within_budget(budget)
+        .map_err(budget_refusal)?;
     let mut attempt = Attempt {
         request,
         kernel,
@@ -271,7 +293,7 @@ pub fn resolve(
             proof: None,
         },
     };
-    if initial.through_commit > certificate.complete_through_commit_seq {
+    if initial.through_commit != certificate.complete_through_commit_seq {
         attempt.disqualify(Disqualification::ProjectionLag {
             tip: initial.through_commit,
             complete_through: certificate.complete_through_commit_seq,
@@ -328,19 +350,15 @@ impl Attempt<'_> {
     }
 
     fn late_failure(&mut self, refusal: ResolveRefusal) -> Result<(), ResolveRefusal> {
-        let reason = match &refusal {
+        match &refusal {
             ResolveRefusal::Lookup(LookupRefusal::BudgetExhausted)
-            | ResolveRefusal::Kernel(KernelError::Deadline) => IncompleteReason::BudgetExhausted,
-            ResolveRefusal::Lookup(LookupRefusal::StaleCursor { .. })
-            | ResolveRefusal::Certificate(CertificateRefusal::ProjectionMismatch) => {
-                IncompleteReason::ProjectionAdvanced
-            }
+            | ResolveRefusal::Kernel(KernelError::Deadline) => {}
             _ => return Err(refusal),
-        };
-        if self.resolution.consumed.pages == 0 {
-            return Err(refusal);
         }
-        self.stop(reason);
+        if self.resolution.consumed.pages == 0 {
+            return Err(ResolveRefusal::BudgetExhausted);
+        }
+        self.stop(IncompleteReason::BudgetExhausted);
         Ok(())
     }
 
@@ -374,9 +392,6 @@ impl Attempt<'_> {
                 Ok(page) => page,
                 Err(refusal) => return self.late_failure(refusal.into()),
             };
-            if page.checkpoint != self.request.certificate.projection {
-                return self.late_failure(CertificateRefusal::ProjectionMismatch.into());
-            }
             self.resolution.consumed.pages += 1;
             self.resolution.consumed.rows += page.rows.len();
             self.resolution.distinct_keys += page.distinct_keys;

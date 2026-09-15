@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group};
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::Occurrence;
+use kernel::source_identity::{Occurrence, Span};
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDestination, CommitIntent, DecisionPayload,
-    DecisionSpec, Dimension, DomainSpec, EventKind, KernelStore, ProjectScope, ScopeSpec,
-    ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
+    DecisionSpec, Dimension, DomainSpec, EventKind, KernelStore, MAX_ELIGIBILITY_CANDIDATES,
+    ProjectScope, ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
 };
 use retrieval::batch::{
     BatchBounds, MutationIdentity, ProjectionBatch, apply_batch, read_checkpoint,
@@ -30,6 +30,8 @@ const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const SCOPE: &str = "project:a";
 const DOMAIN: &str = "domain";
 const DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+/// Four full pages at 256 rows per page, and exactly the retention cap.
+const FANOUT_ROWS: usize = 1024;
 
 fn open(dir: &std::path::Path) -> SqliteStore {
     open_sqlite(
@@ -69,6 +71,7 @@ fn populate(
     through: i64,
     commits: usize,
     claims: usize,
+    fanout: usize,
 ) {
     store
         .with_conn_fenced(|conn| {
@@ -145,6 +148,32 @@ fn populate(
             created_commit_seq: through,
         })
         .collect();
+    // `fanout` spans of one object share the key `obj-fanout`, so a single
+    // resolve enumerates them across several pages.
+    let fanout_identity = [("object_id", "obj-fanout")];
+    let fanout_text = "x".repeat(fanout + 1);
+    let records: Vec<OccurrenceRecord<'_>> = records
+        .into_iter()
+        .chain((0..fanout).map(|n| OccurrenceRecord {
+            occurrence: Occurrence {
+                class: "canonical_claims",
+                identity: &fanout_identity,
+                revision: "1",
+                representation: "decision_summary",
+                span: Some(Span {
+                    start: n as u64,
+                    end: n as u64 + 1,
+                }),
+            },
+            payload: Payload::Whole(&fanout_text),
+            domain_id: "domain",
+            sensitivity: Sensitivity::Normal,
+            source_object_id: "obj-fanout",
+            source_evidence_id: "evidence",
+            source_artifact_digest: DIGEST,
+            created_commit_seq: through,
+        }))
+        .collect();
     let batch = ProjectionBatch {
         identity: MutationIdentity {
             kernel_incarnation_id: kernel_incarnation_id.to_string(),
@@ -199,7 +228,7 @@ fn parse_benches(c: &mut Criterion) {
 fn page_benches(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());
-    populate(&store, KERNEL, 1, 4_096, 4_096);
+    populate(&store, KERNEL, 1, 4_096, 4_096, 0);
     let budget = EvalBudget::unbounded();
     let mut group = c.benchmark_group("exact_page");
     for page_rows in [16usize, 256] {
@@ -344,14 +373,22 @@ fn kernel(root: &std::path::Path, objects: &[String]) -> KernelStore {
 
 fn resolve_benches(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
-    let objects: Vec<String> = (0..256).map(|n| format!("obj-{n:08}")).collect();
+    let mut objects: Vec<String> = (0..256).map(|n| format!("obj-{n:08}")).collect();
+    objects.push("obj-fanout".to_string());
     let kernel = kernel(dir.path(), &objects);
     let budget = EvalBudget::unbounded();
     let incarnation = kernel
         .database_incarnation_id_within_budget(&budget)
         .unwrap();
     let store = open(dir.path());
-    populate(&store, &incarnation, kernel.tip().unwrap(), 0, 256);
+    populate(
+        &store,
+        &incarnation,
+        kernel.tip().unwrap(),
+        0,
+        256,
+        FANOUT_ROWS,
+    );
     let checkpoint = store
         .with_conn(|conn| Ok(read_checkpoint(conn, &incarnation).unwrap().unwrap()))
         .unwrap();
@@ -373,7 +410,7 @@ fn resolve_benches(c: &mut Criterion) {
         page_rows: NonZeroUsize::new(256).unwrap(),
         max_rows: NonZeroUsize::new(4_096).unwrap(),
         max_pages: NonZeroUsize::new(64).unwrap(),
-        max_retained: NonZeroUsize::new(4_096).unwrap(),
+        max_retained: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
         max_retained_bytes: NonZeroUsize::new(1 << 22).unwrap(),
     };
     let request = ResolveRequest {
@@ -393,6 +430,26 @@ fn resolve_benches(c: &mut Criterion) {
             black_box(resolution)
         })
     });
+    let fanout_request = ResolveRequest {
+        query: ExactQuery::CanonicalObject(b"obj-fanout"),
+        intent: RequestIntent::WholeRequest,
+        certificate: &certificate,
+        authority,
+        bounds,
+    };
+    group.bench_function(BenchmarkId::new("fanout_proof", FANOUT_ROWS), |b| {
+        b.iter(|| {
+            let resolution = store
+                .with_conn(|conn| Ok(resolve(conn, &kernel, &fanout_request, &budget).unwrap()))
+                .unwrap();
+            assert_eq!(
+                resolution.consumed.rows, FANOUT_ROWS,
+                "the fanout attempt exercises the per-row and per-page paths"
+            );
+            assert!(resolution.proof.is_some());
+            black_box(resolution)
+        })
+    });
     let proof = store
         .with_conn(|conn| Ok(resolve(conn, &kernel, &request, &budget).unwrap()))
         .unwrap()
@@ -400,11 +457,12 @@ fn resolve_benches(c: &mut Criterion) {
         .unwrap();
     group.bench_function("final_use_validation", |b| {
         b.iter(|| {
-            store
+            let outcome = store
                 .with_conn(|conn| {
                     Ok(validate_for_use(conn, &kernel, &proof, authority, &budget).unwrap())
                 })
-                .unwrap()
+                .unwrap();
+            assert_eq!(outcome, Ok(()), "the bench times the full re-judgment path");
         })
     });
     group.finish();

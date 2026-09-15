@@ -19,6 +19,26 @@ pub struct OccurrenceCandidate {
     pub candidate: EligibilityCandidate,
 }
 
+impl OccurrenceCandidate {
+    pub fn new(
+        occurrence_id: String,
+        class: OccurrenceClass,
+        object_id: String,
+        source_revision: i64,
+        artifact_digest: String,
+    ) -> Self {
+        Self {
+            occurrence_id,
+            class,
+            candidate: EligibilityCandidate {
+                object_id,
+                source_revision,
+                artifact_digest: Some(artifact_digest),
+            },
+        }
+    }
+}
+
 const LIVE_CANDIDATES_SQL: &str =
     "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest
      FROM occurrences o
@@ -75,15 +95,13 @@ pub fn live_candidates(
     rows.into_iter()
         .map(
             |(occurrence_id, class, source_object_id, revision, digest)| {
-                Ok(OccurrenceCandidate {
+                Ok(OccurrenceCandidate::new(
                     occurrence_id,
-                    class: OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?,
-                    candidate: EligibilityCandidate {
-                        object_id: source_object_id,
-                        source_revision: revision,
-                        artifact_digest: Some(digest),
-                    },
-                })
+                    OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?,
+                    source_object_id,
+                    revision,
+                    digest,
+                ))
             },
         )
         .collect()

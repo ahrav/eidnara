@@ -893,6 +893,24 @@ fn bounds_before_exhaustion_yield_incomplete_and_never_uniqueness() {
             .unwrap_err(),
         ResolveRefusal::PageOverBound
     );
+    let over_retained = ResolveBounds {
+        max_retained: NonZeroUsize::new(kernel::MAX_ELIGIBILITY_CANDIDATES + 1).unwrap(),
+        ..bounds()
+    };
+    assert_eq!(
+        fixture
+            .resolve(
+                object_query("obj-1"),
+                true,
+                &certificate,
+                over_retained,
+                &budget
+            )
+            .unwrap_err(),
+        ResolveRefusal::RetainedOverBound,
+        "final use re-judges every proof occurrence in one kernel batch, \
+         so retention past the batch bound could mint an unvalidatable proof"
+    );
 }
 
 #[test]
@@ -1258,6 +1276,106 @@ fn final_use_revalidation_defeats_every_later_change() {
         Err(ProofInvalidation::IncarnationChanged),
         "a restore invalidates every proof captured before it"
     );
+}
+
+#[test]
+fn a_certificate_past_the_restored_kernel_tip_defeats_proof() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = fixture
+        .kernel
+        .backup(BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let restored_tip = fixture.tip();
+    fixture.decide("later", &[ok("obj-2")]);
+    fixture.project(&[], vec![]);
+    let certificate = fixture.certificate();
+    assert!(certificate.complete_through_commit_seq > restored_tip);
+    fixture.kernel.restore(&manifest.destination_path).unwrap();
+    assert_eq!(fixture.tip(), restored_tip);
+    let budget = EvalBudget::unbounded();
+    let resolution = fixture
+        .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+        .unwrap();
+    assert_eq!(resolution.completion, Completion::Complete);
+    assert_eq!(
+        resolution.disqualified,
+        Some(Disqualification::ProjectionLag {
+            tip: restored_tip,
+            complete_through: certificate.complete_through_commit_seq,
+        }),
+        "a projection past the restored tip may describe rolled-back history"
+    );
+    assert!(
+        resolution.proof.is_none(),
+        "the restored kernel cannot certify the projected horizon"
+    );
+    assert_eq!(
+        resolution.retained.len(),
+        1,
+        "the eligible row still reaches hybrid"
+    );
+}
+
+#[test]
+fn a_budget_expiring_anywhere_inside_resolve_refuses_as_budget_exhaustion() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    fixture.project(
+        &[
+            claim("obj-1", 1, "decision_summary"),
+            claim("obj-1", 1, "rationale"),
+        ],
+        vec![],
+    );
+    let certificate = fixture.certificate();
+    let one_row = ResolveBounds {
+        page_rows: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    };
+    let unbounded = EvalBudget::unbounded();
+    let started = Instant::now();
+    fixture
+        .resolve(
+            object_query("obj-1"),
+            true,
+            &certificate,
+            one_row,
+            &unbounded,
+        )
+        .unwrap();
+    let attempt = started.elapsed().max(Duration::from_micros(64));
+    // Sweep deadlines from immediate to twice the observed resolve duration.
+    for step in 0..512u32 {
+        let deadline = Instant::now() + attempt.mul_f64(f64::from(step) / 256.0);
+        let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
+        match fixture.resolve(object_query("obj-1"), true, &certificate, one_row, &budget) {
+            Ok(resolution) => assert!(
+                matches!(
+                    resolution.completion,
+                    Completion::Complete
+                        | Completion::Incomplete(IncompleteReason::BudgetExhausted)
+                ),
+                "a deadline may only stop an attempt as budget exhaustion: {:?}",
+                resolution.completion
+            ),
+            Err(ResolveRefusal::BudgetExhausted) => {}
+            Err(other) => panic!(
+                "a deadline crossing mid-attempt must refuse as budget exhaustion: {other:?}"
+            ),
+        }
+    }
 }
 
 #[test]
