@@ -3,7 +3,6 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::{Occurrence, OccurrenceClass, Span, encode_preserving_span};
 use kernel::{
     ArtifactDestination, CommitReadTarget, EgressSnapshot, EligibilityVerdict, KernelError,
     KernelStore, MAX_ELIGIBILITY_CANDIDATES, ProjectScope,
@@ -233,46 +232,6 @@ fn retained_bytes(row: &AssociationRow) -> usize {
         + row.source_artifact_digest.len()
 }
 
-/// `check_association` rejects rows whose re-encoded occurrence ID, lineage
-/// ID, or query-derived target differs from the stored value.
-fn check_association(query: &ExactQuery<'_>, row: &AssociationRow) -> Result<(), ProjectionError> {
-    let key = std::str::from_utf8(&row.key).map_err(|_| ProjectionError::CorruptRow)?;
-    let identity: Vec<(&str, &str)> = match (query, row.class) {
-        (ExactQuery::CanonicalObject(_), OccurrenceClass::CanonicalClaims) => {
-            vec![("object_id", key)]
-        }
-        (ExactQuery::CanonicalObject(_), OccurrenceClass::PromotedMemory) => {
-            vec![("decision_object_id", key)]
-        }
-        (ExactQuery::Sha(query), OccurrenceClass::GitCommits) => vec![
-            ("repository_id", query.repository_id),
-            ("object_format", query.object_format.code()),
-            ("oid", key),
-        ],
-        _ => return Err(ProjectionError::CorruptRow),
-    };
-    let revision = row.revision.to_string();
-    let encoded = encode_preserving_span(&Occurrence {
-        class: row.class.code(),
-        identity: &identity,
-        revision: &revision,
-        representation: &row.representation,
-        span: row.span.map(|(start, end)| Span { start, end }),
-    })
-    .map_err(|_| ProjectionError::CorruptRow)?;
-    let target = match query {
-        ExactQuery::CanonicalObject(_) => key,
-        ExactQuery::Sha(_) => row.lineage_id.as_str(),
-    };
-    if encoded.occurrence_id != row.occurrence_id
-        || encoded.lineage_id != row.lineage_id
-        || row.target_id != target
-    {
-        return Err(ProjectionError::CorruptRow);
-    }
-    Ok(())
-}
-
 struct Attempt<'a> {
     request: &'a ResolveRequest<'a>,
     kernel: &'a KernelStore,
@@ -453,7 +412,6 @@ impl Attempt<'_> {
     fn judge(&mut self, rows: Vec<AssociationRow>) -> Result<(), ResolveRefusal> {
         let mut live = Vec::with_capacity(rows.len());
         for row in rows {
-            check_association(&self.request.query, &row)?;
             match row.tombstone {
                 Some(tombstone) => {
                     self.resolution.observations.tombstoned += 1;
