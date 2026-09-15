@@ -1082,6 +1082,50 @@ async fn a_restarted_job_is_not_readmitted_past_the_row_deadline() {
     assert!(published(&events).is_empty());
 }
 
+/// A pass whose eligibility read finds every kernel reader held returns at its budget rather than waiting the readers out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_eligibility_read_against_held_kernel_readers_ends_at_the_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("m0", "judged text");
+    let (projection, _rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let held = std::sync::Barrier::new(2);
+    let (waited, end) = std::thread::scope(|scope| {
+        let kernel = Arc::clone(&corpus.kernel);
+        let held = &held;
+        scope.spawn(move || kernel.hold_readers_for_test(held, Duration::from_secs(4)));
+        held.wait();
+        let started = std::time::Instant::now();
+        let mut dispatcher =
+            EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
+        let end = tokio::task::block_in_place(|| {
+            dispatcher.run_pass(
+                eligibility(&project),
+                &bounds(),
+                &budget(Duration::from_millis(300)),
+                NOW,
+                &mut |_| {},
+            )
+        });
+        (started.elapsed(), end)
+    });
+    assert!(
+        matches!(
+            end,
+            Err(DispatchError::RetryableKernel(_)) | Ok(Some(Blocked::BudgetExhausted))
+        ),
+        "{end:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(2),
+        "the pass waited {waited:?} for held readers against a 300 ms budget"
+    );
+}
+
 /// AC2, AC4, AC6: a new host incarnation cannot satisfy work the old one admitted; rebinding returns it to pending with its attempt kept, a lane with a different fingerprint blocks admission, and the stored binding follows the host that actually serves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {

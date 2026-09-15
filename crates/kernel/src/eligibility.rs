@@ -221,4 +221,22 @@ impl KernelStore {
             self.egress_read(|tx, tip| judge_in_tx(tx, tip, project, destination, candidates))?;
         Ok(EligibilityBatch { snapshot, verdicts })
     }
+
+    /// [`Self::judge_eligibility`] whose wait for a reader ends with `budget`, so a caller bounded by a slice is not held by an occupied reader pool.
+    pub fn judge_eligibility_within_budget(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        project: &ProjectScope,
+        destination: ArtifactDestination,
+        candidates: &[EligibilityCandidate],
+    ) -> Result<EligibilityBatch, KernelError> {
+        check_bounds(candidates)?;
+        let limit = budget.acquire_limit();
+        let (snapshot, verdicts) = limit.run(|| {
+            self.egress_read_within(&limit, |tx, tip| {
+                judge_in_tx(tx, tip, project, destination, candidates)
+            })
+        })?;
+        Ok(EligibilityBatch { snapshot, verdicts })
+    }
 }

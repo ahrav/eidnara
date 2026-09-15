@@ -1220,12 +1220,14 @@ fn replacement_spec(
             .min(half_decoded)
             .min(quarter_local),
     )?;
+    // A backfill pass obsoletes every terminal candidate it selected in one transaction, one row each, so the pending bound also fits the rows one transaction may mutate.
     let pending_width = ReplacementSpec::pending_row_width(generation_id);
     let max_pending = nonzero_usize(
         "pending_count",
         limit(manifest, "pending_count")?
             .min(limit(manifest, "pending_bytes")? / pending_width)
-            .min(quarter_local / pending_width),
+            .min(quarter_local / pending_width)
+            .min(half_rows.get() as u64),
     )?;
     let tuple_bytes = nonzero_usize(
         "export_row_standalone_encoded_bytes",
@@ -1529,6 +1531,22 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A backfill pass obsoletes every terminal candidate it selected in one transaction, one row each, so the pending bound fits the rows a transaction may mutate.
+    #[test]
+    fn the_pending_bound_fits_the_transaction_rows() {
+        let identity = test_identity();
+        let mut manifest = manifest(&identity);
+        manifest
+            .limits
+            .insert("local_transaction_rows".to_owned(), 20);
+        let spec = spec(&manifest, identity).unwrap();
+        assert!(
+            spec.episode.batch.max_pending.get() <= 10,
+            "{}",
+            spec.episode.batch.max_pending
+        );
     }
 
     #[test]

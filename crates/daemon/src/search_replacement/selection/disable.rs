@@ -116,9 +116,13 @@ impl SearchSelection {
                 ),
                 ("pending_count", bounds.dispatch.max_jobs.get() as u64),
                 ("supervisor_slice_ms", slice_ms),
+                // A sweep reclaims its candidates and a backfill pass obsoletes its terminal candidates each in one transaction, so the larger of the two is charged.
                 (
                     "local_transaction_rows",
-                    bounds.sweep_candidates.get() as u64,
+                    bounds
+                        .sweep_candidates
+                        .get()
+                        .max(bounds.dispatch.max_jobs.get()) as u64,
                 ),
             ],
         )?;

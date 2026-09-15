@@ -406,7 +406,8 @@ impl<'a> EmbeddingDispatcher<'a> {
                 Vec::new()
             } else {
                 self.kernel
-                    .judge_eligibility(
+                    .judge_eligibility_within_budget(
+                        budget,
                         eligibility.project,
                         eligibility.destination,
                         &kernel_candidates,
@@ -512,6 +513,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             deadline,
             now,
             started: pass_started,
+            row_deadline: deadline,
         };
         for job_id in &selected {
             let job = self.projection.read(|conn| dispatch_job(conn, job_id, now));
@@ -569,13 +571,11 @@ impl<'a> EmbeddingDispatcher<'a> {
         )
         .map(Duration::from_millis)
         .unwrap_or(Duration::ZERO);
-        let deadline_at = pass
-            .started
-            .checked_add(remaining)
-            .unwrap_or(pass.deadline)
-            .min(pass.deadline);
+        let row_deadline_at = pass.started.checked_add(remaining).unwrap_or(pass.deadline);
+        let deadline_at = row_deadline_at.min(pass.deadline);
         let pass = &Pass {
             deadline: deadline_at,
+            row_deadline: row_deadline_at,
             ..*pass
         };
         let (mut host_job_id, item_id) = match &job.host_job_id {
@@ -763,7 +763,8 @@ impl<'a> EmbeddingDispatcher<'a> {
             )))
         } else {
             self.check_quarantine()?;
-            let charged = self.projection.write(charge);
+            // The ledger write waits for the connection until the row's own deadline, past the slice's if need be, since the host owns native work from the submission on; a charge that could not begin by the row's deadline is not made, and the host job runs unowned.
+            let charged = self.projection.write_within(pass.row_deadline, charge);
             if self.take_fault(DispatchFault::LoseChargeReply) && charged.is_ok() {
                 Err(SearchProjectionError::Store(storage::StoreError::Backend(
                     "database is locked".to_owned(),
@@ -774,6 +775,11 @@ impl<'a> EmbeddingDispatcher<'a> {
         };
         let charged = match charged {
             Ok(charged) => charged,
+            // The connection was not acquired by the row's deadline, so nothing was written: the row stays pending for a pass that stops it, and the host job it never owned is orphaned.
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                self.orphan(job, &host_job_id, observer);
+                return Ok(Err(None));
+            }
             Err(SearchProjectionError::Projection(error))
                 if !matches!(classify(&error), Refusal::Storage) =>
             {
@@ -1218,6 +1224,8 @@ struct Pass<'a> {
     now: i64,
     /// When the pass read `now`; the row deadlines it enforces are measured from here.
     started: Instant,
+    /// The row's own episode deadline as an instant, not shortened by the pass's; the charge that follows a submission may run to it, since the host owns native work from the submission on.
+    row_deadline: Instant,
 }
 
 impl Pass<'_> {

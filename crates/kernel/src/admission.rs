@@ -2955,6 +2955,26 @@ impl KernelStore {
             value,
         ))
     }
+
+    /// [`Self::egress_read`] whose wait for a reader ends at `limit`.
+    pub(crate) fn egress_read_within<T>(
+        &self,
+        limit: &crate::open::AcquireLimit,
+        read: impl FnOnce(&Transaction<'_>, i64) -> Result<T, KernelError>,
+    ) -> Result<(EgressSnapshot, T), KernelError> {
+        let generation_before = self.classification_generation.load(Ordering::SeqCst);
+        let mut reader = self.lock_reader_within(limit)?;
+        let (tip, value) = crate::envelope::read_snapshot_on(&mut reader, 0, read)?;
+        drop(reader);
+        let generation_after = self.classification_generation.load(Ordering::SeqCst);
+        Ok((
+            EgressSnapshot {
+                tip,
+                classification_generation: stable_generation(generation_before, generation_after),
+            },
+            value,
+        ))
+    }
 }
 
 pub(crate) fn egress_candidates_tx(
