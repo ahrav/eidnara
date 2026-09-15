@@ -208,7 +208,7 @@ impl TombstoneReason {
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|reason| reason.as_str() == value)
@@ -255,6 +255,8 @@ pub enum ProjectionError {
     TombstoneCollision { occurrence_id: String },
     #[error("occurrence {occurrence_id} already has an exact association with a different target")]
     AssociationCollision { occurrence_id: String },
+    #[error("a stored exact association carries extraction version {stored}, not {expected}")]
+    ExtractionVersionMismatch { stored: u32, expected: u32 },
     #[error("the projection identity is already installed and differs")]
     IdentityMismatch,
     #[error("occurrence {occurrence_id} is not stored")]

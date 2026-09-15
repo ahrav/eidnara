@@ -119,8 +119,10 @@ occurrence. `family` is the selector keyword, `namespace` scopes the key
 the occurrence is evidence for, so alias rows of one target share it. The
 composite primary key serves equality and SHA-prefix range scans in stable
 binary order without a sort; the occurrence index serves physical cleanup.
-`extraction_version` records the mapping the row was derived under; a lookup
-refuses rows from another version. Rows are written in the same transaction
+`extraction_version` records the mapping the row was derived under. The exact
+extraction version is 1; a new mapping requires a new schema version and a
+rebuild, and both the writer and the page reader refuse rows from another
+version rather than reinterpret them. Rows are written in the same transaction
 as their occurrence and before the projection checkpoint advances, and are
 deleted when message cleanup reclaims the occurrence.
 

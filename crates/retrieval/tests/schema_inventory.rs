@@ -290,6 +290,13 @@ fn the_baseline_matches_the_frozen_inventory_field_for_field() {
         .parse()
         .unwrap();
     assert_eq!(documented_version, retrieval::SCHEMA_VERSION);
+    let documented_extraction: u32 = inventory
+        .split_once("The exact\nextraction version is ")
+        .and_then(|(_, suffix)| suffix.split(';').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(documented_extraction, retrieval::exact::EXTRACTION_VERSION);
     let documented = with_implied_not_null(documented());
     assert_eq!(documented.len(), 12, "every baseline table is documented");
     let stored = with_implied_not_null(stored(retrieval::BASELINE));

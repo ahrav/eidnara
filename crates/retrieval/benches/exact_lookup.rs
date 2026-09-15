@@ -11,8 +11,8 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::Occurrence;
 use retrieval::batch::{BatchBounds, MutationIdentity, ProjectionBatch, apply_batch};
 use retrieval::exact::{
-    CANONICAL_OBJECT_NAMESPACE, Family, HexPrefix, KeyQuery, LookupBounds, ObjectFormat,
-    SelectorBounds, ShaPrefixQuery, classify, key_page, sha_prefix_page,
+    ExactQuery, HexPrefix, LookupContext, ObjectFormat, SelectorBounds, ShaPrefixQuery, classify,
+    page,
 };
 use retrieval::{OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, install_identity};
 use storage::{Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite};
@@ -185,56 +185,41 @@ fn page_benches(c: &mut Criterion) {
     let budget = EvalBudget::unbounded();
     let mut group = c.benchmark_group("exact_page");
     for page_rows in [16usize, 256] {
-        let lookup = LookupBounds {
+        let context = LookupContext {
+            kernel_incarnation_id: KERNEL,
             page_rows: NonZeroUsize::new(page_rows).unwrap(),
+            budget: &budget,
         };
+        let equality = ExactQuery::CanonicalObject(b"obj-00002048");
         group.bench_with_input(
             BenchmarkId::new("key_equality", page_rows),
-            &lookup,
-            |b, lookup| {
+            &context,
+            |b, context| {
                 b.iter(|| {
                     store
-                        .with_conn(|conn| {
-                            Ok(key_page(
-                                conn,
-                                KERNEL,
-                                &KeyQuery {
-                                    family: Family::Id,
-                                    namespace: CANONICAL_OBJECT_NAMESPACE,
-                                    key: b"obj-00002048",
-                                },
-                                None,
-                                *lookup,
-                                &budget,
-                            )
-                            .unwrap())
-                        })
+                        .with_conn(|conn| Ok(page(conn, context, &equality, None).unwrap()))
                         .unwrap()
                 })
             },
         );
         let prefix = HexPrefix::parse("ab").unwrap();
-        let query = ShaPrefixQuery::bind("repo", ObjectFormat::Sha1, &prefix).unwrap();
+        let sha =
+            ExactQuery::Sha(ShaPrefixQuery::bind("repo", ObjectFormat::Sha1, &prefix).unwrap());
         group.bench_with_input(
             BenchmarkId::new("sha_prefix_first_page", page_rows),
-            &lookup,
-            |b, lookup| {
+            &context,
+            |b, context| {
                 b.iter(|| {
                     store
-                        .with_conn(|conn| {
-                            Ok(
-                                sha_prefix_page(conn, KERNEL, &query, None, *lookup, &budget)
-                                    .unwrap(),
-                            )
-                        })
+                        .with_conn(|conn| Ok(page(conn, context, &sha, None).unwrap()))
                         .unwrap()
                 })
             },
         );
         group.bench_with_input(
             BenchmarkId::new("sha_prefix_exhaust", page_rows),
-            &lookup,
-            |b, lookup| {
+            &context,
+            |b, context| {
                 b.iter_batched(
                     || None,
                     |mut cursor| {
@@ -242,22 +227,14 @@ fn page_benches(c: &mut Criterion) {
                         loop {
                             let page = store
                                 .with_conn(|conn| {
-                                    Ok(sha_prefix_page(
-                                        conn,
-                                        KERNEL,
-                                        &query,
-                                        cursor.as_ref(),
-                                        *lookup,
-                                        &budget,
-                                    )
-                                    .unwrap())
+                                    Ok(page(conn, context, &sha, cursor.as_ref()).unwrap())
                                 })
                                 .unwrap();
                             pages += 1;
-                            if page.exhausted {
+                            cursor = page.next;
+                            if cursor.is_none() {
                                 break;
                             }
-                            cursor = page.next;
                         }
                         black_box(pages)
                     },

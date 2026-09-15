@@ -8,8 +8,6 @@ use crate::{OccurrenceRecord, ProjectionError};
 /// Changing a mapping changes derived rows, so increment this and rebuild the projection.
 pub const EXTRACTION_VERSION: u32 = 1;
 
-pub const MAX_KEYS_PER_RECORD: usize = Family::ALL.len();
-
 pub const CANONICAL_OBJECT_NAMESPACE: &str = "canonical_object";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,8 +104,13 @@ pub(crate) fn persist(
             )
             .optional()?;
         match stored {
-            Some((target, version)) if target == key.target_id && version == EXTRACTION_VERSION => {
+            Some((_, version)) if version != EXTRACTION_VERSION => {
+                return Err(ProjectionError::ExtractionVersionMismatch {
+                    stored: version,
+                    expected: EXTRACTION_VERSION,
+                });
             }
+            Some((target, _)) if target == key.target_id => {}
             Some(_) => {
                 return Err(ProjectionError::AssociationCollision {
                     occurrence_id: occurrence_id.to_string(),
@@ -137,7 +140,8 @@ pub(crate) fn stored(
 ) -> Result<bool, ProjectionError> {
     let mut lookup = conn.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM exact_associations
-         WHERE family=?1 AND namespace=?2 AND key=?3 AND occurrence_id=?4 AND target_id=?5)",
+         WHERE family=?1 AND namespace=?2 AND key=?3 AND occurrence_id=?4 AND target_id=?5
+           AND extraction_version=?6)",
     )?;
     for key in keys {
         let present: bool = lookup.query_row(
@@ -146,7 +150,8 @@ pub(crate) fn stored(
                 key.namespace,
                 key.key,
                 occurrence_id,
-                key.target_id
+                key.target_id,
+                EXTRACTION_VERSION
             ],
             |row| row.get(0),
         )?;
@@ -233,5 +238,44 @@ mod tests {
         }
         assert!(matches!(coverage(Family::Id), Coverage::Extracted(_)));
         assert!(matches!(coverage(Family::Sha), Coverage::Extracted(_)));
+    }
+
+    #[test]
+    fn coverage_lists_exactly_the_classes_whose_mapping_emits_the_family() {
+        let oid = "b".repeat(64);
+        let identities: Vec<(OccurrenceClass, Vec<(&str, &str)>)> = vec![
+            (OccurrenceClass::Messages, vec![("message_id", "m")]),
+            (OccurrenceClass::CanonicalClaims, vec![("object_id", "o")]),
+            (
+                OccurrenceClass::PromotedMemory,
+                vec![("decision_object_id", "o")],
+            ),
+            (
+                OccurrenceClass::GitCommits,
+                vec![
+                    ("repository_id", "r"),
+                    ("object_format", "sha256"),
+                    ("oid", oid.as_str()),
+                ],
+            ),
+            (OccurrenceClass::RawToolSpans, vec![]),
+        ];
+        for family in Family::ALL {
+            let covered: Vec<OccurrenceClass> = identities
+                .iter()
+                .filter(|(class, identity)| {
+                    extract(&record(class.code(), identity), "l")
+                        .iter()
+                        .any(|key| key.family == family)
+                })
+                .map(|(class, _)| *class)
+                .collect();
+            match coverage(family) {
+                Coverage::Extracted(classes) => {
+                    assert_eq!(classes, covered.as_slice(), "{family:?}")
+                }
+                Coverage::Missing => assert!(covered.is_empty(), "{family:?}"),
+            }
+        }
     }
 }

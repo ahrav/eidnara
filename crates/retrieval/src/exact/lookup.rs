@@ -1,19 +1,14 @@
 use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
+use kernel::source_identity::OccurrenceClass;
 use rusqlite::params;
-use sha2::{Digest, Sha256};
 use storage::GuardedConn;
 
-use crate::batch::read_checkpoint;
-use crate::exact::association::{EXTRACTION_VERSION, sha_namespace};
+use crate::batch::{ProjectionCheckpoint, read_checkpoint};
+use crate::exact::association::{CANONICAL_OBJECT_NAMESPACE, EXTRACTION_VERSION, sha_namespace};
 use crate::exact::selector::{Family, HexPrefix};
 use crate::{ProjectionError, Tombstone, TombstoneReason};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LookupBounds {
-    pub page_rows: NonZeroUsize,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ObjectFormat {
@@ -29,14 +24,6 @@ impl ObjectFormat {
         }
     }
 
-    pub fn from_code(code: &str) -> Option<Self> {
-        match code {
-            "sha1" => Some(Self::Sha1),
-            "sha256" => Some(Self::Sha256),
-            _ => None,
-        }
-    }
-
     pub fn hex_len(self) -> usize {
         match self {
             Self::Sha1 => 40,
@@ -45,19 +32,13 @@ impl ObjectFormat {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyQuery<'a> {
-    pub family: Family,
-    pub namespace: &'a str,
-    pub key: &'a [u8],
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ShaQueryRefusal {
     #[error("a {digits}-digit prefix exceeds the {} digits of {}", format.hex_len(), format.code())]
     PrefixTooLong { digits: usize, format: ObjectFormat },
 }
 
+/// A SHA lookup is only meaningful inside one repository's object format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShaPrefixQuery<'a> {
     repository_id: &'a str,
@@ -91,21 +72,36 @@ impl<'a> ShaPrefixQuery<'a> {
     pub fn namespace(&self) -> String {
         sha_namespace(self.object_format.code(), self.repository_id)
     }
+}
 
+/// Only the families with a declared source mapping are queryable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactQuery<'a> {
+    CanonicalObject(&'a [u8]),
+    Sha(ShaPrefixQuery<'a>),
+}
+
+impl ExactQuery<'_> {
     fn range(&self) -> KeyRange {
-        let lo = self.prefix.as_str().as_bytes().to_vec();
-        let mut hi = lo.clone();
-        // Keys are lowercase hex, so `g` bounds every extension of the prefix.
-        hi.push(if self.is_full_oid() { 0x00 } else { b'g' });
-        KeyRange {
-            family: Family::Sha,
-            namespace: self.namespace(),
-            lo,
-            hi,
+        match self {
+            Self::CanonicalObject(key) => KeyRange::bounded(
+                Family::Id,
+                CANONICAL_OBJECT_NAMESPACE.to_string(),
+                key.to_vec(),
+                0x00,
+            ),
+            Self::Sha(query) => KeyRange::bounded(
+                Family::Sha,
+                query.namespace(),
+                query.prefix.as_str().as_bytes().to_vec(),
+                // Keys are lowercase hex, so `g` bounds every extension.
+                if query.is_full_oid() { 0x00 } else { b'g' },
+            ),
         }
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct KeyRange {
     family: Family,
     namespace: String,
@@ -114,38 +110,24 @@ struct KeyRange {
 }
 
 impl KeyRange {
-    fn equality(query: &KeyQuery<'_>) -> Self {
-        let lo = query.key.to_vec();
+    /// `[lo, lo ++ sentinel)`: a NUL sentinel selects exactly `lo`.
+    fn bounded(family: Family, namespace: String, lo: Vec<u8>, sentinel: u8) -> Self {
         let mut hi = lo.clone();
-        // A trailing NUL excludes every longer key while keeping the range shape.
-        hi.push(0x00);
+        hi.push(sentinel);
         Self {
-            family: query.family,
-            namespace: query.namespace.to_string(),
+            family,
+            namespace,
             lo,
             hi,
         }
-    }
-
-    fn digest(&self) -> String {
-        let mut hasher = Sha256::new();
-        for part in [
-            self.family.keyword().as_bytes(),
-            self.namespace.as_bytes(),
-            &self.lo,
-            &self.hi,
-        ] {
-            hasher.update((part.len() as u64).to_be_bytes());
-            hasher.update(part);
-        }
-        format!("{:x}", hasher.finalize())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor {
-    query: String,
-    checkpoint_commit_seq: i64,
+    kernel_incarnation_id: String,
+    range: KeyRange,
+    checkpoint: ProjectionCheckpoint,
     last_key: Vec<u8>,
     last_occurrence_id: String,
 }
@@ -156,7 +138,7 @@ pub struct AssociationRow {
     pub target_id: String,
     pub occurrence_id: String,
     pub lineage_id: String,
-    pub class: String,
+    pub class: OccurrenceClass,
     pub revision: i64,
     pub representation: String,
     pub span: Option<(u64, u64)>,
@@ -171,24 +153,30 @@ pub struct AssociationRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     pub rows: Vec<AssociationRow>,
+    /// `None` means every matching row has been read.
     pub next: Option<Cursor>,
-    /// `false` means matching rows remain unread.
-    pub exhausted: bool,
-    pub checkpoint_commit_seq: i64,
+    pub checkpoint: ProjectionCheckpoint,
     /// Keys first seen in this page; summing pages counts each key once.
     pub distinct_keys: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LookupContext<'a> {
+    pub kernel_incarnation_id: &'a str,
+    pub page_rows: NonZeroUsize,
+    pub budget: &'a EvalBudget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LookupRefusal {
     #[error("the request budget is exhausted")]
-    Interrupted,
+    BudgetExhausted,
     /// No batch has committed, so there is no applied prefix to enumerate.
     #[error("the projection has no applied prefix")]
     NoCheckpoint,
     #[error("the cursor was issued at checkpoint {cursor} but the projection is at {current}")]
     StaleCursor { cursor: i64, current: i64 },
-    #[error("the cursor belongs to another query")]
+    #[error("the cursor belongs to another query or projection")]
     ForeignCursor,
     #[error("a stored association carries extraction version {stored}, not {expected}")]
     ExtractionMismatch { stored: u32, expected: u32 },
@@ -202,56 +190,6 @@ impl From<rusqlite::Error> for LookupRefusal {
     }
 }
 
-/// Reads at most `bounds.page_rows` associations for one key in occurrence order.
-///
-/// # Errors
-///
-/// Refuses an exhausted budget, a projection without a checkpoint or under
-/// another kernel incarnation, a cursor from another query or checkpoint, and
-/// rows derived under another extraction version.
-pub fn key_page(
-    conn: &GuardedConn<'_>,
-    kernel_incarnation_id: &str,
-    query: &KeyQuery<'_>,
-    cursor: Option<&Cursor>,
-    bounds: LookupBounds,
-    budget: &EvalBudget,
-) -> Result<Page, LookupRefusal> {
-    range_page(
-        conn,
-        kernel_incarnation_id,
-        &KeyRange::equality(query),
-        cursor,
-        bounds,
-        budget,
-    )
-}
-
-/// Reads at most `bounds.page_rows` associations whose key extends the prefix,
-/// in key then occurrence order, within one repository and object format.
-/// Tombstoned occurrences are included so colliding object ids stay counted.
-///
-/// # Errors
-///
-/// As [`key_page`].
-pub fn sha_prefix_page(
-    conn: &GuardedConn<'_>,
-    kernel_incarnation_id: &str,
-    query: &ShaPrefixQuery<'_>,
-    cursor: Option<&Cursor>,
-    bounds: LookupBounds,
-    budget: &EvalBudget,
-) -> Result<Page, LookupRefusal> {
-    range_page(
-        conn,
-        kernel_incarnation_id,
-        &query.range(),
-        cursor,
-        bounds,
-        budget,
-    )
-}
-
 const PAGE_COLUMNS: &str =
     "a.key,a.target_id,a.occurrence_id,a.extraction_version,a.created_commit_seq,
      o.lineage_id,o.class,o.revision,o.representation,o.span_start,o.span_end,o.payload_id,
@@ -261,56 +199,56 @@ const PAGE_COLUMNS: &str =
 const PAGE_FROM: &str = "FROM exact_associations a
      JOIN occurrences o ON o.occurrence_id=a.occurrence_id
      LEFT JOIN occurrence_tombstones t ON t.occurrence_id=a.occurrence_id
-     WHERE a.family=?1 AND a.namespace=?2 AND a.key>=?3 AND a.key<?4";
+     WHERE a.family=?1 AND a.namespace=?2 AND a.key<?4";
 
 fn page_sql(has_cursor: bool) -> String {
-    let after = if has_cursor {
-        " AND (a.key,a.occurrence_id)>(?6,?7)"
+    let lower = if has_cursor {
+        "(a.key,a.occurrence_id)>(?3,?6)"
     } else {
-        ""
+        "a.key>=?3"
     };
-    format!("SELECT {PAGE_COLUMNS} {PAGE_FROM}{after} ORDER BY a.key,a.occurrence_id LIMIT ?5")
+    format!("SELECT {PAGE_COLUMNS} {PAGE_FROM} AND {lower} ORDER BY a.key,a.occurrence_id LIMIT ?5")
 }
 
-#[cfg(feature = "test-support")]
-pub fn page_sql_for_test(has_cursor: bool) -> String {
-    page_sql(has_cursor)
-}
-
-fn range_page(
+/// # Errors
+///
+/// Refuses an exhausted budget, a projection without a checkpoint or under
+/// another kernel incarnation, a cursor from another query or checkpoint, and
+/// rows derived under another extraction version.
+pub fn page(
     conn: &GuardedConn<'_>,
-    kernel_incarnation_id: &str,
-    range: &KeyRange,
+    context: &LookupContext<'_>,
+    query: &ExactQuery<'_>,
     cursor: Option<&Cursor>,
-    bounds: LookupBounds,
-    budget: &EvalBudget,
 ) -> Result<Page, LookupRefusal> {
-    budget.check().map_err(|_| LookupRefusal::Interrupted)?;
+    context
+        .budget
+        .check()
+        .map_err(|_| LookupRefusal::BudgetExhausted)?;
     let checkpoint =
-        read_checkpoint(conn, kernel_incarnation_id)?.ok_or(LookupRefusal::NoCheckpoint)?;
-    let digest = range.digest();
+        read_checkpoint(conn, context.kernel_incarnation_id)?.ok_or(LookupRefusal::NoCheckpoint)?;
+    let range = query.range();
     if let Some(cursor) = cursor {
-        if cursor.query != digest {
+        if cursor.range != range || cursor.kernel_incarnation_id != context.kernel_incarnation_id {
             return Err(LookupRefusal::ForeignCursor);
         }
-        if cursor.checkpoint_commit_seq != checkpoint.checkpoint_commit_seq {
+        if cursor.checkpoint != checkpoint {
             return Err(LookupRefusal::StaleCursor {
-                cursor: cursor.checkpoint_commit_seq,
+                cursor: cursor.checkpoint.checkpoint_commit_seq,
                 current: checkpoint.checkpoint_commit_seq,
             });
         }
     }
-    let limit = i64::try_from(bounds.page_rows.get().saturating_add(1)).unwrap_or(i64::MAX);
+    let limit = i64::try_from(context.page_rows.get().saturating_add(1)).unwrap_or(i64::MAX);
     let mut statement = conn.prepare_cached(&page_sql(cursor.is_some()))?;
     let family = range.family.keyword();
     let mut rows = match cursor {
         Some(cursor) => statement.query(params![
             family,
             range.namespace,
-            range.lo,
+            cursor.last_key,
             range.hi,
             limit,
-            cursor.last_key,
             cursor.last_occurrence_id
         ])?,
         None => statement.query(params![family, range.namespace, range.lo, range.hi, limit])?,
@@ -318,14 +256,20 @@ fn range_page(
     let mut page = Page {
         rows: Vec::new(),
         next: None,
-        exhausted: true,
-        checkpoint_commit_seq: checkpoint.checkpoint_commit_seq,
+        checkpoint: checkpoint.clone(),
         distinct_keys: 0,
     };
     let mut previous_key = cursor.map(|cursor| cursor.last_key.clone());
     while let Some(row) = rows.next()? {
-        if page.rows.len() == bounds.page_rows.get() {
-            page.exhausted = false;
+        if page.rows.len() == context.page_rows.get() {
+            let last = page.rows.last().expect("page_rows is nonzero");
+            page.next = Some(Cursor {
+                kernel_incarnation_id: context.kernel_incarnation_id.to_string(),
+                range,
+                checkpoint,
+                last_key: last.key.clone(),
+                last_occurrence_id: last.occurrence_id.clone(),
+            });
             break;
         }
         let version: u32 = row.get(3)?;
@@ -335,21 +279,29 @@ fn range_page(
                 expected: EXTRACTION_VERSION,
             });
         }
-        let key: Vec<u8> = row.get(0)?;
-        if previous_key.as_ref() != Some(&key) {
+        let decoded = AssociationRow::decode(row)?;
+        if previous_key.as_ref() != Some(&decoded.key) {
             page.distinct_keys += 1;
         }
-        previous_key = Some(key.clone());
+        previous_key = Some(decoded.key.clone());
+        page.rows.push(decoded);
+    }
+    Ok(page)
+}
+
+impl AssociationRow {
+    fn decode(row: &rusqlite::Row<'_>) -> Result<Self, LookupRefusal> {
+        let corrupt = || ProjectionError::CorruptRow;
         let span = match (
             row.get::<_, Option<i64>>(9)?,
             row.get::<_, Option<i64>>(10)?,
         ) {
             (Some(start), Some(end)) => Some((
-                u64::try_from(start).map_err(|_| ProjectionError::CorruptRow)?,
-                u64::try_from(end).map_err(|_| ProjectionError::CorruptRow)?,
+                u64::try_from(start).map_err(|_| corrupt())?,
+                u64::try_from(end).map_err(|_| corrupt())?,
             )),
             (None, None) => None,
-            _ => return Err(ProjectionError::CorruptRow.into()),
+            _ => return Err(corrupt().into()),
         };
         let tombstone = match (
             row.get::<_, Option<i64>>(15)?,
@@ -357,21 +309,19 @@ fn range_page(
         ) {
             (Some(invalidated_commit_seq), Some(reason)) => Some(Tombstone {
                 invalidated_commit_seq,
-                reason: TombstoneReason::ALL
-                    .into_iter()
-                    .find(|candidate| candidate.as_str() == reason)
-                    .ok_or(ProjectionError::CorruptRow)?,
+                reason: TombstoneReason::parse(&reason).ok_or_else(corrupt)?,
             }),
             (None, None) => None,
-            _ => return Err(ProjectionError::CorruptRow.into()),
+            _ => return Err(corrupt().into()),
         };
-        page.rows.push(AssociationRow {
-            key,
+        let class: String = row.get(6)?;
+        Ok(Self {
+            key: row.get(0)?,
             target_id: row.get(1)?,
             occurrence_id: row.get(2)?,
             created_commit_seq: row.get(4)?,
             lineage_id: row.get(5)?,
-            class: row.get(6)?,
+            class: OccurrenceClass::from_code(&class).ok_or_else(corrupt)?,
             revision: row.get(7)?,
             representation: row.get(8)?,
             span,
@@ -380,19 +330,8 @@ fn range_page(
             source_evidence_id: row.get(13)?,
             source_artifact_digest: row.get(14)?,
             tombstone,
-        });
+        })
     }
-    if !page.exhausted
-        && let Some(last) = page.rows.last()
-    {
-        page.next = Some(Cursor {
-            query: digest,
-            checkpoint_commit_seq: checkpoint.checkpoint_commit_seq,
-            last_key: last.key.clone(),
-            last_occurrence_id: last.occurrence_id.clone(),
-        });
-    }
-    Ok(page)
 }
 
 #[cfg(test)]
@@ -417,75 +356,101 @@ mod tests {
                  extraction_version,created_commit_seq)
              SELECT 'id','canonical_object',CAST(printf('obj-%08d',n) AS BLOB),printf('occ-%08d',n),
                  printf('obj-%08d',n),1,1 FROM ids;
+             WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<{count})
              INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
                  extraction_version,created_commit_seq)
-             VALUES ('sha','sha1:repo',CAST('abc123' AS BLOB),'occ-00000001','t',1,1),
-                    ('sha','sha1:repo',CAST('abc999' AS BLOB),'occ-00000002','t',1,1),
-                    ('sha','sha1:repo',CAST('abd000' AS BLOB),'occ-00000003','t',1,1);"
+             SELECT 'sha','sha1:repo',CAST(printf('ab%038x',n) AS BLOB),printf('occ-%08d',n),
+                 printf('obj-%08d',n),1,1 FROM ids;"
         ))
         .unwrap();
         conn
     }
 
+    fn plan(conn: &Connection, sql: &str, params: &[rusqlite::types::Value]) -> Vec<String> {
+        conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
     #[test]
-    fn equality_and_range_pages_search_the_primary_key_without_sorting() {
-        let mut measured = Vec::new();
+    fn first_and_cursor_pages_seek_the_primary_key_without_sorting_or_rescanning() {
+        use rusqlite::types::Value;
+        let mut first_steps = Vec::new();
+        let mut resume_steps = Vec::new();
         for count in [1_024usize, 16_384] {
             let conn = seeded(count);
-            for has_cursor in [false, true] {
-                let sql = page_sql(has_cursor);
-                let plan: Vec<String> = conn
-                    .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-                    .unwrap()
-                    .query_map(
-                        rusqlite::params_from_iter(
-                            [
-                                rusqlite::types::Value::Text("sha".into()),
-                                rusqlite::types::Value::Text("sha1:repo".into()),
-                                rusqlite::types::Value::Blob(b"abc".to_vec()),
-                                rusqlite::types::Value::Blob(b"abcg".to_vec()),
-                                rusqlite::types::Value::Integer(3),
-                                rusqlite::types::Value::Blob(b"abc123".to_vec()),
-                                rusqlite::types::Value::Text("occ-00000001".into()),
-                            ]
-                            .into_iter()
-                            .take(if has_cursor { 7 } else { 5 }),
-                        ),
-                        |row| row.get::<_, String>(3),
-                    )
-                    .unwrap()
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .unwrap();
-                assert!(
-                    plan.iter()
-                        .any(|detail| detail.contains(
-                            "SEARCH a USING INDEX sqlite_autoindex_exact_associations_1 (family=? AND namespace=? AND key>? AND key<?)"
-                        )),
-                    "{has_cursor}: {plan:?}"
-                );
-                assert!(
-                    !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
-                    "{has_cursor}: {plan:?}"
-                );
+            let lo = Value::Blob(b"ab".to_vec());
+            let hi = Value::Blob(b"abg".to_vec());
+            let first = [
+                Value::Text("sha".into()),
+                Value::Text("sha1:repo".into()),
+                lo.clone(),
+                hi.clone(),
+                Value::Integer(9),
+            ];
+            let first_plan = plan(&conn, &page_sql(false), &first);
+            assert!(
+                first_plan.iter().any(|d| d.contains(
+                    "SEARCH a USING INDEX sqlite_autoindex_exact_associations_1 (family=? AND namespace=? AND key>? AND key<?)"
+                )),
+                "{first_plan:?}"
+            );
+            let last_key = Value::Blob(format!("ab{:038x}", count - 1).into_bytes());
+            let resume = [
+                Value::Text("sha".into()),
+                Value::Text("sha1:repo".into()),
+                last_key,
+                hi,
+                Value::Integer(9),
+                Value::Text(format!("occ-{:08}", count - 1)),
+            ];
+            let resume_plan = plan(&conn, &page_sql(true), &resume);
+            assert!(
+                resume_plan.iter().any(|d| d.contains(
+                    "SEARCH a USING INDEX sqlite_autoindex_exact_associations_1 (family=? AND namespace=? AND (key,occurrence_id)>(?,?) AND key<?)"
+                )),
+                "{resume_plan:?}"
+            );
+            for plan in [&first_plan, &resume_plan] {
+                assert!(!plan.iter().any(|d| d.contains("TEMP B-TREE")), "{plan:?}");
             }
             let mut statement = conn.prepare(&page_sql(false)).unwrap();
             let keys = statement
-                .query_map(
-                    params!["sha", "sha1:repo", b"abc".to_vec(), b"abcg".to_vec(), 3],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
+                .query_map(rusqlite::params_from_iter(first.iter()), |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap();
-            assert_eq!(keys, [b"abc123".to_vec(), b"abc999".to_vec()]);
+            assert_eq!(keys.len(), 9);
             assert_eq!(statement.get_status(StatementStatus::Sort), 0);
-            measured.push((count, statement.get_status(StatementStatus::VmStep)));
+            first_steps.push(statement.get_status(StatementStatus::VmStep));
+
+            let mut statement = conn.prepare(&page_sql(true)).unwrap();
+            let keys = statement
+                .query_map(rusqlite::params_from_iter(resume.iter()), |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(keys, [format!("ab{:038x}", count).into_bytes()]);
+            assert_eq!(statement.get_status(StatementStatus::Sort), 0);
+            resume_steps.push(statement.get_status(StatementStatus::VmStep));
         }
         assert!(
-            measured.iter().all(|(_, steps)| *steps < 512),
-            "{measured:?}"
+            first_steps[1] <= first_steps[0] * 2,
+            "first page must not grow with the collision count: {first_steps:?}"
         );
-        assert!(measured[1].1 <= measured[0].1 * 2, "{measured:?}");
+        assert!(
+            resume_steps[1] <= resume_steps[0] * 2,
+            "a cursor page must not rescan the range: {resume_steps:?}"
+        );
     }
 
     #[test]
@@ -496,10 +461,10 @@ mod tests {
         let query = ShaPrefixQuery::bind("repo", ObjectFormat::Sha1, &short).unwrap();
         assert!(!query.is_full_oid());
         assert_eq!(query.namespace(), "sha1:repo");
-        assert_eq!(query.range().hi, b"abcg");
+        assert_eq!(ExactQuery::Sha(query).range().hi, b"abcg");
         let query = ShaPrefixQuery::bind("repo", ObjectFormat::Sha1, &full).unwrap();
         assert!(query.is_full_oid());
-        assert_eq!(query.range().hi.last(), Some(&0));
+        assert_eq!(ExactQuery::Sha(query).range().hi.last(), Some(&0));
         assert_eq!(
             ShaPrefixQuery::bind("repo", ObjectFormat::Sha1, &long).unwrap_err(),
             ShaQueryRefusal::PrefixTooLong {
@@ -509,15 +474,12 @@ mod tests {
         );
         assert!(ShaPrefixQuery::bind("repo", ObjectFormat::Sha256, &long).is_ok());
         assert_ne!(
-            ShaPrefixQuery::bind("repo", ObjectFormat::Sha1, &short)
-                .unwrap()
-                .range()
-                .digest(),
-            ShaPrefixQuery::bind("repo", ObjectFormat::Sha256, &short)
-                .unwrap()
-                .range()
-                .digest(),
+            ExactQuery::Sha(ShaPrefixQuery::bind("repo", ObjectFormat::Sha1, &short).unwrap())
+                .range(),
+            ExactQuery::Sha(ShaPrefixQuery::bind("repo", ObjectFormat::Sha256, &short).unwrap())
+                .range(),
             "the algorithm is part of the query identity"
         );
+        assert_eq!(ExactQuery::CanonicalObject(b"obj").range().hi, b"obj\0");
     }
 }

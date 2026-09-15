@@ -37,12 +37,6 @@ impl Family {
             Self::Error => "error",
         }
     }
-
-    pub fn from_keyword(keyword: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|family| family.keyword() == keyword)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +94,6 @@ impl SelectorValue {
 pub struct Selector {
     pub family: Family,
     pub value: SelectorValue,
-    pub quoted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,7 +115,6 @@ pub enum PathRefusal {
     Absolute,
     EmptyComponent,
     DotComponent,
-    Nul,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -173,7 +165,7 @@ pub fn classify(request: &str, bounds: SelectorBounds) -> Result<Intent, Selecto
             family,
             offset: start + value_at,
         })?;
-        if token.end == trimmed.len() || token.end == value_at {
+        if token.end == trimmed.len() {
             let selector = decode_value(
                 family,
                 &trimmed[value_at..token.end],
@@ -234,10 +226,12 @@ fn selector_head(text: &str, at: usize) -> Option<(Family, usize)> {
             return None;
         }
     }
-    let rest = &text[at..];
-    let colon = rest.find(':')?;
-    let family = Family::from_keyword(&rest[..colon])?;
-    Some((family, at + colon + 1))
+    let rest = &text.as_bytes()[at..];
+    Family::ALL.into_iter().find_map(|family| {
+        let keyword = family.keyword().as_bytes();
+        (rest.starts_with(keyword) && rest.get(keyword.len()) == Some(&b':'))
+            .then(|| (family, at + keyword.len() + 1))
+    })
 }
 
 struct Token {
@@ -282,53 +276,7 @@ fn json_string_end(text: &str) -> Option<usize> {
 }
 
 fn decode_json_string(text: &str) -> Option<String> {
-    let inner = text.strip_prefix('"')?.strip_suffix('"')?;
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => match chars.next()? {
-                '"' => out.push('"'),
-                '\\' => out.push('\\'),
-                '/' => out.push('/'),
-                'b' => out.push('\u{8}'),
-                'f' => out.push('\u{c}'),
-                'n' => out.push('\n'),
-                'r' => out.push('\r'),
-                't' => out.push('\t'),
-                'u' => {
-                    let unit = hex4(&mut chars)?;
-                    let scalar = match unit {
-                        0xD800..=0xDBFF => {
-                            if chars.next()? != '\\' || chars.next()? != 'u' {
-                                return None;
-                            }
-                            let low = hex4(&mut chars)?;
-                            if !(0xDC00..=0xDFFF).contains(&low) {
-                                return None;
-                            }
-                            0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)
-                        }
-                        0xDC00..=0xDFFF => return None,
-                        _ => unit,
-                    };
-                    out.push(char::from_u32(scalar)?);
-                }
-                _ => return None,
-            },
-            c if (c as u32) < 0x20 => return None,
-            c => out.push(c),
-        }
-    }
-    Some(out)
-}
-
-fn hex4(chars: &mut std::str::Chars<'_>) -> Option<u32> {
-    let mut value = 0u32;
-    for _ in 0..4 {
-        value = (value << 4) | chars.next()?.to_digit(16)?;
-    }
-    Some(value)
+    serde_json::from_str(text).ok()
 }
 
 fn decode_value(
@@ -339,14 +287,13 @@ fn decode_value(
     bounds: SelectorBounds,
 ) -> Result<Selector, SelectorRefusal> {
     let bound = bounds.max_value_bytes.get();
-    let over = |bytes: usize| SelectorRefusal::ValueTooLong {
-        family,
-        offset,
-        bytes,
-        bound,
-    };
     if token.len() > bound {
-        return Err(over(token.len()));
+        return Err(SelectorRefusal::ValueTooLong {
+            family,
+            offset,
+            bytes: token.len(),
+            bound,
+        });
     }
     let text = if quoted {
         decode_json_string(token).ok_or(SelectorRefusal::MalformedQuote { family, offset })?
@@ -367,32 +314,23 @@ fn decode_value(
                 percent_decode(text.as_bytes())
                     .ok_or(SelectorRefusal::MalformedPercentEscape { offset })?
             };
-            if bytes.len() > bound {
-                return Err(over(bytes.len()));
+            if bytes.contains(&0) {
+                return Err(SelectorRefusal::Nul { family, offset });
             }
             validate_path(&bytes)
                 .map_err(|reason| SelectorRefusal::InvalidPath { offset, reason })?;
             SelectorValue::Path(bytes)
         }
         Family::Id | Family::Symbol | Family::Command | Family::Config | Family::Error => {
-            if text.len() > bound {
-                return Err(over(text.len()));
-            }
             if text.contains('\0') {
                 return Err(SelectorRefusal::Nul { family, offset });
             }
             SelectorValue::Text(text)
         }
     };
-    Ok(Selector {
-        family,
-        value,
-        quoted,
-    })
+    Ok(Selector { family, value })
 }
 
-/// `%25` decodes to a literal percent; a `%` without two hex digits is
-/// refused rather than repaired.
 fn percent_decode(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -400,8 +338,8 @@ fn percent_decode(bytes: &[u8]) -> Option<Vec<u8>> {
         if bytes[index] == b'%' {
             let high = *bytes.get(index + 1)?;
             let low = *bytes.get(index + 2)?;
-            let digit = |b: u8| (b as char).to_digit(16);
-            out.push(u8::try_from((digit(high)? << 4) | digit(low)?).ok()?);
+            let digit = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+            out.push((digit(high)? << 4) | digit(low)?);
             index += 3;
         } else {
             out.push(bytes[index]);
@@ -413,9 +351,6 @@ fn percent_decode(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// Backslash is filename data; only `/` separates components.
 fn validate_path(bytes: &[u8]) -> Result<(), PathRefusal> {
-    if bytes.contains(&0) {
-        return Err(PathRefusal::Nul);
-    }
     if bytes.first() == Some(&b'/') {
         return Err(PathRefusal::Absolute);
     }
@@ -469,8 +404,7 @@ mod tests {
             let bare = direct(&format!("{}:{value}", family.keyword()));
             let quoted = direct(&format!("{}:\"{value}\"", family.keyword()));
             assert_eq!(bare.family, family);
-            assert!(!bare.quoted);
-            assert!(quoted.quoted);
+            assert_eq!(quoted.family, family);
             assert_eq!(bare.value, quoted.value);
             match bare.value {
                 SelectorValue::Sha(hex) => assert_eq!(hex.as_str(), "abc1"),
@@ -494,10 +428,9 @@ mod tests {
     #[test]
     fn whitespace_around_the_colon_or_an_empty_value_is_not_a_selector() {
         assert_eq!(hybrid("id :x"), vec![]);
-        assert!(matches!(
-            refused("id: x"),
-            SelectorRefusal::EmptyValue { .. }
-        ));
+        assert_eq!(hybrid("id: x"), vec![]);
+        assert_eq!(hybrid("error: the build failed"), vec![]);
+        assert_eq!(hybrid("see id: x"), vec![]);
         assert!(matches!(refused("id:"), SelectorRefusal::EmptyValue { .. }));
         assert!(matches!(
             refused("id:\"\""),
@@ -558,10 +491,7 @@ mod tests {
                 "{request:?}"
             );
         }
-        assert!(matches!(
-            refused("id:'x'"),
-            SelectorRefusal::EmptyValue { .. }
-        ));
+        assert_eq!(hybrid("id:'x'"), vec![], "a quote stops the bare token");
     }
 
     #[test]
@@ -672,7 +602,6 @@ mod tests {
             ("path:%2E%2E/b", PathRefusal::DotComponent),
             ("path:..", PathRefusal::DotComponent),
             ("path:\"../b\"", PathRefusal::DotComponent),
-            ("path:a%00b", PathRefusal::Nul),
         ];
         for (request, expected) in invalid {
             match refused(request) {
@@ -686,6 +615,87 @@ mod tests {
             direct("path:a/.hidden/b..c").value,
             SelectorValue::Path(b"a/.hidden/b..c".to_vec())
         );
+        assert!(matches!(
+            refused("path:a%00b"),
+            SelectorRefusal::Nul {
+                family: Family::Path,
+                ..
+            }
+        ));
+        assert!(matches!(
+            refused("path:\"a\\u0000b\""),
+            SelectorRefusal::Nul {
+                family: Family::Path,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn refusal_offsets_point_at_the_value_in_the_untrimmed_request() {
+        assert_eq!(
+            refused(" \n path:a%"),
+            SelectorRefusal::MalformedPercentEscape { offset: 8 }
+        );
+        assert_eq!(refused("sha:\"zz\""), SelectorRefusal::NotHex { offset: 4 });
+    }
+
+    #[test]
+    fn bare_punctuation_is_data_except_the_declared_stops() {
+        let cases: [(&str, SelectorValue); 6] = [
+            (
+                "symbol:Foo::bar<T>",
+                SelectorValue::Text("Foo::bar<T>".into()),
+            ),
+            ("id:a/b@c#d+e", SelectorValue::Text("a/b@c#d+e".into())),
+            ("path:a:b", SelectorValue::Path(b"a:b".to_vec())),
+            ("config:[a].b=c", SelectorValue::Text("[a].b=c".into())),
+            (
+                "command:git-log|less",
+                SelectorValue::Text("git-log|less".into()),
+            ),
+            ("error:E0308(x)", SelectorValue::Text("E0308(x)".into())),
+        ];
+        for (request, expected) in cases {
+            assert_eq!(direct(request).value, expected, "{request:?}");
+        }
+        let mentions = hybrid("error:E0308, then more");
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].span, 0..11);
+        assert_eq!(
+            mentions[0].selector.value,
+            SelectorValue::Text("E0308".into())
+        );
+    }
+
+    #[test]
+    fn unicode_whitespace_is_data_inside_quotes_and_content_outside_them() {
+        assert_eq!(
+            direct("id:\"a\u{2003}b\"").value,
+            SelectorValue::Text("a\u{2003}b".into())
+        );
+        let mentions = hybrid("id:x\u{a0}");
+        assert_eq!(mentions.len(), 1, "a trailing no-break space is prose");
+        assert_eq!(mentions[0].span, 0..4);
+    }
+
+    #[test]
+    fn json_decoding_agrees_with_serde_json_on_generated_strings() {
+        for text in [
+            "plain",
+            "quote\"inside",
+            "back\\slash",
+            "tab\tnew\nline",
+            "\u{e9}\u{1f600}\u{2003}",
+            "control\u{1}",
+        ] {
+            let encoded = serde_json::to_string(text).unwrap();
+            assert_eq!(decode_json_string(&encoded).as_deref(), Some(text));
+            assert_eq!(json_string_end(&encoded), Some(encoded.len()));
+        }
+        for malformed in [r#""\ud83d""#, r#""\ude00""#, "\"a\tb\"", r#""\x""#, r#""a"#] {
+            assert_eq!(decode_json_string(malformed), None, "{malformed:?}");
+        }
     }
 
     #[test]
