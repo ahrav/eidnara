@@ -1913,8 +1913,11 @@ async fn shutdown_spends_one_grace_across_the_disable_wait_and_the_drain() {
     let _ = disabling.join().unwrap();
     let _ = owner.shutdown().await;
     assert!(
-        outcome.is_err(),
-        "the held call outlives the grace: {outcome:?}"
+        matches!(
+            outcome,
+            Err(daemon::search_lifecycle_owner::ShutdownUnresolved::Drain(_))
+        ),
+        "the handed-back supervisor is drained and its held call outlives the grace: {outcome:?}"
     );
     assert!(
         waited < Duration::from_millis(1_900),
