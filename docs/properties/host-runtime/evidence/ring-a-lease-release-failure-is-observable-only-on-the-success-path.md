@@ -91,9 +91,14 @@ eight, pinned by the profile post-#131 and asserted at
 `run_endpoint` treats as an idle direction. The accumulation this paragraph
 first described, eight silent release failures turning the peer-to-host
 direction into a permanently idle-looking channel, cannot occur: the
-investigation below found that every untracked drop path returns
-`Err(ReadClose::..)` and ends the read loop, so at most one diagnostic is lost
-per retiring connection. The paragraph is kept as the reasoning that led there.
+investigation below found that every untracked drop path belongs to a
+connection that is already ending. The deadline and budget exits return
+`Err(ReadClose::..)` and end the read loop; the `read_cancel` and `discard`
+exits return `Ok(false)` with the lease dropped, and `run_endpoint` then leaves
+at the loop boundary on `discard` or finishes the bounded post-cancel drain on
+`read_cancel` before closing the inbound channel with `ReadClose::Cancelled`. So
+the loss is bounded per retiring connection, not cumulative across its life.
+The paragraph is kept as the reasoning that led there.
 
 ## Failure scenario
 
@@ -218,9 +223,15 @@ the host's handling of it on the drop paths.
   what each returns; `run_endpoint:406-411` (every `Err(close)` from
   `receive_one` ends the loop); `ring.rs:1063-1068` (lease saturation as
   `Ok(None)`).
-- Findings: no. All three untracked paths return `Err(ReadClose::..)`, and
-  `run_endpoint` responds by sending the close, cancelling `retired` and `root`,
-  and returning at `:406-411`. So a silent release failure always coincides with the
+- Findings: no. The deadline and over-budget paths return `Err(ReadClose::..)`,
+  and `run_endpoint` responds by sending the close, cancelling `retired` and
+  `root`, and returning at `:406-411`. At HEAD the `read_cancel` and `discard`
+  exits inside the charge wait return `Ok(false)` instead (`ring_transport.rs`,
+  the `select!` in `receive_one`): `discard` makes `run_endpoint` return at the
+  top of its loop, and `read_cancel` lets it finish one descriptor depth of
+  post-cancel receives before it closes the inbound channel with
+  `ReadClose::Cancelled`. Every path is therefore taken by a connection that is
+  already ending, so a silent release failure always coincides with the
   connection ending. The eight-slot exhaustion scenario I first considered would
   need a release failure on a path that continues the loop, and there is none.
 - Missing evidence: none.

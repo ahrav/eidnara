@@ -109,7 +109,11 @@ The drop path is reachable in the shipped host topology without any injected fau
 3. Either `read_cancel.is_cancelled()` is true and the function returns
    `Err(ReadClose::Cancelled)` (`:712`), or the frame deadline elapses and it
    returns `Err(ReadClose::Overloaded)` (`:715-720`). In both cases `lease` is still
-   in scope and is dropped on the way out.
+   in scope and is dropped on the way out. At HEAD the `read_cancel` exit returns
+   `Ok(false)` rather than `Err`, so the endpoint finishes its bounded post-cancel
+   drain before closing the inbound channel with `Cancelled`; a `discard` exit also
+   returns `Ok(false)` and `run_endpoint` leaves at its loop boundary. The lease
+   is dropped on all of them.
 4. `Drop` calls `release_once`, which calls `Ring::release`. If the ring was
    quarantined in the meantime — by the peer, or by a validation failure on the other
    direction — the call returns `LeaseError::Quarantined`, discarded at
