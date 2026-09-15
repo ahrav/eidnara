@@ -1246,6 +1246,56 @@ describe("mandatory shared-memory channel", () => {
         expect(budget.used).toBe(0);
     });
 
+    test("flush waits for queued frames to publish or for its deadline, so a close does not drop a waiting Goodbye", async () => {
+        const budget = new ByteBudget(1 << 20);
+        const state = { full: true, arm: () => true };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        channel.beginFrames();
+        channel.produce(responseHeader(FrameType.Request, 1n, 4), {
+            byteLength: 4,
+            fill: (cursor: ProducerCursor) => cursor.write(new Uint8Array(4)),
+        });
+        channel.sendControl(responseHeader(FrameType.Goodbye, 0n, 0));
+        expect(channel.stats().queuedControlFrames).toBe(1);
+
+        let settled = false;
+        const flushed = channel.flush(Deadline.start(5_000)).then(() => {
+            settled = true;
+        });
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        // The Goodbye waits behind data, so flush remains pending.
+        expect(settled).toBe(false);
+        state.full = false;
+        mock.readiness()?.();
+        await flushed;
+        expect(mock.published).toEqual([1n, 0n]);
+        channel.close();
+
+        // Flush resolves at its deadline while capacity stays unavailable.
+        const stalled = new ShmFrameChannel({
+            nativeChannel: parkingNative({ full: true, arm: () => true }).native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        stalled.beginFrames();
+        stalled.sendControl(responseHeader(FrameType.Goodbye, 0n, 0));
+        stalled.produce(responseHeader(FrameType.Request, 1n, 0), {
+            byteLength: 0,
+            fill: () => {},
+        });
+        await stalled.flush(Deadline.start(1));
+        expect(stalled.stats().queuedDataFrames).toBe(1);
+        stalled.close();
+        expect(budget.used).toBe(0);
+    });
+
     test("a control frame that cannot publish retires the channel", () => {
         let produceCalls = 0;
         let nativeCloseCalls = 0;

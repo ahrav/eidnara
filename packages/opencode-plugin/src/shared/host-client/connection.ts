@@ -1119,7 +1119,8 @@ export class ConnectionGeneration {
      * Wraps a caller-bound binary lease so its quota charge returns exactly once, when the
      * caller releases it, including after the connection has closed. The transport block
      * itself returns through the inner lease, so the caller's retention never pins anything
-     * beyond its own block.
+     * beyond its own block. A channel close releases that block; the wrapper then refuses
+     * reads and only its charge outlives the connection.
      */
     private retainBinary(lease: ReceiveLease): ReceiveLease | null {
         const byteLength = lease.byteLength;

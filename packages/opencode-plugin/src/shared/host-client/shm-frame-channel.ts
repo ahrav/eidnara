@@ -145,6 +145,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
      */
     private readonly pendingPublications: PendingPublication[] = [];
     private queuedControlFrames = 0;
+    private readonly flushWaiters = new Set<() => void>();
     private pumpScheduled = false;
     private quarantinedBytes = 0;
     private heldBytes = 0;
@@ -327,6 +328,9 @@ export class ShmFrameChannel implements SetupFrameChannel {
         if (index < 0) return;
         this.pendingPublications.splice(index, 1);
         if (pending.control) this.queuedControlFrames -= 1;
+        if (this.pendingPublications.length === 0) {
+            for (const settle of [...this.flushWaiters]) settle();
+        }
     }
 
     /** A host return that lands before the park is recorded rings no doorbell, so an armed park is rechecked once. */
@@ -522,7 +526,23 @@ export class ShmFrameChannel implements SetupFrameChannel {
         }
     }
 
-    async flush(_deadline: Deadline): Promise<void> {}
+    /**
+     * Resolves once every queued frame has published or been dropped, or at `deadline`. A
+     * close drops the queue, so a caller retiring the channel waits here first for a
+     * `Goodbye` parked behind data.
+     */
+    flush(deadline: Deadline): Promise<void> {
+        if (this.pendingPublications.length === 0) return Promise.resolve();
+        return new Promise((resolve) => {
+            const settle = (): void => {
+                this.flushWaiters.delete(settle);
+                cancel();
+                resolve();
+            };
+            const cancel = armExpiryTimer(deadline, settle);
+            this.flushWaiters.add(settle);
+        });
+    }
 
     close(): void {
         this.retire(undefined);

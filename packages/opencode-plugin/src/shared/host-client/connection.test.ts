@@ -858,6 +858,32 @@ describe("connection generation retained binary responses", () => {
             generation.retire("owner_close");
         }
     });
+
+    test("a retained binary lease whose transport block was released fails loudly instead of reading detached bytes", async () => {
+        const { generation, channel } = await harness();
+        try {
+            const request = generation.request({
+                channel: CHANNEL,
+                epoch: EPOCH,
+                body: Buffer.from([1]),
+                binary: true,
+                responseMode: "binary",
+                deadline: Deadline.start(2_000),
+            });
+            const inner = channel.lease(Uint8Array.of(1, 2, 3));
+            channel.deliver(header(FrameType.Response, request.correlation, 3, 1), inner);
+            const body = (await request.result).body as ReceiveLease;
+            expect(body.segment(0)).toEqual(Uint8Array.of(1, 2, 3));
+            inner.release();
+            expect(() => body.segment(0)).toThrow(/released/);
+            expect(() => body.takeOwned()).toThrow(/released/);
+            expect(generation.stats().retainedBinaryBytes).toBe(3);
+            expect(body.release()).toBe(true);
+            expect(generation.stats().retainedBinaryBytes).toBe(0);
+        } finally {
+            generation.retire("owner_close");
+        }
+    });
 });
 
 describe("connection generation response bodies", () => {
