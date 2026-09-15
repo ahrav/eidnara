@@ -46,7 +46,7 @@ pub struct IdentitySweeper<'a> {
     local_embeddings: &'a LocalEmbeddingsComponent,
     cursor: Option<String>,
     invalidated: Option<CancellationToken>,
-    lose_reclaim_reply: bool,
+    lose_reclaim_reply: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl<'a> IdentitySweeper<'a> {
@@ -68,7 +68,7 @@ impl<'a> IdentitySweeper<'a> {
             local_embeddings,
             cursor,
             invalidated: None,
-            lose_reclaim_reply: false,
+            lose_reclaim_reply: None,
         }
     }
 
@@ -91,10 +91,10 @@ impl<'a> IdentitySweeper<'a> {
         self.cursor.as_deref()
     }
 
-    /// Makes the next reclamation return as if its COMMIT reply were lost after the store applied it, so the reconciliation path can be exercised.
+    /// Makes the next reclamation return as if its COMMIT reply were lost after the store applied it, so the reconciliation path can be exercised. `then` runs at the loss, before reconciliation reads a row.
     #[cfg(feature = "test-support")]
-    pub fn lose_next_reclaim_reply_for_test(&mut self) {
-        self.lose_reclaim_reply = true;
+    pub fn lose_next_reclaim_reply_for_test(&mut self, then: impl FnOnce() + Send + 'static) {
+        self.lose_reclaim_reply = Some(Box::new(then));
     }
 
     /// Inspects at most `max_jobs` job rows and reclaims finished, unreferenced identities that no holder protects.
@@ -179,12 +179,14 @@ impl<'a> IdentitySweeper<'a> {
             }
             Err(error) => Err(error),
         };
-        let reclaimed = if std::mem::take(&mut self.lose_reclaim_reply) && reclaimed.is_ok() {
-            Err(SearchProjectionError::Store(storage::StoreError::Backend(
-                "database is locked".to_owned(),
-            )))
-        } else {
-            reclaimed
+        let reclaimed = match self.lose_reclaim_reply.take() {
+            Some(then) if reclaimed.is_ok() => {
+                then();
+                Err(SearchProjectionError::Store(storage::StoreError::Backend(
+                    "database is locked".to_owned(),
+                )))
+            }
+            _ => reclaimed,
         };
         match reclaimed {
             Ok(reclaimed) => {
@@ -196,15 +198,26 @@ impl<'a> IdentitySweeper<'a> {
             Err(SearchProjectionError::Projection(error)) => {
                 return Err(self.enter_quarantine(QuarantineKind::Storage, &error));
             }
-            // A backend reply was lost: the rows, not the error, say what the store applied. A row still present was not reclaimed and stays a candidate for the next sweep.
+            // A backend reply was lost: the rows, not the error, say what the store applied. A row still present was not reclaimed and stays a candidate for the next sweep. The reads end with the budget like the write did; a row not yet read is left to the next sweep's selection, which sees it if it is present.
             Err(lost @ SearchProjectionError::Store(storage::StoreError::Backend(_))) => {
                 for candidate in &free {
-                    match self.projection.read(|conn| presence(conn, candidate)) {
+                    if self.ended(budget) {
+                        report.budget_exhausted = true;
+                        return Ok(report);
+                    }
+                    match self
+                        .projection
+                        .read_within(deadline, |conn| presence(conn, candidate))
+                    {
                         Ok((true, _)) => report.survivors += 1,
                         Ok((false, vector_present)) => {
                             report.jobs_reclaimed += 1;
                             report.vectors_reclaimed +=
                                 usize::from(candidate.has_vector && !vector_present);
+                        }
+                        Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                            report.budget_exhausted = true;
+                            return Ok(report);
                         }
                         Err(_) => {
                             return Err(self.enter_quarantine(QuarantineKind::Storage, &lost));

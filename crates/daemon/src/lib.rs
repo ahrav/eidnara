@@ -12629,6 +12629,8 @@ impl CompositeComponent for Handler {
             owner.admission().close();
         }
         self.tasks.wait().await;
+        // An owner that did not drain stays bound, with its selection, projection connection, and kernel lease live; the rest of the component is still released, and the outcome is reported so the composite does not take the primary as cleanly shut down.
+        let mut unresolved = None;
         let owner = self.lifecycle_owner().or(owner);
         if let Some(owner) = owner {
             match owner.shutdown().await {
@@ -12638,8 +12640,9 @@ impl CompositeComponent for Handler {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 }
-                Err(unresolved) => {
-                    eprintln!("daemon: search maintenance did not drain at shutdown: {unresolved}");
+                Err(error) => {
+                    eprintln!("daemon: search maintenance did not drain at shutdown: {error}");
+                    unresolved = Some(error);
                 }
             }
         }
@@ -12700,7 +12703,12 @@ impl CompositeComponent for Handler {
         *self.store.lock().expect("store slot mutex") = None;
         self.kernel
             .mark_unavailable(kernel_routes::UnavailableKind::Store);
-        Ok(())
+        match unresolved {
+            None => Ok(()),
+            Some(unresolved) => Err(ShutdownError(format!(
+                "search maintenance did not drain at shutdown: {unresolved}"
+            ))),
+        }
     }
 }
 

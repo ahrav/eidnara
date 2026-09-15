@@ -1352,9 +1352,9 @@ struct Pass<'a> {
 }
 
 impl Pass<'_> {
-    /// Where a retry or stop for this job may still be written: within the row's deadline while it is ahead, otherwise within the slice's, since a row past its deadline is stopped by a pass whose clock is past it.
+    /// Where a retry or stop for this job may still be written. A row whose deadline had already passed at the pass's clock reading is stopped within the slice's deadline, since that pass's clock is past it. Every other row's disposition ends at the row's deadline: a refusal learned after it, as when a token count answered late, is not recorded under the pass's earlier clock, and a later pass stops the row.
     fn disposition_deadline(&self) -> Instant {
-        if Instant::now() < self.row_deadline {
+        if self.row_deadline > self.started {
             self.deadline
         } else {
             self.slice_deadline

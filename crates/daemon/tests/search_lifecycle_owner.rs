@@ -3486,6 +3486,83 @@ async fn shutdown_reports_a_manager_held_past_the_grace() {
     owner.shutdown().await.unwrap();
 }
 
+/// The component reports an owner that did not drain: its selection, connection, and lease stay bound, so the composite must not take the primary as cleanly shut down. A later shutdown that finds the manager free releases it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_component_reports_an_owner_that_did_not_drain() {
+    use host_runtime::CompositeComponent;
+    let data = tempfile::tempdir().unwrap();
+    let home = data.path().to_owned();
+    let kernel_root = home.join("eidnara").join("context");
+    {
+        let seed = KernelStore::open(kernel_root.join("kernel")).unwrap();
+        drop(seed);
+    }
+    let identity = identity(&kernel_incarnation_id(&kernel_root));
+    write_records(
+        &home,
+        &manifest_json(&identity, &ProjectionHook::ALL),
+        &campaign_json(&identity),
+    );
+    let daemon = KernelDaemon::start_in(data, None).await;
+    let started = Instant::now();
+    let owner = loop {
+        if let Some(owner) = daemon.handler().search_lifecycle() {
+            break owner;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no owner bound"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    owner.set_drain_grace_for_test(Duration::from_millis(300));
+    // A slice outside the component's tasks holds the manager at its preparation tap until released. The tap pauses that thread only: the component's own slice loop must stay free to end when shutdown cancels it.
+    let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let holder_id = Arc::new(std::sync::Mutex::new(None));
+    owner.tap_slice_events_for_test({
+        let holder_id = Arc::clone(&holder_id);
+        move |event| {
+            if matches!(event, SliceEvent::Prepared { .. })
+                && *holder_id.lock().unwrap() == Some(std::thread::current().id())
+            {
+                let _ = reached_tx.send(());
+                let _ = release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
+            }
+        }
+    });
+    let holder = {
+        let owner = Arc::clone(&owner);
+        std::thread::spawn(move || {
+            *holder_id.lock().unwrap() = Some(std::thread::current().id());
+            owner.run_slice(&slice_budget())
+        })
+    };
+    tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the slice reaches its pause");
+
+    let outcome = CompositeComponent::shutdown(daemon.handler()).await;
+    let error = outcome.expect_err("a held manager is reported, not logged away");
+    assert!(error.0.contains("did not drain"), "{error}");
+    assert!(
+        daemon.handler().search_lifecycle().is_some(),
+        "the owner stays bound while it holds resources"
+    );
+
+    release.send(()).unwrap();
+    let _ = holder.join().unwrap();
+    CompositeComponent::shutdown(daemon.handler())
+        .await
+        .unwrap();
+    assert!(daemon.handler().search_lifecycle().is_none());
+}
+
 /// A grace of nothing still releases an uncontended manager: shutdown takes a free manager at once and only waits, within the grace, for a held one.
 #[tokio::test]
 async fn shutdown_with_no_grace_releases_a_free_manager() {

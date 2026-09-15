@@ -2056,6 +2056,45 @@ async fn a_disposition_held_past_its_deadline_ends_the_pass() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refusal_learned_after_the_row_deadline_is_not_recorded_under_the_pass_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let over = corpus.publish("m0", "two words");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &over);
+    let engine = TestEngine::new();
+    // The token count answers after the row's 300 ms deadline, and its answer refuses the input.
+    engine.delay_counts(Duration::from_millis(500));
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let limits = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope {
+            bytes: u64::MAX,
+            tokens: 1,
+        },
+        grant: grant(3, NOW + 300),
+        ..bounds()
+    };
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &limits, NOW);
+    assert_eq!(end, Some(Blocked::SearchDeadline));
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (row.state.as_str(), row.attempts, row.stop_reason.as_deref()),
+        ("pending", 0, None),
+        "a stop learned after the row deadline is not written under the pass's earlier clock"
+    );
+    assert!(stopped(&events).is_empty());
+    assert_eq!(engine.calls(), 0);
+
+    // A pass whose clock is past the deadline stops the row itself.
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &limits, NOW + 400);
+    assert_eq!(end, None);
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!(stopped(&events).len(), 1, "{events:?}");
+    assert_eq!(row.state, "failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_search_deadline_preserves_the_candidate_for_retry() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());

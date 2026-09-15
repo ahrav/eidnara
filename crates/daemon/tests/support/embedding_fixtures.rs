@@ -65,6 +65,7 @@ pub struct TestEngine {
     completed: AtomicUsize,
     fail_next: Mutex<Option<InferenceError>>,
     count_failure: Mutex<Option<InferenceError>>,
+    count_delay: Mutex<Option<Duration>>,
     malformed: AtomicBool,
     gate: Mutex<Option<Gate>>,
 }
@@ -77,6 +78,7 @@ impl TestEngine {
             completed: AtomicUsize::new(0),
             fail_next: Mutex::new(None),
             count_failure: Mutex::new(None),
+            count_delay: Mutex::new(None),
             malformed: AtomicBool::new(false),
             gate: Mutex::new(None),
         })
@@ -102,6 +104,11 @@ impl TestEngine {
     /// The next token count fails with `error` instead of counting.
     pub fn fail_next_count(&self, error: InferenceError) {
         *self.count_failure.lock().unwrap() = Some(error);
+    }
+
+    /// Every token count sleeps for `delay` before answering, so a count can straddle a deadline.
+    pub fn delay_counts(&self, delay: Duration) {
+        *self.count_delay.lock().unwrap() = Some(delay);
     }
 
     /// Every later inference returns a vector of the right width whose values the publisher rejects.
@@ -138,6 +145,9 @@ impl TestEngine {
 impl EmbeddingEngine for TestEngine {
     fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
         self.count_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(delay) = *self.count_delay.lock().unwrap() {
+            std::thread::sleep(delay);
+        }
         if let Some(error) = self.count_failure.lock().unwrap().take() {
             return Err(error);
         }
