@@ -330,6 +330,27 @@ impl SearchLifecycleOwner {
         }
     }
 
+    /// `lock_within_async` that takes a free manager at once whatever `budget` says, so a grace of nothing still releases an uncontended manager; a held one is waited for within `budget`.
+    async fn lock_free_or_within_async(
+        &self,
+        budget: &EvalBudget,
+    ) -> Result<MutexGuard<'_, Managed>, BuildError> {
+        // The free attempt's guard is returned or dropped before the wait, so none is alive across the await.
+        if let Some(guard) = self.try_lock_free() {
+            return Ok(guard);
+        }
+        self.lock_within_async(budget).await
+    }
+
+    /// The manager if no one holds it, whatever any budget says.
+    fn try_lock_free(&self) -> Option<MutexGuard<'_, Managed>> {
+        match self.managed.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
     /// One attempt at the manager: the guard, `None` while another holder has it and `budget` still allows waiting, or `Expired`.
     fn try_lock(&self, budget: &EvalBudget) -> Result<Option<MutexGuard<'_, Managed>>, BuildError> {
         // An operation whose budget is already over gets no manager even when it is free, so it cannot act past its deadline.
@@ -1062,13 +1083,13 @@ impl SearchLifecycleOwner {
         let taken = loop {
             // Registered before the manager is inspected, so a disable that finishes in between still wakes the wait.
             let handed_back = self.disabled.notified();
-            // A reader or request holding the manager is waited for only within the grace, and the wait yields the worker.
+            // A free manager is taken at once, whatever the grace; a held one is waited for only within the grace, and the wait yields the worker.
             let within_grace = EvalBudget::new(
                 Some(deadline),
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
             );
             let taken = {
-                let Ok(mut managed) = self.lock_within_async(&within_grace).await else {
+                let Ok(mut managed) = self.lock_free_or_within_async(&within_grace).await else {
                     return Err(ShutdownUnresolved::Held);
                 };
                 match std::mem::take(&mut *managed) {

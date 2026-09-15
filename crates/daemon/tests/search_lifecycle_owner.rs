@@ -3311,7 +3311,7 @@ async fn a_request_over_running_foreign_maintenance_closes_admission_until_rotat
 }
 
 /// A shutdown that finds the manager held by a slice waits for it only within the drain grace and reports the holder rather than blocking past the grace.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn shutdown_reports_a_manager_held_past_the_grace() {
     use daemon::search_lifecycle_owner::ShutdownUnresolved;
     let root = tempfile::tempdir().unwrap();
@@ -3342,9 +3342,22 @@ async fn shutdown_reports_a_manager_held_past_the_grace() {
         .await
         .unwrap()
         .expect("the slice reaches its pause");
+    // Shutdown and a ticking task share the one worker of this runtime; the ticks advance only while shutdown's wait yields.
+    let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ticker = tokio::spawn({
+        let ticks = Arc::clone(&ticks);
+        async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    });
     let started = Instant::now();
     let outcome = owner.shutdown().await;
     let waited = started.elapsed();
+    let ticked = ticks.load(std::sync::atomic::Ordering::SeqCst);
+    ticker.abort();
     release.send(()).unwrap();
     let _ = holder.join().unwrap();
     assert!(
@@ -3352,9 +3365,28 @@ async fn shutdown_reports_a_manager_held_past_the_grace() {
         "{outcome:?}"
     );
     assert!(
+        ticked >= 5,
+        "the worker ran {ticked} ticks while shutdown waited; a blocking wait would run none"
+    );
+    assert!(
         waited < Duration::from_secs(2),
         "shutdown waited {waited:?} for the held manager against a 300 ms grace"
     );
+    owner.shutdown().await.unwrap();
+}
+
+/// A grace of nothing still releases an uncontended manager: shutdown takes a free manager at once and only waits, within the grace, for a held one.
+#[tokio::test]
+async fn shutdown_with_no_grace_releases_a_free_manager() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner.set_drain_grace_for_test(Duration::ZERO);
+    owner.shutdown().await.unwrap();
     owner.shutdown().await.unwrap();
 }
 

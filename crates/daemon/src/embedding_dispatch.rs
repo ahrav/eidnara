@@ -779,10 +779,10 @@ impl<'a> EmbeddingDispatcher<'a> {
         };
         let charged = match charged {
             Ok(charged) => charged,
-            // The connection was not acquired by the row's deadline, so nothing was written: the row stays pending for a pass that stops it, and the host job it never owned is orphaned.
+            // The connection was not acquired by the row's deadline, so nothing was written: the row stays pending for a pass that stops it, the host job it never owned is orphaned, and the pass ends, since the next job's reads would wait on the same holder.
             Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
                 self.orphan(job, &host_job_id, observer);
-                return Ok(Err(None));
+                return Ok(Err(Some(Blocked::SearchDeadline)));
             }
             Err(SearchProjectionError::Projection(error))
                 if !matches!(classify(&error), Refusal::Storage) =>
@@ -897,7 +897,11 @@ impl<'a> EmbeddingDispatcher<'a> {
             rebind_host_job(conn, &job.job_id, evicted, &host_job_id, pass.now)
         }) {
             Ok(rebound) => rebound,
-            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => false,
+            // As for the charge: the replacement job is orphaned and the pass ends at the held connection.
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                self.orphan(job, &host_job_id, observer);
+                return Ok(Err(Some(Blocked::SearchDeadline)));
+            }
             Err(error) => {
                 return Err(match &error {
                     SearchProjectionError::Projection(refusal)
