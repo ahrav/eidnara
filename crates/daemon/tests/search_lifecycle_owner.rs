@@ -990,6 +990,39 @@ fn a_revoked_grant_stops_a_running_catch_up_episode() {
     );
 }
 
+/// A rebuild request under a manifest whose limits cannot bound a replacement is refused without a control record, and the request records once the manifest can.
+#[test]
+fn a_rebuild_request_under_unboundable_limits_records_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("retry_attempts", 2)]),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Unregistered
+    ));
+    assert!(
+        owner
+            .request(&rebuild(home), now(), &slice_budget())
+            .is_err(),
+        "limits that refuse every slice refuse the request"
+    );
+    assert!(matches!(control(home), ControlState::Absent));
+
+    records(home);
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    assert!(matches!(control(home), ControlState::Intent(_)));
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

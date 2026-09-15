@@ -307,7 +307,13 @@ impl SearchLifecycleOwner {
             ControlState::Intent(intent) => (intent, false),
             ControlState::Current(intent) => (intent, true),
         };
-        let spec = match replacement_spec(inputs.manifest(), identity.clone(), &intent) {
+        let spec = match replacement_spec(
+            inputs.manifest(),
+            identity.clone(),
+            intent.transition,
+            intent.episodes.allowance,
+            &intent.consumer.generation_id,
+        ) {
             Ok(spec) => spec,
             Err(refusal) => {
                 let _ = self.admission.refresh(None);
@@ -594,7 +600,7 @@ impl SearchLifecycleOwner {
         }))
     }
 
-    /// Records a rebuild request, or begins an authorized recovery, without running a slice. A request naming another kernel incarnation is refused before anything is recorded.
+    /// Records a rebuild request, or begins an authorized recovery, without running a slice. A request naming another kernel incarnation, or one the installed manifest's limits cannot bound, is refused before anything is recorded.
     ///
     /// # Errors
     ///
@@ -612,6 +618,19 @@ impl SearchLifecycleOwner {
             return Err(BuildError::Invalid(
                 "the request names another kernel incarnation",
             ));
+        }
+        // When admission inputs and identity are available, reject manifest limits that cannot bound a slice.
+        if let Ok(inputs) = AdmissionInputs::read(&self.home)
+            && let Ok(identity) = self.identity(inputs.manifest(), budget)
+        {
+            replacement_spec(
+                inputs.manifest(),
+                identity,
+                request.transition,
+                request.allowance,
+                &request.consumer.generation_id,
+            )
+            .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
         }
         match request.transition {
             Transition::Rebuilding => {
@@ -689,8 +708,14 @@ impl SearchLifecycleOwner {
             .handoff
             .as_deref()
             .ok_or(BuildError::Invalid("disabled record names no operation"))?;
-        let spec = replacement_spec(inputs.manifest(), selection.identity().clone(), intent)
-            .map_err(|_| BuildError::Invalid("manifest limits cannot bound the cleanup"))?;
+        let spec = replacement_spec(
+            inputs.manifest(),
+            selection.identity().clone(),
+            intent.transition,
+            intent.episodes.allowance,
+            &intent.consumer.generation_id,
+        )
+        .map_err(|_| BuildError::Invalid("manifest limits cannot bound the cleanup"))?;
         selection
             .reconcile_disabled(&self.kernel, self.admission.gate(), &spec, budget, observer)
             .await
@@ -804,9 +829,11 @@ fn coverage_bounds(manifest: &RuntimeManifest) -> Result<CoverageBounds, SpecRef
 fn replacement_spec(
     manifest: &RuntimeManifest,
     identity: ProjectionIdentity,
-    intent: &LifecycleIntent,
+    transition: Transition,
+    allowance: u32,
+    generation_id: &str,
 ) -> Result<ReplacementSpec, SpecRefusal> {
-    let allowance = u64::from(intent.episodes.allowance.max(1));
+    let allowance = u64::from(allowance.max(1));
     let local_bytes = limit(manifest, "local_transaction_bytes")?;
     let quarter_local = local_bytes / 4;
     let half_rows = nonzero_usize(
@@ -832,7 +859,7 @@ fn replacement_spec(
             .min(half_decoded)
             .min(quarter_local),
     )?;
-    let pending_width = ReplacementSpec::pending_row_width(&intent.consumer.generation_id);
+    let pending_width = ReplacementSpec::pending_row_width(generation_id);
     let max_pending = nonzero_usize(
         "pending_count",
         limit(manifest, "pending_count")?
@@ -868,7 +895,7 @@ fn replacement_spec(
         .filter(|bytes| *bytes > 0)
         .ok_or(SpecRefusal::LimitRange("capture_disk_bytes"))?;
     // Checkpoint attempts spend the retry allowance and their waits spend half the episode bound, both across the episode allowance: one attempt's wait is the lease duration capped so one attempt per episode fits, and the attempts are as many as both limits afford. A limit that cannot afford one attempt per episode refuses the specification.
-    let duration_limit = intent.transition.duration_limit();
+    let duration_limit = transition.duration_limit();
     let wait_bound = limit(manifest, duration_limit)? / 2 / allowance;
     let attempt_wait_ms = limit(manifest, "lease_duration_ms")?.min(wait_bound);
     if attempt_wait_ms == 0 {
@@ -880,6 +907,14 @@ fn replacement_spec(
     .ok()
     .and_then(NonZeroU32::new)
     .ok_or(SpecRefusal::LimitRange("retry_attempts"))?;
+    // The kernel refuses a hold lifetime past its own maximum at every capture.
+    let hold_expiry = nonzero_u64(
+        "capture_hold_expiry_ms",
+        limit(manifest, "capture_hold_expiry_ms")?,
+    )?;
+    if hold_expiry.get() > kernel::MAX_SOURCE_HOLD_LIFETIME_MS {
+        return Err(SpecRefusal::LimitRange("capture_hold_expiry_ms"));
+    }
     let admission = SourceHoldAdmission {
         max_references: nonzero_usize(
             "capture_reference_count",
@@ -888,7 +923,7 @@ fn replacement_spec(
         max_encoded_bytes: source_disk,
     };
     let generation = VectorGeneration {
-        generation_id: intent.consumer.generation_id.clone(),
+        generation_id: generation_id.to_owned(),
         embedding_model: identity.embedding_model.clone(),
         tokenizer_fingerprint: identity.tokenizer_fingerprint.clone(),
         vector_dimension: identity.vector_dimension,
@@ -898,10 +933,7 @@ fn replacement_spec(
         capture: SourceHoldBounds {
             admission,
             max_descriptor_rows: half_rows,
-            expiry_ms: nonzero_u64(
-                "capture_hold_expiry_ms",
-                limit(manifest, "capture_hold_expiry_ms")?,
-            )?,
+            expiry_ms: hold_expiry,
         },
         episode: EpisodeBounds {
             commits: CommitPageBounds {
@@ -1075,7 +1107,6 @@ impl SliceReporter {
 mod tests {
     use super::*;
     use crate::projection_gates::REQUIRED_LIMITS;
-    use crate::projection_lifecycle::{Cause, ConsumerBinding, EpisodeAccounting};
 
     const LIMIT: u64 = 1_000_000;
 
@@ -1109,36 +1140,31 @@ mod tests {
         }
     }
 
-    fn rebuild_intent() -> LifecycleIntent {
-        LifecycleIntent {
-            schema: 2,
-            transition: Transition::Rebuilding,
-            selected_generation: "unregistered".to_owned(),
-            kernel_incarnation_id: "kernel".to_owned(),
-            consumer: ConsumerBinding {
-                consumer_id: "search".to_owned(),
-                generation_id: "generation".to_owned(),
-            },
-            cause: Cause::DeletedAfterPruning,
-            attempt_id: "attempt".to_owned(),
-            recovery_target: None,
-            episodes: EpisodeAccounting {
-                allowance: 3,
-                consumed: 0,
-                deadline: 60_000,
-            },
-            authorization_ref: None,
-            staged_seed_digest: None,
-            replacement_capture: None,
-            recorded_at: 0,
-            prior_disabled: None,
-        }
+    fn spec(
+        manifest: &RuntimeManifest,
+        identity: ProjectionIdentity,
+    ) -> Result<ReplacementSpec, SpecRefusal> {
+        replacement_spec(manifest, identity, Transition::Rebuilding, 3, "generation")
+    }
+
+    #[test]
+    fn a_hold_expiry_past_the_kernel_maximum_refuses_the_specification() {
+        let identity = test_identity();
+        let mut manifest = manifest(&identity);
+        manifest.limits.insert(
+            "capture_hold_expiry_ms".to_owned(),
+            kernel::MAX_SOURCE_HOLD_LIFETIME_MS + 1,
+        );
+        assert_eq!(
+            spec(&manifest, identity).err(),
+            Some(SpecRefusal::LimitRange("capture_hold_expiry_ms"))
+        );
     }
 
     #[test]
     fn the_catch_up_encoded_byte_charges_fit_their_limit_together() {
         let identity = test_identity();
-        let spec = replacement_spec(&manifest(&identity), identity, &rebuild_intent()).unwrap();
+        let spec = spec(&manifest(&identity), identity).unwrap();
         let charged: u64 = spec
             .catchup_page_charges()
             .iter()
