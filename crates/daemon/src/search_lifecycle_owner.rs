@@ -828,7 +828,7 @@ impl SearchLifecycleOwner {
                 "manifest limits cannot bound the request",
             ));
         }
-        // The operation already recorded is bounded as its next slice would bound it; a manifest that no longer bounds it closes the gate now rather than at that slice.
+        // The operation already recorded is bounded as its next slice would bound it; a manifest that no longer bounds it closes the gate now rather than at that slice. The request itself is still judged below, since a replacement that fits the reduced limits may replace what no longer does.
         if let ControlState::Intent(current) | ControlState::Current(current) =
             ProjectionLifecycle::read_at(&self.home)
             && replacement_spec(
@@ -841,9 +841,6 @@ impl SearchLifecycleOwner {
             .is_err()
         {
             let _ = self.admission.refresh(None);
-            return Err(BuildError::Invalid(
-                "manifest limits cannot bound the current operation",
-            ));
         }
         // The replacement bounds depend on this request's allowance and generation, so their refusal is the request's alone and leaves admission as it is.
         replacement_spec(
