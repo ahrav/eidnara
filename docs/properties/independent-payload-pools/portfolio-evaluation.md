@@ -13,7 +13,7 @@ blocks #548, and each names the task that owns its resolution.
 | 4 | The Valgrind job cannot run child-process witnesses. | Resolved by the separate `two-process` job with named witnesses. |
 | 5 | The producer scans every published block's completion cell before each reservation. | Accepted: bounded by 187 cells; the specification defers scan optimization until measured. |
 | 6 | `reclamation.completed` keeps its wire name and counts generation ends; `reclamation.meaning`, `returns`, and `exhaustion.by_resource` now carry the distinct quantities. | Resolved by #548 (`reclamation-diagnostics-meaning`). |
-| 7 | The terminal credit follows its block through `Ring::take_reclaimed`, so a credit can stay held after the terminal is written while the peer holds the block; a peer that never reads its terminals holds credits until the frame deadline retires the generation. | Accepted: the deadline bounds the hold; the credit exhaustion witness in `tests/dispatch.rs` covers the refusal path. |
+| 7 | Terminal credits follow their blocks through `Ring::take_reclaimed` and remain held after publication until the blocks return or the generation ends; the frame deadline bounds pending publication, not retention of an already published terminal block. | Accepted: a peer that retains published terminals holds credits until it returns them or the generation ends; the credit-exhaustion witness in `tests/dispatch.rs` covers refusal, not a return timeout. |
 | 8 | Capacity model outputs are recorded but the trace inputs are invented. | Accepted: labeled uncalibrated; no performance claim is made. |
 
 Biases for a human reviewer: the author of the implementation authored this

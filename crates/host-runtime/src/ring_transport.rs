@@ -254,10 +254,11 @@ impl RingTransport {
         }
     }
 
-    /// Return obligations and released backing, snapshotted together under one lock so the
-    /// two quantities describe the same instant: `outstanding` counts live owned leases across
-    /// every backing still mapped; `released_backings` counts backings whose last holder has
-    /// dropped, each of which returned `mapping_bytes_per_direction` bytes.
+    /// Return obligations and released backing, read in one pass over the backing registry:
+    /// `outstanding` counts live owned leases across every backing still mapped;
+    /// `released_backings` counts backings whose last holder has dropped, each of which
+    /// returned `mapping_bytes_per_direction` bytes. Leases return on other threads while the
+    /// pass runs, so the two counts are independent samples, not one atomic snapshot.
     pub fn return_snapshot(&self) -> ReturnSnapshot {
         let mut outstanding = 0u64;
         let mut live = 0u64;
