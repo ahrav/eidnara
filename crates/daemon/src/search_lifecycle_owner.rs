@@ -323,7 +323,10 @@ impl SearchLifecycleOwner {
             _ => None,
         };
         let (inputs, identity, bounds, budget) = match prepared {
-            Ok(prepared) => prepared,
+            Ok(prepared) => {
+                self.remember_grace(prepared.0.manifest());
+                prepared
+            }
             Err(refusal) => {
                 if let Some(handle) = live {
                     return Err(Unprepared::Rotate(handle));
@@ -366,10 +369,6 @@ impl SearchLifecycleOwner {
                 return SliceOutcome::Closed(refusal);
             }
         };
-        if let Ok(grace) = limit(inputs.manifest(), "physical_drain_ms") {
-            *self.last_grace.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some(Duration::from_millis(grace));
-        }
         #[cfg(feature = "test-support")]
         self.tap(SliceEvent::Prepared);
         let Managed::Selection(selection) = &mut *managed else {
@@ -638,6 +637,14 @@ impl SearchLifecycleOwner {
         Ok(None)
     }
 
+    /// Keeps the manifest's `physical_drain_ms` for a stop whose records are gone by then.
+    fn remember_grace(&self, manifest: &RuntimeManifest) {
+        if let Ok(grace) = limit(manifest, "physical_drain_ms") {
+            *self.last_grace.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(Duration::from_millis(grace));
+        }
+    }
+
     /// The drain grace maintenance stops are given: the manifest's `physical_drain_ms`, the last readable manifest's when the records are gone, or one slice when none was ever read.
     fn drain_grace(&self) -> Duration {
         #[cfg(feature = "test-support")]
@@ -648,11 +655,12 @@ impl SearchLifecycleOwner {
         {
             return grace;
         }
-        AdmissionInputs::read(&self.home)
-            .ok()
-            .and_then(|inputs| limit(inputs.manifest(), "physical_drain_ms").ok())
-            .map(Duration::from_millis)
-            .or(*self.last_grace.lock().unwrap_or_else(|p| p.into_inner()))
+        if let Ok(inputs) = AdmissionInputs::read(&self.home) {
+            self.remember_grace(inputs.manifest());
+        }
+        self.last_grace
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
             .unwrap_or(SLICE_IDLE)
     }
 

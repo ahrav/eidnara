@@ -1979,7 +1979,7 @@ fn a_refresh_that_ends_inside_the_margin_starts_no_recovery() {
         owner.run_slice(&slice_budget())
     });
     assert!(
-        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline")),
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason == "the record's deadline has passed"),
         "{outcome:?}"
     );
     let ControlState::Intent(intent) = control(home) else {
@@ -1988,6 +1988,82 @@ fn a_refresh_that_ends_inside_the_margin_starts_no_recovery() {
     assert_eq!(
         intent.episodes.consumed, 0,
         "no episode starts inside the margin"
+    );
+}
+
+/// A reload that lowers the drain grace and forces a rotation is the grace the next drain uses once the records are gone, even when the first drain did not resolve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_drain_bound_read_on_the_rotation_path_is_retained() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("held-row", "held text");
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("physical_drain_ms", 4_000)],
+        ),
+        &campaign_json(&identity),
+    );
+    let engine = TestEngine::new();
+    let held = engine.block_calls();
+    let _release_on_unwind = support::embedding_fixtures::GateGuard(Arc::clone(&held));
+    let scope = ProjectScope::new(PROJECT).unwrap();
+    let owner = SearchLifecycleOwner::for_home(
+        home,
+        Arc::clone(&corpus.kernel),
+        component(&engine, LocalEmbeddingsLimits::default()),
+    )
+    .with_roster(Arc::new(move || {
+        vec![("project:a".to_owned(), scope.clone())]
+    }));
+    let _ = owner.run_slice(&slice_budget());
+    let mut short = rebuild(home);
+    short.deadline = now() + 4_000;
+    owner.request(&short, now(), &slice_budget()).unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Current), "{outcome:?}");
+    let started = Instant::now();
+    while engine.calls() == 0 {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // The reload lowers the grace and changes the coverage bounds, so the slice hands the supervisor back before it prepares.
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("physical_drain_ms", 500), ("export_page_rows", 2)],
+        ),
+        &campaign_json(&identity),
+    );
+    let SliceOutcome::RotateMaintenance(handle) = owner.run_slice(&slice_budget()) else {
+        panic!("changed bounds hand the supervisor back");
+    };
+    assert!(owner.stop_maintenance(&handle).await.is_err());
+    std::fs::remove_dir_all(home.join(ADMISSION_DIR)).unwrap();
+    let SliceOutcome::RotateMaintenance(handle) = owner.run_slice(&slice_budget()) else {
+        panic!("refused records hand the supervisor back");
+    };
+    let started = Instant::now();
+    let stopped = owner.stop_maintenance(&handle).await;
+    let waited = started.elapsed();
+    TestEngine::release(&held);
+    let _ = owner.shutdown().await;
+    assert!(stopped.is_err(), "{stopped:?}");
+    assert!(
+        waited < Duration::from_secs(2),
+        "the drain waited {waited:?} against the reloaded 500 ms grace"
     );
 }
 
