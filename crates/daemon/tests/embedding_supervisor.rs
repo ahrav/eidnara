@@ -261,6 +261,48 @@ async fn ended(events: &mut UnboundedReceiver<SupervisorEvent>, kind: SliceKind)
     .await
 }
 
+/// Once the episode grant's deadline has passed, no sweep runs under it: only backfill passes continue, and those stop expired rows rather than admit work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn no_sweep_runs_after_the_grant_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, _rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    // The supervisor's clock already stands past the grant's deadline.
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
+        SliceBounds {
+            dispatch: DispatchBounds {
+                grant: grant(3, NOW + DAY_MS),
+                ..bounds()
+            },
+            ..slice_bounds(Duration::from_secs(2))
+        },
+        Arc::new(|| NOW + DAY_MS + 1),
+        sender,
+    );
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    let mut backfills = 0;
+    while backfills < 3 {
+        match next_event(&mut events).await {
+            SupervisorEvent::SliceStarted {
+                kind: SliceKind::Sweep,
+                ..
+            } => panic!("a sweep started under an expired grant"),
+            SupervisorEvent::SliceEnded {
+                kind: SliceKind::Backfill,
+                ..
+            } => backfills += 1,
+            _ => {}
+        }
+    }
+    supervisor.shutdown(Duration::from_secs(5)).await.unwrap();
+    running.await.unwrap();
+}
+
 /// A slice's budget ends at the episode grant's deadline when that comes before the slice bound, so a result that lands after the deadline is not awaited under a slice that would still publish it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_slice_ends_at_the_grant_deadline_when_it_is_nearer_than_the_slice_bound() {
@@ -689,11 +731,12 @@ async fn a_backfill_of_dispositions_alone_does_not_idle() {
             dispositions: 1,
         }
     );
+    // Under the expired grant no sweep runs, so the next slice is the next backfill; what matters is that it starts at once.
     let progressed_at = Instant::now();
     assert!(matches!(
         next_event(&mut events).await,
         SupervisorEvent::SliceStarted {
-            kind: SliceKind::Sweep,
+            kind: SliceKind::Backfill,
             ..
         }
     ));

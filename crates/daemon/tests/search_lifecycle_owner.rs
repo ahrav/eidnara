@@ -2378,6 +2378,54 @@ fn a_request_waiting_for_a_running_slice_ends_with_its_budget() {
     );
 }
 
+/// A slice that finds the manager held waits only as long as its own budget allows, so a cancelled slice returns without waiting for the holder.
+#[test]
+fn a_slice_waiting_for_the_manager_ends_with_its_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    // A request pauses at its preflight tap while holding the manager, until the test releases it.
+    let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared) {
+            let _ = reached_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+        }
+    });
+    let outcome = std::thread::scope(|scope| {
+        let holder = scope.spawn(|| owner.run_slice(&slice_budget()));
+        reached
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first slice reaches its pause");
+        let short = budget(Duration::from_millis(200));
+        short.cancel();
+        let started = Instant::now();
+        let outcome = owner.run_slice(&short);
+        let waited = started.elapsed();
+        release.send(()).unwrap();
+        let _ = holder.join().unwrap();
+        (outcome, waited)
+    });
+    assert!(
+        matches!(outcome.0, SliceOutcome::Blocked(_)),
+        "{:?}",
+        outcome.0
+    );
+    assert!(
+        outcome.1 < Duration::from_secs(2),
+        "the cancelled slice waited {:?} for the manager",
+        outcome.1
+    );
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

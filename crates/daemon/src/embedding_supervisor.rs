@@ -239,7 +239,7 @@ impl EmbeddingSupervisor {
                 self.stop_with(Stop::Shutdown);
                 return;
             }
-            // A slice that would straddle the episode grant's deadline ends there instead, so no pass awaits and publishes a result past the episode; a slice begun after the deadline keeps the slice bound, since its passes only refuse and stop expired rows; one begun at the deadline gets no time, since a row is still completable then and no result may be awaited past it.
+            // A slice that would straddle the episode grant's deadline ends there instead, so no pass awaits and publishes a result past the episode; a backfill slice begun after the deadline keeps the slice bound, since its passes only refuse and stop expired rows, and no sweep runs then; one begun at the deadline gets no time, since a row is still completable then and no result may be awaited past it.
             let until_grant = self
                 .bounds
                 .dispatch
@@ -250,6 +250,12 @@ impl EmbeddingSupervisor {
                 Ok(remaining) => self.bounds.slice.min(Duration::from_millis(remaining)),
                 Err(_) => self.bounds.slice,
             };
+            // Past the grant's deadline nothing is reclaimed under it: sweeps wait for the owner's next grant, while backfill passes still run and only stop expired rows.
+            if until_grant < 0 && kind == SliceKind::Sweep {
+                idle.record(kind, true);
+                kind = kind.other();
+                continue;
+            }
             let budget = EvalBudget::new(
                 Some(Instant::now() + slice),
                 Arc::new(AtomicBool::new(false)),

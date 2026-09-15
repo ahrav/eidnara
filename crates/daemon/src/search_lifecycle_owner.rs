@@ -357,7 +357,11 @@ impl SearchLifecycleOwner {
 
     /// Refreshes admission from the records and the daemon's current observation, then advances the lifecycle record one step. The slice ends within the manifest's `supervisor_slice_ms`, within `budget`, and, for an active record, within that record's own deadline.
     pub fn run_slice(&self, budget: &EvalBudget) -> SliceOutcome {
-        let mut managed = self.lock();
+        // A reader or request holding the manager is waited for only within the slice's budget, so a cancelled slice returns rather than outliving its caller's cancellation.
+        let mut managed = match self.lock_within(budget) {
+            Ok(managed) => managed,
+            Err(_) => return SliceOutcome::Blocked("the manager is held".to_owned()),
+        };
         if matches!(*managed, Managed::Disabling | Managed::ShutDown(_)) {
             return SliceOutcome::Disabled;
         }
