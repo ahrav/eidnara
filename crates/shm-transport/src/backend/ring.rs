@@ -1656,15 +1656,19 @@ impl Ring {
         if self.ledger.borrow().allowed && !self.is_quarantined() {
             self.reclaim_completions()?;
         }
-        let reclaimed: Vec<u32> = std::mem::take(&mut self.ledger.borrow_mut().reclaimed);
-        for block in &reclaimed {
-            settle(*block);
+        // The ledger is not borrowed across a callback: `settle` may re-enter this ring, and a
+        // return reclaimed by that re-entry appends to `reclaimed` and is visited by this same
+        // drain. `clear` keeps the capacity so steady-state returns allocate nothing.
+        let mut index = 0;
+        loop {
+            let next = self.ledger.borrow().reclaimed.get(index).copied();
+            let Some(block) = next else {
+                break;
+            };
+            settle(block);
+            index += 1;
         }
-        // The buffer keeps its capacity so steady-state returns allocate nothing.
-        let mut ledger = self.ledger.borrow_mut();
-        let mut buffer = reclaimed;
-        buffer.clear();
-        ledger.reclaimed = buffer;
+        self.ledger.borrow_mut().reclaimed.clear();
         Ok(())
     }
 
@@ -2508,6 +2512,41 @@ mod tests {
             producer.try_reserve_in(Inventory::Control, 4096, wire_v3_header(4096).unwrap()),
             Err(ProducerError::BoundExceedsClass)
         ));
+    }
+
+    /// A return reclaimed while a `take_reclaimed` callback re-enters the ring is reported,
+    /// on this drain or the next, never dropped.
+    #[test]
+    fn take_reclaimed_keeps_returns_reclaimed_during_a_callback() {
+        let (producer, consumer) = pair(tiny_geometry());
+        let first = publish(&producer, b"first");
+        let second = publish(&producer, b"second");
+        let held_first = receive(&consumer);
+        let held_second = receive(&consumer);
+        held_first.release().unwrap();
+        let mut settled = Vec::new();
+        let mut late = Some(held_second);
+        producer
+            .take_reclaimed(|block| {
+                settled.push(block);
+                // The callback returns the second block and re-enters the ring; the sample
+                // reclaims it into the ledger while this drain is in progress.
+                if let Some(lease) = late.take() {
+                    lease.release().unwrap();
+                    let _ = producer.inventory();
+                }
+            })
+            .unwrap();
+        producer
+            .take_reclaimed(|block| settled.push(block))
+            .unwrap();
+        settled.sort_unstable();
+        let mut expected = vec![first, second];
+        expected.sort_unstable();
+        assert_eq!(
+            settled, expected,
+            "both physical returns are reported exactly once across the two drains"
+        );
     }
 
     /// A reused block is not reportable until its new holder releases it.
