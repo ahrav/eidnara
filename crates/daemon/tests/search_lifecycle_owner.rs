@@ -559,6 +559,68 @@ fn a_current_family_catches_up_under_its_hold_until_the_lease_changes() {
         .expect("a family within the freshness limit still serves");
 }
 
+/// A catch-up window with more than `export_page_rows` rows spans as many export pages as its rows need and reaches the target.
+#[test]
+fn a_catch_up_window_spans_the_pages_its_rows_need() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("export_page_rows", 1)]),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+
+    for index in 0..2 {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    let SliceOutcome::CaughtUp(report) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(report.end, EpisodeEnd::ReachedTarget, "{report:?}");
+    assert_eq!(report.acknowledged_through, corpus.tip());
+}
+
+/// The owner refuses a rebuild request for another kernel incarnation without creating a control record and accepts the following request for its own incarnation.
+#[test]
+fn a_rebuild_request_naming_another_kernel_incarnation_records_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+
+    let mut foreign = rebuild(home);
+    foreign.kernel_incarnation_id = "another-kernel".to_owned();
+    assert!(
+        owner.request(&foreign, now(), &slice_budget()).is_err(),
+        "a request for another kernel is refused"
+    );
+    assert!(matches!(control(home), ControlState::Absent));
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .expect("the refused request left nothing to conflict with");
+    assert!(matches!(control(home), ControlState::Intent(_)));
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

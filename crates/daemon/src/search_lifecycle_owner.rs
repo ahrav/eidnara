@@ -402,7 +402,7 @@ impl SearchLifecycleOwner {
         }))
     }
 
-    /// Records a rebuild request, or begins an authorized recovery, without running a slice.
+    /// Records a rebuild request, or begins an authorized recovery, without running a slice. A request naming another kernel incarnation is refused before anything is recorded.
     ///
     /// # Errors
     ///
@@ -414,6 +414,13 @@ impl SearchLifecycleOwner {
         budget: &EvalBudget,
     ) -> Result<Option<Recorded>, BuildError> {
         let mut managed = self.lock();
+        if self.kernel.database_incarnation_id_within_budget(budget)?
+            != request.kernel_incarnation_id
+        {
+            return Err(BuildError::Invalid(
+                "the request names another kernel incarnation",
+            ));
+        }
         match request.transition {
             Transition::Rebuilding => {
                 let lifecycle = ProjectionLifecycle::open(&self.home)?;
@@ -440,7 +447,7 @@ impl SearchLifecycleOwner {
         }
     }
 
-    /// Pins the selected family for one reader.
+    /// Pins the selected family for one reader. Freshness is judged on the coverage the last slice observed, so a reader can trail the kernel by the commits that arrived since that slice on top of `catchup_lag_commits`; the next slice observes the family again.
     ///
     /// # Errors
     ///
@@ -594,9 +601,10 @@ fn replacement_spec(
         "local_transaction_bytes",
         (half_rows.get() as u64).min(quarter_local / tuple_bytes.get() as u64),
     )?;
+    // The commit page's payload and the window's exported source are both charged against `catchup_batch_encoded_bytes`, so each takes half.
     let commit_bytes = nonzero_u64(
         "catchup_batch_encoded_bytes",
-        limit(manifest, "catchup_batch_encoded_bytes")?,
+        limit(manifest, "catchup_batch_encoded_bytes")? / 2,
     )?;
     // A window's encoded source and a retirement's censused bytes are each charged with one record's bytes on top.
     let with_record = (local_bytes / 2)
@@ -668,11 +676,8 @@ fn replacement_spec(
                     row_bytes.get().min(page_encoded.get()),
                 )?,
             },
-            // A window's source may span as many pages as its byte bound holds whole pages of, and at least one.
-            max_source_pages: nonzero_usize(
-                "catchup_batch_encoded_bytes",
-                window_encoded.get().div_ceil(page_encoded.get()),
-            )?,
+            // Every page that continues a window admits at least one row, so a window within its row allowance spans at most `batch_rows` pages whether its pages end on rows or on bytes.
+            max_source_pages: batch_rows,
             max_source_encoded_bytes: window_encoded,
             batch: BatchBounds {
                 persist: PersistBounds {
@@ -809,9 +814,78 @@ impl SliceReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projection_gates::REQUIRED_LIMITS;
+    use crate::projection_lifecycle::{Cause, ConsumerBinding, EpisodeAccounting};
+
+    const LIMIT: u64 = 1_000_000;
 
     fn blocked(reason: &str) -> SliceOutcome {
         SliceOutcome::Blocked(reason.to_owned())
+    }
+
+    fn test_identity() -> ProjectionIdentity {
+        ProjectionIdentity {
+            schema_version: retrieval::SCHEMA_VERSION,
+            kernel_incarnation_id: "kernel".to_owned(),
+            projection_policy_version: PROJECTION_POLICY_VERSION.to_owned(),
+            identity_contract_version: IDENTITY_CONTRACT_VERSION.to_owned(),
+            limit_manifest_protocol_version: "protocol".to_owned(),
+            embedding_model: "model".to_owned(),
+            tokenizer_fingerprint: "tokenizer".to_owned(),
+            vector_dimension: 4,
+            generation_epoch: 1,
+        }
+    }
+
+    fn manifest(identity: &ProjectionIdentity) -> RuntimeManifest {
+        RuntimeManifest {
+            protocol_version: identity.limit_manifest_protocol_version.clone(),
+            identity: InvalidationIdentity::from(identity),
+            limits: REQUIRED_LIMITS
+                .into_iter()
+                .map(|name| (name.to_owned(), LIMIT))
+                .collect(),
+            enabled: Default::default(),
+        }
+    }
+
+    fn rebuild_intent() -> LifecycleIntent {
+        LifecycleIntent {
+            schema: 2,
+            transition: Transition::Rebuilding,
+            selected_generation: "unregistered".to_owned(),
+            kernel_incarnation_id: "kernel".to_owned(),
+            consumer: ConsumerBinding {
+                consumer_id: "search".to_owned(),
+                generation_id: "generation".to_owned(),
+            },
+            cause: Cause::DeletedAfterPruning,
+            attempt_id: "attempt".to_owned(),
+            recovery_target: None,
+            episodes: EpisodeAccounting {
+                allowance: 3,
+                consumed: 0,
+                deadline: 60_000,
+            },
+            authorization_ref: None,
+            staged_seed_digest: None,
+            replacement_capture: None,
+            recorded_at: 0,
+            prior_disabled: None,
+        }
+    }
+
+    #[test]
+    fn the_catch_up_encoded_byte_charges_fit_their_limit_together() {
+        let identity = test_identity();
+        let spec = replacement_spec(&manifest(&identity), identity, &rebuild_intent()).unwrap();
+        let charged: u64 = spec
+            .catchup_page_charges()
+            .iter()
+            .filter(|(name, _)| *name == "catchup_batch_encoded_bytes")
+            .map(|(_, bytes)| bytes)
+            .sum();
+        assert!(charged <= LIMIT, "{charged} > {LIMIT}");
     }
 
     #[test]
