@@ -393,6 +393,29 @@ describe("HostClient", () => {
         expect((failure as HostClientError).code).toBe("client_closed");
     });
 
+    test("requests on a live handle are refused once closeAsync has started", async () => {
+        const { client, daemon } = await connected({ sleep: async () => {} });
+        const opening = client.routeOpen(MANAGED_TARGET, IDENTITY);
+        await daemon.acceptRouteOpen();
+        const route = await opening;
+
+        const closing = client.closeAsync();
+        const late = client.request(route, { method: "ping" });
+        const lateBinary = client.requestBinary(route, new Uint8Array(1));
+        const lateStream = client.requestStream(route, { method: "ping" });
+        for (const pending of [late, lateBinary, lateStream]) {
+            let failure: unknown;
+            try {
+                await pending;
+            } catch (error) {
+                failure = error;
+            }
+            expect(failure).toBeInstanceOf(HostClientError);
+            expect((failure as HostClientError).code).toBe("client_closed");
+        }
+        await closing;
+    });
+
     test("a route Goodbye delivered with the route.open response fails the open instead of publishing a dead handle", async () => {
         const { client, daemon } = await connected({ sleep: async () => {} });
 

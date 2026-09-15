@@ -130,6 +130,12 @@ export class ReceiveLease {
 
     private assertActive(): void {
         if (this.released) throw new Error("receive lease is released");
+        for (let i = 0; i < this.leasedSegments.length; i++) {
+            const segment = this.leasedSegments[i] as Uint8Array;
+            if ((this.originalLengths[i] as number) > 0 && segment.buffer.byteLength === 0) {
+                throw new Error("receive lease storage was released");
+            }
+        }
     }
 }
 

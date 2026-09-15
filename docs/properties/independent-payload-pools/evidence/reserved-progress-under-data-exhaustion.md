@@ -13,8 +13,10 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/ring.rs:1042`
 - `crates/shm-transport/src/pool.rs:31`
 - `crates/host-runtime/src/ring_transport.rs:1350`
+- `packages/shm-native/src/lib.rs:1040`
+- `packages/opencode-plugin/src/shared/host-client/shm-frame-channel.ts:125`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2468` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:3523` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return; `crates/host-runtime/src/client.rs:7637` shows the Rust client's `Pong` publishing from the control reserve while its data frame waits on ordinary headroom. Native/TypeScript publication selection belongs to #550.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2468` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:3523` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return; `crates/host-runtime/src/client.rs:7637` shows the Rust client's `Pong` publishing from the control reserve while its data frame waits on ordinary headroom; at the native addon, `a pure-header control publishes from its reserve while ordinary headroom is exhausted, and a channel-0 Request does not` in packages/shm-native/tests/mechanism.ts publishes `Pong`, `Cancel`, and `Goodbye` with every ordinary descriptor outstanding, and `the pending publication queue is bounded and a liveness reply bypasses it` in packages/opencode-plugin/src/shared/host-client/shm-frame-channel.test.ts shows the TypeScript channel's `Pong` publishing past 64 waiting data frames.
 
 ## Failure scenario
 
@@ -41,7 +43,7 @@ Check semantics: `always` - `try_reserve_in(Inventory::Control | Terminal, ..)` 
 
 - Sources examined: the files listed under the evidence trail, the test names
   in `Exercised`, and the CI workflow where the record is a gate property.
-- Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
+- Findings: yes at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #550 for the native publisher.
-- Conclusion: unresolved, needs the named handoff.
+- Missing evidence: none for this task
+- Conclusion: resolved with answer.

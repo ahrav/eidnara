@@ -10,11 +10,12 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `packages/shm-native/src/lib.rs:353`
-- `packages/shm-native/src/napi_buffers.rs:142`
-- `packages/shm-native/tests/runtime.ts:146`
+- `packages/shm-native/src/lib.rs:354`
+- `packages/shm-native/src/napi_buffers.rs:149`
+- `packages/shm-native/src/napi_buffers.rs:248`
+- `packages/shm-native/tests/runtime.ts:135`
 
-Witness status: partial - producer aliases detach before commit (`packages/shm-native/src/lib.rs:380`) and consumer aliases detach before return (`packages/shm-native/src/lib.rs:353`); `runNativeLifecycle` in packages/shm-native/tests/runtime.ts asserts subarray, DataView, and Buffer aliases read zero after release, but only when the runtime reports the detachment capability.
+Witness status: yes - producer aliases detach before commit (`packages/shm-native/src/lib.rs:381`) and consumer aliases detach before return (`packages/shm-native/src/lib.rs:354`); `runNativeLifecycle` in packages/shm-native/tests/runtime.ts asserts subarray, DataView, and Buffer aliases read zero after release, but only when the runtime reports the detachment capability; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts runs against the raw addon on every runtime and shows a refused detach leaving the alias attached, the token registered, the block held, and the ring quarantined, with a cooperating retry detaching and returning exactly once.
 
 ## Failure scenario
 
@@ -41,7 +42,7 @@ Check semantics: `always` - `commit_reservation` and `release` reach the ring on
 
 - Sources examined: the files listed under the evidence trail, the test names
   in `Exercised`, and the CI workflow where the record is a gate property.
-- Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
+- Findings: yes at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #550 owns the detach-failure injection witnesses; the Bun 1.3.14 `markAsUntransferable` gap is a recorded unsupported capability.
-- Conclusion: unresolved, needs the named handoff.
+- Missing evidence: none for this task
+- Conclusion: resolved with answer.

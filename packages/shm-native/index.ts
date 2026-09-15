@@ -21,6 +21,32 @@ export function nativeWireConstants(): {
     };
 }
 
+/** What a run actually loaded: the addon's build identity and layout constants, or `null`. */
+export interface NativeArtifactIdentity {
+    buildProfile: string;
+    buildTarget: string;
+    napiVersion: number;
+    descriptorSchemaVersion: number;
+    qualifiedTestProfile: string;
+}
+
+/**
+ * Identity of the loaded addon, for acceptance records: a witness that reports these values
+ * beside the runtime's own version proves which artifact and layout it exercised. `null` when
+ * the addon cannot load.
+ */
+export function nativeArtifactIdentity(): NativeArtifactIdentity | null {
+    const native = addon();
+    if (!native) return null;
+    return {
+        buildProfile: native.buildProfile(),
+        buildTarget: native.buildTarget(),
+        napiVersion: native.napiVersion(),
+        descriptorSchemaVersion: native.descriptorSchemaVersion(),
+        qualifiedTestProfile: native.qualifiedTestProfile(),
+    };
+}
+
 /**
  * Whether `hex` is a current-layout grant for the qualified profile. Fixtures call this before
  * mutating a descriptor so a rejection they then assert comes from the mutation, not from a
@@ -107,6 +133,8 @@ interface NativeAddon {
     nativeLeakDiagnostics(): number;
     activeExternalRefCount(): number;
     setExternalViewFailpoint(call: number): void;
+    setDetachFailpoint(call: number): void;
+    setDeleteFailpoint(call: number): void;
     workerLimit(): number;
     activeChannelCount(): number;
     attach(descriptor: NativeDescriptor): number;
@@ -125,16 +153,15 @@ interface NativeAddon {
         channel: number,
         header: Uint8Array,
         capacity: number,
-        timeoutMs: number,
         fill: (segments: Uint8Array[]) => number,
         beforePublish: () => void,
     ): void;
     reserve(
         channel: number,
         capacity: number,
-        timeoutMs: number,
         deliver: (token: number, segments: Uint8Array[]) => void,
     ): void;
+    armCapacity(channel: number, header: Uint8Array, capacity: number): boolean;
     commitReservation(
         channel: number,
         token: number,
@@ -184,8 +211,9 @@ function consumesHandle(error: unknown): boolean {
 }
 
 /**
- * The exact message `produce` and `reserve` throw when the outbound ring has no capacity.
- * A full ring is retryable backpressure, so callers classify it by this message.
+ * The exact message `produce` and `reserve` throw when the frame's inventory has no free
+ * block or descriptor headroom right now. Nothing was charged; the caller keeps the frame,
+ * calls `armCapacity`, and retries when the readiness handler runs.
  */
 export const RING_FULL_MESSAGE = "shared-memory ring is full";
 
@@ -791,21 +819,24 @@ export class NativeChannel {
         };
     }
 
+    /**
+     * Publishes one frame without waiting. The addon picks the inventory from the header the
+     * way the host does: a pure-header `Cancel`, `Ping`, `Pong`, or `Goodbye` takes the
+     * control reserve, a terminal that fits takes the terminal reserve, and everything else is
+     * ordinary. An exhausted inventory throws `RING_FULL_MESSAGE` with nothing charged.
+     */
     produce(
         header: Uint8Array,
         capacity: number,
         fill: (cursor: ProducerCursor) => void,
         beforePublish?: () => void,
-        timeoutMs = 0,
     ): void {
         this.assertOpen();
         assertUint32Argument("capacity", capacity);
-        assertUint32Argument("timeoutMs", timeoutMs);
         this.native.produce(
             this.id,
             privateBytes(header),
             capacity,
-            timeoutMs,
             (segments) => {
                 protect(segments);
                 const cursor = new ProducerCursor(segments, capacity);
@@ -818,16 +849,15 @@ export class NativeChannel {
         );
     }
 
-    reserve(capacity: number, timeoutMs = 0): NativeProducerReservation {
+    /** Reserves an ordinary block for a direct serializer without waiting; see `produce`. */
+    reserve(capacity: number): NativeProducerReservation {
         this.assertOpen();
         assertUint32Argument("capacity", capacity);
-        assertUint32Argument("timeoutMs", timeoutMs);
         let token: number | undefined;
         let segments: Uint8Array[] | undefined;
         this.native.reserve(
             this.id,
             capacity,
-            timeoutMs,
             (reservedToken, reservedSegments) => {
                 token = reservedToken;
                 segments = reservedSegments;
@@ -843,6 +873,19 @@ export class NativeChannel {
             segments,
             this.liveness,
         );
+    }
+
+    /**
+     * Parks the outbound side on the host's capacity doorbell after a `RING_FULL_MESSAGE`
+     * refusal of the frame `header` and `capacity` describe. `true` means the readiness
+     * handler registered with `startReadiness` runs when the host consumes a descriptor or
+     * returns a block; `false` means that frame's reservation may now succeed, so the caller
+     * retries at once. Requires `startReadiness`.
+     */
+    armCapacity(header: Uint8Array, capacity: number): boolean {
+        this.assertOpen();
+        assertUint32Argument("capacity", capacity);
+        return this.native.armCapacity(this.id, privateBytes(header), capacity);
     }
 
     startReadiness(handler: () => void, onDropped?: (error: unknown) => void): void {
@@ -954,6 +997,16 @@ export function activeExternalRefs(): number {
 
 export function setExternalViewCreationFailpoint(call: number): void {
     addon()?.setExternalViewFailpoint(call);
+}
+
+/** Test hook: the `call`th alias detachment from now fails; `0` disarms. */
+export function setDetachFailpoint(call: number): void {
+    addon()?.setDetachFailpoint(call);
+}
+
+/** Test hook: the `call`th reference deletion from now fails; `0` disarms. */
+export function setDeleteFailpoint(call: number): void {
+    addon()?.setDeleteFailpoint(call);
 }
 
 export function activeNativeChannels(): number {

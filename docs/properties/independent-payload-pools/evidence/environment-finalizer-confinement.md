@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `packages/shm-native/src/lib.rs:493`
+- `packages/shm-native/src/lib.rs:494`
 - `crates/shm-transport/src/lease.rs:378`
 
-Witness status: partial - `packages/shm-native/src/lib.rs:469` closes channels on the environment cleanup hook and `mem::forget`s alias-holding channels; the owned lease's drop is the only finalizer-adjacent return and reaches no N-API (`crates/shm-transport/src/backend/retained.rs:584`).
+Witness status: partial - `packages/shm-native/src/lib.rs:470` closes channels on the environment cleanup hook and `mem::forget`s alias-holding channels; the owned lease's drop is the only finalizer-adjacent return and reaches no N-API (`crates/shm-transport/src/backend/retained.rs:584`).
 
 ## Failure scenario
 
@@ -41,5 +41,5 @@ Check semantics: `always` - `cleanup_env` never calls `Ring` methods other than 
   in `Exercised`, and the CI workflow where the record is a gate property.
 - Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #550 for late-finalizer witnesses.
+- Missing evidence: late-finalizer witnesses remain open within #550.
 - Conclusion: unresolved, needs the named handoff.

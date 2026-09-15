@@ -13,7 +13,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/host-runtime/src/ring_transport.rs:1597`
 - `crates/shm-transport/src/backend/ring.rs:1019`
 
-Witness status: partial - `crates/host-runtime/src/ring_transport.rs:1669` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:3744` retires a host ticket that missed its deadline as `not_sent` with nothing published; `crates/host-runtime/src/client.rs:7738` shows the client's blocked write failing as `Expired`/`Deadline` with zero bytes on the ring, and `daemon_restart_discards_old_rings_and_accepts_fresh_client` in `crates/host-runtime/tests/shm_failure_modes.rs` covers restart. Native/TypeScript stop/restart witnesses belong to #550.
+Witness status: partial - `crates/host-runtime/src/ring_transport.rs:1669` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:3744` retires a host ticket that missed its deadline as `not_sent` with nothing published; `crates/host-runtime/src/client.rs:7738` shows the client's blocked write failing as `Expired`/`Deadline` with zero bytes on the ring, and `daemon_restart_discards_old_rings_and_accepts_fresh_client` in `crates/host-runtime/tests/shm_failure_modes.rs` covers restart; the TypeScript channel drops a waiting frame whose deadline passes without publishing it and its ticket reports cancellation as unpublished (`packages/opencode-plugin/src/shared/host-client/shm-frame-channel.ts:410`). Native and TypeScript stop/restart witnesses over a live daemon remain with the combined matrix.
 
 ## Failure scenario
 
@@ -41,5 +41,5 @@ Check semantics: `always` - every `SendFailure` maps to exactly one of the two o
   in `Exercised`, and the CI workflow where the record is a gate property.
 - Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #550.
+- Missing evidence: the combined daemon matrix for native stop/restart.
 - Conclusion: unresolved, needs the named handoff.

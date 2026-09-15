@@ -63,6 +63,12 @@ const DEFAULT_MEMORY_OVERHEAD_BYTES = 1_048_576;
  */
 const DEFAULT_MAX_STREAM_ITEMS = 100_000;
 const DEFAULT_MAX_PENDING_REQUESTS = 1_024;
+/**
+ * Binary unary responses handed to callers as live leases hold transport blocks until the
+ * caller releases them, so they have their own per-connection ceilings beside the aggregate
+ * byte budget: one maximum body plus the overhead allowance in bytes, and this many leases.
+ */
+const DEFAULT_MAX_RETAINED_BINARY_RESPONSES = 64;
 const EMPTY_JSON_BODY: JsonReceiveBody = Object.freeze({
     kind: "json",
     byteLength: 0,
@@ -189,6 +195,15 @@ export interface ConnectionGenerationOptions {
     maxBodyLen?: number;
     /** `memoryCapBytes` caps reader, decoded, queued, and pending bytes in aggregate. */
     memoryCapBytes?: number;
+    /**
+     * Ceilings for binary unary responses the caller holds as live leases. Each such lease
+     * pins one transport block until `release`, so they are charged to these separate
+     * quotas from delivery until release rather than to `memoryCapBytes`. A response past
+     * either ceiling is released unread and the request fails with
+     * `retained_response_limit`. Defaults: `maxBodyLen` plus 1 MiB, and 64 leases.
+     */
+    maxRetainedBinaryBytes?: number;
+    maxRetainedBinaryResponses?: number;
     /** Bounded cleanup-ticket deadline for post-write aborts. */
     cleanupTicketMs?: number;
     /** `firstCorrelation` defaults to 1n and lets tests reach correlation exhaustion. */
@@ -238,6 +253,9 @@ export interface ConnectionStats {
     pendingRequests: number;
     /** `activeReceiveLeases` counts `ReceiveLease` instances minted by the channel that remain unreleased. */
     activeReceiveLeases: number;
+    /** Binary unary leases the caller still holds, and the bytes they pin. */
+    retainedBinaryResponses: number;
+    retainedBinaryBytes: number;
     droppedFrames: number;
     activeTimers: number;
     readPaused: boolean;
@@ -345,7 +363,10 @@ export class ConnectionGeneration {
     // `nextCorr` allocates only consumer correlations; host Ping correlations are never stored.
     private nextCorr: bigint;
     private corrExhausted = false;
-    /** `producing` blocks nested requests because `DirectFrameBody.fill` runs before its correlation is committed. */
+    /**
+     * `producing` blocks nested requests while a `DirectFrameBody.fill` runs, whether the
+     * channel publishes it now or later from its queue.
+     */
     private producing = false;
     private hostPingWatermark = 0n;
 
@@ -354,6 +375,9 @@ export class ConnectionGeneration {
 
     // `pendingHeld` tracks the pending-retention share of the aggregate budget.
     private pendingHeld = 0;
+    private readonly retainedBinary: ByteBudget;
+    private readonly maxRetainedBinaryResponses: number;
+    private retainedBinaryResponses = 0;
 
     constructor(options: ConnectionGenerationOptions) {
         // Cloned so later mutation of `credentials.daemonId` cannot change the identity.
@@ -378,6 +402,24 @@ export class ConnectionGeneration {
             );
         }
         this.budget = new ByteBudget(memoryCapBytes);
+        const maxRetainedBinaryBytes =
+            options.maxRetainedBinaryBytes ?? maxBodyLen + DEFAULT_MEMORY_OVERHEAD_BYTES;
+        if (!Number.isSafeInteger(maxRetainedBinaryBytes) || maxRetainedBinaryBytes < 0) {
+            throw new RangeError(
+                `maxRetainedBinaryBytes must be a non-negative safe integer, got ${maxRetainedBinaryBytes}`,
+            );
+        }
+        this.retainedBinary = new ByteBudget(maxRetainedBinaryBytes);
+        this.maxRetainedBinaryResponses =
+            options.maxRetainedBinaryResponses ?? DEFAULT_MAX_RETAINED_BINARY_RESPONSES;
+        if (
+            !Number.isSafeInteger(this.maxRetainedBinaryResponses) ||
+            this.maxRetainedBinaryResponses < 0
+        ) {
+            throw new RangeError(
+                `maxRetainedBinaryResponses must be a non-negative safe integer, got ${this.maxRetainedBinaryResponses}`,
+            );
+        }
         this.cleanupTicketMs = options.cleanupTicketMs ?? DEFAULT_CLEANUP_TICKET_MS;
         this.maxPendingRequests = options.maxPendingRequests ?? DEFAULT_MAX_PENDING_REQUESTS;
         if (!Number.isSafeInteger(this.maxPendingRequests) || this.maxPendingRequests < 1) {
@@ -465,6 +507,8 @@ export class ConnectionGeneration {
             queuedControlFrames: channel.queuedControlFrames,
             pendingRequests: this.pending.size,
             activeReceiveLeases: channel.activeReceiveLeases,
+            retainedBinaryResponses: this.retainedBinaryResponses,
+            retainedBinaryBytes: this.retainedBinary.used,
             droppedFrames: this.droppedFrameCount,
             activeTimers: this.timers.size + channel.activeTimers,
             readPaused: channel.readPaused,
@@ -583,7 +627,17 @@ export class ConnectionGeneration {
         // `request` registers the entry before admission so retirement settles it if channel publication fails synchronously.
         this.pending.set(key, entry);
         let ticket: FrameSendTicket;
-        this.producing = true;
+        const guardedBody: DirectFrameBody = {
+            byteLength: body.byteLength,
+            fill: (cursor) => {
+                this.producing = true;
+                try {
+                    body.fill(cursor);
+                } finally {
+                    this.producing = false;
+                }
+            },
+        };
         try {
             // `request` commits `corr` only after successful channel admission.
             ticket = this.channel.produce(
@@ -595,7 +649,7 @@ export class ConnectionGeneration {
                     epoch: header.epoch,
                     corr: header.corr,
                 },
-                body,
+                guardedBody,
                 {
                     onPublish: () => {
                         entry.writeInvoked = true;
@@ -616,8 +670,6 @@ export class ConnectionGeneration {
                 "write_failed",
                 error,
             );
-        } finally {
-            this.producing = false;
         }
         entry.sendTicket = ticket;
         if (corr === MAX_CORRELATION) {
@@ -1015,6 +1067,18 @@ export class ConnectionGeneration {
                 return;
             }
             const body = this.consumeBody(header, lease);
+            if (body === null) {
+                this.settleCallerReject(
+                    entry,
+                    new HostCallError(
+                        "terminal",
+                        "binary response exceeds the retained-response quota; it was released unread",
+                        "retained_response_limit",
+                    ),
+                );
+                this.finishEntry(entry);
+                return;
+            }
             // A streamed sequence ends only with `StreamEnd` or `Error` (wire doc 9.1).
             if (entry.sawStream) {
                 if (body instanceof ReceiveLease) this.releaseLease(body);
@@ -1053,9 +1117,51 @@ export class ConnectionGeneration {
     // Body consumption and lease release.
     // ------------------------------------------------------------------
 
-    /** A binary body stays in its lease; a JSON body is decoded and the lease released. */
-    private consumeBody(header: EnvelopeHeader, lease: ReceiveLease): RequestReceiveBody {
-        return flagsBinary(header.flags) ? lease : this.consumeJson(lease);
+    /**
+     * A binary body stays in its lease and is charged to the retained-response quotas until
+     * the caller releases it; a JSON body is decoded and the lease released. `null` means the
+     * quota refused the body, which was released unread.
+     */
+    private consumeBody(header: EnvelopeHeader, lease: ReceiveLease): RequestReceiveBody | null {
+        return flagsBinary(header.flags) ? this.retainBinary(lease) : this.consumeJson(lease);
+    }
+
+    /**
+     * Wraps a caller-bound binary lease so its quota charge returns exactly once, when the
+     * caller releases it, including after the connection has closed. The transport block
+     * itself returns through the inner lease, so the caller's retention never pins anything
+     * beyond its own block. A channel close releases that block; the wrapper then refuses
+     * reads and only its charge outlives the connection.
+     */
+    private retainBinary(lease: ReceiveLease): ReceiveLease | null {
+        const byteLength = lease.byteLength;
+        if (
+            this.retainedBinaryResponses >= this.maxRetainedBinaryResponses ||
+            this.retainedBinary.wouldExceed(byteLength)
+        ) {
+            this.releaseLease(lease);
+            return null;
+        }
+        this.retainedBinaryResponses += 1;
+        this.retainedBinary.charge(byteLength);
+        const segments = Array.from({ length: lease.segmentCount }, (_, index) =>
+            lease.segment(index),
+        );
+        let refunded = false;
+        const refund = (): void => {
+            if (refunded) return;
+            refunded = true;
+            this.retainedBinaryResponses -= 1;
+            this.retainedBinary.release(byteLength);
+        };
+        return new ReceiveLease(segments, refund, OWNED_STREAM_COPIES, () => {
+            try {
+                lease.release();
+            } catch {
+                return "quarantined";
+            }
+            return "released";
+        });
     }
 
     private consumeJson(lease: ReceiveLease): JsonReceiveBody {
