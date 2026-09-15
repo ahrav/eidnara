@@ -2303,6 +2303,10 @@ fn limits_too_small_to_bound_a_slice_refuse_the_specification() {
             &[("export_page_rows", 0)][..],
             SpecRefusal::TooSmall("export_page_rows"),
         ),
+        (
+            &[("supervisor_slice_ms", 0)][..],
+            SpecRefusal::TooSmall("supervisor_slice_ms"),
+        ),
     ] {
         write_records(
             home,

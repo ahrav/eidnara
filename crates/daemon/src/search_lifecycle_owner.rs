@@ -306,7 +306,13 @@ impl SearchLifecycleOwner {
         let prepared = AdmissionInputs::read(&self.home)
             .map_err(SpecRefusal::from)
             .and_then(|inputs| {
-                let slice = Duration::from_millis(limit(inputs.manifest(), "supervisor_slice_ms")?);
+                let slice = Duration::from_millis(
+                    nonzero_u64(
+                        "supervisor_slice_ms",
+                        limit(inputs.manifest(), "supervisor_slice_ms")?,
+                    )?
+                    .get(),
+                );
                 let budget = budget.bounded_by(Instant::now() + slice);
                 let identity = self.identity(inputs.manifest(), &budget)?;
                 let bounds = coverage_bounds(inputs.manifest())?;
@@ -989,6 +995,11 @@ fn replacement_spec(
     generation_id: &str,
 ) -> Result<ReplacementSpec, SpecRefusal> {
     let allowance = u64::from(allowance.max(1));
+    // A slice of no duration could run nothing recorded under these bounds.
+    nonzero_u64(
+        "supervisor_slice_ms",
+        limit(manifest, "supervisor_slice_ms")?,
+    )?;
     let local_bytes = limit(manifest, "local_transaction_bytes")?;
     let quarter_local = local_bytes / 4;
     let half_rows = nonzero_usize(
@@ -1321,6 +1332,17 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn a_zero_supervisor_slice_refuses_the_specification() {
+        let identity = test_identity();
+        let mut manifest = manifest(&identity);
+        manifest.limits.insert("supervisor_slice_ms".to_owned(), 0);
+        assert_eq!(
+            spec(&manifest, identity).err(),
+            Some(SpecRefusal::TooSmall("supervisor_slice_ms"))
+        );
     }
 
     #[test]
