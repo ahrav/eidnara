@@ -2470,6 +2470,61 @@ async fn a_disable_waiting_for_the_manager_ends_with_its_budget() {
     );
 }
 
+/// A scheduled slice, whose budget carries no deadline of its own, waits for a held manager no longer than the manifest's slice bound.
+#[test]
+fn a_scheduled_slice_waits_for_the_manager_within_the_slice_bound() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("supervisor_slice_ms", 300)],
+        ),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared) {
+            let _ = reached_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+        }
+    });
+    let outcome = std::thread::scope(|scope| {
+        let holder = scope.spawn(|| owner.run_slice(&slice_budget()));
+        reached
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first slice reaches its pause");
+        let scheduled = EvalBudget::new(None, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let started = Instant::now();
+        let outcome = owner.run_slice(&scheduled);
+        let waited = started.elapsed();
+        release.send(()).unwrap();
+        let _ = holder.join().unwrap();
+        (outcome, waited)
+    });
+    assert!(
+        matches!(outcome.0, SliceOutcome::Blocked(_)),
+        "{:?}",
+        outcome.0
+    );
+    assert!(
+        outcome.1 < Duration::from_secs(2),
+        "the scheduled slice waited {:?} against a 300 ms slice bound",
+        outcome.1
+    );
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

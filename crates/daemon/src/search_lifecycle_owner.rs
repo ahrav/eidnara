@@ -250,18 +250,35 @@ impl SearchLifecycleOwner {
     /// Takes the manager within `budget`; a slice holds it across its whole work, so a reader waits only as long as its own budget allows.
     fn lock_within(&self, budget: &EvalBudget) -> Result<MutexGuard<'_, Managed>, BuildError> {
         loop {
-            match self.managed.try_lock() {
-                Ok(guard) => return Ok(guard),
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
-                    return Ok(poisoned.into_inner());
-                }
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    if budget.is_exhausted() {
-                        return Err(BuildError::Expired);
-                    }
-                    std::thread::sleep(LOCK_POLL);
-                }
+            match self.try_lock(budget)? {
+                Some(guard) => return Ok(guard),
+                None => std::thread::sleep(LOCK_POLL),
             }
+        }
+    }
+
+    /// `lock_within` for an async caller: the wait yields to the runtime instead of sleeping its worker.
+    async fn lock_within_async(
+        &self,
+        budget: &EvalBudget,
+    ) -> Result<MutexGuard<'_, Managed>, BuildError> {
+        loop {
+            match self.try_lock(budget)? {
+                Some(guard) => return Ok(guard),
+                None => tokio::time::sleep(LOCK_POLL).await,
+            }
+        }
+    }
+
+    /// One attempt at the manager: the guard, `None` while another holder has it and `budget` still allows waiting, or `Expired`.
+    fn try_lock(&self, budget: &EvalBudget) -> Result<Option<MutexGuard<'_, Managed>>, BuildError> {
+        match self.managed.try_lock() {
+            Ok(guard) => Ok(Some(guard)),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(Some(poisoned.into_inner())),
+            Err(std::sync::TryLockError::WouldBlock) if budget.is_exhausted() => {
+                Err(BuildError::Expired)
+            }
+            Err(std::sync::TryLockError::WouldBlock) => Ok(None),
         }
     }
 
@@ -357,8 +374,18 @@ impl SearchLifecycleOwner {
 
     /// Refreshes admission from the records and the daemon's current observation, then advances the lifecycle record one step. The slice ends within the manifest's `supervisor_slice_ms`, within `budget`, and, for an active record, within that record's own deadline.
     pub fn run_slice(&self, budget: &EvalBudget) -> SliceOutcome {
-        // A reader or request holding the manager is waited for only within the slice's budget, so a cancelled slice returns rather than outliving its caller's cancellation.
-        let mut managed = match self.lock_within(budget) {
+        // A reader or request holding the manager is waited for only within the slice's budget, so a cancelled slice returns rather than outliving its caller's cancellation. A scheduled slice's budget carries no deadline, so its wait is bounded by the manifest's slice bound, read before the manager is held.
+        let wait = match budget.deadline() {
+            Some(_) => budget.clone(),
+            None => {
+                let slice = AdmissionInputs::read(&self.home)
+                    .ok()
+                    .and_then(|inputs| limit(inputs.manifest(), "supervisor_slice_ms").ok())
+                    .map_or(SLICE_IDLE, Duration::from_millis);
+                budget.bounded_by(Instant::now() + slice)
+            }
+        };
+        let mut managed = match self.lock_within(&wait) {
             Ok(managed) => managed,
             Err(_) => return SliceOutcome::Blocked("the manager is held".to_owned()),
         };
@@ -850,7 +877,7 @@ impl SearchLifecycleOwner {
             owner: self,
             selection: {
                 // A slice or reader holding the manager is waited for only within the disable's budget.
-                let mut managed = self.lock_within(budget)?;
+                let mut managed = self.lock_within_async(budget).await?;
                 match std::mem::take(&mut *managed) {
                     Managed::Selection(selection) => {
                         *managed = Managed::Disabling;
