@@ -276,6 +276,7 @@ async fn no_sweep_runs_after_the_grant_deadline() {
         maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 grant: grant(3, NOW + DAY_MS),
                 ..bounds()
             },
@@ -321,6 +322,7 @@ async fn a_slice_ends_at_the_grant_deadline_when_it_is_nearer_than_the_slice_bou
         maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 grant: grant(3, NOW + 300),
                 ..bounds()
             },
@@ -547,6 +549,7 @@ async fn a_stopped_row_keeps_its_running_native_call_in_the_census() {
         maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 grant: grant(1, NOW + DAY_MS),
                 ..bounds()
             },
@@ -710,6 +713,7 @@ async fn a_backfill_of_dispositions_alone_does_not_idle() {
         maintained(&corpus, Arc::new(projection), local_embeddings),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 max_jobs: NonZeroUsize::new(1).unwrap(),
                 grant: grant(3, NOW - 1),
                 ..bounds()
@@ -1078,6 +1082,7 @@ async fn a_reauthorized_row_keeps_its_earlier_native_call_in_the_census() {
         ),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 grant: grant(1, NOW + DAY_MS),
                 ..bounds()
             },
@@ -1244,6 +1249,7 @@ async fn a_held_head_of_the_sweep_order_does_not_starve_identities_behind_it() {
         maintained(&corpus, Arc::clone(&projection), local_embeddings),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 result_wait: Duration::from_millis(50),
                 ..bounds()
             },
@@ -1330,6 +1336,7 @@ async fn a_settled_call_no_row_expects_leaves_the_census_during_maintenance() {
         maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 grant: grant(1, NOW + DAY_MS),
                 ..bounds()
             },

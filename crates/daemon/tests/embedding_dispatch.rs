@@ -645,6 +645,7 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
     let gate = GateGuard(engine.block_calls());
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let short = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         result_wait: Duration::from_millis(50),
         ..bounds()
     };
@@ -702,6 +703,7 @@ async fn a_held_job_is_polled_only_until_its_episode_deadline() {
 
     // The grant ends 300 ms after now while the result wait is five seconds.
     let near = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(3, NOW + 300),
         ..bounds()
     };
@@ -747,6 +749,7 @@ async fn a_blocked_pass_keeps_the_scan_position_it_reached() {
     insert_wrong_scope_jobs(dir.path(), occurrence_b, 1_024);
     let project_a = ProjectScope::new(PROJECT).unwrap();
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
@@ -883,6 +886,7 @@ async fn a_result_ready_after_the_row_deadline_is_not_published() {
     let gate = GateGuard(engine.block_calls());
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let near = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(3, NOW + 300),
         ..bounds()
     };
@@ -948,6 +952,7 @@ async fn a_pending_row_past_its_deadline_is_not_admitted() {
     let gate = GateGuard(engine.block_calls());
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let near = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(3, NOW + 300),
         ..bounds()
     };
@@ -1011,6 +1016,7 @@ async fn a_restarted_job_is_not_readmitted_past_the_row_deadline() {
     );
     // A three-second row deadline: a re-admission with a renewed wait would add three more seconds, which the bound below does not allow.
     let near = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(3, NOW + 3_000),
         result_wait: Duration::from_millis(50),
         ..bounds()
@@ -1059,6 +1065,7 @@ async fn a_restarted_job_is_not_readmitted_past_the_row_deadline() {
         &projection,
         &local_embeddings,
         &DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             result_wait: Duration::from_secs(5),
             ..bounds()
         },
@@ -1139,6 +1146,7 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
     let gate = GateGuard(engine.block_calls());
     let first = component(&engine, LocalEmbeddingsLimits::default());
     let short = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         result_wait: Duration::from_millis(50),
         ..bounds()
     };
@@ -1232,6 +1240,33 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
             bound.table_epoch as i64
         )
     );
+}
+
+/// A job outside the manifest's input envelope is refused before submission even when the lane itself would embed it: no inference call, the row stopped as over the limit and never charged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_outside_the_manifest_envelope_stops_without_inference() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let over = corpus.publish("m0", "fifteen bytes!!");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let mut bounds = bounds();
+    bounds.input = daemon::embedding_dispatch::InputEnvelope {
+        bytes: 8,
+        tokens: u64::MAX,
+    };
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds, NOW);
+    assert_eq!(end, None);
+    assert_eq!(engine.calls(), 0, "a refused input reaches no inference");
+    let ledger = ledger(dir.path(), occurrence_of(&rows, &over));
+    assert_eq!(
+        stopped(&events),
+        vec![(ledger.job_id.clone(), "input_over_limit".to_string())]
+    );
+    assert_eq!(ledger.state, "failed");
+    assert_eq!(ledger.attempts, 0);
 }
 
 /// AC3: input the lane cannot embed makes zero inference calls, stops with a reason that names no content, and leaves the lexical occurrence in place; reopening does not resume it.
@@ -1587,6 +1622,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         "late",
         LocalEmbeddingsLimits::default(),
         DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             grant: grant(3, NOW - 1),
             ..standard
         },
@@ -1606,6 +1642,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
     let tight = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(1, NOW + DAY_MS),
         ..bounds()
     };
@@ -1633,6 +1670,7 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
     let (projection, ledgers) = reopen(dir.path(), projection, &[&occurrence]);
     let after = ledgers.into_iter().next().unwrap();
     let generous = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(9, NOW + 2 * DAY_MS),
         ..tight
     };
@@ -1753,6 +1791,7 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
         },
     );
     let short = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         result_wait: Duration::from_millis(50),
         ..bounds()
     };
@@ -1886,8 +1925,10 @@ async fn charge_rollback_cannot_skip_a_failed_host_attempt() {
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     dispatcher.inject_fault_for_test(DispatchFault::RefuseChargeStatement);
     let mut tight = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(1, NOW + DAY_MS),
         ..DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             result_wait: Duration::ZERO,
             ..bounds()
         }
@@ -2077,6 +2118,7 @@ async fn actionable_rows_are_repolled_before_later_pending_rows() {
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut limits = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         result_wait: Duration::ZERO,
         ..bounds()
     };
@@ -2240,6 +2282,7 @@ async fn an_unresolved_charge_retry_quarantines_without_resubmission() {
         let result = dispatcher.run_pass(
             eligibility(&project),
             &DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 result_wait: Duration::ZERO,
                 ..bounds()
             },
@@ -2526,8 +2569,10 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
     let gate = GateGuard(engine.block_calls());
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let tight = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(1, NOW + DAY_MS),
         ..DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             result_wait: Duration::from_millis(50),
             ..bounds()
         }
@@ -2574,6 +2619,7 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
         &projection,
         &local_embeddings,
         &DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             grant: grant(1, NOW + DAY_MS),
             ..bounds()
         },
@@ -2608,8 +2654,10 @@ async fn completion_count_lane_failures_preserve_the_final_attempt() {
         let gate = GateGuard(engine.block_calls());
         let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
         let tight = DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             grant: grant(1, NOW + DAY_MS),
             ..DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 result_wait: Duration::from_millis(50),
                 ..bounds()
             }
@@ -2667,8 +2715,10 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
                 },
             );
             let tight = DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 grant: grant(allowance, NOW + DAY_MS),
                 ..DispatchBounds {
+                    input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                     result_wait: Duration::from_millis(50),
                     ..bounds()
                 }
@@ -2767,6 +2817,7 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
                 &projection,
                 &local_embeddings,
                 &DispatchBounds {
+                    input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                     grant: grant(allowance, NOW + DAY_MS),
                     ..bounds()
                 },
@@ -2835,6 +2886,7 @@ async fn project_selection_skips_wrong_scope_without_starving_eligible_work() {
     let engine = TestEngine::new();
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
@@ -2905,6 +2957,7 @@ async fn project_scan_cursor_advances_across_more_than_two_wrong_scope_pages() {
     let engine = TestEngine::new();
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
@@ -2960,6 +3013,7 @@ async fn foreign_retries_do_not_restart_another_projects_scan() {
     let engine = TestEngine::new();
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         retry_after: 1,
         ..bounds()
@@ -3054,8 +3108,10 @@ async fn deferred_row_is_revisited_when_its_retry_becomes_due() {
     let gate = GateGuard(engine.block_calls());
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             result_wait: Duration::ZERO,
             ..bounds()
         }
@@ -3107,6 +3163,7 @@ async fn max_jobs_bounds_terminal_dispositions() {
     let engine = TestEngine::new();
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
@@ -3157,6 +3214,7 @@ async fn malformed_candidate_is_obsoleted_without_poisoning_valid_work() {
     let engine = TestEngine::new();
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
@@ -3216,6 +3274,7 @@ async fn selected_jobs_are_hydrated_only_when_they_are_driven() {
     let result = dispatcher.run_pass(
         eligibility(&project),
         &DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             max_jobs: NonZeroUsize::new(2).unwrap(),
             ..bounds()
         },
@@ -3315,6 +3374,7 @@ async fn eligible_rows_are_taken_oldest_first_not_by_identifier() {
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
 
     let one_at_a_time = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
@@ -3400,6 +3460,7 @@ fn a_pass_on_a_runtime_worker_yields_the_worker_to_the_inference_it_awaits() {
                 .run_pass(
                     eligibility(&project),
                     &DispatchBounds {
+                        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                         result_wait: Duration::from_millis(300),
                         ..bounds()
                     },

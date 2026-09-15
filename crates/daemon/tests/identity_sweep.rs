@@ -44,6 +44,7 @@ fn pass(
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut events = Vec::new();
     let bounds = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         result_wait: wait,
         ..*bounds
     };

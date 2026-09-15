@@ -241,6 +241,7 @@ pub fn grant(allowance: u32, deadline: i64) -> EpisodeGrant {
 
 pub fn bounds() -> DispatchBounds {
     DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(16).unwrap(),
         grant: grant(3, NOW + DAY_MS),
         retry_after: 10,

@@ -20,7 +20,7 @@ use retrieval::{PersistBounds, ProjectionIdentity};
 use tokio_util::sync::CancellationToken;
 
 use crate::coverage::ProjectionCoverage;
-use crate::embedding_dispatch::{DispatchBounds, LaneIdentity};
+use crate::embedding_dispatch::{DispatchBounds, InputEnvelope, LaneIdentity};
 use crate::embedding_supervisor::{DrainReport, Maintained, SliceBounds, Unresolved};
 use crate::projection_admission::{
     AdmissionInputs, Closed, InputRefusal, ProjectionAdmission, Refresh, SelectedProjection,
@@ -1196,6 +1196,18 @@ fn maintenance_bounds(
             },
             retry_after,
             result_wait: Duration::from_millis(lease_ms.min(slice_ms / 2)),
+            input: InputEnvelope {
+                bytes: nonzero_u64(
+                    "embedding_input_bytes",
+                    limit(manifest, "embedding_input_bytes")?,
+                )?
+                .get(),
+                tokens: nonzero_u64(
+                    "embedding_input_tokens",
+                    limit(manifest, "embedding_input_tokens")?,
+                )?
+                .get(),
+            },
         },
         sweep_candidates: nonzero_usize(
             "local_transaction_rows",

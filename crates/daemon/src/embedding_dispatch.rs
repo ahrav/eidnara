@@ -11,7 +11,7 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use host_runtime::local_embeddings::{
-    DenseUnavailable, InferenceFailureKind, LaneInfo, LaneUnavailableState,
+    DenseUnavailable, EmbedTokens, InferenceFailureKind, LaneInfo, LaneUnavailableState,
     LocalEmbeddingsComponent, LocalEmbeddingsStatus, PollOutcome, SubmitOutcome,
     failure_is_permanent,
 };
@@ -46,6 +46,23 @@ pub struct DispatchBounds {
     pub retry_after: i64,
     /// How long one job's result is awaited before the pass moves on to the next job; monotonic, independent of the logical episode clock, and only ever shortened by the budget's deadline.
     pub result_wait: Duration,
+    /// The manifest's approved input envelope; a job outside it is refused before submission, whatever the lane itself would accept.
+    pub input: InputEnvelope,
+}
+
+/// The largest input the manifest approves for one embedding: `embedding_input_bytes` and `embedding_input_tokens`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputEnvelope {
+    pub bytes: u64,
+    pub tokens: u64,
+}
+
+impl InputEnvelope {
+    /// No bound beyond the lane's own; for callers whose manifest does not apply.
+    pub const UNBOUNDED: Self = Self {
+        bytes: u64::MAX,
+        tokens: u64::MAX,
+    };
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -709,10 +726,28 @@ impl<'a> EmbeddingDispatcher<'a> {
         if let Some(quarantine) = self.projection.quarantine() {
             return Err(SubmitFailure::Quarantined(quarantine));
         }
+        // The manifest's envelope is judged beside the lane's own limits: bytes before the tokenizer runs, tokens once it has counted them.
+        let envelope = pass.bounds.input;
+        if job.text.len() as u64 > envelope.bytes {
+            return Err(SubmitFailure::Unavailable(DenseUnavailable::ByteOverflow {
+                bytes: job.text.len(),
+                max_bytes: usize::try_from(envelope.bytes).unwrap_or(usize::MAX),
+            }));
+        }
         let admitted = self
             .local_embeddings
             .preflight_embedding_for_lane(pass.lane, &job.text)
             .map_err(SubmitFailure::Unavailable)?;
+        if u64::from(admitted.tokens().get()) > envelope.tokens {
+            return Err(SubmitFailure::Unavailable(
+                DenseUnavailable::TokenOverflow {
+                    tokens: admitted.tokens(),
+                    max_tokens: EmbedTokens::new(
+                        u32::try_from(envelope.tokens).unwrap_or(u32::MAX),
+                    ),
+                },
+            ));
+        }
         if let Some(quarantine) = self.projection.quarantine() {
             return Err(SubmitFailure::Quarantined(quarantine));
         }
