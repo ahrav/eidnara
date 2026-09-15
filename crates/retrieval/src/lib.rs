@@ -15,6 +15,7 @@ pub mod batch;
 pub mod coverage;
 pub mod dispatch;
 pub mod eligibility;
+pub mod exact;
 pub mod identity_sweep;
 pub mod message_cleanup;
 pub mod retirement;
@@ -37,7 +38,7 @@ use storage::{CachedStatement, GuardedConn};
 pub const BASELINE: &str = include_str!("../baseline.sql");
 
 /// A schema mismatch requires a rebuild from canonical state.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Connection opening does not compare projection identities.
 /// A matching identity does not establish completeness or authorize search.
@@ -252,6 +253,8 @@ pub enum ProjectionError {
         "occurrence {occurrence_id} already has a tombstone with a different sequence or reason"
     )]
     TombstoneCollision { occurrence_id: String },
+    #[error("occurrence {occurrence_id} already has an exact association with a different target")]
+    AssociationCollision { occurrence_id: String },
     #[error("the projection identity is already installed and differs")]
     IdentityMismatch,
     #[error("occurrence {occurrence_id} is not stored")]

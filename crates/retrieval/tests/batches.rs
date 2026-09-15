@@ -528,6 +528,7 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
             "index:idx_embedding_jobs_dispatch",
             "index:idx_embedding_jobs_generation",
             "index:idx_embedding_jobs_open_order",
+            "index:idx_exact_associations_occurrence",
             "index:idx_occurrence_vectors_generation",
             "index:idx_occurrences_lineage",
             "index:idx_occurrences_payload",
@@ -536,6 +537,7 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
             "index:idx_vector_generations_selected",
             "table:embedding_jobs",
             "table:embedding_recovery_authorizations",
+            "table:exact_associations",
             "table:occurrence_tombstones",
             "table:occurrence_vectors",
             "table:occurrences",
@@ -600,6 +602,7 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
             tombstones_recorded: 0,
             pending_created: 3,
             pending_obsoleted: 0,
+            associations_inserted: 1,
             checkpoint_commit_seq: 5,
             older_prefix: false,
         }
@@ -689,6 +692,7 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
             tombstones_recorded: 2,
             pending_created: 1,
             pending_obsoleted: 2,
+            associations_inserted: 0,
             checkpoint_commit_seq: 9,
             older_prefix: false,
         }
@@ -828,6 +832,7 @@ fn a_fault_at_any_phase_leaves_the_whole_prior_state() {
     for fault in [
         BatchFault::AfterAdmission,
         BatchFault::AfterRows,
+        BatchFault::AfterAssociations,
         BatchFault::AfterTombstones,
         BatchFault::AfterPending,
         BatchFault::AfterCheckpoint,
@@ -874,6 +879,7 @@ fn a_fault_at_any_phase_leaves_the_whole_prior_state() {
             tombstones_recorded: 0,
             pending_created: 0,
             pending_obsoleted: 0,
+            associations_inserted: 0,
             checkpoint_commit_seq: 4,
             older_prefix: false,
         }

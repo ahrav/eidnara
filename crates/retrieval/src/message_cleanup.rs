@@ -129,6 +129,8 @@ pub fn reclaim(
         conn.prepare_cached("DELETE FROM occurrence_vectors WHERE occurrence_id=?1")?;
     let mut tombstone =
         conn.prepare_cached("DELETE FROM occurrence_tombstones WHERE occurrence_id=?1")?;
+    let mut associations =
+        conn.prepare_cached("DELETE FROM exact_associations WHERE occurrence_id=?1")?;
     let mut occurrence = conn.prepare_cached("DELETE FROM occurrences WHERE occurrence_id=?1")?;
     let mut payload = conn.prepare_cached(
         "DELETE FROM payloads WHERE payload_id=?1
@@ -151,6 +153,7 @@ pub fn reclaim(
         };
         reclaimed.vectors += vectors.execute([&candidate.occurrence_id])?;
         tombstone.execute([&candidate.occurrence_id])?;
+        associations.execute([&candidate.occurrence_id])?;
         reclaimed.occurrences += occurrence.execute([&candidate.occurrence_id])?;
         reclaimed.payloads += payload.execute([&payload_id])?;
     }

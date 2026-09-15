@@ -24,3 +24,8 @@ test-support = []
 retrieval = { path = ".", features = ["test-support"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "exact_lookup"
+harness = false

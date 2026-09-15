@@ -88,6 +88,7 @@ pub struct BatchOutcome {
     pub tombstones_recorded: usize,
     pub pending_created: usize,
     pub pending_obsoleted: usize,
+    pub associations_inserted: usize,
     /// The checkpoint after the batch; unchanged when the batch was an
     /// already-applied prefix.
     pub checkpoint_commit_seq: i64,
@@ -253,6 +254,10 @@ pub fn batch_status(
                 payload_id: stored.payload_id,
             });
         }
+        let keys = crate::exact::extract(record, &stored.lineage_id);
+        if !crate::exact::association::stored(conn, &occurrence_id, &keys)? {
+            return Ok(BatchStatus::NotApplied);
+        }
         if let Some(generation) = batch.generation_id
             && OccurrenceClass::from_code(record.occurrence.class).is_some_and(dense_eligible)
             && stored.tombstone.is_none()
@@ -338,6 +343,7 @@ pub fn apply_batch(
 pub enum BatchFault {
     AfterAdmission,
     AfterRows,
+    AfterAssociations,
     AfterTombstones,
     AfterPending,
     AfterCheckpoint,
@@ -585,6 +591,17 @@ fn apply_batch_inner(
         }
     }
     phase!(fault, AfterRows);
+
+    for (record, row) in batch.records.iter().zip(&persisted) {
+        let keys = crate::exact::extract(record, &row.lineage_id);
+        outcome.associations_inserted += crate::exact::association::persist(
+            conn,
+            &row.occurrence_id,
+            &keys,
+            record.created_commit_seq,
+        )?;
+    }
+    phase!(fault, AfterAssociations);
 
     for invalidation in &batch.invalidations {
         if tombstone_occurrence(
