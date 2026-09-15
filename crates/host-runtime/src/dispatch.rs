@@ -1171,9 +1171,24 @@ pub(crate) async fn emit_pending_rejection<H: HostHandler>(
     code: &'static str,
     message: &'static str,
 ) {
-    if !settlement.won.swap(true, Ordering::SeqCst) {
-        emit_rejection(shared, generation, id, code, message).await;
-    }
+    // The request was admitted with a credit, so this rejection is a credited terminal: `settle`
+    // moves the credit onto the frame and it returns with the block.
+    settle(
+        settlement,
+        &shared.terminal_budget,
+        generation,
+        RouteHandle {
+            channel: id.channel,
+            epoch: id.epoch,
+        },
+        id.corr,
+        Terminal::Error {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            retry_after_ms: None,
+        },
+    )
+    .await;
 }
 
 fn remove_pending(generation: &GenerationCore, key: PendingKey) {
