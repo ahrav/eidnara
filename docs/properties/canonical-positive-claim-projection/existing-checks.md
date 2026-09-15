@@ -17,6 +17,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `causality_in_facts_equals_the_causal_reader_at_every_snapshot` | same | facts and `causal_class_as_of` agree at three snapshots | unaudited |
 | `supporting_approval_is_copied_with_its_validity_at_the_snapshot` | same | approval copied with validity; revocation row copied; out-of-band approval reads invalid | unaudited |
 | `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly` | same | `Oversized` with identity-only summary, `TooManyClaims`, `DuplicateClaim`, `NotADecision`, `FutureSnapshot`, empty request, `MalformedRequiredField` on three columns, `CorruptCanonicalRow` on a decision row whose class, `invalidated_commit_seq`, or `superseded_by` disagrees with its registry row (one `lifecycle_agrees_sql` predicate shared with descriptors), `InvalidInput` on an empty or over-long id | unaudited |
+| `facts_at_a_target_refuse_another_incarnation` | same | `claim_facts_at` equals `claim_facts_as_of` at the target's tip and refuses a target captured from another incarnation | unaudited |
 | `corrected_claims_report_succession_and_serving_standing_at_the_snapshot` | same | predecessor invalidation, succession, and `NotLiveAtSnapshot`; successor `NeverAdmitted`; served `Hidden` on every surface | unaudited |
 | `a_lineage_admission_binds_every_object_on_the_lineage` | same | lineage row copied; own row unchanged; served `Hidden` on every surface after quarantine | unaudited |
 | `facts_survive_reopen` | same | reopen equality | unaudited |
