@@ -2715,65 +2715,68 @@ fn a_request_before_the_first_slice_is_judged_on_the_records() {
 /// A request refused because the reloaded manifest cannot bound a slice closes admission on that manifest: the earlier grants are cancelled and readers are refused, while the lifecycle record is unchanged.
 #[test]
 fn a_request_refused_on_the_manifest_closes_admission() {
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path();
-    let corpus = Corpus::open(home);
-    corpus.seed();
-    records(home);
-    let owner = owner(home, &corpus.kernel);
-    let _ = owner.run_slice(&slice_budget());
-    owner
-        .request(&rebuild(home), now(), &slice_budget())
-        .unwrap();
-    for _ in 0..2 {
+    // Nine rows or one row bound no coverage report; a zero slice bound runs no slice at all.
+    for (name, value) in [
+        ("local_transaction_rows", 9),
+        ("local_transaction_rows", 1),
+        ("supervisor_slice_ms", 0),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let corpus = Corpus::open(home);
+        corpus.seed();
+        records(home);
+        let owner = owner(home, &corpus.kernel);
         let _ = owner.run_slice(&slice_budget());
-    }
-    assert!(matches!(
-        owner.run_slice(&slice_budget()),
-        SliceOutcome::Current
-    ));
-    let grant = owner
-        .admission()
-        .gate()
-        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
-        .unwrap();
-    let ControlState::Current(current) = control(home) else {
-        panic!("the rebuild reached Current");
-    };
+        owner
+            .request(&rebuild(home), now(), &slice_budget())
+            .unwrap();
+        for _ in 0..2 {
+            let _ = owner.run_slice(&slice_budget());
+        }
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Current
+        ));
+        let grant = owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap();
+        let ControlState::Current(current) = control(home) else {
+            panic!("the rebuild reached Current");
+        };
 
-    // Nine rows bound a replacement but not a slice's coverage report; the request is refused before anything is recorded.
-    let identity = identity(&kernel_incarnation_id(home));
-    write_records(
-        home,
-        &manifest_json_with(
-            &identity,
-            &ProjectionHook::ALL,
-            &[("local_transaction_rows", 9)],
-        ),
-        &campaign_json(&identity),
-    );
-    let mut again = rebuild(home);
-    again.selected_generation = current.staged_seed_digest.clone().unwrap();
-    again.consumer.consumer_id = "search-lifecycle-again".to_owned();
-    again.attempt_id = "rebuild-again".to_owned();
-    let outcome = owner.request(&again, now(), &slice_budget());
-    assert!(
-        matches!(outcome, Err(BuildError::Invalid(_))),
-        "{outcome:?}"
-    );
-    assert!(
-        grant.invalidated.is_cancelled(),
-        "a manifest no slice could prepare under cancels the earlier grants"
-    );
-    let pinned = owner.pin(&slice_budget());
-    assert!(
-        pinned.is_err(),
-        "a closed gate admits no reader: {:?}",
-        pinned.err()
-    );
-    assert!(
-        matches!(control(home), ControlState::Current(done) if done.attempt_id == current.attempt_id)
-    );
+        let identity = identity(&kernel_incarnation_id(home));
+        write_records(
+            home,
+            &manifest_json_with(&identity, &ProjectionHook::ALL, &[(name, value)]),
+            &campaign_json(&identity),
+        );
+        let mut again = rebuild(home);
+        again.selected_generation = current.staged_seed_digest.clone().unwrap();
+        again.consumer.consumer_id = "search-lifecycle-again".to_owned();
+        again.attempt_id = "rebuild-again".to_owned();
+        let outcome = owner.request(&again, now(), &slice_budget());
+        assert!(
+            matches!(outcome, Err(BuildError::Invalid(_))),
+            "{name}={value}: {outcome:?}"
+        );
+        assert!(
+            grant.invalidated.is_cancelled(),
+            "{name}={value}: a manifest no slice could prepare under cancels the earlier grants"
+        );
+        let pinned = owner.pin(&slice_budget());
+        assert!(
+            pinned.is_err(),
+            "{name}={value}: a closed gate admits no reader: {:?}",
+            pinned.err()
+        );
+        assert!(
+            matches!(control(home), ControlState::Current(done) if done.attempt_id == current.attempt_id),
+            "{name}={value}"
+        );
+    }
 }
 
 /// A request refused for its own sizing, with no change to the records, leaves the healthy family's admission as it is.

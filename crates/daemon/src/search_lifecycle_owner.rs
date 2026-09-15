@@ -819,6 +819,15 @@ impl SearchLifecycleOwner {
                 return Err(IntentRefusal::Denied(Denial::EvidenceIdentity).into());
             }
         };
+        // What a slice prepares under is checked first: a manifest with no slice bound or no coverage bounds would leave the recorded request to slices that all refuse it. That refusal is the manifest's, and closes the gate as a slice's would, since the earlier grants belong to a manifest that is gone.
+        let slice_bound = limit(inputs.manifest(), "supervisor_slice_ms")
+            .and_then(|slice_ms| nonzero_u64("supervisor_slice_ms", slice_ms));
+        if slice_bound.is_err() || coverage_bounds(inputs.manifest()).is_err() {
+            let _ = self.admission.refresh(None);
+            return Err(BuildError::Invalid(
+                "manifest limits cannot bound the request",
+            ));
+        }
         // The replacement bounds depend on this request's allowance and generation, so their refusal is the request's alone and leaves admission as it is.
         replacement_spec(
             inputs.manifest(),
@@ -828,13 +837,6 @@ impl SearchLifecycleOwner {
             &request.consumer.generation_id,
         )
         .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
-        // A slice prepares under the coverage bounds too, so a manifest that cannot yield them would leave the recorded request to slices that all refuse it. That refusal is the manifest's, and closes the gate as a slice's would: the earlier grants belong to a manifest that is gone.
-        if coverage_bounds(inputs.manifest()).is_err() {
-            let _ = self.admission.refresh(None);
-            return Err(BuildError::Invalid(
-                "manifest limits cannot bound the request",
-            ));
-        }
         let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
         let bound = limit(inputs.manifest(), request.transition.duration_limit())
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
