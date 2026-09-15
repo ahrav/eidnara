@@ -5,7 +5,58 @@
 
 use std::num::NonZeroUsize;
 
+use super::codec::RowRejection;
 use crate::batch::ProjectionCheckpoint;
+
+/// Why a row source could not produce a row it names.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum RowFault {
+    #[error("the row is not a member of the generation: {0}")]
+    Rejected(#[from] RowRejection),
+    #[error("the row could not be read: {0}")]
+    Unavailable(String),
+}
+
+/// A layer's rows by index. Resident rows answer from memory; a file-backed layer reads one row's bytes at its offset and decodes them, so only winners are ever read.
+pub trait RowAccess {
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The row at `index`, validated against the generation's layout by the caller.
+    ///
+    /// # Errors
+    ///
+    /// A row the source cannot produce, whether it fails the codec or cannot be read.
+    fn row(&self, index: usize) -> Result<Vec<f32>, RowFault>;
+}
+
+impl RowAccess for [Vec<f32>] {
+    fn len(&self) -> usize {
+        <[Vec<f32>]>::len(self)
+    }
+
+    fn row(&self, index: usize) -> Result<Vec<f32>, RowFault> {
+        self.get(index).cloned().ok_or_else(|| {
+            RowFault::Unavailable(format!(
+                "row {index} is past the {} resident rows",
+                self.len()
+            ))
+        })
+    }
+}
+
+impl RowAccess for Vec<Vec<f32>> {
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+
+    fn row(&self, index: usize) -> Result<Vec<f32>, RowFault> {
+        self.as_slice().row(index)
+    }
+}
 
 /// Where a layer stands: every layer of one composition shares the base epoch, the base is ordinal zero, and a higher ordinal is newer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +71,7 @@ pub struct Layer<'a> {
     pub precedence: Precedence,
     pub checkpoint: &'a ProjectionCheckpoint,
     pub occurrence_ids: &'a [String],
-    pub rows: &'a [Vec<f32>],
+    pub rows: &'a dyn RowAccess,
     pub tombstones: &'a [String],
 }
 

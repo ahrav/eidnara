@@ -3,263 +3,24 @@ mod support;
 use std::collections::BTreeSet;
 use std::fs;
 use std::num::NonZeroUsize;
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 
-use daemon::projection_gates::{Admission, EntryPoint, HookGate, ProjectionHook};
 use daemon::vector_composition::{
-    COMPOSITION_FILE, Composition, CompositionRefusal, CompositionSpec, Progress, Reconciled,
-    SelectorState, Unavailable, compose, publish, reconcile, recover, verify_composition,
+    COMPOSITION_FILE, CompositionRefusal, CompositionSpec, Progress, Reconciled, SelectorState,
+    Unavailable, compose, publish, reconcile, recover,
 };
 use daemon::vector_generation::{
-    CODES_FILE, ExpectedVectors, Staging, VerifiedVectors, build, stage, verify,
+    CODES_FILE, ExpectedVectors, VerifiedVectors, build, stage, verify,
 };
 use host_runtime::generation::{
     CurrentProfile, GENERATIONS_DIR_NAME, GenerationError, GenerationStore, MEMBERS_FILE_NAME,
     ProfileEvent, SEARCH_PROFILE_NAME, SourceSpec, StageMeta, VECTOR_PROFILE_NAME,
     VECTOR_SELECTION_TARGET,
 };
-use host_runtime::lifecycle::LifecycleTransactionLock;
-use retrieval::ProjectionIdentity;
-use retrieval::batch::{ProjectionCheckpoint, VectorGeneration};
-use retrieval::dense::codec::Metric;
-use retrieval::dense::export::{ExportedRow, LiveRows};
-use retrieval::dense::scalar::ScalarRecipe;
+use retrieval::batch::ProjectionCheckpoint;
+use retrieval::dense::export::LiveRows;
 use sha2::Digest;
-use support::projection_gate::{identity, passing_evaluator};
 
-const DIMENSION: u32 = 8;
-const TOLERANCE: f64 = 1e-3;
-
-fn unit(raw: [f32; 8]) -> Vec<f32> {
-    let norm = raw
-        .iter()
-        .map(|value| f64::from(*value) * f64::from(*value))
-        .sum::<f64>()
-        .sqrt();
-    raw.iter()
-        .map(|value| (f64::from(*value) / norm) as f32)
-        .collect()
-}
-
-fn rows(seed: u8) -> Vec<ExportedRow> {
-    let mut rows: Vec<(String, Vec<f32>)> = (0..4u8)
-        .map(|i| {
-            let mut raw = [0.05f32; 8];
-            raw[usize::from(i)] = 0.9;
-            raw[7] = f32::from(seed) / 100.0;
-            (format!("{:02x}", i + seed).repeat(32), unit(raw))
-        })
-        .collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    rows.into_iter()
-        .map(|(occurrence_id, vector)| ExportedRow {
-            occurrence_id,
-            vector,
-        })
-        .collect()
-}
-
-fn export(seed: u8, checkpoint: i64) -> LiveRows {
-    LiveRows {
-        checkpoint: ProjectionCheckpoint {
-            snapshot_commit_seq: checkpoint - 1,
-            checkpoint_commit_seq: checkpoint,
-            hold_id: "hold-7".to_owned(),
-        },
-        rows: rows(seed),
-        tombstones: Vec::new(),
-    }
-}
-
-struct Fixture {
-    root: tempfile::TempDir,
-    store: GenerationStore,
-    tx: LifecycleTransactionLock,
-    gate: HookGate,
-    admission: Admission,
-    identity: ProjectionIdentity,
-    generation: VectorGeneration,
-    protected: BTreeSet<String>,
-    work_dirs: std::cell::Cell<usize>,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let store = GenerationStore::open(Some(root.path())).unwrap();
-        let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
-        let identity = identity("test-incarnation", DIMENSION);
-        let gate = HookGate::closed();
-        gate.install(passing_evaluator(&identity, 0, &ProjectionHook::ALL));
-        let admission = gate
-            .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
-            .unwrap();
-        let generation = VectorGeneration {
-            generation_id: "gen-vectors-1".to_owned(),
-            embedding_model: identity.embedding_model.clone(),
-            tokenizer_fingerprint: identity.tokenizer_fingerprint.clone(),
-            vector_dimension: identity.vector_dimension,
-            generation_epoch: identity.generation_epoch,
-        };
-        Self {
-            root,
-            store,
-            tx,
-            gate,
-            admission,
-            identity,
-            generation,
-            protected: BTreeSet::new(),
-            work_dirs: std::cell::Cell::new(0),
-        }
-    }
-
-    fn expected(&self) -> ExpectedVectors<'_> {
-        ExpectedVectors {
-            generation: &self.generation,
-            kernel_incarnation_id: &self.identity.kernel_incarnation_id,
-            metric: Metric::InnerProduct,
-            unit_norm_tolerance: TOLERANCE,
-            recipe: ScalarRecipe::SymmetricInt8V1,
-            checkpoint: None,
-        }
-    }
-
-    fn work_dir(&self) -> PathBuf {
-        let index = self.work_dirs.get();
-        self.work_dirs.set(index + 1);
-        let dir = self.root.path().join(format!("work-{index}"));
-        fs::create_dir(&dir).unwrap();
-        dir
-    }
-
-    fn staging(&self) -> Staging<'_> {
-        Staging {
-            store: &self.store,
-            transaction: &self.tx,
-            gate: &self.gate,
-            admission: &self.admission,
-            identity: &self.identity,
-            protected: &self.protected,
-        }
-    }
-
-    /// Builds, stages, and verifies one layer.
-    fn layer(&self, seed: u8, checkpoint: i64) -> VerifiedVectors {
-        self.layer_masking(seed, checkpoint, &[])
-    }
-
-    fn layer_masking(&self, seed: u8, checkpoint: i64, tombstones: &[String]) -> VerifiedVectors {
-        let mut export = export(seed, checkpoint);
-        export.tombstones = tombstones.to_vec();
-        let built = build(&self.expected(), &export, &self.work_dir()).unwrap();
-        let digest = stage(&built, &self.staging()).unwrap();
-        verify(&self.store, &digest, &self.expected()).unwrap()
-    }
-
-    fn compose(
-        &self,
-        sequence: u64,
-        base: &VerifiedVectors,
-        deltas: &[VerifiedVectors],
-    ) -> Result<Composition, CompositionRefusal> {
-        let expected = self.expected();
-        compose(&CompositionSpec {
-            expected: &expected,
-            sequence,
-            base,
-            deltas,
-            max_deltas: NonZeroUsize::new(4).unwrap(),
-        })
-    }
-
-    fn publish(&self, composition: &Composition) -> Result<String, CompositionRefusal> {
-        publish(composition, &self.staging(), &self.work_dir(), &mut |_| {
-            Ok(())
-        })
-        .map_err(|failure| failure.refusal)
-    }
-
-    fn verify_composition(&self, digest: &str) -> Result<Vec<String>, CompositionRefusal> {
-        verify_composition(
-            &self.store,
-            digest,
-            &self.expected(),
-            NonZeroUsize::new(4).unwrap(),
-        )
-        .map(|verified| verified.composition.members())
-    }
-
-    fn lifecycle_dir(&self) -> PathBuf {
-        self.root.path().join("eidnara").join("lifecycle")
-    }
-
-    fn generation_dir(&self, digest: &str) -> PathBuf {
-        self.lifecycle_dir().join(GENERATIONS_DIR_NAME).join(digest)
-    }
-
-    fn generations(&self) -> BTreeSet<String> {
-        fs::read_dir(self.lifecycle_dir().join(GENERATIONS_DIR_NAME))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect()
-    }
-
-    fn selector_bytes(&self, name: &str) -> Option<Vec<u8>> {
-        fs::read(self.lifecycle_dir().join(name)).ok()
-    }
-
-    fn write_selector(&self, name: &str, bytes: &[u8]) {
-        let path = self.lifecycle_dir().join(name);
-        let _ = fs::remove_file(&path);
-        fs::write(&path, bytes).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    }
-
-    fn corrupt(&self, digest: &str, file: &str) {
-        let path = self.generation_dir(digest).join(file);
-        let mut bytes = fs::read(&path).unwrap();
-        bytes[0] ^= 0xff;
-        fs::write(&path, bytes).unwrap();
-    }
-
-    fn stage_search_seed(&self) -> String {
-        let dir = self.work_dir();
-        let path = dir.join("search.sqlite");
-        fs::write(&path, b"not really a database").unwrap();
-        let meta = StageMeta {
-            target: "search-projection-seed".to_owned(),
-            release_contract_sha256: "a".repeat(64),
-            inputs_lock_sha256: "b".repeat(64),
-            source_payload_manifest_sha256: "c".repeat(64),
-        };
-        self.store
-            .stage(
-                &[SourceSpec {
-                    rel_path: "search.sqlite".to_owned(),
-                    source: path,
-                    executable: false,
-                    expected_size: None,
-                    expected_sha256: None,
-                }],
-                &meta,
-                &BTreeSet::new(),
-            )
-            .unwrap()
-    }
-
-    fn recover(&self) -> Result<(String, SelectorState), Unavailable> {
-        recover(
-            &self.store,
-            &self.tx,
-            &self.expected(),
-            NonZeroUsize::new(4).unwrap(),
-            NonZeroUsize::new(8).unwrap(),
-        )
-        .map(|recovered| (recovered.composition.digest, recovered.selector))
-    }
-}
+use support::vector_store::*;
 
 #[test]
 fn a_base_publishes_as_one_complete_selection_whose_members_stay_protected_without_readers() {
@@ -267,7 +28,7 @@ fn a_base_publishes_as_one_complete_selection_whose_members_stay_protected_witho
     let seed = fixture.stage_search_seed();
     fixture
         .store
-        .select_search(&seed, &fixture.tx, &mut |_| Ok(()))
+        .select_search(&seed, fixture.transaction(), &mut |_| Ok(()))
         .unwrap();
     let search_before = fixture.selector_bytes(SEARCH_PROFILE_NAME).unwrap();
 
@@ -305,7 +66,7 @@ fn a_base_publishes_as_one_complete_selection_whose_members_stay_protected_witho
     assert!(
         fixture
             .store
-            .discard_unselected(&base_manifest, &fixture.tx, &BTreeSet::new())
+            .discard_unselected(&base_manifest, fixture.transaction(), &BTreeSet::new())
             .is_err(),
         "a selected composition's member cannot be discarded"
     );
@@ -447,7 +208,7 @@ fn a_composition_with_a_missing_or_unverified_member_is_never_selected() {
     drop(base);
     fixture
         .store
-        .discard_unselected(&member_manifest, &fixture.tx, &BTreeSet::new())
+        .discard_unselected(&member_manifest, fixture.transaction(), &BTreeSet::new())
         .unwrap();
     let failure = publish(
         &composition,
@@ -463,7 +224,7 @@ fn a_composition_with_a_missing_or_unverified_member_is_never_selected() {
         CurrentProfile::Absent
     );
     assert_eq!(
-        reconcile(&fixture.store, &fixture.tx, &composition.digest()).unwrap(),
+        reconcile(&fixture.store, fixture.transaction(), &composition.digest()).unwrap(),
         Reconciled::Other(None)
     );
 
@@ -539,7 +300,7 @@ fn every_selector_cut_leaves_the_old_or_the_new_complete_selection_and_reconcile
             "{cut:?}: the selection is the old complete one or the new complete one"
         );
         assert_eq!(
-            reconcile(&fixture.store, &fixture.tx, &new.digest()).unwrap(),
+            reconcile(&fixture.store, fixture.transaction(), &new.digest()).unwrap(),
             expected_reconciled,
             "{cut:?}"
         );
@@ -598,7 +359,7 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
     // the acknowledged selection stands; the newer staged composition does not displace it.
     fixture
         .store
-        .select_vector(&first.digest(), &fixture.tx, &mut |_| Ok(()))
+        .select_vector(&first.digest(), fixture.transaction(), &mut |_| Ok(()))
         .unwrap();
     let (digest, selector) = fixture.recover().unwrap();
     assert_eq!(digest, first.digest());
@@ -607,7 +368,7 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
     // The selected composition is corrupt: recovery falls back to the newest other verified one and says the selector is stale.
     fixture
         .store
-        .select_vector(&second.digest(), &fixture.tx, &mut |_| Ok(()))
+        .select_vector(&second.digest(), fixture.transaction(), &mut |_| Ok(()))
         .unwrap();
     fixture.corrupt(&second.digest(), COMPOSITION_FILE);
     let (digest, selector) = fixture.recover().unwrap();
@@ -636,7 +397,7 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
         CompositionRefusal::Quarantined
     ));
     assert_eq!(
-        reconcile(&fixture.store, &fixture.tx, &first.digest()).unwrap(),
+        reconcile(&fixture.store, fixture.transaction(), &first.digest()).unwrap(),
         Reconciled::Quarantined
     );
 
@@ -651,7 +412,7 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
     assert_eq!(
         recover(
             &fixture.store,
-            &fixture.tx,
+            fixture.transaction(),
             &foreign,
             NonZeroUsize::new(4).unwrap(),
             NonZeroUsize::new(8).unwrap()
@@ -663,7 +424,7 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
     assert!(
         recover(
             &fixture.store,
-            &fixture.tx,
+            fixture.transaction(),
             &fixture.expected(),
             NonZeroUsize::new(4).unwrap(),
             NonZeroUsize::new(1).unwrap()
@@ -674,7 +435,7 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
     assert_eq!(
         recover(
             &fixture.store,
-            &fixture.tx,
+            fixture.transaction(),
             &fixture.expected(),
             NonZeroUsize::new(1).unwrap(),
             NonZeroUsize::new(8).unwrap()
@@ -693,14 +454,14 @@ fn the_vector_selector_refuses_layers_and_other_owners_and_a_composition_record_
     assert!(
         fixture
             .store
-            .select_vector(&seed, &fixture.tx, &mut |_| Ok(()))
+            .select_vector(&seed, fixture.transaction(), &mut |_| Ok(()))
             .is_err()
     );
     let base = fixture.layer(1, 10);
     assert!(
         fixture
             .store
-            .select_vector(&base.digest, &fixture.tx, &mut |_| Ok(()))
+            .select_vector(&base.digest, fixture.transaction(), &mut |_| Ok(()))
             .is_err(),
         "a layer is not a composition"
     );
@@ -788,7 +549,7 @@ fn a_reader_pinning_a_superseded_composition_keeps_its_members_through_prune() {
             .store
             .discard_unselected(
                 &base.sidecar.stage_manifest(),
-                &fixture.tx,
+                fixture.transaction(),
                 &BTreeSet::new()
             )
             .is_err(),
@@ -861,7 +622,7 @@ fn an_unreadable_selected_composition_quarantines_pruning_while_a_corrupt_member
     assert!(matches!(
         fixture.store.discard_unselected(
             &another.sidecar.stage_manifest(),
-            &fixture.tx,
+            fixture.transaction(),
             &BTreeSet::new()
         ),
         Err(GenerationError::UnsupportedStateSchema)
@@ -897,14 +658,14 @@ fn a_rename_lost_before_its_sync_is_read_back_as_the_old_selection_and_the_retry
     // The rename was acknowledged but never synced: a crash here can leave the old selector on disk.
     fixture.write_selector(VECTOR_PROFILE_NAME, &old_bytes);
     assert_eq!(
-        reconcile(&fixture.store, &fixture.tx, &new.digest()).unwrap(),
+        reconcile(&fixture.store, fixture.transaction(), &new.digest()).unwrap(),
         Reconciled::Other(Some(old.digest())),
         "an acknowledged rename is not proof of durability"
     );
     let reopened = GenerationStore::open(Some(fixture.root.path())).unwrap();
     let recovered = recover(
         &reopened,
-        &fixture.tx,
+        fixture.transaction(),
         &fixture.expected(),
         NonZeroUsize::new(4).unwrap(),
         NonZeroUsize::new(8).unwrap(),
@@ -991,7 +752,7 @@ fn equal_sequences_without_a_selector_recover_deterministically_and_a_selector_n
         .stage_manifest();
     fixture
         .store
-        .discard_unselected(&orphaned_manifest, &fixture.tx, &BTreeSet::new())
+        .discard_unselected(&orphaned_manifest, fixture.transaction(), &BTreeSet::new())
         .unwrap();
     let failure = publish(
         &orphaned,
@@ -1169,7 +930,7 @@ fn a_search_seed_that_lists_members_retains_them_like_any_owner() {
         .unwrap();
     fixture
         .store
-        .select_search(&seed, &fixture.tx, &mut |_| Ok(()))
+        .select_search(&seed, fixture.transaction(), &mut |_| Ok(()))
         .unwrap();
     let report = fixture.store.prune(&BTreeSet::new()).unwrap();
     assert_eq!(

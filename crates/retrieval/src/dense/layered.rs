@@ -15,7 +15,7 @@ use super::codec::{self, Metric, RowLayout};
 use super::oracle::{
     self, ExhaustiveRanking, OracleBounds, OracleRefusal, PageRow, RowSource, Walk, Window,
 };
-use super::resolve::{self, Layer, ResolveRefusal, Winner};
+use super::resolve::{self, Layer, ResolveRefusal, RowFault, Winner};
 use crate::batch::VectorGeneration;
 use crate::coverage::CURRENT_PENDING;
 use crate::eligibility::Authority;
@@ -109,14 +109,29 @@ impl RowSource for ResolvedRows<'_> {
                 }
                 std::cmp::Ordering::Equal => {
                     self.next += 1;
-                    let vector = &self.layers[winner.layer].rows[winner.row];
-                    codec::validate(vector, layout).map_err(|rejection| {
+                    let occurrence_id = &winner.occurrence_id;
+                    let vector = match self.layers[winner.layer].rows.row(winner.row) {
+                        Ok(vector) => vector,
+                        Err(RowFault::Rejected(rejection)) => {
+                            return Err(OracleRefusal::StoredRow {
+                                occurrence_id: occurrence_id.clone(),
+                                rejection,
+                            });
+                        }
+                        Err(RowFault::Unavailable(detail)) => {
+                            return Err(OracleRefusal::Unreadable {
+                                occurrence_id: occurrence_id.clone(),
+                                detail,
+                            });
+                        }
+                    };
+                    codec::validate(&vector, layout).map_err(|rejection| {
                         OracleRefusal::StoredRow {
-                            occurrence_id: winner.occurrence_id.clone(),
+                            occurrence_id: occurrence_id.clone(),
                             rejection,
                         }
                     })?;
-                    return Ok(Some(vector.clone()));
+                    return Ok(Some(vector));
                 }
                 std::cmp::Ordering::Greater => return Ok(None),
             }

@@ -460,6 +460,10 @@ pub struct PruneReport {
     pub removed_temps: usize,
     pub removed_profile_temps: usize,
     pub quarantined: usize,
+    /// Unprotected generations a reader's shared lock kept in place.
+    pub retained_pinned: usize,
+    /// Manifest-declared bytes of those generations, so the accounting owner sees what readers hold.
+    pub retained_bytes: u64,
 }
 
 impl GenerationStore {
@@ -1242,7 +1246,15 @@ impl GenerationStore {
             }
             let _pin = match lock_for_reclamation(&self.generations_fd, &name) {
                 Ok(pin) => pin,
-                Err(Reclamation::Pinned) => continue,
+                Err(Reclamation::Pinned) => {
+                    report.retained_pinned += 1;
+                    // A pinned generation's manifest may be unreadable; it is still retained, only its bytes are unknown.
+                    if let Ok(manifest) = self.manifest(&name) {
+                        report.retained_bytes +=
+                            manifest.files.iter().map(|file| file.size).sum::<u64>();
+                    }
+                    continue;
+                }
                 Err(Reclamation::Unopenable(err)) => {
                     first_error.get_or_insert(err);
                     continue;

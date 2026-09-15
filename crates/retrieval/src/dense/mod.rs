@@ -18,5 +18,7 @@ pub use oracle::{
     Completion, Consumed, DenseCoverage, ExhaustiveQuery, ExhaustiveRanking, IncompleteReason,
     OracleBounds, OracleRefusal, Window, exhaustive,
 };
-pub use resolve::{Layer, Precedence, ResolveRefusal, Resolved, Winner, resolve};
+pub use resolve::{
+    Layer, Precedence, ResolveRefusal, Resolved, RowAccess, RowFault, Winner, resolve,
+};
 pub use score::{Ranked, inner_product, rank_order, rescore, score};
