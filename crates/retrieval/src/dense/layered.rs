@@ -156,8 +156,7 @@ fn rank_layers_inner(
     budget: &EvalBudget,
     hook: impl FnMut(Window<'_>),
 ) -> Result<LayeredRanking, LayeredRefusal> {
-    let resolved = resolve::resolve(request.layers, request.max_entries)?;
-    // The resolver made every epoch equal to the base's; the layers must also be the generation's.
+    budget.check().map_err(|_| OracleRefusal::BudgetExhausted)?;
     if let Some(layer) = request
         .layers
         .iter()
@@ -168,6 +167,7 @@ fn rank_layers_inner(
             generation: request.generation.generation_epoch,
         });
     }
+    let resolved = resolve::resolve(request.layers, request.max_entries)?;
     let mut account = LayerAccount {
         winners: resolved.winners.len(),
         superseded: resolved.superseded,

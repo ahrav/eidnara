@@ -171,20 +171,22 @@ fn check_topology(
     layers: &[Layer<'_>],
     max_entries: NonZeroUsize,
 ) -> Result<Vec<usize>, ResolveRefusal> {
-    let mut entries = 0usize;
-    for (index, layer) in layers.iter().enumerate() {
-        entries = entries.saturating_add(check_layer(index, layer)?);
-        if entries > max_entries.get() {
-            return Err(ResolveRefusal::OverBound {
+    let mut remaining = max_entries.get();
+    for layer in layers {
+        remaining = remaining
+            .checked_sub(layer.occurrence_ids.len())
+            .and_then(|left| left.checked_sub(layer.tombstones.len()))
+            .ok_or(ResolveRefusal::OverBound {
                 max: max_entries.get(),
-            });
-        }
+            })?;
+    }
+    for (index, layer) in layers.iter().enumerate() {
+        check_layer(index, layer)?;
     }
     order_layers(layers)
 }
 
-/// One layer's own consistency; returns the rows and tombstones it carries.
-fn check_layer(index: usize, layer: &Layer<'_>) -> Result<usize, ResolveRefusal> {
+fn check_layer(index: usize, layer: &Layer<'_>) -> Result<(), ResolveRefusal> {
     if layer.checkpoint.snapshot_commit_seq > layer.checkpoint.checkpoint_commit_seq {
         return Err(ResolveRefusal::CheckpointOrder { index });
     }
@@ -213,7 +215,7 @@ fn check_layer(index: usize, layer: &Layer<'_>) -> Result<usize, ResolveRefusal>
             occurrence_id: occurrence_id.clone(),
         });
     }
-    Ok(layer.occurrence_ids.len() + layer.tombstones.len())
+    Ok(())
 }
 
 /// The base is found and every epoch is checked against it before anything is ordered, so no layer's position can hide a foreign epoch; only then are the deltas ordered by ordinal.

@@ -248,12 +248,18 @@ conservative reading `compose` uses); a layer naming more or fewer
 occurrences than it holds rows; identifiers or tombstones out of strictly
 increasing order, which also catches repeats; an occurrence a layer both
 lists and tombstones; and more rows and tombstones together than the caller's
-bound. Equal-precedence conflicts are refused, not decided: the owners have
-not chosen a rule, and a refusal is not a default.
+bound. The resolver checks the total from slice lengths before inspecting
+any layer's identifiers or tombstones, so an oversized set cannot consume
+content-validation work. Equal-precedence conflicts are refused, not decided:
+the owners have not chosen a rule, and a refusal is not a default.
 
-`dense::layered::rank_layers` refuses layers whose base epoch is not the
-request generation's epoch, then ranks the resolved winners through the
-oracle's own walk. The population, visit order, paging, eligibility batches, top-`k`
+`dense::layered::rank_layers` checks the request budget and the layers' epochs
+against the request generation before resolving any layer contents. An ended
+budget refuses as `OracleRefusal::BudgetExhausted`. Resolution is synchronous
+and does not poll the budget; the oracle checks it again before reading the
+projection. If the budget ends while a valid layer set resolves, the oracle
+still refuses because no page has completed. The resolved winners then enter
+the oracle's own walk. The population, visit order, paging, eligibility batches, top-`k`
 admission, final re-judgment, coverage, budget, and completion rules are the
 oracle's without change; only the source of each visited row's vector
 differs. The walk reads the projection's live dense-required rows in

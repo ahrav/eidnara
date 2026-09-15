@@ -261,6 +261,37 @@ fn malformed_layer_sets_are_refused_whole() {
     assert!(resolve(&layers(&[base(), wide()]), NonZeroUsize::new(4).unwrap()).is_ok());
 }
 
+#[test]
+fn the_entry_bound_is_checked_before_any_layer_contents() {
+    let mut base = layer(0, &[("a", 1.0), ("b", 2.0)], &[]);
+    base.ids.reverse();
+    let delta = layer(1, &[], &["c", "d"]);
+    for (owned, bound) in [
+        (vec![base.layer()], 1),
+        (vec![base.layer(), delta.layer()], 3),
+        (vec![delta.layer(), base.layer()], 3),
+    ] {
+        assert_eq!(
+            resolve(&owned, NonZeroUsize::new(bound).unwrap()).unwrap_err(),
+            ResolveRefusal::OverBound { max: bound },
+            "an oversized set must not inspect even the first layer's identifiers"
+        );
+    }
+    assert_eq!(
+        resolve(
+            &[base.layer(), delta.layer()],
+            NonZeroUsize::new(4).unwrap()
+        )
+        .unwrap_err(),
+        ResolveRefusal::Order {
+            index: 0,
+            list: "occurrence identifiers",
+            entry: 1
+        },
+        "admission at the exact bound still validates layer contents"
+    );
+}
+
 /// `None` is a tombstone; otherwise the `(layer, row)` of a row.
 type Entry = Option<(usize, usize)>;
 

@@ -1,7 +1,7 @@
 //! Walks every live occurrence whose class requires a vector in occurrence identifier order through bounded keyset pages, inside the caller's read transaction.
 //! Each page is decoded and validated, judged for canonical eligibility in one kernel batch, scored, and offered to a bounded top-K; the top-K is re-judged once before return.
 //! A live required row without a vector is a coverage shortfall, so the result is incomplete even when every scored row was eligible; a kernel snapshot or incarnation that moves between batches ends the walk the same way.
-//! The walk itself is shared: a [`RowSource`] supplies the page query and the vector of each visited row, so the oracle reads `occurrence_vectors` and the layered ranking reads resolved layer rows through one judgment, admission, and revalidation path.
+//! The walk itself is shared: a `RowSource` supplies the page query and the vector of each visited row, so the oracle reads `occurrence_vectors` and the layered ranking reads resolved layer rows through one judgment, admission, and revalidation path.
 
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;

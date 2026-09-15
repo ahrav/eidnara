@@ -433,6 +433,69 @@ fn layers_that_do_not_resolve_or_carry_an_invalid_row_refuse_before_any_row_is_r
 }
 
 #[test]
+fn ended_budgets_and_foreign_epochs_refuse_before_layer_contents_are_inspected() {
+    let fixture = Fixture::all_admitted();
+    let query = axis(0);
+    let mut base = full_base(&fixture);
+    base.ids.reverse();
+    let cancelled = EvalBudget::unbounded();
+    cancelled.cancel();
+    let expired = EvalBudget::new(
+        Some(std::time::Instant::now()),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let mut visited = 0;
+    for budget in [cancelled, expired] {
+        assert_eq!(
+            rank(
+                &fixture,
+                &[base.layer()],
+                &query,
+                bounds(8),
+                &budget,
+                |_| visited += 1,
+            )
+            .unwrap_err(),
+            LayeredRefusal::Oracle(OracleRefusal::BudgetExhausted)
+        );
+    }
+    base.precedence.base_epoch += 1;
+    assert_eq!(
+        rank(
+            &fixture,
+            &[base.layer()],
+            &query,
+            bounds(8),
+            &EvalBudget::unbounded(),
+            |_| visited += 1,
+        )
+        .unwrap_err(),
+        LayeredRefusal::Epoch {
+            layers: generation().generation_epoch + 1,
+            generation: generation().generation_epoch,
+        }
+    );
+    base.precedence.base_epoch -= 1;
+    assert_eq!(
+        rank(
+            &fixture,
+            &[base.layer()],
+            &query,
+            bounds(8),
+            &EvalBudget::unbounded(),
+            |_| visited += 1,
+        )
+        .unwrap_err(),
+        LayeredRefusal::Resolve(ResolveRefusal::Order {
+            index: 0,
+            list: "occurrence identifiers",
+            entry: 1,
+        })
+    );
+    assert_eq!(visited, 0);
+}
+
+#[test]
 fn a_class_that_requires_no_vector_is_never_a_winner_the_walk_visits() {
     let fixture = Fixture::all_admitted();
     let query = axis(0);
