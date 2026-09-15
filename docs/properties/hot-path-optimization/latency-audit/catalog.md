@@ -1585,16 +1585,16 @@ or panic drops the reservation, and each path runs
 egress `ByteCharge` of exactly `exact_len + HEADER_LEN`
 ([`reserve_direct`][reserve-direct]), [`into_parts`][into-parts] passes it
 through unshrunk, the charge drops only after `commit` in
-[`publish_one`][publish-one], and any request-owned bytes the serializer
+[`Publisher::try_publish`][publish-one], and any request-owned bytes the serializer
 closure captures count as retained until that point. `always` because
 [`prepare_commit`][prepare-commit] checks the declared length against
 `body_len` on every commit, there is no partial-frame state, and [E2][e2]
 requires each charge to cover its resource's lifetime.
 Fault/timing angle: The serializer runs on the [endpoint thread][idle-select]
-after `reserve_until` returns, so its CPU time holds a ring reservation and
+after `try_reserve_in` returns, so its CPU time holds a ring reservation and
 blocks inbound receives; a serializer that finishes after `frame_deadline` is
 refused at [`commit_before`][commit-before]. Every `publish_direct` error is
-reported through `publish_one` as
+reported through `Publisher::try_publish` as
 [`ReadClose::Corrupt("shared-memory publish failed")`][publish-fail], which
 closes the whole connection, while the owned path turns the same failure into
 a request-scoped `encode_failed` terminal in
@@ -1623,7 +1623,7 @@ Open questions:
   settled response, or must the direct path preserve the owned path's
   request-scoped `encode_failed` terminal? (needs human input)
 - Which charge class covers the captured source bytes between `handle`
-  returning and `publish_one` completing: the egress charge already taken,
+  returning and `Publisher::try_publish` completing: the egress charge already taken,
   the request scratch charge, or a new class? (needs human input)
 - [The host-runtime terminal record][hr-terminal] holds trivially on the
   failure arm because nothing is emitted; the settled `Response` is then
@@ -1641,7 +1641,7 @@ Guarantee: A direct-serialize campaign reaches the window in which the
 serializer closure is the only owner of the response's source bytes.
 Check: `sometimes` - For some request, an `OutboundFrame` carrying a
 [`DirectFrame`][direct-frame] is queued, the handler future that produced it
-has returned or been dropped, and [`publish_one`][publish-one] has not yet
+has returned or been dropped, and [`Publisher::try_publish`][publish-one] has not yet
 committed. The marker asserts these three preconditions, not the charge
 accounting.
 Fault/timing angle: For a unary response the frame is queued from `settle`
@@ -1656,7 +1656,7 @@ Required faults and enabling state: A slow egress or a held ring reservation
 ahead of the direct frame, to lengthen the window so the marker can observe
 it; a handler that returns immediately after
 [`output_from_writer`][from-writer]; observation of handler completion (the
-joined future) and of the `publish_one` commit as separate events.
+joined future) and of the `Publisher::try_publish` commit as separate events.
 Confidence: medium - [Evidence](evidence/direct-frame-outlives-its-handler-before-publication.md).
 The queueing and commit points are source-verified; the direct path is
 reached only through the [fixture arm][fixture-arm] at HEAD.
@@ -2867,9 +2867,9 @@ evaluation of this area and its disposition are recorded in
 [affordable]: ../../../../crates/host-runtime/src/ring_transport.rs#L60
 [process-limits]: ../../../../crates/host-runtime/src/ring_transport.rs#L98
 [idle-select]: ../../../../crates/host-runtime/src/ring_transport.rs#L582-L617
-[publish-fail]: ../../../../crates/host-runtime/src/ring_transport.rs#L622-L646
+[publish-fail]: ../../../../crates/host-runtime/src/ring_transport.rs#L696-L704
 [receive-to-vec]: ../../../../crates/host-runtime/src/ring_transport.rs#L664
-[publish-one]: ../../../../crates/host-runtime/src/ring_transport.rs#L749
+[publish-one]: ../../../../crates/host-runtime/src/ring_transport.rs#L1221-L1277
 [publish-direct]: ../../../../crates/host-runtime/src/ring_transport.rs#L788
 [commit-before]: ../../../../crates/host-runtime/src/ring_transport.rs#L815
 [res-writer]: ../../../../crates/host-runtime/src/ring_transport.rs#L830

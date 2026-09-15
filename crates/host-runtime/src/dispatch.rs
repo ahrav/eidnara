@@ -990,7 +990,17 @@ pub async fn dispatch_request<H: HostHandler>(
         // still reading. The lease is released inside `into_private`, before any storage or
         // response work, and a copied length that disagrees with the header is a structural
         // fault that ends the generation.
-        let copied = ledgers.run_blocking(move || frame.into_private()).await;
+        let copied = if frame.is_empty() {
+            // Nothing to read, so no worker hop; the closed-route outcome matches `run_blocking`.
+            if ledgers.route.is_closed() {
+                drop(frame);
+                Err(crate::handler::BlockingWorkFailed::RouteClosing)
+            } else {
+                Ok(frame.into_private())
+            }
+        } else {
+            ledgers.run_blocking(move || frame.into_private()).await
+        };
         let private = match copied {
             Ok(Ok(private)) => private,
             Ok(Err(_)) => {

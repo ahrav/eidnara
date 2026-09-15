@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/ring.rs:989`
 - `crates/shm-transport/src/lease.rs:308`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2138` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:317` repeats it across a process boundary with returns from a worker thread.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2144` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:317` repeats it across a process boundary with returns from a worker thread.
 
 ## Failure scenario
 

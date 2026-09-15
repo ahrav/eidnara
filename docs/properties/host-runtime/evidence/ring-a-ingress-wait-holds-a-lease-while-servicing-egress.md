@@ -21,43 +21,59 @@ inside the wait - is what nothing constructs.
 
 ## Evidence trail
 
-**The lease is live across the whole wait.** Bound at `:496-501`, released at
-`:546-548`. Between them (`ring_transport.rs:519-542`):
+**The lease is live across the whole wait.** Bound at `:937-943`, handed to
+the connection engine inside `InboundFrame::new` at `:1032-1034`; the release
+happens later, in `InboundFrame::into_private` (`frame_channel.rs:119`).
+Between them (`ring_transport.rs:961-1025`):
 
 ```
 let deadline = Instant::now() + frame_deadline;
+let discard = queue.discard.clone();
 let charge = ingress.charge(header.len);
 tokio::pin!(charge);
 let charge = loop {
+    let capacity_armed = if publisher.has_pending() {
+        match rings.first.arm_capacity_wait() { /* :968-981 */ }
+    } else {
+        false
+    };
     tokio::select! {
         biased;
-        () = read_cancel.cancelled() => return Err(ReadClose::Cancelled),
-        charge = &mut charge => break charge,
+        charge = &mut charge => match charge {
+            Some(charge) => break charge,
+            None => return Err(ReadClose::Overloaded),
+        },
+        () = read_cancel.cancelled() => return Ok(false),
+        () = discard.cancelled() => return Ok(false),
         () = tokio::time::sleep_until(deadline) => {
-            // The peer and transport are healthy; only the ingress budget is
-            // saturated. Overloaded retires the generation without branding
-            // it corrupt, so the admission charge releases cleanly.
             return Err(ReadClose::Overloaded);
         }
-        queued = queue.recv() => match queued {
+        queued = queue.recv(), if publisher.can_accept() => match queued {
             Some(queued) => {
-                if publish_one(&rings.first, queued, frame_deadline, publish_hook).is_err() {
+                publisher.push(queued);
+                if publisher.pump(&rings.first).is_err() {
                     return Err(ReadClose::Corrupt("shared-memory publish failed"));
                 }
             }
             None => return Err(ReadClose::Cancelled),
+        },
+        ready = capacity.readable(), if capacity_armed => { /* :1009-1020, then pump */ },
+        () = tokio::time::sleep_until(publisher.earliest_deadline()), if publisher.has_pending() => {
+            return Err(ReadClose::Corrupt("shared-memory publish failed"));
         }
     }
 };
 ```
 
-Post-#131 the wait parks instead of polling: `ByteBudget::charge`
-(`crates/host-runtime/src/wire.rs:397-407`) is `acquire_many_owned` on a tokio
+The wait parks instead of polling: `ByteBudget::charge`
+(`crates/host-runtime/src/wire.rs:415-428`) is `acquire_many_owned` on a tokio
 semaphore, so the future queues and resolves when another holder's
 `ByteCharge` drops its permits. Egress servicing is likewise event-driven -
 `queue.recv()` is an async receive, not the polling-era `try_recv` - so an
-outbound frame queued at any point during the wait is published from inside
-it (`:533-540`).
+outbound frame queued at any point during the wait is pushed to the
+`Publisher` and pumped from inside it (`:1000-1008`), and a frame the pump
+could not place parks on capacity readiness (`:968-981`, `:1009-1020`) rather
+than inside a blocking reserve.
 
 **The lease budget.** Eight, pinned by the profile rather than by file-local
 constants post-#131: `ring_profile_pins_per_connection_grant_geometry`

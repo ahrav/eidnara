@@ -577,14 +577,14 @@ async fn handle_control<H: HostHandler>(
 
     match action {
         ControlAction::Reject { code, message } => {
-            // The read loop queues emission because egress-budget acquisition can block.
+            // The read loop queues emission because terminal-budget acquisition can block.
             // The acquired permit bounds queued emissions.
             let shared_task = Arc::clone(shared);
             let gen_task = Arc::clone(generation);
             shared.spawn_tracked(generation.read_tasks.track_future(async move {
                 let _pending_permit = pending_permit;
                 emit_error_terminal(
-                    &shared_task.egress_budget,
+                    &shared_task.terminal_budget,
                     &gen_task,
                     FrameId::control(corr),
                     code,

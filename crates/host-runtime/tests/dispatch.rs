@@ -54,6 +54,30 @@ async fn a_unary_request_dispatches_once_with_one_matching_terminal() {
 }
 
 #[tokio::test]
+async fn an_empty_body_request_dispatches_and_settles() {
+    let host = TestHost::start().await;
+    let mut client = host.client().await;
+    let (channel, epoch) = client
+        .route_open(LINKED_MODULE_ID, ROOT, "opencode", "empty")
+        .await
+        .expect("route");
+
+    let corr = client.next_corr();
+    client
+        .send_frame(TY_REQUEST, FLAGS_INTERACTIVE, channel, epoch, corr, &[])
+        .await
+        .expect("send empty request");
+
+    let frame = client.frame_within(BUDGET).await.expect("terminal");
+    assert_eq!(frame.ty, TY_RESPONSE);
+    assert_eq!(frame.corr, corr);
+    assert!(frame.body.is_empty(), "the empty body echoes back empty");
+    assert_eq!(host.handler.dispatch_count(), 1);
+
+    host.shutdown_gracefully().await;
+}
+
+#[tokio::test]
 async fn an_application_error_is_a_terminal_for_its_correlation_only() {
     let host = TestHost::start().await;
     let mut client = host.client().await;
@@ -1075,6 +1099,60 @@ async fn egress_budget_deadline_retires_the_generation() {
     host.shutdown_gracefully().await;
 }
 
+/// A semantic channel-0 rejection encodes from the terminal reserve, so it settles while a
+/// maximum response holds every ordinary egress byte.
+#[tokio::test]
+async fn a_control_rejection_settles_while_ordinary_egress_is_exhausted() {
+    let host = TestHost::start_with(|config| {
+        config.timing.frame_deadline = Duration::from_millis(300);
+    })
+    .await;
+    let mut client = host.client().await;
+    let (channel, epoch) = client
+        .route_open(LINKED_MODULE_ID, ROOT, "opencode", "egress-hold")
+        .await
+        .expect("route");
+    // `bytes + HEADER_LEN` equals `EGRESS_RESERVED_BYTES`, so ordinary egress is empty.
+    let corr = client.next_corr();
+    client
+        .send_frame(
+            TY_REQUEST,
+            FLAGS_INTERACTIVE,
+            channel,
+            epoch,
+            corr,
+            &mode_body(serde_json::json!({
+                "mode": "reserve_then_await_completion",
+                "bytes": 64 * 1024 * 1024
+            })),
+        )
+        .await
+        .expect("send maximum response request");
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    while host.handler.output_reservation_count() < 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the maximum reservation never landed"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    let rejected = client
+        .control(&serde_json::json!({"op": "nope"}))
+        .await
+        .expect("send unsupported control");
+    let (skipped, frame) = client
+        .frames_until_corr(rejected, Duration::from_secs(2))
+        .await
+        .expect("the rejection terminal must not wait for ordinary egress");
+    assert!(skipped.is_empty(), "the held response must not settle");
+    assert_eq!(frame.ty, TY_ERROR);
+    assert_eq!(frame.error_code(), "unsupported_operation");
+
+    host.handler.release_completion();
+    host.shutdown_gracefully().await;
+}
+
 #[tokio::test]
 async fn closing_a_route_settles_its_admitted_work() {
     let host = TestHost::start().await;
@@ -1569,7 +1647,7 @@ async fn held_blocking_work_retains_handler_and_instance_after_fatal_close() {
 /// consumed the block, after which the next request dispatches again.
 #[tokio::test]
 async fn terminal_credits_bound_admission_and_return_with_the_settled_block() {
-    const CREDITS: usize = 63;
+    const CREDITS: usize = host_runtime::config::TERMINAL_CREDITS_PER_CONNECTION;
     let host = TestHost::start_with(|config| {
         config.limits.max_pending_requests = CREDITS + 8;
     })

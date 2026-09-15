@@ -357,7 +357,7 @@ async fn close_rejects_new_sends() {
     host.shutdown_gracefully().await;
 }
 
-/// Rust-client real-process witness for the payload-pool layout: a managed client attaches
+/// Rust-client in-process witness for the payload-pool layout: a managed client attaches
 /// the sole profile, completes a daemon request in each direction at the maximum body,
 /// refuses one byte over it locally, and records the host's artifact identity and lifecycle
 /// counters through `host.status` before and after a controlled close and reconnect.
@@ -476,15 +476,14 @@ async fn managed_client_witnesses_current_layout_maximum_bodies_and_controlled_r
         let snapshot = client.host_status().await.expect("host.status decodes");
         let shm = &snapshot.shared_memory;
         assert_eq!(shm["activation"]["completed"], 2);
-        assert_eq!(shm["reclamation"]["completed"], 1);
-        if shm["returns"]["released_backings"] == 2 {
+        if shm["reclamation"]["completed"] == 1 && shm["returns"]["released_backings"] == 2 {
             assert_eq!(shm["returns"]["live_backings"], 2);
             assert_eq!(shm["returns"]["outstanding"], 0);
             break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the closed connection's backing never released: {shm}"
+            "the closed connection's generation never retired or its backing never released: {shm}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -493,8 +492,8 @@ async fn managed_client_witnesses_current_layout_maximum_bodies_and_controlled_r
 }
 
 /// A retained response is private: while the caller holds A, more B responses than the 4 KiB
-/// class has blocks complete through the same connection, so A pins no transport storage, and
-/// A's bytes are unchanged after B's reuse and after the connection closes.
+/// class has blocks complete through the same connection and are all held too, so no response
+/// pins transport storage, and A's bytes are unchanged after reuse and after the connection closes.
 #[tokio::test]
 async fn a_retained_response_stays_private_while_transport_storage_is_reused_and_after_close() {
     let host = TestHost::start().await;
@@ -511,18 +510,25 @@ async fn a_retained_response_stays_private_while_transport_storage_is_reused_and
         .expect("A completes");
     assert_eq!(a.body, a_body);
 
-    // More B responses than the 4 KiB class holds: reuse of A's former block is forced while A
-    // is retained, and every B completes because A holds no block.
+    // More B responses than the 4 KiB class holds, every one retained alongside A: a response
+    // that pinned its block would exhaust the class before the loop ends and the request would
+    // never complete, so a bounded wait on each B is the witness that retention pins nothing.
     let block_count = 64 + 8;
+    let mut held = Vec::with_capacity(block_count);
     for cycle in 0..block_count {
         let b_body =
             mode_body(serde_json::json!({"mode": "echo", "value": cycle, "pad": "b".repeat(900)}));
-        let b = client
-            .request(route, b_body.clone(), RequestOptions::default())
-            .await
-            .expect("B completes while A is retained");
+        let b = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.request(route, b_body.clone(), RequestOptions::default()),
+        )
+        .await
+        .expect("B completes while A and every earlier B are retained")
+        .expect("B completes");
         assert_eq!(b.body, b_body);
+        held.push(b);
     }
+    assert_eq!(held.len(), block_count);
     assert_eq!(
         a.body, a_body,
         "A is unchanged by B's reuse of transport storage"

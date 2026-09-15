@@ -28,8 +28,12 @@ returns an error while leaving shared state advanced.
   `usize::try_from(validated.body_len()).map_err(|_| RingError::InvalidLayout)?`
   runs *after* the block above. A failure here leaves the cursor advanced and the
   lease count incremented with no lease object in existence.
-- `ring.rs:1462-1470` — **failure path 3.** `ReceiveLease::new(...)` with
-  `.map_err(RingError::Lease)?` at `:1470`, also after the commit point.
+- `ring.rs:1462-1470` — **failure path 3** (source tree; not at HEAD). The lease
+  constructor with `.map_err(RingError::Lease)?` at `:1470`, also after the commit
+  point. At HEAD the constructor is `PayloadLease::new` (`ring.rs:1360-1366`,
+  `crates/shm-transport/src/lease.rs:259-274`), which cannot fail, and the
+  `body_len` conversion (`ring.rs:1338-1339`) runs before the commit point, the
+  `consumed` compare-exchange at `:1349-1352`.
 - `ring.rs:1427-1438` — why path 1 is permanent: the next `try_receive` recomputes
   `sequence = consumed + 1` (`:1427-1429`), the same value, and its CAS expects
   `SLOT_PUBLISHED` but finds `SLOT_RECEIVER_HELD`, so it returns
@@ -43,9 +47,11 @@ returns an error while leaving shared state advanced.
   `usize::try_from` conversions (`:2058`, `:2059`), a `checked_add` overflow
   (`:617-619`), and `end > self.arena_bytes()` (`:620-622`), plus
   `LeaseSpan::new`'s null-pointer check at `crates/shm-transport/src/lease.rs:34-42`.
-- `crates/shm-transport/src/lease.rs:270-276` — `ReceiveLease::new`'s only
-  rejection: `span_count` outside `1..=2`, `spans[0]` none, `span_count == 1` with
-  `spans[1]` some, or `span_count == 2` with `spans[1]` none.
+- `crates/shm-transport/src/lease.rs:270-276` (source tree; not at HEAD) — the
+  lease constructor's only rejection: `span_count` outside `1..=2`, `spans[0]`
+  none, `span_count == 1` with `spans[1]` some, or `span_count == 2` with
+  `spans[1]` none. At HEAD `PayloadLease::new` (`lease.rs:259-274`) takes a
+  validated block, generation, `body_len`, and wire header and has no rejection.
 - `crates/shm-transport/src/descriptor.rs:252-334` `validate` — the constraints
   that decide reachability: `body_len > MAX_FRAME_BYTES` rejected (`:272-274`);
   `span_count` restricted to `1..=MAX_SPANS` where `MAX_SPANS = 2`
@@ -84,8 +90,8 @@ Paths 2 and 3, the unreleasable lease:
 1. Same claim, same successful validation.
 2. The consumer state block at `:1452-1454` commits: state `RECEIVER_LEASED`,
    `consumed` advanced, `active_leases` incremented.
-3. `body_len` conversion (`:1460`) or `ReceiveLease::new` (`:1462`) fails.
-4. No `ReceiveLease` exists, so nothing will ever call release for this sequence.
+3. `body_len` conversion (`:1460`) or the lease constructor (`:1462`) fails.
+4. No lease exists, so nothing will ever call release for this sequence.
 5. Consequence: `reclaim_completed` head-of-line blocks at this sequence forever, the
    arena bytes behind it are never reclaimed, and one lease slot is permanently
    consumed. Unlike path 1, later receives still succeed, so the loss is silent
@@ -113,8 +119,11 @@ The enabling state is ordinary: one published, valid frame. The fault is a force
 failure at a named internal point after the receive CAS has succeeded — fault class
 F3, which does not exist in this repository today. Two injection points are needed,
 one before the consumer state block (inside `lease_span`, to reach path 1) and one
-after it (at `ReceiveLease::new` or the `body_len` conversion, to reach paths 2 and
-3), because the two have different post-states and different oracles. Path 1 oracle:
+after it (at the lease constructor or the `body_len` conversion, to reach paths 2 and
+3), because the two have different post-states and different oracles. At HEAD
+neither post-commit injection point exists: no fallible step follows the
+`consumed` compare-exchange (`ring.rs:1349-1352`), so the paths 2 and 3 arm has
+nothing to inject into. Path 1 oracle:
 after the `Err`, assert `is_quarantined()` is true, or assert no slot is left in
 `RECEIVER_HELD` with `consumed` un-advanced — and then assert the stronger
 consequence, that a following `try_receive` on the same ring can still make
@@ -130,7 +139,7 @@ emit: `shm_receive_cas_won_then_validation_ran`.
 
 - Sources examined: `ring.rs:1395-1472` (`try_receive` in full), `:2057-2068`
   (`lease_span`), `crates/shm-transport/src/lease.rs:34-42` (`LeaseSpan::new`)
-  and `:262-276` (`ReceiveLease::new`),
+  and `:262-276` (the lease constructor; `PayloadLease::new` at HEAD, `:259-274`),
   `crates/shm-transport/src/descriptor.rs:252-334` (`validate` in full) and
   `:23` (`MAX_SPANS`), `crates/shm-transport/src/arena.rs:4`
   (`MAX_FRAME_BYTES`).
@@ -144,7 +153,7 @@ emit: `shm_receive_cas_won_then_validation_ran`.
   `LeaseSpan::new` rejects only a null base, and the base is
   `mapping.base.as_ptr().add(layout.arena + offset)` on a `NonNull` mapping with
   `offset` inside the arena.
-  *`ReceiveLease::new` is unreachable given `validate` plus how `try_receive`
+  *The lease constructor is unreachable given `validate` plus how `try_receive`
   builds its arguments.* `validate` constrains `span_count` to `1..=2`
   (`descriptor.rs:282-284` with `MAX_SPANS = 2`), and `try_receive` passes
   `[Some(first), second]` where `second` is `Some` exactly when
@@ -181,3 +190,25 @@ emit: `shm_receive_cas_won_then_validation_ran`.
   - line 36, `:1090` now `:1438`: `try_receive` quarantines that error through `quarantine_with` (`:1401`), so `is_quarantined()` becomes true rather than staying false.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+### Q: Does any fallible step follow the receive commit point at HEAD?
+
+- Sources examined: `crates/shm-transport/src/backend/ring.rs:1277-1293`
+  (`try_receive`), `:1295-1367` (`try_receive_inner`);
+  `crates/shm-transport/src/lease.rs:256-274` (`PayloadLease::new`);
+  `crates/shm-transport/src/backend/retained.rs:571-582` (`mark_live`).
+- Findings: no. The commit point is the `consumed` compare-exchange at
+  `ring.rs:1349-1352`. Everything fallible runs before it: `verified_published`
+  (`:1297`), the descriptor `validate` (`:1318-1320`), the live-block and
+  generation checks (`:1325-1337`), the `body_len` conversion (`:1338-1339`),
+  and the header copy and `check_wire_header` (`:1340-1346`). After it the path
+  sets local cursors (`:1353-1354`), calls `mark_live` (`:1355`), discards the
+  `signal_capacity` result (`:1359`), and returns `PayloadLease::new(..)`
+  (`:1360-1366`), which is infallible. The wrapper still quarantines on every
+  inner error (`:1283-1285`), so a fallible step added after the exchange would
+  quarantine rather than wedge. There is no slot state, no `active_leases`, and
+  no `lease_span`; the three failure paths this trail analyses are superseded.
+- Missing evidence: none; the analysis is a direct read.
+- Conclusion: needs human input - the record's `unreachable` check names
+  branches that do not exist, so it is either retired as superseded or restated
+  as `always(!X)` over "a fallible step follows the `consumed` exchange".

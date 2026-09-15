@@ -58,9 +58,10 @@ with `Underfill`; one that writes more fails earlier in
 `ReservationWriter::write` (`ring_transport.rs:611-619`, mapping the overflow to
 `WriteZero`). Either way `publish_direct` returns `Err`.
 
-`publish_one` then returns `Err` at `ring_transport.rs:564-566`, before
-`completion.store(COMPLETE)` at `:567`, before the publish hook, and before the
-`written` hook at `:574-576`. The boxed `written` closure is dropped unrun.
+`Publisher::try_publish` then returns `Err` at `ring_transport.rs:1263-1265`,
+before the terminal credit is parked at `:1266-1268`, before the publish hook at
+`:1269-1271`, and before the `written` hook at `:1272-1274`. The boxed `written`
+closure is dropped unrun.
 
 Meanwhile the settling side has long since finished. `settle`'s unary-response
 arm is `dispatch.rs:447-460`:
@@ -89,8 +90,13 @@ the queue (`dispatch.rs:351-363`). So `settle` returns `true`, `won` stays
    `true`. The request is now settled and forgotten.
 4. The writer runs the serializer. It writes `exact_len - 1` bytes, because the
    handler's length model and its writer disagree by one.
-5. `commit` returns `Underfill`. `publish_one` returns `Err`.
-6. Per Part 2b, the endpoint thread reports this as a clean peer close.
+5. `commit` returns `Underfill`. `Publisher::try_publish` returns `Err`, and
+   `run_endpoint` retires the generation with
+   `ReadClose::Corrupt("shared-memory publish failed")`
+   (`ring_transport.rs:884-892`).
+6. Per Part 2b, `read_loop` folds that cause into `ReadExit::Peer`
+   (`connection.rs:364-366`), so the connection engine treats it as a peer
+   close.
 7. The client sees the connection close with no terminal for the correlation, and
    per Part 2d a clean host close and a transport failure share one code.
 

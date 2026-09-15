@@ -2456,6 +2456,94 @@ struct RingBridge {
     thread: std::thread::JoinHandle<()>,
 }
 
+/// Test hooks the bridge thread runs at fixed points. Keying each hook by the bridge's wake
+/// eventfd keeps concurrent bridge tests in one process from taking each other's hook.
+#[cfg(test)]
+mod bridge_hooks {
+    use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+    use std::sync::Mutex;
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    static BEFORE_CAPACITY_ARM: Mutex<Option<(RawFd, Hook)>> = Mutex::new(None);
+
+    /// Runs `hook` once on the bridge whose wake eventfd is `wake`, immediately before that
+    /// bridge's next `arm_capacity_wait`.
+    pub(super) fn install_before_capacity_arm(
+        wake: &OwnedFd,
+        hook: impl FnOnce() + Send + 'static,
+    ) {
+        *super::lock_unpoisoned(&BEFORE_CAPACITY_ARM) = Some((wake.as_raw_fd(), Box::new(hook)));
+    }
+
+    pub(super) fn before_capacity_arm(wake: &OwnedFd) {
+        let hook = {
+            let mut slot = super::lock_unpoisoned(&BEFORE_CAPACITY_ARM);
+            match slot.as_ref() {
+                Some((key, _)) if *key == wake.as_raw_fd() => slot.take().map(|(_, hook)| hook),
+                _ => None,
+            }
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+struct LaneRound {
+    /// True when an occupied lane publishes a frame or reports `Publication::Expired`.
+    resolved: bool,
+    failed: bool,
+}
+
+fn attempt_pending_writes(
+    endpoint: &crate::ring_transport::RingClientEndpoint,
+    lanes: [&mut Option<RingWrite>; 2],
+) -> LaneRound {
+    let mut round = LaneRound {
+        resolved: false,
+        failed: false,
+    };
+    for lane in lanes {
+        let Some(write) = lane.as_ref() else {
+            continue;
+        };
+        let attempt = endpoint.try_send_bounded(write.header, &write.body, write.commit_by);
+        let outcome = match attempt {
+            Ok(TrySend::Published) => Ok(Publication::Published),
+            // An exhausted ring leaves the write queued while its commit deadline holds.
+            Ok(TrySend::Exhausted) if StdInstant::now() < write.commit_by => continue,
+            Ok(TrySend::Exhausted) => Err(SendFailure::Deadline),
+            Err(failure) => Err(failure),
+        };
+        let write = lane.take().expect("lane holds the attempted write");
+        // A commit deadline expiring before the frame deadline resolves only this write as
+        // `Publication::Expired`.
+        let result = match outcome {
+            Err(SendFailure::Deadline) if StdInstant::now() < write.deadline => {
+                Ok(Publication::Expired)
+            }
+            other => other,
+        };
+        if matches!(
+            result,
+            Ok(Publication::Expired) | Err(SendFailure::Deadline | SendFailure::Unreserved)
+        ) && let Some(state) = &write.publish
+        {
+            // Zero bytes were published; the state is restored before the outcome is
+            // observable so a concurrent stop classifies `NotSent`.
+            let _ = state.compare_exchange(WRITING, QUEUED, Ordering::AcqRel, Ordering::Acquire);
+        }
+        round.failed = result.is_err();
+        let _ = write.completed.send(result);
+        if round.failed {
+            return round;
+        }
+        round.resolved = true;
+    }
+    round
+}
+
 async fn start_ring_bridge(
     descriptor: serde_json::Value,
     descriptors: [OwnedFd; crate::setup_socket::RING_DESCRIPTOR_COUNT],
@@ -2517,7 +2605,6 @@ async fn start_ring_bridge(
             let mut pending_control: Option<RingWrite> = None;
             let mut pending_data: Option<RingWrite> = None;
             while !cancel.is_cancelled() {
-                let mut wrote = false;
                 let mut disconnected = false;
                 for (slot, rx) in [
                     (&mut pending_control, &control_write_rx),
@@ -2545,58 +2632,12 @@ async fn start_ring_bridge(
                 if disconnected {
                     break;
                 }
-                // Each lane makes one nonblocking attempt. An exhausted inventory leaves the
-                // frame pending and the loop parks on the capacity doorbell below; a frame whose
-                // commit deadline passed while it waited fails without a further attempt.
-                let mut failed = false;
-                for lane in [&mut pending_control, &mut pending_data] {
-                    let Some(write) = lane.as_ref() else {
-                        continue;
-                    };
-                    let attempt =
-                        endpoint.try_send_bounded(write.header, &write.body, write.commit_by);
-                    let outcome = match attempt {
-                        Ok(TrySend::Published) => Ok(Publication::Published),
-                        Ok(TrySend::Exhausted) if StdInstant::now() < write.commit_by => {
-                            continue;
-                        }
-                        Ok(TrySend::Exhausted) => Err(SendFailure::Deadline),
-                        Err(failure) => Err(failure),
-                    };
-                    let write = lane.take().expect("lane holds the attempted write");
-                    // An operation that expired before its connection-scoped frame
-                    // deadline fails alone; the bridge keeps serving other frames.
-                    let result = match outcome {
-                        Err(SendFailure::Deadline) if StdInstant::now() < write.deadline => {
-                            Ok(Publication::Expired)
-                        }
-                        other => other,
-                    };
-                    if matches!(
-                        result,
-                        Ok(Publication::Expired)
-                            | Err(SendFailure::Deadline | SendFailure::Unreserved)
-                    ) && let Some(state) = &write.publish
-                    {
-                        // Zero bytes were published; the state is restored before the
-                        // outcome is observable so a concurrent stop classifies `NotSent`.
-                        let _ = state.compare_exchange(
-                            WRITING,
-                            QUEUED,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        );
-                    }
-                    failed = result.is_err();
-                    let _ = write.completed.send(result);
-                    if failed {
-                        break;
-                    }
-                    wrote = true;
-                }
-                if failed {
+                let round =
+                    attempt_pending_writes(&endpoint, [&mut pending_control, &mut pending_data]);
+                if round.failed {
                     break;
                 }
+                let wrote = round.resolved;
                 // `endpoint.try_recv_with` advances the ring's consumed cursor,
                 // so refusing a charge would discard a valid response. Waiting
                 // is backpressure against `ring_reader_loop`, which releases
@@ -2664,16 +2705,31 @@ async fn start_ring_bridge(
                     Ok(true) => {}
                     Err(_) => break,
                 }
-                // A blocked write parks on the host's capacity doorbell, armed with the same
-                // recheck as the data wait so a return between the attempt and the park is not
-                // missed. An unblocked bridge never arms it and does not wake on every return.
-                let blocked: Vec<&RingWrite> =
-                    pending_control.iter().chain(pending_data.iter()).collect();
-                let capacity_armed = if blocked.is_empty() {
+                let capacity_armed = if pending_control.is_none() && pending_data.is_none() {
                     false
                 } else {
+                    #[cfg(test)]
+                    bridge_hooks::before_capacity_arm(&worker_wake);
                     match endpoint.to_host.arm_capacity_wait() {
-                        Ok(true) => true,
+                        Ok(true) => {
+                            // A return that landed before `parked` was set rang no doorbell.
+                            let recheck = attempt_pending_writes(
+                                &endpoint,
+                                [&mut pending_control, &mut pending_data],
+                            );
+                            if recheck.failed {
+                                break;
+                            }
+                            if recheck.resolved {
+                                if endpoint.to_host.complete_capacity_wait().is_err()
+                                    || endpoint.from_host.complete_data_wait().is_err()
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
+                            true
+                        }
                         Ok(false) => {
                             // Capacity moved between the attempt and the arm; retry at once.
                             let _ = endpoint.from_host.complete_data_wait();
@@ -2685,15 +2741,11 @@ async fn start_ring_bridge(
                 // The earliest pending commit deadline bounds the park: a host that never
                 // returns capacity cannot hold a frame past its deadline, and the next attempt
                 // classifies the expiry.
-                let park_until = blocked.iter().map(|write| write.commit_by).min();
-                drop(blocked);
-                let timeout = park_until.map(|until| {
-                    let remaining = until.saturating_duration_since(StdInstant::now());
-                    rustix::event::Timespec {
-                        tv_sec: remaining.as_secs().try_into().unwrap_or(i64::MAX),
-                        tv_nsec: remaining.subsec_nanos().into(),
-                    }
-                });
+                let park_until = pending_control
+                    .iter()
+                    .chain(pending_data.iter())
+                    .map(|write| write.commit_by)
+                    .min();
                 let mut fds = [
                     rustix::event::PollFd::new(&*worker_wake, rustix::event::PollFlags::IN),
                     rustix::event::PollFd::new(&data_ready, rustix::event::PollFlags::IN),
@@ -2702,6 +2754,15 @@ async fn start_ring_bridge(
                 ];
                 let watched = if capacity_armed { 4 } else { 3 };
                 let poll_ready = loop {
+                    // Recomputed per attempt: `poll` takes a relative timeout, so a retry after
+                    // `EINTR` with the original value would restart the wait.
+                    let timeout = park_until.map(|until| {
+                        let remaining = until.saturating_duration_since(StdInstant::now());
+                        rustix::event::Timespec {
+                            tv_sec: remaining.as_secs().try_into().unwrap_or(i64::MAX),
+                            tv_nsec: remaining.subsec_nanos().into(),
+                        }
+                    });
                     match rustix::event::poll(&mut fds[..watched], timeout.as_ref()) {
                         Ok(_) => break true,
                         Err(rustix::io::Errno::INTR) if !cancel.is_cancelled() => continue,
@@ -7728,5 +7789,66 @@ mod tests {
             drop(lease);
         }
         assert_eq!(consumed, ordinary);
+    }
+
+    /// A host consumption between the exhausted attempt and the capacity arm rings no doorbell,
+    /// because `parked` is still clear. Only a fresh attempt after the arm observes the freed
+    /// slot. No inbound data or writes occur and the 30 s deadline cannot publish the frame, so
+    /// publication within 2 s proves the recheck.
+    #[tokio::test]
+    async fn ring_bridge_capacity_returned_in_the_arm_window_is_not_a_lost_wake() {
+        let rings = shm_transport::backend::ring::DuplexRing::create(
+            &crate::ring_transport::ring_profile(),
+        )
+        .expect("duplex ring");
+        let ordinary = rings.second.geometry().ordinary_descriptors() as usize;
+        let cancel = CancellationToken::new();
+        let (write, _read, _thread, _host_end) = attached_bridge(&rings, cancel.clone()).await;
+        let far = StdInstant::now() + Duration::from_secs(30);
+        for corr in 1..=ordinary as u64 {
+            let (ring_write, rx) = bridge_write(FrameType::Request, 1, corr, vec![1], far);
+            write.try_send(ring_write).expect("queue");
+            tokio::time::timeout(Duration::from_secs(5), rx)
+                .await
+                .expect("published")
+                .expect("bridge alive")
+                .expect("published");
+        }
+
+        // The bridge reports that it is about to arm and blocks until the host has consumed.
+        let (window_tx, window_rx) = oneshot::channel::<()>();
+        let (consumed_tx, consumed_rx) = std::sync::mpsc::channel::<()>();
+        bridge_hooks::install_before_capacity_arm(&write.wake, move || {
+            let _ = window_tx.send(());
+            let _ = consumed_rx.recv();
+        });
+        let (blocked, blocked_rx) =
+            bridge_write(FrameType::Request, 1, ordinary as u64 + 1, vec![2], far);
+        write.try_send(blocked).expect("queue blocked");
+        tokio::time::timeout(Duration::from_secs(5), window_rx)
+            .await
+            .expect("the bridge reaches the capacity arm")
+            .expect("hook ran");
+        // One consumption frees one ordinary descriptor slot; the lease stays held so the
+        // consumption is the only capacity transition.
+        let consumed = rings
+            .second
+            .try_receive()
+            .expect("receive")
+            .expect("a published frame");
+        // A direct channel receive skips the poll, so drain `write.wake` before the post-arm recheck.
+        drain_eventfd(&write.wake);
+        consumed_tx.send(()).expect("bridge waits in the hook");
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), blocked_rx)
+                .await
+                .expect("a return in the arm window must not park the write to its deadline")
+                .expect("bridge alive"),
+            Ok(Publication::Published)
+        );
+        drop(consumed);
+        cancel.cancel();
+        signal_eventfd(&write.wake);
     }
 }

@@ -24,11 +24,11 @@ pub struct OutboundFrame {
 }
 ```
 
-The hook fires in `publish_one` at `ring_transport.rs:573-575`, after
-`completion.store(COMPLETE, Ordering::Release)` at `:567` and after the publish
-hook at `:568-572`. Crucially it fires only on the success path: the early
-return at `:563-565` (`if !matches!(result, Ok(Ok(())))`) skips it, dropping the
-boxed closure unrun.
+The hook fires in `Publisher::try_publish` at `ring_transport.rs:1272-1274`,
+after the terminal credit is parked against the block at `:1266-1268` and after
+the publish hook at `:1269-1271`. Crucially it fires only on the success path:
+the early return at `:1263-1265` (`if !matches!(result, Ok(Ok(())))`) skips it,
+dropping the boxed closure unrun.
 
 Every `written` construction in this sub-part, exhaustively:
 
@@ -74,8 +74,9 @@ identically zero.
 The gap is unbounded in wall-clock terms. `send_before`'s deadline
 (`gen.writer.admission_deadline()`, `frame_channel.rs:710-712`) bounds only the
 *admission* wait. Once queued, publication is the endpoint thread's business and
-is bounded per frame by `frame_deadline` (`config.rs:207`, default 30 s) inside
-`publish_one` at `ring_transport.rs:559`, but that deadline expiring produces a
+is bounded per frame by `frame_deadline` (`config.rs:207`, default 30 s), which
+`Publisher::push` stamps on each pending frame (`ring_transport.rs:1152`) and
+`pump` enforces (`:1168-1171`), but that deadline expiring produces a
 publish failure, not a signal back to the settling task, which by then has
 returned.
 

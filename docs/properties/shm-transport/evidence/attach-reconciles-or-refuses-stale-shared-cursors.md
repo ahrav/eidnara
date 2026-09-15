@@ -68,8 +68,8 @@ The scenario below was derived against the source tree this record was written f
 1. A receiver attaches and takes `K == max_leases` leases. Each lease sets its slot
    to `RECEIVER_LEASED` (`ring.rs:1452`), advances `consumed` (`:1453`), and increments
    `active_leases` (`:1454`).
-2. The receiver is killed. None of `ReceiveLease::Drop`
-   (`crates/shm-transport/src/lease.rs:366-372`) runs, so no release is recorded
+2. The receiver is killed. No lease drop (`PayloadLease::Drop` at HEAD,
+   `crates/shm-transport/src/lease.rs:364-370`) runs, so no release is recorded
    and `completion_sequence` stays 0 for all K slots.
 3. A fresh process attaches with the same grant. `validate_lifecycle` compares the
    eight geometry and identity fields, all of which still match, and attach succeeds.

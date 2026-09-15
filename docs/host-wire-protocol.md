@@ -569,7 +569,8 @@ activation settles, polling returns to the configured health interval.
 Handler detail strings are tainted and omitted.
 
 The response also carries a `shared_memory` diagnostics object for the
-payload-pool transport. Its quantities are distinct and snapshotted together:
+payload-pool transport. Its quantities are distinct and sampled independently,
+not as one atomic snapshot:
 `reclamation.completed` counts connection generations that ended (its
 `reclamation.meaning` field states this; the key is a wire name and does not
 mean released storage); `returns` reports outstanding return obligations,

@@ -16,10 +16,15 @@ panic, and the hook's own `Drop` behaves differently depending on which one does
   The comment at `:723-728` reasons about ordering - the fence must flip
   "atomically with" the commit - and says nothing about partial application.
 - **The hook is not panic-isolated.**
-  `crates/host-runtime/src/tcp_frame_channel.rs:393-394` calls `written(completed_at)`
-  with no `catch_unwind`, in contrast with `:349`, where the same function wraps
-  `direct.into_owned()` in `std::panic::catch_unwind`. So the surrounding
-  protection exists in that loop and does not cover this call.
+  `crates/host-runtime/src/tcp_frame_channel.rs:393-394` called
+  `written(completed_at)` with no `catch_unwind`, in contrast with `:349`, where
+  the same function wrapped
+  the direct serializer's conversion to owned bytes in `std::panic::catch_unwind`.
+  That file is absent from HEAD, and the ring publisher preserves the split:
+  `Publisher::try_publish` wraps `publish_direct` and `publish_owned` in
+  `catch_unwind` (`crates/host-runtime/src/ring_transport.rs:1259-1262`) and calls
+  `written` outside it (`:1272-1274`). So the surrounding protection exists in
+  that function and does not cover this call.
 - **An abort cannot split the hook.** The closure at `dispatch.rs:722-732` is a
   synchronous `FnOnce` with no await point, invoked synchronously at
   `tcp_frame_channel.rs:394`. Tokio cancellation lands only at await points, so

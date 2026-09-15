@@ -21,8 +21,10 @@ pub(crate) const EGRESS_RESERVED_BYTES: u64 = MAX_BODY_LEN as u64 + HEADER_LEN a
 /// Terminal obligations one connection may hold for admitted requests. Each admitted request
 /// takes one credit before dispatch and the credit follows the terminal's transport block until
 /// the block physically returns, so a connection can never owe more terminals than its reserved
-/// terminal inventory can carry while one block stays free for a pre-admission rejection.
-pub(crate) const TERMINAL_CREDITS_PER_CONNECTION: usize = 63;
+/// terminal inventory can carry while one block stays free for a pre-admission rejection. The
+/// value is the terminal class count of `ring_transport::ring_profile()` less one;
+/// `aggregate_overflow_is_rejected_before_activation` pins it against the geometry.
+pub const TERMINAL_CREDITS_PER_CONNECTION: usize = 63;
 
 /// Largest terminal frame the error serializer can produce: a 128-byte code and a 4,096-byte
 /// message, every byte a control character that escapes to six (`\u00XX`), plus the longest
@@ -629,7 +631,15 @@ mod tests {
             exact.max_connections as u64 * 64 * TERMINAL_FRAME_BYTES,
             "63 credits plus one pre-admission rejection slice per connection"
         );
-        assert_eq!(TERMINAL_CREDITS_PER_CONNECTION, 63);
+        assert_eq!(
+            TERMINAL_CREDITS_PER_CONNECTION as u32 + 1,
+            crate::ring_transport::ring_profile()
+                .geometry()
+                .class(shm_transport::pool::BlockClass::Terminal)
+                .count,
+            "one credit per reserved terminal block, less the block kept for a pre-admission \
+             rejection"
+        );
     }
 
     #[test]
