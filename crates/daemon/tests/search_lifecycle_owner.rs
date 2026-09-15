@@ -2887,6 +2887,70 @@ fn a_replacement_that_fits_reduced_limits_is_recorded_when_the_current_operation
     );
 }
 
+/// A request refused for its own sizing still installs the records it read: a hook the reload withdrew loses its grant.
+#[test]
+fn a_refused_request_still_installs_the_records_it_read() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("retry_attempts", 3)]),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let backfill = owner
+        .admission()
+        .gate()
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .unwrap();
+    let ControlState::Current(current) = control(home) else {
+        panic!("the rebuild reached Current");
+    };
+
+    // The reload withdraws the backfill hook and still bounds the family; the request's allowance of four exceeds what three retry attempts afford.
+    let without_backfill: Vec<ProjectionHook> = ProjectionHook::ALL
+        .iter()
+        .copied()
+        .filter(|hook| *hook != ProjectionHook::EmbeddingBackfill)
+        .collect();
+    write_records(
+        home,
+        &manifest_json_with(&identity, &without_backfill, &[("retry_attempts", 3)]),
+        &campaign_json(&identity),
+    );
+    let mut oversized = rebuild(home);
+    oversized.allowance = 4;
+    oversized.selected_generation = current.staged_seed_digest.clone().unwrap();
+    oversized.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    oversized.attempt_id = "rebuild-again".to_owned();
+    let outcome = owner.request(&oversized, now(), &slice_budget());
+    assert!(
+        matches!(outcome, Err(BuildError::Invalid(_))),
+        "{outcome:?}"
+    );
+    assert!(
+        backfill.invalidated.is_cancelled(),
+        "the withdrawn hook's grant is cancelled by the records the request read"
+    );
+    assert!(
+        matches!(control(home), ControlState::Current(done) if done.attempt_id == current.attempt_id)
+    );
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

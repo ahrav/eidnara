@@ -828,38 +828,7 @@ impl SearchLifecycleOwner {
                 "manifest limits cannot bound the request",
             ));
         }
-        // The operation already recorded is bounded as its next slice would bound it; a manifest that no longer bounds it closes the gate now rather than at that slice. The request itself is still judged below, since a replacement that fits the reduced limits may replace what no longer does.
-        if let ControlState::Intent(current) | ControlState::Current(current) =
-            ProjectionLifecycle::read_at(&self.home)
-            && replacement_spec(
-                inputs.manifest(),
-                identity.clone(),
-                current.transition,
-                current.episodes.allowance,
-                &current.consumer.generation_id,
-            )
-            .is_err()
-        {
-            let _ = self.admission.refresh(None);
-        }
-        // The replacement bounds depend on this request's allowance and generation, so their refusal is the request's alone and leaves admission as it is.
-        replacement_spec(
-            inputs.manifest(),
-            identity.clone(),
-            request.transition,
-            request.allowance,
-            &request.consumer.generation_id,
-        )
-        .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
-        let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
-        let bound = limit(inputs.manifest(), request.transition.duration_limit())
-            .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
-        if duration > bound {
-            return Err(BuildError::Invalid(
-                "the request's deadline lies past its transition's bound",
-            ));
-        }
-        // The gate judges the request on the records just read, not on the evidence the last slice installed or, before the first slice, on its initial closed state.
+        // The records just read are installed before the request's own sizing is judged, so a refused request still leaves the gate on the current records rather than on the evidence the last slice installed or, before the first slice, on its initial closed state; a reload that changed them cancels the earlier grants here.
         let selection = match &*managed {
             Managed::Selection(selection) => Some(&**selection),
             _ => None,
@@ -869,6 +838,43 @@ impl SearchLifecycleOwner {
                 Closed::ShutDown => "the owner is shut down",
                 _ => "admission is closed",
             }));
+        }
+        // Whether the manifest still bounds the operation already recorded, as its next slice would check. A replacement that fits the reduced limits may replace what no longer does; a request that does not fit either leaves the gate closed, as that slice would.
+        let current_fits = match ProjectionLifecycle::read_at(&self.home) {
+            ControlState::Intent(current) | ControlState::Current(current) => replacement_spec(
+                inputs.manifest(),
+                identity.clone(),
+                current.transition,
+                current.episodes.allowance,
+                &current.consumer.generation_id,
+            )
+            .is_ok(),
+            _ => true,
+        };
+        // The replacement bounds depend on this request's allowance and generation, so their refusal is the request's alone.
+        if replacement_spec(
+            inputs.manifest(),
+            identity.clone(),
+            request.transition,
+            request.allowance,
+            &request.consumer.generation_id,
+        )
+        .is_err()
+        {
+            if !current_fits {
+                let _ = self.admission.refresh(None);
+            }
+            return Err(BuildError::Invalid(
+                "manifest limits cannot bound the request",
+            ));
+        }
+        let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
+        let bound = limit(inputs.manifest(), request.transition.duration_limit())
+            .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+        if duration > bound {
+            return Err(BuildError::Invalid(
+                "the request's deadline lies past its transition's bound",
+            ));
         }
         match request.transition {
             Transition::Rebuilding => {
