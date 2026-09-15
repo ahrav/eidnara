@@ -115,8 +115,7 @@ impl InboundFrame {
         } else {
             lease.to_vec().map_err(|_| PrivateCopyError::Transport)?
         };
-        // Explicit release names the intent; drop would return the block too.
-        let _ = lease.release();
+        lease.release().map_err(|_| PrivateCopyError::Transport)?;
         if body.len() as u64 != u64::from(header.len) {
             return Err(PrivateCopyError::LengthMismatch);
         }
