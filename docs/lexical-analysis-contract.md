@@ -228,6 +228,45 @@ two fields are one limit applied at two stages, not two limits.
 `EvalBudget`. The caller checks the shared request budget at entry and never
 creates or renews one for analysis.
 
+## Retrieval
+
+`lexical::retrieve` runs compiled probes against the `lexical` table and returns
+`Contribution`s: an occurrence identifier, its class, the raw FTS rank under the
+probe that ranked it best, and that probe's ordinal. It reads no payload bytes.
+A contribution is a recall candidate for the caller's fusion or rendering step;
+it carries no authorization and its rank is comparable only within one request.
+
+Each probe runs as one `MATCH ?` bound through `ToSql`, joined to `occurrences`
+with tombstoned rows excluded, ordered by `rank` then `occurrence_id`, and
+limited to `scan_rows`. Zero probes issue no `MATCH` and return
+`Completion::Empty`. An occurrence hit by several probes keeps its lowest rank;
+among equal ranks it keeps the lowest ordinal. The comparator throughout is
+rank ascending, then occurrence identifier bytes ascending, so the result of a
+permuted or duplicated probe list is the same set of `(occurrence_id, rank)`
+pairs in the same order.
+
+Candidates are judged in that order through `eligibility::judge_occurrences`
+in batches of `batch_rows`. An ineligible candidate counts toward `judged` and
+`excluded` and takes no accepted slot, so eligible candidates behind it are
+still reached. Admission stops when `max_accepted` fills, the budget ends, or
+the kernel snapshot or incarnation changes between batches. The accepted set is
+re-judged once in one batch, and only candidates the kernel still admits are
+returned. A change of snapshot or incarnation at that step marks the result
+incomplete but does not discard the re-judged contributions.
+
+`RetrievalBounds` has four `NonZeroUsize` fields with no default: `max_probes`,
+`scan_rows`, `max_accepted`, and `batch_rows`. A probe list longer than
+`max_probes` is refused before any probe runs. `max_accepted` and `batch_rows`
+may not exceed `kernel::MAX_ELIGIBILITY_CANDIDATES`. Each probe reads one row
+past `scan_rows`, so `Completion::Incomplete(ScanBound)` means a probe matched
+more rows than the bound, not that it filled the bound exactly. A budget that is
+exhausted before any probe completes is `RetrievalRefusal::BudgetExhausted`; one
+that ends later yields `Completion::Incomplete(BudgetExhausted)` with no
+contributions. A statement that SQLite interrupts (`SQLITE_INTERRUPT`, raised by
+the progress handler `SqliteStore::with_conn_interruptible` installs) ends the
+request the same way regardless of the budget's own state. The host-side query
+limits that feed these bounds are not defined in this repository.
+
 ## Analysis identity
 
 `AnalysisIdentity::current()` is the SHA-256 of a length-delimited manifest:
