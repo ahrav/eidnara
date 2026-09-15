@@ -10,7 +10,7 @@ blocks #546, and each names the task that owns its resolution.
 | 2 | The native and direct-host real-process suites skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and Node (`node_detachment_unavailable`). | Recorded as an explicit unsupported capability in `real-process-current-layout-witness`; a probe copy of `runtime.ts` with the transfer gate removed passed locally, which is diagnostic only, not evidence. |
 | 3 | Miri proves same-shape access and ownership within one process; hostile cross-process writers are unprovable there. | Accepted limitation; the two-process job supplies the process boundary without Miri. |
 | 4 | The Valgrind job cannot run child-process witnesses. | Resolved by the separate `two-process` job with named witnesses. |
-| 5 | The producer scans every published block's completion cell before each reservation. | Accepted: bounded by 187 cells; the specification defers scan optimization until measured. |
+| 5 | Before each reservation the producer reclaims only the completion cells flagged in the return summary; the full scan of every published block's cell is `Ring::probe`, run on demand rather than per reservation. | Accepted: a held lease costs nothing per reservation; the probe scan is bounded by 187 cells. |
 | 6 | `reclamation.completed` in host diagnostics still counts generation ends. | #548 (`reclamation-diagnostics-meaning`). |
 | 7 | Terminal credit, encoding reserve, and 63+1 reconciliation are unimplemented. | #548. |
 | 8 | Capacity model outputs are recorded but the trace inputs are invented. | Accepted: labeled uncalibrated; no performance claim is made. |

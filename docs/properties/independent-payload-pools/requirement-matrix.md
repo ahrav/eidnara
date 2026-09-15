@@ -21,7 +21,7 @@ column as each task lands. Status values: `landed` (every named record is
 | R12 | `capacity-model-conservation` | - | landed |
 | R13 | `single-replacement-surface` | last task reruns | landed at this revision |
 | KTD1 | `class-allocation-conservation`, `direct-serialization-commit-boundary` | #548 | partial |
-| KTD2 | `descriptor-private-snapshot`, `payload-identity-authorizes-reuse`, `validated-setup-geometry` | - | landed |
+| KTD2 | `descriptor-private-snapshot`, `payload-identity-authorizes-reuse`, `validated-setup-geometry` | `descriptor-private-snapshot` handoff (unsafe-review, invariant-test-review) | partial |
 | KTD3 | `completion-cell-final-owner-once`, `worker-drop-forbidden-operations`, `capacity-wake-progress`, `wake-failure-preserves-published-ownership` | - | landed |
 | KTD4 | `owned-lease-thread-boundary`, `shared-copy-source-access`, `private-decode-input-stability`, `request-conversion-completion-ownership` | #548 | partial |
 | KTD5 | `retained-mapping-lifetime`, `partial-setup-reclaims-only-unexposed-resources` | #548 | partial |
