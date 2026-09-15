@@ -2982,9 +2982,12 @@ fn a_lowered_duration_bound_blocks_an_active_record() {
     records(home);
     let owner = owner(home, &corpus.kernel);
     let _ = owner.run_slice(&slice_budget());
-    // Recorded with a minute's deadline under a generous bound; the reload allows one second.
+    // Recorded with a minute's deadline under a generous bound, from one clock reading so the charged duration is exactly a minute; the reload allows one second.
+    let recorded_at = now();
+    let mut request = rebuild(home);
+    request.deadline = recorded_at + 60_000;
     owner
-        .request(&rebuild(home), now(), &slice_budget())
+        .request(&request, recorded_at, &slice_budget())
         .unwrap();
     let identity = identity(&kernel_incarnation_id(home));
     write_records(
