@@ -31,6 +31,9 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | --- | --- | --- | --- |
 | `state_follows_the_documented_precedence` | `crates/retrieval/tests/claims.rs` | the full state table with precedence, written by hand, including a successor recorded without invalidation and every Hidden-over-Stale conflict pair | unaudited |
 | `causal_class_changes_no_state` | same | Unknown neutrality across every state-relevant fact combination | unaudited |
+| `a_candidate_from_another_batch_reads_no_facts` | same | `ClaimCandidateBatch::claim` returns `None` for a candidate whose index is out of range or names another object | unaudited |
+| `live_rows::an_association_whose_target_disagrees_with_its_key_or_row_is_refused` | same | `CorruptRow` when the association target, its key, or the occurrence tuple name different objects | unaudited |
+| `live_rows::a_projection_from_another_kernel_incarnation_is_refused_before_any_read` | same | `NoIdentity` and `ForeignKernel` before the row bound is checked | unaudited |
 | `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees` | `crates/daemon/tests/claim_sources.rs` | lagging rows classify Superseded, Retracted, Hidden from canonical facts against an independent oracle; catch-up tombstones; quarantine stays live and Hidden; the classified map is equal before and after a causality record on the successor; a fresh rebuild classifies identically | unaudited |
 
 ## Adjacent kernel checks the records rely on

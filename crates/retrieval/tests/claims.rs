@@ -8,7 +8,9 @@ use kernel::{
     ObjectRow, Outcome, Sensitivity, ServedFacts, ServedStanding, SourceClass, SurfaceVisibility,
     TaintClass, UnknownReason, VisibilityRow,
 };
-use retrieval::claims::{CandidateState, ClaimCandidateRow, classify};
+use retrieval::claims::{
+    CandidateState, ClaimCandidate, ClaimCandidateBatch, ClaimCandidateRow, classify,
+};
 
 fn occurrence(revision: i64) -> ClaimCandidateRow {
     ClaimCandidateRow {
@@ -308,6 +310,39 @@ fn state_follows_the_documented_precedence() {
 /// Unknown neutrality: for every state, the class is the only field that
 /// differs between an otherwise identical genuine and unknown claim.
 #[test]
+fn a_candidate_from_another_batch_reads_no_facts() {
+    let mut other = Facts::current().build();
+    other.object.object_id = "decision-object-2".to_string();
+    let batch = ClaimCandidateBatch {
+        known_as_of: 7,
+        claims: vec![other],
+        candidates: Vec::new(),
+    };
+    let mut foreign = ClaimCandidate {
+        row: occurrence(1),
+        state: CandidateState::Current,
+        claim: Some(0),
+    };
+    // In range, but the facts at that index belong to another object.
+    assert_eq!(batch.claim(&foreign), None);
+    foreign.claim = Some(1);
+    assert_eq!(
+        batch.claim(&foreign),
+        None,
+        "an out-of-range index reads no facts"
+    );
+    let own = ClaimCandidate {
+        row: ClaimCandidateRow {
+            object_id: "decision-object-2".to_string(),
+            ..occurrence(1)
+        },
+        state: CandidateState::Current,
+        claim: Some(0),
+    };
+    assert_eq!(batch.claim(&own), Some(&batch.claims[0]));
+}
+
+#[test]
 fn causal_class_changes_no_state() {
     for served_visibility in [SurfaceVisibility::Labeled, SurfaceVisibility::Hidden] {
         for disposition in [
@@ -356,9 +391,32 @@ fn causal_class_changes_no_state() {
 mod live_rows {
     use std::num::NonZeroUsize;
 
-    use retrieval::ProjectionError;
-    use retrieval::claims::{ClaimCandidateBounds, classify_live_claims, live_claim_candidates};
+    use kernel::source_identity::{Occurrence, OccurrenceClass, encode};
+    use retrieval::claims::{
+        ClaimCandidateBounds, ClaimCandidateError, classify_live_claims, live_claim_candidates,
+    };
+    use retrieval::{ProjectionError, ProjectionIdentity, install_identity};
+    use rusqlite::params;
     use storage::{Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite};
+
+    const KERNEL: &str = "kernel-incarnation-a";
+
+    fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
+        ProjectionIdentity {
+            schema_version: retrieval::SCHEMA_VERSION,
+            kernel_incarnation_id: kernel_incarnation_id.to_string(),
+            projection_policy_version: "policy".to_string(),
+            identity_contract_version: "search-projection-identity-v3".to_string(),
+            limit_manifest_protocol_version: "limits.v1".to_string(),
+            embedding_model: "model".to_string(),
+            tokenizer_fingerprint: "fingerprint".to_string(),
+            analysis_identity: retrieval::lexical::AnalysisIdentity::current()
+                .as_str()
+                .to_string(),
+            vector_dimension: 8,
+            generation_epoch: 1,
+        }
+    }
 
     fn open(dir: &std::path::Path) -> SqliteStore {
         open_sqlite(
@@ -379,30 +437,50 @@ mod live_rows {
         .unwrap()
     }
 
-    /// `count` live claim rows with associations, plus one message row that must
-    /// never appear, written straight into the baseline schema.
     fn seed(store: &SqliteStore, count: usize) {
         store
             .with_conn_unfenced(|conn| {
-                conn.execute_batch(&format!(
+                conn.execute_batch(
                     "INSERT INTO payloads(payload_id,bytes,byte_length,created_at) VALUES ('p',x'00',1,0);
-                     WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<{count})
                      INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
                          payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
                          source_artifact_digest,created_commit_seq,persisted_at)
-                     SELECT printf('occ-%08d',n),x'00','l',
-                         CASE n%2 WHEN 0 THEN 'canonical_claims' ELSE 'promoted_memory' END,
-                         1,'decision_summary','p','d','normal','srcdesc:s','e','digest',1,0 FROM ids;
-                     WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<{count})
-                     INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
-                         extraction_version,created_commit_seq)
-                     SELECT 'id','canonical_object',CAST(printf('obj-%08d',n) AS BLOB),printf('occ-%08d',n),
-                         printf('obj-%08d',n),1,1 FROM ids;
-                     INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
-                         payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
-                         source_artifact_digest,created_commit_seq,persisted_at)
-                     VALUES ('msg',x'01','m','messages',1,'text','p','d','normal','srcdesc:m','e','digest',1,0);"
-                ))
+                     VALUES ('msg',x'01','m','messages',1,'text','p','d','normal','srcdesc:m','e','digest',1,0);",
+                )?;
+                for n in 1..=count {
+                    let (class, field, representation) = if n % 2 == 0 {
+                        (OccurrenceClass::CanonicalClaims, "object_id", "decision_summary")
+                    } else {
+                        (OccurrenceClass::PromotedMemory, "decision_object_id", "summary")
+                    };
+                    let object_id = format!("obj-{n:08}");
+                    let tuple = encode(
+                        &Occurrence {
+                            class: class.code(),
+                            identity: &[(field, object_id.as_str())],
+                            revision: "1",
+                            representation,
+                            span: None,
+                        },
+                        "",
+                    )
+                    .unwrap()
+                    .tuple;
+                    conn.execute(
+                        "INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
+                             payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
+                             source_artifact_digest,created_commit_seq,persisted_at)
+                         VALUES (?1,?2,'l',?3,1,?4,'p','d','normal','srcdesc:s','e','digest',1,0)",
+                        params![format!("occ-{n:08}"), tuple, class.code(), representation],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
+                             extraction_version,created_commit_seq)
+                         VALUES ('id','canonical_object',CAST(?1 AS BLOB),?2,?1,1,1)",
+                        params![object_id, format!("occ-{n:08}")],
+                    )?;
+                }
+                Ok(())
             })
             .unwrap();
     }
@@ -481,10 +559,102 @@ mod live_rows {
     }
 
     #[test]
+    fn an_association_whose_target_disagrees_with_its_key_or_row_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        seed(&store, 2);
+        // The key and the row still identify obj-1; the target names obj-2.
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE exact_associations SET target_id='obj-00000002' WHERE occurrence_id='occ-00000001'",
+                    [],
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(live_claim_candidates(conn, bound(8))))
+                .unwrap(),
+            Err(ProjectionError::CorruptRow)
+        ));
+        // Key and target agree on obj-2, but the row's tuple identifies obj-1.
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE exact_associations SET key=CAST('obj-00000002' AS BLOB)
+                     WHERE occurrence_id='occ-00000001'",
+                    [],
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(live_claim_candidates(conn, bound(8))))
+                .unwrap(),
+            Err(ProjectionError::CorruptRow)
+        ));
+    }
+
+    #[test]
+    fn a_projection_from_another_kernel_incarnation_is_refused_before_any_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        seed(&store, 2);
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        let bounds = ClaimCandidateBounds {
+            max_rows: bound(1),
+            facts: kernel::ClaimFactBounds {
+                max_claims: bound(1),
+                max_causal_payload_bytes: std::num::NonZeroU64::new(1 << 16).unwrap(),
+            },
+        };
+        // No identity: refused before the row bound, which two rows would also trip.
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, bounds)))
+                .unwrap(),
+            Err(ClaimCandidateError::NoIdentity)
+        ));
+        store
+            .with_conn_fenced(|conn| Ok(install_identity(conn, &identity(KERNEL), 1)))
+            .unwrap()
+            .unwrap();
+        let refused = store
+            .with_conn(|conn| {
+                Ok(classify_live_claims(
+                    conn,
+                    &kernel,
+                    "kernel-incarnation-b",
+                    bounds,
+                ))
+            })
+            .unwrap();
+        match refused {
+            Err(ClaimCandidateError::ForeignKernel {
+                kernel_incarnation_id,
+            }) => assert_eq!(kernel_incarnation_id, KERNEL),
+            other => panic!("expected ForeignKernel, got {other:?}"),
+        }
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, bounds)))
+                .unwrap(),
+            Err(ClaimCandidateError::Projection(
+                ProjectionError::TooManyRecords { count: 2 }
+            ))
+        ));
+    }
+
+    #[test]
     fn distinct_objects_past_the_facts_bound_are_refused_before_the_kernel_is_read() {
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
         seed(&store, 3);
+        store
+            .with_conn_fenced(|conn| Ok(install_identity(conn, &identity(KERNEL), 1)))
+            .unwrap()
+            .unwrap();
         let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
         // Renaming commit_log makes tip reads fail; TooManyClaims must win over Io.
         let raw = rusqlite::Connection::open(dir.path().join("kernel/kernel.sqlite")).unwrap();
@@ -499,7 +669,7 @@ mod live_rows {
             },
         };
         let refused = store
-            .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, bounds)))
+            .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, bounds)))
             .unwrap();
         assert!(matches!(
             refused,
@@ -516,7 +686,7 @@ mod live_rows {
         };
         assert!(matches!(
             store
-                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, at_bound)))
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, at_bound)))
                 .unwrap(),
             Err(retrieval::claims::ClaimCandidateError::Facts(
                 kernel::ClaimFactsError::Kernel(kernel::KernelError::Io)

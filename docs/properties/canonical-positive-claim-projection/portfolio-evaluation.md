@@ -75,6 +75,14 @@ dispositioned. Every code fix landed behind a test that failed first.
 | `kernel.tip()` ran before `max_claims` was enforced, so the bound test named a guarantee the code lacked | refinement | fixed: the bound is checked before any kernel read; the test proves it with a failing tip |
 | The catalog credited the daemon test with showing a causality record leaves a state unchanged, but the record was committed before the successor had any projection rows | gap | fixed: the test classifies after catch-up, records causality, classifies again, and asserts equality; the record wording follows the test |
 
+Codex review of the pushed branch added three findings:
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The live-claim query trusted the association's `target_id` alone, so an association whose key and occurrence tuple named claim A while its target named claim B classified A from B's facts; `exact::lookup::AssociationRow::decode` checks the same agreement | gap | fixed: the query also selects the key and the tuple, and refuses `CorruptRow` unless key, target, and the tuple's identity field name one object; `an_association_whose_target_disagrees_with_its_key_or_row_is_refused` pins both disagreements |
+| `classify_live_claims` read the kernel's tip and facts without comparing the projection identity's `kernel_incarnation_id` to the kernel it was given, unlike `coverage::observe` and the exact lookup, so a reused object id in another incarnation could classify from an unrelated history | gap | fixed: the caller names the kernel's incarnation as the sibling readers do; `NoIdentity` and `ForeignKernel` refuse before any row is read |
+| `ClaimCandidateBatch::claim` indexed `claims` unchecked, so a candidate from another batch read another object's facts or panicked from a method returning `Option` | gap | fixed: checked index and the facts must name the candidate's object; `a_candidate_from_another_batch_reads_no_facts` |
+
 ## Biases for a human
 
 - Every record is `test-only` because no production path calls the reader or
