@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/lease.rs:188`
 - docs/payload-pool-protocol.md section 10
 
-Witness status: partial - `crates/shm-transport/src/lease.rs:650` and `crates/shm-transport/src/lease.rs:756` under Miri prove same-shape access; cross-process hostile writers are not provable here (recorded limitation).
+Witness status: partial - `crates/shm-transport/src/lease.rs:631` and `crates/shm-transport/src/lease.rs:737` under Miri prove same-shape access; cross-process hostile writers are not provable here (recorded limitation).
 
 ## Failure scenario
 

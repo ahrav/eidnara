@@ -15,8 +15,8 @@ use std::{fmt, io};
 
 use crate::setup_socket::RING_DESCRIPTOR_COUNT;
 use crate::wire::{EnvelopeHeader, FrameType, decode_header};
-use shm_transport::backend::ring::PoolGrant;
 use shm_transport::backend::ring::{DuplexRing, ProducerError, ProducerReservation, Ring};
+use shm_transport::backend::ring::{HOST_TO_PEER_LANE, PEER_TO_HOST_LANE, PoolGrant};
 use shm_transport::pool::Inventory;
 use shm_transport::profile::{
     AdmissionController, HostLimits as ShmHostLimits, ResourceCharges, TargetProfile,
@@ -62,9 +62,9 @@ pub fn per_connection_limits() -> ShmHostLimits {
     }
 }
 
-/// Ceiling on committed transport bytes this process admits at once: every mapped byte of
-/// every pool plus its private ledgers. Sparse mappings make this a virtual commitment, not
-/// a residency claim.
+/// Maximum committed transport bytes admitted at once, including every pool's mapped bytes
+/// and private ledgers. Pools never return touched pages to the kernel, so the maximum bounds
+/// resident bytes as well as the mapping commitment.
 pub const MAX_RING_RESIDENT_BYTES: u64 = 1 << 30;
 
 /// Connections whose complete checked transport charge fits under
@@ -584,8 +584,14 @@ pub(crate) fn worker_descriptor(
 
 /// A stream doorbell reads end-of-file only after its peer end is closed, which is how a peer that exited or dropped its attachment appears to the host.
 fn peer_released_ring(rings: &DuplexRing) -> bool {
+    // A lease the peer keeps from the host-to-peer pool holds that pool's doorbell end open, so
+    // both directions must read end-of-file before the backing counts as released.
+    doorbell_at_eof(&rings.first) && doorbell_at_eof(&rings.second)
+}
+
+fn doorbell_at_eof(ring: &Ring) -> bool {
     use std::io::Read;
-    let Ok(doorbell) = rings.second.duplicate_data_ready() else {
+    let Ok(doorbell) = ring.duplicate_data_ready() else {
         return false;
     };
     let mut doorbell = std::os::unix::net::UnixStream::from(doorbell);
@@ -785,8 +791,8 @@ async fn run_endpoint(
             };
             // A blocked ticket parks on capacity readiness; an unblocked publisher never arms
             // it, so an idle owner does not wake on every peer return.
-            let capacity_armed = if publisher.has_pending() {
-                match rings.first.arm_capacity_wait() {
+            let capacity_armed = if let Some((inventory, bound)) = publisher.blocked_head() {
+                match rings.first.arm_capacity_wait(inventory, bound) {
                     Ok(armed) => armed,
                     Err(_) => {
                         fail(
@@ -966,8 +972,8 @@ async fn receive_one(
     let charge = loop {
         // A blocked ticket parks on capacity readiness during the budget wait too; otherwise a
         // peer return while handlers hold the budget would publish nothing until the deadline.
-        let capacity_armed = if publisher.has_pending() {
-            match rings.first.arm_capacity_wait() {
+        let capacity_armed = if let Some((inventory, bound)) = publisher.blocked_head() {
+            match rings.first.arm_capacity_wait(inventory, bound) {
                 Ok(true) => true,
                 Ok(false) => {
                     if publisher.pump(&rings.first).is_err() {
@@ -1057,6 +1063,9 @@ struct PendingFrame {
     frame: OutboundFrame,
     header: Option<EnvelopeHeader>,
     inventory: Inventory,
+    /// Body length the reservation is sized for; with `inventory`, the bound a capacity wait
+    /// re-checks before parking.
+    body_len: usize,
     /// Publication must complete before this instant or the generation retires.
     deadline: StdInstant,
 }
@@ -1111,6 +1120,14 @@ impl Publisher {
         !self.pending.is_empty()
     }
 
+    /// Inventory and bound of the head frame, which `pump` left pending only because its
+    /// reservation was exhausted; a capacity wait arms against this reservation.
+    fn blocked_head(&self) -> Option<(Inventory, usize)> {
+        self.pending
+            .front()
+            .map(|pending| (pending.inventory, pending.body_len))
+    }
+
     /// Whether another admitted frame may move from the queue into the owner's pending set.
     fn can_accept(&self) -> bool {
         self.pending.len() < self.capacity
@@ -1150,6 +1167,7 @@ impl Publisher {
             frame,
             header,
             inventory,
+            body_len,
             deadline: StdInstant::now() + self.frame_deadline,
         });
     }
@@ -1368,7 +1386,8 @@ impl RingClientEndpoint {
         let expected = ring_profile();
         if from_host_grant.geometry() != to_host_grant.geometry()
             || from_host_grant.geometry() != expected.geometry()
-            || from_host_grant == to_host_grant
+            || from_host_grant.lane() != HOST_TO_PEER_LANE
+            || to_host_grant.lane() != PEER_TO_HOST_LANE
         {
             return Err(RingClientError);
         }
@@ -1549,6 +1568,16 @@ mod tests {
         fn drop(&mut self) {
             self.used.fetch_sub(self.bytes, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn production_profile_affords_five_connections_under_the_byte_ceiling() {
+        let one = per_connection_limits();
+        assert_eq!(one.mapping_bytes, 2 * 95_825_920);
+        assert_eq!(one.ledger_bytes, 2 * 187 * 40);
+        assert_eq!(MAX_RING_RESIDENT_BYTES, 1 << 30);
+        assert_eq!(affordable_connections(), 5);
+        assert_eq!(crate::config::HostLimits::default().max_connections, 5);
     }
 
     #[test]
@@ -1814,6 +1843,43 @@ mod tests {
         assert!(decode_hex::<1>("+0").is_err());
         let non_ascii = std::panic::catch_unwind(|| decode_hex::<2>("0é0"));
         assert!(matches!(non_ascii, Ok(Err(_))));
+    }
+
+    #[test]
+    fn setup_rejects_grants_whose_lanes_do_not_match_their_direction() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            mut descriptor,
+            descriptors,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let fields = descriptor.as_object_mut().unwrap();
+        let host_to_peer = fields.remove("host_to_peer_grant").unwrap();
+        let peer_to_host = fields.remove("peer_to_host_grant").unwrap();
+        fields.insert("host_to_peer_grant".to_owned(), peer_to_host);
+        fields.insert("peer_to_host_grant".to_owned(), host_to_peer);
+        let [
+            from_mapping,
+            from_data,
+            from_capacity,
+            to_mapping,
+            to_data,
+            to_capacity,
+        ] = descriptors;
+        let swapped = [
+            to_mapping,
+            to_data,
+            to_capacity,
+            from_mapping,
+            from_data,
+            from_capacity,
+        ];
+        assert!(
+            RingClientEndpoint::attach_with_descriptors(&descriptor, swapped).is_err(),
+            "each grant attaches to its own mapping, but lane 1 is not host-to-peer"
+        );
     }
 
     #[test]
@@ -2458,6 +2524,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_lease_the_peer_keeps_after_closing_holds_the_backing_charge_in_quarantine() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            mut receiver,
+            io,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        let frame = OutboundFrame {
+            bytes: crate::wire::encode_frame(
+                FrameType::Response,
+                Flags::new(false, Priority::Interactive, false),
+                crate::wire::FrameId {
+                    channel: 7,
+                    epoch: 1,
+                    corr: 1,
+                },
+                &[9],
+            )
+            .expect("frame encodes"),
+            tail: Vec::new(),
+            direct: None,
+            charge: crate::wire::ByteCharge::none(),
+            written: None,
+            credit: None,
+        };
+        sender.send(frame).await.expect("frame admits");
+        let deadline = StdInstant::now() + Duration::from_secs(1);
+        let held = loop {
+            if let Some(lease) = peer.from_host.try_receive().expect("receive") {
+                break lease;
+            }
+            assert!(
+                peer.from_host.wait_for_data(deadline).expect("wait"),
+                "frame arrives"
+            );
+        };
+        let RingClientEndpoint { to_host, from_host } = peer;
+        drop(to_host);
+        drop(from_host);
+        assert!(matches!(receiver.recv().await, Err(ReadClose::Corrupt(_))));
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits after the peer closes")
+            .expect("endpoint task joins");
+        let accounting = transport.accounting().unwrap();
+        assert_eq!(held.to_vec().expect("copy"), [9]);
+        assert_ne!(
+            accounting.quarantined,
+            ResourceCharges::ZERO,
+            "the peer still maps the host-to-peer pool through its lease"
+        );
+        held.release().expect("release");
+    }
+
+    #[tokio::test]
     async fn peer_close_refunds_admission_although_the_backend_quarantines_the_ring() {
         let transport = RingTransport::for_ring_profile(per_connection_limits());
         let PreparedRing {
@@ -2748,7 +2877,7 @@ mod tests {
         let mut held = exhaust_smallest_class(&rings.first, &consumer);
         let lease = held.pop().unwrap();
         assert_eq!(
-            rings.first.arm_capacity_wait(),
+            rings.first.arm_capacity_wait(Inventory::Ordinary, 1),
             Ok(true),
             "the producer parks, so the return must ring the doorbell"
         );

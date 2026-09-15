@@ -3,10 +3,12 @@
 Uncalibrated sizing input. Not performance evidence. Inputs are invented, not
 measured traffic or a production SLO.
 
-Provenance: `simulate.py` in this directory is byte-identical to the settled
-plan model (`docs/plans/independent-payload-pools/simulate.py`, SHA-256
-`372e5be3660de581be96823d28ce0a7e13b39354ff64250a9d5a0528634d6768`); the copy
-here hashes to `372e5be3660de581be96823d28ce0a7e13b39354ff64250a9d5a0528634d6768`. Run with `Python 3.9.25` by
+Provenance: `simulate.py` in this directory hashes to SHA-256
+`372e5be3660de581be96823d28ce0a7e13b39354ff64250a9d5a0528634d6768`. It was
+copied from the plan model at `docs/plans/independent-payload-pools/simulate.py`,
+which is not tracked in this repository, so the byte-identity claim is
+unresolved: nothing in the tree can be compared against it. Run with `Python
+3.9.25` by
 `python3 docs/properties/independent-payload-pools/capacity-model/simulate.py`.
 
 The first output line was `Self-checks passed. Scenario results, not measured performance:`.

@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/retained.rs:344`
+- `crates/shm-transport/src/backend/retained.rs:342`
 - `crates/host-runtime/src/ring_transport.rs:262`
 - `crates/host-runtime/src/ring_transport.rs:378`
 
-Witness status: yes - `crates/host-runtime/src/ring_transport.rs:3253` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:262`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:3382` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:262`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
 
 ## Failure scenario
 

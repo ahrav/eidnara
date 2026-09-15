@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:980`
+- `crates/shm-transport/src/backend/ring.rs:1044`
 - `crates/shm-transport/src/profile.rs:416`
 - `crates/host-runtime/src/ring_transport.rs:279`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2213` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:3181` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:2999` bounds a stalled peer by the frame deadline.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2356` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:3310` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:3128` bounds a stalled peer by the frame deadline.
 
 ## Failure scenario
 

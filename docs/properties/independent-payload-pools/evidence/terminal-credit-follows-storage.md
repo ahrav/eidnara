@@ -12,8 +12,8 @@ Resolved against the tree of this catalog's introducing commit:
 
 - `crates/host-runtime/src/dispatch.rs:652`
 - `crates/host-runtime/src/connection.rs:98`
-- `crates/shm-transport/src/backend/ring.rs:1510`
-- `crates/host-runtime/src/ring_transport.rs:1267`
+- `crates/shm-transport/src/backend/ring.rs:1653`
+- `crates/host-runtime/src/ring_transport.rs:1285`
 
 Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2890` publishes a terminal carrying a credit and shows the credit outstanding until `Ring::take_reclaimed` observes the block's return; `crates/host-runtime/tests/dispatch.rs:1649` admits 63 unsettled requests, refuses the 64th with `server_busy`/`terminal capacity exhausted` and zero dispatch while pending slots remain, then dispatches again only after the cancelled terminal's block is consumed.
 

@@ -11,10 +11,10 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/lease.rs:346`
-- `crates/shm-transport/src/backend/retained.rs:588`
-- `crates/shm-transport/src/backend/retained.rs:354`
+- `crates/shm-transport/src/backend/retained.rs:584`
+- `crates/shm-transport/src/backend/retained.rs:352`
 
-Witness status: yes - `crates/shm-transport/src/lease.rs:563`, `crates/shm-transport/src/lease.rs:592`, and `crates/shm-transport/src/lease.rs:607` run under Miri.
+Witness status: yes - `crates/shm-transport/src/lease.rs:544`, `crates/shm-transport/src/lease.rs:573`, and `crates/shm-transport/src/lease.rs:588` run under Miri.
 
 ## Failure scenario
 

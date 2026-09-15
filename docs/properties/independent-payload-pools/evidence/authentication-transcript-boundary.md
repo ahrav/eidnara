@@ -11,7 +11,7 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `packages/shm-native/src/setup.rs:116`
-- `crates/shm-transport/src/backend/ring.rs:286`
+- `crates/shm-transport/src/backend/ring.rs:306`
 
 Witness status: yes - `crates/shm-transport/src/setup_auth.rs` vector tests and `crates/host-runtime/src/setup_socket.rs` activation tests; carried forward unchanged from the host-runtime setup-identity catalog.
 

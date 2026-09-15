@@ -42,8 +42,7 @@ compile_error!("shm-transport ring backend supports Linux only");
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::marker::PhantomData;
-use std::os::fd::RawFd;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -56,19 +55,40 @@ use crate::backend::retained::{
 };
 use crate::backend::sys;
 use crate::descriptor::{
-    DESCRIPTOR_SCHEMA_VERSION, DescriptorError, Incarnation, PayloadIdentity, PoolDescriptor,
-    WIRE_V3_HEADER_BYTES, WIRE_V3_VERSION, check_wire_header,
+    CompletionRecord, DESCRIPTOR_SCHEMA_VERSION, DescriptorError, Incarnation, PayloadIdentity,
+    PoolDescriptor, WIRE_V3_HEADER_BYTES, WIRE_V3_VERSION, check_wire_header,
 };
 use crate::lease::{LeaseError, LeaseSpan, PayloadLease, copy_in, copy_out};
 use crate::pool::{
     BlockClass, CLASS_COUNT, ClassSpec, GeometryError, Inventory, MAX_FRAME_BYTES, MappingLayout,
-    ORDINARY_CLASSES, PoolGeometry,
+    ORDINARY_CLASSES, PoolGeometry, RETURN_WORD_BITS,
 };
 use crate::profile::{BackingAdmission, TargetProfile};
+
+#[cfg(test)]
+pub(crate) mod reclaim_counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CELL_LOADS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn record_cell_load() {
+        CELL_LOADS.with(|loads| loads.set(loads.get() + 1));
+    }
+
+    pub(crate) fn cell_loads() -> u64 {
+        CELL_LOADS.with(Cell::get)
+    }
+}
 
 /// Encoded grant length: layout version, incarnation, lane, two descriptor depths, seven
 /// class specs, total bytes, and a zero reserved tail.
 pub const GRANT_BYTES: usize = 2 + 16 + 4 + 4 + 4 + CLASS_COUNT * (8 + 4) + 8 + 4;
+/// The grant stores 0 for the host-produced direction at wire offset 18.
+pub const HOST_TO_PEER_LANE: u32 = 0;
+/// The grant stores 1 for the peer-produced direction at wire offset 18.
+pub const PEER_TO_HOST_LANE: u32 = 1;
 
 /// Marks a wake epoch parked for one generation and clears the marker on drop, so every exit
 /// from a park loop, including `?` and `continue`, unparks.
@@ -457,10 +477,8 @@ enum BlockState {
     Published,
 }
 
-/// The producer's private ledger: which block is in which state, each block's current reuse
-/// generation, one free-index list per class, and the list of published blocks whose
-/// completion cells are scanned before allocation. Everything is preallocated at creation or
-/// attachment; allocation and return never grow the heap.
+/// The producer's private ledger. Everything is preallocated at creation or attachment;
+/// allocation and return never grow the heap.
 struct ProducerLedger {
     states: Vec<BlockState>,
     generations: Vec<u64>,
@@ -706,7 +724,15 @@ impl Ring {
     /// Whether no frame has been published or consumed. Setup paths attach only fresh pools;
     /// a pool with traffic already in flight was not created for this attachment.
     pub fn is_fresh(&self) -> bool {
-        self.published_local.get() == 0 && self.consumed_local.get() == 0
+        let published = self
+            .retained
+            .producer()
+            .map(|page| page.published.load(Ordering::Acquire));
+        let consumed = self
+            .retained
+            .consumer()
+            .map(|page| page.consumed.load(Ordering::Acquire));
+        matches!((published, consumed), (Ok(0), Ok(0)))
     }
 
     /// Grant a peer needs to attach to this pool.
@@ -728,11 +754,6 @@ impl Ring {
     /// Attaches the backing charge; see `Retained::retain_charge`.
     pub fn retain_charge(&self, charge: Arc<BackingAdmission>) {
         self.retained.retain_charge(charge);
-    }
-
-    /// Descriptor of the memfd, for sending over the setup channel.
-    pub fn raw_fd(&self) -> RawFd {
-        self.retained.mapping().fd().as_raw_fd()
     }
 
     /// Duplicate of the data doorbell, for registering with an event loop that owns its fds.
@@ -770,11 +791,6 @@ impl Ring {
             ],
             grant: self.grant,
         })
-    }
-
-    /// Mappings this pool holds; always one. Exists so callers charge admission uniformly.
-    pub const fn mapping_count(&self) -> usize {
-        1
     }
 
     /// Byte length of the memfd, equal to the grant's total.
@@ -880,27 +896,78 @@ impl Ring {
         Ok(published != consumed)
     }
 
-    /// Prepares to block on the capacity doorbell; the caller retries `try_reserve` first and
-    /// polls the returned readiness descriptor only when this returns `true`. Mirrors
-    /// `arm_data_wait` for the producer side so an owner that multiplexes several sources can
-    /// park without an uninterruptible wait.
-    pub fn arm_capacity_wait(&self) -> Result<bool, RingError> {
+    /// Returns `true` only when blocking on the capacity doorbell is correct. `false` means the
+    /// reservation may now succeed or a wake generation changed; retry `try_reserve_in`
+    /// instead of polling. Capacity is re-checked after `parked` is set because a return that
+    /// landed before arming bumped the generation while nobody was parked and sent no token.
+    pub fn arm_capacity_wait(&self, inventory: Inventory, bound: usize) -> Result<bool, RingError> {
         if self.is_quarantined() {
             return Err(RingError::Quarantined);
         }
         let wake = self.retained.capacity_wake().map_err(RingError::from)?;
         let (generation, guard) = ParkGuard::arm(wake);
+        if !self.armed_capacity_wait_holds(wake, generation, inventory, bound)? {
+            return Ok(false);
+        }
         self.capacity_ready
             .drain()
             .map_err(|error| self.quarantine_with(error))?;
-        if self.is_quarantined() {
-            return Err(RingError::Quarantined);
-        }
-        if wake.generation.load(Ordering::SeqCst) != generation {
+        if !self.armed_capacity_wait_holds(wake, generation, inventory, bound)? {
             return Ok(false);
         }
         std::mem::forget(guard);
         Ok(true)
+    }
+
+    fn armed_capacity_wait_holds(
+        &self,
+        wake: &WakeEpoch,
+        generation: u64,
+        inventory: Inventory,
+        bound: usize,
+    ) -> Result<bool, RingError> {
+        if self.is_quarantined() {
+            return Err(RingError::Quarantined);
+        }
+        let exhausted = self.reservation_exhausted(inventory, bound)?;
+        Ok(exhausted && wake.generation.load(Ordering::SeqCst) == generation)
+    }
+
+    /// Whether `try_reserve_in(inventory, bound, ..)` would return `Exhausted` right now.
+    /// Any other refusal (`ReservationOutstanding`, `Retired`, `RoleMismatch`,
+    /// `BoundExceedsClass`) is not cured by a wake, so it reports `false` and the caller's
+    /// retry surfaces the real error instead of parking.
+    fn reservation_exhausted(&self, inventory: Inventory, bound: usize) -> Result<bool, RingError> {
+        if self.reserved_block.get().is_some() {
+            return Ok(false);
+        }
+        {
+            let ledger = self.ledger.borrow();
+            if !ledger.allowed || ledger.retired {
+                return Ok(false);
+            }
+        }
+        self.reclaim_completions()?;
+        let geometry = *self.geometry();
+        let Some(class) = geometry.class_for(inventory, bound as u64) else {
+            return Ok(false);
+        };
+        let outstanding = self
+            .descriptors_outstanding()
+            .map_err(|error| self.quarantine_with(error))?;
+        if outstanding >= Self::descriptor_limit(&geometry, inventory) {
+            return Ok(true);
+        }
+        Ok(self.ledger.borrow().free[class.index()].is_empty())
+    }
+
+    /// Unconsumed descriptors `inventory` may hold at once: ordinary traffic leaves the
+    /// reserved slots alone; control and terminal traffic may use every slot.
+    fn descriptor_limit(geometry: &PoolGeometry, inventory: Inventory) -> u64 {
+        match inventory {
+            Inventory::Ordinary => u64::from(geometry.ordinary_descriptors()),
+            Inventory::Control | Inventory::Terminal => u64::from(geometry.descriptor_depth()),
+        }
     }
 
     /// Clears the parked marker set by `arm_capacity_wait` and drains the doorbell token.
@@ -972,10 +1039,7 @@ impl Ring {
         let outstanding = self
             .descriptors_outstanding()
             .map_err(|error| ProducerError::Ring(self.quarantine_with(error)))?;
-        let limit = match inventory {
-            Inventory::Ordinary => u64::from(geometry.ordinary_descriptors()),
-            Inventory::Control | Inventory::Terminal => u64::from(geometry.descriptor_depth()),
-        };
+        let limit = Self::descriptor_limit(&geometry, inventory);
         if outstanding >= limit {
             return Err(ProducerError::Exhausted);
         }
@@ -1001,6 +1065,18 @@ impl Ring {
             ledger.retired = true;
             return Err(ProducerError::Retired);
         };
+        // A completion generation >= `generation` can forge the next return.
+        let cell = self
+            .retained
+            .completion(block)
+            .map_err(|error| ProducerError::Ring(self.quarantine_with(error.into())))?;
+        if cell.generation.load(Ordering::Acquire) >= generation {
+            ledger.free[class.index()].push(block);
+            drop(ledger);
+            return Err(ProducerError::Ring(self.quarantine_with(
+                RingError::Descriptor(DescriptorError::FutureCompletion),
+            )));
+        }
         ledger.generations[block as usize] = generation;
         ledger.states[block as usize] = BlockState::Reserved;
         drop(ledger);
@@ -1085,43 +1161,108 @@ impl Ring {
         }
     }
 
-    /// Scans the completion cell of every published block and returns each block whose cell
-    /// holds its current generation to its class free list. A cell ahead of the generation the
-    /// producer issued names a payload this pool never published and quarantines the ring.
+    /// Returns every block the consumer has flagged in the return summary and whose completion
+    /// cell holds its current generation to its class free list. Each summary word is swapped
+    /// to zero with Acquire, which pairs with the final owner's Release on the word and so
+    /// covers its earlier store to the cell; only flagged blocks are visited, so a held lease
+    /// costs nothing per reservation. A cell ahead of the generation the producer issued, or
+    /// a flag on a block id past the geometry, names a payload this pool never published and
+    /// quarantines the ring.
     fn reclaim_completions(&self) -> Result<(), RingError> {
+        let mut ledger = self.ledger.borrow_mut();
+        let geometry = *self.geometry();
+        for word in 0..self.retained.layout().return_words {
+            let summary = self.retained.return_word(word).map_err(RingError::from)?;
+            let mut flagged = summary.swap(0, Ordering::Acquire);
+            while flagged != 0 {
+                let bit = flagged.trailing_zeros() as usize;
+                flagged &= flagged - 1;
+                let block = word * RETURN_WORD_BITS + bit;
+                if let Err(error) = self.reclaim_block(&mut ledger, &geometry, block as u64, true) {
+                    drop(ledger);
+                    return Err(self.quarantine_with(error));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Scans the completion cell of every published block, so a cell written without its
+    /// summary flag is still reclaimed or, when it is ahead of any issued generation, still
+    /// quarantines. `probe` uses this; the reservation path uses the summary alone.
+    fn reclaim_all_completions(&self) -> Result<(), RingError> {
         let mut ledger = self.ledger.borrow_mut();
         let geometry = *self.geometry();
         let mut index = 0;
         while index < ledger.outstanding.len() {
             let block = ledger.outstanding[index];
-            let generation = ledger.generations[block as usize];
-            let cell = self.retained.completion(block).map_err(RingError::from)?;
-            // Acquire pairs with the final owner's Release publication of the generation.
-            let completed = cell.generation.load(Ordering::Acquire);
-            if completed > generation {
+            let before = ledger.outstanding.len();
+            if let Err(error) = self.reclaim_block(&mut ledger, &geometry, u64::from(block), false)
+            {
                 drop(ledger);
-                return Err(
-                    self.quarantine_with(RingError::Descriptor(DescriptorError::FutureCompletion))
-                );
+                return Err(self.quarantine_with(error));
             }
-            if completed == generation {
-                let class = geometry
-                    .placement(block)
-                    .ok_or(RingError::InvalidLayout)?
-                    .class;
-                ledger.outstanding.swap_remove(index);
-                ledger.states[block as usize] = BlockState::Free;
-                #[cfg(test)]
-                crate::lease::observers::free_list_mutation();
-                ledger.free[class.index()].push(block);
-                if ledger.reclaimed.len() < ledger.reclaimed.capacity() {
-                    ledger.reclaimed.push(block);
-                }
-                continue;
+            // A freed block was swap-removed into `index`; anything else advances.
+            if ledger.outstanding.len() == before {
+                index += 1;
             }
-            index += 1;
         }
         Ok(())
+    }
+
+    /// Checks one completion against the ledger and frees the block when the cell holds the
+    /// generation the producer issued for a published block. A completion equal to the
+    /// generation of a block that is not published is a duplicate flag for a return already
+    /// reclaimed and frees nothing; a stale completion frees nothing; a zero cell reached by
+    /// the full scan is a block never returned. Every other outcome is a protocol error for
+    /// the caller to quarantine on, including a zero cell behind a summary flag, which no
+    /// return can produce because the cell is written before the flag.
+    fn reclaim_block(
+        &self,
+        ledger: &mut ProducerLedger,
+        geometry: &PoolGeometry,
+        block: u64,
+        flagged: bool,
+    ) -> Result<(), RingError> {
+        let id = usize::try_from(block)
+            .ok()
+            .filter(|id| *id < ledger.generations.len())
+            .ok_or(RingError::Descriptor(DescriptorError::InvalidBlock))?;
+        let generation = ledger.generations[id];
+        let cell = self
+            .retained
+            .completion(block as u32)
+            .map_err(RingError::from)?;
+        #[cfg(test)]
+        reclaim_counters::record_cell_load();
+        // Acquire pairs with the final owner's Release publication of the generation.
+        let completed = cell.generation.load(Ordering::Acquire);
+        if completed == 0 && !flagged {
+            return Ok(());
+        }
+        match CompletionRecord::from_untrusted(block, completed)
+            .validate(geometry, Some(generation))
+        {
+            Ok(freed) if ledger.states[id] == BlockState::Published => {
+                let class = geometry
+                    .placement(freed)
+                    .ok_or(RingError::InvalidLayout)?
+                    .class;
+                if let Some(position) = ledger.outstanding.iter().position(|held| *held == freed) {
+                    ledger.outstanding.swap_remove(position);
+                }
+                ledger.states[id] = BlockState::Free;
+                #[cfg(test)]
+                crate::lease::observers::free_list_mutation();
+                ledger.free[class.index()].push(freed);
+                if ledger.reclaimed.len() < ledger.reclaimed.capacity() {
+                    ledger.reclaimed.push(freed);
+                }
+                Ok(())
+            }
+            Ok(_) | Err(DescriptorError::StaleCompletion) => Ok(()),
+            Err(error) => Err(RingError::Descriptor(error)),
+        }
     }
 
     /// `published - consumed`, with the peer-writable `consumed` checked for monotonicity and
@@ -1353,10 +1494,10 @@ impl Ring {
         self.consumed_local.set(sequence);
         self.consumer.set(true);
         self.retained.mark_live(block, generation);
-        // Consumption alone frees a descriptor slot, so the producer is woken even though the
-        // payload stays held. A failed wake latches on the backing; the consumption stands and
-        // the frame is still delivered.
-        let _ = self.retained.signal_capacity();
+        // A failed wake is a doorbell failure and quarantines the handle.
+        if self.retained.signal_capacity().is_err() {
+            self.enter_quarantine();
+        }
         Ok(Some(PayloadLease::new(
             Arc::clone(&self.retained),
             block,
@@ -1394,9 +1535,11 @@ impl Ring {
     /// as published so nothing looks reusable.
     pub fn inventory(&self) -> PoolInventory {
         let geometry = *self.geometry();
-        if self.ledger.borrow().allowed && !self.is_quarantined() {
+        if self.producer.get() && !self.is_quarantined() {
             // Returns since the last reservation are folded in so the counts reflect what the
             // next reservation would see; a failure here quarantines, which the counts show.
+            // Only the producing handle owns the completion stream; a consumer sample must
+            // leave the summary flags for it.
             let _ = self.reclaim_completions();
         }
         let ledger = self.ledger.borrow();
@@ -1460,9 +1603,9 @@ impl Ring {
         if !consistent {
             return Err(self.quarantine_with(RingError::InvalidSharedState));
         }
-        // Completion cells ahead of any issued generation are caught here too.
+        // Completion cells ahead of any issued generation are caught here too, flagged or not.
         if self.producer.get() {
-            self.reclaim_completions()?;
+            self.reclaim_all_completions()?;
         }
         Ok(())
     }
@@ -1503,7 +1646,7 @@ impl Ring {
         self.ledger.borrow().retired
     }
 
-    /// Scans completion cells now and hands every block returned since the previous call to
+    /// Drains the return summary now and hands every block returned since the previous call to
     /// `settle`, in return order. A caller that ties a credit or record to a published block
     /// releases it here, at the physical return, not when a callback finishes. `try_reserve_in`
     /// removes a returned block it reuses, so `settle` never sees a block the peer holds again.
@@ -1766,8 +1909,8 @@ impl DuplexRing {
     /// Creates both rings from the same profile.
     pub fn create(profile: &TargetProfile) -> Result<Self, RingError> {
         Ok(Self {
-            first: Ring::create(profile, 0)?,
-            second: Ring::create(profile, 1)?,
+            first: Ring::create(profile, HOST_TO_PEER_LANE)?,
+            second: Ring::create(profile, PEER_TO_HOST_LANE)?,
         })
     }
 
@@ -2077,14 +2220,14 @@ mod miri {
 
 #[cfg(test)]
 mod tests {
-    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::os::fd::{AsFd, AsRawFd, OwnedFd};
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
     use crate::descriptor::{
         DescriptorError, HardwareProfileId, SETUP_MAPPING_COUNT, TransportDescriptor,
     };
-    use crate::lease::PayloadLease;
+    use crate::lease::{LeaseError, PayloadLease};
     use crate::pool::{BlockClass, ClassSpec, Inventory, PoolGeometry};
     use crate::profile::{ProfileConfig, TargetProfile, WorkerTopology};
 
@@ -2471,6 +2614,23 @@ mod tests {
         );
     }
 
+    /// Writes `cell` and sets its summary flag the way `Retained::complete` does, without a
+    /// lease, so a test can forge the completion of a block it never received.
+    fn forge_flagged_completion(ring: &Ring, block: u32, generation: u64) {
+        ring.retained()
+            .completion(block)
+            .unwrap()
+            .generation
+            .store(generation, Ordering::Release);
+        ring.retained()
+            .return_word(block as usize / super::RETURN_WORD_BITS)
+            .unwrap()
+            .fetch_or(
+                1 << (block as usize % super::RETURN_WORD_BITS),
+                Ordering::Release,
+            );
+    }
+
     #[test]
     fn stale_returns_free_nothing_and_future_completions_quarantine() {
         let geometry = tiny_geometry();
@@ -2480,8 +2640,7 @@ mod tests {
         assert_eq!(publish(&producer, b"second"), block, "the block was reused");
         let second = receive(&consumer);
         // A late return of the first generation lands in the same cell and is ignored.
-        let cell = consumer.retained().completion(block).unwrap();
-        cell.generation.fetch_max(1, Ordering::Release);
+        forge_flagged_completion(&consumer, block, 1);
         assert!(matches!(
             producer.try_reserve(4000, wire_v3_header(4000).unwrap()).map(|r| r.block()),
             Ok(other) if other != block
@@ -2489,7 +2648,7 @@ mod tests {
         assert_eq!(producer.inventory().classes[0].published, 1);
         assert_eq!(second.to_vec().unwrap(), b"second");
         // A completion ahead of anything issued is a protocol error.
-        cell.generation.store(99, Ordering::Release);
+        forge_flagged_completion(&consumer, block, 99);
         assert!(matches!(
             producer.try_reserve(1, wire_v3_header(1).unwrap()),
             Err(ProducerError::Ring(RingError::Descriptor(
@@ -2497,6 +2656,52 @@ mod tests {
             )))
         ));
         assert!(producer.is_quarantined());
+    }
+
+    #[test]
+    fn unflagged_future_completions_are_caught_at_reuse_and_by_probe() {
+        // On a free block the forged cell is seen when the block is next reserved.
+        let geometry = tiny_geometry();
+        let (producer, consumer) = pair(geometry);
+        let first = geometry.first_block(BlockClass::Ordinary(0));
+        consumer
+            .retained()
+            .completion(first)
+            .unwrap()
+            .generation
+            .store(5, Ordering::Release);
+        assert!(matches!(
+            producer.try_reserve(1, wire_v3_header(1).unwrap()),
+            Err(ProducerError::Ring(RingError::Descriptor(
+                DescriptorError::FutureCompletion
+            )))
+        ));
+        assert!(producer.is_quarantined());
+
+        // On a published block the reservation path never visits the cell; `probe` does.
+        let (producer, consumer) = pair(geometry);
+        let block = publish(&producer, b"held");
+        let held = receive(&consumer);
+        producer
+            .probe()
+            .expect("a held block whose cell was never written is not a completion");
+        consumer
+            .retained()
+            .completion(block)
+            .unwrap()
+            .generation
+            .store(99, Ordering::Release);
+        producer
+            .try_reserve(1, wire_v3_header(1).unwrap())
+            .unwrap()
+            .abort();
+        assert!(!producer.is_quarantined());
+        assert!(matches!(
+            producer.probe(),
+            Err(RingError::Descriptor(DescriptorError::FutureCompletion))
+        ));
+        assert!(producer.is_quarantined());
+        assert_eq!(held.to_vec().unwrap(), b"held");
     }
 
     #[test]
@@ -2635,6 +2840,188 @@ mod tests {
         reservation.abort();
         consumer.join().unwrap();
         drop(held);
+    }
+
+    #[test]
+    fn arm_capacity_wait_refuses_to_park_over_a_return_that_landed_before_arming() {
+        let geometry = tiny_geometry();
+        let (producer, consumer) = pair(geometry);
+        let count = geometry.class(BlockClass::Ordinary(0)).count as usize;
+        let mut held = Vec::new();
+        for _ in 0..count {
+            publish(&producer, &[7u8; 100]);
+            held.push(receive(&consumer));
+        }
+        assert!(matches!(
+            producer.try_reserve(100, wire_v3_header(100).unwrap()),
+            Err(ProducerError::Exhausted)
+        ));
+        // The return lands before arming: generation bumps, `parked` is zero, no token.
+        held.pop().unwrap().release().unwrap();
+        assert_eq!(
+            producer.arm_capacity_wait(Inventory::Ordinary, 100),
+            Ok(false),
+            "capacity is already there; parking would sleep until an unrelated return"
+        );
+        producer
+            .try_reserve(100, wire_v3_header(100).unwrap())
+            .unwrap()
+            .abort();
+
+        // With the class exhausted again, arming parks, and a later return rings the
+        // duplicated readiness descriptor the caller polls.
+        publish(&producer, &[8u8; 100]);
+        held.push(receive(&consumer));
+        assert!(matches!(
+            producer.try_reserve(100, wire_v3_header(100).unwrap()),
+            Err(ProducerError::Exhausted)
+        ));
+        assert_eq!(
+            producer.arm_capacity_wait(Inventory::Ordinary, 100),
+            Ok(true)
+        );
+        let ready = producer.duplicate_capacity_ready().unwrap();
+        assert!(!sys::poll_readable(ready.as_fd(), 0).unwrap());
+        let lease = held.pop().unwrap();
+        std::thread::spawn(move || drop(lease)).join().unwrap();
+        assert!(sys::poll_readable(ready.as_fd(), 1000).unwrap());
+        producer.complete_capacity_wait().unwrap();
+        producer
+            .try_reserve(100, wire_v3_header(100).unwrap())
+            .unwrap()
+            .abort();
+        assert!(producer.inventory().conserves(&geometry));
+    }
+
+    #[test]
+    fn is_fresh_reads_the_live_cursors_not_the_attach_snapshot() {
+        let (producer, consumer) = pair(tiny_geometry());
+        assert!(consumer.is_fresh());
+        publish(&producer, b"early");
+        assert!(
+            !consumer.is_fresh(),
+            "a publication after attach is traffic in flight"
+        );
+    }
+
+    #[test]
+    fn consumer_inventory_does_not_reclaim_the_producer_completion_stream() {
+        let geometry = tiny_geometry();
+        let (producer, consumer) = pair(geometry);
+        publish(&producer, b"sampled");
+        receive(&consumer).release().unwrap();
+        let sampled = consumer.inventory();
+        assert!(
+            !consumer.is_quarantined(),
+            "a fresh attached handle that only consumes has no producer ledger to check against"
+        );
+        assert!(sampled.conserves(&geometry));
+        assert_eq!(
+            publish(&producer, b"reused"),
+            0,
+            "the producer reclaims the return the consumer sample left in place"
+        );
+        assert!(!producer.is_quarantined());
+    }
+
+    #[test]
+    fn a_failed_return_wake_reports_wake_failed_and_keeps_the_completion() {
+        let geometry = tiny_geometry();
+        let (producer, consumer) = pair(geometry);
+        publish(&producer, b"returned");
+        let lease = receive(&consumer);
+        let identity = lease.identity();
+        publish(&producer, b"second");
+        publish(&producer, b"third");
+        assert_eq!(
+            producer.arm_capacity_wait(Inventory::Ordinary, 100),
+            Ok(true),
+            "both ordinary descriptors are taken, so the producer parks"
+        );
+        drop(producer);
+        assert_eq!(lease.release(), Err(LeaseError::WakeFailed));
+        let cell = consumer.retained.completion(identity.block()).unwrap();
+        assert_eq!(
+            cell.generation.load(Ordering::SeqCst),
+            identity.generation(),
+            "the completion stands although the doorbell send failed"
+        );
+        let word = consumer
+            .retained
+            .return_word(0)
+            .unwrap()
+            .load(Ordering::SeqCst);
+        assert_ne!(
+            word & (1 << identity.block()),
+            0,
+            "the return flag stands too"
+        );
+        assert_eq!(consumer.retained.live_generation(identity.block()), Some(0));
+    }
+
+    #[test]
+    fn a_failed_consumption_wake_quarantines_the_consumer_and_returns_the_block() {
+        let geometry = tiny_geometry();
+        let (producer, consumer) = pair(geometry);
+        publish(&producer, b"undelivered");
+        publish(&producer, b"second");
+        assert_eq!(
+            producer.arm_capacity_wait(Inventory::Ordinary, 100),
+            Ok(true),
+            "both ordinary descriptors are taken, so the producer parks"
+        );
+        drop(producer);
+        assert!(
+            matches!(consumer.try_receive(), Err(RingError::Quarantined)),
+            "a failed capacity wake is a doorbell failure and quarantines the handle"
+        );
+        assert!(consumer.is_quarantined());
+        assert_eq!(
+            consumer.retained.live_generation(0),
+            Some(0),
+            "the undelivered lease returned its block exactly once"
+        );
+    }
+
+    #[test]
+    fn reclaim_loads_only_the_cells_of_returned_blocks_while_others_stay_held() {
+        let geometry = PoolGeometry::new(
+            8,
+            1,
+            [
+                ClassSpec::new(4096, 8),
+                ClassSpec::new(8192, 1),
+                ClassSpec::new(16384, 1),
+                ClassSpec::new(32768, 1),
+                ClassSpec::new(64 * 1024 * 1024 + 4096, 1),
+            ],
+            ClassSpec::new(4096, 1),
+            ClassSpec::new(32768, 1),
+        )
+        .unwrap();
+        let (producer, consumer) = pair(geometry);
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            publish(&producer, &[3u8; 64]);
+            held.push(receive(&consumer));
+        }
+        assert!(matches!(
+            producer.try_reserve(64, wire_v3_header(64).unwrap()),
+            Err(ProducerError::Exhausted)
+        ));
+        held.remove(2).release().unwrap();
+        let before = super::reclaim_counters::cell_loads();
+        producer
+            .try_reserve(64, wire_v3_header(64).unwrap())
+            .unwrap()
+            .abort();
+        assert_eq!(
+            super::reclaim_counters::cell_loads() - before,
+            1,
+            "one return costs one completion-cell load, not one per held block"
+        );
+        drop(held);
+        assert!(producer.inventory().conserves(&geometry));
     }
 
     #[test]
