@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-Diagnostics report outstanding return obligations, quarantined commitment, and actually released backing as distinct quantities, each sampled independently rather than as one atomic snapshot. The specification (#524) names this record under its
+Diagnostics report the host's own outstanding return obligations, quarantined commitment, and backing proved released as distinct quantities, each sampled independently rather than as one atomic snapshot; a quarantined backing is never counted as released. The specification (#524) names this record under its
 acceptance section and ties it to the requirements and decisions the
 `catalog.md` relationship map lists.
 

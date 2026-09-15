@@ -573,8 +573,10 @@ payload-pool transport. Its quantities are distinct and sampled independently,
 not as one atomic snapshot:
 `reclamation.completed` counts connection generations that ended (its
 `reclamation.meaning` field states this; the key is a wire name and does not
-mean released storage); `returns` reports outstanding return obligations,
-live and released backings, and released backing bytes; `exhaustion.observed`
+mean released storage); `returns` reports the payload leases the host itself
+still holds (`outstanding`, its own return obligations to the peer, not leases
+the peer holds), live backings, and backings proved released with their
+bytes; `exhaustion.observed`
 and `exhaustion.by_resource` count admission refusals in total and by the
 resource that ran out; `accounting` reports active and quarantined
 commitment; and `aggregate` reports the transport, host-resident, and terminal

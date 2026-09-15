@@ -406,13 +406,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/host-runtime/src/ring_transport.rs:2336` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:532`) parses channel-0 bodies only from that private copy. Oversized channel-0 requests are refused before any lease (`crates/host-runtime/src/ring_transport.rs:1004`).
+Exercised: yes - `crates/host-runtime/src/ring_transport.rs:2336` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:532`) parses channel-0 bodies only from that private copy. An oversized channel-0 request's lease is released before any parse or delivery (`crates/host-runtime/src/ring_transport.rs:985-988`) and only a `Rejected` event is delivered.
 Guarantee: Rust decoding reads only stable private bytes: routed and channel-0 bodies are copied out of the lease before any parser sees them, and the lease is released after the last copy (KTD4).
 Check: `always` - no `InboundFrame` or control decoder holds a `LeaseSpan`; `lease.release()` precedes `deliver`.
 Fault/timing angle: A peer rewriting a published block during the copy.
 Required faults and enabling state: A copy racing a peer write of the same block. Markers: marker:`host.copy_races_peer_write`.
 Confidence: high - [evidence](evidence/private-decode-input-stability.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/frame_channel.rs:107`; `crates/host-runtime/src/connection.rs:532`; `crates/host-runtime/src/dispatch.rs:993`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:2336` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:532`) parses channel-0 bodies only from that private copy. Oversized channel-0 requests are refused before any lease (`crates/host-runtime/src/ring_transport.rs:1004`).
+Existing check: `crates/host-runtime/src/ring_transport.rs:2336` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:532`) parses channel-0 bodies only from that private copy. An oversized channel-0 request's lease is released before any parse or delivery (`crates/host-runtime/src/ring_transport.rs:985-988`) and only a `Rejected` event is delivered.
 Impact: Decoding shared bytes would let a peer change a message under the parser.
 Open questions:
 
@@ -664,7 +664,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - `crates/host-runtime/src/ring_transport.rs:3738` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:262`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
-Guarantee: Diagnostics report outstanding return obligations, quarantined commitment, and actually released backing as distinct quantities, each sampled independently rather than as one atomic snapshot.
+Guarantee: Diagnostics report the host's own outstanding return obligations, quarantined commitment, and backing proved released as distinct quantities, each sampled independently rather than as one atomic snapshot; a quarantined backing is never counted as released.
 Check: `always` - `outstanding_returns` counts live leases exactly, and the host counter's meaning is corrected without changing wire names.
 Fault/timing angle: A held reader across a connection generation end.
 Required faults and enabling state: A generation ends while a lease is live. Markers: marker:`host.generation_ended_with_live_lease`.
