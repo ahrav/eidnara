@@ -1,5 +1,5 @@
 //! The fixture fixes key population and collision depth, so each run measures
-//! one parse, equality page, and prefix page at a known size.
+//! one parse, equality page, prefix page, and batch write at a known size.
 
 use std::hint::black_box;
 use std::num::NonZeroUsize;
@@ -51,7 +51,7 @@ fn bounds() -> BatchBounds {
     }
 }
 
-fn populate(store: &SqliteStore, commits: usize, claims: usize) {
+fn install(store: &SqliteStore) {
     store
         .with_conn_fenced(|conn| {
             install_identity(
@@ -73,24 +73,24 @@ fn populate(store: &SqliteStore, commits: usize, claims: usize) {
             Ok(())
         })
         .unwrap();
-    let oids: Vec<String> = (0..commits).map(|n| format!("ab{n:038x}")).collect();
-    let objects: Vec<String> = (0..claims).map(|n| format!("obj-{n:08}")).collect();
-    let identities: Vec<Vec<(String, String)>> = oids
-        .iter()
-        .map(|oid| {
+}
+
+/// `commits` git commit identities followed by `claims` canonical claim identities.
+fn identities(commits: usize, claims: usize) -> Vec<Vec<(String, String)>> {
+    (0..commits)
+        .map(|n| {
             vec![
                 ("repository_id".to_string(), "repo".to_string()),
                 ("object_format".to_string(), "sha1".to_string()),
-                ("oid".to_string(), oid.clone()),
+                ("oid".to_string(), format!("ab{n:038x}")),
             ]
         })
-        .chain(
-            objects
-                .iter()
-                .map(|object| vec![("object_id".to_string(), object.clone())]),
-        )
-        .collect();
-    let borrowed: Vec<Vec<(&str, &str)>> = identities
+        .chain((0..claims).map(|n| vec![("object_id".to_string(), format!("obj-{n:08}"))]))
+        .collect()
+}
+
+fn borrow(identities: &[Vec<(String, String)>]) -> Vec<Vec<(&str, &str)>> {
+    identities
         .iter()
         .map(|fields| {
             fields
@@ -98,8 +98,11 @@ fn populate(store: &SqliteStore, commits: usize, claims: usize) {
                 .map(|(n, v)| (n.as_str(), v.as_str()))
                 .collect()
         })
-        .collect();
-    let records: Vec<OccurrenceRecord<'_>> = borrowed
+        .collect()
+}
+
+fn batch<'a>(borrowed: &'a [Vec<(&'a str, &'a str)>], commits: usize) -> ProjectionBatch<'a> {
+    let records = borrowed
         .iter()
         .enumerate()
         .map(|(index, identity)| OccurrenceRecord {
@@ -127,7 +130,7 @@ fn populate(store: &SqliteStore, commits: usize, claims: usize) {
             created_commit_seq: 1,
         })
         .collect();
-    let batch = ProjectionBatch {
+    ProjectionBatch {
         identity: MutationIdentity {
             kernel_incarnation_id: KERNEL.to_string(),
             hold_id: "hold".to_string(),
@@ -137,13 +140,14 @@ fn populate(store: &SqliteStore, commits: usize, claims: usize) {
         records,
         invalidations: vec![],
         generation_id: None,
-    };
+    }
+}
+
+fn apply(store: &SqliteStore, batch: &ProjectionBatch<'_>) -> usize {
     store
-        .with_conn_fenced(|conn| {
-            apply_batch(conn, &batch, bounds(), 1).unwrap();
-            Ok(())
-        })
-        .unwrap();
+        .with_conn_fenced(|conn| Ok(apply_batch(conn, batch, bounds(), 1).unwrap()))
+        .unwrap()
+        .associations_inserted
 }
 
 fn parse_benches(c: &mut Criterion) {
@@ -181,7 +185,10 @@ fn parse_benches(c: &mut Criterion) {
 fn page_benches(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());
-    populate(&store, 4_096, 4_096);
+    install(&store);
+    let identities = identities(4_096, 4_096);
+    let borrowed = borrow(&identities);
+    apply(&store, &batch(&borrowed, 4_096));
     let budget = EvalBudget::unbounded();
     let mut group = c.benchmark_group("exact_page");
     for page_rows in [16usize, 256] {
@@ -246,6 +253,28 @@ fn page_benches(c: &mut Criterion) {
     group.finish();
 }
 
+/// One batch of commits and claims into a fresh projection: every record
+/// derives one association, so this is the write cost the index adds.
+fn write_benches(c: &mut Criterion) {
+    let identities = identities(1_024, 1_024);
+    let borrowed = borrow(&identities);
+    let batch = batch(&borrowed, 1_024);
+    let mut group = c.benchmark_group("exact_write");
+    group.bench_function(BenchmarkId::new("apply_batch", batch.records.len()), |b| {
+        b.iter_batched(
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let store = open(dir.path());
+                install(&store);
+                (dir, store)
+            },
+            |(_dir, store)| black_box(apply(&store, &batch)),
+            BatchSize::PerIteration,
+        )
+    });
+    group.finish();
+}
+
 fn configure() -> Criterion {
     Criterion::default()
         .warm_up_time(Duration::from_secs(1))
@@ -256,7 +285,7 @@ fn configure() -> Criterion {
 criterion_group! {
     name = benches;
     config = configure();
-    targets = parse_benches, page_benches
+    targets = parse_benches, page_benches, write_benches
 }
 
 fn main() {

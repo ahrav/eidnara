@@ -1,5 +1,5 @@
 use kernel::source_identity::OccurrenceClass;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use storage::GuardedConn;
 
 use crate::exact::selector::Family;
@@ -108,41 +108,40 @@ pub(crate) fn persist(
     let mut insert = conn.prepare_cached(
         "INSERT INTO exact_associations(
              family,namespace,key,occurrence_id,target_id,extraction_version,created_commit_seq
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7)
+         ON CONFLICT(family,namespace,key,occurrence_id) DO NOTHING",
     )?;
     let mut inserted = 0;
     for key in keys {
-        let stored: Option<(String, u32)> = lookup
-            .query_row(
-                params![key.family.keyword(), key.namespace, key.key, occurrence_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        match stored {
-            Some((_, version)) if version != EXTRACTION_VERSION => {
-                return Err(ProjectionError::ExtractionVersionMismatch {
-                    stored: version,
-                    expected: EXTRACTION_VERSION,
-                });
-            }
-            Some((target, _)) if target == key.target_id => {}
-            Some(_) => {
-                return Err(ProjectionError::AssociationCollision {
-                    occurrence_id: occurrence_id.to_string(),
-                });
-            }
-            None => {
-                insert.execute(params![
-                    key.family.keyword(),
-                    key.namespace,
-                    key.key,
-                    occurrence_id,
-                    key.target_id,
-                    EXTRACTION_VERSION,
-                    created_commit_seq,
-                ])?;
-                inserted += 1;
-            }
+        // A conflict-free insert is a new key. After a conflict, one read
+        // classifies the stored row as a replay, a collision, or another version.
+        if insert.execute(params![
+            key.family.keyword(),
+            key.namespace,
+            key.key,
+            occurrence_id,
+            key.target_id,
+            EXTRACTION_VERSION,
+            created_commit_seq,
+        ])? == 1
+        {
+            inserted += 1;
+            continue;
+        }
+        let (target, version): (String, u32) = lookup.query_row(
+            params![key.family.keyword(), key.namespace, key.key, occurrence_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if version != EXTRACTION_VERSION {
+            return Err(ProjectionError::ExtractionVersionMismatch {
+                stored: version,
+                expected: EXTRACTION_VERSION,
+            });
+        }
+        if target != key.target_id {
+            return Err(ProjectionError::AssociationCollision {
+                occurrence_id: occurrence_id.to_string(),
+            });
         }
     }
     Ok(inserted)
