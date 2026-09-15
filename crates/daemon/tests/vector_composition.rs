@@ -257,6 +257,34 @@ impl Fixture {
         )
         .map(|recovered| (recovered.composition.digest, recovered.selector))
     }
+
+    /// Stages a record another build or a foreign stager could have written, bypassing `publish`'s canonical encoding.
+    fn stage_record(&self, record: &[u8], template: &Composition) -> String {
+        let dir = self.work_dir();
+        fs::write(dir.join(COMPOSITION_FILE), record).unwrap();
+        fs::write(
+            dir.join(MEMBERS_FILE_NAME),
+            serde_json::to_vec(&host_runtime::generation::WireMembers {
+                schema: 1,
+                members: template.members(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let sources: Vec<SourceSpec> = [COMPOSITION_FILE, MEMBERS_FILE_NAME]
+            .into_iter()
+            .map(|name| SourceSpec {
+                rel_path: name.to_owned(),
+                source: dir.join(name),
+                executable: false,
+                expected_size: None,
+                expected_sha256: None,
+            })
+            .collect();
+        self.store
+            .stage(&sources, &template.stage_meta(), &BTreeSet::new())
+            .unwrap()
+    }
 }
 
 #[test]
@@ -1113,6 +1141,68 @@ fn verification_refuses_excess_deltas_before_opening_any_member() {
         fixture.verify_composition(&composition.digest()),
         Err(CompositionRefusal::Member { digest, .. }) if digest == base.digest
     ));
+}
+
+#[test]
+fn a_selection_the_verifier_rejects_gates_publication_the_same_way_recovery_treats_it() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let first = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&first).unwrap();
+
+    // A hash-valid record that is not canonical: the store selects it, the verifier refuses it.
+    let loose = fixture.compose(5, &base, &[]).unwrap();
+    let selected = fixture.stage_record(&serde_json::to_vec_pretty(&loose).unwrap(), &loose);
+    fixture
+        .store
+        .select_vector(&selected, &fixture.tx, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(
+        fixture.verify_composition(&selected).unwrap_err(),
+        CompositionRefusal::NotComposition("record not canonical")
+    );
+    assert_eq!(
+        fixture.recover().unwrap(),
+        (first.digest(), SelectorState::Stale(selected.clone()))
+    );
+    // Recovery calls that selection stale, so its sequence must not gate the repair publication.
+    let repair = fixture.compose(2, &base, &[]).unwrap();
+    assert_eq!(fixture.publish(&repair).unwrap(), repair.digest());
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(repair.digest())
+    );
+
+    // A record of a schema this build does not know may be a later build's selection: nothing is published over it and nothing is concluded about it.
+    let mut future = fixture.compose(3, &base, &[]).unwrap();
+    future.schema = 2;
+    let selected = fixture.stage_record(&future.canonical_bytes(), &future);
+    fixture
+        .store
+        .select_vector(&selected, &fixture.tx, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(
+        fixture.verify_composition(&selected).unwrap_err(),
+        CompositionRefusal::Quarantined
+    );
+    let failure = publish(
+        &fixture.compose(9, &base, &[]).unwrap(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(failure.progress, Progress::NotStaged);
+    assert_eq!(failure.refusal, CompositionRefusal::Quarantined);
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(selected.clone())
+    );
+    // Recovery still serves what this build can verify without repointing the selector.
+    assert_eq!(
+        fixture.recover().unwrap(),
+        (repair.digest(), SelectorState::Stale(selected))
+    );
 }
 
 #[test]

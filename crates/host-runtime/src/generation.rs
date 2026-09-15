@@ -348,7 +348,7 @@ impl ValidatedGeneration {
         crate::harness_closure::descriptor_path(self.dir.as_raw_fd())
     }
 
-    /// The bytes of one manifest-listed file, read through [`Self::open_verified_file`]; the manifest cap bounds the read because every listed file's size was checked against it.
+    /// Returns file bytes only when their length equals the manifest entry size.
     pub fn read_verified_file(&self, rel_path: &str) -> Result<Vec<u8>, GenerationError> {
         let fd = self.open_verified_file(rel_path)?;
         let size = self
@@ -358,7 +358,15 @@ impl ValidatedGeneration {
             .find(|file| file.path == rel_path)
             .map_or(0, |file| file.size);
         let cap = usize::try_from(size).map_err(|_| invalid("file too large to read"))?;
-        read_all_fd(&fd, cap).map_err(|_| invalid("verified file read failed"))
+        let mut bytes = Vec::with_capacity(cap);
+        // One byte of slack distinguishes a file that grew after verification from one that matched.
+        let mut reader = std::io::Read::take(std::fs::File::from(fd), size.saturating_add(1));
+        std::io::Read::read_to_end(&mut reader, &mut bytes)
+            .map_err(|_| invalid("verified file read failed"))?;
+        if bytes.len() != cap {
+            return Err(invalid("file size diverges from the manifest"));
+        }
+        Ok(bytes)
     }
 
     /// `open_verified_file` opens a manifest-listed file through the retained directory descriptor and rechecks its shape and hash.
@@ -2596,6 +2604,40 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn verified_file_reads_return_whole_payloads_above_the_metadata_limit() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        // Larger than the metadata cap and not a multiple of any read chunk.
+        let payload: Vec<u8> = (0..(3 * MAX_MANIFEST_BYTES + 17))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let sources = [SourceSpec {
+            rel_path: "rows.f32".to_owned(),
+            source: write_source(src.path(), "rows", &payload),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        let generation = store.validate(&digest).unwrap();
+        assert_eq!(generation.read_verified_file("rows.f32").unwrap(), payload);
+        assert!(generation.read_verified_file("missing").is_err());
+        assert!(matches!(
+            store.read_manifest_file(&digest, "rows.f32"),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "metadata file exceeds size limit"
+            })
+        ));
+
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        let mut grown = payload.clone();
+        grown.push(0);
+        std::fs::write(dir.join("rows.f32"), &grown).unwrap();
+        assert!(generation.read_verified_file("rows.f32").is_err());
     }
 
     /// Persisted manifest bytes must equal the canonical serialization of the decoded manifest.

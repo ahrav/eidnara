@@ -312,7 +312,13 @@ semantics belong to the layer-resolution work.
 
 `publish` refuses a sequence at or below the selected composition's, stages
 the composition under the caller's admission, and moves the selector in one
-rename. It reports how far the attempt got, recorded when each step returns:
+rename. The sequence gate reads the selected record the same way
+`verify_composition` and `recover` do: a selection whose record is not
+canonical, does not bind to its manifest, or whose generation fails inventory
+validation is not a composition this build accepts, so it sets no sequence
+floor and a repair publication proceeds. A selected record of a schema this
+build does not know refuses publication as `Quarantined`, because it may be a
+later build's selection. It reports how far the attempt got, recorded when each step returns:
 `NotStaged`, `Staged` when the store holds the record, `Acknowledged` when
 the selector rename returned, `Durable` when the containing-directory sync
 returned. A failure carries the last stage reached; a failure at or after
@@ -326,7 +332,8 @@ sequence without a second record.
 
 `verify_composition` checks the record's target, schema, canonical bytes,
 manifest binding, agreement with `members.json`, and identity, verifies every
-member with `vector_generation::verify`, and re-checks the topology. It refuses
+member with `vector_generation::verify`, and re-checks the topology. A record
+of unknown schema is refused as `Quarantined`, not as a malformed record. It refuses
 an excessive delta count before opening any member, so the caller's delta bound
 limits member-verification work as well as the accepted topology.
 `recover` takes the selected composition when it verifies; otherwise it reads
