@@ -822,3 +822,40 @@ fn a_predecessor_folded_in_later_keeps_the_subjects_insert_operation() {
         .unwrap();
     assert_eq!(again.operation, CausalOperation::Insert);
 }
+
+#[test]
+fn a_fold_in_the_subjects_own_commit_leaves_its_insert_operation_intact() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(2, 1);
+    let mut recorded = None;
+    fixture
+        .store
+        .commit(intent("insert-record-fold"), |envelope| {
+            envelope.insert_decision(decision(1, 2))?;
+            envelope.record_admission(admission("decision-object-1"))?;
+            recorded = Some(
+                envelope
+                    .record_claim_causality(&request(
+                        "decision-object-1",
+                        2,
+                        derived(&[("domain-object", 1)]),
+                    ))
+                    .unwrap(),
+            );
+            envelope.correct_decision("decision-object-2", decision(1, 2))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(recorded.unwrap().operation, CausalOperation::Insert);
+    let reading = fixture.reading("decision-object-1", fixture.tip());
+    assert_eq!(
+        reading.class,
+        CausalClass::DerivedReinjection {
+            parents: parents(&[("domain-object", 1)]),
+        }
+    );
+    assert_eq!(
+        reading.record.unwrap().operation,
+        Some(CausalOperation::Insert)
+    );
+}

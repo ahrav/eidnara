@@ -23,7 +23,9 @@ use serde::{Deserialize, Serialize};
 
 use super::envelope::{Envelope, ObjectRow};
 use super::redaction::identity;
-use super::slice::{ObservationDependencySpec, ObservationPayload, ObservationSpec};
+use super::slice::{
+    DECISION_INSERT_KIND, ObservationDependencySpec, ObservationPayload, ObservationSpec,
+};
 use super::{
     CachedSql, KernelError, KernelStore,
     cas::{ExactEvidence, exact_evidence, is_artifact_digest},
@@ -222,7 +224,7 @@ impl Envelope<'_> {
         if subject.object.source_revision != request.subject_revision {
             return Err(ClaimCausalityError::SubjectRevisionMismatch);
         }
-        let operation = derived_operation(self.tx, &subject.object)?;
+        let operation = self.subject_operation(&subject.object)?;
         let (evidence_id, dependencies) = match &request.evidence {
             CausalEvidence::DirectObservation {
                 acquisition_evidence_id,
@@ -292,6 +294,22 @@ impl Envelope<'_> {
             object_id,
             operation,
             replaced_object_id: predecessor,
+        })
+    }
+
+    /// This commit's change events are written after the operation closure
+    /// returns, so a subject created in it is judged from the pending list.
+    fn subject_operation(&self, subject: &ObjectRow) -> Result<CausalOperation, KernelError> {
+        if subject.created_commit_seq != self.commit_seq {
+            return creation_operation(self.tx, subject);
+        }
+        let inserted = self.changes.iter().any(|change| {
+            change.kind == DECISION_INSERT_KIND && change.object.object_id == subject.object_id
+        });
+        Ok(if inserted {
+            CausalOperation::Insert
+        } else {
+            CausalOperation::Correct
         })
     }
 
@@ -408,27 +426,31 @@ struct SubjectRow {
     scope_id: Option<String>,
 }
 
-/// A subject that replaced a predecessor when it was created was corrected;
-/// one created without a predecessor was inserted. A predecessor folded into
-/// an already-live subject later (`correct_decision` naming a live survivor)
-/// is invalidated at the fold's commit, not the subject's, so it leaves the
-/// operation unchanged at every snapshot.
-fn derived_operation(
+/// The operation is how the subject came to be: `Insert` when its creation
+/// commit logged a `decision_insert` for it, `Correct` when it was created as
+/// a replacement. Succession attached later, such as a predecessor folded into
+/// an already-live survivor by `correct_decision`, is not creation and leaves
+/// the operation unchanged at every snapshot.
+fn creation_operation(
     tx: &Transaction<'_>,
     subject: &ObjectRow,
 ) -> Result<CausalOperation, KernelError> {
-    let replaced_predecessor: bool = tx
+    let inserted: bool = tx
         .query_row_cached(
-            "SELECT EXISTS(SELECT 1 FROM object_registry
-                           WHERE superseded_by=?1 AND invalidated_commit_seq=?2)",
-            params![subject.object_id, subject.created_commit_seq],
+            "SELECT EXISTS(SELECT 1 FROM change_event
+                           WHERE commit_seq=?1 AND object_id=?2 AND change_kind=?3)",
+            params![
+                subject.created_commit_seq,
+                subject.object_id,
+                DECISION_INSERT_KIND
+            ],
             |row| row.get(0),
         )
         .map_err(map_sqlite)?;
-    Ok(if replaced_predecessor {
-        CausalOperation::Correct
-    } else {
+    Ok(if inserted {
         CausalOperation::Insert
+    } else {
+        CausalOperation::Correct
     })
 }
 
@@ -585,17 +607,19 @@ pub(crate) fn causal_class_at(
             Some(summary),
         ));
     }
-    if detail.operation != derived_operation(tx, subject)? {
+    if detail.operation != creation_operation(tx, subject)? {
         return Ok((
             CausalClass::Unknown(UnknownReason::Malformed),
             Some(summary),
         ));
     }
     summary.operation = Some(detail.operation);
-    // The detail is the one column without an immutability guard, so each
-    // class is accepted only where the guarded columns agree with it: the
-    // cited `evidence_id` for an acquisition, the `derived_from` rows for a
-    // derivation.
+    // The detail is producer text. A class is accepted only where the columns
+    // the writer set from store-verified facts agree with it: the cited
+    // `evidence_id` for an acquisition, the `derived_from` rows for a
+    // derivation. No table here carries an immutability trigger; this binds
+    // the detail to those facts and to the live evidence, it does not defend
+    // against an editor with write access to the whole file.
     let class = match detail.evidence {
         CausalEvidence::DirectObservation {
             acquisition_evidence_id,
