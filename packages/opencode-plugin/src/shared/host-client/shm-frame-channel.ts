@@ -319,22 +319,9 @@ export class ShmFrameChannel implements SetupFrameChannel {
             this.releasePublication(reservedBytes);
             throw ringFullError(undefined);
         }
-        // The fill runs now, as it would have on a direct publication, so bytes the caller
-        // edits after `produce` returns do not reach the ring.
+        // The queue position is taken before the fill runs, so a control the fill enqueues
+        // waits behind this frame as the wire contract's admission order requires.
         const snapshot = new Uint8Array(body.byteLength);
-        try {
-            const cursor = new SnapshotCursor(snapshot);
-            body.fill(cursor);
-            if (cursor.written !== body.byteLength) throw new RangeError("producer underfill");
-        } catch (error) {
-            this.releasePublication(reservedBytes);
-            throw error;
-        }
-        // The fill may have closed the channel; the close sweep has already run.
-        if (this.closed) {
-            this.releasePublication(reservedBytes);
-            throw new HostCallError("not_sent", "shared-memory channel closed");
-        }
         const pending: PendingPublication = {
             header,
             body: { byteLength: body.byteLength, fill: (cursor) => cursor.write(snapshot) },
@@ -347,8 +334,22 @@ export class ShmFrameChannel implements SetupFrameChannel {
         this.pendingPublications.push(pending);
         if (control) this.queuedControlFrames += 1;
         if (cancel) this.queuedCancelFrames += 1;
+        // The fill runs now, as it would have on a direct publication, so bytes the caller
+        // edits after `produce` returns do not reach the ring.
+        try {
+            const cursor = new SnapshotCursor(snapshot);
+            body.fill(cursor);
+            if (cursor.written !== body.byteLength) throw new RangeError("producer underfill");
+        } catch (error) {
+            this.dropPending(pending);
+            throw error;
+        }
+        // A fill that closed the channel met the close sweep, which dropped this entry.
+        if (pending.state !== "queued") {
+            throw new HostCallError("not_sent", "shared-memory channel closed");
+        }
         // Only the queue head arms for capacity; re-arming behind it can consume its host wake.
-        if (this.pendingPublications.length === 1) this.pumpPending();
+        if (this.pendingPublications[0] === pending) this.pumpPending();
         return {
             cancel: () => {
                 if (pending.state === "queued") {

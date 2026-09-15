@@ -10,7 +10,7 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `packages/shm-native/tests/mechanism.ts:56`
+- `packages/shm-native/tests/mechanism.ts:50`
 - `.github/workflows/ci.yml:785`
 - `packages/shm-native/index.ts:38`
 

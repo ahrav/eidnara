@@ -1250,6 +1250,34 @@ describe("mandatory shared-memory channel", () => {
         expect(budget.used).toBe(0);
     });
 
+    test("a control enqueued from inside a queued frame's fill publishes after that frame", () => {
+        const budget = new ByteBudget(1 << 20);
+        const state = { full: true, arm: () => true };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        channel.beginFrames();
+        channel.produce(responseHeader(FrameType.Request, 1n, 4), {
+            byteLength: 4,
+            fill: (cursor: ProducerCursor) => {
+                cursor.write(new Uint8Array(4));
+                channel.sendControl(responseHeader(FrameType.Goodbye, 0n, 0));
+            },
+        });
+        expect(channel.stats().queuedDataFrames).toBe(1);
+        expect(channel.stats().queuedControlFrames).toBe(1);
+        // The head still arms although the fill queued a second frame behind it.
+        expect(mock.arms()).toBe(1);
+        state.full = false;
+        mock.readiness()?.();
+        expect(mock.published).toEqual([1n, 0n]);
+        expect(budget.used).toBe(0);
+    });
+
     test("cancelling the queue head publishes its successor without a readiness wake", async () => {
         const budget = new ByteBudget(1 << 20);
         const state = { full: true, arm: () => true };
