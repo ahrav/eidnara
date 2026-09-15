@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/host-runtime/src/frame_channel.rs:107`
-- `crates/host-runtime/src/connection.rs:532`
-- `crates/host-runtime/src/dispatch.rs:993`
+- `crates/host-runtime/src/frame_channel.rs:115`
+- `crates/host-runtime/src/connection.rs:547`
+- `crates/host-runtime/src/dispatch.rs:998`
 
-Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2336` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:532`) parses channel-0 bodies only from that private copy. An oversized channel-0 request's lease is released before any parse or delivery (`crates/host-runtime/src/ring_transport.rs:985-988`) and only a `Rejected` event is delivered.
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2362` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:115`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:547`) parses channel-0 bodies only from that private copy. An oversized channel-0 request's lease is released before any parse or delivery (`crates/host-runtime/src/ring_transport.rs:985-988`) and only a `Rejected` event is delivered.
 
 ## Failure scenario
 

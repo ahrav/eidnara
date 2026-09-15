@@ -1651,7 +1651,9 @@ impl Ring {
     /// in block-id order, not in the order the peer returned them. A caller that ties a credit or
     /// record to a published block releases it here, at the physical return, not when a callback
     /// finishes. `try_reserve_in` removes a returned block it reuses, so `settle` never sees a
-    /// block the peer holds again.
+    /// block the peer holds again; that holds for a reservation made from inside `settle` too,
+    /// so a caller that reserves from the callback settles the reused block's own record at
+    /// the reservation, as the host's publisher does when it republishes into the block.
     pub fn take_reclaimed(&self, mut settle: impl FnMut(u32)) -> Result<(), RingError> {
         if self.ledger.borrow().allowed && !self.is_quarantined() {
             self.reclaim_completions()?;

@@ -679,6 +679,12 @@ impl Inbound {
 }
 
 impl ShmReceiver {
+    /// A receiver over a test-owned channel, so `read_loop` can be driven with hand-built events.
+    #[cfg(test)]
+    pub(crate) fn from_channel(inbound: mpsc::Receiver<Result<InboundEvent, ReadClose>>) -> Self {
+        Self { inbound }
+    }
+
     pub(crate) async fn recv(&mut self) -> Result<InboundEvent, ReadClose> {
         self.inbound
             .recv()
