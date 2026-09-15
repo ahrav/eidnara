@@ -23,10 +23,12 @@ with no default; a missing bound is a compile error, not an experimental value.
   The `fts5vocab` oracle also needs full detail to report offsets.
 - Two indexed columns, in order: `original` and `parts`
   (`lexical::ORIGINAL_COLUMN`, `lexical::PARTS_COLUMN`).
+- One unindexed column, `occurrence_id`, so a probe result names its
+  occurrence without a join. Unindexed columns take no part in matching.
 - `lexical::fts5_table_args()` renders all of the above as the argument list
-  of `CREATE VIRTUAL TABLE ... USING fts5(...)`. The index and every scratch
-  oracle table use it, so neither can drift to another tokenizer or detail
-  mode.
+  of `CREATE VIRTUAL TABLE ... USING fts5(...)`. The `lexical` table in
+  `search.sqlite` and every scratch oracle table use it, so neither can drift
+  to another tokenizer or detail mode.
 - No custom tokenizer, dictionary, prefix index, or n-gram index.
 
 The engine folds case and removes Latin diacritics. Two inputs that fold to the
@@ -138,6 +140,62 @@ selector alone, and a bare `ab12` in prose is a lexical atom.
 never contain whitespace, so the join does not change what the engine
 tokenizes. The index stores these two strings in the two columns.
 
+## The index row
+
+`search.sqlite` holds one `lexical` row per live occurrence, written in the
+same transaction as the occurrence and deleted by
+`retrieval::tombstone_occurrence` in the transaction that records its
+tombstone; the primitive owns that deletion, so every tombstone path keeps the
+invariant. The rowid is one of `lexical::rowids(occurrence_id)`: the four
+sixty-four-bit words of the occurrence identifier with the sign bit cleared, in
+identifier order. The row sits at the first word no other occurrence holds, so a
+rebuild from fenced input and incremental application store equal rows whatever
+order they see the occurrences in, unless two live occurrences share a word; then
+the one stored second takes its next word, and the two orders may place the pair
+differently. Identifiers are SHA-256 digests, so among N live occurrences a
+shared first word has probability near N squared over 2 to the 64th, and an
+adversary who can choose identifiers can produce a shared word with about 2 to
+the 32nd trials but cannot exhaust another occurrence's four words without a
+preimage. An occurrence whose four words are all held by other live occurrences
+is refused as `ProjectionError::LexicalRowidCollision`, which names every
+holder; the batch that would have stored it persists nothing. Within a batch,
+tombstones remove their holders before new lexical rows are placed. If all four
+holders remain live, an operator must retire a holder or rebuild from canonical
+input that excludes one. `lexical::verify_rows` accepts a row at any of its
+occurrence's words.
+
+The lexical row follows liveness rather than the batch that stores the
+occurrence: a record whose occurrence is live and has no row gains one, and a
+record whose occurrence is tombstoned gains none, whether or not the occurrence
+row itself was new. `batch_status` reads the same predicate, so a live record
+without its row reports the batch as not applied and reapplying the batch
+restores the row. A present row with different `original` or `parts` text is
+corrupt, not an applied batch or a successful replay. Both paths compare those
+columns with the selected payload analyzed under the current contract.
+
+The index analyzes the occurrence's selected payload bytes under the payload
+byte bound, which also bounds the atom count because every atom is at least one
+byte. NUL is replaced by a space before analysis: the analyzer refuses NUL to
+protect a bound probe, and indexed text is never bound as one. Equal-byte
+occurrences are distinct rows; revising or deleting one leaves its sibling's row
+in place.
+
+The projection identity records `AnalysisIdentity::current()` in
+`analysis_identity`. A projection whose stored identity differs from the current
+one is incompatible and is rebuilt, exactly as a tokenizer or schema mismatch
+is. `lexical::verify_rows` checks that live occurrences and lexical rows
+correspond one to one and that both indexed columns equal the analyzed payload.
+`PRAGMA integrity_check` verifies the inverted index against its own content.
+The row check runs under one snapshot at reopen, construction verification, and
+closed-seed certification. It scans every lexical row and reanalyzes each live
+payload; `CoverageBounds` does not bound this work. `lexical::probe_engine`
+checks FTS5, tokenizer availability, and agreement between the linked engine
+and bundled version/source identity at open and closed-seed certification.
+It reports the engine as `EngineIdentity`; a missing module, tokenizer, or
+mismatched build is `ProjectionError::Unsupported`. `install_identity` and
+`require_compatible` pin `analysis_identity` to this build's
+`AnalysisIdentity::current()` the way they pin the schema version.
+
 ## What a request analyzes
 
 `Intent::lexical_segments(request)` returns the slices of a classified request
@@ -220,23 +278,87 @@ by documenting it as an upper bound with a fixture shared between
 `EvalBudget`. The caller checks the shared request budget at entry and never
 creates or renews one for analysis.
 
+## Retrieval
+
+`lexical::retrieve` runs compiled probes against the `lexical` table and returns
+`Contribution`s: an occurrence identifier, its class, the raw FTS rank under the
+probe that ranked it best, and that probe's ordinal. It reads no payload bytes.
+A contribution is a recall candidate for the caller's fusion or rendering step;
+it carries no authorization and its rank is comparable only within one request.
+
+Each probe runs as one `MATCH ?` bound through `ToSql`, joined to `occurrences`
+with tombstoned rows excluded, ordered by `rank` then `occurrence_id`, and
+limited to `scan_rows`. Zero probes issue no `MATCH` and return
+`Completion::Empty`. An occurrence hit by several probes keeps its lowest rank;
+among equal ranks it keeps the lowest ordinal. The comparator throughout is
+rank ascending, then occurrence identifier bytes ascending, so the result of a
+permuted or duplicated probe list is the same set of `(occurrence_id, rank)`
+pairs in the same order.
+
+Candidates are judged in that order through `eligibility::judge_occurrences`
+in batches of `batch_rows`. An ineligible candidate counts toward `judged` and
+`excluded` and takes no accepted slot, so eligible candidates behind it are
+still reached. Admission stops when `max_accepted` fills, the budget ends, or
+the kernel snapshot or incarnation changes between batches; a batch whose
+`classification_generation` is unknown counts as a snapshot change, since a
+classification merge overlapped the read. The accepted set is
+re-judged once in one batch, and only candidates the kernel still admits are
+returned. A change of snapshot or incarnation at that step marks the result
+incomplete but does not discard the re-judged contributions. Each kernel
+judgment runs through `KernelStore::judge_eligibility_within_budget` under the
+request's budget, so a wait for a pooled kernel reader or a kernel read that
+reaches the deadline ends the request as `Incomplete(BudgetExhausted)` instead
+of blocking while the projection connection is held.
+
+`RetrievalBounds` has four `NonZeroUsize` fields with no default: `max_probes`,
+`scan_rows`, `max_accepted`, and `batch_rows`. A probe list longer than
+`max_probes` is refused before any probe runs. `max_accepted` and `batch_rows`
+may not exceed `kernel::MAX_ELIGIBILITY_CANDIDATES`. Each probe reads one row
+past `scan_rows`, so `Completion::Incomplete(ScanBound)` means a probe matched
+more rows than the bound, not that it filled the bound exactly. A budget that is
+exhausted before any probe completes is `RetrievalRefusal::BudgetExhausted`; one
+that ends later yields `Completion::Incomplete(BudgetExhausted)` with no
+contributions, including when no hits were accepted. Budget exhaustion overrides
+an earlier scan or accepted bound. The budget is checked again after final
+revalidation; contributions are discarded if it ended during that check.
+A statement that SQLite interrupts (`SQLITE_INTERRUPT`, raised by
+the progress handler `SqliteStore::with_conn_interruptible` installs) ends the
+request the same way regardless of the budget's own state. The host-side query
+limits that feed these bounds are not defined in this repository.
+
+`scan_rows` bounds returned rows, not rows visited or sorted by SQLite. The
+[progress handler](https://www.sqlite.org/c3ref/progress_handler.html) polls at
+approximate VM-instruction intervals, not wall-clock intervals. Lock waits, I/O,
+and work inside a VM instruction can delay cancellation. The storage method's
+`deadline` bounds connection acquisition; its `stop` closure must check the
+execution budget. This closure must not block or panic. No hard query-latency
+bound follows from either the row limit or the progress-handler interval.
+
 ## Analysis identity
 
 `AnalysisIdentity::current()` is the SHA-256 of a length-delimited manifest:
 the contract epoch, the toolchain's `char::UNICODE_VERSION`, the tokenizer
-string, the detail mode, and the column names in order. Changing any of them
-changes the identity, even when a given fixture still analyzes to the same
-terms. The Unicode version is included because atom and part boundaries come
-from the toolchain's character classification tables, so a toolchain upgrade
-that changes those tables changes what the analyzer emits.
+string, the detail mode, the column names in order, the linked SQLite version,
+and the bundled SQLite source identity. Changing any of them changes the
+identity, even when a given fixture
+still analyzes to the same terms. The Unicode version is included because atom
+and part boundaries come from the toolchain's character classification tables,
+so a toolchain upgrade that changes those tables changes what the analyzer
+emits. The SQLite version is included because `unicode61` folds and splits
+analyzer output with the engine's own tables, so an engine upgrade can change
+the effective terms of rows already indexed.
 
 Every other rule in this document is covered by the epoch. A change to the atom
 rule, the part rules, multiplicity, or the grammar requires a new epoch in the
 same change as the code, the updated goldens, and the updated pinned digest in
 `crates/retrieval/tests/lexical_analysis.rs`.
 
-The identity does not include the SQLite build. Engine skew is a projection
-concern and is detected by the projection's own identity, not by this one.
+Because the projection identity pins `analysis_identity` to the running build,
+a projection indexed under another SQLite version or source identity is
+incompatible and is rebuilt. `probe_engine` checks that the running engine
+matches the bundled version and source identity used in the manifest. Rebuild
+from canonical input; do not relabel old rows with a new digest. Restoring a
+prior binary requires a projection built under its prior identity.
 
 ## Known behaviour to keep in mind
 

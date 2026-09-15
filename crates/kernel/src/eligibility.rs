@@ -219,40 +219,44 @@ impl KernelStore {
         destination: ArtifactDestination,
         candidates: &[EligibilityCandidate],
     ) -> Result<EligibilityBatch, KernelError> {
-        check_bounds(candidates)?;
-        let (snapshot, (incarnation, verdicts)) = self.egress_read(|tx, tip| {
-            let incarnation = self.incarnation();
-            Ok((
-                incarnation,
-                judge_in_tx(tx, tip, project, destination, candidates)?,
-            ))
-        })?;
-        Ok(EligibilityBatch {
-            snapshot,
-            incarnation,
-            verdicts,
-        })
+        self.judge_eligibility_with(None, project, destination, candidates)
     }
 
-    /// [`Self::judge_eligibility`] whose wait for a reader ends with `budget`, so a caller bounded by a slice is not held by an occupied reader pool.
+    /// The wait for a pooled reader and the read itself stop at the budget's deadline or interrupt with `KernelError::Deadline`.
     pub fn judge_eligibility_within_budget(
         &self,
+        project: &ProjectScope,
+        destination: ArtifactDestination,
+        candidates: &[EligibilityCandidate],
         budget: &crate::applicability::EvalBudget,
+    ) -> Result<EligibilityBatch, KernelError> {
+        self.judge_eligibility_with(
+            Some(&budget.acquire_limit()),
+            project,
+            destination,
+            candidates,
+        )
+    }
+
+    fn judge_eligibility_with(
+        &self,
+        limit: Option<&crate::open::AcquireLimit>,
         project: &ProjectScope,
         destination: ArtifactDestination,
         candidates: &[EligibilityCandidate],
     ) -> Result<EligibilityBatch, KernelError> {
         check_bounds(candidates)?;
-        let limit = budget.acquire_limit();
-        let (snapshot, (incarnation, verdicts)) = limit.run(|| {
-            self.egress_read_within(&limit, |tx, tip| {
-                let incarnation = self.incarnation();
-                Ok((
-                    incarnation,
-                    judge_in_tx(tx, tip, project, destination, candidates)?,
-                ))
-            })
-        })?;
+        let read = |tx: &Transaction<'_>, tip: i64| {
+            let incarnation = self.incarnation();
+            Ok((
+                incarnation,
+                judge_in_tx(tx, tip, project, destination, candidates)?,
+            ))
+        };
+        let (snapshot, (incarnation, verdicts)) = match limit {
+            Some(limit) => self.egress_read_within(limit, read)?,
+            None => self.egress_read(read)?,
+        };
         Ok(EligibilityBatch {
             snapshot,
             incarnation,

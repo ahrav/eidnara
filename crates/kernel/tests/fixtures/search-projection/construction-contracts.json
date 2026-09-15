@@ -215,6 +215,7 @@
     "invalidation_identity": [
       "schema_version",
       "tokenizer_fingerprint",
+      "analysis_identity",
       "embedding_model",
       "projection_policy_version",
       "identity_contract_version",

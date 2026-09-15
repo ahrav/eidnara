@@ -130,6 +130,7 @@ pub enum Gate {
 pub struct InvalidationIdentity {
     pub schema_version: u32,
     pub tokenizer_fingerprint: String,
+    pub analysis_identity: String,
     pub embedding_model: String,
     pub projection_policy_version: String,
     pub identity_contract_version: String,
@@ -149,12 +150,14 @@ impl From<&ProjectionIdentity> for InvalidationIdentity {
             limit_manifest_protocol_version,
             embedding_model,
             tokenizer_fingerprint,
+            analysis_identity,
             vector_dimension,
             generation_epoch,
         } = identity;
         Self {
             schema_version: *schema_version,
             tokenizer_fingerprint: tokenizer_fingerprint.clone(),
+            analysis_identity: analysis_identity.clone(),
             embedding_model: embedding_model.clone(),
             projection_policy_version: projection_policy_version.clone(),
             identity_contract_version: identity_contract_version.clone(),

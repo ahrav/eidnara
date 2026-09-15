@@ -41,7 +41,7 @@ fn documented() -> BTreeMap<String, Table> {
         repo_root().join("docs/properties/search-projection/projection-schema.md"),
     )
     .unwrap();
-    assert!(text.contains("Every table below is `STRICT`."));
+    assert!(text.contains("Every table below is `STRICT` except the virtual table `lexical`"));
     let mut tables: BTreeMap<String, Table> = BTreeMap::new();
     let mut current: Option<String> = None;
     let mut section = "";
@@ -62,6 +62,13 @@ fn documented() -> BTreeMap<String, Table> {
         let Some(table) = current.as_ref().and_then(|name| tables.get_mut(name)) else {
             continue;
         };
+        if let Some(definition) = line.strip_prefix("Virtual table: `") {
+            table.strict = false;
+            table
+                .constraints
+                .push(normalize(definition.trim_end_matches('`')));
+            continue;
+        }
         if line.starts_with("Table constraints:") {
             section = "constraints";
             continue;
@@ -138,8 +145,32 @@ fn stored(baseline: &str) -> BTreeMap<String, Table> {
             let rows = names
                 .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            let virtual_tables: Vec<String> = rows
+                .iter()
+                .filter(|(_, sql)| sql.starts_with("CREATE VIRTUAL TABLE"))
+                .map(|(name, _)| name.clone())
+                .collect();
             for (name, sql) in rows {
                 if storage::INFRASTRUCTURE_TABLES.contains(&name.as_str()) {
+                    continue;
+                }
+                // A virtual table's module arguments are its whole definition; the shadow tables the module creates are engine-owned.
+                if let Some(definition) = sql.split_once(" USING ").filter(|_| sql.starts_with("CREATE VIRTUAL TABLE")).map(|(_, definition)| definition) {
+                    tables.insert(
+                        name,
+                        Table {
+                            strict: false,
+                            constraints: vec![normalize(definition)],
+                            ..Table::default()
+                        },
+                    );
+                    continue;
+                }
+                if virtual_tables.iter().any(|vtab| {
+                    ["config", "content", "data", "docsize", "idx"]
+                        .iter()
+                        .any(|shadow| name == format!("{vtab}_{shadow}"))
+                }) {
                     continue;
                 }
                 // Table-level constraints are the body items that name no column.
@@ -298,13 +329,19 @@ fn the_baseline_matches_the_frozen_inventory_field_for_field() {
         .unwrap();
     assert_eq!(documented_extraction, retrieval::exact::EXTRACTION_VERSION);
     let documented = with_implied_not_null(documented());
-    assert_eq!(documented.len(), 12, "every baseline table is documented");
+    assert_eq!(documented.len(), 13, "every baseline table is documented");
+    assert_eq!(
+        documented["lexical"].constraints,
+        [format!("fts5({})", retrieval::lexical::fts5_table_args())],
+        "the frozen lexical definition is the analysis contract's"
+    );
     let stored = with_implied_not_null(stored(retrieval::BASELINE));
     assert_eq!(compare(&documented, &stored), Vec::<String>::new());
     // The inventory gives every persistence field of the contract a home.
     for (table, column) in [
         ("projection_identity", "kernel_incarnation_id"),
         ("projection_identity", "tokenizer_fingerprint"),
+        ("projection_identity", "analysis_identity"),
         ("projection_identity", "vector_dimension"),
         ("projection_identity", "generation_epoch"),
         ("occurrences", "tuple"),
@@ -410,6 +447,15 @@ fn an_omitted_field_or_constraint_fails_the_inventory() {
         "removing STRICT must fail the inventory: {differences:?}"
     );
     assert!(differences[0].starts_with("projection_identity:"));
+
+    let other_tokenizer = retrieval::BASELINE.replace("remove_diacritics 2", "remove_diacritics 1");
+    assert_ne!(other_tokenizer, retrieval::BASELINE);
+    let differences = compare(
+        &documented,
+        &with_implied_not_null(stored(&other_tokenizer)),
+    );
+    assert_eq!(differences.len(), 1, "{differences:?}");
+    assert!(differences[0].starts_with("lexical:"), "{differences:?}");
 
     let missing_column = retrieval::BASELINE.replace("    persisted_at INTEGER NOT NULL,\n", "");
     assert_ne!(missing_column, retrieval::BASELINE);

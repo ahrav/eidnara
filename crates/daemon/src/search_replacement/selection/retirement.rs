@@ -54,6 +54,7 @@ impl SearchSelection {
             serde_json::from_slice(&certificate_bytes(&self.family_home(digest)?)?)
                 .map_err(|_| BuildError::Invalid("old bootstrap corrupt"))?;
         if !matches!(old.schema, 1 | 2)
+            || !old.seed.shape_matches_schema()
             || old.seed.stage_manifest().digest() != *digest
             || old.intent.consumer.generation_id != old.seed.generation_id
             || old.intent.consumer.consumer_id == intent.consumer.consumer_id

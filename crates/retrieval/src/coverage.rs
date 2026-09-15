@@ -409,6 +409,7 @@ pub fn verify_construction(
     if batch_status(conn, batch)? != BatchStatus::Applied {
         return Err(ProjectionError::CorruptRow);
     }
+    crate::lexical::verify_rows(conn)?;
     Ok(report)
 }
 
@@ -429,7 +430,7 @@ fn excluded_class_jobs(conn: &GuardedConn<'_>) -> Result<bool, ProjectionError> 
     Ok(false)
 }
 
-/// `PRAGMA integrity_check` scans the whole database, so its cost grows with file size.
+/// `PRAGMA integrity_check` scans the whole database and re-tokenizes every lexical row to verify the inverted index, so its cost grows with file size and payload bytes.
 /// `CoverageBounds` does not bound database-wide integrity checks.
 pub fn verify_pages(conn: &GuardedConn<'_>) -> Result<(), ProjectionError> {
     let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
@@ -442,7 +443,7 @@ pub fn verify_pages(conn: &GuardedConn<'_>) -> Result<(), ProjectionError> {
     {
         return Err(ProjectionError::CorruptRow);
     }
-    Ok(())
+    crate::lexical::verify_rows(conn)
 }
 
 /// Checks mutable state without comparing it to immutable seed bytes. Required dense rows

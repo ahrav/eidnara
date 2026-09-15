@@ -89,6 +89,8 @@ pub struct BatchOutcome {
     pub pending_created: usize,
     pub pending_obsoleted: usize,
     pub associations_inserted: usize,
+    pub lexical_rows_inserted: usize,
+    pub lexical_rows_deleted: usize,
     /// The checkpoint after the batch; unchanged when the batch was an
     /// already-applied prefix.
     pub checkpoint_commit_seq: i64,
@@ -263,6 +265,20 @@ pub fn batch_status(
         )? {
             return Ok(BatchStatus::NotApplied);
         }
+        // Every atom has at least one byte, so `selected.len()` bounds the analysis.
+        let lexical = if stored.tombstone.is_none() {
+            crate::lexical::index::stores(
+                conn,
+                &occurrence_id,
+                std::str::from_utf8(selected).map_err(|_| ProjectionError::CorruptRow)?,
+                NonZeroUsize::new(selected.len()).unwrap_or(NonZeroUsize::MIN),
+            )?
+        } else {
+            !crate::lexical::index::present(conn, &occurrence_id)?
+        };
+        if !lexical {
+            return Ok(BatchStatus::NotApplied);
+        }
         if let Some(generation) = batch.generation_id
             && OccurrenceClass::from_code(record.occurrence.class).is_some_and(dense_eligible)
             && stored.tombstone.is_none()
@@ -284,7 +300,7 @@ pub fn batch_status(
             ],
             |row| row.get(0),
         )?;
-        if !applied {
+        if !applied || crate::lexical::index::present(conn, &invalidation.occurrence_id)? {
             return Ok(BatchStatus::NotApplied);
         }
     }
@@ -349,6 +365,7 @@ pub enum BatchFault {
     AfterAdmission,
     AfterRows,
     AfterAssociations,
+    AfterLexical,
     AfterTombstones,
     AfterPending,
     AfterCheckpoint,
@@ -408,6 +425,8 @@ macro_rules! phase {
 /// Charges judged before any row is written.
 struct Admission<'a> {
     occurrence_ids: Vec<String>,
+    /// The selected payload text of each record, in record order; the lexical row indexes exactly these bytes.
+    selected: Vec<&'a str>,
     tombstoned: HashSet<&'a str>,
     /// Whether the stored checkpoint is exactly the batch's end, so the batch re-validates its rows without moving the checkpoint.
     already_applied: bool,
@@ -472,11 +491,13 @@ fn admit<'a>(
     }
     // The identities decide which pending work is new; encoding refuses a
     // malformed record here, before anything is written.
-    let occurrence_ids = batch
-        .records
-        .iter()
-        .map(|record| crate::encode_record(record).map(|(encoded, _)| encoded.occurrence_id))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut occurrence_ids = Vec::with_capacity(batch.records.len());
+    let mut selected = Vec::with_capacity(batch.records.len());
+    for record in &batch.records {
+        let (encoded, bytes) = crate::encode_record(record)?;
+        occurrence_ids.push(encoded.occurrence_id);
+        selected.push(std::str::from_utf8(bytes).map_err(|_| ProjectionError::CorruptRow)?);
+    }
     let tombstoned: HashSet<&str> = batch
         .invalidations
         .iter()
@@ -499,6 +520,7 @@ fn admit<'a>(
         });
     let admission = Admission {
         occurrence_ids,
+        selected,
         tombstoned,
         already_applied: stored
             .as_ref()
@@ -609,16 +631,36 @@ fn apply_batch_inner(
     phase!(fault, AfterAssociations);
 
     for invalidation in &batch.invalidations {
-        if tombstone_occurrence(
+        let tombstoned = tombstone_occurrence(
             conn,
             &invalidation.occurrence_id,
             invalidation.tombstone,
             now,
-        )? {
+        )?;
+        if tombstoned.recorded {
             outcome.tombstones_recorded += 1;
         }
+        outcome.lexical_rows_deleted += tombstoned.lexical_rows_deleted;
     }
     phase!(fault, AfterTombstones);
+
+    // Retire holders before placing replacements so their rowids are available in this transaction.
+    for (row, selected) in persisted.iter().zip(&admission.selected) {
+        if admission.tombstoned.contains(row.occurrence_id.as_str())
+            || has_tombstone(conn, &row.occurrence_id)?
+        {
+            continue;
+        }
+        if crate::lexical::index::insert(
+            conn,
+            &row.occurrence_id,
+            selected,
+            bounds.persist.max_payload_bytes,
+        )? {
+            outcome.lexical_rows_inserted += 1;
+        }
+    }
+    phase!(fault, AfterLexical);
 
     let tombstoned = &admission.tombstoned;
     if let Some(generation) = batch.generation_id {
@@ -671,11 +713,11 @@ fn apply_batch_inner(
 }
 
 fn has_tombstone(conn: &GuardedConn<'_>, occurrence_id: &str) -> Result<bool, ProjectionError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM occurrence_tombstones WHERE occurrence_id=?1)",
-        [occurrence_id],
-        |row| row.get(0),
-    )?)
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM occurrence_tombstones WHERE occurrence_id=?1)",
+        )?
+        .query_row([occurrence_id], |row| row.get(0))?)
 }
 
 fn has_job(

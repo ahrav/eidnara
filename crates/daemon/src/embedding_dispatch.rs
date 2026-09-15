@@ -405,15 +405,19 @@ impl<'a> EmbeddingDispatcher<'a> {
             let verdicts = if kernel_candidates.is_empty() {
                 Vec::new()
             } else {
-                self.kernel
-                    .judge_eligibility_within_budget(
-                        budget,
-                        eligibility.project,
-                        eligibility.destination,
-                        &kernel_candidates,
-                    )
-                    .map_err(eligibility_error)?
-                    .verdicts
+                // A read ended by the budget is the pass ending at its budget, as at any other stage; a deadline the kernel reached on its own is retryable.
+                match self.kernel.judge_eligibility_within_budget(
+                    eligibility.project,
+                    eligibility.destination,
+                    &kernel_candidates,
+                    budget,
+                ) {
+                    Ok(batch) => batch.verdicts,
+                    Err(KernelError::Deadline) if budget.is_exhausted() => {
+                        return Ok(Some(Blocked::BudgetExhausted));
+                    }
+                    Err(error) => return Err(eligibility_error(error)),
+                }
             };
             let classifications = classify_candidates(prepared, verdicts)?;
             let mut processed = 0;

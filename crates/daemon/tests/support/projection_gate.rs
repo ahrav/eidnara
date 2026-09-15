@@ -31,6 +31,9 @@ pub fn identity(kernel_incarnation_id: &str, vector_dimension: u32) -> Projectio
         limit_manifest_protocol_version: LIMITS.to_string(),
         embedding_model: MODEL.to_string(),
         tokenizer_fingerprint: FINGERPRINT.to_string(),
+        analysis_identity: retrieval::lexical::AnalysisIdentity::current()
+            .as_str()
+            .to_string(),
         vector_dimension,
         generation_epoch: 1,
     }
@@ -159,6 +162,7 @@ pub fn invalidation_json(identity: &ProjectionIdentity) -> Value {
     json!({
         "schema_version": identity.schema_version,
         "tokenizer_fingerprint": identity.tokenizer_fingerprint,
+        "analysis_identity": identity.analysis_identity,
         "embedding_model": identity.embedding_model,
         "projection_policy_version": identity.projection_policy_version,
         "identity_contract_version": identity.identity_contract_version,

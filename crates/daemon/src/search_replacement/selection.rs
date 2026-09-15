@@ -66,7 +66,8 @@ impl Bootstrap {
     }
 
     fn retiring_is_bound(&self, old: &RetiringFamily) -> bool {
-        old.seed.stage_manifest().digest() == self.intent.selected_generation
+        old.seed.shape_matches_schema()
+            && old.seed.stage_manifest().digest() == self.intent.selected_generation
             && old.consumer.generation_id == old.seed.generation_id
             && old.consumer.consumer_id != self.intent.consumer.consumer_id
             && old.seed.kernel_incarnation_id == self.seed.kernel_incarnation_id
@@ -559,6 +560,7 @@ impl SearchSelection {
         let certificate: Bootstrap =
             serde_json::from_slice(&bytes).map_err(|_| BuildError::Invalid("bootstrap corrupt"))?;
         if certificate.schema != 2
+            || !certificate.seed.shape_matches_schema()
             || certificate.intent.validate().is_err()
             || certificate.seed.stage_manifest().digest() != digest
             || certificate.intent.staged_seed_digest.as_deref() != Some(digest)
@@ -821,6 +823,7 @@ impl SearchSelection {
             _ => {}
         }
         if !matches!(certificate.schema, 1 | 2)
+            || !certificate.seed.shape_matches_schema()
             || certificate.seed.stage_manifest().digest() != digest
         {
             return Err(BuildError::Invalid("foreign family certificate"));

@@ -1990,14 +1990,15 @@ async fn an_expired_record_keeps_the_evidence_a_disable_needs() {
     records(home);
     let owner = owner(home, &corpus.kernel);
     let _ = owner.run_slice(&slice_budget());
+    // Four seconds leaves construction three past the start margin under a loaded test run; the record still expires before the next slice.
     let mut short = rebuild(home);
-    short.deadline = now() + 2_500;
+    short.deadline = now() + 4_000;
     owner.request(&short, now(), &slice_budget()).unwrap();
     assert!(matches!(
         owner.run_slice(&slice_budget()),
         SliceOutcome::Advanced(RecoveryProgress::Selected)
     ));
-    tokio::time::sleep(Duration::from_millis(2_600)).await;
+    tokio::time::sleep(Duration::from_millis(4_100)).await;
     let outcome = owner.run_slice(&slice_budget());
     assert!(
         matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline")),

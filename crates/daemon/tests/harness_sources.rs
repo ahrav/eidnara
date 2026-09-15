@@ -137,6 +137,9 @@ fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: MODEL.to_string(),
         tokenizer_fingerprint: FINGERPRINT.to_string(),
+        analysis_identity: retrieval::lexical::AnalysisIdentity::current()
+            .as_str()
+            .to_string(),
         vector_dimension: DIMS as u32,
         generation_epoch: 1,
     }

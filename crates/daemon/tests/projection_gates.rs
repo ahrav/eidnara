@@ -58,6 +58,7 @@ fn manifest_json(hooks: &[ProjectionHook]) -> Value {
         "invalidation_identity": {
             "schema_version": retrieval::SCHEMA_VERSION,
             "tokenizer_fingerprint": support::projection_gate::FINGERPRINT,
+            "analysis_identity": retrieval::lexical::AnalysisIdentity::current().as_str(),
             "embedding_model": support::projection_gate::MODEL,
             "projection_policy_version": support::projection_gate::POLICY,
             "identity_contract_version": support::projection_gate::CONTRACT,

@@ -374,6 +374,10 @@ impl SearchLifecycleOwner {
             limit_manifest_protocol_version: manifest.protocol_version.clone(),
             embedding_model: lane.embedding_model,
             tokenizer_fingerprint: lane.tokenizer_fingerprint,
+            // The lexical analysis contract this build carries; the projection refuses any other.
+            analysis_identity: retrieval::lexical::AnalysisIdentity::current()
+                .as_str()
+                .to_owned(),
             vector_dimension: lane
                 .vector_dimension
                 .ok_or(SpecRefusal::LimitRange("vector_dimension"))?,
@@ -1508,6 +1512,9 @@ mod tests {
             limit_manifest_protocol_version: "protocol".to_owned(),
             embedding_model: "model".to_owned(),
             tokenizer_fingerprint: "tokenizer".to_owned(),
+            analysis_identity: retrieval::lexical::AnalysisIdentity::current()
+                .as_str()
+                .to_owned(),
             vector_dimension: 4,
             generation_epoch: 1,
         }

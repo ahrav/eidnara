@@ -1,5 +1,4 @@
-//! The identity digests a fixed-order, length-delimited manifest of every mechanical component the analyzer's output depends on, so a change to any of them changes the digest even when a particular fixture still analyzes to the same terms.
-//! The engine's own build identity is deliberately excluded: engine skew is a projection concern, not an analysis rule.
+//! The identity digests a fixed-order, length-delimited manifest of every mechanical component the indexed terms depend on, so a change to any of them changes the digest even when a particular fixture still analyzes to the same terms.
 
 use sha2::{Digest, Sha256};
 
@@ -18,7 +17,7 @@ impl AnalysisIdentity {
     }
 
     /// Length prefixes keep `("a", "bc")` and `("ab", "c")` distinct, which plain concatenation would not.
-    /// The Unicode version is included because atom and part boundaries come from the toolchain's `char` classification tables.
+    /// The Unicode version is included because atom and part boundaries come from the toolchain's `char` classification tables; the SQLite version because `unicode61` folds with the engine's own tables.
     pub fn preimage() -> String {
         let (major, minor, update) = char::UNICODE_VERSION;
         let unicode = format!("{major}.{minor}.{update}");
@@ -35,6 +34,12 @@ impl AnalysisIdentity {
             "columns",
             ORIGINAL_COLUMN,
             PARTS_COLUMN,
+            "sqlite",
+            rusqlite::version(),
+            "sqlite_source_id",
+            rusqlite::ffi::SQLITE_SOURCE_ID
+                .to_str()
+                .expect("SQLite's source identity is ASCII"),
         ] {
             preimage.push_str(&field.len().to_string());
             preimage.push(':');

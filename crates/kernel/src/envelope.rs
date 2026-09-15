@@ -1059,7 +1059,7 @@ pub(super) fn replace_alignment_projection_tx(
 }
 
 /// The deferred transaction makes `tip` and `read` observe one snapshot.
-pub(crate) fn read_snapshot_on<T>(
+fn read_snapshot_on<T>(
     reader: &mut Connection,
     requested: i64,
     read: impl FnOnce(&Transaction<'_>, i64) -> Result<T, KernelError>,
