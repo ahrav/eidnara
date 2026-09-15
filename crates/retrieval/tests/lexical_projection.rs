@@ -1015,13 +1015,21 @@ fn verify_rows_refuses_a_missing_or_orphaned_row() {
         );
         assert_eq!(verify_pages(conn), Err(ProjectionError::CorruptRow));
     });
+    // The surviving row stays; a ghost at one of its own derived rowids restores the counts, so only the liveness check can refuse it.
+    let ghost = "f".repeat(64);
     let raw = Connection::open(&path).unwrap();
-    raw.execute("DELETE FROM lexical", []).unwrap();
-    raw.execute("INSERT INTO lexical(rowid, original, parts, occurrence_id) VALUES (7, 'ghost', '', 'no-such-occurrence')", []).unwrap();
-    raw.execute("INSERT INTO lexical(rowid, original, parts, occurrence_id) SELECT 1, 'one', '', occurrence_id FROM occurrences ORDER BY occurrence_id LIMIT 1", []).unwrap();
-    raw.execute("INSERT INTO lexical(rowid, original, parts, occurrence_id) SELECT 2, 'two', '', occurrence_id FROM occurrences ORDER BY occurrence_id LIMIT 1 OFFSET 1", []).unwrap();
+    raw.execute(
+        "INSERT INTO lexical(rowid, original, parts, occurrence_id) VALUES (?1, 'ghost', '', ?2)",
+        params![rowid(&ghost).unwrap(), ghost],
+    )
+    .unwrap();
     drop(raw);
     with_conn(&store, |conn| {
+        assert_eq!(
+            lexical_rows(conn).len(),
+            2,
+            "counts match the live occurrences"
+        );
         assert_eq!(
             verify_rows(conn),
             Err(ProjectionError::CorruptRow),
