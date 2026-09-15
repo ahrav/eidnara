@@ -63,15 +63,19 @@ pub fn encode(row: &[f32]) -> Vec<u8> {
     row.iter().flat_map(|value| value.to_le_bytes()).collect()
 }
 
-/// Truncation and dimension are checked before any coordinate is read; the norm is not, so a stored row can be read where the generation's tolerance is unknown.
-pub fn decode_shape(bytes: &[u8], dimension: u32) -> Result<Vec<f32>, RowRejection> {
+/// Splits bytes into little-endian f32 words without judging them; a trailing partial word is refused.
+pub fn decode_words(bytes: &[u8]) -> Result<Vec<f32>, RowRejection> {
     let (words, rest) = bytes.as_chunks::<4>();
     if !rest.is_empty() {
         return Err(RowRejection::TruncatedWord { bytes: bytes.len() });
     }
-    check_dimension(words.len(), dimension)?;
-    let row: Vec<f32> = words.iter().map(|word| f32::from_le_bytes(*word)).collect();
-    check_finite(&row)?;
+    Ok(words.iter().map(|word| f32::from_le_bytes(*word)).collect())
+}
+
+/// Truncation and dimension are checked before any coordinate is read; the norm is not, so a stored row can be read where the generation's tolerance is unknown.
+pub fn decode_shape(bytes: &[u8], dimension: u32) -> Result<Vec<f32>, RowRejection> {
+    let row = decode_words(bytes)?;
+    validate_shape(&row, dimension)?;
     Ok(row)
 }
 

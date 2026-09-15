@@ -6,7 +6,7 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use retrieval::dense::codec::{Metric, RowLayout};
 use retrieval::dense::inner_product;
-use retrieval::dense::scalar::{Scales, calibrate, encode, weighted_dot};
+use retrieval::dense::scalar::{calibrate, encode, weighted_dot};
 
 const DIMENSIONS: [u32; 3] = [128, 384, 1024];
 const ROWS: usize = 256;
@@ -44,7 +44,7 @@ fn scalar_benches(c: &mut Criterion) {
         let layout = layout(dimension);
         let rows = rows(dimension);
         let calibration = calibrate(&layout, rows.iter().map(Vec::as_slice)).unwrap();
-        let scales: Scales = calibration.scales;
+        let scales = calibration.scales;
         let codes: Vec<Vec<i8>> = rows
             .iter()
             .map(|row| encode(&layout, &scales, row).unwrap().codes)

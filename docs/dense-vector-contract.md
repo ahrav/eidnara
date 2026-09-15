@@ -146,8 +146,8 @@ identifier; persisted codes are never reinterpreted under another recipe.
 each of which must satisfy `N_gen`, and produces one scale per coordinate:
 
 - `max_abs_j` is the largest `|x_j|` over the calibration rows, taken in f32.
-- `s_j = max_abs_j / 127`, computed once in f32 so the stored scale is the
-  single correctly rounded quotient. Nothing is computed in f64 and narrowed.
+- `s_j = max_abs_j / 127`, computed as one f32 division, so the stored scale
+  is the correctly rounded quotient of the two f32 values.
 - A coordinate that is zero in every row takes `s_j = 1`.
 - A coordinate whose `max_abs_j` is nonzero but whose quotient is `0` in f32
   is refused (`ScaleUnderflow`); a scale of zero would make every value of
@@ -159,6 +159,9 @@ The calibration identity is the recipe, the number of calibrated rows, and
 the SHA-256 of the encoded scales. Scales encode as four little-endian bytes
 per coordinate, the same word encoding as a row; decoding refuses a truncated
 word, a wrong dimension, and any scale that is not a positive finite number.
+Subnormal positive scales are admitted: their squares stay normal in f64 and
+every quotient stays finite. A layout whose tolerance is negative or not
+finite is refused before any row is read, by calibration and by encoding.
 
 ### Encoding
 
@@ -166,7 +169,8 @@ word, a wrong dimension, and any scale that is not a positive finite number.
 `N_gen` and the scales against the layout's dimension, then for each
 coordinate:
 
-- forms `x_j / s_j` in f64 from the two f32 values,
+- widens `x_j` and `s_j` to f64 and divides; the quotient is never formed in
+  f32, whose rounding could land a near-tie exactly on a half-integer,
 - rounds it to the nearest integer with ties to even (`f64::round_ties_even`),
 - clamps it to `[-127, 127]`, counting the coordinate as clipped when the
   clamp changed the value,
@@ -188,7 +192,7 @@ sum_j (s_j * s_j) * (i32(c_query_j) * i32(c_doc_j))
 
 - The integer product is formed in i32 and lies in `[-16129, 16129]`.
 - The weight `s_j * s_j` is formed in f64 from the f32 scale.
-- Each term is `weight * f64(product)`, written to a local before it is added.
+- Each term is `weight * f64(product)`.
 - Terms are summed into one f64 accumulator in increasing coordinate order,
   starting from `+0.0`, with no fused multiply-add and no reassociation.
 - Unequal lengths panic; they never truncate.
@@ -201,14 +205,19 @@ same order as the f32 oracle.
 
 ### Fidelity
 
-For a query `q` and a document `d`, neither clipped,
+For a query `q` and a document `d` whose codes were not clipped,
 
 ```text
-|Σ q_j d_j − Σ s_j² c_q,j c_d,j| ≤ Σ_j |q_j| s_j / 2 + |s_j c_d,j| s_j / 2
+|Σ q_j d_j − Σ s_j² c_q,j c_d,j| ≤ Σ_j |q_j| · |d_j − s_j c_d,j| + |s_j c_d,j| · |q_j − s_j c_q,j|
 ```
 
-because each reconstruction error is at most half a scale. The fixtures assert
-this bound and check that pairs whose exact scores differ by more than both
-bounds keep their order under the int8 score. Pairs closer than the bound may
-reorder; that is the loss the RP2.9 fidelity campaign measures, and it is not
-decided here.
+and each unclipped reconstruction error `|x − s c|` is at most `s / 2`. The
+fixtures assert this bound with the document residual taken as `s_j / 2` and
+the query residual taken exactly, so a clipped query is covered too, and they
+check that pairs whose exact scores differ by more than both bounds keep
+their order under the int8 score. Pairs closer than the bound may reorder;
+that is the loss the RP2.9 fidelity campaign measures, and it is not decided
+here.
+
+Pinned bytes for a fixed corpus live in `tests/dense_scalar.rs`. A change to
+them is a change to the recipe.

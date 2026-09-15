@@ -1,7 +1,7 @@
 //! Symmetric per-coordinate int8 quantization over unit-normalized rows.
 //!
 //! Calibration fixes one positive finite f32 scale per coordinate, `s_j = max_abs_j / 127`, computed once in f32.
-//! Encoding widens `x_j / s_j` to f64, rounds ties to even, clamps to `[-127, 127]`, and counts every clamp; `-128` is never produced.
+//! Encoding widens `x_j` and `s_j` to f64, divides, rounds ties to even, clamps to `[-127, 127]`, and counts every clamp; `-128` is never produced.
 //! Scoring sums `(s_j * s_j) * (c_query_j * c_doc_j)` in f64 in increasing coordinate order with the integer product formed in i32, so the same scales and codes yield the same f64 everywhere.
 
 use sha2::{Digest, Sha256};
@@ -34,6 +34,8 @@ pub const CODE_MIN: i8 = -127;
 
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum CalibrationRejection {
+    #[error("the layout admits no generation: {0}")]
+    Layout(RowRejection),
     #[error("no calibration rows were supplied")]
     NoRows,
     #[error("calibration row {index}: {rejection}")]
@@ -45,22 +47,17 @@ pub enum CalibrationRejection {
     ScaleUnderflow { coordinate: usize },
 }
 
+/// Why persisted scale or code bytes are not a member of the recipe.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
-pub enum ScaleRejection {
+pub enum ScalarBytesRejection {
     #[error("{bytes} bytes is not a whole number of f32 words")]
     TruncatedWord { bytes: usize },
-    #[error("the scales have {actual} coordinates, not {expected}")]
+    #[error("{actual} coordinates were supplied, not {expected}")]
     Dimension { expected: u32, actual: usize },
     #[error("scale {coordinate} is not a positive finite number")]
     NotPositiveFinite { coordinate: usize },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
-pub enum CodeRejection {
-    #[error("the codes have {actual} coordinates, not {expected}")]
-    Dimension { expected: u32, actual: usize },
     #[error("code {coordinate} is the reserved value -128")]
-    Reserved { coordinate: usize },
+    ReservedCode { coordinate: usize },
 }
 
 /// One positive finite f32 per coordinate.
@@ -79,8 +76,21 @@ impl std::fmt::Debug for Scales {
 }
 
 impl Scales {
-    pub fn dimension(&self) -> u32 {
-        u32::try_from(self.scales.len()).expect("a dimension is a u32")
+    /// Subnormal positive scales are admitted: their squares stay normal in f64 and every quotient stays finite.
+    pub fn from_values(scales: Vec<f32>, dimension: u32) -> Result<Self, ScalarBytesRejection> {
+        if scales.len() != dimension as usize {
+            return Err(ScalarBytesRejection::Dimension {
+                expected: dimension,
+                actual: scales.len(),
+            });
+        }
+        if let Some(coordinate) = scales
+            .iter()
+            .position(|scale| !(scale.is_finite() && *scale > 0.0))
+        {
+            return Err(ScalarBytesRejection::NotPositiveFinite { coordinate });
+        }
+        Ok(Self { scales })
     }
 
     pub fn as_slice(&self) -> &[f32] {
@@ -92,31 +102,10 @@ impl Scales {
         codec::encode(&self.scales)
     }
 
-    pub fn decode(bytes: &[u8], dimension: u32) -> Result<Self, ScaleRejection> {
-        let (words, rest) = bytes.as_chunks::<4>();
-        if !rest.is_empty() {
-            return Err(ScaleRejection::TruncatedWord { bytes: bytes.len() });
-        }
-        Self::from_values(
-            words.iter().map(|word| f32::from_le_bytes(*word)).collect(),
-            dimension,
-        )
-    }
-
-    fn from_values(scales: Vec<f32>, dimension: u32) -> Result<Self, ScaleRejection> {
-        if scales.len() != dimension as usize {
-            return Err(ScaleRejection::Dimension {
-                expected: dimension,
-                actual: scales.len(),
-            });
-        }
-        if let Some(coordinate) = scales
-            .iter()
-            .position(|scale| !(scale.is_finite() && *scale > 0.0))
-        {
-            return Err(ScaleRejection::NotPositiveFinite { coordinate });
-        }
-        Ok(Self { scales })
+    pub fn decode(bytes: &[u8], dimension: u32) -> Result<Self, ScalarBytesRejection> {
+        let values = codec::decode_words(bytes)
+            .map_err(|_| ScalarBytesRejection::TruncatedWord { bytes: bytes.len() })?;
+        Self::from_values(values, dimension)
     }
 
     /// SHA-256 of the encoded scales, for binding a calibration to the generation that carries it.
@@ -143,11 +132,12 @@ pub struct Calibration {
 ///
 /// # Errors
 ///
-/// No rows, a row outside `layout`, or a nonzero coordinate whose scale rounds to zero.
+/// A layout that is not a generation predicate, no rows, a row outside `layout`, or a nonzero coordinate whose scale rounds to zero.
 pub fn calibrate<'a>(
     layout: &RowLayout,
     rows: impl IntoIterator<Item = &'a [f32]>,
 ) -> Result<Calibration, CalibrationRejection> {
+    layout.check().map_err(CalibrationRejection::Layout)?;
     let dimension = layout.dimension as usize;
     let mut max_abs = vec![0.0f32; dimension];
     let mut count = 0u64;
@@ -187,18 +177,19 @@ pub struct Encoded {
 }
 
 /// Each quotient is formed in f64 from the f32 value and scale, rounded ties to even, then clamped; the scale is never changed to fit the value.
+/// Scales of another dimension than the layout are a wiring error and panic, like unequal code lengths in [`weighted_dot`].
 ///
 /// # Errors
 ///
-/// A row outside `layout`, or scales of another dimension.
+/// A layout that is not a generation predicate, or a row outside it.
 pub fn encode(layout: &RowLayout, scales: &Scales, row: &[f32]) -> Result<Encoded, RowRejection> {
+    layout.check()?;
     codec::validate(row, layout)?;
-    if scales.dimension() != layout.dimension {
-        return Err(RowRejection::Dimension {
-            expected: layout.dimension,
-            actual: scales.scales.len(),
-        });
-    }
+    assert_eq!(
+        scales.scales.len(),
+        layout.dimension as usize,
+        "scales of one calibration match the layout"
+    );
     let mut codes = Vec::with_capacity(row.len());
     let mut clipped = 0u32;
     for (value, scale) in row.iter().zip(&scales.scales) {
@@ -207,7 +198,7 @@ pub fn encode(layout: &RowLayout, scales: &Scales, row: &[f32]) -> Result<Encode
         if code != rounded {
             clipped += 1;
         }
-        // The clamp bounds the value to i8 range, so the cast is exact.
+        // A finite value over a positive finite scale is a finite quotient, and the clamp bounds it to i8, so the cast is exact.
         codes.push(code as i8);
     }
     Ok(Encoded { codes, clipped })
@@ -215,23 +206,20 @@ pub fn encode(layout: &RowLayout, scales: &Scales, row: &[f32]) -> Result<Encode
 
 /// One byte per code, two's complement.
 pub fn encode_codes(codes: &[i8]) -> Vec<u8> {
-    codes.iter().map(|code| code.to_le_bytes()[0]).collect()
+    codes.iter().map(|code| *code as u8).collect()
 }
 
 /// Rejects the reserved code `-128` so a corrupt byte cannot widen into a product outside the recipe's range.
-pub fn decode_codes(bytes: &[u8], dimension: u32) -> Result<Vec<i8>, CodeRejection> {
+pub fn decode_codes(bytes: &[u8], dimension: u32) -> Result<Vec<i8>, ScalarBytesRejection> {
     if bytes.len() != dimension as usize {
-        return Err(CodeRejection::Dimension {
+        return Err(ScalarBytesRejection::Dimension {
             expected: dimension,
             actual: bytes.len(),
         });
     }
-    let codes: Vec<i8> = bytes
-        .iter()
-        .map(|byte| i8::from_le_bytes([*byte]))
-        .collect();
+    let codes: Vec<i8> = bytes.iter().map(|byte| *byte as i8).collect();
     if let Some(coordinate) = codes.iter().position(|code| *code == i8::MIN) {
-        return Err(CodeRejection::Reserved { coordinate });
+        return Err(ScalarBytesRejection::ReservedCode { coordinate });
     }
     Ok(codes)
 }

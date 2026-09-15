@@ -168,7 +168,7 @@ fn weighted_dot_matches_the_in_order_model_over_the_full_code_range() {
             }),
             |(scales, query, doc)| {
                 let dimension = scales.len() as u32;
-                let scales = Scales::decode(&codec::encode(&scales), dimension).unwrap();
+                let scales = Scales::from_values(scales, dimension).unwrap();
                 let mut model = 0.0f64;
                 for j in 0..query.len() {
                     let s = f64::from(scales.as_slice()[j]);
@@ -202,7 +202,7 @@ fn encoding_codes_are_clamped_counted_and_rounded_to_even() {
                     metric: Metric::InnerProduct,
                     unit_norm_tolerance: 1e12,
                 };
-                let scales = Scales::decode(&codec::encode(&scales), dimension).unwrap();
+                let scales = Scales::from_values(scales, dimension).unwrap();
                 let Ok(encoded) = encode(&layout, &scales, &row) else {
                     // The only rejection a finite row can draw here is a zero norm.
                     prop_assert!(row.iter().all(|v| *v == 0.0));

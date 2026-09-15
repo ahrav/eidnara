@@ -13,5 +13,4 @@ pub use oracle::{
     Completion, Consumed, DenseCoverage, ExhaustiveQuery, ExhaustiveRanking, IncompleteReason,
     OracleBounds, OracleRefusal, Window, exhaustive,
 };
-pub use scalar::{Calibration, CalibrationIdentity, Encoded, ScalarRecipe, Scales};
 pub use score::{Ranked, inner_product, rank_order, rescore, score};
