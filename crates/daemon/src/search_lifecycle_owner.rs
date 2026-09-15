@@ -872,6 +872,18 @@ impl SearchLifecycleOwner {
                 "manifest limits cannot bound the request",
             ));
         }
+        // A supervisor still running under the identity or bounds a reload replaced is not re-admitted under the new records: admission closes, the slice loop is woken to rotate it, and the request is refused until then.
+        if let Managed::Selection(selection) = &mut *managed
+            && selection.maintenance().is_some()
+            && (*selection.identity() != identity
+                || coverage_bounds(inputs.manifest()).ok() != Some(selection.bounds()))
+        {
+            let _ = self.admission.refresh(None);
+            self.requested.notify_one();
+            return Err(BuildError::Invalid(
+                "maintenance runs under records a reload replaced; retry after the next slice rotates it",
+            ));
+        }
         // The records just read are installed before the request's own sizing is judged, so a refused request still leaves the gate on the current records rather than on the evidence the last slice installed or, before the first slice, on its initial closed state; a reload that changed them cancels the earlier grants here.
         let selection = match &*managed {
             Managed::Selection(selection) => Some(&**selection),

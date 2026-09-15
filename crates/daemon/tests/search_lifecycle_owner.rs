@@ -3179,7 +3179,7 @@ fn a_refused_request_over_an_unreadable_record_closes_admission() {
     assert!(owner.pin(&slice_budget()).is_err());
 }
 
-/// A request recorded while the slice loop idles wakes the loop, so the record is observed well within the idle period rather than after it.
+/// A request recorded while the slice loop idles wakes the loop, so the next slice begins well within the idle period rather than after it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_request_wakes_an_idle_slice_loop() {
     let root = tempfile::tempdir().unwrap();
@@ -3199,35 +3199,91 @@ async fn a_request_wakes_an_idle_slice_loop() {
         Arc::clone(&owner),
         cancel.clone(),
     ));
-    // The first slice finds nothing to do and the loop idles; the request lands inside that idle wait.
-    tokio::task::spawn_blocking(move || waiting.recv_timeout(Duration::from_secs(10)))
-        .await
-        .unwrap()
-        .expect("the first slice runs");
+    // The first slice finds nothing to do and the loop idles; the request lands inside that idle wait. The slice events are the observation, since reading the record would contend for the lifecycle lock a slice holds.
+    let waiting = tokio::task::spawn_blocking(move || {
+        waiting
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first slice runs");
+        waiting
+    })
+    .await
+    .unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
     let requested = Instant::now();
     owner
         .request(&rebuild(home), now(), &slice_budget())
         .unwrap();
-    let observed = tokio::time::timeout(Duration::from_millis(2_000), async {
-        loop {
-            if matches!(control(home), ControlState::Current(_))
-                || matches!(control(home), ControlState::Intent(intent) if intent.staged_seed_digest.is_some())
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await;
+    let next =
+        tokio::task::spawn_blocking(move || waiting.recv_timeout(Duration::from_millis(2_000)))
+            .await
+            .unwrap();
     let elapsed = requested.elapsed();
     cancel.cancel();
     loop_task.await.unwrap();
     let _ = owner.shutdown().await;
     assert!(
-        observed.is_ok(),
-        "the loop did not observe the request within {elapsed:?}; it idles for five seconds otherwise"
+        next.is_ok(),
+        "no slice began within {elapsed:?} of the request; the loop idles for five seconds otherwise"
     );
+}
+
+/// A request made after a reload that changes the identity while the old family's supervisor still runs does not open admission under the new identity over that supervisor: it closes admission, refuses, and leaves the rotation to the next slice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_request_over_running_foreign_maintenance_closes_admission_until_rotation() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+        .with_roster(Arc::new(|| {
+            vec![("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap())]
+        }));
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    drive(&owner, 40, || published(&owner).len() == 1).await;
+    assert!(owner.maintenance().is_some());
+    let ControlState::Current(current) = control(home) else {
+        panic!("the rebuild reached Current");
+    };
+
+    // The reload changes the identity; the running supervisor belongs to the old one.
+    let mut renewed = identity(&kernel_incarnation_id(home));
+    renewed.limit_manifest_protocol_version = "limits.v2".to_owned();
+    write_records(
+        home,
+        &manifest_json(&renewed, &ProjectionHook::ALL),
+        &campaign_json(&renewed),
+    );
+    let mut request = rebuild(home);
+    request.selected_generation = current.staged_seed_digest.clone().unwrap();
+    request.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    request.attempt_id = "rebuild-under-limits-v2".to_owned();
+    let outcome = owner.request(&request, now(), &slice_budget());
+    assert!(
+        matches!(outcome, Err(BuildError::Invalid(_))),
+        "{outcome:?}"
+    );
+    assert!(
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .is_err(),
+        "the running supervisor is admitted under nothing until the rotation"
+    );
+    let SliceOutcome::RotateMaintenance(handle) = owner.run_slice(&slice_budget()) else {
+        panic!("the next slice hands the foreign supervisor back");
+    };
+    owner.stop_maintenance(&handle).await.unwrap();
+    owner.shutdown().await.unwrap();
 }
 
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
