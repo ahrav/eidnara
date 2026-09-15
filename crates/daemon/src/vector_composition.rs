@@ -15,6 +15,7 @@ use host_runtime::generation::{
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 
+use crate::projection_gates::Denial;
 use crate::vector_generation::{
     ExpectedVectors, Staging, VectorIdentity, VectorRefusal, VerifiedVectors, sha256_hex, verify,
     write_new,
@@ -135,6 +136,8 @@ pub enum CompositionRefusal {
     },
     #[error("staging: {0}")]
     Stage(VectorRefusal),
+    #[error("delta admission: {0}")]
+    Deltas(Denial),
     #[error("the lifecycle store refused: {0}")]
     Store(String),
     #[error(
@@ -287,6 +290,10 @@ pub fn publish(
             },
         ));
     }
+    staging
+        .ledger
+        .admit_deltas(staging.admission, composition.deltas.len())
+        .map_err(|denial| fail(progress, CompositionRefusal::Deltas(denial)))?;
     write_new(
         &work_dir.join(COMPOSITION_FILE),
         &composition.canonical_bytes(),

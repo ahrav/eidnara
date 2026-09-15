@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use host_runtime::generation::{
     GenerationError, GenerationManifest, GenerationStore, ManifestFile, StageMeta,
@@ -26,6 +27,7 @@ use sha2::{Digest, Sha256};
 
 use crate::projection_gates::{Admission, Denial, HookGate, InvalidationIdentity};
 use crate::search_seed::manifest_sources;
+use crate::vector_admission::{Ledger, ResourceClass};
 
 /// The manifest target of one vector layer: a base or a delta of original rows, codes, and scales.
 pub const VECTOR_TARGET: &str = "vector-generation";
@@ -288,6 +290,8 @@ pub enum VectorRefusal {
     Calibration(scalar::CalibrationRejection),
     #[error("admission refused staging: {0}")]
     Admission(Denial),
+    #[error("reservation: {0}")]
+    Reservation(crate::vector_admission::Refusal),
     #[error("the lifecycle store refused the generation: {0}")]
     Store(String),
     #[error("the generation carries a state schema this build does not know")]
@@ -421,23 +425,24 @@ pub fn build(
     })
 }
 
-/// Everything a stager needs from the lifecycle and the admission gate. `transaction` is the caller's exclusive hold on the store's transaction lock; hold it until the digest is pinned or protected.
+/// Everything a stager needs from the lifecycle, the admission gate, and the ledger. `transaction` is the caller's exclusive hold on the store's transaction lock; hold it until the digest is pinned or protected.
 pub struct Staging<'a> {
     pub store: &'a GenerationStore,
     pub transaction: &'a LifecycleTransactionLock,
     pub gate: &'a HookGate,
     pub admission: &'a Admission,
     pub identity: &'a ProjectionIdentity,
+    pub ledger: &'a Arc<Ledger>,
     /// Digests a corrupt same-digest target may never be exchange-repaired over.
     pub protected: &'a BTreeSet<String>,
 }
 
 impl Staging<'_> {
-    /// Charges the manifest's whole inventory against the staged-bytes limit, then stages the files `resolve` names for each manifest path; a refused admission stages nothing.
+    /// Charges the manifest's whole inventory against the staged-bytes limit, reserves it in the ledger's disk pool on top of what the store already holds, then stages the files `resolve` names for each manifest path; a refused admission or reservation stages nothing. The reservation ends with the copy: the bytes then belong to the store, which the next disk reservation counts.
     ///
     /// # Errors
     ///
-    /// An admission denial or the store's refusal.
+    /// An admission denial, a refused reservation, or the store's refusal.
     pub(crate) fn stage_manifest(
         &self,
         manifest: &GenerationManifest,
@@ -452,6 +457,15 @@ impl Staging<'_> {
                 &[(STAGE_DISK_LIMIT, bytes)],
             )
             .map_err(VectorRefusal::Admission)?;
+        let _staging = self
+            .ledger
+            .reserve(
+                self.admission,
+                ResourceClass::Staging,
+                bytes,
+                Ledger::store_bytes(self.store).map_err(VectorRefusal::Reservation)?,
+            )
+            .map_err(VectorRefusal::Reservation)?;
         let sources = manifest_sources(manifest, |path| Some(resolve(path)))
             .expect("every manifest path resolves under the work directory");
         let digest = self.store.stage(&sources, meta, self.protected)?;

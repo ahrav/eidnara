@@ -1,6 +1,6 @@
 //! The fail-closed gate every projection hook consults before it runs. A hook is admitted only when the runtime manifest enables it and every evidence gate passes under the projection identity the daemon runs with; installing another manifest or identity cancels the grant's token and nothing further is admitted under the old evidence, while work already admitted keeps its owners until it joins.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -122,6 +122,8 @@ pub enum Gate {
     Freshness,
     Resource,
     BothHarness,
+    /// The compression campaign's evidence, read by compressed activation alone.
+    Compression,
 }
 
 /// The part of the projection identity a grant is bound to. The kernel incarnation is excluded: it changes on every kernel restart while the evidence about the projection's content, model, and limits stays valid; every other field invalidates the evidence when it changes.
@@ -199,6 +201,13 @@ pub const REQUIRED_LIMITS: [&str; 27] = [
     "decoded_heap_high_water_bytes",
 ];
 
+/// Limits the vector ledger reads when a manifest carries them. They are optional in the manifest: a manifest without one refuses the vector work that needs it, and nothing else, so an existing deployment keeps its other hooks.
+pub const VECTOR_LIMITS: [&str; 3] = [
+    "vector_resident_bytes",
+    "vector_disk_bytes",
+    "vector_delta_count",
+];
+
 const MANIFEST_FIELDS: [&str; 4] = [
     "protocol_version",
     "invalidation_identity",
@@ -226,6 +235,9 @@ pub enum ManifestRefusal {
     MalformedFlag(String),
 }
 
+/// The `hooks` key under which a manifest approves production use and full-corpus publication of compressed vector layers. It is not a projection hook: no class coverage or slice runs under it; it is the owners' enablement of a capability the compression evidence must then prove.
+pub const COMPRESSED_ACTIVATION_ID: &str = "search_projection.vector.compressed_activation";
+
 /// What product code reads from the manifest: nothing about the campaign that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeManifest {
@@ -233,6 +245,8 @@ pub struct RuntimeManifest {
     pub identity: InvalidationIdentity,
     pub limits: BTreeMap<String, u64>,
     pub enabled: BTreeMap<ProjectionHook, bool>,
+    /// The [`COMPRESSED_ACTIVATION_ID`] flag; absent is disabled.
+    pub compressed_activation: bool,
 }
 
 impl RuntimeManifest {
@@ -280,10 +294,17 @@ impl RuntimeManifest {
                 .ok_or_else(|| ManifestRefusal::NonNumericLimit(name.to_owned()))?;
             limits.insert(name.to_owned(), limit);
         }
-        if let Some(extra) = limits_object
-            .keys()
-            .find(|key| !REQUIRED_LIMITS.contains(&key.as_str()))
-        {
+        for name in VECTOR_LIMITS {
+            if let Some(value) = limits_object.get(name) {
+                let limit = value
+                    .as_u64()
+                    .ok_or_else(|| ManifestRefusal::NonNumericLimit(name.to_owned()))?;
+                limits.insert(name.to_owned(), limit);
+            }
+        }
+        if let Some(extra) = limits_object.keys().find(|key| {
+            !REQUIRED_LIMITS.contains(&key.as_str()) && !VECTOR_LIMITS.contains(&key.as_str())
+        }) {
             return Err(ManifestRefusal::UnknownLimit(extra.clone()));
         }
         let hooks_object = object
@@ -291,15 +312,20 @@ impl RuntimeManifest {
             .and_then(Value::as_object)
             .ok_or(ManifestRefusal::Shape)?;
         let mut enabled = BTreeMap::new();
+        let mut compressed_activation = false;
         for (id, entry) in hooks_object {
-            let hook = ProjectionHook::from_id(id)
-                .ok_or_else(|| ManifestRefusal::UnknownHook(id.clone()))?;
             let flag = entry
                 .as_object()
                 .filter(|entry| entry.keys().all(|key| key == "enabled"))
                 .and_then(|entry| entry.get("enabled"))
                 .and_then(Value::as_bool)
                 .ok_or_else(|| ManifestRefusal::MalformedFlag(id.clone()))?;
+            if id == COMPRESSED_ACTIVATION_ID {
+                compressed_activation = flag;
+                continue;
+            }
+            let hook = ProjectionHook::from_id(id)
+                .ok_or_else(|| ManifestRefusal::UnknownHook(id.clone()))?;
             enabled.insert(hook, flag);
         }
         Ok(Self {
@@ -307,6 +333,7 @@ impl RuntimeManifest {
             identity,
             limits,
             enabled,
+            compressed_activation,
         })
     }
 }
@@ -387,6 +414,79 @@ pub enum HarnessRun {
     Failed,
 }
 
+/// The RP2.9 criteria a compression campaign must pass before compressed layers may serve or publish in production.
+pub const COMPRESSION_CRITERIA: [&str; 9] = [
+    "fidelity",
+    "request_latency",
+    "startup_cold_cache",
+    "concurrency",
+    "freshness",
+    "disk",
+    "compaction",
+    "cancellation",
+    "task_cost",
+];
+
+/// The stages one harness's full-path trace must show, from a real embedding through validated application.
+pub const TRACE_STAGES: [&str; 9] = [
+    "real_embedding",
+    "exact_lane",
+    "lexical_lane",
+    "dense_lane",
+    "canonical_validation",
+    "fusion",
+    "span_grouping",
+    "bounded_packing",
+    "validated_application",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Passed,
+    Failed,
+}
+
+/// How a harness trace was produced. Only a real run counts; a simulation or a report about a run proves nothing about the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceKind {
+    Real,
+    Simulated,
+    ReportOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FullPathTrace {
+    pub kind: TraceKind,
+    pub stages: BTreeSet<String>,
+}
+
+/// What a compression campaign ran under beyond the projection identity: the build, the corpus, the quantizer recipe, the hardware, and the harness versions. The daemon supplies its own binding and the evidence must name the same one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompressionBinding {
+    pub build: String,
+    pub corpus_sha256: String,
+    pub quantizer_recipe: String,
+    pub hardware: String,
+    pub harnesses: BTreeMap<String, String>,
+}
+
+/// The compression campaign's record: its identity and binding, the caps it ran under, an outcome per criterion, a trace per harness, and whether the owners revoked it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompressionEvidence {
+    pub identity: InvalidationIdentity,
+    pub binding: CompressionBinding,
+    /// The vector limits in force during the campaign; a manifest whose limits differ invalidates the evidence.
+    pub limits: BTreeMap<String, u64>,
+    pub criteria: BTreeMap<String, Outcome>,
+    pub traces: BTreeMap<String, FullPathTrace>,
+    pub revoked: bool,
+}
+
 /// Everything the gates read, gathered under `identity`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evidence {
@@ -396,6 +496,7 @@ pub struct Evidence {
     /// `(harness, capability)` to what the harness proved.
     pub capabilities: BTreeMap<(String, String), CapabilityEvidence>,
     pub harness_runs: BTreeMap<String, HarnessRun>,
+    pub compression: Option<CompressionEvidence>,
 }
 
 /// Why a hook was denied. Variants name gates, hooks, harnesses, class codes, and sizes, never content.
@@ -431,6 +532,18 @@ pub enum Denial {
         observed: u64,
         max: u64,
     },
+    #[error("compressed activation is not enabled")]
+    CompressionDisabled,
+    #[error("the compression evidence was revoked")]
+    Revoked,
+    #[error(
+        "the compression evidence ran under {limit} = {evidence}, but the manifest says {manifest}"
+    )]
+    LimitChanged {
+        limit: String,
+        evidence: u64,
+        manifest: u64,
+    },
 }
 
 /// A grant. `invalidated` fires when the gate's manifest or identity changes after the grant; the holder cancels its budget and lets admitted work join.
@@ -438,6 +551,12 @@ pub enum Denial {
 pub struct Admission {
     pub hook: ProjectionHook,
     pub entry: EntryPoint,
+    pub invalidated: CancellationToken,
+}
+
+/// A grant to use or publish compressed vector layers in production; `invalidated` fires when the gate's manifest or identity changes after the grant.
+#[derive(Debug, Clone)]
+pub struct ActivationGrant {
     pub invalidated: CancellationToken,
 }
 
@@ -451,12 +570,14 @@ pub enum Renewal {
     Disabled,
 }
 
-/// One manifest, the projection identity the daemon runs with, and one evidence packet.
+/// One manifest, the projection identity the daemon runs with, one evidence packet, and the compression binding the daemon itself runs under, when it knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceEvaluator {
     pub manifest: RuntimeManifest,
     pub current: InvalidationIdentity,
     pub evidence: Evidence,
+    /// `None` when the daemon cannot name its own build, corpus, recipe, hardware, and harness versions; the compression gate then refuses as missing rather than guessing.
+    pub binding: Option<CompressionBinding>,
 }
 
 impl EvidenceEvaluator {
@@ -485,6 +606,103 @@ impl EvidenceEvaluator {
         self.resource()?;
         self.capability()?;
         self.both_harness()
+    }
+
+    /// Judges compressed activation: the manifest's flag, both identities, every gate a dense hook passes, and then the compression campaign, which must be bound to this identity and this daemon's binding, unrevoked, run under the manifest's vector limits, passed on every criterion, and traced end to end by a real run of each harness.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Denial`]; a report about a campaign never authorizes production on its own.
+    pub fn judge_compressed_activation(&self) -> Result<(), Denial> {
+        if !self.manifest.compressed_activation {
+            return Err(Denial::CompressionDisabled);
+        }
+        if self.manifest.identity != self.current {
+            return Err(Denial::ManifestIdentity);
+        }
+        if self.evidence.identity != self.current {
+            return Err(Denial::EvidenceIdentity);
+        }
+        let coverage = self
+            .evidence
+            .coverage
+            .as_ref()
+            .ok_or(Denial::Missing(Gate::ClassCoverage))?;
+        self.class_coverage(ProjectionHook::EmbeddingBootstrap, coverage)?;
+        self.freshness(coverage)?;
+        self.resource()?;
+        self.capability()?;
+        self.both_harness()?;
+        self.compression()
+    }
+
+    fn compression(&self) -> Result<(), Denial> {
+        let evidence = self
+            .evidence
+            .compression
+            .as_ref()
+            .ok_or(Denial::Missing(Gate::Compression))?;
+        let binding = self
+            .binding
+            .as_ref()
+            .ok_or(Denial::Missing(Gate::Compression))?;
+        if evidence.identity != self.current || evidence.binding != *binding {
+            return Err(Denial::EvidenceIdentity);
+        }
+        if evidence.revoked {
+            return Err(Denial::Revoked);
+        }
+        for name in VECTOR_LIMITS {
+            let manifest = self.limit(name)?;
+            match evidence.limits.get(name) {
+                Some(ran) if *ran == manifest => {}
+                Some(ran) => {
+                    return Err(Denial::LimitChanged {
+                        limit: name.to_owned(),
+                        evidence: *ran,
+                        manifest,
+                    });
+                }
+                None => {
+                    return Err(Denial::Failed(
+                        Gate::Compression,
+                        format!("the campaign does not record {name}"),
+                    ));
+                }
+            }
+        }
+        for criterion in COMPRESSION_CRITERIA {
+            match evidence.criteria.get(criterion) {
+                Some(Outcome::Passed) => {}
+                Some(Outcome::Failed) => {
+                    return Err(Denial::Failed(
+                        Gate::Compression,
+                        format!("criterion {criterion} failed"),
+                    ));
+                }
+                None => {
+                    return Err(Denial::Failed(
+                        Gate::Compression,
+                        format!("criterion {criterion} is missing"),
+                    ));
+                }
+            }
+        }
+        for harness in HARNESSES {
+            let unsupported = || Denial::Unsupported {
+                harness: harness.to_owned(),
+                capability: "compressed_full_path_trace".to_owned(),
+            };
+            let trace = evidence.traces.get(harness).ok_or_else(unsupported)?;
+            if trace.kind != TraceKind::Real
+                || TRACE_STAGES
+                    .iter()
+                    .any(|stage| !trace.stages.contains(*stage))
+            {
+                return Err(unsupported());
+            }
+        }
+        Ok(())
     }
 
     fn limit(&self, name: &str) -> Result<u64, Denial> {
@@ -890,6 +1108,23 @@ impl HookGate {
     pub fn admit(&self, hook: ProjectionHook, entry: EntryPoint) -> Result<Admission, Denial> {
         self.admit_all(&[hook], entry)
             .map(|mut admissions| admissions.remove(0))
+    }
+
+    /// Admits production use or full-corpus publication of compressed vector layers under the gate's current state, judged by [`EvidenceEvaluator::judge_compressed_activation`]. The grant carries the same invalidation token as every hook grant, so a changed manifest or identity withdraws it too.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Denial`]; a gate without a manifest, a disabled gate, or a manifest whose flag is off refuses before any evidence is read.
+    pub fn admit_compressed_activation(&self) -> Result<ActivationGrant, Denial> {
+        let state = self.state.lock().map_err(|_| Denial::NoManifest)?;
+        if state.disabled {
+            return Err(Denial::RecoveryRequired);
+        }
+        let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
+        evaluator.judge_compressed_activation()?;
+        Ok(ActivationGrant {
+            invalidated: state.invalidated.clone(),
+        })
     }
 
     /// Returns [`Denial::EvidenceIdentity`] unless `data_home` matches; an unbound gate is accepted only with `test-support`.

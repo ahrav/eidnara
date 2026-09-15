@@ -1,4 +1,4 @@
-//! Reads a vector composition through pinned files. Acquisition observes the selector under the lifecycle's shared protection, recovers and verifies the composition, pins the record and every member with shared locks, keeps the row and code artifacts open on the descriptors verification hashed them through, charges the bytes the view keeps resident, and re-reads the selector before the protection is released; a failure anywhere returns nothing, and the pins, descriptors, and charge go with it.
+//! Reads a vector composition through pinned files. Acquisition observes the selector under the lifecycle's shared protection, recovers and verifies the composition, pins the record and every member with shared locks, keeps the row and code artifacts open on the descriptors verification hashed them through, reserves the bytes the view keeps resident and the bytes it pins on disk in the ledger, and re-reads the selector before the protection is released; a failure anywhere returns nothing, and the pins, descriptors, and reservations go with it.
 //! Ranking reads only the rows the resolver names, each by its offset in the row artifact into scratch charged for one page, and decodes them through the original-row codec; the int8 codes are read the same way under the layer's own scales. Positioned reads after acquisition are not re-hashed: pins protect lifetime, and same-user writes after verification are outside the cooperative-file threat model.
 //! A caller runs the ranking through the request's blocking seam with the view moved into the work, so the view lives until the physical read returns whatever happens to the caller.
 
@@ -12,7 +12,6 @@ use host_runtime::generation::{
     CurrentProfile, GenerationError, GenerationStore, ValidatedGeneration,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
-use host_runtime::wire::{ByteBudget, ByteCharge};
 use kernel::KernelStore;
 use kernel::applicability::EvalBudget;
 use retrieval::batch::ProjectionCheckpoint;
@@ -25,6 +24,8 @@ use retrieval::dense::{
 use retrieval::eligibility::Authority;
 use storage::GuardedConn;
 
+use crate::projection_gates::Admission;
+use crate::vector_admission::{self, Ledger, Reservation, ResourceClass};
 use crate::vector_composition::{self, SelectorState, Unavailable, VerifiedComposition};
 use crate::vector_generation::{
     self, ExpectedVectors, ROW_IDS_FILE, SCALES_FILE, SIDECAR_FILE, TOMBSTONES_FILE, VectorRefusal,
@@ -55,8 +56,8 @@ pub enum AcquireRefusal {
     Unavailable(#[from] Unavailable),
     #[error("the lifecycle store refused: {0}")]
     Store(String),
-    #[error("the view would keep {bytes} bytes resident; the residency budget refused them")]
-    Residency { bytes: usize },
+    #[error("the ledger refused the view's bytes: {0}")]
+    Reservation(#[from] vector_admission::Refusal),
     #[error("the selector moved during acquisition: it named {observed:?}, now {current:?}")]
     SelectorMoved {
         observed: SelectorState,
@@ -183,14 +184,15 @@ impl RowAccess for PinnedLayer {
     }
 }
 
-/// A complete verified composition held open: the record and every member pinned, every artifact open, and the resident bytes charged until the view is dropped. Acquire a view once and share it; acquisition hashes every member and holds the lifecycle's shared lock while it does.
+/// A complete verified composition held open: the record and every member pinned, every artifact open, and the resident and pinned bytes reserved until the view is dropped. Acquire a view once and share it; acquisition hashes every member and holds the lifecycle's shared lock while it does.
 pub struct PinnedVectors {
     pub digest: String,
     pub layout: RowLayout,
     /// The base first, then the deltas in application order.
     pub layers: Vec<PinnedLayer>,
     _record: ValidatedGeneration,
-    _residency: ByteCharge,
+    _resident: Reservation,
+    _pinned: Reservation,
 }
 
 impl std::fmt::Debug for PinnedVectors {
@@ -224,7 +226,7 @@ impl PinnedVectors {
     }
 }
 
-/// The files a view keeps decoded in memory for its lifetime, charged at their manifest-declared sizes; rows and codes stay on disk and are read by offset.
+/// The files a view keeps decoded in memory for its lifetime, reserved at their manifest-declared sizes; rows and codes stay on disk and are read by offset.
 const RESIDENT_FILES: [&str; 4] = [ROW_IDS_FILE, TOMBSTONES_FILE, SCALES_FILE, SIDECAR_FILE];
 
 impl SelectorState {
@@ -243,12 +245,13 @@ impl SelectorState {
 ///
 /// # Errors
 ///
-/// No shared protection, no verifying composition, a store refusal, a residency budget that cannot hold the view's resident bytes, or a selector that moved while the view was being taken. Nothing is handed out on any of them.
+/// No shared protection, no verifying composition, a store refusal, a ledger that cannot hold the view's resident or pinned bytes, or a selector that moved while the view was being taken. Nothing is handed out on any of them.
 pub fn acquire(
     root: Option<&Path>,
     expected: &ExpectedVectors<'_>,
     bounds: ReaderBounds,
-    residency: &ByteBudget,
+    ledger: &Arc<Ledger>,
+    grant: &Admission,
     observe: &mut dyn FnMut(AcquireEvent),
 ) -> Result<Arc<PinnedVectors>, AcquireRefusal> {
     let protection = LifecycleTransactionLock::acquire_shared(root)
@@ -284,10 +287,16 @@ pub fn acquire(
         .filter(|file| RESIDENT_FILES.contains(&file.path.as_str()))
         .map(|file| file.size)
         .sum();
-    let resident = usize::try_from(resident).unwrap_or(usize::MAX);
-    let residency = residency
-        .try_charge(resident)
-        .ok_or(AcquireRefusal::Residency { bytes: resident })?;
+    let pinned: u64 = members
+        .iter()
+        .map(|member| &member.generation.manifest)
+        .chain([&record.manifest])
+        .flat_map(|manifest| manifest.files.iter())
+        .map(|file| file.size)
+        .sum();
+    let resident = ledger.reserve(grant, ResourceClass::LayerTables, resident, 0)?;
+    // Census only: the store's total already holds these bytes, and the reservation says what this view keeps past a prune.
+    let pinned = ledger.reserve(grant, ResourceClass::PinnedGenerations, pinned, 0)?;
     let epoch = composition.generation_epoch;
     let last = members.len() - 1;
     let mut layers = Vec::with_capacity(members.len());
@@ -315,7 +324,8 @@ pub fn acquire(
         },
         layers,
         _record: record,
-        _residency: residency,
+        _resident: resident,
+        _pinned: pinned,
     }))
 }
 
@@ -334,13 +344,16 @@ pub struct RankRequest<'a> {
 pub enum RankRefusal {
     #[error("the view's {field} is not the request's")]
     Identity { field: &'static str },
-    #[error("one page of rows needs {bytes} bytes of scratch; the budget refused them")]
-    Scratch { bytes: usize },
+    #[error("one page of rows needs {bytes} bytes of scratch: {refusal}")]
+    Scratch {
+        bytes: u64,
+        refusal: vector_admission::Refusal,
+    },
     #[error(transparent)]
     Layered(#[from] LayeredRefusal),
 }
 
-/// Ranks `request` over the view's layers inside the caller's read transaction. Every layer's sidecar is checked against the request's expectation first, and one page of row scratch is charged for the walk's duration.
+/// Ranks `request` over the view's layers inside the caller's read transaction. Every layer's sidecar is checked against the request's expectation first, and one page of row scratch is reserved for the walk's duration.
 /// Run it through the request's blocking seam with the `Arc<PinnedVectors>` moved into the work, so the view outlives a caller that drops its future, cancels, or times out.
 ///
 /// # Errors
@@ -352,7 +365,8 @@ pub fn rank(
     kernel: &KernelStore,
     request: &RankRequest<'_>,
     budget: &EvalBudget,
-    scratch: &ByteBudget,
+    ledger: &Arc<Ledger>,
+    grant: &Admission,
 ) -> Result<LayeredRanking, RankRefusal> {
     let expected = request.expected;
     for layer in &view.layers {
@@ -366,12 +380,17 @@ pub fn rank(
         })?;
     }
     // The page's decoded rows plus the one raw row being read.
-    let bytes = (request.bounds.page_rows.get() + 1)
-        .checked_mul(view.layout.dimension as usize * 4)
-        .ok_or(RankRefusal::Scratch { bytes: usize::MAX })?;
-    let _scratch = scratch
-        .try_charge(bytes)
-        .ok_or(RankRefusal::Scratch { bytes })?;
+    let bytes = (request.bounds.page_rows.get() as u64 + 1)
+        .checked_mul(u64::from(view.layout.dimension) * 4)
+        .ok_or(RankRefusal::Scratch {
+            bytes: u64::MAX,
+            refusal: vector_admission::Refusal::Overflow {
+                pool: vector_admission::Pool::Resident,
+            },
+        })?;
+    let _scratch = ledger
+        .reserve(grant, ResourceClass::Scratch, bytes, 0)
+        .map_err(|refusal| RankRefusal::Scratch { bytes, refusal })?;
     let layers = view.resolver_layers();
     let query = LayeredQuery {
         generation: expected.generation,

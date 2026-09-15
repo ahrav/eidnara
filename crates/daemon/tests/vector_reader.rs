@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use daemon::projection_gates::{Admission, Denial};
+use daemon::vector_admission::{Ledger, RESIDENT_LIMIT, Refusal, ResourceClass};
 use daemon::vector_generation::{ExpectedVectors, ROWS_FILE, VerifiedVectors};
 use daemon::vector_reader::{
     AcquireEvent, AcquireRefusal, PinnedVectors, RankRefusal, RankRequest, ReaderBounds, acquire,
@@ -16,7 +18,6 @@ use daemon::vector_reader::{
 };
 use host_runtime::generation::{CurrentProfile, GenerationStore, VECTOR_PROFILE_NAME};
 use host_runtime::lifecycle::{TRANSACTION_LOCK_NAME, coordination_dir_path};
-use host_runtime::wire::ByteBudget;
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
 use retrieval::batch::ProjectionCheckpoint;
@@ -89,8 +90,8 @@ fn oracle_bounds(k: usize) -> OracleBounds {
     }
 }
 
-const RESIDENCY: usize = 1 << 20;
-const SCRATCH: usize = 1 << 16;
+/// One page of two rows plus one raw row, eight coordinates wide.
+const PAGE_SCRATCH: u64 = (2 + 1) * 8 * 4;
 
 fn projection(fixture: &Fixture, admitted: &[&str]) -> Projection {
     Projection::new(
@@ -111,7 +112,6 @@ fn transaction_lock(fixture: &Fixture) -> PathBuf {
 /// Acquires under the reader's own shared protection, giving up the fixture's exclusive transaction for the duration.
 fn acquire_view(
     fixture: &mut Fixture,
-    residency: &ByteBudget,
     observe: &mut dyn FnMut(AcquireEvent),
 ) -> Result<Arc<PinnedVectors>, AcquireRefusal> {
     fixture.release_transaction();
@@ -119,11 +119,17 @@ fn acquire_view(
         Some(fixture.root.path()),
         &fixture.expected(),
         bounds(),
-        residency,
+        &fixture.ledger,
+        &fixture.admission,
         observe,
     );
     fixture.reacquire_transaction();
     view
+}
+
+/// What the ledger holds for `class`, or zero.
+fn held(ledger: &Ledger, class: ResourceClass) -> u64 {
+    ledger.census().held.get(&class).copied().unwrap_or(0)
 }
 
 /// The corpus with `alpha` replaced and `epsilon` gone, published as a new base over the old composition.
@@ -154,19 +160,18 @@ fn rank_view(
     view: &PinnedVectors,
     query: &[f32],
     k: usize,
-    scratch: &ByteBudget,
 ) -> Result<LayeredRanking, RankRefusal> {
     let expected = fixture.expected();
-    rank_expecting(projection, view, &expected, query, k, scratch)
+    rank_expecting(fixture, projection, view, &expected, query, k)
 }
 
 fn rank_expecting(
+    fixture: &Fixture,
     projection: &Projection,
     view: &PinnedVectors,
     expected: &ExpectedVectors<'_>,
     query: &[f32],
     k: usize,
-    scratch: &ByteBudget,
 ) -> Result<LayeredRanking, RankRefusal> {
     let request = RankRequest {
         expected,
@@ -184,7 +189,8 @@ fn rank_expecting(
                 &projection.kernel,
                 &request,
                 &EvalBudget::unbounded(),
-                scratch,
+                &fixture.ledger,
+                &fixture.admission,
             ))
         })
         .unwrap()
@@ -206,7 +212,7 @@ fn map(rows: &[(&str, Vec<f32>)]) -> Vec<(String, Vec<f32>)> {
 }
 
 /// The bytes the view should keep resident, from the store's manifests rather than the reader.
-fn resident_bytes(fixture: &Fixture, members: &[String]) -> usize {
+fn resident_bytes(fixture: &Fixture, members: &[String]) -> u64 {
     members
         .iter()
         .flat_map(|digest| fixture.store.manifest(digest).unwrap().files)
@@ -219,7 +225,16 @@ fn resident_bytes(fixture: &Fixture, members: &[String]) -> usize {
             ]
             .contains(&file.path.as_str())
         })
-        .map(|file| file.size as usize)
+        .map(|file| file.size)
+        .sum()
+}
+
+/// Every manifest byte of `digests`, from the store rather than the reader.
+fn manifest_bytes(fixture: &Fixture, digests: &[String]) -> u64 {
+    digests
+        .iter()
+        .flat_map(|digest| fixture.store.manifest(digest).unwrap().files)
+        .map(|file| file.size)
         .sum()
 }
 
@@ -242,8 +257,7 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
     let delta = fixture.layer_from(&export(&[("alpha", low.clone())], &["beta"], 12));
     let composition = fixture.compose(1, &base, &[delta]).unwrap();
     let digest = fixture.publish(&composition).unwrap();
-    let residency = ByteBudget::new(RESIDENCY as u64);
-    let view = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
 
     assert_eq!(view.digest, digest);
     assert_eq!(view.members(), composition.members());
@@ -253,12 +267,19 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
             "a competing exclusive lock on a pinned generation fails"
         );
     }
-    // Exactly the resident tables are charged: the complement is free, one more byte is not.
+    // Exactly the resident tables are held in the resident pool, and every pinned byte is in the census.
     let resident = resident_bytes(&fixture, &composition.members());
     assert!(resident > 0);
-    let complement = residency.try_charge(RESIDENCY - resident).unwrap();
-    assert!(residency.try_charge(1).is_none());
-    drop(complement);
+    let census = fixture.ledger.census();
+    assert_eq!(census.resident, resident);
+    assert_eq!(census.held[&ResourceClass::LayerTables], resident);
+    let mut pinned = composition.members();
+    pinned.push(digest.clone());
+    assert_eq!(
+        census.held[&ResourceClass::PinnedGenerations],
+        manifest_bytes(&fixture, &pinned)
+    );
+    assert_eq!(census.disk, 0, "pinned generations are census only");
 
     // Rows come back bit for bit from their offsets; codes are the rows under this layer's own scales.
     let layout = view.layout;
@@ -293,8 +314,7 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
     }
 
     let query = axis(0);
-    let scratch = ByteBudget::new(SCRATCH as u64);
-    let ranking = rank_view(&fixture, &projection, &view, &query, 8, &scratch).unwrap();
+    let ranking = rank_view(&fixture, &projection, &view, &query, 8).unwrap();
     let mut expected = map(&corpus);
     expected.retain(|(id, _)| *id != occurrence_id("beta"));
     for (id, vector) in &mut expected {
@@ -320,14 +340,16 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
             unvisited: 0
         }
     );
-    assert!(
-        scratch.try_charge(SCRATCH).is_some(),
+    assert_eq!(
+        held(&fixture.ledger, ResourceClass::Scratch),
+        0,
         "the page scratch is released when the walk returns"
     );
 
     drop(view);
-    assert!(
-        residency.try_charge(RESIDENCY).is_some(),
+    assert_eq!(
+        fixture.ledger.census(),
+        daemon::vector_admission::Census::default(),
         "dropping the view releases its bytes"
     );
     for member in composition.members().iter().chain([&digest]) {
@@ -344,7 +366,6 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
     let composition = fixture.compose(1, &base, &[delta]).unwrap();
     let digest = fixture.publish(&composition).unwrap();
     let members = composition.members();
-    let residency = ByteBudget::new(RESIDENCY as u64);
     let lock = transaction_lock(&fixture);
     let selector = fixture.lifecycle_dir().join(VECTOR_PROFILE_NAME);
     let mut seen = Vec::new();
@@ -352,7 +373,7 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
     let refusal = {
         let mut observe = |event: AcquireEvent| {
             seen.push(event);
-            // Every pin and the charge are held, and a publisher's exclusive lifecycle lock cannot be taken, at both windows.
+            // Every pin and both reservations are held, and a publisher's exclusive lifecycle lock cannot be taken, at both windows.
             assert!(
                 !try_exclusive(&lock),
                 "a competing mutator is refused the transaction lock at {event:?}"
@@ -360,7 +381,8 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
             for pinned in members.iter().chain([&digest]) {
                 assert!(!try_exclusive(&fixture.generation_dir(pinned)));
             }
-            assert!(residency.try_charge(RESIDENCY).is_none());
+            assert!(held(&fixture.ledger, ResourceClass::LayerTables) > 0);
+            assert!(held(&fixture.ledger, ResourceClass::PinnedGenerations) > 0);
             if event == AcquireEvent::BeforeLastLayer {
                 // An attempted prune reclaims nothing the view needs; the files are witnessed on disk afterwards.
                 let report = GenerationStore::open(Some(fixture.root.path()))
@@ -380,7 +402,8 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
             Some(fixture.root.path()),
             &fixture.expected(),
             bounds(),
-            &residency,
+            &fixture.ledger,
+            &fixture.admission,
             &mut observe,
         )
         .unwrap_err()
@@ -409,20 +432,20 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
             "no pin outlives a failed acquisition"
         );
     }
-    assert!(
-        residency.try_charge(RESIDENCY).is_some(),
-        "no charge outlives a failed acquisition"
+    assert_eq!(
+        fixture.ledger.census(),
+        daemon::vector_admission::Census::default(),
+        "no reservation outlives a failed acquisition"
     );
     fixture.reacquire_transaction();
 }
 
 #[test]
-fn no_composition_or_a_short_residency_budget_refuses_before_any_layer_and_a_truncated_row_is_unreadable()
+fn no_composition_or_a_short_resident_limit_refuses_before_any_layer_and_a_truncated_row_is_unreadable()
  {
-    let residency = ByteBudget::new(RESIDENCY as u64);
     let mut empty = Fixture::new();
     assert!(matches!(
-        acquire_view(&mut empty, &residency, &mut |_| {}).unwrap_err(),
+        acquire_view(&mut empty, &mut |_| {}).unwrap_err(),
         AcquireRefusal::Unavailable(_)
     ));
 
@@ -433,31 +456,34 @@ fn no_composition_or_a_short_residency_budget_refuses_before_any_layer_and_a_tru
     let composition = fixture.compose(1, &base, &[]).unwrap();
     fixture.publish(&composition).unwrap();
     let mut seen = 0;
-    let refusal = acquire_view(&mut fixture, &ByteBudget::new(16), &mut |_| seen += 1).unwrap_err();
-    assert!(
-        matches!(refusal, AcquireRefusal::Residency { .. }),
-        "{refusal:?}"
+    fixture.set_limit(RESIDENT_LIMIT, 16);
+    let resident = resident_bytes(&fixture, std::slice::from_ref(&base.digest));
+    let refusal = acquire_view(&mut fixture, &mut |_| seen += 1).unwrap_err();
+    assert_eq!(
+        refusal,
+        AcquireRefusal::Reservation(Refusal::Denied(Denial::LimitExceeded {
+            limit: RESIDENT_LIMIT.to_owned(),
+            observed: resident,
+            max: 16
+        }))
     );
     assert_eq!(seen, 0);
     assert!(try_exclusive(&fixture.generation_dir(&base.digest)));
+    assert_eq!(
+        fixture.ledger.census(),
+        daemon::vector_admission::Census::default()
+    );
+    fixture.set_limit(RESIDENT_LIMIT, u64::MAX);
 
     // A row artifact cut short after acquisition, as a fault injector and not a threat-model claim: the row past the cut is unreadable, and nothing is reinterpreted.
-    let view = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let rows = fixture.generation_dir(&base.digest).join(ROWS_FILE);
     let bytes = std::fs::read(&rows).unwrap();
     std::fs::write(&rows, &bytes[..bytes.len() - 8]).unwrap();
     let layer = &view.layers[0];
     assert!(layer.row(3).is_ok());
     assert!(matches!(layer.row(4), Err(RowFault::Unavailable(_))));
-    let refusal = rank_view(
-        &fixture,
-        &projection,
-        &view,
-        &axis(0),
-        8,
-        &ByteBudget::new(SCRATCH as u64),
-    )
-    .unwrap_err();
+    let refusal = rank_view(&fixture, &projection, &view, &axis(0), 8).unwrap_err();
     assert!(
         matches!(
             refusal,
@@ -465,6 +491,7 @@ fn no_composition_or_a_short_residency_budget_refuses_before_any_layer_and_a_tru
         ),
         "{refusal:?}"
     );
+    assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
 }
 
 #[test]
@@ -475,8 +502,7 @@ fn old_readers_keep_their_complete_set_while_a_new_composition_is_published_and_
     let old_base = fixture.layer_from(&export(&corpus, &[], 10));
     let old = fixture.compose(1, &old_base, &[]).unwrap();
     let old_digest = fixture.publish(&old).unwrap();
-    let residency = ByteBudget::new(RESIDENCY as u64);
-    let old_view = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
+    let old_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
 
     let (replaced, new_base) = publish_replacement(&fixture, &corpus, 2);
     let report = fixture.store.prune(&BTreeSet::new()).unwrap();
@@ -487,25 +513,24 @@ fn old_readers_keep_their_complete_set_while_a_new_composition_is_published_and_
     );
     assert_eq!(
         report.retained_bytes,
-        fixture
-            .store
-            .manifest(&old_digest)
-            .unwrap()
-            .files
-            .iter()
-            .map(|file| file.size)
-            .sum::<u64>()
+        manifest_bytes(&fixture, std::slice::from_ref(&old_digest))
     );
+    // The prune's readback is within what the ledger knows readers pin: the record and its base.
+    let reconciliation = fixture.ledger.reconcile(&report);
+    assert_eq!(
+        reconciliation.ledger_pinned,
+        manifest_bytes(&fixture, &[old_digest.clone(), old_base.digest.clone()])
+    );
+    assert!(!reconciliation.unaccounted());
 
-    let new_view = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
+    let new_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     assert_eq!(old_view.digest, old_digest);
     assert_eq!(new_view.members(), vec![new_base.digest.clone()]);
     let query = axis(0);
-    let scratch = ByteBudget::new(SCRATCH as u64);
-    let old_ranking = rank_view(&fixture, &projection, &old_view, &query, 8, &scratch).unwrap();
+    let old_ranking = rank_view(&fixture, &projection, &old_view, &query, 8).unwrap();
     assert_eq!(keyed(&old_ranking), reference(&query, &map(&corpus)));
     assert_eq!(old_ranking.ranking.completion, Completion::Complete);
-    let new_ranking = rank_view(&fixture, &projection, &new_view, &query, 8, &scratch).unwrap();
+    let new_ranking = rank_view(&fixture, &projection, &new_view, &query, 8).unwrap();
     assert_eq!(keyed(&new_ranking), reference(&query, &map(&replaced)));
     assert_eq!(
         new_ranking.ranking.completion,
@@ -524,7 +549,7 @@ fn old_readers_keep_their_complete_set_while_a_new_composition_is_published_and_
     assert!(!fixture.generations().contains(&old_base.digest));
     assert!(!try_exclusive(&fixture.generation_dir(&new_base.digest)));
     assert_eq!(
-        keyed(&rank_view(&fixture, &projection, &new_view, &query, 8, &scratch).unwrap()),
+        keyed(&rank_view(&fixture, &projection, &new_view, &query, 8).unwrap()),
         reference(&query, &map(&replaced))
     );
 }
@@ -539,10 +564,8 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
     let delta = fixture.layer_from(&export(&[("alpha", axis(0)), ("gamma", axis(0))], &[], 12));
     let composition = fixture.compose(1, &base, &[delta]).unwrap();
     fixture.publish(&composition).unwrap();
-    let residency = ByteBudget::new(RESIDENCY as u64);
-    let view = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let query = axis(0);
-    let scratch = ByteBudget::new(SCRATCH as u64);
 
     let mut other_model = fixture.generation.clone();
     other_model.embedding_model = "another-model".to_owned();
@@ -557,7 +580,7 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
             ..fixture.expected()
         };
         let refusal =
-            rank_expecting(&projection, &view, &foreign, &query, 8, &scratch).unwrap_err();
+            rank_expecting(&fixture, &projection, &view, &foreign, &query, 8).unwrap_err();
         assert_eq!(refusal, RankRefusal::Identity { field });
     }
     let other_recipe = ExpectedVectors {
@@ -565,23 +588,36 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
         ..fixture.expected()
     };
     assert_eq!(
-        rank_expecting(&projection, &view, &other_recipe, &query, 8, &scratch).unwrap_err(),
+        rank_expecting(&fixture, &projection, &view, &other_recipe, &query, 8).unwrap_err(),
         RankRefusal::Identity {
             field: "unit_norm_tolerance"
         }
     );
-    let refusal =
-        rank_view(&fixture, &projection, &view, &query, 8, &ByteBudget::new(8)).unwrap_err();
+    // The resident limit leaves room for the view's tables but not for one page of scratch.
+    let resident = fixture.ledger.census().resident;
+    fixture.set_limit(RESIDENT_LIMIT, resident + PAGE_SCRATCH - 1);
+    let refusal = rank_view(&fixture, &projection, &view, &query, 8).unwrap_err();
     assert_eq!(
         refusal,
         RankRefusal::Scratch {
-            bytes: (2 + 1) * 8 * 4
+            bytes: PAGE_SCRATCH,
+            refusal: Refusal::Denied(Denial::LimitExceeded {
+                limit: RESIDENT_LIMIT.to_owned(),
+                observed: resident + PAGE_SCRATCH,
+                max: resident + PAGE_SCRATCH - 1
+            })
         }
     );
+    fixture.set_limit(RESIDENT_LIMIT, resident + PAGE_SCRATCH);
+    assert!(
+        rank_view(&fixture, &projection, &view, &query, 8).is_ok(),
+        "the exact bound admits"
+    );
+    fixture.set_limit(RESIDENT_LIMIT, u64::MAX);
 
     // `gamma` is hidden by the kernel, and `alpha` is retired after the view was taken: neither the delta's row nor the base's row for them is returned.
     projection.retire("alpha");
-    let ranking = rank_view(&fixture, &projection, &view, &query, 8, &scratch).unwrap();
+    let ranking = rank_view(&fixture, &projection, &view, &query, 8).unwrap();
     let mut expected = map(&corpus);
     expected.retain(|(id, _)| *id != occurrence_id("alpha") && *id != occurrence_id("gamma"));
     assert_eq!(keyed(&ranking), reference(&query, &expected));
@@ -598,7 +634,7 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
     assert_eq!(ranking.ranking.coverage.with_vector, 5);
 }
 
-/// Everything a blocking worker owns for one ranking: the view, the projection, the kernel, the expectation's parts, and the scratch.
+/// Everything a blocking worker owns for one ranking: the view, the projection, the kernel, the expectation's parts, the ledger, and its grant.
 struct Work {
     view: Arc<PinnedVectors>,
     projection_store: Arc<storage::SqliteStore>,
@@ -606,7 +642,8 @@ struct Work {
     generation: retrieval::batch::VectorGeneration,
     kernel_incarnation_id: String,
     project: kernel::ProjectScope,
-    scratch: ByteBudget,
+    ledger: Arc<Ledger>,
+    grant: Admission,
 }
 
 impl Work {
@@ -638,7 +675,8 @@ impl Work {
                     &self.kernel,
                     &request,
                     budget,
-                    &self.scratch,
+                    &self.ledger,
+                    &self.grant,
                 ))
             })
             .unwrap()
@@ -653,10 +691,10 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
     let base = fixture.layer_from(&export(&corpus, &[], 10));
     let composition = fixture.compose(1, &base, &[]).unwrap();
     let digest = fixture.publish(&composition).unwrap();
-    let residency = ByteBudget::new(RESIDENCY as u64);
-    let scratch = ByteBudget::new(SCRATCH as u64);
     let generation = fixture.generation.clone();
     let kernel_incarnation_id = fixture.identity.kernel_incarnation_id.clone();
+    let ledger = Arc::clone(&fixture.ledger);
+    let grant = fixture.admission.clone();
     let work = |view: Arc<PinnedVectors>| Work {
         view,
         projection_store: Arc::clone(&projection.store),
@@ -664,51 +702,54 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
         generation: generation.clone(),
         kernel_incarnation_id: kernel_incarnation_id.clone(),
         project: projection.project.clone(),
-        scratch: scratch.clone(),
+        ledger: Arc::clone(&ledger),
+        grant: grant.clone(),
     };
 
     // The caller drops its handle and its Arc while the worker waits to start the read; the view, its pins, and its bytes stay with the work.
-    let view = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
-    let (release, held) = mpsc::channel::<()>();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let (release, gate) = mpsc::channel::<()>();
     let (entered, entering) = mpsc::channel::<()>();
     let owned = work(Arc::clone(&view));
     let handle = tokio::task::spawn_blocking(move || {
         entered.send(()).unwrap();
-        held.recv().unwrap();
+        gate.recv().unwrap();
         owned.run(&EvalBudget::unbounded())
     });
     drop(view);
     drop(handle);
     entering.recv().unwrap();
     assert!(!try_exclusive(&fixture.generation_dir(&digest)));
-    assert!(residency.try_charge(RESIDENCY).is_none());
+    let old_resident = held(&fixture.ledger, ResourceClass::LayerTables);
+    assert!(old_resident > 0);
     // A publisher and a prune meanwhile leave the worker's set alone, and a new reader takes the new complete set while the old work is still held.
     let (replaced, new_base) = publish_replacement(&fixture, &corpus, 2);
     let report = fixture.store.prune(&BTreeSet::new()).unwrap();
     assert_eq!((report.removed_generations, report.retained_pinned), (0, 1));
-    let overlapping = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
+    let overlapping = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     assert_eq!(overlapping.members(), vec![new_base.digest.clone()]);
-    let overlapping_ranking =
-        rank_view(&fixture, &projection, &overlapping, &axis(0), 8, &scratch).unwrap();
+    assert!(
+        held(&fixture.ledger, ResourceClass::LayerTables) > old_resident,
+        "both views' tables are held at once"
+    );
+    let overlapping_ranking = rank_view(&fixture, &projection, &overlapping, &axis(0), 8).unwrap();
     assert_eq!(
         keyed(&overlapping_ranking),
         reference(&axis(0), &map(&replaced))
     );
     release.send(()).unwrap();
     let store_dir = fixture.generation_dir(&digest);
-    let residency_probe = residency.clone();
+    let probe = Arc::clone(&fixture.ledger);
     let overlapping_resident = resident_bytes(&fixture, &overlapping.members());
     tokio::task::spawn_blocking(move || {
         wait_until("the detached worker to release the old view", || {
             try_exclusive(&store_dir)
-                && residency_probe
-                    .try_charge(RESIDENCY - overlapping_resident)
-                    .is_some()
+                && held(&probe, ResourceClass::LayerTables) == overlapping_resident
         });
     })
     .await
     .unwrap();
-    assert!(scratch.try_charge(SCRATCH).is_some());
+    assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
     let report = fixture.store.prune(&BTreeSet::new()).unwrap();
     assert_eq!(
         report.removed_generations, 1,
@@ -716,10 +757,13 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
     );
     assert!(!try_exclusive(&fixture.generation_dir(&new_base.digest)));
     drop(overlapping);
-    assert!(residency.try_charge(RESIDENCY).is_some());
+    assert_eq!(
+        fixture.ledger.census(),
+        daemon::vector_admission::Census::default()
+    );
 
     // Completion with retained output: whoever keeps the ranking's view keeps its pins until that view is dropped.
-    let view = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let new_digest = view.digest.clone();
     let owned = work(Arc::clone(&view));
     let ranked = tokio::task::spawn_blocking(move || owned.run(&EvalBudget::unbounded()))
@@ -728,13 +772,16 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
         .unwrap();
     assert_eq!(keyed(&ranked), reference(&axis(0), &map(&replaced)));
     assert!(!try_exclusive(&fixture.generation_dir(&new_digest)));
-    assert!(residency.try_charge(RESIDENCY).is_none());
+    assert!(held(&fixture.ledger, ResourceClass::LayerTables) > 0);
     drop(view);
     assert!(try_exclusive(&fixture.generation_dir(&new_digest)));
-    assert!(residency.try_charge(RESIDENCY).is_some());
+    assert_eq!(
+        fixture.ledger.census(),
+        daemon::vector_admission::Census::default()
+    );
 
     // A cancelled budget, or one whose deadline has passed, ends the walk without a ranking; the view is held through the read either way and released only by its owner.
-    let view = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let cancelled = EvalBudget::unbounded();
     cancelled.cancel();
     let expired = EvalBudget::new(
@@ -756,9 +803,12 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
             !try_exclusive(&fixture.generation_dir(&new_digest)),
             "the caller's view is untouched"
         );
-        assert!(residency.try_charge(RESIDENCY).is_none());
+        assert!(held(&fixture.ledger, ResourceClass::LayerTables) > 0);
     }
     drop(view);
     assert!(try_exclusive(&fixture.generation_dir(&new_digest)));
-    assert!(residency.try_charge(RESIDENCY).is_some());
+    assert_eq!(
+        fixture.ledger.census(),
+        daemon::vector_admission::Census::default()
+    );
 }

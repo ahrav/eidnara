@@ -9,8 +9,9 @@ use serde::Deserialize;
 
 use crate::coverage::ProjectionCoverage;
 use crate::projection_gates::{
-    CAPABILITIES, CapabilityEvidence, Evidence, EvidenceEvaluator, HARNESSES, HarnessRun, HookGate,
-    InvalidationIdentity, ManifestRefusal, Renewal, ResourceEvidence, RuntimeManifest,
+    CAPABILITIES, CapabilityEvidence, CompressionEvidence, Evidence, EvidenceEvaluator, HARNESSES,
+    HarnessRun, HookGate, InvalidationIdentity, ManifestRefusal, Renewal, ResourceEvidence,
+    RuntimeManifest,
 };
 use crate::projection_lifecycle::{RecordRead, read_owner_only_record};
 
@@ -62,6 +63,9 @@ struct CampaignRecord {
     resource: Option<ResourceEvidence>,
     capabilities: BTreeMap<String, BTreeMap<String, CapabilityEvidence>>,
     harness_runs: BTreeMap<String, HarnessRunRecord>,
+    /// A record may carry no campaign; the compression hook then refuses as missing.
+    #[serde(default)]
+    compression: Option<CompressionEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,10 +86,15 @@ impl AdmissionInputs {
             .map_err(|refusal| InputRefusal::Manifest(bounded_manifest_refusal(refusal)))?;
         let campaign: CampaignRecord = serde_json::from_value(read_record(&dir, EVIDENCE_RECORD)?)
             .map_err(|_| InputRefusal::Malformed(EVIDENCE_RECORD))?;
+        let trace_harnesses = campaign
+            .compression
+            .iter()
+            .flat_map(|compression| compression.traces.keys());
         for harness in campaign
             .capabilities
             .keys()
             .chain(campaign.harness_runs.keys())
+            .chain(trace_harnesses)
         {
             if !HARNESSES.contains(&harness.as_str()) {
                 return Err(InputRefusal::UnknownHarness(bounded_name(harness)));
@@ -141,7 +150,10 @@ impl AdmissionInputs {
                     })
                     .collect(),
                 identity: campaign.invalidation_identity,
+                compression: campaign.compression,
             },
+            // Nothing here can name the daemon's own build, corpus, recipe, hardware, and harness versions, so compressed activation refuses as missing.
+            binding: None,
         }
     }
 }
