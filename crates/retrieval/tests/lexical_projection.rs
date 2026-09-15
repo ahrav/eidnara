@@ -1039,6 +1039,87 @@ fn verify_rows_refuses_a_missing_or_orphaned_row() {
 }
 
 #[test]
+fn verify_rows_refuses_unavailable_payloads_even_when_row_counts_match() {
+    for damage in ["missing_payload", "oversized_payload", "tombstoned"] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let sources = [
+            Source {
+                class: "messages",
+                key: "m1",
+                text: ".",
+                created: 1,
+            },
+            Source {
+                class: "messages",
+                key: "m2",
+                text: "two",
+                created: 1,
+            },
+        ];
+        let arena = Arena {
+            identities: sources.iter().map(Source::identity).collect(),
+        };
+        let borrowed = borrow(&arena);
+        let records = records(&sources, &borrowed);
+        apply(&store, &collision_batch(&records), None).unwrap();
+        let id = occurrence_id(&records[0]);
+        let raw = Connection::open(dir.path().join("search").join("search.sqlite")).unwrap();
+        match damage {
+            "missing_payload" => {
+                raw.pragma_update(None, "foreign_keys", false).unwrap();
+                raw.execute(
+                    "DELETE FROM payloads WHERE payload_id=(SELECT payload_id FROM occurrences WHERE occurrence_id=?1)",
+                    [&id],
+                ).unwrap();
+            }
+            "oversized_payload" => {
+                raw.execute(
+                    "UPDATE payloads SET bytes=zeroblob(?2), byte_length=?2
+                     WHERE payload_id=(SELECT payload_id FROM occurrences WHERE occurrence_id=?1)",
+                    params![id, i64::try_from(kernel::MAX_PAYLOAD_BYTES + 1).unwrap()],
+                )
+                .unwrap();
+            }
+            "tombstoned" => {
+                raw.execute(
+                    "INSERT INTO occurrence_tombstones VALUES (?1, 2, 'retired', 2)",
+                    [&id],
+                )
+                .unwrap();
+                raw.execute(
+                    "DELETE FROM lexical WHERE occurrence_id=?1",
+                    [occurrence_id(&records[1])],
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let counts: (i64, i64, i64) = raw.query_row(
+            "SELECT (SELECT count(*) FROM occurrences o WHERE NOT EXISTS(
+                        SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id)),
+                    (SELECT count(*) FROM lexical), (SELECT count(DISTINCT occurrence_id) FROM lexical)",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(counts.0, counts.1, "{damage}");
+        assert_eq!(counts.1, counts.2, "{damage}");
+        assert_eq!(
+            verify_rows(&raw),
+            Err(ProjectionError::CorruptRow),
+            "{damage}"
+        );
+        drop(raw);
+        with_conn(&store, |conn| {
+            assert_eq!(
+                verify_rows(conn),
+                Err(ProjectionError::CorruptRow),
+                "{damage}"
+            );
+        });
+    }
+}
+
+#[test]
 fn integrity_check_detects_an_injected_inverted_index_corruption() {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());

@@ -9,7 +9,7 @@ use retrieval::batch::{
     BatchBounds, MutationIdentity, ProjectionBatch, VectorGeneration, apply_batch,
     register_generation,
 };
-use retrieval::lexical::AnalysisIdentity;
+use retrieval::lexical::{AnalysisIdentity, verify_rows};
 use retrieval::{OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, install_identity};
 use rusqlite::Connection;
 use storage::{Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite};
@@ -187,6 +187,23 @@ fn index_benches(c: &mut Criterion) {
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
         build(&store, rows);
+        store
+            .with_conn(|conn| {
+                verify_rows(conn).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        group.bench_with_input(BenchmarkId::new("verify_rows", rows), &rows, |b, _| {
+            // Each iteration verifies a fresh read snapshot of the same warmed database.
+            b.iter(|| {
+                store
+                    .with_conn(|conn| {
+                        verify_rows(conn).unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+        });
         drop(store);
         let payload: usize = (0..rows).map(|i| text(i).len()).sum();
         let bytes = lexical_bytes(dir.path());
@@ -203,6 +220,7 @@ fn index_benches(c: &mut Criterion) {
                     (dir, store)
                 },
                 |(dir, store)| {
+                    // Transactions and store close are timed; directory cleanup is not.
                     build(&store, rows);
                     black_box(dir)
                 },

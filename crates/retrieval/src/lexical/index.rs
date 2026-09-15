@@ -203,28 +203,26 @@ pub fn verify_rows(conn: &impl QueryRow) -> Result<(), ProjectionError> {
     if live != rows || rows != distinct {
         return Err(ProjectionError::CorruptRow);
     }
-    let mut statement =
-        conn.prepare("SELECT rowid, occurrence_id, original, parts FROM lexical")?;
-    let mut live = conn.prepare(
-        "SELECT CASE WHEN length(p.bytes)<=?2 THEN p.bytes END
-         FROM occurrences o JOIN payloads p USING(payload_id) WHERE o.occurrence_id=?1
-         AND NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id)",
+    // Outer joins retain orphaned rows for refusal rather than hiding them from the scan.
+    let mut statement = conn.prepare(
+        "SELECT l.rowid, l.occurrence_id, l.original, l.parts,
+                CASE WHEN length(p.bytes)<=?1 AND t.occurrence_id IS NULL THEN p.bytes END
+         FROM lexical l
+         LEFT JOIN occurrences o ON o.occurrence_id=l.occurrence_id
+         LEFT JOIN payloads p ON p.payload_id=o.payload_id
+         LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id",
     )?;
     let max_payload_bytes =
         i64::try_from(kernel::MAX_PAYLOAD_BYTES).map_err(|_| ProjectionError::CorruptRow)?;
-    let mut rows = statement.query([])?;
+    let mut rows = statement.query([max_payload_bytes])?;
     while let Some(row) = rows.next()? {
         let stored: i64 = row.get(0)?;
         let occurrence_id: String = row.get(1)?;
         if !rowids(&occurrence_id).is_some_and(|words| words.contains(&stored)) {
             return Err(ProjectionError::CorruptRow);
         }
-        let payload: Vec<u8> = live
-            .query_row(params![occurrence_id, max_payload_bytes], |row| {
-                row.get::<_, Option<Vec<u8>>>(0)
-            })
-            .optional()?
-            .flatten()
+        let payload = row
+            .get::<_, Option<Vec<u8>>>(4)?
             .ok_or(ProjectionError::CorruptRow)?;
         let text = std::str::from_utf8(&payload).map_err(|_| ProjectionError::CorruptRow)?;
         let bound = NonZeroUsize::new(payload.len()).unwrap_or(NonZeroUsize::MIN);
