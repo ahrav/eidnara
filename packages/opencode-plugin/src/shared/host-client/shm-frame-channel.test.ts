@@ -1216,6 +1216,16 @@ describe("mandatory shared-memory channel", () => {
                 fill: (cursor: ProducerCursor) => cursor.write(Uint8Array.of(1)),
             }),
         ).toThrow(RangeError);
+        // A fractional advance cannot fake a complete fill, as on the native cursor.
+        expect(() =>
+            channel.produce(responseHeader(FrameType.Request, 3n, 1), {
+                byteLength: 1,
+                fill: (cursor: ProducerCursor) => {
+                    cursor.advance(0.5);
+                    cursor.advance(0.5);
+                },
+            }),
+        ).toThrow(RangeError);
         expect(channel.stats().queuedDataFrames).toBe(0);
         expect(budget.used).toBe(0);
     });

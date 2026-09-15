@@ -96,7 +96,9 @@ class SnapshotCursor implements FrameProducerCursor {
     }
 
     advance(count: number): void {
-        if (count < 0 || count > this.remaining) throw new RangeError("producer overflow");
+        if (!Number.isSafeInteger(count) || count < 0 || count > this.remaining) {
+            throw new RangeError("producer overflow");
+        }
         this.written += count;
     }
 

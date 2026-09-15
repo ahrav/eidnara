@@ -537,7 +537,7 @@ export class HostClient {
         body: unknown,
         options: RequestOptions = {},
     ): Promise<unknown> {
-        const active = this.requireLiveHandle(handle);
+        const active = this.requireOpenForRequests(handle);
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
         const terminal = await this.awaitRequest(active.generation, {
             channel: handle.channel,
@@ -561,7 +561,7 @@ export class HostClient {
         body: Uint8Array,
         options: RequestOptions = {},
     ): Promise<ReceiveLease> {
-        const active = this.requireLiveHandle(handle);
+        const active = this.requireOpenForRequests(handle);
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
         const terminal = await this.awaitRequest(active.generation, {
             channel: handle.channel,
@@ -590,7 +590,7 @@ export class HostClient {
         body: unknown,
         options: RequestOptions & { maxStreamItems?: number } = {},
     ): Promise<Item[]> {
-        const active = this.requireLiveHandle(handle);
+        const active = this.requireOpenForRequests(handle);
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
         const terminal = await this.awaitRequest(active.generation, {
             channel: handle.channel,
@@ -935,6 +935,12 @@ export class HostClient {
         const conn = this.connectionFor(handle);
         if (conn === null) throw new StaleRouteHandleError(handle);
         return conn;
+    }
+
+    /** Once close begins, a request would queue behind the connection Goodbye; refuse it here. */
+    private requireOpenForRequests(handle: RouteHandle): ActiveConnection {
+        if (this.closeStarted) throw new HostClientError("client closed", "client_closed");
+        return this.requireLiveHandle(handle);
     }
 
     private assertExpectedDaemon(
