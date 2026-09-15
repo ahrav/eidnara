@@ -4198,13 +4198,17 @@ impl HandlerCore {
         Some(owner)
     }
 
-    /// The lifecycle owner, once the kernel is ready under a SQLite store with a lane attached.
-    #[cfg(feature = "test-support")]
-    pub fn search_lifecycle(&self) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
+    fn lifecycle_owner(&self) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
         self.search_lifecycle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// The lifecycle owner, once the kernel is ready under a SQLite store with a lane attached.
+    #[cfg(feature = "test-support")]
+    pub fn search_lifecycle(&self) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
+        self.lifecycle_owner()
     }
 
     async fn open_store_once(
@@ -12616,12 +12620,12 @@ impl CompositeComponent for Handler {
             self.tasks.close();
         }
         // Closing admission before the join cancels every grant so a slice holding one can exit; the owner itself is released after the join, when no slice can run and an owner bound during the join is visible too.
-        let owner = self.search_lifecycle();
+        let owner = self.lifecycle_owner();
         if let Some(owner) = &owner {
             owner.admission().close();
         }
         self.tasks.wait().await;
-        let owner = self.search_lifecycle().or(owner);
+        let owner = self.lifecycle_owner().or(owner);
         if let Some(owner) = owner {
             match owner.shutdown().await {
                 Ok(()) => {
