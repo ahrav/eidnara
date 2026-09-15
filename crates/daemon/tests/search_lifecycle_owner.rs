@@ -2992,13 +2992,21 @@ fn a_lowered_duration_bound_blocks_an_active_record() {
     records(home);
     let owner = owner(home, &corpus.kernel);
     let _ = owner.run_slice(&slice_budget());
-    // Recorded with a minute's deadline under a generous bound; the request stamps the record at its own clock, a few milliseconds after this reading, so the charged duration is within a few milliseconds of a minute. The reload allows one second.
+    // Recorded with a minute's deadline under a generous bound; the request stamps the record at its own clock, so the charged duration is read back from the record rather than assumed. The reload allows one second.
     let recorded_at = now();
     let mut request = rebuild(home);
     request.deadline = recorded_at + 60_000;
     owner
         .request(&request, recorded_at, &slice_budget())
         .unwrap();
+    let ControlState::Intent(intent) = control(home) else {
+        panic!("the request records an intent");
+    };
+    let charged = intent.episodes.deadline - intent.recorded_at;
+    assert!(
+        charged > 1_000,
+        "the record's duration {charged} exceeds the lowered bound"
+    );
     let identity = identity(&kernel_incarnation_id(home));
     write_records(
         home,
@@ -3007,7 +3015,7 @@ fn a_lowered_duration_bound_blocks_an_active_record() {
     );
     let outcome = owner.run_slice(&slice_budget());
     assert!(
-        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.starts_with("B_recovery_ms observed at 599") | reason.starts_with("B_recovery_ms observed at 60000") && reason.ends_with("above 1000")),
+        matches!(&outcome, SliceOutcome::Blocked(reason) if *reason == format!("B_recovery_ms observed at {charged}, above 1000")),
         "{outcome:?}"
     );
     assert!(matches!(control(home), ControlState::Intent(_)));
@@ -3045,12 +3053,17 @@ fn a_request_that_waited_for_the_manager_is_judged_after_the_wait() {
     records(home);
     let owner = Arc::new(owner(home, &corpus.kernel));
     let _ = owner.run_slice(&slice_budget());
-    // A slice holds the manager at its preparation tap for longer than the request's time past the margin.
+    // A slice holds the manager at its preparation tap until released; the timed hold starts only once the request has taken its clock reading and is entering, so the wait is charged against this request's own deadline whatever the scheduling.
     let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
     owner.tap_slice_events_for_test(move |event| {
         if matches!(event, SliceEvent::Prepared { .. }) {
             let _ = reached_tx.send(());
-            std::thread::sleep(Duration::from_millis(1_200));
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
         }
     });
     let holder = {
@@ -3060,11 +3073,25 @@ fn a_request_that_waited_for_the_manager_is_judged_after_the_wait() {
     reached
         .recv_timeout(Duration::from_secs(10))
         .expect("the slice reaches its pause");
-    let at = now();
-    let mut request = rebuild(home);
-    request.deadline = at + 1_500;
-    let outcome = owner.request(&request, at, &budget(Duration::from_secs(5)));
+    let (entering_tx, entering) = std::sync::mpsc::channel();
+    let requester = {
+        let owner = Arc::clone(&owner);
+        let home = home.to_path_buf();
+        std::thread::spawn(move || {
+            let at = now();
+            let mut request = rebuild(&home);
+            request.deadline = at + 1_500;
+            let _ = entering_tx.send(());
+            owner.request(&request, at, &budget(Duration::from_secs(5)))
+        })
+    };
+    entering
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the request enters");
+    std::thread::sleep(Duration::from_millis(1_200));
+    release.send(()).unwrap();
     let _ = holder.join().unwrap();
+    let outcome = requester.join().unwrap();
     assert!(
         matches!(&outcome, Err(BuildError::Invalid(reason)) if reason.contains("start margin")),
         "{outcome:?}"
