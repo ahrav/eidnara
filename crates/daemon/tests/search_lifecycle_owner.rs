@@ -3309,6 +3309,54 @@ async fn a_request_over_running_foreign_maintenance_closes_admission_until_rotat
     owner.shutdown().await.unwrap();
 }
 
+/// A shutdown that finds the manager held by a slice waits for it only within the drain grace and reports the holder rather than blocking past the grace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_reports_a_manager_held_past_the_grace() {
+    use daemon::search_lifecycle_owner::ShutdownUnresolved;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = Arc::new(owner(home, &corpus.kernel));
+    owner.set_drain_grace_for_test(Duration::from_millis(300));
+    // A slice pauses at its preparation tap while holding the manager, until the test releases it.
+    let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared { .. }) {
+            let _ = reached_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+        }
+    });
+    let holder = {
+        let owner = Arc::clone(&owner);
+        std::thread::spawn(move || owner.run_slice(&slice_budget()))
+    };
+    tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the slice reaches its pause");
+    let started = Instant::now();
+    let outcome = owner.shutdown().await;
+    let waited = started.elapsed();
+    release.send(()).unwrap();
+    let _ = holder.join().unwrap();
+    assert!(
+        matches!(outcome, Err(ShutdownUnresolved::Held)),
+        "{outcome:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(2),
+        "shutdown waited {waited:?} for the held manager against a 300 ms grace"
+    );
+    owner.shutdown().await.unwrap();
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

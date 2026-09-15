@@ -887,8 +887,24 @@ impl<'a> EmbeddingDispatcher<'a> {
             job_id: job.job_id.clone(),
             host_job_id: host_job_id.clone(),
         });
-        let rebound =
-            self.write(|conn| rebind_host_job(conn, &job.job_id, evicted, &host_job_id, pass.now))?;
+        // The rebind waits for the connection until the row's own deadline, as the charge does; a rebind that could not begin by then is not made, and the replacement job runs unowned.
+        self.check_quarantine()?;
+        let rebound = match self.projection.write_within(pass.row_deadline, |conn| {
+            rebind_host_job(conn, &job.job_id, evicted, &host_job_id, pass.now)
+        }) {
+            Ok(rebound) => rebound,
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => false,
+            Err(error) => {
+                return Err(match &error {
+                    SearchProjectionError::Projection(refusal)
+                        if !matches!(classify(refusal), Refusal::Storage) =>
+                    {
+                        self.enter_quarantine(QuarantineKind::Integrity, &error)
+                    }
+                    _ => self.enter_quarantine(QuarantineKind::Storage, &error),
+                });
+            }
+        };
         if !rebound {
             self.orphan(job, &host_job_id, observer);
             return Ok(Err(None));

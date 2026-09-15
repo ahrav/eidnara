@@ -196,6 +196,8 @@ pub enum ShutdownUnresolved {
     Drain(#[from] Unresolved),
     #[error("a disable was still reconciling after the grace period")]
     Disabling,
+    #[error("a reader or request still held the manager after the grace period")]
+    Held,
 }
 
 impl SearchLifecycleOwner {
@@ -320,10 +322,11 @@ impl SearchLifecycleOwner {
         budget: &EvalBudget,
     ) -> Result<MutexGuard<'_, Managed>, BuildError> {
         loop {
-            match self.try_lock(budget)? {
-                Some(guard) => return Ok(guard),
-                None => tokio::time::sleep(LOCK_POLL).await,
+            // The attempt's result is dropped before the wait, so no guard is alive across the await and the future stays `Send`.
+            if let Some(guard) = self.try_lock(budget)? {
+                return Ok(guard);
             }
+            tokio::time::sleep(LOCK_POLL).await;
         }
     }
 
@@ -1055,8 +1058,15 @@ impl SearchLifecycleOwner {
         let taken = loop {
             // Registered before the manager is inspected, so a disable that finishes in between still wakes the wait.
             let handed_back = self.disabled.notified();
+            // A reader or request holding the manager is waited for only within the grace, and the wait yields the worker.
+            let within_grace = EvalBudget::new(
+                Some(deadline),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            );
             let taken = {
-                let mut managed = self.lock();
+                let Ok(mut managed) = self.lock_within_async(&within_grace).await else {
+                    return Err(ShutdownUnresolved::Held);
+                };
                 match std::mem::take(&mut *managed) {
                     Managed::Disabling => {
                         *managed = Managed::Disabling;
