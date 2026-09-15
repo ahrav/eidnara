@@ -2712,6 +2712,70 @@ fn a_request_before_the_first_slice_is_judged_on_the_records() {
     assert!(outcome.is_ok(), "{outcome:?}");
 }
 
+/// A request refused because the reloaded manifest cannot bound a slice closes admission on that manifest: the earlier grants are cancelled and readers are refused, while the lifecycle record is unchanged.
+#[test]
+fn a_request_refused_on_the_manifest_closes_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let grant = owner
+        .admission()
+        .gate()
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .unwrap();
+    let ControlState::Current(current) = control(home) else {
+        panic!("the rebuild reached Current");
+    };
+
+    // Nine rows bound a replacement but not a slice's coverage report; the request is refused before anything is recorded.
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("local_transaction_rows", 9)],
+        ),
+        &campaign_json(&identity),
+    );
+    let mut again = rebuild(home);
+    again.selected_generation = current.staged_seed_digest.clone().unwrap();
+    again.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    again.attempt_id = "rebuild-again".to_owned();
+    let outcome = owner.request(&again, now(), &slice_budget());
+    assert!(
+        matches!(outcome, Err(BuildError::Invalid(_))),
+        "{outcome:?}"
+    );
+    assert!(
+        grant.invalidated.is_cancelled(),
+        "a manifest no slice could prepare under cancels the earlier grants"
+    );
+    let pinned = owner.pin(&slice_budget());
+    assert!(
+        pinned.is_err(),
+        "a closed gate admits no reader: {:?}",
+        pinned.err()
+    );
+    assert!(
+        matches!(control(home), ControlState::Current(done) if done.attempt_id == current.attempt_id)
+    );
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

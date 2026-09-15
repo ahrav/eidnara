@@ -819,17 +819,22 @@ impl SearchLifecycleOwner {
                 return Err(IntentRefusal::Denied(Denial::EvidenceIdentity).into());
             }
         };
-        replacement_spec(
+        // A slice prepares under the coverage bounds too, so a manifest that cannot yield them would leave the recorded request to slices that all refuse it. Either refusal closes the gate, as a slice's would: the earlier grants belong to a manifest that is gone.
+        if replacement_spec(
             inputs.manifest(),
             identity.clone(),
             request.transition,
             request.allowance,
             &request.consumer.generation_id,
         )
-        .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
-        // A slice prepares under the coverage bounds too, so a manifest that cannot yield them would leave the recorded request to slices that all refuse it.
-        coverage_bounds(inputs.manifest())
-            .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+        .is_err()
+            || coverage_bounds(inputs.manifest()).is_err()
+        {
+            let _ = self.admission.refresh(None);
+            return Err(BuildError::Invalid(
+                "manifest limits cannot bound the request",
+            ));
+        }
         let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
         let bound = limit(inputs.manifest(), request.transition.duration_limit())
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
