@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use daemon::projection_gates::{Admission, EntryPoint, HookGate, ProjectionHook};
 use daemon::vector_composition::{
-    COMPOSITION_FILE, Composition, CompositionRefusal, CompositionSpec, Publication, Reconciled,
+    COMPOSITION_FILE, Composition, CompositionRefusal, CompositionSpec, Progress, Reconciled,
     SelectorState, Unavailable, compose, publish, reconcile, recover, verify_composition,
 };
 use daemon::vector_generation::{
@@ -138,7 +138,7 @@ impl Fixture {
             gate: &self.gate,
             admission: &self.admission,
             identity: &self.identity,
-            protected: Box::leak(Box::new(BTreeSet::new())),
+            protected: BTreeSet::new(),
         }
     }
 
@@ -171,11 +171,21 @@ impl Fixture {
         })
     }
 
-    fn publish(&self, composition: &Composition) -> Result<Publication, CompositionRefusal> {
+    fn publish(&self, composition: &Composition) -> Result<String, CompositionRefusal> {
         publish(composition, &self.staging(), &self.work_dir(), &mut |_| {
             Ok(())
         })
         .map_err(|failure| failure.refusal)
+    }
+
+    fn verify_composition(&self, digest: &str) -> Result<Vec<String>, CompositionRefusal> {
+        verify_composition(
+            &self.store,
+            digest,
+            &self.expected(),
+            NonZeroUsize::new(4).unwrap(),
+        )
+        .map(|verified| verified.composition.members())
     }
 
     fn lifecycle_dir(&self) -> PathBuf {
@@ -237,7 +247,14 @@ impl Fixture {
     }
 
     fn recover(&self) -> Result<(String, SelectorState, usize), Unavailable> {
-        recover(&self.store, &self.expected(), NonZeroUsize::new(8).unwrap()).map(|recovered| {
+        recover(
+            &self.store,
+            &self.tx,
+            &self.expected(),
+            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(8).unwrap(),
+        )
+        .map(|recovered| {
             (
                 recovered.composition.digest,
                 recovered.selector,
@@ -263,16 +280,8 @@ fn a_base_publishes_as_one_complete_selection_whose_members_stay_protected_witho
     assert_eq!(composition.members(), vec![base_digest.clone()]);
     drop(base);
 
-    let publication = fixture.publish(&composition).unwrap();
-    assert_eq!(
-        publication,
-        Publication {
-            digest: composition.digest(),
-            staged: true,
-            acknowledged: true,
-            durable: true,
-        }
-    );
+    let published = fixture.publish(&composition).unwrap();
+    assert_eq!(published, composition.digest());
     assert_eq!(
         fixture.store.read_vector_current().unwrap(),
         CurrentProfile::Current(composition.digest())
@@ -304,9 +313,14 @@ fn a_base_publishes_as_one_complete_selection_whose_members_stay_protected_witho
         "a selected composition's member cannot be discarded"
     );
 
-    // An identical retry restages nothing new and leaves the selection as it is.
-    let again = fixture.publish(&composition).unwrap();
-    assert_eq!(again.digest, composition.digest());
+    // An identical retry is refused by sequence, not by a second record: the selection already names this composition.
+    assert_eq!(
+        fixture.publish(&composition).unwrap_err(),
+        CompositionRefusal::Sequence {
+            sequence: 1,
+            selected: 1
+        }
+    );
     assert_eq!(fixture.generations().len(), 3);
 
     let (digest, selector, examined) = fixture.recover().unwrap();
@@ -350,10 +364,18 @@ fn a_delta_update_publishes_a_new_complete_target_and_releases_the_old_compositi
     assert!(remaining.contains(&second.digest()));
     assert!(!remaining.contains(&first.digest()));
 
-    let verified =
-        verify_composition(&fixture.store, &second.digest(), &fixture.expected()).unwrap();
-    assert_eq!(verified.deltas.len(), 1);
-    assert_eq!(verified.base.digest, base.digest);
+    assert_eq!(
+        fixture.verify_composition(&second.digest()).unwrap(),
+        vec![base.digest.clone(), delta.digest.clone()]
+    );
+    // A stale sequence can no longer be published over the selection.
+    assert_eq!(
+        fixture.publish(&first).unwrap_err(),
+        CompositionRefusal::Sequence {
+            sequence: 1,
+            selected: 2
+        }
+    );
 }
 
 #[test]
@@ -435,16 +457,15 @@ fn a_composition_with_a_missing_or_unverified_member_is_never_selected() {
         &mut |_| Ok(()),
     )
     .unwrap_err();
-    assert!(failure.publication.staged);
-    assert!(!failure.publication.acknowledged);
-    assert!(matches!(failure.refusal, CompositionRefusal::Select(_)));
+    assert_eq!(failure.progress, Progress::Staged);
+    assert!(matches!(failure.refusal, CompositionRefusal::Store(_)));
     assert_eq!(
         fixture.store.read_vector_current().unwrap(),
         CurrentProfile::Absent
     );
     assert_eq!(
         reconcile(&fixture.store, &fixture.tx, &composition.digest()).unwrap(),
-        Reconciled::Prior(None)
+        Reconciled::Other(None)
     );
 
     // A composition whose member is present but rehashed to another meaning verifies as a store object and fails composition verification.
@@ -453,8 +474,9 @@ fn a_composition_with_a_missing_or_unverified_member_is_never_selected() {
     let composition = fixture.compose(1, &base, &[]).unwrap();
     fixture.publish(&composition).unwrap();
     fixture.corrupt(&base.digest, CODES_FILE);
-    let refused =
-        verify_composition(&fixture.store, &composition.digest(), &fixture.expected()).unwrap_err();
+    let refused = fixture
+        .verify_composition(&composition.digest())
+        .unwrap_err();
     assert!(
         matches!(refused, CompositionRefusal::Member { .. }),
         "{refused:?}"
@@ -463,7 +485,7 @@ fn a_composition_with_a_missing_or_unverified_member_is_never_selected() {
         fixture.recover().unwrap_err(),
         Unavailable::NoCompatibleTarget { examined: 1 }
     );
-    // The store, too, refuses to reclaim anything while the selected composition's member is corrupt.
+    // The store still retains the selected composition's member: its record is readable, so its members are known.
     assert!(fixture.store.prune(&BTreeSet::new()).is_ok());
     assert!(fixture.generations().contains(&base.digest));
 }
@@ -500,21 +522,15 @@ fn every_selector_cut_leaves_the_old_or_the_new_complete_selection_and_reconcile
         )
         .unwrap_err();
         assert_eq!(*seen.last().unwrap(), cut);
-        let publication = &failure.publication;
-        assert!(publication.staged, "{cut:?}");
-        assert_eq!(
-            publication.acknowledged,
-            cut != ProfileEvent::BeforeRename,
-            "{cut:?}"
-        );
-        assert_eq!(
-            publication.durable,
-            cut == ProfileEvent::AfterDirectorySync,
-            "{cut:?}"
-        );
+        let expected_progress = match cut {
+            ProfileEvent::BeforeRename => Progress::Staged,
+            ProfileEvent::AfterRename | ProfileEvent::BeforeDirectorySync => Progress::Acknowledged,
+            ProfileEvent::AfterDirectorySync => Progress::Durable,
+        };
+        assert_eq!(failure.progress, expected_progress, "{cut:?}");
 
         let (expected_current, expected_reconciled) = if cut == ProfileEvent::BeforeRename {
-            (old.digest(), Reconciled::Prior(Some(old.digest())))
+            (old.digest(), Reconciled::Other(Some(old.digest())))
         } else {
             (new.digest(), Reconciled::Published)
         };
@@ -539,21 +555,26 @@ fn every_selector_cut_leaves_the_old_or_the_new_complete_selection_and_reconcile
         assert_eq!(recovered, expected_current, "{cut:?}");
         assert_eq!(selector, SelectorState::Current, "{cut:?}");
 
-        // A retry of the same publication converges on the new selection without a second composition record.
+        // A retry of the same publication converges on the new selection without a second composition record;
+        // once the new selection is acknowledged, the retry is refused by sequence and changes nothing.
         let records_before = fixture.generations().len();
-        let retry = fixture.publish(&new).unwrap();
-        assert_eq!(retry.digest, new.digest());
-        assert!(retry.acknowledged && retry.durable);
+        match fixture.publish(&new) {
+            Ok(retry) => assert_eq!(retry, new.digest(), "{cut:?}"),
+            Err(CompositionRefusal::Sequence {
+                sequence: 2,
+                selected: 2,
+            }) => {
+                assert_ne!(cut, ProfileEvent::BeforeRename, "{cut:?}");
+            }
+            Err(other) => panic!("{cut:?}: {other:?}"),
+        }
         assert_eq!(fixture.generations().len(), records_before, "{cut:?}");
         assert_eq!(
             fixture.store.read_vector_current().unwrap(),
             CurrentProfile::Current(new.digest())
         );
         assert_eq!(
-            verify_composition(&fixture.store, &new.digest(), &fixture.expected())
-                .unwrap()
-                .composition
-                .members(),
+            fixture.verify_composition(&new.digest()).unwrap(),
             new.members()
         );
     }
@@ -631,17 +652,39 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
         ..fixture.expected()
     };
     assert_eq!(
-        recover(&fixture.store, &foreign, NonZeroUsize::new(8).unwrap()).unwrap_err(),
+        recover(
+            &fixture.store,
+            &fixture.tx,
+            &foreign,
+            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(8).unwrap()
+        )
+        .unwrap_err(),
         Unavailable::NoCompatibleTarget { examined: 1 }
     );
-    // The bound is honored: one candidate examined means the corrupt newest is skipped before validation, and a bound of one still reaches the verified one.
+    // With no selector the corrupt record is not a candidate, so a bound of one still reaches the verified one.
     assert!(
         recover(
             &fixture.store,
+            &fixture.tx,
             &fixture.expected(),
+            NonZeroUsize::new(4).unwrap(),
             NonZeroUsize::new(1).unwrap()
         )
         .is_ok()
+    );
+    // A delta bound below the recovered composition's deltas refuses it: admission limits hold through recovery.
+    assert_eq!(
+        recover(
+            &fixture.store,
+            &fixture.tx,
+            &fixture.expected(),
+            NonZeroUsize::new(1).unwrap(),
+            NonZeroUsize::new(8).unwrap()
+        )
+        .map(|r| r.composition.digest),
+        Ok(first.digest()),
+        "the base-only composition still verifies under a one-delta bound"
     );
 }
 
@@ -718,8 +761,110 @@ fn the_vector_selector_refuses_layers_and_other_owners_and_a_composition_record_
         .unwrap();
     assert!(fixture.store.validate(&forged_digest).is_ok());
     assert_eq!(
-        verify_composition(&fixture.store, &forged_digest, &fixture.expected()).unwrap_err(),
+        fixture.verify_composition(&forged_digest).unwrap_err(),
         CompositionRefusal::NotComposition("manifest binding")
     );
     let _ = VectorRefusal::NoRows;
+}
+
+#[test]
+fn a_reader_pinning_a_superseded_composition_keeps_its_members_through_prune() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10, &[]);
+    let first = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&first).unwrap();
+    // The reader pins the composition it opened, as the daemon's handoff will, before the selector moves on.
+    let pinned = fixture.store.validate(&first.digest()).unwrap();
+    pinned.pin().unwrap();
+
+    let other_base = fixture.layer(7, 11, &[]);
+    let second = fixture.compose(2, &other_base, &[]).unwrap();
+    fixture.publish(&second).unwrap();
+
+    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
+    assert_eq!(
+        report.removed_generations, 0,
+        "the pinned composition and its member both stay"
+    );
+    assert!(fixture.generations().contains(&base.digest));
+    assert!(
+        fixture
+            .store
+            .discard_unselected(
+                &base.sidecar.stage_manifest(),
+                &fixture.tx,
+                &BTreeSet::new()
+            )
+            .is_err(),
+        "a member of a pinned composition cannot be discarded"
+    );
+    drop(pinned);
+    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
+    assert_eq!(
+        report.removed_generations, 2,
+        "released, the old composition and its member are reclaimed"
+    );
+    assert!(!fixture.generations().contains(&base.digest));
+    assert!(fixture.generations().contains(&other_base.digest));
+}
+
+#[test]
+fn an_unreadable_selected_composition_quarantines_pruning_while_a_corrupt_member_does_not() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10, &[]);
+    let composition = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&composition).unwrap();
+    let orphan = fixture.layer(9, 30, &[]);
+
+    // A corrupt member: the record still names it, so prune knows what to keep and reclaims only the orphan.
+    fixture.corrupt(&base.digest, CODES_FILE);
+    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
+    assert_eq!(report.removed_generations, 1);
+    assert!(fixture.generations().contains(&base.digest));
+    assert!(!fixture.generations().contains(&orphan.digest));
+    // Exchange repair refuses to replace the selected record even when a same-digest stager arrives.
+    fixture.corrupt(&composition.digest(), COMPOSITION_FILE);
+    let failure = publish(
+        &composition,
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(failure.progress, Progress::NotStaged);
+    assert!(
+        matches!(
+            failure.refusal,
+            CompositionRefusal::Sequence { .. } | CompositionRefusal::Stage(_)
+        ),
+        "{failure:?}"
+    );
+
+    // A torn record manifest: the members are unknown, so prune quarantines and removes temps only.
+    let dir = fixture.generation_dir(&composition.digest());
+    let manifest = fs::read(dir.join("manifest.json")).unwrap();
+    fs::write(dir.join("manifest.json"), &manifest[..manifest.len() / 2]).unwrap();
+    let temp = fixture
+        .lifecycle_dir()
+        .join(GENERATIONS_DIR_NAME)
+        .join("tmp-0123456789abcdef");
+    fs::create_dir(&temp).unwrap();
+    let another = fixture.layer(11, 31, &[]);
+    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
+    assert_eq!(report.removed_temps, 1);
+    assert_eq!(report.removed_generations, 0);
+    assert!(report.quarantined >= 1);
+    assert!(fixture.generations().contains(&another.digest));
+    assert!(matches!(
+        fixture.store.discard_unselected(
+            &another.sidecar.stage_manifest(),
+            &fixture.tx,
+            &BTreeSet::new()
+        ),
+        Err(GenerationError::UnsupportedStateSchema)
+    ));
+    assert_eq!(
+        fixture.recover().unwrap_err(),
+        Unavailable::NoCompatibleTarget { examined: 1 }
+    );
 }

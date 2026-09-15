@@ -1,7 +1,7 @@
 //! Publishes and recovers one complete vector composition: one base layer plus bounded, ordered delta layers, named together by an immutable composition generation the vector selector points at.
 //!
-//! Publication stages the composition, then moves the selector in one rename, so an interruption leaves the old complete selection or the new one and never a mix. The selector's `members.json` makes the lifecycle store retain every member while the composition is selected, with or without readers.
-//! Attempt, acknowledgement, and durability are tracked as separate facts; an unknown outcome is settled by reading the selector back and comparing digests, never by treating an error as a rollback.
+//! Publication stages the composition, then moves the selector in one rename, so an interruption leaves the old complete selection or the new one and never a mix. The selector's `members.json` makes the lifecycle store retain every member while the composition is selected or pinned by a reader.
+//! How far an attempt got is tracked as a ladder of separate facts; an unknown outcome is settled by reading the selector back and comparing digests, never by treating an error as a rollback.
 //! Recovery takes the selected composition when it verifies; otherwise it examines the other compositions newest first under a bound and takes the first whose every member verifies, reporting the selector as stale rather than silently repointing it.
 
 use std::collections::BTreeSet;
@@ -18,7 +18,8 @@ use retrieval::dense::scalar::ScalarRecipe;
 use sha2::{Digest, Sha256};
 
 use crate::vector_generation::{
-    ExpectedVectors, Staging, VectorRefusal, VerifiedVectors, read_verified, verify,
+    ExpectedVectors, ReadFault, Staging, VectorIdentity, VectorRefusal, VerifiedVectors,
+    read_verified, verify, write_new,
 };
 
 pub const COMPOSITION_FILE: &str = "composition.json";
@@ -30,7 +31,7 @@ pub const MEMBERS_SCHEMA: u32 = 1;
 #[serde(deny_unknown_fields)]
 pub struct Composition {
     pub schema: u32,
-    /// Publication order among compositions of one namespace; recovery prefers the highest that verifies.
+    /// Publication order among compositions of one namespace; a publication must exceed the selected composition's, and recovery falls back in descending order.
     pub sequence: u64,
     pub embedding_model: String,
     pub tokenizer_fingerprint: String,
@@ -56,6 +57,19 @@ impl Composition {
             .collect()
     }
 
+    pub fn identity(&self) -> VectorIdentity {
+        VectorIdentity {
+            embedding_model: self.embedding_model.clone(),
+            tokenizer_fingerprint: self.tokenizer_fingerprint.clone(),
+            vector_dimension: self.vector_dimension,
+            metric: Metric::from_name(&self.metric),
+            unit_norm_tolerance_bits: self.unit_norm_tolerance.to_bits(),
+            recipe: ScalarRecipe::from_id(&self.quantizer_recipe),
+            generation_epoch: self.generation_epoch,
+            kernel_incarnation_id: self.kernel_incarnation_id.clone(),
+        }
+    }
+
     fn members_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(&WireMembers {
             schema: MEMBERS_SCHEMA,
@@ -65,19 +79,9 @@ impl Composition {
     }
 
     pub fn stage_meta(&self) -> StageMeta {
-        let compatibility = serde_json::to_vec(&[
-            serde_json::Value::from(self.embedding_model.as_str()),
-            serde_json::Value::from(self.tokenizer_fingerprint.as_str()),
-            serde_json::Value::from(self.vector_dimension),
-            serde_json::Value::from(self.metric.as_str()),
-            serde_json::Value::from(self.unit_norm_tolerance.to_bits()),
-            serde_json::Value::from(self.quantizer_recipe.as_str()),
-            serde_json::Value::from(self.generation_epoch),
-        ])
-        .expect("identity serialization cannot fail");
         StageMeta {
             target: VECTOR_SELECTION_TARGET.to_owned(),
-            release_contract_sha256: sha256_hex(&compatibility),
+            release_contract_sha256: self.identity().compatibility_sha256(),
             inputs_lock_sha256: sha256_hex(&self.canonical_bytes()),
             source_payload_manifest_sha256: self.base.clone(),
         }
@@ -122,6 +126,8 @@ pub enum CompositionRefusal {
     CheckpointOrder { index: usize },
     #[error("member {digest} does not carry the composition's identity: {field}")]
     MemberIdentity { digest: String, field: &'static str },
+    #[error("sequence {sequence} does not exceed the selected composition's {selected}")]
+    Sequence { sequence: u64, selected: u64 },
     #[error("the composition is not a vector composition: {0}")]
     NotComposition(&'static str),
     #[error("member {digest}: {refusal}")]
@@ -131,12 +137,33 @@ pub enum CompositionRefusal {
     },
     #[error("staging: {0}")]
     Stage(VectorRefusal),
-    #[error("selection: {0}")]
-    Select(String),
-    #[error("the vector selector carries a state schema this build does not know")]
+    #[error("the lifecycle store refused: {0}")]
+    Store(String),
+    #[error("the vector selector or a composition carries a state schema this build does not know")]
     Quarantined,
+    #[error("insufficient storage")]
+    InsufficientStorage,
     #[error("i/o failure: {0}")]
     Io(String),
+}
+
+impl From<GenerationError> for CompositionRefusal {
+    fn from(error: GenerationError) -> Self {
+        match error {
+            GenerationError::InsufficientStorage => Self::InsufficientStorage,
+            GenerationError::UnsupportedStateSchema => Self::Quarantined,
+            other => Self::Store(other.to_string()),
+        }
+    }
+}
+
+impl From<ReadFault> for CompositionRefusal {
+    fn from(fault: ReadFault) -> Self {
+        match fault {
+            ReadFault::Store(error) => error.into(),
+            ReadFault::Io(detail) => Self::Io(detail),
+        }
+    }
 }
 
 /// One base and its ordered deltas, each already verified under the same expectation.
@@ -154,43 +181,19 @@ pub struct CompositionSpec<'a> {
 ///
 /// Any topology or identity disagreement; nothing is staged.
 pub fn compose(spec: &CompositionSpec<'_>) -> Result<Composition, CompositionRefusal> {
-    if spec.base.sidecar.tombstones != 0 {
-        return Err(CompositionRefusal::BaseWithTombstones);
-    }
-    if spec.deltas.len() > spec.max_deltas.get() {
-        return Err(CompositionRefusal::DeltasOverBound {
-            count: spec.deltas.len(),
-            max: spec.max_deltas.get(),
-        });
-    }
-    let expected = spec.expected;
-    let mut seen = BTreeSet::from([spec.base.digest.clone()]);
-    let mut previous = spec.base.sidecar.checkpoint().checkpoint_commit_seq;
-    check_member(spec.base, expected)?;
-    for (index, delta) in spec.deltas.iter().enumerate() {
-        if !seen.insert(delta.digest.clone()) {
-            return Err(CompositionRefusal::DuplicateMember { index });
-        }
-        check_member(delta, expected)?;
-        let checkpoint = delta.sidecar.checkpoint();
-        if checkpoint.snapshot_commit_seq < previous || checkpoint.checkpoint_commit_seq < previous
-        {
-            return Err(CompositionRefusal::CheckpointOrder { index });
-        }
-        previous = checkpoint.checkpoint_commit_seq;
-    }
-    let generation = expected.generation;
+    check_topology(spec.expected, spec.base, spec.deltas, spec.max_deltas)?;
+    let generation = spec.expected.generation;
     Ok(Composition {
         schema: COMPOSITION_SCHEMA,
         sequence: spec.sequence,
         embedding_model: generation.embedding_model.clone(),
         tokenizer_fingerprint: generation.tokenizer_fingerprint.clone(),
         vector_dimension: generation.vector_dimension,
-        metric: expected.metric.name().to_owned(),
-        unit_norm_tolerance: expected.unit_norm_tolerance,
-        quantizer_recipe: expected.recipe.id().to_owned(),
+        metric: spec.expected.metric.name().to_owned(),
+        unit_norm_tolerance: spec.expected.unit_norm_tolerance,
+        quantizer_recipe: spec.expected.recipe.id().to_owned(),
         generation_epoch: generation.generation_epoch,
-        kernel_incarnation_id: expected.kernel_incarnation_id.to_owned(),
+        kernel_incarnation_id: spec.expected.kernel_incarnation_id.to_owned(),
         base: spec.base.digest.clone(),
         deltas: spec
             .deltas
@@ -200,104 +203,108 @@ pub fn compose(spec: &CompositionSpec<'_>) -> Result<Composition, CompositionRef
     })
 }
 
-/// A verified member still carries the sidecar it was verified with; comparing it again here binds the composition to that identity rather than to the caller's memory of it.
-fn check_member(
-    member: &VerifiedVectors,
+/// The one-base, bounded, ordered-member contract, checked the same way at composition and at verification.
+/// The checkpoint rule is the conservative reading of the not yet frozen base/delta relation: every delta's snapshot and checkpoint are at or after the checkpoint of the layer before it.
+fn check_topology(
     expected: &ExpectedVectors<'_>,
+    base: &VerifiedVectors,
+    deltas: &[VerifiedVectors],
+    max_deltas: NonZeroUsize,
 ) -> Result<(), CompositionRefusal> {
-    let generation = expected.generation;
-    let sidecar = &member.sidecar;
-    let checks: [(&'static str, bool); 6] = [
-        (
-            "embedding_model",
-            sidecar.embedding_model == generation.embedding_model,
-        ),
-        (
-            "tokenizer_fingerprint",
-            sidecar.tokenizer_fingerprint == generation.tokenizer_fingerprint,
-        ),
-        (
-            "vector_dimension",
-            sidecar.vector_dimension == generation.vector_dimension,
-        ),
-        (
-            "recipe",
-            ScalarRecipe::from_id(&sidecar.quantizer_recipe) == Some(expected.recipe)
-                && Metric::from_name(&sidecar.metric) == Some(expected.metric)
-                && sidecar.unit_norm_tolerance.to_bits() == expected.unit_norm_tolerance.to_bits(),
-        ),
-        (
-            "generation_epoch",
-            sidecar.generation_epoch == generation.generation_epoch,
-        ),
-        (
-            "kernel_incarnation_id",
-            sidecar.kernel_incarnation_id == expected.kernel_incarnation_id,
-        ),
-    ];
-    match checks.into_iter().find(|(_, holds)| !holds) {
-        Some((field, _)) => Err(CompositionRefusal::MemberIdentity {
-            digest: member.digest.clone(),
-            field,
-        }),
-        None => Ok(()),
+    if base.sidecar.tombstones != 0 {
+        return Err(CompositionRefusal::BaseWithTombstones);
     }
+    if deltas.len() > max_deltas.get() {
+        return Err(CompositionRefusal::DeltasOverBound {
+            count: deltas.len(),
+            max: max_deltas.get(),
+        });
+    }
+    let identity = VectorIdentity::from_expected(expected);
+    let check_member = |member: &VerifiedVectors| {
+        VectorIdentity::from_sidecar(&member.sidecar)
+            .first_mismatch(&identity)
+            .map_or(Ok(()), |field| {
+                Err(CompositionRefusal::MemberIdentity {
+                    digest: member.digest.clone(),
+                    field,
+                })
+            })
+    };
+    check_member(base)?;
+    let mut seen = BTreeSet::from([base.digest.clone()]);
+    let mut previous = base.sidecar.checkpoint().checkpoint_commit_seq;
+    for (index, delta) in deltas.iter().enumerate() {
+        if !seen.insert(delta.digest.clone()) {
+            return Err(CompositionRefusal::DuplicateMember { index });
+        }
+        check_member(delta)?;
+        let checkpoint = delta.sidecar.checkpoint();
+        if checkpoint.snapshot_commit_seq < previous || checkpoint.checkpoint_commit_seq < previous
+        {
+            return Err(CompositionRefusal::CheckpointOrder { index });
+        }
+        previous = checkpoint.checkpoint_commit_seq;
+    }
+    Ok(())
 }
 
-/// How far one publication attempt is known to have gone; each fact is recorded when its step returns, so a lost reply leaves the later ones `false` without implying they did not happen.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Publication {
-    pub digest: String,
-    /// The composition generation is in the store.
-    pub staged: bool,
+/// How far one publication attempt is known to have gone; each rung is recorded when its step returns, so a lost reply leaves the attempt on the last rung that returned without implying the next did not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Progress {
+    /// Nothing reached the store.
+    NotStaged,
+    /// The composition generation is in the store; the selector is unchanged.
+    Staged,
     /// The selector rename returned, so a reader can see the new selection.
-    pub acknowledged: bool,
+    Acknowledged,
     /// The containing directory sync returned.
-    pub durable: bool,
+    Durable,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[error("{refusal}")]
 pub struct PublishFailure {
-    pub publication: Publication,
+    pub progress: Progress,
     pub refusal: CompositionRefusal,
 }
 
-/// Stages `composition` through `staging` and points the vector selector at it. `observer` sees every selector event after this function has recorded it.
+/// Stages `composition` through `staging` and points the vector selector at it. `observer` sees every selector event after this function has recorded it. A composition whose sequence does not exceed the selected composition's is refused, so two publishers under the same lock cannot reorder the namespace.
 ///
 /// # Errors
 ///
-/// A failure carries how far the attempt is known to have gone; a failure after `acknowledged` is an unknown outcome the caller settles with [`reconcile`].
+/// A failure carries how far the attempt is known to have gone; a failure at or after `Acknowledged` is an unknown outcome the caller settles with [`reconcile`].
 pub fn publish(
     composition: &Composition,
     staging: &Staging<'_>,
     work_dir: &Path,
     observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
-) -> Result<Publication, Box<PublishFailure>> {
-    let mut publication = Publication {
-        digest: composition.digest(),
-        staged: false,
-        acknowledged: false,
-        durable: false,
-    };
-    let fail = |publication: &Publication, refusal| {
-        Box::new(PublishFailure {
-            publication: publication.clone(),
-            refusal,
-        })
-    };
-    let io = |error: std::io::Error| CompositionRefusal::Io(error.kind().to_string());
-    std::fs::write(
-        work_dir.join(COMPOSITION_FILE),
-        composition.canonical_bytes(),
+) -> Result<String, Box<PublishFailure>> {
+    let mut progress = Progress::NotStaged;
+    let fail = |progress: Progress, refusal| Box::new(PublishFailure { progress, refusal });
+    if let Some(selected) =
+        selected_sequence(staging.store).map_err(|refusal| fail(progress, refusal))?
+        && composition.sequence <= selected
+    {
+        return Err(fail(
+            progress,
+            CompositionRefusal::Sequence {
+                sequence: composition.sequence,
+                selected,
+            },
+        ));
+    }
+    write_new(
+        &work_dir.join(COMPOSITION_FILE),
+        &composition.canonical_bytes(),
     )
     .and_then(|()| {
-        std::fs::write(
-            work_dir.join(MEMBERS_FILE_NAME),
-            composition.members_bytes(),
+        write_new(
+            &work_dir.join(MEMBERS_FILE_NAME),
+            &composition.members_bytes(),
         )
     })
-    .map_err(|error| fail(&publication, io(error)))?;
+    .map_err(|refusal| fail(progress, CompositionRefusal::Stage(refusal)))?;
     // Members were verified before composing; the store re-validates each on selection, so a member reclaimed meanwhile refuses the selection rather than exposing a partial set.
     let digest = staging
         .stage_manifest(
@@ -305,28 +312,42 @@ pub fn publish(
             &composition.stage_meta(),
             |path| work_dir.join(path),
         )
-        .map_err(|refusal| fail(&publication, CompositionRefusal::Stage(refusal)))?;
-    publication.staged = true;
+        .map_err(|refusal| fail(progress, CompositionRefusal::Stage(refusal)))?;
+    progress = Progress::Staged;
     let selected = staging
         .store
         .select_vector(&digest, staging.transaction, &mut |event| {
             match event {
-                ProfileEvent::AfterRename => publication.acknowledged = true,
-                ProfileEvent::AfterDirectorySync => publication.durable = true,
+                ProfileEvent::AfterRename => progress = Progress::Acknowledged,
+                ProfileEvent::AfterDirectorySync => progress = Progress::Durable,
                 ProfileEvent::BeforeRename | ProfileEvent::BeforeDirectorySync => {}
             }
             observer(event)
         });
     match selected {
-        Ok(()) => Ok(publication),
-        Err(GenerationError::UnsupportedStateSchema) => {
-            Err(fail(&publication, CompositionRefusal::Quarantined))
-        }
-        Err(error) => Err(fail(
-            &publication,
-            CompositionRefusal::Select(error.to_string()),
-        )),
+        Ok(()) => Ok(digest),
+        Err(error) => Err(fail(progress, error.into())),
     }
+}
+
+/// The sequence of the composition the selector names, or `None` when nothing is selected or the selection is not a readable composition; the latter must not block a repair publication.
+fn selected_sequence(store: &GenerationStore) -> Result<Option<u64>, CompositionRefusal> {
+    match store.read_vector_current()? {
+        CurrentProfile::Quarantined => Err(CompositionRefusal::Quarantined),
+        CurrentProfile::Absent => Ok(None),
+        CurrentProfile::Current(digest) => Ok(record(store, &digest).map(|record| record.sequence)),
+    }
+}
+
+/// The composition record of `digest` from its manifest and record file alone, or `None` when it is not a readable vector composition.
+fn record(store: &GenerationStore, digest: &str) -> Option<Composition> {
+    let manifest = store.manifest(digest).ok()?;
+    if manifest.target != VECTOR_SELECTION_TARGET {
+        return None;
+    }
+    let generation = store.validate(digest).ok()?;
+    let bytes = read_verified(&generation, COMPOSITION_FILE).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// What the selector durably names after an attempt with an unknown outcome.
@@ -334,8 +355,8 @@ pub fn publish(
 pub enum Reconciled {
     /// The attempted composition is the selection; the attempt took effect.
     Published,
-    /// Another composition, or none, is the selection; the attempt did not take effect and the prior selection stands complete.
-    Prior(Option<String>),
+    /// Another composition, or none, is the selection: the attempt did not take effect, or a later publication replaced it. Whatever is named is complete.
+    Other(Option<String>),
     /// The selector carries an unknown schema; nothing can be concluded and nothing may be mutated.
     Quarantined,
 }
@@ -346,13 +367,10 @@ pub fn reconcile(
     transaction: &LifecycleTransactionLock,
     intended: &str,
 ) -> Result<Reconciled, CompositionRefusal> {
-    match store
-        .reconcile_vector(transaction)
-        .map_err(|error| CompositionRefusal::Select(error.to_string()))?
-    {
+    match store.reconcile_vector(transaction)? {
         CurrentProfile::Current(current) if current == intended => Ok(Reconciled::Published),
-        CurrentProfile::Current(current) => Ok(Reconciled::Prior(Some(current))),
-        CurrentProfile::Absent => Ok(Reconciled::Prior(None)),
+        CurrentProfile::Current(current) => Ok(Reconciled::Other(Some(current))),
+        CurrentProfile::Absent => Ok(Reconciled::Other(None)),
         CurrentProfile::Quarantined => Ok(Reconciled::Quarantined),
     }
 }
@@ -374,25 +392,22 @@ impl std::fmt::Debug for VerifiedComposition {
     }
 }
 
-/// Verifies one composition generation and every member under `expected`.
+/// Verifies one composition generation and every member under `expected`, and re-checks the topology under `max_deltas` so a composition current admission would refuse does not verify.
 ///
 /// # Errors
 ///
-/// A generation of another owner or schema, a record that is not canonical or does not agree with its members file, a record whose identity is not `expected`, or a member that fails [`verify`].
+/// A generation of another owner or schema, a record that is not canonical or does not agree with its members file, a record whose identity is not `expected`, a member that fails [`verify`], or a topology outside the contract.
 pub fn verify_composition(
     store: &GenerationStore,
     digest: &str,
     expected: &ExpectedVectors<'_>,
+    max_deltas: NonZeroUsize,
 ) -> Result<VerifiedComposition, CompositionRefusal> {
-    let generation = store.validate(digest).map_err(|error| match error {
-        GenerationError::UnsupportedStateSchema => CompositionRefusal::Quarantined,
-        other => CompositionRefusal::Select(other.to_string()),
-    })?;
+    let generation = store.validate(digest)?;
     if generation.manifest.target != VECTOR_SELECTION_TARGET {
         return Err(CompositionRefusal::NotComposition("manifest target"));
     }
-    let bytes = read_verified(&generation, COMPOSITION_FILE)
-        .map_err(|error| CompositionRefusal::Select(error.to_string()))?;
+    let bytes = read_verified(&generation, COMPOSITION_FILE)?;
     let composition: Composition =
         serde_json::from_slice(&bytes).map_err(|_| CompositionRefusal::NotComposition("record"))?;
     if composition.schema != COMPOSITION_SCHEMA {
@@ -404,24 +419,16 @@ pub fn verify_composition(
     if composition.stage_manifest() != generation.manifest {
         return Err(CompositionRefusal::NotComposition("manifest binding"));
     }
-    let members = generation
-        .members()
-        .map_err(|_| CompositionRefusal::NotComposition("members"))?;
-    if members != composition.members() {
+    if generation.members()? != composition.members() {
         return Err(CompositionRefusal::NotComposition(
             "members disagree with the record",
         ));
     }
-    let generation_identity = expected.generation;
-    let identity_holds = composition.embedding_model == generation_identity.embedding_model
-        && composition.tokenizer_fingerprint == generation_identity.tokenizer_fingerprint
-        && composition.vector_dimension == generation_identity.vector_dimension
-        && Metric::from_name(&composition.metric) == Some(expected.metric)
-        && composition.unit_norm_tolerance.to_bits() == expected.unit_norm_tolerance.to_bits()
-        && ScalarRecipe::from_id(&composition.quantizer_recipe) == Some(expected.recipe)
-        && composition.generation_epoch == generation_identity.generation_epoch
-        && composition.kernel_incarnation_id == expected.kernel_incarnation_id;
-    if !identity_holds {
+    if composition
+        .identity()
+        .first_mismatch(&VectorIdentity::from_expected(expected))
+        .is_some()
+    {
         return Err(CompositionRefusal::NotComposition("identity"));
     }
     let member = |digest: &str| {
@@ -436,16 +443,7 @@ pub fn verify_composition(
         .iter()
         .map(|digest| member(digest))
         .collect::<Result<Vec<_>, _>>()?;
-    let spec = CompositionSpec {
-        expected,
-        sequence: composition.sequence,
-        base: &base,
-        deltas: &deltas,
-        max_deltas: NonZeroUsize::new(deltas.len().max(1)).expect("at least one"),
-    };
-    if compose(&spec)? != composition {
-        return Err(CompositionRefusal::NotComposition("topology"));
-    }
+    check_topology(expected, &base, &deltas, max_deltas)?;
     Ok(VerifiedComposition {
         digest: digest.to_owned(),
         composition,
@@ -469,7 +467,7 @@ pub enum SelectorState {
 pub struct Recovered {
     pub composition: VerifiedComposition,
     pub selector: SelectorState,
-    /// Composition generations examined, newest first, before one verified.
+    /// Compositions fully verified, or attempted, before one passed: the selection and then the fallbacks.
     pub examined: usize,
 }
 
@@ -483,14 +481,16 @@ pub enum Unavailable {
     Store(String),
 }
 
-/// Takes the selected composition when it verifies. Otherwise examines the store's other compositions newest first, at most `bound` of them, and takes the first that verifies. An acknowledged selection is never displaced by a newer composition that was staged but not selected.
+/// Takes the selected composition when it verifies. Otherwise reads only the manifests of the store's other generations to find compositions, orders them by descending sequence, then fully verifies at most `bound` of them and takes the first that passes. An acknowledged selection is never displaced by a newer composition that was staged but not selected. `_transaction` keeps a concurrent mutator from reclaiming what recovery is examining.
 ///
 /// # Errors
 ///
 /// A quarantined selector or no verifying composition within the bound; neither mutates the store.
 pub fn recover(
     store: &GenerationStore,
+    _transaction: &LifecycleTransactionLock,
     expected: &ExpectedVectors<'_>,
+    max_deltas: NonZeroUsize,
     bound: NonZeroUsize,
 ) -> Result<Recovered, Unavailable> {
     let store_error = |error: GenerationError| Unavailable::Store(error.to_string());
@@ -502,7 +502,7 @@ pub fn recover(
     let mut examined = 0;
     if let Some(current) = &selected {
         examined += 1;
-        if let Ok(composition) = verify_composition(store, current, expected) {
+        if let Ok(composition) = verify_composition(store, current, expected, max_deltas) {
             return Ok(Recovered {
                 composition,
                 selector: SelectorState::Current,
@@ -515,16 +515,7 @@ pub fn recover(
         if selected.as_deref() == Some(digest.as_str()) {
             continue;
         }
-        let Ok(generation) = store.validate(&digest) else {
-            continue;
-        };
-        if generation.manifest.target != VECTOR_SELECTION_TARGET {
-            continue;
-        }
-        let Ok(bytes) = read_verified(&generation, COMPOSITION_FILE) else {
-            continue;
-        };
-        if let Ok(composition) = serde_json::from_slice::<Composition>(&bytes) {
+        if let Some(composition) = record(store, &digest) {
             candidates.push((composition.sequence, digest));
         }
     }
@@ -534,12 +525,9 @@ pub fn recover(
             .cmp(left_sequence)
             .then_with(|| right.cmp(left))
     });
-    for (_, digest) in candidates
-        .into_iter()
-        .take(bound.get().saturating_sub(examined))
-    {
+    for (_, digest) in candidates.into_iter().take(bound.get()) {
         examined += 1;
-        if let Ok(composition) = verify_composition(store, &digest, expected) {
+        if let Ok(composition) = verify_composition(store, &digest, expected, max_deltas) {
             let selector = match &selected {
                 Some(current) => SelectorState::Stale(current.clone()),
                 None => SelectorState::Absent,

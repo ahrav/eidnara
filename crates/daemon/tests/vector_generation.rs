@@ -150,7 +150,6 @@ impl Fixture {
         built: &BuiltVectors,
         admission: &Admission,
     ) -> Result<String, VectorRefusal> {
-        let protected = BTreeSet::new();
         stage(
             built,
             &Staging {
@@ -159,7 +158,7 @@ impl Fixture {
                 gate: &self.gate,
                 admission,
                 identity: &self.identity,
-                protected: &protected,
+                protected: BTreeSet::new(),
             },
         )
     }

@@ -119,19 +119,9 @@ impl VectorSidecar {
 
     /// The compatibility identity's digest fills the contract slot, the sidecar's hash the inputs slot, and the row artifact's hash the payload slot; no release contract or inputs lock exists for a vector generation.
     pub fn stage_meta(&self) -> StageMeta {
-        let compatibility = serde_json::to_vec(&[
-            serde_json::Value::from(self.embedding_model.as_str()),
-            serde_json::Value::from(self.tokenizer_fingerprint.as_str()),
-            serde_json::Value::from(self.vector_dimension),
-            serde_json::Value::from(self.metric.as_str()),
-            serde_json::Value::from(self.unit_norm_tolerance.to_bits()),
-            serde_json::Value::from(self.quantizer_recipe.as_str()),
-            serde_json::Value::from(self.generation_epoch),
-        ])
-        .expect("identity serialization cannot fail");
         StageMeta {
             target: VECTOR_TARGET.to_owned(),
-            release_contract_sha256: sha256_hex(&compatibility),
+            release_contract_sha256: VectorIdentity::from_sidecar(self).compatibility_sha256(),
             inputs_lock_sha256: self.sha256(),
             source_payload_manifest_sha256: self
                 .files
@@ -161,6 +151,104 @@ impl VectorSidecar {
             sha256: sha256_hex(&sidecar),
         });
         GenerationManifest::from_files(&self.stage_meta(), files)
+    }
+}
+
+/// The compatibility identity every layer and composition carries: what must agree before two artifacts share a metric space.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorIdentity {
+    pub embedding_model: String,
+    pub tokenizer_fingerprint: String,
+    pub vector_dimension: u32,
+    pub metric: Option<Metric>,
+    pub unit_norm_tolerance_bits: u64,
+    pub recipe: Option<ScalarRecipe>,
+    pub generation_epoch: u64,
+    pub kernel_incarnation_id: String,
+}
+
+impl VectorIdentity {
+    pub fn from_expected(expected: &ExpectedVectors<'_>) -> Self {
+        Self {
+            embedding_model: expected.generation.embedding_model.clone(),
+            tokenizer_fingerprint: expected.generation.tokenizer_fingerprint.clone(),
+            vector_dimension: expected.generation.vector_dimension,
+            metric: Some(expected.metric),
+            unit_norm_tolerance_bits: expected.unit_norm_tolerance.to_bits(),
+            recipe: Some(expected.recipe),
+            generation_epoch: expected.generation.generation_epoch,
+            kernel_incarnation_id: expected.kernel_incarnation_id.to_owned(),
+        }
+    }
+
+    pub fn from_sidecar(sidecar: &VectorSidecar) -> Self {
+        Self {
+            embedding_model: sidecar.embedding_model.clone(),
+            tokenizer_fingerprint: sidecar.tokenizer_fingerprint.clone(),
+            vector_dimension: sidecar.vector_dimension,
+            metric: Metric::from_name(&sidecar.metric),
+            unit_norm_tolerance_bits: sidecar.unit_norm_tolerance.to_bits(),
+            recipe: ScalarRecipe::from_id(&sidecar.quantizer_recipe),
+            generation_epoch: sidecar.generation_epoch,
+            kernel_incarnation_id: sidecar.kernel_incarnation_id.clone(),
+        }
+    }
+
+    /// The first field on which `self` and `other` disagree, in the order the fields are declared.
+    pub fn first_mismatch(&self, other: &Self) -> Option<&'static str> {
+        let checks: [(&'static str, bool); 8] = [
+            (
+                "embedding_model",
+                self.embedding_model == other.embedding_model,
+            ),
+            (
+                "tokenizer_fingerprint",
+                self.tokenizer_fingerprint == other.tokenizer_fingerprint,
+            ),
+            (
+                "vector_dimension",
+                self.vector_dimension == other.vector_dimension,
+            ),
+            (
+                "metric",
+                self.metric.is_some() && self.metric == other.metric,
+            ),
+            (
+                "unit_norm_tolerance",
+                self.unit_norm_tolerance_bits == other.unit_norm_tolerance_bits,
+            ),
+            (
+                "quantizer_recipe",
+                self.recipe.is_some() && self.recipe == other.recipe,
+            ),
+            (
+                "generation_epoch",
+                self.generation_epoch == other.generation_epoch,
+            ),
+            (
+                "kernel_incarnation_id",
+                self.kernel_incarnation_id == other.kernel_incarnation_id,
+            ),
+        ];
+        checks
+            .into_iter()
+            .find(|(_, holds)| !holds)
+            .map(|(field, _)| field)
+    }
+
+    /// The digest of the fields that decide compatibility, for a manifest's contract slot; the kernel incarnation is provenance, not compatibility, and stays out.
+    pub fn compatibility_sha256(&self) -> String {
+        let fields = serde_json::to_vec(&[
+            serde_json::Value::from(self.embedding_model.as_str()),
+            serde_json::Value::from(self.tokenizer_fingerprint.as_str()),
+            serde_json::Value::from(self.vector_dimension),
+            serde_json::Value::from(self.metric.map(Metric::name).unwrap_or_default()),
+            serde_json::Value::from(self.unit_norm_tolerance_bits),
+            serde_json::Value::from(self.recipe.map(ScalarRecipe::id).unwrap_or_default()),
+            serde_json::Value::from(self.generation_epoch),
+        ])
+        .expect("identity serialization cannot fail");
+        sha256_hex(&fields)
     }
 }
 
@@ -344,7 +432,8 @@ pub struct Staging<'a> {
     pub gate: &'a HookGate,
     pub admission: &'a Admission,
     pub identity: &'a ProjectionIdentity,
-    pub protected: &'a BTreeSet<String>,
+    /// Digests a corrupt same-digest target may never be exchange-repaired over.
+    pub protected: BTreeSet<String>,
 }
 
 impl Staging<'_> {
@@ -369,7 +458,7 @@ impl Staging<'_> {
             .map_err(VectorRefusal::Admission)?;
         let sources = manifest_sources(manifest, |path| Some(resolve(path)))
             .expect("every manifest path resolves under the work directory");
-        let digest = self.store.stage(&sources, meta, self.protected)?;
+        let digest = self.store.stage(&sources, meta, &self.protected)?;
         // The store checked every source against the manifest's size and hash, so the digest it returns is the manifest's.
         debug_assert_eq!(digest, manifest.digest());
         Ok(digest)
@@ -503,40 +592,28 @@ fn check_identity(
     sidecar: &VectorSidecar,
     expected: &ExpectedVectors<'_>,
 ) -> Result<(), VectorRefusal> {
-    let generation = expected.generation;
-    let field = |field| VectorRefusal::Identity { field };
-    if sidecar.embedding_model != generation.embedding_model {
-        return Err(field("embedding_model"));
+    if let Some(field) = VectorIdentity::from_sidecar(sidecar)
+        .first_mismatch(&VectorIdentity::from_expected(expected))
+    {
+        return Err(VectorRefusal::Identity { field });
     }
-    if sidecar.tokenizer_fingerprint != generation.tokenizer_fingerprint {
-        return Err(field("tokenizer_fingerprint"));
-    }
-    if sidecar.vector_dimension != generation.vector_dimension {
-        return Err(field("vector_dimension"));
-    }
-    if Metric::from_name(&sidecar.metric) != Some(expected.metric) {
-        return Err(field("metric"));
-    }
-    if sidecar.unit_norm_tolerance.to_bits() != expected.unit_norm_tolerance.to_bits() {
-        return Err(field("unit_norm_tolerance"));
-    }
-    if ScalarRecipe::from_id(&sidecar.quantizer_recipe) != Some(expected.recipe) {
-        return Err(field("quantizer_recipe"));
-    }
-    if sidecar.generation_id != generation.generation_id {
-        return Err(field("generation_id"));
-    }
-    if sidecar.generation_epoch != generation.generation_epoch {
-        return Err(field("generation_epoch"));
-    }
-    if sidecar.kernel_incarnation_id != expected.kernel_incarnation_id {
-        return Err(field("kernel_incarnation_id"));
+    if sidecar.generation_id != expected.generation.generation_id {
+        return Err(VectorRefusal::Identity {
+            field: "generation_id",
+        });
     }
     if expected
         .checkpoint
         .is_some_and(|checkpoint| sidecar.checkpoint() != *checkpoint)
     {
-        return Err(field("checkpoint"));
+        return Err(VectorRefusal::Identity {
+            field: "checkpoint",
+        });
+    }
+    if sidecar.snapshot_commit_seq > sidecar.checkpoint_commit_seq {
+        return Err(VectorRefusal::Identity {
+            field: "checkpoint",
+        });
     }
     Ok(())
 }
@@ -556,24 +633,39 @@ fn encode_all<'a>(
     Ok(codes)
 }
 
+/// Why a verified read did not return bytes: the store refused the file, or the read itself failed.
+#[derive(Debug)]
+pub(crate) enum ReadFault {
+    Store(GenerationError),
+    Io(String),
+}
+
+impl From<ReadFault> for VectorRefusal {
+    fn from(fault: ReadFault) -> Self {
+        match fault {
+            ReadFault::Store(error) => error.into(),
+            ReadFault::Io(detail) => Self::Io(detail),
+        }
+    }
+}
+
 /// Reads one manifest-listed file through the retained descriptor after rehashing it.
 pub(crate) fn read_verified(
     generation: &ValidatedGeneration,
     path: &str,
-) -> Result<Vec<u8>, GenerationError> {
-    let fd = generation.open_verified_file(path)?;
+) -> Result<Vec<u8>, ReadFault> {
+    let fd = generation
+        .open_verified_file(path)
+        .map_err(ReadFault::Store)?;
     let mut file = fs::File::from(fd);
     let mut bytes = Vec::new();
-    io::Read::read_to_end(&mut file, &mut bytes).map_err(|_| {
-        GenerationError::NativePayloadInvalid {
-            detail: "verified file read failed",
-        }
-    })?;
+    io::Read::read_to_end(&mut file, &mut bytes)
+        .map_err(|error| ReadFault::Io(error.kind().to_string()))?;
     Ok(bytes)
 }
 
 /// `O_EXCL` so a build never overwrites a file another build left behind.
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), VectorRefusal> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), VectorRefusal> {
     let io = |error: io::Error| VectorRefusal::Io(error.kind().to_string());
     let mut file = fs::OpenOptions::new()
         .write(true)

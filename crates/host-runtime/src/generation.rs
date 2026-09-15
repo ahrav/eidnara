@@ -288,6 +288,38 @@ pub struct WireMembers {
     pub members: Vec<String>,
 }
 
+/// The members a manifest-listed members file names, after the file is rehashed against its entry; empty when the manifest lists none.
+fn read_members(
+    dir: &OwnedFd,
+    manifest: &GenerationManifest,
+) -> Result<Vec<String>, GenerationError> {
+    let Some(entry) = manifest
+        .files
+        .iter()
+        .find(|file| file.path == MEMBERS_FILE_NAME)
+    else {
+        return Ok(Vec::new());
+    };
+    let fd =
+        open_rel_file(dir, MEMBERS_FILE_NAME).ok_or_else(|| invalid("members file missing"))?;
+    verify_file_against_entry(&fd, entry)?;
+    let bytes = read_all_fd(&fd, MAX_MANIFEST_BYTES).map_err(|_| invalid("members read failed"))?;
+    match decode_with_schema::<WireMembers>(&bytes) {
+        SchemaDecode::Valid(members) => {
+            if members
+                .members
+                .iter()
+                .any(|digest| !is_canonical_payload_digest(digest))
+            {
+                return Err(invalid("members name a noncanonical digest"));
+            }
+            Ok(members.members)
+        }
+        SchemaDecode::UnknownSchema => Err(GenerationError::UnsupportedStateSchema),
+        SchemaDecode::Malformed => Err(invalid("members file is corrupt")),
+    }
+}
+
 impl ValidatedGeneration {
     /// The digests this generation requires retained, read through the retained descriptor; empty when the manifest lists no members file.
     ///
@@ -295,31 +327,7 @@ impl ValidatedGeneration {
     ///
     /// A members file the manifest names but that fails its hash, has an unknown schema, or names a noncanonical digest.
     pub fn members(&self) -> Result<Vec<String>, GenerationError> {
-        if !self
-            .manifest
-            .files
-            .iter()
-            .any(|file| file.path == MEMBERS_FILE_NAME)
-        {
-            return Ok(Vec::new());
-        }
-        let fd = self.open_verified_file(MEMBERS_FILE_NAME)?;
-        let bytes =
-            read_all_fd(&fd, MAX_MANIFEST_BYTES).map_err(|_| invalid("members read failed"))?;
-        match decode_with_schema::<WireMembers>(&bytes) {
-            SchemaDecode::Valid(members) => {
-                if members
-                    .members
-                    .iter()
-                    .any(|digest| !is_canonical_payload_digest(digest))
-                {
-                    return Err(invalid("members name a noncanonical digest"));
-                }
-                Ok(members.members)
-            }
-            SchemaDecode::UnknownSchema => Err(GenerationError::UnsupportedStateSchema),
-            SchemaDecode::Malformed => Err(invalid("members file is corrupt")),
-        }
+        read_members(&self.dir, &self.manifest)
     }
 
     pub fn pin(&self) -> Result<(), GenerationError> {
@@ -523,20 +531,17 @@ impl GenerationStore {
     }
 
     /// The digest every owner selector names, plus every member such a generation requires retained, plus whether any owner selector is quarantined.
-    ///
-    /// # Errors
-    ///
-    /// A selected generation that fails validation or whose members cannot be read: its members are unknown, so nothing may be reclaimed.
+    /// A selected generation whose manifest or members file cannot be read has unknown members, so it counts as quarantined: its own digest stays protected and no generation is reclaimed.
     fn owner_selections(&self) -> Result<(BTreeSet<String>, bool), GenerationError> {
         let mut selected = BTreeSet::new();
         let mut quarantined = false;
         for name in OWNER_PROFILE_NAMES {
             match self.read_profile(name)? {
                 CurrentProfile::Current(digest) => {
-                    let validated = self
-                        .validate(&digest)
-                        .map_err(|_| invalid("owner selection is not a valid generation"))?;
-                    selected.extend(validated.members()?);
+                    match self.members_of(&digest) {
+                        Ok(members) => selected.extend(members),
+                        Err(_) => quarantined = true,
+                    }
                     selected.insert(digest);
                 }
                 CurrentProfile::Quarantined => quarantined = true,
@@ -544,6 +549,33 @@ impl GenerationStore {
             }
         }
         Ok((selected, quarantined))
+    }
+
+    /// The members `digest` requires retained, from its manifest and members file alone; the other listed files are not opened.
+    fn members_of(&self, digest: &str) -> Result<Vec<String>, GenerationError> {
+        let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
+            return Err(invalid("generation directory is missing or insecure"));
+        };
+        let manifest = Self::read_manifest_in_dir(&dir, digest)?;
+        read_members(&dir, &manifest)
+    }
+
+    /// Members of every pinned generation, so a reader that holds a superseded composition keeps its members too; a pinned generation whose members cannot be read counts as quarantined.
+    fn pinned_members(&self, digests: &[String]) -> (BTreeSet<String>, bool) {
+        let mut members = BTreeSet::new();
+        let mut quarantined = false;
+        for digest in digests {
+            if matches!(
+                lock_for_reclamation(&self.generations_fd, digest),
+                Err(Reclamation::Pinned)
+            ) {
+                match self.members_of(digest) {
+                    Ok(found) => members.extend(found),
+                    Err(_) => quarantined = true,
+                }
+            }
+        }
+        (members, quarantined)
     }
 
     fn read_profile(&self, name: &str) -> Result<CurrentProfile, GenerationError> {
@@ -596,8 +628,18 @@ impl GenerationStore {
         })
     }
 
-    fn validate_in_dir(
-        &self,
+    /// The manifest alone: its bytes hash to `digest` and are canonical, but the files it lists are not opened. Cheap enough to run on every prune.
+    pub fn manifest(&self, digest: &str) -> Result<GenerationManifest, GenerationError> {
+        if !is_canonical_payload_digest(digest) {
+            return Err(invalid("generation digest is noncanonical"));
+        }
+        let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
+            return Err(invalid("generation directory is missing or insecure"));
+        };
+        Self::read_manifest_in_dir(&dir, digest)
+    }
+
+    fn read_manifest_in_dir(
         dir: &OwnedFd,
         digest: &str,
     ) -> Result<GenerationManifest, GenerationError> {
@@ -626,12 +668,21 @@ impl GenerationStore {
         if manifest.canonical_bytes() != bytes {
             return Err(invalid("manifest is not canonically encoded"));
         }
-        let mut expected: BTreeSet<String> = BTreeSet::new();
         let mut sorted = manifest.files.clone();
         sorted.sort_by(|a, b| a.path.cmp(&b.path));
         if sorted != manifest.files {
             return Err(invalid("manifest files are not sorted by path"));
         }
+        Ok(manifest)
+    }
+
+    fn validate_in_dir(
+        &self,
+        dir: &OwnedFd,
+        digest: &str,
+    ) -> Result<GenerationManifest, GenerationError> {
+        let manifest = Self::read_manifest_in_dir(dir, digest)?;
+        let mut expected: BTreeSet<String> = BTreeSet::new();
         for entry in &manifest.files {
             // The same path rules the stager enforces bound length and depth before the walk.
             validate_rel_path(&entry.path)?;
@@ -1091,6 +1142,13 @@ impl GenerationStore {
         if selected.contains(&digest) {
             return Err(invalid("owner generation is selected"));
         }
+        let (held, held_quarantined) = self.pinned_members(&self.digests()?);
+        if held_quarantined {
+            return Err(GenerationError::UnsupportedStateSchema);
+        }
+        if held.contains(&digest) {
+            return Err(invalid("generation is a member of a pinned composition"));
+        }
         match rustix::fs::statat(
             &self.generations_fd,
             digest.as_str(),
@@ -1122,9 +1180,9 @@ impl GenerationStore {
     /// `prune` preserves entries with unknown manifest schemas or foreign names.
     /// `prune` returns `UnsupportedStateSchema` when the current profile is quarantined.
     /// A quarantined owner profile may name any digest, so `prune` then counts it as quarantined
-    /// and removes only temps, which no selector can reference. Every owner selector gates every
-    /// caller: a corrupt or quarantined vector selector stops the host launcher's prune as a
-    /// corrupt or quarantined search selector already does.
+    /// and removes only temps, which no selector can reference; a selected or pinned generation
+    /// whose members cannot be read is treated the same way. Every owner selector gates every
+    /// caller, as the search selector already did.
     /// One unremovable entry does not stop the sweep: every reclaimable entry is removed first,
     /// then the first removal error is returned.
     pub fn prune(&self, protected: &BTreeSet<String>) -> Result<PruneReport, GenerationError> {
@@ -1149,6 +1207,17 @@ impl GenerationStore {
         let (entries, unnamed) = read_dir_names_partitioned(&self.generations_fd)
             .map_err(|_| invalid("directory listing failed"))?;
         report.quarantined += unnamed;
+        let digests: Vec<String> = entries
+            .iter()
+            .filter(|name| is_canonical_payload_digest(name))
+            .cloned()
+            .collect();
+        let (held, held_quarantined) = self.pinned_members(&digests);
+        protected.extend(held);
+        let owner_quarantined = owner_quarantined || held_quarantined;
+        if held_quarantined {
+            report.quarantined += 1;
+        }
         for name in entries {
             if is_staging_temp_name(&name) {
                 match remove_tree(&self.generations_fd, &name) {

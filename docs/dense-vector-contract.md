@@ -269,15 +269,19 @@ at an equal dimension.
 The vector selector is `vector-profile.json`, beside the host and search
 selectors. It names a composition, never a layer. A layer's manifest target
 is `vector-generation`; a composition's is `vector-composition`, and
-`select_vector` refuses any other. The search selector keeps its existing
-behavior and checks no target. Pruning retains every owner-selected
-generation and every member it lists in `members.json`, discard refuses one,
-exchange repair refuses to replace one, and a corrupt or quarantined owner
-selector, or a selected generation that fails validation, stops the store's
-mutators for every caller. The store's selection primitive checks inventory,
-sizes, modes, hashes, the target, and that every listed member validates; the
-daemon's semantic verification of the composition and its members precedes
-selection.
+`select_vector` refuses any other. Any generation an owner selector names or
+a reader pins may list `members.json`, digests the store must retain with it:
+pruning retains every selected or pinned generation and every member it
+lists, discard refuses one, and exchange repair refuses to replace one. The
+store reads only a generation's manifest and members file for this, never
+its payload, so a corrupt payload of a selected generation does not stop
+pruning; a manifest or members file that cannot be read makes the members
+unknown, and the store then behaves as with a quarantined selector: temps
+only are reclaimed and discard refuses. The search selector keeps its
+existing behavior apart from this shared members rule, which no search seed
+exercises. The store's selection primitive checks inventory, sizes, modes,
+hashes, the target, and that every listed member validates; the daemon's
+semantic verification of the composition and its members precedes selection.
 
 A delta layer may carry `tombstones.json`, a JSON array of the occurrence
 identifiers it masks in strictly increasing order; a base never does. The
@@ -309,24 +313,33 @@ yet frozen: every delta's snapshot and checkpoint are at or after the
 checkpoint of the layer before it. Equal-precedence conflicts among members
 are not decided here.
 
-`publish` stages the composition under the caller's admission and moves the
-selector in one rename. It records three facts separately: `staged` when the
-store holds the record, `acknowledged` when the selector rename returned, and
-`durable` when the containing-directory sync returned. A failure carries those
-facts; a failure after `acknowledged` is an unknown outcome, and `reconcile`
-settles it by reading the selector back, syncing its directory, and comparing
-digests: `Published` when it names the attempt, `Prior` with whatever it names
-otherwise, `Quarantined` when its schema is unknown. An interrupted
-publication therefore leaves the old complete selection or the new one, never
-a partial or mixed view, and an identical retry converges on the same digest
-without a second record.
+`publish` refuses a sequence at or below the selected composition's, stages
+the composition under the caller's admission, and moves the selector in one
+rename. It reports how far the attempt got, recorded when each step returns:
+`NotStaged`, `Staged` when the store holds the record, `Acknowledged` when
+the selector rename returned, `Durable` when the containing-directory sync
+returned. A failure carries the last stage reached; a failure at or after
+`Acknowledged` is an unknown outcome, and `reconcile` settles it by reading
+the selector back, syncing its directory, and comparing digests: `Published`
+when it names the attempt, `Other` with whatever it names otherwise,
+`Quarantined` when its schema is unknown. An interrupted publication
+therefore leaves the old complete selection or the new one, never a partial
+or mixed view, and a retry of an acknowledged publication is refused by
+sequence without a second record.
 
 `verify_composition` checks the record's target, schema, canonical bytes,
 manifest binding, agreement with `members.json`, and identity, verifies every
-member with `vector_generation::verify`, and recomposes the members to check
-the recorded topology. `recover` takes the selected composition when it
-verifies; otherwise it examines the other compositions newest first, at most
-`bound` of them, and takes the first that verifies, reporting the selector as
+member with `vector_generation::verify`, and re-checks the topology under the
+caller's delta bound, so a composition current admission would refuse does
+not verify. `recover` takes the selected composition when it verifies;
+otherwise it reads only the manifests of the other generations to find
+compositions, orders them by descending sequence, fully verifies at most
+`bound` of them, and takes the first that passes, reporting the selector as
 `Stale` or `Absent` rather than repointing it. An acknowledged selection is
 never displaced by a newer composition that was staged but not selected, and
 no verifying composition means explicit unavailability.
+
+Readers hold a composition the way the store expects: pin the composition
+generation, then open every member, then re-read the selector. While the pin
+is held the composition's members stay retained even after a later
+publication moves the selector.
