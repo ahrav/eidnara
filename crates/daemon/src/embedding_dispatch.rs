@@ -698,8 +698,8 @@ impl<'a> EmbeddingDispatcher<'a> {
         if let Some(quarantine) = self.projection.quarantine() {
             return Err(SubmitFailure::Quarantined(quarantine));
         }
-        // Native work must not start under a budget that already ended; this is the last check before the host owns the call.
-        if pass.budget.is_exhausted() {
+        // Native work must not start under a budget that already ended, nor past the row's deadline the pass carries for this job; this is the last check before the host owns the call.
+        if pass.budget.is_exhausted() || Instant::now() >= pass.deadline {
             return Err(SubmitFailure::BudgetExhausted);
         }
         // The host item is the episode, so a new episode never reuses a job the table retains from a stopped one.
