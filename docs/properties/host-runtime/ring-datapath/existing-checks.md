@@ -48,9 +48,12 @@ functions and false of doctests. `cargo test -p host-runtime --doc` runs at
 `ci.yml:190` under the step name "Rust lease non-escape" (`:189`), and it builds
 and runs the lib target's doctests.
 
-**Doctests: 2, and they are the only source-resident checks in this sub-part
-that CI executes at all.** Both are `compile_fail`, both were printed and
-confirmed at `HEAD`:
+**Doctests: 3 at HEAD, and they are the only source-resident checks in this
+sub-part that CI executes at all.** The two `frame_channel.rs` doctests below
+are superseded; their replacements are the two `compile_fail` blocks at
+`crates/shm-transport/src/backend/ring.rs:25-33` and the positive
+`PayloadLease: Send` block at `:35-38`, all three run by the workspace
+`cargo test --doc`:
 
 | Location | What it asserts |
 | --- | --- |
@@ -67,7 +70,8 @@ runs. `wire.rs:4-14` is a ```text``` fence
 and is not compiled, so it is not a check.
 
 So the correct statement is: **no inline unit test in this sub-part runs in CI,
-and two doctests do.**
+and the three replacement doctests in `crates/shm-transport/src/backend/ring.rs`
+do.**
 
 ### The in-crate contract suite, split by reach
 

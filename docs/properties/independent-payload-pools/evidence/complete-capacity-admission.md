@@ -13,7 +13,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/profile.rs:166`
 - `crates/host-runtime/src/ring_transport.rs:72`
 - `crates/host-runtime/src/config.rs:209`
-- `crates/host-runtime/src/ring_transport.rs:1199`
+- `crates/host-runtime/src/ring_transport.rs:1219`
 
 Witness status: yes - `crates/shm-transport/tests/profile.rs:261` checks the charge equals the created object size; `crates/shm-transport/tests/profile.rs:131` and `process_limits_reject_counts_above_the_resident_byte_ceiling` in crates/host-runtime/src/ring_transport.rs. On the host side, `HostLimits::checked_aggregate` (`crates/host-runtime/src/config.rs:209`) states transport, resident, and terminal ceilings as distinct checked quantities and `crates/host-runtime/src/config.rs:615` refuses an unstatable total; `host.status` exposes the aggregate (`crates/host-runtime/src/connection.rs:643`).
 
