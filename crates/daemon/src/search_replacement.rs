@@ -24,7 +24,6 @@ use crate::projection_gates::{
 };
 use crate::projection_lifecycle::{
     IntentRefusal, LifecycleIntent, ProjectionLifecycle, RecoveryTarget, ReplacementCapture,
-    Transition,
 };
 use crate::search_catchup::{
     Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeEvent, SearchCatchUp,
@@ -54,6 +53,11 @@ pub struct RetirementBounds {
 }
 
 impl ReplacementSpec {
+    /// The bytes one pending job row charges: two identifiers, the state literal, four integers, and the generation id.
+    pub(crate) fn pending_row_width(generation_id: &str) -> u64 {
+        (2 * 64 + "pending".len() + 4 * std::mem::size_of::<i64>() + generation_id.len()) as u64
+    }
+
     /// The manifest charges for one commit page of the episode's catch-up read. Every path that pages through commits under `episode.commits` charges these, so one page costs the same at construction and at cleanup.
     pub(crate) fn catchup_page_charges(&self) -> [(&'static str, u64); 3] {
         let episode = &self.episode;
@@ -126,10 +130,8 @@ impl ReplacementSpec {
         let peak_rows = (batch.persist.max_records.get() as u64)
             .checked_add(page.max_rows.get() as u64)
             .ok_or(BuildError::Invalid("row charge overflow"))?;
-        let pending_width = (2 * 64 + "pending".len() + 4 * std::mem::size_of::<i64>()) as u64;
-        let pending_bytes = pending_width
-            .checked_add(self.generation.generation_id.len() as u64)
-            .and_then(|width| width.checked_mul(batch.max_pending.get() as u64))
+        let pending_bytes = Self::pending_row_width(&self.generation.generation_id)
+            .checked_mul(batch.max_pending.get() as u64)
             .ok_or(BuildError::Invalid("pending charge overflow"))?;
         let local_bytes = (batch.persist.max_tuple_bytes.get() as u64)
             .checked_mul(batch.persist.max_records.get() as u64)
@@ -152,10 +154,7 @@ impl ReplacementSpec {
             .checked_sub(intent.recorded_at)
             .and_then(|n| u64::try_from(n).ok())
             .ok_or(BuildError::Invalid("episode duration"))?;
-        let duration_limit = match intent.transition {
-            Transition::Rebuilding => "B_recovery_ms",
-            Transition::AuthorizedRecovery => "B_authorized_recovery_ms",
-        };
+        let duration_limit = intent.transition.duration_limit();
         let mut requested = vec![
             ("export_page_rows", page.max_rows.get() as u64),
             ("export_page_encoded_bytes", page.max_encoded_bytes.get()),

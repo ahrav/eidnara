@@ -146,6 +146,8 @@ const STATUS_SCAN_THREAD_CAP: usize = 4;
 pub struct EvalBudget {
     deadline: Option<Instant>,
     interrupt: Arc<AtomicBool>,
+    /// The flag of the budget this one was linked from; raising it exhausts this budget too, while this budget's own flag leaves it untouched.
+    parent: Option<Arc<AtomicBool>>,
 }
 
 impl EvalBudget {
@@ -153,6 +155,16 @@ impl EvalBudget {
         Self {
             deadline,
             interrupt,
+            parent: None,
+        }
+    }
+
+    /// The same deadline under a private interrupt that this budget's cancellation still raises: cancelling the linked budget does not cancel this one.
+    pub fn linked(&self) -> Self {
+        Self {
+            deadline: self.deadline,
+            interrupt: Arc::new(AtomicBool::new(false)),
+            parent: Some(Arc::clone(&self.interrupt)),
         }
     }
 
@@ -172,6 +184,15 @@ impl EvalBudget {
         self.deadline
     }
 
+    /// The same cancellation with the earlier of this deadline and `deadline`. Crossing either deadline raises the shared interrupt, so the bounded budget cannot outlive the one it came from.
+    pub fn bounded_by(&self, deadline: Instant) -> Self {
+        Self {
+            deadline: Some(self.deadline.map_or(deadline, |own| own.min(deadline))),
+            interrupt: Arc::clone(&self.interrupt),
+            parent: self.parent.clone(),
+        }
+    }
+
     /// Cancellation is irreversible: no method clears `interrupt`.
     pub fn cancel(&self) {
         self.interrupt.store(true, Ordering::Relaxed);
@@ -181,6 +202,14 @@ impl EvalBudget {
     /// every gix walk sharing the flag stop without re-reading the clock.
     pub fn is_exhausted(&self) -> bool {
         if self.interrupt.load(Ordering::Relaxed) {
+            return true;
+        }
+        if self
+            .parent
+            .as_ref()
+            .is_some_and(|parent| parent.load(Ordering::Relaxed))
+        {
+            self.interrupt.store(true, Ordering::Relaxed);
             return true;
         }
         match self.deadline {
@@ -205,15 +234,20 @@ impl EvalBudget {
     /// interrupt, so the interrupt travels with the deadline.
     pub(crate) fn acquire_limit(&self) -> crate::open::AcquireLimit {
         crate::open::AcquireLimit::new(self.deadline, Some(Arc::clone(&self.interrupt)))
+            .with_parent(self.parent.clone())
     }
 }
 
-/// `DeadlineWatchdog` raises `budget`'s interrupt when its deadline passes, so
-/// an in-flight gix walk stops at its next poll.
+/// `DeadlineWatchdog` raises `budget`'s interrupt when its deadline passes or,
+/// for a linked budget, when its parent is cancelled, so an in-flight gix walk
+/// stops at its next poll; the walk polls only the budget's own flag.
 ///
 /// The wait is a condvar rather than a sleep: `drop` has to stop this thread
 /// promptly, and a sleeping thread cannot be woken, which would add the
 /// remainder of its nap to every snapshot that finishes early.
+/// How often the watchdog looks at a linked budget's parent flag.
+const PARENT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
 struct DeadlineWatchdog {
     stop: Arc<(Mutex<bool>, Condvar)>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -224,9 +258,11 @@ impl DeadlineWatchdog {
     /// under process or container thread limits, which is a load condition
     /// this request path has to survive.
     fn arm(budget: &EvalBudget) -> Result<Option<Self>, SnapshotError> {
-        let Some(deadline) = budget.deadline else {
+        let parent = budget.parent.clone();
+        if budget.deadline.is_none() && parent.is_none() {
             return Ok(None);
-        };
+        }
+        let deadline = budget.deadline;
         let interrupt = budget.interrupt_flag();
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let signal = Arc::clone(&stop);
@@ -239,14 +275,25 @@ impl DeadlineWatchdog {
                 let mut stop = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 while !*stop {
                     let now = Instant::now();
-                    if now >= deadline {
+                    if deadline.is_some_and(|deadline| now >= deadline)
+                        || parent
+                            .as_ref()
+                            .is_some_and(|parent| parent.load(Ordering::Relaxed))
+                    {
                         interrupt.store(true, Ordering::Relaxed);
                         return;
                     }
+                    // A parent flag has no wakeup of its own, so it is polled; the deadline is waited for exactly.
+                    let until_deadline = deadline.map_or(PARENT_POLL, |deadline| deadline - now);
+                    let wait = if parent.is_some() {
+                        until_deadline.min(PARENT_POLL)
+                    } else {
+                        until_deadline
+                    };
                     // The guard is held across the deadline test, so a `drop`
                     // racing this wait cannot signal into the gap and be missed.
                     stop = woken
-                        .wait_timeout(stop, deadline - now)
+                        .wait_timeout(stop, wait)
                         .unwrap_or_else(PoisonError::into_inner)
                         .0;
                 }
@@ -1544,6 +1591,68 @@ fn repository_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_linked_budget_follows_its_parents_cancellation_but_not_the_reverse() {
+        let parent = EvalBudget::unbounded();
+        let linked = parent.linked();
+        linked.cancel();
+        assert!(linked.is_exhausted());
+        assert!(
+            !parent.is_exhausted(),
+            "cancelling the link leaves the parent live"
+        );
+        let linked = parent.linked();
+        parent.cancel();
+        assert!(
+            linked.is_exhausted(),
+            "the parent's cancellation reaches the link"
+        );
+        assert!(linked.acquire_limit().should_stop());
+    }
+
+    /// A gix walk polls only the linked budget's own flag, so the watchdog carries the parent's cancellation into it while the walk runs, without waiting for a poll of the budget itself.
+    #[test]
+    fn the_watchdog_forwards_a_parents_cancellation_into_the_linked_flag() {
+        let parent = EvalBudget::unbounded();
+        let linked = parent.linked();
+        let watchdog = DeadlineWatchdog::arm(&linked).unwrap();
+        assert!(
+            watchdog.is_some(),
+            "a linked budget is watched even without a deadline"
+        );
+        let flag = linked.interrupt_flag();
+        parent.cancel();
+        let started = Instant::now();
+        while !flag.load(Ordering::Relaxed) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "the parent's cancellation never reached the flag gix polls"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        drop(watchdog);
+    }
+
+    #[test]
+    fn bounded_by_keeps_the_earlier_deadline_and_shares_the_interrupt() {
+        let now = Instant::now();
+        let earlier = now + std::time::Duration::from_secs(10);
+        let later = now + std::time::Duration::from_secs(20);
+        let unbounded = EvalBudget::unbounded();
+        assert_eq!(unbounded.bounded_by(earlier).deadline(), Some(earlier));
+        let own_earlier = EvalBudget::new(Some(earlier), Arc::new(AtomicBool::new(false)));
+        assert_eq!(own_earlier.bounded_by(later).deadline(), Some(earlier));
+        let own_later = EvalBudget::new(Some(later), Arc::new(AtomicBool::new(false)));
+        let bounded = own_later.bounded_by(earlier);
+        assert_eq!(bounded.deadline(), Some(earlier));
+        assert!(!bounded.is_exhausted());
+        own_later.cancel();
+        assert!(
+            bounded.is_exhausted(),
+            "cancellation reaches the bounded budget"
+        );
+    }
 
     /// The descriptor, not the pathname, decides what a hash reads. Every
     /// case here is what a racing swap would substitute after a stat.

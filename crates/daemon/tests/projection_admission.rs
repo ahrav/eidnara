@@ -5,7 +5,6 @@ mod support;
 use std::fs;
 use std::num::NonZeroUsize;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,8 +15,8 @@ use daemon::projection_admission::{
     ProjectionAdmission, Refresh, SelectedProjection,
 };
 use daemon::projection_gates::{
-    APPROVED_OBSERVERS, CAPABILITIES, CapabilityDisposition, Denial, EntryPoint, Gate, HARNESSES,
-    HookGate, ManifestRefusal, ProjectionHook, REQUIRED_LIMITS, Renewal, ResourceEvidence,
+    APPROVED_OBSERVERS, Denial, EntryPoint, Gate, HookGate, ManifestRefusal, ProjectionHook,
+    Renewal, ResourceEvidence,
 };
 use daemon::projection_lifecycle::{MAX_RECORD_BYTES, ProjectionLifecycle};
 use kernel::applicability::EvalBudget;
@@ -29,115 +28,10 @@ use support::embedding_fixtures::{
     Corpus, PROJECT, generation, kernel_incarnation_id, occurrence_of, tombstone,
 };
 use support::kernel_daemon::KernelDaemon;
-use support::projection_gate::{empty_coverage, identity, passing_evaluator};
-
-const LAG_LIMIT: u64 = 4;
-const LIMIT: u64 = 1_000_000;
-const HEAP_BYTES: u64 = 1024;
-
-fn manifest_json(identity: &ProjectionIdentity, enabled: &[ProjectionHook]) -> Value {
-    let limits: serde_json::Map<String, Value> = REQUIRED_LIMITS
-        .into_iter()
-        .map(|name| {
-            let value = if name == "catchup_lag_commits" {
-                LAG_LIMIT
-            } else {
-                LIMIT
-            };
-            (name.to_owned(), json!(value))
-        })
-        .collect();
-    let hooks: serde_json::Map<String, Value> = ProjectionHook::ALL
-        .iter()
-        .map(|hook| {
-            (
-                hook.id().to_owned(),
-                json!({ "enabled": enabled.contains(hook) }),
-            )
-        })
-        .collect();
-    json!({
-        "protocol_version": identity.limit_manifest_protocol_version,
-        "invalidation_identity": invalidation_json(identity),
-        "limits": limits,
-        "hooks": hooks,
-    })
-}
-
-fn invalidation_json(identity: &ProjectionIdentity) -> Value {
-    json!({
-        "schema_version": identity.schema_version,
-        "tokenizer_fingerprint": identity.tokenizer_fingerprint,
-        "analysis_identity": identity.analysis_identity,
-        "embedding_model": identity.embedding_model,
-        "projection_policy_version": identity.projection_policy_version,
-        "identity_contract_version": identity.identity_contract_version,
-        "limit_manifest_protocol_version": identity.limit_manifest_protocol_version,
-        "vector_dimension": identity.vector_dimension,
-        "generation_epoch": identity.generation_epoch,
-    })
-}
-
-/// A campaign record whose every dimension passes under `identity`.
-fn campaign_json(identity: &ProjectionIdentity) -> Value {
-    let proved: serde_json::Map<String, Value> = CAPABILITIES
-        .iter()
-        .map(|capability| {
-            let outcome = match capability.disposition {
-                CapabilityDisposition::Required => "supported",
-                CapabilityDisposition::OptionalDisabled => "unsupported",
-            };
-            (capability.name.to_owned(), json!(outcome))
-        })
-        .collect();
-    let capabilities: serde_json::Map<String, Value> = HARNESSES
-        .iter()
-        .map(|harness| ((*harness).to_owned(), Value::Object(proved.clone())))
-        .collect();
-    let harness_runs: serde_json::Map<String, Value> = HARNESSES
-        .iter()
-        .map(|harness| ((*harness).to_owned(), passed_run_json(identity)))
-        .collect();
-    json!({
-        "invalidation_identity": invalidation_json(identity),
-        "resource": {
-            "observer": APPROVED_OBSERVERS[0],
-            "decoded_heap_high_water_bytes": HEAP_BYTES,
-        },
-        "capabilities": capabilities,
-        "harness_runs": harness_runs,
-    })
-}
-
-fn passed_run_json(identity: &ProjectionIdentity) -> Value {
-    json!({
-        "outcome": "passed",
-        "invalidation_identity": invalidation_json(identity),
-    })
-}
-
-fn write_record(home: &Path, record: &str, bytes: &[u8]) {
-    let dir = home.join(ADMISSION_DIR);
-    if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&dir) {
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-    }
-    let path = dir.join(record);
-    fs::write(&path, bytes).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-}
-
-fn write_records(home: &Path, manifest: &Value, campaign: &Value) {
-    write_record(
-        home,
-        MANIFEST_RECORD,
-        &serde_json::to_vec_pretty(manifest).unwrap(),
-    );
-    write_record(
-        home,
-        EVIDENCE_RECORD,
-        &serde_json::to_vec_pretty(campaign).unwrap(),
-    );
-}
+use support::projection_gate::{
+    HEAP_BYTES, LAG_LIMIT, LIMIT, campaign_json, empty_coverage, fixture_limit, identity,
+    manifest_json, passed_run_json, passing_evaluator, write_record, write_records,
+};
 
 /// Refreshes `admission` for `identity` with an empty projection's coverage observed at `tip`.
 fn refresh_at(admission: &ProjectionAdmission, identity: &ProjectionIdentity, tip: i64) -> Refresh {
@@ -211,11 +105,7 @@ fn records_must_be_the_callers_own_regular_files_of_their_schemas() {
     write_records(home, &manifest, &campaign);
     let mut expected = passing_evaluator(&identity, 10, &ProjectionHook::ALL);
     for (name, limit) in expected.manifest.limits.iter_mut() {
-        *limit = if name == "catchup_lag_commits" {
-            LAG_LIMIT
-        } else {
-            LIMIT
-        };
+        *limit = fixture_limit(name);
     }
     expected.evidence.resource = Some(ResourceEvidence {
         observer: APPROVED_OBSERVERS[0].to_owned(),
@@ -830,9 +720,9 @@ async fn a_restart_reopens_the_gate_closed_until_it_refreshes() {
     let data_home = daemon.data_home().to_owned();
     // The owner binds after the kernel reports ready, so the accessor may trail the start by a moment.
     let started = std::time::Instant::now();
-    let admission = loop {
-        if let Some(admission) = daemon.handler().projection_admission() {
-            break admission;
+    let owner = loop {
+        if let Some(owner) = daemon.handler().search_lifecycle() {
+            break owner;
         }
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -840,6 +730,7 @@ async fn a_restart_reopens_the_gate_closed_until_it_refreshes() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
+    let admission = owner.admission();
     all_denied(admission.gate(), |_| Denial::NoManifest);
     write_records(
         &data_home,
