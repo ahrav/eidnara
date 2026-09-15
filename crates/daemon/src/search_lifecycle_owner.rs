@@ -170,6 +170,8 @@ pub enum SliceEvent {
     Draining(Duration),
     /// The slice loop enters its idle wait, which a recorded request ends early.
     Idle,
+    /// A request has taken its entry clock reading and is about to wait for the manager.
+    RequestEntered,
 }
 
 /// Puts the manager a disable took back unless the owner shut down meanwhile, whether the disable finished or its future was dropped.
@@ -871,6 +873,8 @@ impl SearchLifecycleOwner {
     ) -> Result<Option<Recorded>, BuildError> {
         // A slice holds the manager across its whole work, so the wait for it is the request's own budget, like everything after it.
         let entered = Instant::now();
+        #[cfg(feature = "test-support")]
+        self.tap(SliceEvent::RequestEntered);
         let mut managed = self.lock_within(budget)?;
         if self.kernel.database_incarnation_id_within_budget(budget)?
             != request.kernel_incarnation_id

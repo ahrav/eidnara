@@ -1168,7 +1168,7 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
     );
 }
 
-/// AC5: a reclamation whose COMMIT reply is lost is reconciled from the rows: the report matches what the store applied, a second sweep has no second effect, and the sweeper is not quarantined.
+/// AC5: a reclamation held off by another writer applies nothing within its budget, and one whose COMMIT reply is lost is reconciled from the rows: the report matches what the store applied, a second sweep has no second effect, and the sweeper is not quarantined.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     let dir = tempfile::tempdir().unwrap();
@@ -1185,14 +1185,14 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     let required = required_vectors(dir.path());
     let before = inventory(dir.path());
 
-    // A reply lost because the write never applied: another writer holds the file, the store gives up, and the rows say nothing changed.
+    // Another writer holds the file for the whole budget: the reclamation's write lock is awaited only until the budget's deadline, nothing is applied, the report says the budget ended it, and the page stays selected for the next sweep.
     let blocker = Connection::open(search_path(dir.path())).unwrap();
     blocker.busy_timeout(Duration::ZERO).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
     let report = tokio::task::block_in_place(|| {
         sweeper
-            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .run_sweep(ten(), &budget(Duration::from_millis(500)))
             .unwrap()
     });
     assert_eq!(
@@ -1200,9 +1200,10 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
             report.candidates,
             report.jobs_reclaimed,
             report.vectors_reclaimed,
-            report.survivors
+            report.survivors,
+            report.budget_exhausted
         ),
-        (1, 0, 0, 1)
+        (1, 0, 0, 0, true)
     );
     assert_eq!(inventory(dir.path()), before, "nothing was reclaimed");
     blocker.execute_batch("COMMIT").unwrap();

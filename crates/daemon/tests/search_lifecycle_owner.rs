@@ -3053,18 +3053,23 @@ fn a_request_that_waited_for_the_manager_is_judged_after_the_wait() {
     records(home);
     let owner = Arc::new(owner(home, &corpus.kernel));
     let _ = owner.run_slice(&slice_budget());
-    // A slice holds the manager at its preparation tap until released; the timed hold starts only once the request has taken its clock reading and is entering, so the wait is charged against this request's own deadline whatever the scheduling.
+    // A slice holds the manager at its preparation tap until released; the timed hold starts only once the request has taken its entry clock reading inside `request`, so the wait is charged against this request's own deadline whatever the scheduling of either thread.
     let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (entering_tx, entering) = std::sync::mpsc::channel();
     let (release, release_rx) = std::sync::mpsc::channel::<()>();
     let release_rx = std::sync::Mutex::new(release_rx);
-    owner.tap_slice_events_for_test(move |event| {
-        if matches!(event, SliceEvent::Prepared { .. }) {
+    owner.tap_slice_events_for_test(move |event| match event {
+        SliceEvent::Prepared { .. } => {
             let _ = reached_tx.send(());
             let _ = release_rx
                 .lock()
                 .unwrap()
                 .recv_timeout(Duration::from_secs(10));
         }
+        SliceEvent::RequestEntered => {
+            let _ = entering_tx.send(());
+        }
+        _ => {}
     });
     let holder = {
         let owner = Arc::clone(&owner);
@@ -3073,7 +3078,6 @@ fn a_request_that_waited_for_the_manager_is_judged_after_the_wait() {
     reached
         .recv_timeout(Duration::from_secs(10))
         .expect("the slice reaches its pause");
-    let (entering_tx, entering) = std::sync::mpsc::channel();
     let requester = {
         let owner = Arc::clone(&owner);
         let home = home.to_path_buf();
@@ -3081,7 +3085,6 @@ fn a_request_that_waited_for_the_manager_is_judged_after_the_wait() {
             let at = now();
             let mut request = rebuild(&home);
             request.deadline = at + 1_500;
-            let _ = entering_tx.send(());
             owner.request(&request, at, &budget(Duration::from_secs(5)))
         })
     };

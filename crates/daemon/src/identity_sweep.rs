@@ -117,10 +117,23 @@ impl<'a> IdentitySweeper<'a> {
             });
         }
         let mut report = SweepReport::default();
-        let page = self
-            .projection
-            .read(|conn| candidates(conn, max_jobs, self.cursor.as_deref()))
-            .map_err(SweepError::Read)?;
+        // Both connection acquisitions end at the budget's deadline when it has one; a connection still held then leaves the page and cursor for the next sweep.
+        let select =
+            |conn: &storage::GuardedConn<'_>| candidates(conn, max_jobs, self.cursor.as_deref());
+        let page = match budget.deadline() {
+            Some(deadline) => self.projection.read_within(deadline, select),
+            None => self.projection.read(select),
+        };
+        let page = match page {
+            Ok(page) => page,
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                return Ok(SweepReport {
+                    budget_exhausted: true,
+                    ..SweepReport::default()
+                });
+            }
+            Err(error) => return Err(SweepError::Read(error)),
+        };
         report.inspected = page.inspected;
         report.candidates = page.candidates.len();
         // A short page ends one pass over the table; a full page resumes after its last row once this call has judged it.
@@ -146,8 +159,28 @@ impl<'a> IdentitySweeper<'a> {
             report.budget_exhausted = true;
             return Ok(report);
         }
-        self.cursor = next_cursor;
-        let reclaimed = self.projection.write(|conn| reclaim(conn, &free));
+        let prior_cursor = std::mem::replace(&mut self.cursor, next_cursor);
+        // The budget and grant are judged once more inside the transaction, so a cancellation that lands while the connection was awaited commits nothing.
+        let ended = |conn: &storage::GuardedConn<'_>| {
+            if self.ended(budget) {
+                return Ok(None);
+            }
+            reclaim(conn, &free).map(Some)
+        };
+        let reclaimed = match budget.deadline() {
+            Some(deadline) => self.projection.write_within(deadline, ended),
+            None => self.projection.write(ended),
+        };
+        let reclaimed = match reclaimed {
+            Ok(Some(reclaimed)) => Ok(reclaimed),
+            // Nothing was applied: at the deadline the connection was still held, or the budget ended once it was ours. The cursor returns to before this page.
+            Ok(None) | Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                self.cursor = prior_cursor;
+                report.budget_exhausted = true;
+                return Ok(report);
+            }
+            Err(error) => Err(error),
+        };
         let reclaimed = if std::mem::take(&mut self.lose_reclaim_reply) && reclaimed.is_ok() {
             Err(SearchProjectionError::Store(storage::StoreError::Backend(
                 "database is locked".to_owned(),
