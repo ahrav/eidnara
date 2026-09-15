@@ -71,9 +71,9 @@ at once.
   `:884-892`). `Ring::reserve_until`
   (`crates/shm-transport/src/backend/ring.rs:1025-1086`) still parks the calling
   thread on `capacity_ready` (`:1075-1078`); its remaining Rust caller is the
-  test-only `RingClientEndpoint::send` (`ring_transport.rs:1497`) through
+  test-only `RingClientEndpoint::send` (`ring_transport.rs:1503`) through
   `reserve_until_in`, not the endpoint; the production bridge uses
-  `try_send_bounded` (`:1520`) and parks on `arm_capacity_wait` instead.
+  `try_send_bounded` (`:1526`) and parks on `arm_capacity_wait` instead.
 - **Second starvation path, inbound blocks outbound.** `receive_one` ends with
   `inbound.send(Ok(InboundEvent::Frame(..))).await` (`:737-745`) on the bounded
   channel created at `:283` with `mpsc::channel(queue_frames)`. That await has no
@@ -106,7 +106,7 @@ at once.
   (`crates/shm-transport/tests/ring.rs:488-543`) uses a single ring in a single
   direction.
   At HEAD: recv is cfg(test)-only at HEAD, so no shipped host code calls wait_for_data.
-  At HEAD: `send` (`:1497`) reserves through `reserve_until_in` and `try_send_bounded` (`:1520`) through `try_reserve_in`; both hand the reservation to `publish` (`:1557-1581`), which writes, rechecks the frame deadline, checks quarantine, then commits, and reports a `SendFailure` stage instead of an opaque error.
+  At HEAD: `send` (`:1503`) reserves through `reserve_until_in` and `try_send_bounded` (`:1526`) through `try_reserve_in`; both hand the reservation to `publish` (`:1563-1587`), which writes, rechecks the frame deadline, checks quarantine, then commits, and reports a `SendFailure` stage instead of an opaque error.
   At HEAD: send_ticket_before and the publication ticket are gone; the admission select! lives in send_before and reserves a permit with self.tx.reserve().
   At HEAD: The inbound channel is sized queue_frames plus one and the extra slot is held as an owned permit for the terminal event, so a fault or cancellation is delivered even when the receiver has stopped draining (`:279-291`).
   At HEAD: The handoff goes through `deliver`, a biased select! over inbound.send, queue.discard.cancelled(), and root.cancelled(), so it is cancellable and no longer an unselected untimed await.
@@ -250,7 +250,7 @@ timeout rather than an unbounded stall. Coverage check to emit:
   `frame_deadline` alone, and the drain arm gains a second job as a lost-wake
   detector.
   At HEAD: The doorbell is a connected AF_UNIX stream socketpair end held in a UnixStream, not an eventfd, and its syscalls go through backend/sys.rs.
-  At HEAD: The main impl block holds `send`, `try_send_bounded`, `publish`, `try_recv`, and `try_recv_with`; `recv` lives in a separate `cfg(test)` impl at `:1672-1689`.
+  At HEAD: The main impl block holds `send`, `try_send_bounded`, `publish`, `try_recv`, and `try_recv_with`; `recv` lives in a separate `cfg(test)` impl at `:1678-1695`.
   At HEAD: The host publish is `Publisher::try_publish` (`ring_transport.rs:1221`), which is nonblocking; the outbound-blocks-inbound stall this entry describes does not exist, and only the per-frame deadline (`:1168-1171`) survives from it.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
@@ -276,7 +276,7 @@ timeout rather than an unbounded stall. Coverage check to emit:
 
 - Sources examined: `crates/host-runtime/src/ring_transport.rs:636-894`
   (`run_endpoint`), `:926-1038` (`receive_one`), `:1075-1278` (`Publisher`),
-  `:1497-1581` (`RingClientEndpoint::send`, `try_send_bounded`, `publish`);
+  `:1503-1587` (`RingClientEndpoint::send`, `try_send_bounded`, `publish`);
   `crates/shm-transport/src/backend/ring.rs:887-922` (`arm_capacity_wait`,
   `complete_capacity_wait`, `duplicate_capacity_ready`), `:940-1020`
   (`try_reserve_in`), `:1025-1086` (`reserve_until`), `:1506-1524`

@@ -959,8 +959,13 @@ pub async fn dispatch_request<H: HostHandler>(
         }
 
         if cancel.is_cancelled() {
-            // The lease returns with `frame` before any copy; nothing private was reserved.
-            drop(frame);
+            // The lease returns before any copy; a failed return doorbell ends the generation.
+            if frame.release().is_err() {
+                gen_task.token.cancel();
+                gen_task.writer.discard();
+                remove_pending(&gen_task, key);
+                return;
+            }
             settle(
                 &settlement,
                 &shared_task.terminal_budget,
@@ -993,7 +998,12 @@ pub async fn dispatch_request<H: HostHandler>(
         let copied = if frame.is_empty() {
             // Nothing to read, so no worker hop; the closed-route outcome matches `run_blocking`.
             if ledgers.route.is_closed() {
-                drop(frame);
+                if frame.release().is_err() {
+                    gen_task.token.cancel();
+                    gen_task.writer.discard();
+                    remove_pending(&gen_task, key);
+                    return;
+                }
                 Err(crate::handler::BlockingWorkFailed::RouteClosing)
             } else {
                 Ok(frame.into_private())

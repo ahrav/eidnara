@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/host-runtime/src/ring_transport.rs:279`
 - `crates/host-runtime/src/ring_transport.rs:395`
 
-Witness status: yes - `crates/host-runtime/src/ring_transport.rs:3915` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:279`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:3921` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:279`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
 
 ## Failure scenario
 

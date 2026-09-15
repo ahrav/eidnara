@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/retained.rs:270`
 - `crates/host-runtime/src/ring_transport.rs:444`
 
-Witness status: yes - `crates/shm-transport/src/lease.rs:606` (Miri) and `crates/shm-transport/src/backend/ring.rs:2742`.
+Witness status: yes - `crates/shm-transport/src/lease.rs:606` (Miri) and `crates/shm-transport/src/backend/ring.rs:2815`.
 
 ## Failure scenario
 

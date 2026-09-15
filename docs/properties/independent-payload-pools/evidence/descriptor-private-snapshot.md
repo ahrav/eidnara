@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/descriptor.rs:222`
 - `crates/shm-transport/src/backend/ring.rs:1501`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2149` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2542` forges every field through the peer handle. No test races a rewrite against the copy itself.
+Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2153` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2615` forges every field through the peer handle. No test races a rewrite against the copy itself.
 
 ## Failure scenario
 

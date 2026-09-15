@@ -341,13 +341,14 @@ fn discard_unregistered_generation(generation: &GenerationCore) {
 }
 
 /// Only `HostCancelled` may keep the writer draining; `Peer` retires silently.
-enum ReadExit {
+#[derive(Debug)]
+pub(crate) enum ReadExit {
     HostCancelled,
     Peer,
 }
 
 /// Serves validated frames until close. Returning retires the generation.
-async fn read_loop<H: HostHandler>(
+pub(crate) async fn read_loop<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     generation: &Arc<GenerationCore>,
     mut channel: ShmReceiver,
@@ -406,8 +407,22 @@ async fn read_loop<H: HostHandler>(
             }
             InboundEvent::Frame(frame) => {
                 let header = frame.header;
+                // A pure-header frame carries nothing to copy, so its lease returns here; a
+                // return that cannot ring the peer's doorbell is a transport fault and ends the
+                // generation before the frame is applied.
+                let frame = if header.ty.is_pure_header() {
+                    if frame.release().is_err() {
+                        return ReadExit::Peer;
+                    }
+                    None
+                } else {
+                    Some(frame)
+                };
                 match header.ty {
                     FrameType::Request => {
+                        let Some(frame) = frame else {
+                            return ReadExit::Peer;
+                        };
                         if header.corr <= watermark {
                             return ReadExit::Peer;
                         }

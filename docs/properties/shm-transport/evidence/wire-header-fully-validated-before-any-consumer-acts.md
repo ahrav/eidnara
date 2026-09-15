@@ -140,7 +140,7 @@ that test is absent from the rewritten post-#131 file, so the end-to-end arm
 must be rebuilt rather than generalised. A static counterpart is worth more than a fault harness here: assert
 that every reader of `ValidatedFrame::wire_header()` outside a test reaches
 `decode_header` and `validate_inbound_header`.
-At HEAD: The type is `RingClientEndpoint` at HEAD; `send` (`ring_transport.rs:1497`) hands `header.encode()` to `reserve_until_in` and `try_send_bounded` (`:1520`) to `try_reserve_in`, and both commit `body.len()` through `publish` (`:1557-1581`).
+At HEAD: The type is `RingClientEndpoint` at HEAD; `send` (`ring_transport.rs:1503`) hands `header.encode()` to `reserve_until_in` and `try_send_bounded` (`:1526`) to `try_reserve_in`, and both commit `body.len()` through `publish` (`:1563-1587`).
 
 ## Investigation log
 

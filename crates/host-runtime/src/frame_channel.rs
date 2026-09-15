@@ -100,6 +100,14 @@ impl InboundFrame {
         self.lease.is_empty()
     }
 
+    /// Returns the transport block without copying. A pure-header frame has no body to copy;
+    /// its lease still returns through the doorbell, and a failed return is `Transport`.
+    pub fn release(self) -> Result<(), PrivateCopyError> {
+        let Self { lease, charge, .. } = self;
+        drop(charge);
+        lease.release().map_err(|_| PrivateCopyError::Transport)
+    }
+
     /// Copies the body into private bytes and returns the transport block. A pure-header frame
     /// copies nothing. The copied length is checked against the header before the bytes are
     /// handed to any decoder, and the lease is released before this returns, so no storage or
