@@ -1723,11 +1723,13 @@ mod sqlite_backend {
         create_database_file_owner_only(Path::new(path)).map_err(StoreError::Io)?;
         // `SQLITE_OPEN_NOFOLLOW` closes the window between the owner-only creation and this
         // open, so a symlink swapped in between is refused rather than followed.
+        // `SQLITE_OPEN_NO_MUTEX` selects SQLite multi-thread mode.
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|e| StoreError::Backend(e.to_string()))?;
         // Installed before the first statement, so no later install expires one.

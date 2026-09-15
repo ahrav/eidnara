@@ -4,8 +4,8 @@ use std::num::NonZeroUsize;
 
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, EgressSnapshot, EligibilityCandidate, EligibilityVerdict, KernelError,
-    KernelStore, ProjectScope,
+    ArtifactDestination, CommitReadIncarnation, EgressSnapshot, EligibilityCandidate,
+    EligibilityVerdict, KernelError, KernelStore, ProjectScope,
 };
 use rusqlite::params;
 use storage::GuardedConn;
@@ -140,6 +140,7 @@ pub struct ClassExclusion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EligibilityReport {
     pub snapshot: EgressSnapshot,
+    pub incarnation: CommitReadIncarnation,
     pub occurrences: Vec<JudgedOccurrence>,
 }
 
@@ -197,6 +198,7 @@ pub fn judge_occurrences(
     debug_assert_eq!(batch.verdicts.len(), candidates.len());
     Ok(EligibilityReport {
         snapshot: batch.snapshot,
+        incarnation: batch.incarnation,
         occurrences: candidates
             .iter()
             .zip(batch.verdicts)

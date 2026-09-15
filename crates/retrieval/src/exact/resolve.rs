@@ -440,7 +440,7 @@ impl Attempt<'_> {
             self.resolution.consumed.pages += 1;
             self.resolution.consumed.rows += page.rows.len();
             self.resolution.distinct_keys += page.distinct_keys;
-            if let Err(refusal) = self.judge(&page.rows) {
+            if let Err(refusal) = self.judge(page.rows) {
                 return self.late_failure(refusal);
             }
             match page.next {
@@ -450,10 +450,10 @@ impl Attempt<'_> {
         }
     }
 
-    fn judge(&mut self, rows: &[AssociationRow]) -> Result<(), ResolveRefusal> {
+    fn judge(&mut self, rows: Vec<AssociationRow>) -> Result<(), ResolveRefusal> {
         let mut live = Vec::with_capacity(rows.len());
         for row in rows {
-            check_association(&self.request.query, row)?;
+            check_association(&self.request.query, &row)?;
             match row.tombstone {
                 Some(tombstone) => {
                     self.resolution.observations.tombstoned += 1;
@@ -465,7 +465,7 @@ impl Attempt<'_> {
         if live.is_empty() {
             return Ok(());
         }
-        let candidates: Vec<OccurrenceCandidate> = live.iter().map(|row| candidate(row)).collect();
+        let candidates: Vec<OccurrenceCandidate> = live.iter().map(candidate).collect();
         let report = judge_occurrences(
             self.kernel,
             self.request.authority.project,
@@ -479,10 +479,7 @@ impl Attempt<'_> {
             });
         }
         self.resolution.consumed.validated += candidates.len();
-        let target = self
-            .kernel
-            .capture_commit_read_target_within_budget(self.budget)?;
-        if target.incarnation != self.initial.incarnation {
+        if report.incarnation != self.initial.incarnation {
             self.disqualify(Disqualification::SnapshotChanged);
             self.stop(IncompleteReason::KernelIncarnationChanged);
             return Ok(());
@@ -498,7 +495,7 @@ impl Attempt<'_> {
             self.disqualify(Disqualification::SnapshotChanged);
         }
         self.snapshot.get_or_insert(report.snapshot);
-        for (row, judged) in live.iter().zip(&report.occurrences) {
+        for (row, judged) in live.into_iter().zip(&report.occurrences) {
             match judged.disposition {
                 Disposition::Eligible => self.retain(row),
                 Disposition::PolicyExcluded(verdict) => {
@@ -510,13 +507,13 @@ impl Attempt<'_> {
         Ok(())
     }
 
-    fn retain(&mut self, row: &AssociationRow) {
+    fn retain(&mut self, row: AssociationRow) {
         if self.stopped.is_some() {
             return;
         }
         let bounds = self.request.bounds;
         let consumed = self.resolution.consumed;
-        let bytes = retained_bytes(row);
+        let bytes = retained_bytes(&row);
         if consumed.retained == bounds.max_retained.get()
             || consumed.retained_bytes + bytes > bounds.max_retained_bytes.get()
         {
@@ -526,10 +523,12 @@ impl Attempt<'_> {
         self.resolution.observations.record(EligibilityVerdict::Ok);
         self.resolution.consumed.retained += 1;
         self.resolution.consumed.retained_bytes += bytes;
-        self.resolution
-            .observed_targets
-            .insert(row.target_id.clone());
-        self.retained.push(row.clone());
+        if !self.resolution.observed_targets.contains(&row.target_id) {
+            self.resolution
+                .observed_targets
+                .insert(row.target_id.clone());
+        }
+        self.retained.push(row);
     }
 
     fn finish(mut self) -> Resolution {

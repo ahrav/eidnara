@@ -266,7 +266,7 @@ pub fn page(
         checkpoint: checkpoint.clone(),
         distinct_keys: 0,
     };
-    let mut previous_key = cursor.map(|cursor| cursor.last_key.clone());
+    let cursor_key = cursor.map(|cursor| cursor.last_key.as_slice());
     while let Some(row) = rows.next()? {
         if page.rows.len() == context.page_rows.get() {
             let last = page.rows.last().expect("page_rows is nonzero");
@@ -287,10 +287,14 @@ pub fn page(
             });
         }
         let decoded = AssociationRow::decode(row, range.family)?;
-        if previous_key.as_ref() != Some(&decoded.key) {
+        let previous_key = page
+            .rows
+            .last()
+            .map(|row| row.key.as_slice())
+            .or(cursor_key);
+        if previous_key != Some(decoded.key.as_slice()) {
             page.distinct_keys += 1;
         }
-        previous_key = Some(decoded.key.clone());
         page.rows.push(decoded);
     }
     Ok(page)
