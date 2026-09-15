@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `packages/shm-native/src/lib.rs:278`
+- `packages/shm-native/src/lib.rs:279`
 - `crates/shm-transport/tests/fuzz_corpus.rs:60`
 
-Witness status: yes - `packages/shm-native/tests/mechanism.ts:939` proves the unmutated fixture decodes before mutation cases; `crates/shm-transport/tests/fuzz_corpus.rs:78` asserts each `valid` seed is accepted.
+Witness status: yes - `packages/shm-native/tests/mechanism.ts:1168` proves the unmutated fixture decodes before mutation cases; `crates/shm-transport/tests/fuzz_corpus.rs:78` asserts each `valid` seed is accepted.
 
 ## Failure scenario
 

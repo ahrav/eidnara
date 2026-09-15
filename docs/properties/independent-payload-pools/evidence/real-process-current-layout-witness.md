@@ -42,5 +42,5 @@ Check semantics: `reachable` - the code point that reports a completed real exch
   in `Exercised`, and the CI workflow where the record is a gate property.
 - Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #550 adds the native and TypeScript real-process witnesses.
+- Missing evidence: a native/TypeScript daemon-level witness on a runtime that reports the detachment capability remains a recorded gap; the capability witness records artifact and runtime identity for every skip.
 - Conclusion: unresolved, needs the named handoff.

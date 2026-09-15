@@ -12,10 +12,10 @@ Resolved against the tree of this catalog's introducing commit:
 
 - `crates/host-runtime/src/ring_transport.rs:1444`
 - `crates/host-runtime/src/client.rs:477`
-- `packages/opencode-plugin/src/shared/host-client/connection.ts:1057`
-- `packages/opencode-plugin/src/shared/host-client/connection.ts:1088`
+- `packages/opencode-plugin/src/shared/host-client/connection.ts:1124`
+- `packages/opencode-plugin/src/shared/host-client/connection.ts:1182`
 
-Witness status: partial - Rust client: `RingClientEndpoint::try_recv_with` (`crates/host-runtime/src/ring_transport.rs:1444`) copies each body to private bytes and releases the lease before the frame leaves the bridge, and `crates/host-runtime/tests/client.rs:499` holds response A through more B responses than the 4 KiB class has blocks and past close; separate stream and unpolled-unary budgets are covered by `exhausted_retention_cancels_only_the_saturating_stream` in crates/host-runtime/src/client.rs. Native/TypeScript retained binary quotas belong to #550; the transport side is proved by `released-block-reuse-preserves-held-bytes`.
+Witness status: yes - Rust client: `RingClientEndpoint::try_recv_with` (`crates/host-runtime/src/ring_transport.rs:1444`) copies each body to private bytes and releases the lease before the frame leaves the bridge, and `crates/host-runtime/tests/client.rs:499` holds response A through more B responses than the 4 KiB class has blocks and past close; separate stream and unpolled-unary budgets are covered by `exhausted_retention_cancels_only_the_saturating_stream` in crates/host-runtime/src/client.rs. TypeScript client: `retainBinary` (`packages/opencode-plugin/src/shared/host-client/connection.ts:1124`) charges a caller-held binary unary lease to separate per-connection byte and count quotas from delivery until the caller releases it, including after the connection closes, and `binary unary leases are charged to their own byte and count quotas until the caller releases them` in packages/opencode-plugin/src/shared/host-client/connection.test.ts refuses on each quota independently with the lease released unread, refunds exactly once, and keeps the aggregate budget untouched; stream items stay private copies (`ownedStreamCopy`). The transport side is proved by `released-block-reuse-preserves-held-bytes`.
 
 ## Failure scenario
 
@@ -41,7 +41,7 @@ Check semantics: `always` - holding A leaves `descriptors_outstanding` and B's c
 
 - Sources examined: the files listed under the evidence trail, the test names
   in `Exercised`, and the CI workflow where the record is a gate property.
-- Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
+- Findings: yes at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #550 for native/TypeScript retention.
-- Conclusion: unresolved, needs the named handoff.
+- Missing evidence: none for this task
+- Conclusion: resolved with answer.

@@ -67,25 +67,14 @@ function header(length = 0): Uint8Array {
     return bytes;
 }
 
-function fill(
-    channel: NativeChannel,
-    bytes: number,
-    value = 1,
-    timeoutMs = 0,
-): void {
-    channel.produce(
-        header(bytes),
-        bytes,
-        (cursor) => {
-            while (cursor.remaining > 0) {
-                const view = cursor.view();
-                view.fill(value);
-                cursor.advance(view.byteLength);
-            }
-        },
-        undefined,
-        timeoutMs,
-    );
+function fill(channel: NativeChannel, bytes: number, value = 1): void {
+    channel.produce(header(bytes), bytes, (cursor) => {
+        while (cursor.remaining > 0) {
+            const view = cursor.view();
+            view.fill(value);
+            cursor.advance(view.byteLength);
+        }
+    });
 }
 
 function receive(channel: NativeChannel): NativeReceiveLease {
@@ -173,22 +162,22 @@ function runNativeLifecycle(): void {
         fill(descriptors.first, 1, index);
         held.push(receive(descriptors.second));
     }
-    fill(descriptors.first, 1, 2, 1);
+    fill(descriptors.first, 1, 2);
     receive(descriptors.second).release();
     // Holding every block of the smallest class does exhaust that class, and only that class.
     while (held.length < descriptors.smallestClassCount) {
         fill(descriptors.first, 1, 3);
         held.push(receive(descriptors.second));
     }
-    assert.throws(() => fill(descriptors.first, 1, 1, 1));
-    fill(descriptors.first, descriptors.smallestBodyCapacity + 1, 4, 1);
+    assert.throws(() => fill(descriptors.first, 1, 1));
+    fill(descriptors.first, descriptors.smallestBodyCapacity + 1, 4);
     receive(descriptors.second).release();
     // Returning one held block makes exactly that block reusable while the others stay intact.
     const first = held.shift();
     const firstSegment = held[0]?.segment(0);
     assert.ok(firstSegment);
     first?.release();
-    fill(descriptors.first, 1, 2, 1);
+    fill(descriptors.first, 1, 2);
     receive(descriptors.second).release();
     assert.equal(firstSegment[0], 1, "an unreleased neighbor keeps its bytes");
     for (const active of held) active.release();
@@ -198,15 +187,15 @@ function runNativeLifecycle(): void {
     // The maximum body has one block; holding it leaves every other class free.
     const MAX_BODY = 67_108_864;
     const arena = NativeChannel.createTestPair();
-    fill(arena.first, MAX_BODY, 1, 1_000);
+    fill(arena.first, MAX_BODY, 1);
     const arenaLease = receive(arena.second);
     assert.equal(arenaLease.byteLength, MAX_BODY);
-    fill(arena.first, 1, 2, 1);
+    fill(arena.first, 1, 2);
     receive(arena.second).release();
-    assert.throws(() => fill(arena.first, MAX_BODY, 1, 1));
-    assert.throws(() => fill(arena.first, MAX_BODY + 1, 1, 1));
+    assert.throws(() => fill(arena.first, MAX_BODY, 1));
+    assert.throws(() => fill(arena.first, MAX_BODY + 1, 1));
     arenaLease.release();
-    fill(arena.first, MAX_BODY, 2, 1_000);
+    fill(arena.first, MAX_BODY, 2);
     receive(arena.second).release();
     arena.first.close();
     arena.second.close();
@@ -216,7 +205,7 @@ function runNativeLifecycle(): void {
         cursor.advance(MAX_BODY - 2);
     });
     receive(partial.second).release();
-    fill(partial.first, 4, 3, 1_000);
+    fill(partial.first, 4, 3);
     const refsBeforeFailure = activeExternalRefs();
     // One contiguous body means one view per receive; failing that creation must return the
     // block and leave no reference behind.
@@ -230,7 +219,7 @@ function runNativeLifecycle(): void {
         setExternalViewCreationFailpoint(0);
     }
     assert.equal(activeExternalRefs(), refsBeforeFailure);
-    fill(partial.first, 1, 4, 1_000);
+    fill(partial.first, 1, 4);
     receive(partial.second).release();
     partial.first.close();
     partial.second.close();
@@ -246,8 +235,8 @@ function runNativeLifecycle(): void {
         );
     }
     forceGc();
-    assert.throws(() => fill(leaked.first, 1, 1, 1));
+    assert.throws(() => fill(leaked.first, 1, 1));
     leaked.second.forceClose();
-    assert.throws(() => fill(leaked.first, 1, 1, 1));
+    assert.throws(() => fill(leaked.first, 1, 1));
     leaked.first.close();
 }

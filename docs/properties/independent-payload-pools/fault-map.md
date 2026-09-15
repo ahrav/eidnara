@@ -22,10 +22,10 @@ whether the harness can produce it at the tree of this catalog's introducing com
 | F4 counter wrap | Place a block generation or the publication sequence at `u64::MAX` | Yes, test hooks: `set_block_generation_for_test`, `set_sequence_for_test` |
 | F5 resource exhaustion | Exhaust one class, ordinary descriptor headroom, reserved depth, or one admission field | Yes: ring unit tests and `tests/profile.rs` |
 | F6 wrong setup identifier or doorbell type | Present layout 3, schema 3, an eventfd, a datagram, an unconnected or non-fresh pool | Yes: `attach_rejects_eventfd_and_datagram_doorbells_and_a_second_producer`, `tests/contract.rs`, `setup_socket.rs` tests |
-| F7 native detach or registration failure | Fail external-view creation, detach, or reference deletion | Partial: external-view creation failpoint exists (`napi_buffers.rs`); detach and deletion failpoints are #550 |
+| F7 native detach or registration failure | Fail external-view creation, detach, or reference deletion | Yes: `set_external_view_failpoint`, `set_detach_failpoint`, and `set_delete_failpoint` in `napi_buffers.rs`; `injected detach and deletion failures quarantine the backing and conserve tokens` (`packages/shm-native/tests/mechanism.ts`) |
 | F8 quarantine-accounting failure | Poison or overflow the accounting at quarantine time | Partial: `BackingAdmission::quarantine` rejects a second quarantine and `retain_uncertain` is tested; a poisoned lock is not injected |
 | F9 barrier-held copy under cancel | Hold request copy work while `Cancel`, route close, or shutdown arrives | Yes: `barrier_held_copy_returns_block_and_charge_once_after_physical_completion` (`crates/host-runtime/src/ring_transport.rs`) gates a real `into_private` on the blocking barrier while every ledger closes |
-| F10 publication selection under exhaustion | Ordinary exhaustion with eligible controls and terminals queued | Yes at the host: `eligible_controls_and_unrelated_terminals_publish_past_a_blocked_ordinary_ticket` empties the smallest ordinary class with held leases. Yes at the Rust client: `ring_bridge_blocked_data_waits_for_capacity_while_controls_bypass` (`crates/host-runtime/src/client.rs`). Not yet at the native publisher: #550 |
+| F10 publication selection under exhaustion | Ordinary exhaustion with eligible controls and terminals queued | Yes at the host: `eligible_controls_and_unrelated_terminals_publish_past_a_blocked_ordinary_ticket` empties the smallest ordinary class with held leases. Yes at the Rust client: `ring_bridge_blocked_data_waits_for_capacity_while_controls_bypass` (`crates/host-runtime/src/client.rs`). Yes at the native addon and TypeScript channel: `a pure-header control publishes from its reserve while ordinary headroom is exhausted, and a channel-0 Request does not` (`packages/shm-native/tests/mechanism.ts`), `the pending publication queue is bounded and a liveness reply bypasses it` (`shm-frame-channel.test.ts`) |
 
 ## Per-property required faults
 
@@ -81,6 +81,6 @@ whether the harness can produce it at the tree of this catalog's introducing com
 2. F3 across a process boundary (two-process tests) is the only in-tree proof
    that a return from a foreign thread wakes a parked producer in another
    process; keep it out of the memcheck runner.
-3. F7 and the native half of F10 need #550's seams and are its blocking
-   evidence gaps; F9 and the host and Rust-client halves of F10 are in-process
-   tests that need no external process.
+3. F7, F9, and F10 are all in-process tests that need no external process;
+   the remaining gaps are runtime capability (a Bun with `markAsUntransferable`)
+   and the combined daemon matrix, not fault availability.

@@ -206,7 +206,12 @@ function header(ty: FrameType, corr: bigint, len: number, flags = 0): EnvelopeHe
 
 type HarnessOptions = Pick<
     ConnectionGenerationOptions,
-    "memoryCapBytes" | "maxBodyLen" | "maxPendingRequests" | "firstCorrelation"
+    | "memoryCapBytes"
+    | "maxBodyLen"
+    | "maxPendingRequests"
+    | "firstCorrelation"
+    | "maxRetainedBinaryBytes"
+    | "maxRetainedBinaryResponses"
 > &
     Partial<Pick<ConnectionGenerationOptions, "credentials">>;
 
@@ -772,6 +777,83 @@ describe("connection generation control frames", () => {
                 channel.lease(new TextEncoder().encode("{}")),
             );
             expect((await inflight.result).kind).toBe("response");
+        } finally {
+            generation.retire("owner_close");
+        }
+    });
+});
+
+describe("connection generation retained binary responses", () => {
+    test("binary unary leases are charged to their own byte and count quotas until the caller releases them", async () => {
+        const { generation, channel } = await harness({
+            maxRetainedBinaryBytes: 6,
+            maxRetainedBinaryResponses: 2,
+        });
+        try {
+            const respond = async (payload: Uint8Array) => {
+                const request = generation.request({
+                    channel: CHANNEL,
+                    epoch: EPOCH,
+                    body: Buffer.from([1]),
+                    binary: true,
+                    responseMode: "binary",
+                    deadline: Deadline.start(2_000),
+                });
+                const lease = channel.lease(payload);
+                channel.deliver(
+                    header(FrameType.Response, request.correlation, payload.byteLength, 1),
+                    lease,
+                );
+                return { result: request.result, lease };
+            };
+            // Two responses fill the count quota within the byte quota.
+            const first = await respond(Uint8Array.of(1, 2, 3));
+            const second = await respond(Uint8Array.of(4, 5));
+            const firstBody = (await first.result).body as ReceiveLease;
+            const secondBody = (await second.result).body as ReceiveLease;
+            expect(firstBody.segment(0)).toEqual(Uint8Array.of(1, 2, 3));
+            expect(generation.stats().retainedBinaryResponses).toBe(2);
+            expect(generation.stats().retainedBinaryBytes).toBe(5);
+            // The aggregate budget is untouched: retention has its own ceiling.
+            expect(channel.budget.used).toBe(0);
+
+            // The count quota refuses independently of bytes; the lease is released unread.
+            const third = await respond(Uint8Array.of(6));
+            await expect(third.result).rejects.toMatchObject({
+                kind: "terminal",
+                code: "retained_response_limit",
+            });
+            expect(third.lease.isReleased()).toBe(true);
+            expect(generation.stats().retainedBinaryResponses).toBe(2);
+
+            // Releasing one lease refunds exactly its share; the byte quota then refuses a body
+            // that fits the count.
+            secondBody.release();
+            expect(second.lease.isReleased()).toBe(true);
+            expect(generation.stats().retainedBinaryResponses).toBe(1);
+            expect(generation.stats().retainedBinaryBytes).toBe(3);
+            const oversize = await respond(Uint8Array.of(7, 8, 9, 10));
+            await expect(oversize.result).rejects.toMatchObject({
+                kind: "terminal",
+                code: "retained_response_limit",
+            });
+            expect(oversize.lease.isReleased()).toBe(true);
+            const fitting = await respond(Uint8Array.of(7, 8, 9));
+            const fittingBody = (await fitting.result).body as ReceiveLease;
+            expect(generation.stats().retainedBinaryBytes).toBe(6);
+
+            // A second release of the same lease refunds nothing.
+            expect(secondBody.release()).toBe(false);
+            expect(generation.stats().retainedBinaryResponses).toBe(2);
+
+            // A lease that survives the connection stays charged until its caller releases it.
+            generation.retire("owner_close");
+            expect(generation.stats().retainedBinaryResponses).toBe(2);
+            expect(generation.stats().retainedBinaryBytes).toBe(6);
+            firstBody.release();
+            fittingBody.release();
+            expect(generation.stats().retainedBinaryResponses).toBe(0);
+            expect(generation.stats().retainedBinaryBytes).toBe(0);
         } finally {
             generation.retire("owner_close");
         }

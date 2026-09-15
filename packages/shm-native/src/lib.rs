@@ -11,7 +11,7 @@ use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use napi::bindgen_prelude::{AsyncTask, Buffer, FnArgs, Function, Object};
 use napi::{Env, Error, JsValue, Result, Status, Task, Unknown, ValueType, sys};
@@ -20,6 +20,7 @@ use shm_transport::backend::ring::PoolGrant;
 use shm_transport::backend::ring::{ProducerError, ProducerReservation, Ring};
 use shm_transport::descriptor::{WIRE_V3_HEADER_BYTES, check_wire_header};
 use shm_transport::lease::PayloadLease;
+use shm_transport::pool::{BlockClass, Inventory};
 use shm_transport::profile::host_payload_pool_profile;
 
 use napi_buffers::ExternalRef;
@@ -634,6 +635,18 @@ pub fn set_external_view_failpoint(call: u32) {
     napi_buffers::set_external_view_failpoint(call);
 }
 
+/// Makes the `call`th alias detachment from now fail; `0` disarms.
+#[napi]
+pub fn set_detach_failpoint(call: u32) {
+    napi_buffers::set_detach_failpoint(call);
+}
+
+/// Makes the `call`th reference deletion from now fail; `0` disarms.
+#[napi]
+pub fn set_delete_failpoint(call: u32) {
+    napi_buffers::set_delete_failpoint(call);
+}
+
 #[napi]
 pub fn worker_limit() -> u32 {
     scheduling::WORKER_LIMIT
@@ -1018,13 +1031,32 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
     }
 }
 
+/// Wire frame types that publish from the control reserve when they carry no body
+/// (`Cancel`, `Ping`, `Pong`, `Goodbye`), and the two terminal types (`StreamEnd`, `Error`).
+const CONTROL_FRAME_TYPES: [u8; 4] = [6, 7, 8, 11];
+const TERMINAL_FRAME_TYPES: [u8; 2] = [4, 5];
+
+/// The inventory a frame publishes from, by the same rule the host applies: a pure-header
+/// control takes the control reserve, a terminal that fits the terminal class takes the
+/// terminal reserve, and everything else, including a channel-0 `Request`, is ordinary.
+fn inventory_for(ring: &Ring, header: &[u8; WIRE_V3_HEADER_BYTES], body_len: usize) -> Inventory {
+    let ty = header[5];
+    if body_len == 0 && CONTROL_FRAME_TYPES.contains(&ty) {
+        return Inventory::Control;
+    }
+    let terminal_capacity = ring.geometry().class(BlockClass::Terminal).body_capacity();
+    if TERMINAL_FRAME_TYPES.contains(&ty) && body_len as u64 <= terminal_capacity {
+        return Inventory::Terminal;
+    }
+    Inventory::Ordinary
+}
+
 #[napi]
 pub fn produce(
     env: &Env,
     channel_id: u32,
     header: Buffer,
     capacity: u32,
-    timeout_ms: u32,
     fill: Function<Vec<Unknown<'_>>, u32>,
     before_publish: Function<(), ()>,
 ) -> Result<()> {
@@ -1043,13 +1075,12 @@ pub fn produce(
         if channel.closed {
             return Err(error("native channel is closed"));
         }
+        // Nonblocking: an exhausted inventory is reported as a full ring and the caller parks
+        // on capacity readiness (`arm_capacity`) instead of this thread waiting.
+        let inventory = inventory_for(&channel.to_host, &header, capacity as usize);
         let mut reservation = channel
             .to_host
-            .reserve_until(
-                capacity as usize,
-                header,
-                Instant::now() + Duration::from_millis(u64::from(timeout_ms)),
-            )
+            .try_reserve_in(inventory, capacity as usize, header)
             .map_err(reservation_error)?;
         let mut views = Vec::with_capacity(reservation.segment_count());
         let mut refs = Vec::with_capacity(reservation.segment_count());
@@ -1107,7 +1138,6 @@ pub fn reserve(
     env: &Env,
     channel_id: u32,
     capacity: u32,
-    timeout_ms: u32,
     deliver: Function<FnArgs<(u32, Vec<Unknown<'_>>)>, ()>,
 ) -> Result<()> {
     REGISTRY.with(|registry| {
@@ -1126,12 +1156,10 @@ pub fn reserve(
         // ring. `producers` is declared before `to_host`, so every stored
         // reservation drops before the ring on every Channel destruction path.
         let ring: &'static Ring = unsafe { &*ring_ptr };
+        // A direct serializer's header is supplied at commit, so its frame is ordinary data;
+        // the attempt does not block, and only a reserved block ever reaches the serializer.
         let reservation = ring
-            .reserve_until(
-                capacity as usize,
-                [0; WIRE_V3_HEADER_BYTES],
-                Instant::now() + Duration::from_millis(u64::from(timeout_ms)),
-            )
+            .try_reserve(capacity as usize, [0; WIRE_V3_HEADER_BYTES])
             .map_err(reservation_error)?;
         let mut views = Vec::with_capacity(reservation.segment_count());
         let mut refs = Vec::with_capacity(reservation.segment_count());
@@ -1335,7 +1363,7 @@ mod tests {
             .reserve_until(
                 5,
                 shm_transport::backend::ring::wire_v3_header(5).expect("header"),
-                Instant::now() + Duration::from_secs(1),
+                std::time::Instant::now() + Duration::from_secs(1),
             )
             .expect("reservation");
         reservation.write(b"owned").expect("write");
@@ -1383,7 +1411,7 @@ mod tests {
             .reserve_until(
                 0,
                 [0; WIRE_V3_HEADER_BYTES],
-                Instant::now() + Duration::from_secs(1),
+                std::time::Instant::now() + Duration::from_secs(1),
             )
             .expect("reservation");
         let mut producers = HashMap::new();
@@ -1453,6 +1481,17 @@ pub fn readiness_handled() -> bool {
             return false;
         };
         let mut redispatch = false;
+        // A capacity wake whose owner did not re-arm during dispatch is consumed here, so a
+        // level-triggered doorbell cannot wake the reactor again for a park nobody holds. An
+        // owner that re-armed drained the doorbell itself and cleared its entry.
+        for channel_id in reactor.take_capacity_ready() {
+            let Some(channel) = channels.get_mut(&channel_id) else {
+                continue;
+            };
+            if channel.to_host.complete_capacity_wait().is_err() {
+                reactor.unregister(channel_id);
+            }
+        }
         for channel_id in reactor.take_ready() {
             if !reactor.is_registered(channel_id) {
                 continue;
@@ -1479,6 +1518,43 @@ pub fn readiness_handled() -> bool {
         }
         reactor.handled();
         redispatch
+    })
+}
+
+/// Parks the channel's producer on the host's capacity doorbell. `true` means the wait is
+/// armed and the readiness callback will run when the host consumes a descriptor or returns
+/// a block; `false` means capacity became visible while arming, so the caller retries at
+/// once. The channel must be watched (`watch`) so the reactor can deliver the wake.
+#[napi]
+pub fn arm_capacity(channel_id: u32) -> Result<bool> {
+    REGISTRY.with(|registry| {
+        let mut registry = registry
+            .try_borrow_mut()
+            .map_err(|_| error("native channel is busy"))?;
+        let Registry {
+            channels, reactor, ..
+        } = &mut *registry;
+        let channel = channels
+            .get_mut(&channel_id)
+            .ok_or_else(|| error("native channel is closed"))?;
+        if channel.closed {
+            return Err(error("native channel is closed"));
+        }
+        let reactor = reactor
+            .as_mut()
+            .ok_or_else(|| error("native channel is not watched"))?;
+        reactor.watch_capacity(channel_id, &channel.to_host)?;
+        // A previous park's marker and any undrained token are cleared first so the new arm
+        // observes the current generation; the recorded wake, if any, is consumed with them.
+        channel
+            .to_host
+            .complete_capacity_wait()
+            .map_err(|_| error("shared-memory capacity wait failed"))?;
+        reactor.clear_capacity_ready(channel_id);
+        channel
+            .to_host
+            .arm_capacity_wait()
+            .map_err(|_| error("shared-memory capacity wait failed"))
     })
 }
 

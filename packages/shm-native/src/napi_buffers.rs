@@ -10,6 +10,24 @@ static ACTIVE_EXTERNAL_REFS: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static FAIL_EXTERNAL_VIEW_AFTER: Cell<u32> = const { Cell::new(0) };
+    static FAIL_DETACH_AFTER: Cell<u32> = const { Cell::new(0) };
+    static FAIL_DELETE_AFTER: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Counts a failpoint down: `0` is disarmed, `1` fires now and disarms, `n` fires on the
+/// `n`th call from now.
+fn failpoint_fires(counter: &'static std::thread::LocalKey<Cell<u32>>) -> bool {
+    counter.with(|remaining| match remaining.get() {
+        0 => false,
+        1 => {
+            remaining.set(0);
+            true
+        }
+        count => {
+            remaining.set(count - 1);
+            false
+        }
+    })
 }
 
 pub(crate) struct ExternalRef {
@@ -62,18 +80,7 @@ pub(crate) fn create_external_view<'env>(
     data: *mut u8,
     len: usize,
 ) -> Result<(Unknown<'env>, ExternalRef)> {
-    let fail = FAIL_EXTERNAL_VIEW_AFTER.with(|remaining| match remaining.get() {
-        0 => false,
-        1 => {
-            remaining.set(0);
-            true
-        }
-        count => {
-            remaining.set(count - 1);
-            false
-        }
-    });
-    if fail {
+    if failpoint_fires(&FAIL_EXTERNAL_VIEW_AFTER) {
         return Err(Error::new(
             Status::GenericFailure,
             "external view creation failpoint",
@@ -140,6 +147,14 @@ pub(crate) fn create_external_view<'env>(
 }
 
 pub(crate) fn detach(env: &Env, external: &ExternalRef) -> Result<()> {
+    // The failpoint stands in for a runtime that refuses to detach: the alias stays attached
+    // and `released` stays false, exactly as a real refusal leaves them.
+    if failpoint_fires(&FAIL_DETACH_AFTER) {
+        return Err(Error::new(
+            Status::GenericFailure,
+            "ArrayBuffer detachment failpoint",
+        ));
+    }
     let mut value = std::ptr::null_mut();
     // SAFETY: reference belongs to env until delete is called.
     check(
@@ -174,6 +189,15 @@ pub(crate) fn detach(env: &Env, external: &ExternalRef) -> Result<()> {
 }
 
 pub(crate) fn delete_ref(env: &Env, external: ExternalRef) -> Result<()> {
+    // A refused deletion leaks the reference: the strong reference keeps the detached
+    // ArrayBuffer alive, so the count of active references does not move, and the caller
+    // decides what the leak means for its channel.
+    if failpoint_fires(&FAIL_DELETE_AFTER) {
+        return Err(Error::new(
+            Status::GenericFailure,
+            "ArrayBuffer reference deletion failpoint",
+        ));
+    }
     // SAFETY: reference belongs to env and is deleted once.
     check(
         unsafe { sys::napi_delete_reference(env.raw(), external.reference) },
@@ -219,6 +243,14 @@ pub(crate) fn delete_all(env: &Env, refs: Vec<ExternalRef>) -> Result<()> {
 
 pub(crate) fn set_external_view_failpoint(call: u32) {
     FAIL_EXTERNAL_VIEW_AFTER.with(|remaining| remaining.set(call));
+}
+
+pub(crate) fn set_detach_failpoint(call: u32) {
+    FAIL_DETACH_AFTER.with(|remaining| remaining.set(call));
+}
+
+pub(crate) fn set_delete_failpoint(call: u32) {
+    FAIL_DELETE_AFTER.with(|remaining| remaining.set(call));
 }
 
 pub(crate) fn active_external_refs() -> u64 {

@@ -10,10 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `packages/shm-native/src/lib.rs:409`
-- `packages/shm-native/src/lib.rs:1650`
+- `packages/shm-native/src/lib.rs:410`
+- `packages/shm-native/src/lib.rs:1726`
+- `packages/shm-native/src/napi_buffers.rs:252`
 
-Witness status: partial - `packages/shm-native/src/lib.rs:409` sweeps every alias and reports the first failure; `finish_close` retains alias-holding channels; mechanism tests in packages/shm-native/tests/mechanism.ts cover repeated release and close.
+Witness status: yes - `packages/shm-native/src/lib.rs:410` sweeps every alias and reports the first failure; `finish_close` retains alias-holding channels; `injected detach and deletion failures quarantine the backing and conserve tokens` in packages/shm-native/tests/mechanism.ts injects a detach failure into a two-lease close sweep and shows exactly one alias surviving, the channel entry retained with its mapping, and a later close completing the sweep and removing it; a deletion failure after a successful detach consumes the token (the wrapper is told), keeps the leaked reference counted, and quarantines the ring; repeated release and close are covered by the neighboring tests.
 
 ## Failure scenario
 
@@ -40,7 +41,7 @@ Check semantics: `always` - every token is released or retained exactly once acr
 
 - Sources examined: the files listed under the evidence trail, the test names
   in `Exercised`, and the CI workflow where the record is a gate property.
-- Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
+- Findings: yes at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #550.
-- Conclusion: unresolved, needs the named handoff.
+- Missing evidence: none for this task
+- Conclusion: resolved with answer.

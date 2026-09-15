@@ -28,31 +28,58 @@ fn retry_interrupted<T>(
     }
 }
 
-/// Identifies the control eventfd; channel events start at 2, so none share it.
+/// Identifies the control eventfd; channel events start at 4, so none share it.
 const CONTROL_EVENT: u64 = 0;
 
-/// Epoll event data for a channel's data doorbell: even, and at least 2.
+/// Which of a channel's descriptors an epoll event names; the low two bits of the event data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventKind {
+    /// The inbound data doorbell.
+    Data = 0,
+    /// The setup socket; readiness there is the host closing its end.
+    Setup = 1,
+    /// The outbound capacity doorbell: the host consumed a descriptor or returned a block.
+    Capacity = 2,
+}
+
+fn channel_event(channel_id: u32, kind: EventKind) -> u64 {
+    ((u64::from(channel_id) + 1) << 2) | kind as u64
+}
+
+/// Epoll event data for a channel's data doorbell.
 fn data_event(channel_id: u32) -> u64 {
-    (u64::from(channel_id) + 1) << 1
+    channel_event(channel_id, EventKind::Data)
 }
 
-/// Epoll event data for a channel's setup socket: odd, paired with `data_event`.
+/// Epoll event data for a channel's setup socket.
 fn setup_event(channel_id: u32) -> u64 {
-    data_event(channel_id) | 1
+    channel_event(channel_id, EventKind::Setup)
 }
 
-/// Inverse of `data_event`/`setup_event`; `true` marks the setup socket.
-fn decode_event(data: u64) -> (u32, bool) {
-    (((data >> 1) - 1) as u32, data & 1 == 1)
+/// Epoll event data for a channel's capacity doorbell.
+fn capacity_event(channel_id: u32) -> u64 {
+    channel_event(channel_id, EventKind::Capacity)
+}
+
+/// Inverse of the `*_event` encodings.
+fn decode_event(data: u64) -> (u32, EventKind) {
+    let kind = match data & 0b11 {
+        1 => EventKind::Setup,
+        2 => EventKind::Capacity,
+        _ => EventKind::Data,
+    };
+    (((data >> 2) - 1) as u32, kind)
 }
 
 /// Channels the watcher saw wake since the main thread last drained the set, plus the
 /// setup sockets that reported hangup. `peer_closed` is latched rather than drained: the
 /// hangup fires once (the registration is one-shot) and `peer_closed()` must keep
-/// reporting it until the channel unregisters.
+/// reporting it until the channel unregisters. `capacity` holds channels whose outbound
+/// capacity doorbell rang while a producer was parked on it.
 #[derive(Default)]
 struct ReadyState {
     data: BTreeSet<u32>,
+    capacity: BTreeSet<u32>,
     peer_closed: BTreeSet<u32>,
 }
 
@@ -107,6 +134,8 @@ type ReadinessCallback = ThreadsafeFunction<(), (), (), Status, false, true, 2>;
 
 struct Registration {
     descriptors: Vec<OwnedFd>,
+    /// The outbound capacity doorbell, registered on the first `arm_capacity`.
+    capacity: Option<OwnedFd>,
 }
 
 pub(crate) struct Reactor {
@@ -198,13 +227,13 @@ impl Reactor {
                                 ready |= kick.swap(false, Ordering::AcqRel);
                                 continue;
                             }
-                            let (channel_id, is_setup) = decode_event(data);
+                            let (channel_id, kind) = decode_event(data);
                             if let Ok(mut state) = ready_state.lock() {
-                                if is_setup {
-                                    state.peer_closed.insert(channel_id);
-                                } else {
-                                    state.data.insert(channel_id);
-                                }
+                                match kind {
+                                    EventKind::Setup => state.peer_closed.insert(channel_id),
+                                    EventKind::Data => state.data.insert(channel_id),
+                                    EventKind::Capacity => state.capacity.insert(channel_id),
+                                };
                             }
                             ready = true;
                         }
@@ -294,8 +323,13 @@ impl Reactor {
                 }
             }
         }
-        self.registrations
-            .insert(channel_id, Registration { descriptors });
+        self.registrations.insert(
+            channel_id,
+            Registration {
+                descriptors,
+                capacity: None,
+            },
+        );
         match ring.arm_data_wait() {
             Ok(true) => {}
             Ok(false) => self.kick(channel_id),
@@ -310,14 +344,44 @@ impl Reactor {
         Ok(())
     }
 
+    /// Watches `producer`'s capacity doorbell for `channel_id`, once. The channel must already
+    /// be registered for data readiness; the caller arms the wait on the ring itself.
+    pub(crate) fn watch_capacity(&mut self, channel_id: u32, producer: &Ring) -> Result<()> {
+        self.ensure_healthy()?;
+        let registration = self
+            .registrations
+            .get_mut(&channel_id)
+            .ok_or_else(|| Error::new(Status::GenericFailure, "native channel is not watched"))?;
+        if registration.capacity.is_some() {
+            return Ok(());
+        }
+        let descriptor = producer
+            .duplicate_capacity_ready()
+            .map_err(|_| Error::new(Status::GenericFailure, "readiness registration failed"))?;
+        epoll::add(
+            &self.epoll,
+            &descriptor,
+            epoll::EventData::new_u64(capacity_event(channel_id)),
+            epoll::EventFlags::IN,
+        )
+        .map_err(|_| Error::new(Status::GenericFailure, "readiness registration failed"))?;
+        registration.capacity = Some(descriptor);
+        Ok(())
+    }
+
     pub(crate) fn unregister(&mut self, channel_id: u32) {
         if let Some(registration) = self.registrations.remove(&channel_id) {
-            for descriptor in registration.descriptors {
-                let _ = epoll::delete(&self.epoll, &descriptor);
+            for descriptor in registration
+                .descriptors
+                .iter()
+                .chain(registration.capacity.iter())
+            {
+                let _ = epoll::delete(&self.epoll, descriptor);
             }
         }
         if let Ok(mut state) = self.ready.lock() {
             state.data.remove(&channel_id);
+            state.capacity.remove(&channel_id);
             state.peer_closed.remove(&channel_id);
         }
     }
@@ -329,6 +393,22 @@ impl Reactor {
     pub(crate) fn take_ready(&self) -> Vec<u32> {
         match self.ready.lock() {
             Ok(mut state) => std::mem::take(&mut state.data).into_iter().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Forgets a recorded capacity wake for `channel_id`: its owner re-armed, which drained
+    /// the doorbell itself, so `readiness_handled` must not complete the new park.
+    pub(crate) fn clear_capacity_ready(&self, channel_id: u32) {
+        if let Ok(mut state) = self.ready.lock() {
+            state.capacity.remove(&channel_id);
+        }
+    }
+
+    /// Channels whose capacity doorbell rang since the last call.
+    pub(crate) fn take_capacity_ready(&self) -> Vec<u32> {
+        match self.ready.lock() {
+            Ok(mut state) => std::mem::take(&mut state.capacity).into_iter().collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -398,8 +478,8 @@ mod tests {
     use rustix::io::Errno;
 
     use super::{
-        data_event, decode_event, register_setup_socket, retry_interrupted, setup_event,
-        wait_until_handled,
+        EventKind, capacity_event, data_event, decode_event, register_setup_socket,
+        retry_interrupted, setup_event, wait_until_handled,
     };
 
     #[test]
@@ -471,8 +551,19 @@ mod tests {
         for channel_id in [0, 1, 7, u32::MAX] {
             assert_ne!(data_event(channel_id), super::CONTROL_EVENT);
             assert_ne!(setup_event(channel_id), super::CONTROL_EVENT);
-            assert_eq!(decode_event(data_event(channel_id)), (channel_id, false));
-            assert_eq!(decode_event(setup_event(channel_id)), (channel_id, true));
+            assert_ne!(capacity_event(channel_id), super::CONTROL_EVENT);
+            assert_eq!(
+                decode_event(data_event(channel_id)),
+                (channel_id, EventKind::Data)
+            );
+            assert_eq!(
+                decode_event(setup_event(channel_id)),
+                (channel_id, EventKind::Setup)
+            );
+            assert_eq!(
+                decode_event(capacity_event(channel_id)),
+                (channel_id, EventKind::Capacity)
+            );
         }
     }
 

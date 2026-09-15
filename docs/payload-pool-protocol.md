@@ -294,3 +294,11 @@ retires as `not_sent` with nothing published. Each connection holds 63 terminal
 credits; a request takes one before dispatch and the credit returns when the
 terminal's block physically returns, so admitted requests never exceed the
 terminal inventory while one block stays free for a pre-admission rejection.
+
+The managed Rust client (`crates/host-runtime/src/client.rs`) and the native
+addon behind the TypeScript client (`packages/shm-native`) publish through the
+same rule. Both classify the inventory from the wire header before a
+nonblocking reservation, keep data frames in admission order, let only a
+liveness `Pong` bypass waiting data, and park on the capacity doorbell with
+the arm-and-recheck protocol of section 8 when an inventory is exhausted, so a
+consumption or return by the host is the only wake they need.

@@ -941,25 +941,35 @@ describe("mandatory shared-memory channel", () => {
         expect(publishHooks).toBe(1);
     });
 
-    test("a full ring is retryable backpressure, not a terminal failure", () => {
+    test("a full ring queues the frame in order, holds its charge, and publishes on capacity readiness", () => {
         const budget = new ByteBudget(1 << 20);
-        let produceBlockMs: number | undefined;
-        let reserveBlockMs: number | undefined;
+        let full = true;
+        let arms = 0;
+        let readiness: (() => void) | undefined;
+        const published: bigint[] = [];
         const native = {
             produce: (
-                _header: Uint8Array,
+                header: Uint8Array,
                 _capacity: number,
-                _fill: unknown,
-                _beforePublish: unknown,
-                timeoutMs: number,
+                fill: (cursor: ProducerCursor) => void,
+                beforePublish: () => void,
             ) => {
-                produceBlockMs = timeoutMs;
+                if (full) throw new Error(RING_FULL_MESSAGE);
+                fill({ write: () => {} } as unknown as ProducerCursor);
+                beforePublish();
+                published.push(decodeHeader(header).corr);
+            },
+            reserve: () => {
                 throw new Error(RING_FULL_MESSAGE);
             },
-            reserve: (_capacity: number, timeoutMs: number) => {
-                reserveBlockMs = timeoutMs;
-                throw new Error(RING_FULL_MESSAGE);
+            armCapacity: () => {
+                arms += 1;
+                return true;
             },
+            startReadiness: (handler: () => void) => {
+                readiness = handler;
+            },
+            drainOne: () => false,
             close: () => {},
             peerClosed: () => false,
         } as unknown as NativeChannel;
@@ -969,31 +979,99 @@ describe("mandatory shared-memory channel", () => {
             maxBodyLen: 1 << 20,
             handlers: { onFrame: () => {}, onClosed: () => {} },
         });
-        const header = responseHeader(FrameType.Request, 1n, 4);
+        channel.beginFrames();
         const body = {
             byteLength: 4,
             fill: (cursor: ProducerCursor) => cursor.write(new Uint8Array(4)),
         };
-
-        for (const attempt of [
-            () => channel.produce(header, body),
-            () => channel.reserve(header, 4),
-        ]) {
-            let caught: unknown;
-            try {
-                attempt();
-            } catch (error) {
-                caught = error;
-            }
-            expect(caught).toBeInstanceOf(HostCallError);
-            expect((caught as HostCallError).kind).toBe("not_sent");
-            expect((caught as HostCallError).code).toBe("ring_full");
+        let publishHooks = 0;
+        const first = channel.produce(responseHeader(FrameType.Request, 1n, 4), body, {
+            onPublish: () => {
+                publishHooks += 1;
+            },
+        });
+        // Nothing reached the ring; the charge is held and the outbound side is parked.
+        expect(publishHooks).toBe(0);
+        expect(budget.used).toBe(HEADER_LEN + 4);
+        expect(channel.stats().queuedDataFrames).toBe(1);
+        expect(arms).toBe(1);
+        // Admission order: a later frame waits behind the queued head even though the mock
+        // would now accept it, and a reservation refuses rather than jumping the queue.
+        full = false;
+        const second = channel.produce(responseHeader(FrameType.Request, 2n, 4), body);
+        expect(published).toEqual([]);
+        expect(channel.stats().queuedDataFrames).toBe(2);
+        let refused: unknown;
+        try {
+            channel.reserve(responseHeader(FrameType.Request, 3n, 4), 4);
+        } catch (error) {
+            refused = error;
         }
-        // Neither publication path may hold the event loop for ring capacity;
-        // the loop is also the only consumer draining the inbound ring.
-        expect(produceBlockMs).toBe(0);
-        expect(reserveBlockMs).toBe(0);
-        // Every refused attempt returns its charge.
+        expect(refused).toBeInstanceOf(HostCallError);
+        expect((refused as HostCallError).code).toBe("ring_full");
+        expect(budget.used).toBe(2 * (HEADER_LEN + 4));
+        // The readiness wake publishes the queue in order and returns every charge.
+        readiness?.();
+        expect(published).toEqual([1n, 2n]);
+        expect(publishHooks).toBe(1);
+        expect(budget.used).toBe(0);
+        expect(channel.stats().queuedDataFrames).toBe(0);
+        expect(first.cancel()).toBe(false);
+        expect(second.cancel()).toBe(false);
+        // A cancelled queued frame leaves the queue with its charge returned.
+        full = true;
+        const cancelled = channel.produce(responseHeader(FrameType.Request, 4n, 4), body);
+        expect(cancelled.cancel()).toBe(true);
+        expect(budget.used).toBe(0);
+        expect(channel.stats().queuedDataFrames).toBe(0);
+    });
+
+    test("the pending publication queue is bounded and a liveness reply bypasses it", () => {
+        const budget = new ByteBudget(1 << 24);
+        let controlPublished = 0;
+        const native = {
+            produce: (header: Uint8Array) => {
+                if (decodeHeader(header).ty === FrameType.Pong) {
+                    controlPublished += 1;
+                    return;
+                }
+                throw new Error(RING_FULL_MESSAGE);
+            },
+            armCapacity: () => true,
+            startReadiness: () => {},
+            drainOne: () => false,
+            close: () => {},
+            peerClosed: () => false,
+        } as unknown as NativeChannel;
+        const channel = new ShmFrameChannel({
+            nativeChannel: native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        channel.beginFrames();
+        const body = {
+            byteLength: 4,
+            fill: (cursor: ProducerCursor) => cursor.write(new Uint8Array(4)),
+        };
+        for (let index = 0; index < 64; index += 1) {
+            channel.produce(responseHeader(FrameType.Request, BigInt(index + 1), 4), body);
+        }
+        expect(channel.stats().queuedDataFrames).toBe(64);
+        let refused: unknown;
+        try {
+            channel.produce(responseHeader(FrameType.Request, 65n, 4), body);
+        } catch (error) {
+            refused = error;
+        }
+        expect(refused).toBeInstanceOf(HostCallError);
+        expect((refused as HostCallError).code).toBe("ring_full");
+        expect(budget.used).toBe(64 * (HEADER_LEN + 4));
+        // A Pong publishes from the control reserve while every data frame waits.
+        channel.sendControl({ ...responseHeader(FrameType.Pong, 0n, 0), len: 0 });
+        expect(controlPublished).toBe(1);
+        expect(channel.isClosed()).toBe(false);
+        channel.close();
         expect(budget.used).toBe(0);
     });
 
@@ -1148,6 +1226,7 @@ describe("mandatory shared-memory channel", () => {
 
     test("a refused send does not count an adapter copy", () => {
         let full = true;
+        let readiness: (() => void) | undefined;
         const native = {
             produce: (
                 _header: Uint8Array,
@@ -1157,6 +1236,11 @@ describe("mandatory shared-memory channel", () => {
                 if (full) throw new Error(RING_FULL_MESSAGE);
                 fill({ write: () => {} } as unknown as ProducerCursor);
             },
+            armCapacity: () => true,
+            startReadiness: (handler: () => void) => {
+                readiness = handler;
+            },
+            drainOne: () => false,
             close: () => {},
             peerClosed: () => false,
         } as unknown as NativeChannel;
@@ -1166,13 +1250,17 @@ describe("mandatory shared-memory channel", () => {
             maxBodyLen: 1 << 20,
             handlers: { onFrame: () => {}, onClosed: () => {} },
         });
+        channel.beginFrames();
         const frame = { header: responseHeader(FrameType.Request, 1n, 2), body: new Uint8Array(2) };
-        expect(() => channel.send(frame)).toThrow(HostCallError);
-        expect(() => channel.send(frame)).toThrow(HostCallError);
-        expect(channel.stats().ownedAdapterCopies).toBe(0);
-        full = false;
+        // A queued send has not copied anything yet: the copy happens at publication.
         channel.send(frame);
-        expect(channel.stats().ownedAdapterCopies).toBe(1);
+        channel.send(frame);
+        expect(channel.stats().ownedAdapterCopies).toBe(0);
+        expect(channel.stats().queuedDataFrames).toBe(2);
+        full = false;
+        readiness?.();
+        expect(channel.stats().ownedAdapterCopies).toBe(2);
+        expect(channel.stats().queuedDataFrames).toBe(0);
     });
 
     test("a saturated outbound ring cannot block inbound readiness", async () => {
@@ -1198,11 +1286,31 @@ describe("mandatory shared-memory channel", () => {
         }
         publish(pair.second, responseHeader(FrameType.Response, 99n, 0), new Uint8Array());
 
-        expect(() => channel.produce(responseHeader(FrameType.Request, 100n, 0), body)).toThrow(
-            HostCallError,
-        );
+        // The frame past ordinary headroom waits in the queue with its charge held; inbound
+        // readiness still drains while it waits.
+        let publishHooks = 0;
+        const ticket = channel.produce(responseHeader(FrameType.Request, 100n, 0), body, {
+            onPublish: () => {
+                publishHooks += 1;
+            },
+        });
+        expect(channel.stats().queuedControlFrames + channel.stats().queuedDataFrames).toBe(1);
+        expect(publishHooks).toBe(0);
         await waitUntil(() => received.length === 1);
         expect(received).toEqual([99n]);
+        expect(publishHooks).toBe(0);
+
+        // A peer consumption alone is capacity readiness: the reactor wakes the channel and the
+        // queued frame publishes with no inbound data and no timer.
+        let drained = false;
+        pair.second.drainOne((lease) => {
+            drained = true;
+            lease.release();
+        });
+        expect(drained).toBe(true);
+        await waitUntil(() => publishHooks === 1);
+        expect(channel.stats().queuedDataFrames + channel.stats().queuedControlFrames).toBe(0);
+        expect(ticket.cancel()).toBe(false);
 
         channel.close();
         pair.second.close();

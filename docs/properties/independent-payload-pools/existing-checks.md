@@ -218,8 +218,7 @@ An existing check does not remove a property from the catalog; each entry is
 
 ## Suspiciously quiet areas
 
-- No test injects a detach or reference-deletion failure (F7); #550.
-- No test exercises the native publisher's selection under exhaustion (F10); #550.
+- No test exercises the TypeScript channel's capacity wake against a live daemon on a runtime that reports the detachment capability; the raw-addon child-process witness and the mocked channel tests carry it here.
 - No test injects a failure between descriptor duplication and grant transfer;
   the last implementation task's combined matrix.
 - No test runs the two-process exchange under Valgrind; the memcheck runner

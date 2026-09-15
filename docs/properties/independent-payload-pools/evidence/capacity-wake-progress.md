@@ -14,8 +14,10 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/retained.rs:625`
 - `crates/shm-transport/src/backend/ring.rs:75`
 - `crates/host-runtime/src/client.rs:2675`
+- `packages/shm-native/src/lib.rs:1529`
+- `packages/opencode-plugin/src/shared/host-client/shm-frame-channel.ts:342`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2525`, `crates/shm-transport/src/backend/ring.rs:2565`, and both two-process tests in crates/shm-transport/tests/ring.rs; at the client, `crates/host-runtime/src/client.rs:7564` parks the managed bridge on the capacity doorbell with ordinary headroom exhausted and shows a host consumption alone, with no inbound data or timer, admits the blocked frame; `shared_memory_workers_have_no_periodic_polling` in crates/host-runtime/src/ring_transport.rs pins that the bridge has no reservation slice.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2525`, `crates/shm-transport/src/backend/ring.rs:2565`, and both two-process tests in crates/shm-transport/tests/ring.rs; at the client, `crates/host-runtime/src/client.rs:7564` parks the managed bridge on the capacity doorbell with ordinary headroom exhausted and shows a host consumption alone, with no inbound data or timer, admits the blocked frame; `shared_memory_workers_have_no_periodic_polling` in crates/host-runtime/src/ring_transport.rs pins that the bridge has no reservation slice. At the native addon, `an armed capacity wait wakes the readiness callback on the peer's consumption or return alone` in packages/shm-native/tests/mechanism.ts arms `arm_capacity` (`packages/shm-native/src/lib.rs:1529`) with ordinary headroom exhausted and shows one peer consumption, and later one lease return, each delivering exactly one readiness wake through the reactor's capacity doorbell registration (`packages/shm-native/src/scheduling.rs:349`), with no replay for a park nobody holds.
 
 ## Failure scenario
 
