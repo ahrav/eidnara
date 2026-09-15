@@ -537,6 +537,16 @@ fn bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly() 
         "UPDATE decisions SET invalidated_commit_seq=NULL WHERE object_id='decision-object-1';",
     );
     assert!(read().is_ok());
+    fixture.sql(
+        "UPDATE decisions SET superseded_by='domain-object' WHERE object_id='decision-object-1';",
+    );
+    assert_eq!(
+        read(),
+        Err(ClaimFactsError::Kernel(KernelError::CorruptCanonicalRow)),
+        "decision successor disagrees with the registry row"
+    );
+    fixture.sql("UPDATE decisions SET superseded_by=NULL WHERE object_id='decision-object-1';");
+    assert!(read().is_ok());
 
     // `claim_facts_as_of` validates each identifier before acquiring a reader, including missing identifiers.
     for id in [String::new(), "x".repeat(MAX_CLAIM_OBJECT_ID_BYTES + 1)] {

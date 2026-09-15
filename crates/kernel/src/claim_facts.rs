@@ -282,7 +282,8 @@ fn sensitivity_field(value: &str) -> Result<Sensitivity, ClaimFactsError> {
 }
 
 /// The decision row is written from the same spec as its registry row, so a
-/// disagreement on creation commit, invalidation, or class is corruption, not a fact.
+/// disagreement on creation commit, invalidation, successor, or class is
+/// corruption, not a fact.
 /// `ObjectRow` decodes an unrecognized class as `Secret`; compare raw stored
 /// values.
 fn load_decision(
@@ -294,6 +295,8 @@ fn load_decision(
         created: i64,
         invalidated: Option<i64>,
         registry_invalidated: Option<i64>,
+        superseded_by: Option<String>,
+        registry_superseded_by: Option<String>,
         sensitivity: String,
         registry_sensitivity: String,
     }
@@ -301,7 +304,8 @@ fn load_decision(
         .query_row_cached(
             "SELECT d.decision_id,d.decision_kind,d.proposition_id,d.scope_id,d.anchor_id,
                     d.evidence_id,d.created_commit_seq,d.invalidated_commit_seq,
-                    o.invalidated_commit_seq,d.sensitivity_class,o.sensitivity_class
+                    o.invalidated_commit_seq,d.superseded_by,o.superseded_by,
+                    d.sensitivity_class,o.sensitivity_class
              FROM decisions d
              JOIN object_registry o ON o.object_id=d.object_id
              WHERE d.object_id=?1",
@@ -319,8 +323,10 @@ fn load_decision(
                     created: row.get(6)?,
                     invalidated: row.get(7)?,
                     registry_invalidated: row.get(8)?,
-                    sensitivity: row.get(9)?,
-                    registry_sensitivity: row.get(10)?,
+                    superseded_by: row.get(9)?,
+                    registry_superseded_by: row.get(10)?,
+                    sensitivity: row.get(11)?,
+                    registry_sensitivity: row.get(12)?,
                 })
             },
         )
@@ -329,6 +335,7 @@ fn load_decision(
     let raw = row.ok_or(KernelError::CorruptCanonicalRow)?;
     if raw.created != object.created_commit_seq
         || raw.invalidated != raw.registry_invalidated
+        || raw.superseded_by != raw.registry_superseded_by
         || raw.sensitivity != raw.registry_sensitivity
     {
         return Err(KernelError::CorruptCanonicalRow.into());
