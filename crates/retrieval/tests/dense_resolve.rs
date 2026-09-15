@@ -33,7 +33,7 @@ fn layer(ordinal: u32, rows: &[(&str, f32)], tombstones: &[&str]) -> Owned {
     )
 }
 
-fn run(owned: &[Owned]) -> Result<Resolved, ResolveRefusal> {
+fn run(owned: &[Owned]) -> Result<Resolved<'_>, ResolveRefusal> {
     resolve(&layers(owned), NonZeroUsize::new(MAX).unwrap())
 }
 
@@ -44,7 +44,7 @@ fn values(owned: &[Owned], resolved: &Resolved) -> Vec<(String, f32)> {
         .iter()
         .map(|winner| {
             (
-                winner.occurrence_id.clone(),
+                winner.occurrence_id.to_owned(),
                 owned[winner.layer].rows[winner.row][0],
             )
         })
@@ -57,23 +57,23 @@ fn expect(pairs: &[(&str, f32)]) -> Vec<(String, f32)> {
 
 #[test]
 fn a_base_alone_resolves_to_its_own_rows_in_identifier_order() {
-    let base = layer(0, &[("a", 1.0), ("b", 2.0), ("c", 3.0)], &[]);
-    let resolved = run(&[base]).unwrap();
+    let owned = [layer(0, &[("a", 1.0), ("b", 2.0), ("c", 3.0)], &[])];
+    let resolved = run(&owned).unwrap();
     assert_eq!(
         resolved.winners,
         vec![
             Winner {
-                occurrence_id: "a".to_owned(),
+                occurrence_id: "a",
                 layer: 0,
                 row: 0
             },
             Winner {
-                occurrence_id: "b".to_owned(),
+                occurrence_id: "b",
                 layer: 0,
                 row: 1
             },
             Winner {
-                occurrence_id: "c".to_owned(),
+                occurrence_id: "c",
                 layer: 0,
                 row: 2
             },
@@ -134,7 +134,12 @@ fn the_order_layers_are_handed_in_decides_nothing() {
         let got: Vec<(String, f32)> = resolved
             .winners
             .iter()
-            .map(|w| (w.occurrence_id.clone(), permutation[w.layer].rows[w.row][0]))
+            .map(|w| {
+                (
+                    w.occurrence_id.to_owned(),
+                    permutation[w.layer].rows[w.row][0],
+                )
+            })
             .collect();
         assert_eq!(got, reference);
         // `c`'s base row is superseded by the second delta's row; both older rows of `a` are masked by its tombstone.
@@ -397,16 +402,12 @@ fn any_layer_set_resolves_to_the_model_in_every_enumeration_order() {
             let got: BTreeMap<String, (usize, usize)> = resolved
                 .winners
                 .iter()
-                .map(|w| (w.occurrence_id.clone(), (order[w.layer], w.row)))
+                .map(|w| (w.occurrence_id.to_owned(), (order[w.layer], w.row)))
                 .collect();
             prop_assert_eq!(got, expected);
             prop_assert_eq!(resolved.superseded, superseded);
             prop_assert_eq!(resolved.masked, masked);
-            let ids: Vec<&str> = resolved
-                .winners
-                .iter()
-                .map(|w| w.occurrence_id.as_str())
-                .collect();
+            let ids: Vec<&str> = resolved.winners.iter().map(|w| w.occurrence_id).collect();
             prop_assert!(ids.windows(2).all(|p| p[0] < p[1]));
             Ok(())
         })

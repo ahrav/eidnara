@@ -36,18 +36,18 @@ impl std::fmt::Debug for Layer<'_> {
     }
 }
 
-/// `layer` indexes the caller's slice as handed in, not the precedence order.
+/// `layer` indexes the caller's slice as handed in, not the precedence order; `occurrence_id` borrows that layer's identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Winner {
-    pub occurrence_id: String,
+pub struct Winner<'a> {
+    pub occurrence_id: &'a str,
     pub layer: usize,
     pub row: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Resolved {
+pub struct Resolved<'a> {
     /// In occurrence identifier byte order.
-    pub winners: Vec<Winner>,
+    pub winners: Vec<Winner<'a>>,
     /// Older rows hidden by a newer row of the same occurrence.
     pub superseded: usize,
     /// Older rows hidden by a newer tombstone; a tombstone with nothing under it is not counted.
@@ -97,14 +97,14 @@ pub enum ResolveRefusal {
 /// # Errors
 ///
 /// Every structural refusal is found before any winner is chosen; an empty result is a valid resolution of a base whose rows are all masked.
-pub fn resolve(
-    layers: &[Layer<'_>],
+pub fn resolve<'a>(
+    layers: &[Layer<'a>],
     max_entries: NonZeroUsize,
-) -> Result<Resolved, ResolveRefusal> {
+) -> Result<Resolved<'a>, ResolveRefusal> {
     let order = check_topology(layers, max_entries)?;
-    // Every entry of every layer, keyed by identifier then by age, so one pass over the sorted entries sees each occurrence's entries together with the newest last.
+    // Appending layers oldest first lets the stable sort keep each occurrence's entries adjacent and ordered oldest to newest.
     let mut entries: Vec<Entry<'_>> = Vec::new();
-    for (age, index) in order.into_iter().enumerate() {
+    for index in order {
         let layer = &layers[index];
         entries.extend(
             layer
@@ -113,24 +113,17 @@ pub fn resolve(
                 .enumerate()
                 .map(|(row, id)| Entry {
                     occurrence_id: id,
-                    age,
                     layer: index,
                     row: Some(row),
                 }),
         );
         entries.extend(layer.tombstones.iter().map(|id| Entry {
             occurrence_id: id,
-            age,
             layer: index,
             row: None,
         }));
     }
-    entries.sort_unstable_by(|a, b| {
-        a.occurrence_id
-            .as_bytes()
-            .cmp(b.occurrence_id.as_bytes())
-            .then(a.age.cmp(&b.age))
-    });
+    entries.sort_by(|a, b| a.occurrence_id.as_bytes().cmp(b.occurrence_id.as_bytes()));
     let mut resolved = Resolved {
         winners: Vec::new(),
         superseded: 0,
@@ -146,7 +139,7 @@ pub fn resolve(
             Some(row) => {
                 resolved.superseded += older_rows;
                 resolved.winners.push(Winner {
-                    occurrence_id: newest.occurrence_id.to_owned(),
+                    occurrence_id: newest.occurrence_id,
                     layer: newest.layer,
                     row,
                 });
@@ -157,10 +150,8 @@ pub fn resolve(
     Ok(resolved)
 }
 
-/// One row or tombstone of one layer; `age` is the layer's position oldest first.
 struct Entry<'a> {
     occurrence_id: &'a str,
-    age: usize,
     layer: usize,
     /// `None` for a tombstone.
     row: Option<usize>,
@@ -205,15 +196,21 @@ fn check_layer(index: usize, layer: &Layer<'_>) -> Result<(), ResolveRefusal> {
             return Err(ResolveRefusal::Order { index, list, entry });
         }
     }
-    if let Some(occurrence_id) = layer
-        .occurrence_ids
-        .iter()
-        .find(|id| layer.tombstones.binary_search(id).is_ok())
-    {
-        return Err(ResolveRefusal::ListedAndTombstoned {
-            index,
-            occurrence_id: occurrence_id.clone(),
-        });
+    let mut tombstones = layer.tombstones.iter().peekable();
+    for occurrence_id in layer.occurrence_ids {
+        while tombstones
+            .next_if(|tombstone| tombstone.as_bytes() < occurrence_id.as_bytes())
+            .is_some()
+        {}
+        if tombstones
+            .peek()
+            .is_some_and(|tombstone| *tombstone == occurrence_id)
+        {
+            return Err(ResolveRefusal::ListedAndTombstoned {
+                index,
+                occurrence_id: occurrence_id.clone(),
+            });
+        }
     }
     Ok(())
 }

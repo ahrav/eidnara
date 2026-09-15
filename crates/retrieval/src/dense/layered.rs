@@ -78,7 +78,7 @@ static LIVE_SQL: LazyLock<String> = LazyLock::new(|| {
 /// Merges the winners, in identifier order, with the walk's rows in the same order.
 struct ResolvedRows<'a> {
     layers: &'a [Layer<'a>],
-    winners: Vec<Winner>,
+    winners: Vec<Winner<'a>>,
     next: usize,
     revoked: usize,
     /// The last page read had no rows after it, so every winner still ahead of the cursor is past the live population.
@@ -112,7 +112,7 @@ impl RowSource for ResolvedRows<'_> {
                     let vector = &self.layers[winner.layer].rows[winner.row];
                     codec::validate(vector, layout).map_err(|rejection| {
                         OracleRefusal::StoredRow {
-                            occurrence_id: winner.occurrence_id.clone(),
+                            occurrence_id: winner.occurrence_id.to_owned(),
                             rejection,
                         }
                     })?;
