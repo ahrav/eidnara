@@ -283,7 +283,7 @@ fn validate_object(fd: &OwnedFd, expected_len: usize) -> Result<(), MappingError
         || stat.size < 0
         || stat.size as usize != expected_len
         || !type_valid
-        || stat.mode & 0o077 != 0
+        || stat.mode & 0o7777 != 0o600
     {
         return Err(MappingError::ObjectValidationFailed);
     }

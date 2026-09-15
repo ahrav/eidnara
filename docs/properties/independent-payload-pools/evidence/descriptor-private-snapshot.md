@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1431`
+- `crates/shm-transport/src/backend/ring.rs:1439`
 - `crates/shm-transport/src/descriptor.rs:222`
-- `crates/shm-transport/src/backend/ring.rs:1479`
+- `crates/shm-transport/src/backend/ring.rs:1487`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2105` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2470` forges every field through the peer handle. No test races a rewrite against the copy itself.
+Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2113` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2478` forges every field through the peer handle. No test races a rewrite against the copy itself.
 
 ## Failure scenario
 

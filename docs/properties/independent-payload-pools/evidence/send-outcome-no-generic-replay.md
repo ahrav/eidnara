@@ -11,7 +11,7 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `crates/host-runtime/src/ring_transport.rs:967`
-- `crates/shm-transport/src/backend/ring.rs:1007`
+- `crates/shm-transport/src/backend/ring.rs:1015`
 
 Witness status: partial - `crates/host-runtime/src/ring_transport.rs:1030` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs. Stop/restart witnesses belong to #548, #552, #550.
 

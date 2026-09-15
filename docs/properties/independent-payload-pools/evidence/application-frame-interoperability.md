@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/profile.rs:676`
 - `crates/shm-transport/src/descriptor.rs:26`
 
-Witness status: yes - `crates/shm-transport/tests/ring.rs:74` and `crates/shm-transport/src/backend/ring.rs:2378`; application vectors stay frozen in `crates/host-runtime/tests/protocol_vectors.rs`.
+Witness status: yes - `crates/shm-transport/tests/ring.rs:74` and `crates/shm-transport/src/backend/ring.rs:2386`; application vectors stay frozen in `crates/host-runtime/tests/protocol_vectors.rs`.
 
 ## Failure scenario
 

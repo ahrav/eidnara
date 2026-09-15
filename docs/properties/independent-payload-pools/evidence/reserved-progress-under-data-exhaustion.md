@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1030`
+- `crates/shm-transport/src/backend/ring.rs:1038`
 - `crates/shm-transport/src/pool.rs:31`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2420` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; host and client publication selection belong to #548, #552, and #550.
+Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2428` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; host and client publication selection belong to #548, #552, and #550.
 
 ## Failure scenario
 

@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/tests/ring.rs:416`
+- `crates/shm-transport/tests/ring.rs:429`
 - `packages/e2e-tests/src/rust-runner/hermetic-host.ts:275`
 
-Witness status: partial - `crates/shm-transport/tests/ring.rs:334` records a completed real cross-process exchange at layout 4; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
+Witness status: partial - `crates/shm-transport/tests/ring.rs:347` records a completed real cross-process exchange at layout 4; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
 
 ## Failure scenario
 

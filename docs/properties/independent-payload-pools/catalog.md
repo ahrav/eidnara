@@ -114,13 +114,13 @@ A marker fires on a correct implementation; none asserts a violation.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/shm-transport/src/backend/ring.rs:2105` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2470` forges every field through the peer handle. No test races a rewrite against the copy itself.
+Exercised: partial - `crates/shm-transport/src/backend/ring.rs:2113` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2478` forges every field through the peer handle. No test races a rewrite against the copy itself.
 Guarantee: The receiver validates only a private copy of the four descriptor words taken once under the Acquire on `published`; no check rereads shared memory and no lease references the slot.
 Check: `always` - after `try_receive_inner` returns, the lease's block, generation, and body length equal the values `PoolDescriptor::from_untrusted` captured, whatever the slot holds now; the semantics are `always` because the property must hold on every receive, not only when a rewrite occurs.
 Fault/timing angle: The window between the four relaxed loads and the compare-exchange on `consumed`, during which a peer may rewrite the slot.
 Required faults and enabling state: A peer rewrite of a slot field after publication; the consumer must have observed `published` past that slot. Markers: marker:`pool.slot_rewritten_after_publication`, marker:`pool.consumer_saw_published_sequence`.
-Confidence: high - [evidence](evidence/descriptor-private-snapshot.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1431`; `crates/shm-transport/src/descriptor.rs:222`; `crates/shm-transport/src/backend/ring.rs:1479`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2105` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2470` forges every field through the peer handle. No test races a rewrite against the copy itself.
+Confidence: high - [evidence](evidence/descriptor-private-snapshot.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1439`; `crates/shm-transport/src/descriptor.rs:222`; `crates/shm-transport/src/backend/ring.rs:1487`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2113` copies the four fields out under Miri and shows a later peer rewrite changes nothing the receiver holds; `crates/shm-transport/src/backend/ring.rs:2478` forges every field through the peer handle. No test races a rewrite against the copy itself.
 Impact: A receiver that rereads the slot could validate one value and lease another, exposing bytes outside the block or a body longer than the block holds.
 Open questions:
 
@@ -131,13 +131,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2280` publishes past a one-slot ordinary depth after the consumer acknowledges while still holding the payload; `crates/shm-transport/tests/ring.rs:473` does the same across processes.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2288` publishes past a one-slot ordinary depth after the consumer acknowledges while still holding the payload; `crates/shm-transport/tests/ring.rs:486` does the same across processes.
 Guarantee: Acknowledging a descriptor makes its queue slot reusable by the producer without the payload having returned and without the request having completed (R1).
 Check: `always` - immediately after `try_receive` returns a lease, the producer's `descriptors_outstanding` is one lower than before and a reservation that was `Exhausted` on descriptor headroom alone now succeeds, while `outstanding_returns` still counts the held lease.
 Fault/timing angle: None; the property is structural. The interesting window is a producer parked on descriptor exhaustion when the acknowledgement arrives.
 Required faults and enabling state: Ordinary descriptor headroom exhausted with every published payload still held by its lease. Markers: marker:`pool.ordinary_descriptors_exhausted`, marker:`pool.payload_held_across_consumption`.
-Confidence: high - [evidence](evidence/descriptor-capacity-independent-of-payload.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1248`; `crates/shm-transport/src/backend/ring.rs:1475`; `crates/shm-transport/src/backend/retained.rs:623`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2280` publishes past a one-slot ordinary depth after the consumer acknowledges while still holding the payload; `crates/shm-transport/tests/ring.rs:473` does the same across processes.
+Confidence: high - [evidence](evidence/descriptor-capacity-independent-of-payload.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1256`; `crates/shm-transport/src/backend/ring.rs:1483`; `crates/shm-transport/src/backend/retained.rs:623`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2288` publishes past a one-slot ordinary depth after the consumer acknowledges while still holding the payload; `crates/shm-transport/tests/ring.rs:486` does the same across processes.
 Impact: Retained payloads would stop publication regardless of unused blocks, the FIFO coupling the replacement removes.
 Open questions:
 
@@ -148,13 +148,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2565` and `crates/shm-transport/src/backend/ring.rs:2470`; `crates/shm-transport/tests/contract.rs:118` covers the pure validator.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2573` and `crates/shm-transport/src/backend/ring.rs:2478`; `crates/shm-transport/tests/contract.rs:118` covers the pure validator.
 Guarantee: A block is reused only when its completion cell holds exactly the generation the producer issued; a stale cell frees nothing, a cell ahead of any issued generation quarantines, and no pointer or peer offset is ever consulted (KTD2).
 Check: `always` - in `reclaim_completions`, every block pushed to a free list satisfies `cell == ledger.generations[block]`, and every observed `cell > generation` ends in quarantine before any free-list mutation.
 Fault/timing angle: A stale return landing after the block was reused with a newer generation; a forged cell value above the issued generation.
 Required faults and enabling state: A block reused at least once (generation >= 2) with a late return of the earlier generation; a cell written past the issued generation. Markers: marker:`pool.block_reused_with_newer_generation`, marker:`pool.completion_cell_ahead_of_issue`.
-Confidence: high - [evidence](evidence/payload-identity-authorizes-reuse.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1152`; `crates/shm-transport/src/backend/retained.rs:597`; `crates/shm-transport/src/descriptor.rs:222`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2565` and `crates/shm-transport/src/backend/ring.rs:2470`; `crates/shm-transport/tests/contract.rs:118` covers the pure validator.
+Confidence: high - [evidence](evidence/payload-identity-authorizes-reuse.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1160`; `crates/shm-transport/src/backend/retained.rs:597`; `crates/shm-transport/src/descriptor.rs:222`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2573` and `crates/shm-transport/src/backend/ring.rs:2478`; `crates/shm-transport/tests/contract.rs:118` covers the pure validator.
 Impact: A stale or forged return could free a block a newer occupant still reads, the early-reuse stop condition.
 Open questions:
 
@@ -165,13 +165,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2245` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:334` repeats it across a process boundary with returns from a worker thread.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2253` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:347` repeats it across a process boundary with returns from a worker thread.
 Guarantee: Releasing payload B permits reuse of B's block while an older payload A remains byte-identical and live (R2); B's reuse never touches A's block.
 Check: `always` - after each B cycle, `A.to_vec()` equals the bytes captured at A's receive and no B reservation returned A's block id.
 Fault/timing angle: None structural; the enabling state is reuse of a block while another block's lease is live across more than one descriptor lap.
 Required faults and enabling state: At least `2 * descriptor_depth + 1` publications after A while A is held; B's block id repeats. Markers: marker:`pool.reuse_beyond_descriptor_lap`, marker:`pool.older_lease_live_during_reuse`.
-Confidence: high - [evidence](evidence/released-block-reuse-preserves-held-bytes.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/pool.rs:285`; `crates/shm-transport/src/backend/ring.rs:1041`; `crates/shm-transport/src/lease.rs:308`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2245` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:334` repeats it across a process boundary with returns from a worker thread.
+Confidence: high - [evidence](evidence/released-block-reuse-preserves-held-bytes.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/pool.rs:285`; `crates/shm-transport/src/backend/ring.rs:1049`; `crates/shm-transport/src/lease.rs:308`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2253` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:347` repeats it across a process boundary with returns from a worker thread.
 Impact: Reuse that overlapped a live block would corrupt bytes a reader is decoding.
 Open questions:
 
@@ -182,13 +182,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2314`, `crates/shm-transport/src/backend/ring.rs:2343`, and `crates/shm-transport/src/backend/ring.rs:2378`.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2322`, `crates/shm-transport/src/backend/ring.rs:2351`, and `crates/shm-transport/src/backend/ring.rs:2386`.
 Guarantee: Each class's free, reserved, and published counts sum to its block count; an ordinary bound takes the smallest fitting class and never spills; abort and underfill return the block; a short commit retains it (KTD1).
 Check: `always` - `PoolInventory::conserves` holds after every reserve, abort, commit, and reclaim, and `class_for` returns the smallest fitting class or `None`.
 Fault/timing angle: Abort and underfill paths; a bound exactly at, one below, and one above each class boundary.
 Required faults and enabling state: A class exhausted while a larger class has free blocks; an aborted reservation; an underfilled commit; a body of exactly `MAX_FRAME_BYTES` and of `MAX_FRAME_BYTES + 1`. Markers: marker:`pool.class_exhausted_with_larger_class_free`, marker:`pool.reservation_aborted`, marker:`pool.commit_underfilled`, marker:`pool.maximum_body_reserved`.
-Confidence: high - [evidence](evidence/class-allocation-conservation.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/pool.rs:273`; `crates/shm-transport/src/backend/ring.rs:1266`; `crates/shm-transport/src/backend/ring.rs:551`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2314`, `crates/shm-transport/src/backend/ring.rs:2343`, and `crates/shm-transport/src/backend/ring.rs:2378`.
+Confidence: high - [evidence](evidence/class-allocation-conservation.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/pool.rs:273`; `crates/shm-transport/src/backend/ring.rs:1274`; `crates/shm-transport/src/backend/ring.rs:551`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2322`, `crates/shm-transport/src/backend/ring.rs:2351`, and `crates/shm-transport/src/backend/ring.rs:2386`.
 Impact: A lost or double-counted block either strands capacity forever or hands one block to two frames.
 Open questions:
 
@@ -216,13 +216,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/lease.rs:621` and `crates/shm-transport/src/backend/ring.rs:3162` assert the three observers stay unreached through saturated drops on worker threads.
+Exercised: yes - `crates/shm-transport/src/lease.rs:621` and `crates/shm-transport/src/backend/ring.rs:3181` assert the three observers stay unreached through saturated drops on worker threads.
 Guarantee: The final drop of a lease performs no `Ring` call, allocates no completion node, waits for no slot, makes no N-API call, and mutates no free list (KTD3).
 Check: `unreachable` - the three observer code points in `lease::observers` (`ring_call`, `slot_wait`, `free_list_mutation`) are never entered while `in_final_drop` is set; `unreachable` because each is a specific code location that must not execute. Completion-node allocation and the N-API boundary have no code point in this crate and are guaranteed by construction, not observed.
 Fault/timing angle: Drops under class exhaustion, after endpoint exit, and from several worker threads at once.
 Required faults and enabling state: Leases dropped on worker threads while the producer is `Exhausted`; leases dropped after both endpoint handles are gone. Markers: marker:`lease.drop_during_exhaustion`, marker:`lease.drop_after_endpoint_exit`.
-Confidence: high - [evidence](evidence/worker-drop-forbidden-operations.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/lease.rs:378`; `crates/shm-transport/src/backend/retained.rs:586`; `crates/shm-transport/src/backend/ring.rs:1040`.
-Existing check: `crates/shm-transport/src/lease.rs:621` and `crates/shm-transport/src/backend/ring.rs:3162` assert the three observers stay unreached through saturated drops on worker threads.
+Confidence: high - [evidence](evidence/worker-drop-forbidden-operations.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/lease.rs:378`; `crates/shm-transport/src/backend/retained.rs:586`; `crates/shm-transport/src/backend/ring.rs:1048`.
+Existing check: `crates/shm-transport/src/lease.rs:621` and `crates/shm-transport/src/backend/ring.rs:3181` assert the three observers stay unreached through saturated drops on worker threads.
 Impact: A drop that reached the ring or a free list would race the endpoint thread or need it alive, re-coupling lease lifetime to the endpoint.
 Open questions:
 
@@ -233,13 +233,13 @@ Open questions:
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2694`, `crates/shm-transport/src/backend/ring.rs:2734`, and both two-process tests in crates/shm-transport/tests/ring.rs.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2702`, `crates/shm-transport/src/backend/ring.rs:2742`, and both two-process tests in crates/shm-transport/tests/ring.rs.
 Guarantee: Both capacity transitions, descriptor acknowledgement and final payload return, wake a producer parked on the capacity doorbell within the bounded `reserve_until` deadline, without incoming data or polling (KTD3).
 Check: `always` - a `reserve_until` parked on exhaustion returns `Ok` before its deadline once either transition happens, with `parks >= 1` in `syscall_counters`; bounded by the test deadline, never an open-ended eventually.
 Fault/timing angle: Return before arm, return after arm, and a coalesced token covering both transitions.
 Required faults and enabling state: Producer parked (`parked != 0`) when the transition happens; a transition landing between `try_reserve` and `ParkGuard::arm`. Markers: marker:`pool.producer_parked_on_capacity`, marker:`pool.transition_during_arm_window`.
-Confidence: high - [evidence](evidence/capacity-wake-progress.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1092`; `crates/shm-transport/src/backend/retained.rs:623`; `crates/shm-transport/src/backend/ring.rs:95`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2694`, `crates/shm-transport/src/backend/ring.rs:2734`, and both two-process tests in crates/shm-transport/tests/ring.rs.
+Confidence: high - [evidence](evidence/capacity-wake-progress.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1100`; `crates/shm-transport/src/backend/retained.rs:623`; `crates/shm-transport/src/backend/ring.rs:95`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2702`, `crates/shm-transport/src/backend/ring.rs:2742`, and both two-process tests in crates/shm-transport/tests/ring.rs.
 Impact: A lost wake leaves the producer parked to its deadline although capacity exists.
 Open questions:
 
@@ -255,7 +255,7 @@ Guarantee: A doorbell failure after publication or consumption quarantines the h
 Check: `always` - after a failed wake, `published` still holds the new sequence or the completion cell still holds the generation, and no free-list mutation followed the failure.
 Fault/timing angle: Peer doorbell end closed before the wake; a full socket buffer (`WouldBlock`).
 Required faults and enabling state: `parked` set with the peer's doorbell end closed so `send` fails with `EPIPE`. Markers: marker:`pool.wake_send_failed_after_publication`, marker:`pool.wake_would_block_token_pending`.
-Confidence: high - [evidence](evidence/wake-failure-preserves-published-ownership.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1343`; `crates/shm-transport/src/backend/retained.rs:628`; `crates/shm-transport/src/backend/retained.rs:644`.
+Confidence: high - [evidence](evidence/wake-failure-preserves-published-ownership.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1351`; `crates/shm-transport/src/backend/retained.rs:628`; `crates/shm-transport/src/backend/retained.rs:644`.
 Existing check: publish side: `wake_failure_after_publication_quarantines_but_leaves_the_frame_published`; consumption side: `a_failed_consumption_wake_quarantines_the_consumer_and_returns_the_block`; return side: `a_failed_return_wake_reports_wake_failed_and_keeps_the_completion`, which arms `parked`, closes the producer's doorbell end, asserts `WakeFailed` from `release`, and reads the completion cell and return flag back. All three are in `crates/shm-transport/src/backend/ring.rs`.
 Impact: Rolling back a publication the peer may already hold would reuse bytes a reader is decoding.
 Open questions:
@@ -267,13 +267,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/lease.rs:606` (Miri) and `crates/shm-transport/src/backend/ring.rs:2670`.
+Exercised: yes - `crates/shm-transport/src/lease.rs:606` (Miri) and `crates/shm-transport/src/backend/ring.rs:2678`.
 Guarantee: Backing, completion cells, wake handle, and the backing charge stay alive while any lease exists; the mapping unmaps only when the last holder drops; endpoint exit refunds worker count only (KTD5).
 Check: `always` - with a lease live, `Weak::upgrade` on the backing succeeds after both `Ring` handles drop and `to_vec` returns the original bytes; after the lease drops, the upgrade fails.
 Fault/timing angle: Endpoint close and reconnect with a reader still holding a lease.
 Required faults and enabling state: Both endpoint handles dropped while a lease is live; a late return after the drop. Markers: marker:`lease.live_after_endpoint_exit`, marker:`lease.late_return_after_endpoint_exit`.
 Confidence: high - [evidence](evidence/retained-mapping-lifetime.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/lease.rs:248`; `crates/shm-transport/src/backend/retained.rs:270`; `crates/host-runtime/src/ring_transport.rs:299`.
-Existing check: `crates/shm-transport/src/lease.rs:606` (Miri) and `crates/shm-transport/src/backend/ring.rs:2670`.
+Existing check: `crates/shm-transport/src/lease.rs:606` (Miri) and `crates/shm-transport/src/backend/ring.rs:2678`.
 Impact: Unmapping under a reader is a use-after-unmap; refunding its charge early lets admission oversubscribe.
 Open questions:
 
@@ -284,13 +284,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/tests/ring.rs:74` and `crates/shm-transport/src/backend/ring.rs:2378`; application vectors stay frozen in `crates/host-runtime/tests/protocol_vectors.rs`.
+Exercised: yes - `crates/shm-transport/tests/ring.rs:74` and `crates/shm-transport/src/backend/ring.rs:2386`; application vectors stay frozen in `crates/host-runtime/tests/protocol_vectors.rs`.
 Guarantee: The 21-byte header, JSON bodies, direct serializers, send outcomes, and the exact 67,108,864-byte maximum are unchanged; both directions accept one maximum frame on an admitted connection and refuse maximum-plus-one (R7).
 Check: `always` - every published body of length `n <= MAX_FRAME_BYTES` is received with identical bytes and header, and `MAX_FRAME_BYTES + 1` is `BoundExceedsClass` before any block is taken.
 Fault/timing angle: None; boundary values are the enabling state.
 Required faults and enabling state: A body of exactly `MAX_FRAME_BYTES` in each direction on an otherwise empty connection. Markers: marker:`pool.maximum_frame_each_direction`, marker:`pool.zero_body_frame`.
 Confidence: high - [evidence](evidence/application-frame-interoperability.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/pool.rs:310`; `crates/shm-transport/src/profile.rs:676`; `crates/shm-transport/src/descriptor.rs:26`.
-Existing check: `crates/shm-transport/tests/ring.rs:74` and `crates/shm-transport/src/backend/ring.rs:2378`; application vectors stay frozen in `crates/host-runtime/tests/protocol_vectors.rs`.
+Existing check: `crates/shm-transport/tests/ring.rs:74` and `crates/shm-transport/src/backend/ring.rs:2386`; application vectors stay frozen in `crates/host-runtime/tests/protocol_vectors.rs`.
 Impact: A smaller effective maximum would break the interoperability promise of the wire contract.
 Open questions:
 
@@ -301,13 +301,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:2980`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.
+Exercised: yes - `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:2999`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.
 Guarantee: Only descriptor schema 4, layout version 4, and profile `host-payload-pool-v1` are accepted; any other identifier, an eventfd or datagram doorbell, or a pool with traffic in flight fails before application traffic (R8, KTD8).
 Check: `always` - every mismatch path returns an error before `Mapping::attach` or before `activate` commits, and no code path decodes another layout.
 Fault/timing angle: None; this is fail-closed identity checking.
 Required faults and enabling state: A grant with layout version 3; a setup message with schema 3; an eventfd in a doorbell position; a non-fresh pool at attach. Markers: marker:`setup.stale_identifier_presented`, marker:`setup.wrong_doorbell_type_presented`, marker:`setup.non_fresh_pool_presented`.
 Confidence: high - [evidence](evidence/sole-identifiers-before-activation.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:190`; `crates/shm-transport/src/backend/ring.rs:722`; `crates/host-runtime/src/ring_transport.rs:919`; `packages/shm-native/src/lib.rs:305`.
-Existing check: `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:2980`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.
+Existing check: `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:2999`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.
 Impact: An accepted stale identifier would decode another layout's bytes as this one's.
 Open questions:
 
@@ -318,13 +318,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:3067`, `crates/shm-transport/tests/ring.rs:104`, `crates/shm-transport/src/pool.rs:623`, and `crates/shm-transport/tests/fuzz_corpus.rs:92`.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:3086`, `crates/shm-transport/tests/ring.rs:104`, `crates/shm-transport/src/pool.rs:623`, and `crates/shm-transport/tests/fuzz_corpus.rs:92`.
 Guarantee: Every block offset and capacity comes from geometry both peers validated; the grant's total must equal the computed layout; unsealed, resized, or non-regular objects are refused before mapping (KTD2).
 Check: `always` - `PoolGrant::decode` accepts only a geometry `PoolGeometry::new` accepts whose layout total matches, and `Ring::attach` refuses a mapping whose lifecycle page disagrees with the grant in any field.
 Fault/timing angle: Mutated grant fields; an unsealed or wrongly sized object; a lifecycle page that disagrees with the grant.
 Required faults and enabling state: Each grant field mutated one at a time; an unsealed memfd of the right size; a lifecycle lane rewritten after creation. Markers: marker:`setup.grant_field_mutated`, marker:`setup.unsealed_object_presented`.
 Confidence: high - [evidence](evidence/validated-setup-geometry.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:341`; `crates/shm-transport/src/backend/retained.rs:761`; `crates/shm-transport/src/backend/retained.rs:293`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:3067`, `crates/shm-transport/tests/ring.rs:104`, `crates/shm-transport/src/pool.rs:623`, and `crates/shm-transport/tests/fuzz_corpus.rs:92`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:3086`, `crates/shm-transport/tests/ring.rs:104`, `crates/shm-transport/src/pool.rs:623`, and `crates/shm-transport/tests/fuzz_corpus.rs:92`.
 Impact: A peer-supplied offset or size would let a forged descriptor address bytes outside its block.
 Open questions:
 
@@ -352,13 +352,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/shm-transport/src/backend/ring.rs:2470` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
+Exercised: partial - `crates/shm-transport/src/backend/ring.rs:2478` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
 Guarantee: A structurally illegal descriptor, header, or body length closes the generation before any application dispatch and exposes no byte.
 Check: `always` - `try_receive` returns `Err` and quarantines for every validation failure, and `receive_one` maps a header failure to `ReadClose::Corrupt` before delivering an `InboundEvent`.
 Fault/timing angle: Header/body mismatch written into the block; oversized declared length.
 Required faults and enabling state: A block header whose declared length differs from the descriptor's body length. Markers: marker:`pool.header_body_mismatch_in_block`, marker:`pool.oversized_body_declared`.
-Confidence: high - [evidence](evidence/structural-rejection-before-dispatch.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1465`; `crates/host-runtime/src/ring_transport.rs:714`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2470` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
+Confidence: high - [evidence](evidence/structural-rejection-before-dispatch.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1473`; `crates/host-runtime/src/ring_transport.rs:714`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2478` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
 Impact: Dispatching a structurally illegal frame would let a peer steer application decoding with unchecked lengths.
 Open questions:
 
@@ -388,13 +388,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - compile-time: the `compile_fail` doctests at the top of crates/shm-transport/src/backend/ring.rs and the `assert_send::<PayloadLease>` in crates/shm-transport/src/lease.rs; runtime: `crates/shm-transport/src/lease.rs:573` and `crates/shm-transport/src/backend/ring.rs:3106`.
+Exercised: yes - compile-time: the `compile_fail` doctests at the top of crates/shm-transport/src/backend/ring.rs and the `assert_send::<PayloadLease>` in crates/shm-transport/src/lease.rs; runtime: `crates/shm-transport/src/lease.rs:573` and `crates/shm-transport/src/backend/ring.rs:3125`.
 Guarantee: `PayloadLease` is `Send`; `Ring`, `ProducerReservation`, and `LeaseSpan` are `!Send`; `Retained` is `Send + Sync` by explicit justification (R5, KTD4).
 Check: `always` - the positive and negative `Send` assertions compile as written; no other `unsafe impl Send/Sync` exists in the crate.
 Fault/timing angle: None; type-level.
 Required faults and enabling state: A build of the doctests. Markers: marker:`lease.moved_across_threads`.
 Confidence: high - [evidence](evidence/owned-lease-thread-boundary.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:25`; `crates/shm-transport/src/backend/retained.rs:354`; `crates/shm-transport/src/lease.rs:21`.
-Existing check: compile-time: the `compile_fail` doctests at the top of crates/shm-transport/src/backend/ring.rs and the `assert_send::<PayloadLease>` in crates/shm-transport/src/lease.rs; runtime: `crates/shm-transport/src/lease.rs:573` and `crates/shm-transport/src/backend/ring.rs:3106`.
+Existing check: compile-time: the `compile_fail` doctests at the top of crates/shm-transport/src/backend/ring.rs and the `assert_send::<PayloadLease>` in crates/shm-transport/src/lease.rs; runtime: `crates/shm-transport/src/lease.rs:573` and `crates/shm-transport/src/backend/ring.rs:3125`.
 Impact: A `Send` `Ring` would let two threads drive one endpoint's non-atomic ledger.
 Open questions:
 
@@ -531,7 +531,7 @@ Guarantee: One terminal credit is reserved before request admission and released
 Check: `always` - the count of admitted requests never exceeds terminal credits, and a credit is released exactly once at the physical return point.
 Fault/timing angle: Cancellation and foreign retention of a terminal block.
 Required faults and enabling state: A cancelled request whose terminal block is still held by the peer. Markers: marker:`host.terminal_held_after_cancel`.
-Confidence: low - [evidence](evidence/terminal-credit-follows-storage.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/pool.rs:40`; `crates/shm-transport/src/backend/ring.rs:957`.
+Confidence: low - [evidence](evidence/terminal-credit-follows-storage.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/pool.rs:40`; `crates/shm-transport/src/backend/ring.rs:965`.
 Existing check: the terminal-credit and dedicated encoding reservation are #548's implementation over the `Inventory::Terminal` class this transport provides.
 Impact: A credit refunded on callback completion lets terminals exceed the reserved inventory.
 Open questions:
@@ -543,13 +543,13 @@ Open questions:
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/shm-transport/src/backend/ring.rs:2420` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; host and client publication selection belong to #548, #552, and #550.
+Exercised: partial - `crates/shm-transport/src/backend/ring.rs:2428` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; host and client publication selection belong to #548, #552, and #550.
 Guarantee: With ordinary blocks and descriptors exhausted, eligible reserved control and terminal frames still publish within the bounded attempt, and returns still complete (R11).
 Check: `always` - `try_reserve_in(Inventory::Control | Terminal, ..)` succeeds while `try_reserve_in(Ordinary, ..)` is `Exhausted`, until the reserved depth itself is full.
 Fault/timing angle: Ordinary exhaustion by block class and by descriptor headroom, separately and together.
 Required faults and enabling state: Ordinary descriptors at 32 outstanding; every ordinary class empty; both at once. Markers: marker:`pool.ordinary_class_and_descriptors_exhausted_together`, marker:`pool.reserved_depth_exhausted`.
-Confidence: high - [evidence](evidence/reserved-progress-under-data-exhaustion.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1030`; `crates/shm-transport/src/pool.rs:31`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2420` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; host and client publication selection belong to #548, #552, and #550.
+Confidence: high - [evidence](evidence/reserved-progress-under-data-exhaustion.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1038`; `crates/shm-transport/src/pool.rs:31`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2428` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; host and client publication selection belong to #548, #552, and #550.
 Impact: A draining peer that cannot exchange controls under data backpressure never recovers.
 Open questions:
 
@@ -594,13 +594,13 @@ Open questions:
 Type: liveness
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2314` and `crates/shm-transport/tests/profile.rs:107`.
+Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2322` and `crates/shm-transport/tests/profile.rs:107`.
 Guarantee: Every refusal is bounded and named by resource (class, descriptor headroom, admission field), and recovery follows the resource's own release within one reservation attempt.
 Check: `always` - after the exhausting resource is released, the next `try_reserve_in` or `admit` succeeds; refusals charge nothing.
 Fault/timing angle: Exhaustion of each resource in isolation.
 Required faults and enabling state: One class empty; descriptor headroom full; one admission field at its limit. Markers: marker:`pool.single_resource_exhausted`, marker:`admission.field_at_limit`.
-Confidence: high - [evidence](evidence/bounded-refusal-and-recovery.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1032`; `crates/shm-transport/src/profile.rs:416`.
-Existing check: `crates/shm-transport/src/backend/ring.rs:2314` and `crates/shm-transport/tests/profile.rs:107`.
+Confidence: high - [evidence](evidence/bounded-refusal-and-recovery.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1040`; `crates/shm-transport/src/profile.rs:416`.
+Existing check: `crates/shm-transport/src/backend/ring.rs:2322` and `crates/shm-transport/tests/profile.rs:107`.
 Impact: An unbounded or unrecoverable refusal is a hang the peer cannot diagnose.
 Open questions:
 
@@ -611,13 +611,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/host-runtime/src/ring_transport.rs:819` serializes through `ReservationWriter` after reservation and commits under the frame deadline; `crates/shm-transport/src/backend/ring.rs:2343` covers abort and short commit.
+Exercised: partial - `crates/host-runtime/src/ring_transport.rs:819` serializes through `ReservationWriter` after reservation and commits under the frame deadline; `crates/shm-transport/src/backend/ring.rs:2351` covers abort and short commit.
 Guarantee: A direct serializer runs only into a reserved block whose span is the logical body bound, is never consumed without a reservation, and a short result keeps its block (KTD1).
 Check: `always` - `ProducerReservation::capacity()` equals the caller's bound, `segment(0)` has that length, and an unreserved `DirectFrame` is never invoked.
 Fault/timing angle: Reservation failure before serialization.
 Required faults and enabling state: `reserve_until` returning `Deadline` with a `DirectFrame` queued. Markers: marker:`host.direct_frame_unreserved_on_deadline`.
-Confidence: medium - [evidence](evidence/direct-serialization-commit-boundary.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1694`; `crates/host-runtime/src/ring_transport.rs:858`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:819` serializes through `ReservationWriter` after reservation and commits under the frame deadline; `crates/shm-transport/src/backend/ring.rs:2343` covers abort and short commit.
+Confidence: medium - [evidence](evidence/direct-serialization-commit-boundary.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1702`; `crates/host-runtime/src/ring_transport.rs:858`.
+Existing check: `crates/host-runtime/src/ring_transport.rs:819` serializes through `ReservationWriter` after reservation and commits under the frame deadline; `crates/shm-transport/src/backend/ring.rs:2351` covers abort and short commit.
 Impact: Serializing into class slack or without a reservation would write bytes no descriptor accounts for.
 Open questions:
 
@@ -650,7 +650,7 @@ Guarantee: Failure before publication is `not_sent`; failure after publication i
 Check: `always` - every `SendFailure` maps to exactly one of the two outcomes and no code path resubmits a frame after `commit` returned `Err`.
 Fault/timing angle: Quarantine between the pre-commit check and `commit`.
 Required faults and enabling state: A quarantine landing after `write` and before `commit`. Markers: marker:`host.quarantine_between_write_and_commit`.
-Confidence: medium - [evidence](evidence/send-outcome-no-generic-replay.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/ring_transport.rs:967`; `crates/shm-transport/src/backend/ring.rs:1007`.
+Confidence: medium - [evidence](evidence/send-outcome-no-generic-replay.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/ring_transport.rs:967`; `crates/shm-transport/src/backend/ring.rs:1015`.
 Existing check: `crates/host-runtime/src/ring_transport.rs:1030` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs. Stop/restart witnesses belong to #548, #552, #550.
 Impact: A replayed uncertain request executes twice.
 Open questions:
@@ -749,13 +749,13 @@ Open questions:
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: partial - `crates/shm-transport/tests/ring.rs:334` records a completed real cross-process exchange at layout 4; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
+Exercised: partial - `crates/shm-transport/tests/ring.rs:347` records a completed real cross-process exchange at layout 4; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
 Guarantee: Every required real-process witness records current-layout activation and a completed daemon request on a supported runtime; a skip discharges nothing.
 Check: `reachable` - the code point that reports a completed real exchange (`EIDNARA_SHM_CHILD_DONE`) executes in the two-process job; `reachable` because a specific code location must execute.
 Fault/timing angle: None.
 Required faults and enabling state: A supported runtime. Markers: marker:`gate.supported_runtime_present`.
-Confidence: medium - [evidence](evidence/real-process-current-layout-witness.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/tests/ring.rs:416`; `packages/e2e-tests/src/rust-runner/hermetic-host.ts:275`.
-Existing check: `crates/shm-transport/tests/ring.rs:334` records a completed real cross-process exchange at layout 4; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
+Confidence: medium - [evidence](evidence/real-process-current-layout-witness.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/tests/ring.rs:429`; `packages/e2e-tests/src/rust-runner/hermetic-host.ts:275`.
+Existing check: `crates/shm-transport/tests/ring.rs:347` records a completed real cross-process exchange at layout 4; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
 Impact: A skipped suite counted as passing hides an unexercised layout.
 Open questions:
 

@@ -178,6 +178,19 @@ fn artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected() {
 }
 
 #[test]
+fn attachment_object_must_carry_exactly_the_owner_read_write_mode() {
+    let ring = Ring::create(&profile(), 43).unwrap();
+    let [object, data_ready, capacity_ready] = ring.attachment().unwrap().into_parts().0;
+    // SAFETY: `object` is open for the call; fchmod takes no pointers.
+    let owner_read_only = unsafe { libc::fchmod(object.as_raw_fd(), 0o400) };
+    assert_eq!(owner_read_only, 0);
+    assert!(matches!(
+        Ring::attach([object, data_ready, capacity_ready], ring.grant()),
+        Err(RingError::ObjectValidationFailed)
+    ));
+}
+
+#[test]
 fn non_regular_attachment_object_is_rejected_before_mapping() {
     let ring = Ring::create(&profile(), 41).unwrap();
     let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();

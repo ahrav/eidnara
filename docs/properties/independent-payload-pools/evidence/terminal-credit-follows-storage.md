@@ -11,7 +11,7 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/pool.rs:40`
-- `crates/shm-transport/src/backend/ring.rs:957`
+- `crates/shm-transport/src/backend/ring.rs:965`
 
 Witness status: not yet - the terminal-credit and dedicated encoding reservation are #548's implementation over the `Inventory::Terminal` class this transport provides.
 

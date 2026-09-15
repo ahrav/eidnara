@@ -720,7 +720,15 @@ impl Ring {
     /// Whether no frame has been published or consumed. Setup paths attach only fresh pools;
     /// a pool with traffic already in flight was not created for this attachment.
     pub fn is_fresh(&self) -> bool {
-        self.published_local.get() == 0 && self.consumed_local.get() == 0
+        let published = self
+            .retained
+            .producer()
+            .map(|page| page.published.load(Ordering::Acquire));
+        let consumed = self
+            .retained
+            .consumer()
+            .map(|page| page.consumed.load(Ordering::Acquire));
+        matches!((published, consumed), (Ok(0), Ok(0)))
     }
 
     /// Grant a peer needs to attach to this pool.
@@ -2821,6 +2829,17 @@ mod tests {
             .unwrap()
             .abort();
         assert!(producer.inventory().conserves(&geometry));
+    }
+
+    #[test]
+    fn is_fresh_reads_the_live_cursors_not_the_attach_snapshot() {
+        let (producer, consumer) = pair(tiny_geometry());
+        assert!(consumer.is_fresh());
+        publish(&producer, b"early");
+        assert!(
+            !consumer.is_fresh(),
+            "a publication after attach is traffic in flight"
+        );
     }
 
     #[test]
