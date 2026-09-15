@@ -11,7 +11,7 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/profile.rs:622`
-- `crates/host-runtime/src/ring_transport.rs:387`
+- `crates/host-runtime/src/ring_transport.rs:393`
 
 Witness status: partial - `crates/shm-transport/tests/profile.rs:215` covers worker/backing settlement, quarantine, and uncertain retention; `crates/host-runtime/src/ring_transport.rs:344` refunds on a pre-exposure failure. Failure after each individual acquisition is not yet injected.
 

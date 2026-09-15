@@ -255,9 +255,12 @@ blocks (`leases`), mappings, file descriptors, retained wake handles, and the
 client instance. The worker charge refunds when the endpoint thread exits. The
 backing charge is shared by both directions' retained backing and refunds when
 the last lease has returned and both handles have dropped, or moves to the
-quarantined bucket. If quarantine accounting itself fails, the charge stays
-counted as active for the process lifetime; nothing refunds storage whose
-release is unproved.
+quarantined bucket. The host takes end-of-file on both of a connection's data
+doorbells as the proof that the peer dropped its rings and every lease; a peer
+that still holds either two seconds after the host's endpoint retires moves the
+backing charge to the quarantined bucket. If quarantine accounting itself fails,
+the charge stays counted as active for the process lifetime; nothing refunds
+storage whose release is unproved.
 
 One connection commits 191,666,800 bytes: two mappings of 95,825,920 bytes and
 two ledgers of 7,480 bytes (187 blocks at 40 bytes). The host admits
