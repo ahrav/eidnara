@@ -320,6 +320,67 @@ fn a_mark_the_engine_separates_becomes_an_adjacent_pair_on_both_sides() {
 }
 
 #[test]
+fn distinct_parts_can_repeat_the_originals_effective_terms() {
+    let conn = engine();
+    index(&conn, 1, "x\u{305}Y");
+    assert_eq!(
+        effective_terms(&conn),
+        [
+            row("x", 1, "original", 0),
+            row("y", 1, "original", 1),
+            row("x", 1, "parts", 0),
+            row("y", 1, "parts", 1),
+        ],
+        "byte-distinct parts do not imply distinct engine terms"
+    );
+    assert_eq!(probe_matches(&conn, "x\u{305}Y"), [vec![1]]);
+}
+
+#[test]
+fn long_tokens_share_the_engines_truncated_term_without_a_prefix_operator() {
+    let conn = engine();
+    // FTS5_MAX_TOKEN_SIZE limits both insertion and query terms in bundled SQLite.
+    let prefix = "a".repeat(32_768);
+    let inputs = [
+        "a".repeat(32_767),
+        prefix.clone(),
+        format!("{prefix}x"),
+        format!("{prefix}y"),
+    ];
+    let bounds = LexicalBounds {
+        max_input_bytes: NonZeroUsize::new(32_769).unwrap(),
+        ..bounds()
+    };
+    for (rowid, text) in (1..).zip(&inputs) {
+        let analysis = analyze(text, bounds).unwrap();
+        store(
+            &conn,
+            rowid,
+            &analysis.original_text(),
+            &analysis.parts_text(),
+        );
+    }
+    assert_eq!(
+        effective_terms(&conn),
+        [
+            row(&inputs[0], 1, "original", 0),
+            row(&prefix, 2, "original", 0),
+            row(&prefix, 3, "original", 0),
+            row(&prefix, 4, "original", 0),
+        ]
+    );
+    for (text, expected) in
+        inputs
+            .iter()
+            .zip([vec![1], vec![2, 3, 4], vec![2, 3, 4], vec![2, 3, 4]])
+    {
+        let probes = compile(&analyze(text, bounds).unwrap());
+        assert_eq!(probes.len(), 1);
+        assert_eq!(matches(&conn, &probes[0]), expected);
+    }
+}
+
+#[test]
 fn a_code_point_only_the_engine_knows_as_a_letter_is_still_analyzed_identically_on_both_sides() {
     let conn = populated();
     index(&conn, 11, "foo\u{1F914}bar");

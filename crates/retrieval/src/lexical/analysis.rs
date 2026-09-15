@@ -4,7 +4,8 @@
 //! Parts split one atom at `_`, at a lower-to-upper case change, at a letter-to-digit or digit-to-letter change, and before the last uppercase letter of an uppercase run that two or more lowercase letters follow (`HTTPServer` yields `HTTP` and `Server`; `IDs` stays whole).
 //! A combining mark attaches to the character before it and is invisible to the boundary rules: it shares that character's class, never opens a part, and is not a letter when the acronym rule counts the lowercase tail, so `e\u{301}Bar` and `éBar`, and `IDs\u{301}` and `IDś`, split identically.
 //! Parts keep their original bytes; the engine folds case and diacritics.
-//! Parts are additive: an atom whose parts are exactly itself contributes nothing to the parts column, so a term is never counted twice for one atom.
+//! Parts are additive: an atom whose parts are byte-identical to itself contributes nothing to the parts column.
+//! Distinct parts can still repeat the original's effective engine terms after tokenization and folding.
 
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;

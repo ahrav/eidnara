@@ -95,11 +95,13 @@ begins with a combining mark.
 
 Parts keep their original bytes. The engine folds them.
 
-Parts are additive. When the parts of an atom are exactly the atom itself, the
-atom contributes nothing to the parts column, so no term is counted twice for
-one atom. When the parts differ from the atom, all of them are emitted, even
-when there is only one (`_foo_` contributes `foo`). Duplicates are retained in
-both columns; frequencies belong to the engine.
+Parts are additive. When the parts of an atom are byte-identical to the atom
+itself, the atom contributes nothing to the parts column. When the parts differ
+from the atom, all of them are emitted, even when there is only one (`_foo_`
+contributes `foo`). This is not effective-term deduplication: `x\u0305Y` emits
+parts `x\u0305` and `Y`, and the engine indexes `x` and `y` in both columns.
+Duplicates are retained; frequencies belong to the engine, and ranking must
+not assume each atom contributes an effective term only once.
 
 Parts are a flat sequence with no per-atom alignment. The number of parts never
 exceeds the number of scalar values in the atom, so the input byte bound also
@@ -178,6 +180,16 @@ ranking unchanged. A probe's position in the vector is its ordinal.
   it before any character is scanned.
 - `max_atoms`: atoms are counted as they are found; the atom after the last
   permitted one is refused before it is retained.
+
+These input bounds do not override engine term limits. Bundled SQLite 3.51.3
+caps each tokenized term at 32,768 bytes (`FTS5_MAX_TOKEN_SIZE`) on both insertion
+and MATCH compilation. Longer terms with the same first 32,768 bytes therefore
+collide, including with a term exactly that long, without a prefix operator.
+The bound is on engine token bytes after folding, not input scalar values.
+`tests/lexical_engine.rs` checks the boundary and the differing-suffix collision.
+This is another recall-only equivalence, not byte identity. No extra refusal or
+product limit is introduced here; choosing caller limits remains an integration
+decision.
 
 Refusals are checked in that order. On the query side the same approved
 query-byte limit must feed both `SelectorBounds::max_input_bytes` and
