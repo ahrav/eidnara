@@ -1785,30 +1785,24 @@ fn a_request_is_judged_on_the_records_it_reads_not_on_cached_evidence() {
     );
 }
 
-/// A shutdown that overlaps a disable waits for it within the drain grace and reports the disable unresolved otherwise; a resolved disable lets a later shutdown complete.
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn shutdown_waits_for_an_in_flight_disable() {
+/// Builds a Current family for `PROJECT` whose lone supervisor holds a native call the test controls.
+fn owner_with_held_maintenance(
+    home: &Path,
+    corpus: &Corpus,
+    engine: &Arc<TestEngine>,
+) -> SearchLifecycleOwner {
     use support::embedding_fixtures::PROJECT;
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path();
-    let corpus = Corpus::open(home);
-    corpus.seed();
     corpus.publish("held-row", "held text");
     records(home);
-    let engine = TestEngine::new();
-    let held = engine.block_calls();
     let scope = ProjectScope::new(PROJECT).unwrap();
-    let owner = Arc::new(
-        SearchLifecycleOwner::for_home(
-            home,
-            Arc::clone(&corpus.kernel),
-            component(&engine, LocalEmbeddingsLimits::default()),
-        )
-        .with_roster(Arc::new(move || {
-            vec![("project:a".to_owned(), scope.clone())]
-        })),
-    );
-    owner.set_drain_grace_for_test(Duration::from_millis(300));
+    let owner = SearchLifecycleOwner::for_home(
+        home,
+        Arc::clone(&corpus.kernel),
+        component(engine, LocalEmbeddingsLimits::default()),
+    )
+    .with_roster(Arc::new(move || {
+        vec![("project:a".to_owned(), scope.clone())]
+    }));
     let _ = owner.run_slice(&slice_budget());
     owner
         .request(&rebuild(home), now(), &slice_budget())
@@ -1816,48 +1810,116 @@ async fn shutdown_waits_for_an_in_flight_disable() {
     for _ in 0..2 {
         let _ = owner.run_slice(&slice_budget());
     }
-    assert!(matches!(
-        owner.run_slice(&slice_budget()),
-        SliceOutcome::Current
-    ));
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Current), "{outcome:?}");
     let started = Instant::now();
     while engine.calls() == 0 {
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "the supervisor submits the row"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        std::thread::sleep(Duration::from_millis(20));
     }
+    owner
+}
+
+/// Runs `disable` on its own thread and reports its events; the thread ends when the disable returns.
+fn disable_on_a_thread(
+    owner: &Arc<SearchLifecycleOwner>,
+    budget: EvalBudget,
+) -> (
+    std::thread::JoinHandle<Result<(), BuildError>>,
+    std::sync::mpsc::Receiver<DisableEvent>,
+) {
+    let (events, received) = std::sync::mpsc::channel();
+    let owner = Arc::clone(owner);
+    let thread = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(owner.disable(&budget, &mut |event| {
+                let _ = events.send(event);
+            }))
+    });
+    (thread, received)
+}
+
+/// A shutdown that overlaps a disable waits for it within the drain grace and reports the disable unresolved otherwise; a resolved disable lets a later shutdown complete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn shutdown_waits_for_an_in_flight_disable() {
+    use daemon::search_lifecycle_owner::ShutdownUnresolved;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let engine = TestEngine::new();
+    let held = engine.block_calls();
+    let _release_on_unwind = support::embedding_fixtures::GateGuard(Arc::clone(&held));
+    let owner = Arc::new(owner_with_held_maintenance(home, &corpus, &engine));
+    owner.set_drain_grace_for_test(Duration::from_millis(300));
 
     // The disable joins the supervisor, whose native call is held, so it stays in reconciliation.
-    let disabling = {
-        let owner = Arc::clone(&owner);
-        std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(owner.disable(&slice_budget(), &mut |_| {}))
-        })
-    };
+    let (disabling, events) = disable_on_a_thread(&owner, slice_budget());
     let started = Instant::now();
-    while !matches!(owner.run_slice(&slice_budget()), SliceOutcome::Disabled) {
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "the disable began"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    loop {
+        let event = events
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the disable reaches its drain");
+        if event == DisableEvent::DrainStarted {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     let outcome = owner.shutdown().await;
     assert!(
-        outcome.is_err(),
+        matches!(outcome, Err(ShutdownUnresolved::Disabling)),
         "a disable still reconciling is not a resolved shutdown: {outcome:?}"
     );
     TestEngine::release(&held);
     let _ = disabling.join().unwrap();
     owner.shutdown().await.unwrap();
     assert!(matches!(control(home), ControlState::Disabled(_)));
+}
+
+/// A shutdown that waits for a disable and then drains the supervisor it hands back spends one drain grace in total.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn shutdown_spends_one_grace_across_the_disable_wait_and_the_drain() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let engine = TestEngine::new();
+    let held = engine.block_calls();
+    let _release_on_unwind = support::embedding_fixtures::GateGuard(Arc::clone(&held));
+    let owner = Arc::new(owner_with_held_maintenance(home, &corpus, &engine));
+    owner.set_drain_grace_for_test(Duration::from_millis(1_500));
+
+    // The disable's own budget ends after 800 ms, so it hands the manager back while the native call is still held.
+    let (disabling, events) = disable_on_a_thread(&owner, budget(Duration::from_millis(800)));
+    loop {
+        let event = events
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the disable reaches its drain");
+        if event == DisableEvent::DrainStarted {
+            break;
+        }
+    }
+    let started = Instant::now();
+    let outcome = owner.shutdown().await;
+    let waited = started.elapsed();
+    TestEngine::release(&held);
+    let _ = disabling.join().unwrap();
+    let _ = owner.shutdown().await;
+    assert!(
+        outcome.is_err(),
+        "the held call outlives the grace: {outcome:?}"
+    );
+    assert!(
+        waited < Duration::from_millis(1_900),
+        "shutdown waited {waited:?} against a 1.5 s grace"
+    );
 }
 
 /// An active record that expires after selection keeps the evidence a cleanup needs, so a disable that follows reconciles the selected family.
@@ -1941,6 +2003,7 @@ async fn a_drain_after_the_records_vanish_keeps_the_approved_grace() {
     records(home);
     let engine = TestEngine::new();
     let held = engine.block_calls();
+    let _release_on_unwind = support::embedding_fixtures::GateGuard(Arc::clone(&held));
     let scope = ProjectScope::new(PROJECT).unwrap();
     let owner = SearchLifecycleOwner::for_home(
         home,

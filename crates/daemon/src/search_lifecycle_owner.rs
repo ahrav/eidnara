@@ -856,9 +856,11 @@ impl SearchLifecycleOwner {
             .map(|_| ())
     }
 
-    /// Closes admission for good, joins the running supervisor within the drain grace, and releases the selection manager; the durable record and every kernel obligation stay for the next start. A disable still reconciling is waited for within the same grace and otherwise reported, with the manager left to it. A supervisor that does not drain in time keeps its manager, so its task and native work stay owned, and the unresolved drain is returned. Idempotent, and a disable that returns afterwards restores nothing.
+    /// Closes admission for good, joins the running supervisor within the drain grace, and releases the selection manager; the durable record and every kernel obligation stay for the next start. A disable still reconciling is waited for within that same grace, which the drain that follows shares, and otherwise reported, with the manager left to it. A supervisor that does not drain in time keeps its manager, so its task and native work stay owned, and the unresolved drain is returned. Idempotent, and a disable that returns afterwards restores nothing.
     pub async fn shutdown(&self) -> Result<(), ShutdownUnresolved> {
         self.admission.close();
+        // One grace covers both the wait for a disable and the drain of the supervisor it hands back.
+        let deadline = Instant::now() + self.drain_grace();
         let taken = loop {
             // Registered before the manager is inspected, so a disable that finishes in between still wakes the wait.
             let handed_back = self.disabled.notified();
@@ -882,9 +884,9 @@ impl SearchLifecycleOwner {
             match taken {
                 Some(taken) => break taken,
                 None => {
-                    if tokio::time::timeout(self.drain_grace(), handed_back)
-                        .await
-                        .is_err()
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero()
+                        || tokio::time::timeout(remaining, handed_back).await.is_err()
                     {
                         return Err(ShutdownUnresolved::Disabling);
                     }
@@ -897,7 +899,9 @@ impl SearchLifecycleOwner {
         let Some(handle) = selection.maintenance() else {
             return Ok(());
         };
-        let outcome = self.stop_maintenance(&handle).await;
+        let outcome = handle
+            .stop(deadline.saturating_duration_since(Instant::now()))
+            .await;
         if outcome.is_err() {
             *self.lock() = Managed::ShutDown(Some(selection));
         }
