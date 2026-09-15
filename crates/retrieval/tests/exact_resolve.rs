@@ -1,0 +1,1150 @@
+//! A real kernel judges every projected row the resolver reads.
+
+use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use kernel::applicability::EvalBudget;
+use kernel::source_identity::Occurrence;
+use kernel::{
+    AdmissionEvent, AdmissionRequest, ArtifactDestination, BackupRequest, CommitIntent,
+    DecisionPayload, DecisionSpec, Dimension, DomainSpec, EligibilityVerdict, EventKind,
+    KernelStore, ProjectScope, ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
+};
+use retrieval::batch::{
+    BatchBounds, Invalidation, MutationIdentity, ProjectionBatch, apply_batch, read_checkpoint,
+};
+use retrieval::exact::{
+    Authority, CertificateRefusal, CompletenessCertificate, Completion, Disqualification,
+    ExactProof, ExactQuery, HexPrefix, IncompleteReason, LookupRefusal, ObjectFormat,
+    ProofInvalidation, Resolution, ResolveBounds, ResolveRefusal, ResolveRequest, ShaPrefixQuery,
+    resolve, validate_for_use,
+};
+use retrieval::{
+    OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity, Tombstone,
+    TombstoneReason, install_identity,
+};
+use sha2::{Digest, Sha256};
+use storage::{Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite};
+
+const DOMAIN: &str = "domain";
+const PROJECT_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PROJECT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const SCOPE_A: &str = "project:a";
+const SCOPE_B: &str = "project:b";
+const HOLD: &str = "hold-1";
+const CONTRACT: &str = "search-projection-identity-v3";
+const EPOCH: &str = "inventory-epoch-1";
+const DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+fn intent(key: &str) -> CommitIntent {
+    CommitIntent {
+        producer: "exact-resolve-test".to_string(),
+        operation_key: key.to_string(),
+        request_digest: format!("{:x}", Sha256::digest(key.as_bytes())),
+        actor: "test".to_string(),
+        cause: "proof".to_string(),
+    }
+}
+
+fn scope(scope_id: &str, digest: &str) -> ScopeSpec {
+    ScopeSpec {
+        scope_id: scope_id.to_string(),
+        object_id: scope_id.to_string(),
+        source_id: scope_id.to_string(),
+        domain_id: DOMAIN.to_string(),
+        source_kind: "kernel_route".to_string(),
+        source_revision: 1,
+        sensitivity: Sensitivity::Normal,
+        terms: vec![ScopeTermSpec {
+            dimension: Dimension::Project.as_str().to_string(),
+            operator: "exact".to_string(),
+            exact_value: Some(digest.to_string()),
+            ..ScopeTermSpec::default()
+        }],
+    }
+}
+
+fn decision(object: &str, scope_id: Option<&str>, sensitivity: Sensitivity) -> DecisionSpec {
+    DecisionSpec {
+        decision_id: format!("decision-{object}"),
+        object_id: object.to_string(),
+        domain_id: DOMAIN.to_string(),
+        proposition_id: None,
+        scope_id: scope_id.map(str::to_string),
+        anchor_id: None,
+        evidence_id: None,
+        decision_kind: "architecture".to_string(),
+        payload: DecisionPayload {
+            summary: format!("summary {object}"),
+            rationale: format!("rationale {object}"),
+        },
+        source_kind: "repo".to_string(),
+        source_id: format!("src/{object}"),
+        source_revision: 1,
+        sensitivity,
+    }
+}
+
+fn admission(object: &str) -> AdmissionRequest {
+    AdmissionRequest {
+        candidate_id: None,
+        subject_object_id: Some(object.to_string()),
+        source_class: Some(SourceClass::ExplicitUser),
+        taint_class: Some(TaintClass::UserExplicit),
+        event: AdmissionEvent {
+            kind: EventKind::Other,
+            trigger_object_id: None,
+            approval_object_id: None,
+            evidence_id: None,
+            reason: "test".to_string(),
+        },
+    }
+}
+
+type Decision = (&'static str, Option<&'static str>, Sensitivity, bool);
+
+fn ok(object: &'static str) -> Decision {
+    (object, Some(SCOPE_A), Sensitivity::Normal, true)
+}
+
+struct Fixture {
+    _root: tempfile::TempDir,
+    kernel: KernelStore,
+    store: SqliteStore,
+    incarnation: String,
+    project: ProjectScope,
+}
+
+fn open_store(dir: &Path) -> SqliteStore {
+    open_sqlite(
+        &StorageDescriptor {
+            module_id: "eidnara-test".to_string(),
+            storage_namespace: "search-projection".to_string(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: dir
+                    .join("search")
+                    .join("search.sqlite")
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        },
+        retrieval::BASELINE,
+    )
+    .unwrap()
+}
+
+fn batch_bounds() -> BatchBounds {
+    BatchBounds {
+        persist: PersistBounds {
+            max_records: NonZeroUsize::new(256).unwrap(),
+            max_payload_bytes: NonZeroUsize::new(4096).unwrap(),
+            max_tuple_bytes: NonZeroUsize::new(2048).unwrap(),
+        },
+        max_source_bytes: NonZeroUsize::new(1 << 20).unwrap(),
+        max_local_mutations: NonZeroUsize::new(512).unwrap(),
+        max_pending: NonZeroUsize::new(512).unwrap(),
+    }
+}
+
+fn bounds() -> ResolveBounds {
+    ResolveBounds {
+        page_rows: NonZeroUsize::new(2).unwrap(),
+        max_rows: NonZeroUsize::new(64).unwrap(),
+        max_pages: NonZeroUsize::new(64).unwrap(),
+        max_retained: NonZeroUsize::new(64).unwrap(),
+        max_retained_bytes: NonZeroUsize::new(1 << 16).unwrap(),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Row {
+    Claim {
+        key: &'static str,
+        object: &'static str,
+        revision: i64,
+        representation: &'static str,
+    },
+    Commit {
+        object: &'static str,
+        oid: String,
+    },
+}
+
+impl Row {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::Claim { .. } => "canonical_claims",
+            Self::Commit { .. } => "git_commits",
+        }
+    }
+
+    fn identity(&self) -> Vec<(String, String)> {
+        match self {
+            Self::Claim { key, .. } => vec![("object_id".into(), (*key).into())],
+            Self::Commit { oid, .. } => vec![
+                ("repository_id".into(), "repo".into()),
+                ("object_format".into(), "sha1".into()),
+                ("oid".into(), oid.clone()),
+            ],
+        }
+    }
+
+    fn revision(&self) -> i64 {
+        match self {
+            Self::Claim { revision, .. } => *revision,
+            Self::Commit { .. } => 1,
+        }
+    }
+
+    fn representation(&self) -> &'static str {
+        match self {
+            Self::Claim { representation, .. } => representation,
+            Self::Commit { .. } => "commit_message",
+        }
+    }
+
+    fn object(&self) -> &'static str {
+        match self {
+            Self::Claim { object, .. } | Self::Commit { object, .. } => object,
+        }
+    }
+
+    fn occurrence_id(&self) -> String {
+        let identity = self.identity();
+        let borrowed: Vec<(&str, &str)> = identity
+            .iter()
+            .map(|(n, v)| (n.as_str(), v.as_str()))
+            .collect();
+        kernel::source_identity::encode_preserving_span(&Occurrence {
+            class: self.class(),
+            identity: &borrowed,
+            revision: &self.revision().to_string(),
+            representation: self.representation(),
+            span: None,
+        })
+        .unwrap()
+        .occurrence_id
+    }
+}
+
+fn claim(object: &'static str, revision: i64, representation: &'static str) -> Row {
+    Row::Claim {
+        key: object,
+        object,
+        revision,
+        representation,
+    }
+}
+
+fn alias(key: &'static str, object: &'static str, representation: &'static str) -> Row {
+    Row::Claim {
+        key,
+        object,
+        revision: 1,
+        representation,
+    }
+}
+
+fn oid(prefix: &str, fill: char) -> String {
+    format!("{prefix}{}", fill.to_string().repeat(40 - prefix.len()))
+}
+
+fn object_query(object: &str) -> ExactQuery<'_> {
+    ExactQuery::CanonicalObject(object.as_bytes())
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let kernel = KernelStore::open(root.path().join("kernel")).unwrap();
+        kernel
+            .commit(intent("seed"), |envelope| {
+                envelope.insert_domain(DomainSpec {
+                    domain_id: DOMAIN.to_string(),
+                    object_id: "domain-object".to_string(),
+                    name: "fixture".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: DOMAIN.to_string(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                envelope.insert_scope(scope(SCOPE_A, PROJECT_A))?;
+                envelope.insert_scope(scope(SCOPE_B, PROJECT_B))?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let incarnation = kernel
+            .database_incarnation_id_within_budget(&EvalBudget::unbounded())
+            .unwrap();
+        let store = open_store(root.path());
+        store
+            .with_conn_fenced(|conn| {
+                install_identity(
+                    conn,
+                    &ProjectionIdentity {
+                        schema_version: retrieval::SCHEMA_VERSION,
+                        kernel_incarnation_id: incarnation.clone(),
+                        projection_policy_version: "source-policy.v1".to_string(),
+                        identity_contract_version: CONTRACT.to_string(),
+                        limit_manifest_protocol_version: "limits.v1".to_string(),
+                        embedding_model: "model-a".to_string(),
+                        tokenizer_fingerprint: "fp-a".to_string(),
+                        vector_dimension: 8,
+                        generation_epoch: 1,
+                    },
+                    1,
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        Self {
+            _root: root,
+            kernel,
+            store,
+            incarnation,
+            project: ProjectScope::new(PROJECT_A).unwrap(),
+        }
+    }
+
+    fn decide(&self, key: &str, objects: &[Decision]) {
+        self.kernel
+            .commit(intent(key), |envelope| {
+                for (object, scope_id, sensitivity, admitted) in objects {
+                    envelope.insert_decision(decision(object, *scope_id, *sensitivity))?;
+                    if *admitted {
+                        envelope.record_admission(admission(object))?;
+                    }
+                }
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    fn retire(&self, key: &str, object: &str) {
+        self.kernel
+            .commit(intent(key), |envelope| {
+                envelope.retire_decision(object)?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    fn tip(&self) -> i64 {
+        self.kernel.tip().unwrap()
+    }
+
+    fn project(&self, rows: &[Row], invalidations: Vec<Invalidation>) {
+        let through = self.tip();
+        let identities: Vec<Vec<(String, String)>> = rows.iter().map(Row::identity).collect();
+        let revisions: Vec<String> = rows.iter().map(|row| row.revision().to_string()).collect();
+        let texts: Vec<String> = rows.iter().map(|row| format!("{row:?}")).collect();
+        let borrowed: Vec<Vec<(&str, &str)>> = identities
+            .iter()
+            .map(|f| f.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect())
+            .collect();
+        let records: Vec<OccurrenceRecord<'_>> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| OccurrenceRecord {
+                occurrence: Occurrence {
+                    class: row.class(),
+                    identity: &borrowed[index],
+                    revision: &revisions[index],
+                    representation: row.representation(),
+                    span: None,
+                },
+                payload: Payload::Whole(&texts[index]),
+                domain_id: DOMAIN,
+                sensitivity: Sensitivity::Normal,
+                source_object_id: row.object(),
+                source_evidence_id: "evidence",
+                source_artifact_digest: DIGEST,
+                created_commit_seq: through,
+            })
+            .collect();
+        let batch = ProjectionBatch {
+            identity: MutationIdentity {
+                kernel_incarnation_id: self.incarnation.clone(),
+                hold_id: HOLD.to_string(),
+                snapshot_commit_seq: 0,
+                through_commit_seq: through,
+            },
+            records,
+            invalidations,
+            generation_id: None,
+        };
+        self.store
+            .with_conn_fenced(|conn| {
+                apply_batch(conn, &batch, batch_bounds(), through).unwrap();
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn certificate(&self) -> CompletenessCertificate {
+        let checkpoint = self
+            .store
+            .with_conn(|conn| Ok(read_checkpoint(conn, &self.incarnation).unwrap().unwrap()))
+            .unwrap();
+        CompletenessCertificate {
+            canonical_incarnation_id: self.incarnation.clone(),
+            inventory_epoch: EPOCH.to_string(),
+            identity_contract_version: CONTRACT.to_string(),
+            extraction_version: retrieval::exact::EXTRACTION_VERSION,
+            complete_through_commit_seq: checkpoint.checkpoint_commit_seq,
+            projection: checkpoint,
+        }
+    }
+
+    fn resolve_with(
+        &self,
+        request: ResolveRequest<'_>,
+        budget: &EvalBudget,
+    ) -> Result<Resolution, ResolveRefusal> {
+        self.store
+            .with_conn(|conn| Ok(resolve(conn, &self.kernel, &request, budget)))
+            .unwrap()
+    }
+
+    fn resolve(
+        &self,
+        query: ExactQuery<'_>,
+        whole_request: bool,
+        certificate: &CompletenessCertificate,
+        bounds: ResolveBounds,
+        budget: &EvalBudget,
+    ) -> Result<Resolution, ResolveRefusal> {
+        self.resolve_with(
+            ResolveRequest {
+                query,
+                whole_request,
+                certificate,
+                inventory_epoch: EPOCH,
+                authority: Authority {
+                    project: &self.project,
+                    destination: ArtifactDestination::Local,
+                },
+                bounds,
+            },
+            budget,
+        )
+    }
+
+    fn validate_with(
+        &self,
+        proof: &ExactProof,
+        project: &ProjectScope,
+        destination: ArtifactDestination,
+        budget: &EvalBudget,
+    ) -> Result<(), ProofInvalidation> {
+        let authority = Authority {
+            project,
+            destination,
+        };
+        self.store
+            .with_conn(|conn| {
+                Ok(validate_for_use(
+                    conn,
+                    &self.kernel,
+                    proof,
+                    authority,
+                    budget,
+                ))
+            })
+            .unwrap()
+            .unwrap()
+    }
+
+    fn validate(&self, proof: &ExactProof, budget: &EvalBudget) -> Result<(), ProofInvalidation> {
+        self.validate_with(proof, &self.project, ArtifactDestination::Local, budget)
+    }
+}
+
+#[test]
+fn a_healthy_explicit_singleton_proves_and_validates_while_an_always_refuse_control_cannot() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1"), ok("obj-2")]);
+    fixture.project(
+        &[
+            claim("obj-1", 1, "decision_summary"),
+            claim("obj-1", 1, "rationale"),
+            claim("obj-2", 1, "decision_summary"),
+        ],
+        vec![],
+    );
+    let certificate = fixture.certificate();
+    let budget = EvalBudget::unbounded();
+    let resolution = fixture
+        .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+        .unwrap();
+    assert_eq!(resolution.completion, Completion::Complete);
+    assert_eq!(resolution.disqualified, None);
+    assert_eq!(resolution.targets, BTreeSet::from(["obj-1".to_string()]));
+    assert_eq!(
+        resolution.retained.len(),
+        2,
+        "both representations are retained"
+    );
+    assert_eq!(resolution.observations.eligible, 2);
+    assert_eq!(resolution.consumed.validated, 2);
+    let proof = resolution
+        .proof
+        .clone()
+        .expect("a healthy singleton proves");
+    assert_eq!(proof.target_id, "obj-1");
+    assert_eq!(proof.occurrences.len(), 2);
+    assert_eq!(fixture.validate(&proof, &budget), Ok(()));
+
+    let hybrid = fixture
+        .resolve(
+            object_query("obj-1"),
+            false,
+            &certificate,
+            bounds(),
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(hybrid.completion, Completion::Complete);
+    assert!(
+        hybrid.proof.is_none(),
+        "prose around a selector never proves"
+    );
+    assert_eq!(
+        hybrid.retained.len(),
+        2,
+        "hybrid keeps the validated evidence"
+    );
+
+    let absent = fixture
+        .resolve(object_query("obj-9"), true, &certificate, bounds(), &budget)
+        .unwrap();
+    assert_eq!(absent.completion, Completion::NoMatch);
+    assert!(absent.proof.is_none());
+    assert!(absent.retained.is_empty());
+
+    let foreign = ProjectScope::new(PROJECT_B).unwrap();
+    let refused = fixture
+        .resolve_with(
+            ResolveRequest {
+                query: object_query("obj-1"),
+                whole_request: true,
+                certificate: &certificate,
+                inventory_epoch: EPOCH,
+                authority: Authority {
+                    project: &foreign,
+                    destination: ArtifactDestination::Local,
+                },
+                bounds: bounds(),
+            },
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(refused.completion, Completion::Complete);
+    assert_eq!(
+        refused.disqualified,
+        Some(Disqualification::Verdict(EligibilityVerdict::WrongScope))
+    );
+    assert!(
+        refused.proof.is_none(),
+        "an authority that refuses everything is the always-refuse control"
+    );
+    assert!(refused.retained.is_empty());
+    assert_eq!(refused.observations.wrong_scope, 2);
+}
+
+#[test]
+fn eligible_targets_after_many_rejected_rows_are_retained_without_renewing_bypass() {
+    let fixture = Fixture::new();
+    fixture.decide(
+        "objects",
+        &[
+            ok("keep"),
+            ok("gone"),
+            ("hidden", Some(SCOPE_A), Sensitivity::Normal, false),
+            ("secret", Some(SCOPE_A), Sensitivity::Secret, true),
+            ("elsewhere", Some(SCOPE_B), Sensitivity::Normal, true),
+        ],
+    );
+    fixture.retire("retire", "gone");
+    fixture.project(
+        &[
+            alias("shared", "gone", "decision_summary"),
+            alias("shared", "hidden", "rationale"),
+            claim("secret", 1, "decision_summary"),
+            claim("elsewhere", 1, "decision_summary"),
+            claim("keep", 1, "decision_summary"),
+            claim("lonely", 1, "decision_summary"),
+        ],
+        vec![],
+    );
+    let certificate = fixture.certificate();
+    let budget = EvalBudget::unbounded();
+
+    let shared = fixture
+        .resolve(
+            object_query("shared"),
+            true,
+            &certificate,
+            bounds(),
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(shared.completion, Completion::Complete);
+    assert_eq!(shared.observations.rows, 2);
+    assert_eq!(shared.observations.retracted, 1);
+    assert_eq!(shared.observations.hidden, 1);
+    assert!(shared.retained.is_empty());
+    assert!(
+        shared.proof.is_none(),
+        "all-rejected is not NoMatch and not unique"
+    );
+    assert_ne!(shared.completion, Completion::NoMatch);
+
+    for (object, expected) in [
+        ("secret", EligibilityVerdict::ProviderSensitive),
+        ("elsewhere", EligibilityVerdict::WrongScope),
+    ] {
+        let resolution = fixture
+            .resolve(object_query(object), true, &certificate, bounds(), &budget)
+            .unwrap();
+        assert_eq!(
+            resolution.disqualified,
+            Some(Disqualification::Verdict(expected)),
+            "{object}"
+        );
+        assert!(resolution.proof.is_none(), "{object}");
+        assert!(resolution.retained.is_empty(), "{object}");
+    }
+    let lonely = fixture
+        .resolve(
+            object_query("lonely"),
+            true,
+            &certificate,
+            bounds(),
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(
+        lonely.disqualified,
+        Some(Disqualification::Verdict(EligibilityVerdict::Retracted)),
+        "a projected row with no canonical object is retracted, not proven"
+    );
+    let kept = fixture
+        .resolve(object_query("keep"), true, &certificate, bounds(), &budget)
+        .unwrap();
+    assert!(kept.proof.is_some());
+
+    let many = Fixture::new();
+    many.decide("live", &[ok("late")]);
+    let mut rejected: Vec<Row> = (0..7)
+        .map(|index| Row::Claim {
+            key: "crowd",
+            object: ["r0", "r1", "r2", "r3", "r4", "r5", "r6"][index],
+            revision: index as i64 + 1,
+            representation: "decision_summary",
+        })
+        .collect();
+    rejected.push(alias("crowd", "late", "rationale"));
+    many.project(&rejected, vec![]);
+    let certificate = many.certificate();
+    let crowd = many
+        .resolve(object_query("crowd"), true, &certificate, bounds(), &budget)
+        .unwrap();
+    assert_eq!(crowd.completion, Completion::Complete);
+    assert_eq!(crowd.consumed.pages, 4);
+    assert_eq!(crowd.observations.rows, 8);
+    assert_eq!(crowd.retained.len(), 1);
+    assert_eq!(crowd.retained[0].source_object_id, "late");
+    assert_eq!(crowd.targets, BTreeSet::from(["crowd".to_string()]));
+    assert!(matches!(
+        crowd.disqualified,
+        Some(Disqualification::Verdict(EligibilityVerdict::Retracted))
+    ));
+    assert!(
+        crowd.proof.is_none(),
+        "a later eligible singleton does not renew bypass within the attempt"
+    );
+
+    let superseded = Fixture::new();
+    superseded.decide("objects", &[ok("obj-1")]);
+    superseded.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
+    let old = claim("obj-1", 1, "decision_summary").occurrence_id();
+    superseded.decide("bump", &[]);
+    superseded.project(
+        &[claim("obj-1", 2, "decision_summary")],
+        vec![Invalidation {
+            occurrence_id: old.clone(),
+            tombstone: Tombstone {
+                invalidated_commit_seq: superseded.tip(),
+                reason: TombstoneReason::Superseded,
+            },
+        }],
+    );
+    let certificate = superseded.certificate();
+    let resolution = superseded
+        .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+        .unwrap();
+    assert_eq!(resolution.completion, Completion::Complete);
+    assert_eq!(
+        resolution.disqualified,
+        Some(Disqualification::Tombstoned(TombstoneReason::Superseded))
+    );
+    assert!(
+        resolution.proof.is_none(),
+        "a tombstoned alias bars bypass for the attempt"
+    );
+    assert_eq!(resolution.observations.tombstoned, 1);
+    assert_eq!(
+        resolution.observations.stale, 1,
+        "the kernel still holds revision one, so revision two is stale"
+    );
+    assert!(resolution.retained.is_empty());
+}
+
+#[test]
+fn bounds_before_exhaustion_yield_incomplete_and_never_uniqueness() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    fixture.project(
+        &[
+            claim("obj-1", 1, "decision_summary"),
+            claim("obj-1", 1, "rationale"),
+        ],
+        vec![],
+    );
+    let certificate = fixture.certificate();
+    let budget = EvalBudget::unbounded();
+    let one_row = ResolveBounds {
+        page_rows: NonZeroUsize::new(1).unwrap(),
+        max_rows: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    };
+    let resolution = fixture
+        .resolve(object_query("obj-1"), true, &certificate, one_row, &budget)
+        .unwrap();
+    assert_eq!(
+        resolution.completion,
+        Completion::Incomplete(IncompleteReason::RowBound)
+    );
+    assert!(
+        resolution.proof.is_none(),
+        "a singleton under a cap is not unique"
+    );
+    assert_eq!(
+        resolution.retained.len(),
+        1,
+        "progress before the cap is kept"
+    );
+
+    let one_page = ResolveBounds {
+        page_rows: NonZeroUsize::new(1).unwrap(),
+        max_pages: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    };
+    let resolution = fixture
+        .resolve(object_query("obj-1"), true, &certificate, one_page, &budget)
+        .unwrap();
+    assert_eq!(
+        resolution.completion,
+        Completion::Incomplete(IncompleteReason::PageBound)
+    );
+    assert!(resolution.proof.is_none());
+
+    let one_retained = ResolveBounds {
+        page_rows: NonZeroUsize::new(1).unwrap(),
+        max_retained: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    };
+    let resolution = fixture
+        .resolve(
+            object_query("obj-1"),
+            true,
+            &certificate,
+            one_retained,
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(
+        resolution.completion,
+        Completion::Incomplete(IncompleteReason::RetentionExhausted)
+    );
+    assert_eq!(
+        resolution.retained.len(),
+        1,
+        "stopped before the unretainable row"
+    );
+    assert_eq!(resolution.consumed.retained, 1);
+    assert!(resolution.proof.is_none());
+
+    let few_bytes = ResolveBounds {
+        max_retained_bytes: NonZeroUsize::new(8).unwrap(),
+        ..bounds()
+    };
+    let resolution = fixture
+        .resolve(
+            object_query("obj-1"),
+            true,
+            &certificate,
+            few_bytes,
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(
+        resolution.completion,
+        Completion::Incomplete(IncompleteReason::RetentionExhausted)
+    );
+    assert!(resolution.retained.is_empty());
+
+    let cancelled = EvalBudget::unbounded();
+    cancelled.cancel();
+    assert_eq!(
+        fixture
+            .resolve(
+                object_query("obj-1"),
+                true,
+                &certificate,
+                bounds(),
+                &cancelled
+            )
+            .unwrap_err(),
+        ResolveRefusal::BudgetExhausted
+    );
+    let expired = EvalBudget::new(
+        Some(Instant::now() + Duration::from_millis(1)),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(
+        fixture
+            .resolve(
+                object_query("obj-1"),
+                true,
+                &certificate,
+                bounds(),
+                &expired
+            )
+            .unwrap_err(),
+        ResolveRefusal::BudgetExhausted
+    );
+    let over = ResolveBounds {
+        page_rows: NonZeroUsize::new(kernel::MAX_ELIGIBILITY_CANDIDATES + 1).unwrap(),
+        ..bounds()
+    };
+    assert_eq!(
+        fixture
+            .resolve(object_query("obj-1"), true, &certificate, over, &budget)
+            .unwrap_err(),
+        ResolveRefusal::PageOverBound
+    );
+}
+
+#[test]
+fn sha_prefix_proof_requires_one_complete_oid_and_distinct_targets_stay_ambiguous() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("c1"), ok("c2"), ok("twin-a"), ok("twin-b")]);
+    fixture.project(
+        &[
+            Row::Commit {
+                object: "c1",
+                oid: oid("abc1", '0'),
+            },
+            Row::Commit {
+                object: "c2",
+                oid: oid("abc2", '0'),
+            },
+            claim("twin-a", 1, "decision_summary"),
+            claim("twin-b", 1, "decision_summary"),
+        ],
+        vec![],
+    );
+    let certificate = fixture.certificate();
+    let budget = EvalBudget::unbounded();
+    let sha = |prefix: &str| {
+        let prefix = HexPrefix::parse(prefix).unwrap();
+        let query = ShaPrefixQuery::bind("repo", ObjectFormat::Sha1, &prefix).unwrap();
+        fixture
+            .resolve(
+                ExactQuery::Sha(query),
+                true,
+                &certificate,
+                bounds(),
+                &budget,
+            )
+            .unwrap()
+    };
+    let colliding = sha("abc");
+    assert_eq!(colliding.completion, Completion::Complete);
+    assert_eq!(colliding.distinct_keys, 2);
+    assert_eq!(
+        colliding.targets.len(),
+        2,
+        "two eligible commits are ambiguous"
+    );
+    assert!(colliding.proof.is_none());
+    assert_eq!(colliding.retained.len(), 2, "both stay as hybrid evidence");
+
+    let unique = sha("abc1");
+    assert_eq!(unique.distinct_keys, 1);
+    assert_eq!(unique.targets.len(), 1);
+    let proof = unique.proof.expect("one complete oid proves");
+    assert_eq!(proof.occurrences[0].key, oid("abc1", '0').into_bytes());
+    assert_eq!(fixture.validate(&proof, &budget), Ok(()));
+
+    let none = sha("e");
+    assert_eq!(none.completion, Completion::NoMatch);
+
+    let twins = fixture
+        .resolve(
+            object_query("twin-a"),
+            true,
+            &certificate,
+            bounds(),
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(twins.targets, BTreeSet::from(["twin-a".to_string()]));
+    assert!(
+        twins.proof.is_some(),
+        "equal payload bytes do not merge distinct targets"
+    );
+}
+
+#[test]
+fn certificates_must_name_this_projection_and_kernel_and_lag_defeats_proof() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
+    let certificate = fixture.certificate();
+    let budget = EvalBudget::unbounded();
+    let refusal = |certificate: &CompletenessCertificate, epoch: &str| {
+        fixture
+            .resolve_with(
+                ResolveRequest {
+                    query: object_query("obj-1"),
+                    whole_request: true,
+                    certificate,
+                    inventory_epoch: epoch,
+                    authority: Authority {
+                        project: &fixture.project,
+                        destination: ArtifactDestination::Local,
+                    },
+                    bounds: bounds(),
+                },
+                &budget,
+            )
+            .unwrap_err()
+    };
+    let mut other_kernel = certificate.clone();
+    other_kernel.canonical_incarnation_id = "someone-else".into();
+    assert_eq!(
+        refusal(&other_kernel, EPOCH),
+        ResolveRefusal::Certificate(CertificateRefusal::IncarnationMismatch)
+    );
+    assert_eq!(
+        refusal(&certificate, "inventory-epoch-2"),
+        ResolveRefusal::Certificate(CertificateRefusal::InventoryEpochMismatch {
+            certified: EPOCH.into(),
+            current: "inventory-epoch-2".into(),
+        })
+    );
+    let mut old_extraction = certificate.clone();
+    old_extraction.extraction_version = 0;
+    assert_eq!(
+        refusal(&old_extraction, EPOCH),
+        ResolveRefusal::Certificate(CertificateRefusal::ExtractionVersion {
+            certified: 0,
+            expected: retrieval::exact::EXTRACTION_VERSION,
+        })
+    );
+    let mut other_contract = certificate.clone();
+    other_contract.identity_contract_version = "v0".into();
+    assert_eq!(
+        refusal(&other_contract, EPOCH),
+        ResolveRefusal::Certificate(CertificateRefusal::IdentityContract)
+    );
+    let mut other_projection = certificate.clone();
+    other_projection.projection.hold_id = "hold-2".into();
+    assert_eq!(
+        refusal(&other_projection, EPOCH),
+        ResolveRefusal::Certificate(CertificateRefusal::ProjectionMismatch)
+    );
+    let mut short = certificate.clone();
+    short.complete_through_commit_seq -= 1;
+    assert_eq!(
+        refusal(&short, EPOCH),
+        ResolveRefusal::Certificate(CertificateRefusal::CompleteThrough)
+    );
+
+    fixture.decide("collision", &[ok("obj-1-collider")]);
+    let lagging = fixture
+        .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+        .unwrap();
+    assert_eq!(lagging.completion, Completion::Complete);
+    assert_eq!(
+        lagging.disqualified,
+        Some(Disqualification::ProjectionLag {
+            tip: fixture.tip(),
+            complete_through: certificate.complete_through_commit_seq,
+        }),
+        "an unprojected collision may exist past the certified horizon"
+    );
+    assert!(
+        lagging.proof.is_none(),
+        "the known winner alone cannot prove"
+    );
+    assert_eq!(
+        lagging.retained.len(),
+        1,
+        "the eligible row still reaches hybrid"
+    );
+
+    fixture.project(&[], vec![]);
+    assert_eq!(
+        refusal(&certificate, EPOCH),
+        ResolveRefusal::Certificate(CertificateRefusal::ProjectionMismatch),
+        "a certificate for an older checkpoint no longer describes the projection"
+    );
+    let fresh = fixture.certificate();
+    let resolution = fixture
+        .resolve(object_query("obj-1"), true, &fresh, bounds(), &budget)
+        .unwrap();
+    assert!(resolution.proof.is_some());
+
+    let empty = Fixture::new();
+    let refused = empty
+        .resolve_with(
+            ResolveRequest {
+                query: object_query("obj-1"),
+                whole_request: true,
+                certificate: &fresh,
+                inventory_epoch: EPOCH,
+                authority: Authority {
+                    project: &empty.project,
+                    destination: ArtifactDestination::Local,
+                },
+                bounds: bounds(),
+            },
+            &budget,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        refused,
+        ResolveRefusal::Certificate(CertificateRefusal::IncarnationMismatch)
+            | ResolveRefusal::Lookup(LookupRefusal::NoCheckpoint)
+            | ResolveRefusal::Lookup(LookupRefusal::Projection(ProjectionError::IdentityMismatch))
+    ));
+}
+
+#[test]
+fn final_use_revalidation_defeats_every_later_change() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
+    let certificate = fixture.certificate();
+    let budget = EvalBudget::unbounded();
+    let proof = fixture
+        .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+        .unwrap()
+        .proof
+        .unwrap();
+    assert_eq!(fixture.validate(&proof, &budget), Ok(()));
+
+    let cancelled = EvalBudget::unbounded();
+    cancelled.cancel();
+    assert_eq!(
+        fixture.validate(&proof, &cancelled),
+        Err(ProofInvalidation::BudgetExhausted)
+    );
+    let other = ProjectScope::new(PROJECT_B).unwrap();
+    assert_eq!(
+        fixture.validate_with(&proof, &other, ArtifactDestination::Local, &budget),
+        Err(ProofInvalidation::AuthorityMismatch)
+    );
+    assert_eq!(
+        fixture.validate_with(
+            &proof,
+            &fixture.project,
+            ArtifactDestination::Remote,
+            &budget
+        ),
+        Err(ProofInvalidation::AuthorityMismatch),
+        "a proof for one destination grants nothing at another"
+    );
+
+    let proven = fixture.tip();
+    fixture.decide("unrelated", &[ok("obj-2")]);
+    assert_eq!(
+        fixture.validate(&proof, &budget),
+        Err(ProofInvalidation::CanonicalChanged {
+            proven,
+            current: fixture.tip(),
+        }),
+        "any later canonical commit stales the horizon"
+    );
+
+    fixture.project(&[claim("obj-2", 1, "decision_summary")], vec![]);
+    assert_eq!(
+        fixture.validate(&proof, &budget),
+        Err(ProofInvalidation::ProjectionChanged)
+    );
+
+    let certificate = fixture.certificate();
+    let proof = fixture
+        .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+        .unwrap()
+        .proof
+        .unwrap();
+    let proven = fixture.tip();
+    fixture.retire("retire", "obj-1");
+    assert_eq!(
+        fixture.validate(&proof, &budget),
+        Err(ProofInvalidation::CanonicalChanged {
+            proven,
+            current: fixture.tip(),
+        })
+    );
+    fixture.project(&[], vec![]);
+    let certificate = fixture.certificate();
+    let resolution = fixture
+        .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+        .unwrap();
+    assert_eq!(
+        resolution.disqualified,
+        Some(Disqualification::Verdict(EligibilityVerdict::Retracted))
+    );
+    assert!(resolution.proof.is_none());
+
+    let rollback = Fixture::new();
+    rollback.decide("objects", &[ok("obj-1")]);
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = rollback
+        .kernel
+        .backup(BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    rollback.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
+    let certificate = rollback.certificate();
+    let proof = rollback
+        .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+        .unwrap()
+        .proof
+        .unwrap();
+    rollback.kernel.restore(&manifest.destination_path).unwrap();
+    assert_eq!(
+        rollback.validate(&proof, &budget),
+        Err(ProofInvalidation::IncarnationChanged),
+        "a restore invalidates every proof captured before it"
+    );
+}

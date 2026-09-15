@@ -6,18 +6,30 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group};
-use kernel::Sensitivity;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::Occurrence;
-use retrieval::batch::{BatchBounds, MutationIdentity, ProjectionBatch, apply_batch};
+use kernel::{
+    AdmissionEvent, AdmissionRequest, ArtifactDestination, CommitIntent, DecisionPayload,
+    DecisionSpec, Dimension, DomainSpec, EventKind, KernelStore, ProjectScope, ScopeSpec,
+    ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
+};
+use retrieval::batch::{
+    BatchBounds, MutationIdentity, ProjectionBatch, apply_batch, read_checkpoint,
+};
 use retrieval::exact::{
-    ExactQuery, HexPrefix, LookupContext, ObjectFormat, SelectorBounds, ShaPrefixQuery, classify,
-    page,
+    Authority, CompletenessCertificate, ExactQuery, HexPrefix, LookupContext, ObjectFormat,
+    ResolveBounds, ResolveRequest, SelectorBounds, ShaPrefixQuery, classify, page, resolve,
+    validate_for_use,
 };
 use retrieval::{OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, install_identity};
+use sha2::{Digest, Sha256};
 use storage::{Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite};
 
 const KERNEL: &str = "kernel-bench";
+const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SCOPE: &str = "project:a";
+const DOMAIN: &str = "domain";
+const DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 fn open(dir: &std::path::Path) -> SqliteStore {
     open_sqlite(
@@ -51,14 +63,14 @@ fn bounds() -> BatchBounds {
     }
 }
 
-fn populate(store: &SqliteStore, commits: usize, claims: usize) {
+fn populate(store: &SqliteStore, kernel_incarnation_id: &str, commits: usize, claims: usize) {
     store
         .with_conn_fenced(|conn| {
             install_identity(
                 conn,
                 &ProjectionIdentity {
                     schema_version: retrieval::SCHEMA_VERSION,
-                    kernel_incarnation_id: KERNEL.to_string(),
+                    kernel_incarnation_id: kernel_incarnation_id.to_string(),
                     projection_policy_version: "source-policy.v1".to_string(),
                     identity_contract_version: "search-projection-identity-v3".to_string(),
                     limit_manifest_protocol_version: "limits.v1".to_string(),
@@ -123,13 +135,13 @@ fn populate(store: &SqliteStore, commits: usize, claims: usize) {
             sensitivity: Sensitivity::Normal,
             source_object_id: identity[identity.len() - 1].1,
             source_evidence_id: "evidence",
-            source_artifact_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+            source_artifact_digest: DIGEST,
             created_commit_seq: 1,
         })
         .collect();
     let batch = ProjectionBatch {
         identity: MutationIdentity {
-            kernel_incarnation_id: KERNEL.to_string(),
+            kernel_incarnation_id: kernel_incarnation_id.to_string(),
             hold_id: "hold".to_string(),
             snapshot_commit_seq: 0,
             through_commit_seq: 1,
@@ -181,7 +193,7 @@ fn parse_benches(c: &mut Criterion) {
 fn page_benches(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());
-    populate(&store, 4_096, 4_096);
+    populate(&store, KERNEL, 4_096, 4_096);
     let budget = EvalBudget::unbounded();
     let mut group = c.benchmark_group("exact_page");
     for page_rows in [16usize, 256] {
@@ -246,6 +258,162 @@ fn page_benches(c: &mut Criterion) {
     group.finish();
 }
 
+fn intent(key: &str) -> CommitIntent {
+    CommitIntent {
+        producer: "exact-bench".to_string(),
+        operation_key: key.to_string(),
+        request_digest: format!("{:x}", Sha256::digest(key.as_bytes())),
+        actor: "bench".to_string(),
+        cause: "measure".to_string(),
+    }
+}
+
+/// `objects` admitted decisions under one project scope, all eligible.
+fn kernel(root: &std::path::Path, objects: &[String]) -> KernelStore {
+    let kernel = KernelStore::open(root.join("kernel")).unwrap();
+    kernel
+        .commit(intent("seed"), |envelope| {
+            envelope.insert_domain(DomainSpec {
+                domain_id: DOMAIN.to_string(),
+                object_id: "domain-object".to_string(),
+                name: "bench".to_string(),
+                source_kind: "bench".to_string(),
+                source_id: DOMAIN.to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            envelope.insert_scope(ScopeSpec {
+                scope_id: SCOPE.to_string(),
+                object_id: SCOPE.to_string(),
+                source_id: SCOPE.to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "kernel_route".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+                terms: vec![ScopeTermSpec {
+                    dimension: Dimension::Project.as_str().to_string(),
+                    operator: "exact".to_string(),
+                    exact_value: Some(PROJECT.to_string()),
+                    ..ScopeTermSpec::default()
+                }],
+            })?;
+            for object in objects {
+                envelope.insert_decision(DecisionSpec {
+                    decision_id: format!("decision-{object}"),
+                    object_id: object.clone(),
+                    domain_id: DOMAIN.to_string(),
+                    proposition_id: None,
+                    scope_id: Some(SCOPE.to_string()),
+                    anchor_id: None,
+                    evidence_id: None,
+                    decision_kind: "architecture".to_string(),
+                    payload: DecisionPayload {
+                        summary: format!("summary {object}"),
+                        rationale: format!("rationale {object}"),
+                    },
+                    source_kind: "repo".to_string(),
+                    source_id: format!("src/{object}"),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                envelope.record_admission(AdmissionRequest {
+                    candidate_id: None,
+                    subject_object_id: Some(object.clone()),
+                    source_class: Some(SourceClass::ExplicitUser),
+                    taint_class: Some(TaintClass::UserExplicit),
+                    event: AdmissionEvent {
+                        kind: EventKind::Other,
+                        trigger_object_id: None,
+                        approval_object_id: None,
+                        evidence_id: None,
+                        reason: "bench".to_string(),
+                    },
+                })?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    kernel
+}
+
+fn resolve_benches(c: &mut Criterion) {
+    let dir = tempfile::tempdir().unwrap();
+    let objects: Vec<String> = (0..256).map(|n| format!("obj-{n:08}")).collect();
+    let kernel = kernel(dir.path(), &objects);
+    let budget = EvalBudget::unbounded();
+    let incarnation = kernel
+        .database_incarnation_id_within_budget(&budget)
+        .unwrap();
+    let store = open(dir.path());
+    populate(&store, &incarnation, 0, 256);
+    let through = kernel.tip().unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "UPDATE projection_checkpoint SET checkpoint_commit_seq=?1",
+                [through],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let checkpoint = store
+        .with_conn(|conn| Ok(read_checkpoint(conn, &incarnation).unwrap().unwrap()))
+        .unwrap();
+    let certificate = CompletenessCertificate {
+        canonical_incarnation_id: incarnation.clone(),
+        inventory_epoch: "bench-epoch".to_string(),
+        identity_contract_version: "search-projection-identity-v3".to_string(),
+        extraction_version: retrieval::exact::EXTRACTION_VERSION,
+        complete_through_commit_seq: checkpoint.checkpoint_commit_seq,
+        projection: checkpoint,
+    };
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let authority = Authority {
+        project: &project,
+        destination: ArtifactDestination::Local,
+    };
+    let bounds = ResolveBounds {
+        page_rows: NonZeroUsize::new(256).unwrap(),
+        max_rows: NonZeroUsize::new(4_096).unwrap(),
+        max_pages: NonZeroUsize::new(64).unwrap(),
+        max_retained: NonZeroUsize::new(4_096).unwrap(),
+        max_retained_bytes: NonZeroUsize::new(1 << 22).unwrap(),
+    };
+    let request = ResolveRequest {
+        query: ExactQuery::CanonicalObject(b"obj-00000128"),
+        whole_request: true,
+        certificate: &certificate,
+        inventory_epoch: "bench-epoch",
+        authority,
+        bounds,
+    };
+    let mut group = c.benchmark_group("exact_resolve");
+    group.bench_function("singleton_proof", |b| {
+        b.iter(|| {
+            let resolution = store
+                .with_conn(|conn| Ok(resolve(conn, &kernel, &request, &budget).unwrap()))
+                .unwrap();
+            assert!(resolution.proof.is_some());
+            black_box(resolution)
+        })
+    });
+    let proof = store
+        .with_conn(|conn| Ok(resolve(conn, &kernel, &request, &budget).unwrap()))
+        .unwrap()
+        .proof
+        .unwrap();
+    group.bench_function("final_use_validation", |b| {
+        b.iter(|| {
+            store
+                .with_conn(|conn| {
+                    Ok(validate_for_use(conn, &kernel, &proof, authority, &budget).unwrap())
+                })
+                .unwrap()
+        })
+    });
+    group.finish();
+}
+
 fn configure() -> Criterion {
     Criterion::default()
         .warm_up_time(Duration::from_secs(1))
@@ -256,7 +424,7 @@ fn configure() -> Criterion {
 criterion_group! {
     name = benches;
     config = configure();
-    targets = parse_benches, page_benches
+    targets = parse_benches, page_benches, resolve_benches
 }
 
 fn main() {
