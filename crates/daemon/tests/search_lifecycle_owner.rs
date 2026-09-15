@@ -2715,11 +2715,12 @@ fn a_request_before_the_first_slice_is_judged_on_the_records() {
 /// A request refused because the reloaded manifest cannot bound a slice closes admission on that manifest: the earlier grants are cancelled and readers are refused, while the lifecycle record is unchanged.
 #[test]
 fn a_request_refused_on_the_manifest_closes_admission() {
-    // Nine rows or one row bound no coverage report; a zero slice bound runs no slice at all.
+    // Nine rows or one row bound no coverage report; a zero slice bound runs no slice at all; a hundred thousand transaction bytes cannot bound the Current family's own replacement.
     for (name, value) in [
         ("local_transaction_rows", 9),
         ("local_transaction_rows", 1),
         ("supervisor_slice_ms", 0),
+        ("local_transaction_bytes", 100_000),
     ] {
         let root = tempfile::tempdir().unwrap();
         let home = root.path();

@@ -828,6 +828,23 @@ impl SearchLifecycleOwner {
                 "manifest limits cannot bound the request",
             ));
         }
+        // The operation already recorded is bounded as its next slice would bound it; a manifest that no longer bounds it closes the gate now rather than at that slice.
+        if let ControlState::Intent(current) | ControlState::Current(current) =
+            ProjectionLifecycle::read_at(&self.home)
+            && replacement_spec(
+                inputs.manifest(),
+                identity.clone(),
+                current.transition,
+                current.episodes.allowance,
+                &current.consumer.generation_id,
+            )
+            .is_err()
+        {
+            let _ = self.admission.refresh(None);
+            return Err(BuildError::Invalid(
+                "manifest limits cannot bound the current operation",
+            ));
+        }
         // The replacement bounds depend on this request's allowance and generation, so their refusal is the request's alone and leaves admission as it is.
         replacement_spec(
             inputs.manifest(),
@@ -1042,8 +1059,10 @@ fn maintenance_bounds(
     let lease_ms = limit(manifest, "lease_duration_ms")?;
     let retry_after =
         i64::try_from(lease_ms).map_err(|_| SpecRefusal::LimitRange("lease_duration_ms"))?;
-    let recovery_ms = i64::try_from(limit(manifest, "B_recovery_ms")?)
-        .map_err(|_| SpecRefusal::LimitRange("B_recovery_ms"))?;
+    // A recovery bound of nothing would start every supervisor on an expired grant.
+    let recovery_ms =
+        i64::try_from(nonzero_u64("B_recovery_ms", limit(manifest, "B_recovery_ms")?)?.get())
+            .map_err(|_| SpecRefusal::LimitRange("B_recovery_ms"))?;
     Ok(SliceBounds {
         dispatch: DispatchBounds {
             max_jobs: spec.episode.batch.max_pending,
