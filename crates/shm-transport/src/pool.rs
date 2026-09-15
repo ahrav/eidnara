@@ -399,6 +399,11 @@ pub struct MappingLayout {
     pub completions: usize,
     /// Completion cells, one per block.
     pub block_count: usize,
+    /// First return-summary word. Each bit names a block whose completion cell was written
+    /// after the producer last cleared the word; reclamation visits only those blocks.
+    pub returns: usize,
+    /// Return-summary words: `block_count` bits rounded up to whole `u64`s.
+    pub return_words: usize,
     /// First arena byte.
     pub arena: usize,
     /// Arena bytes.
@@ -440,8 +445,14 @@ impl MappingLayout {
         )?;
         let block_count = geometry.block_count() as usize;
         let completion_bytes = block_count.checked_mul(size_of::<u64>()).ok_or(overflow)?;
-        let arena = align_up(
+        let returns = align_up(
             completions.checked_add(completion_bytes).ok_or(overflow)?,
+            CACHELINE,
+        )?;
+        let return_words = block_count.div_ceil(RETURN_WORD_BITS);
+        let return_bytes = return_words.checked_mul(size_of::<u64>()).ok_or(overflow)?;
+        let arena = align_up(
+            returns.checked_add(return_bytes).ok_or(overflow)?,
             page_size,
         )?;
         let arena_bytes = usize::try_from(geometry.arena_bytes()?).map_err(|_| overflow)?;
@@ -456,6 +467,8 @@ impl MappingLayout {
             descriptor_depth,
             completions,
             block_count,
+            returns,
+            return_words,
             arena,
             arena_bytes,
             total,
@@ -479,7 +492,19 @@ impl MappingLayout {
         self.completions
             .checked_add(block.checked_mul(size_of::<u64>())?)
     }
+
+    /// Offset of return-summary word `word`, refused at or past `return_words`.
+    pub fn return_offset(&self, word: usize) -> Option<usize> {
+        if word >= self.return_words {
+            return None;
+        }
+        self.returns
+            .checked_add(word.checked_mul(size_of::<u64>())?)
+    }
 }
+
+/// Blocks one return-summary word covers.
+pub const RETURN_WORD_BITS: usize = u64::BITS as usize;
 
 /// Rounds `value` up to a multiple of `alignment`, which must be a power of two.
 pub fn align_up(value: usize, alignment: usize) -> Result<usize, GeometryError> {
@@ -653,17 +678,29 @@ mod tests {
         assert_eq!(layout.lifecycle, 4 * CACHELINE);
         assert_eq!(layout.descriptors, 4 * CACHELINE + LIFECYCLE_PAGE_BYTES);
         assert!(layout.completions.is_multiple_of(CACHELINE));
+        assert!(layout.returns.is_multiple_of(CACHELINE));
+        assert!(layout.returns >= layout.completions + layout.block_count * 8);
+        assert_eq!(layout.return_words, 1);
         assert!(layout.arena.is_multiple_of(4096));
+        assert!(layout.arena >= layout.returns + layout.return_words * 8);
         assert_eq!(layout.arena_bytes as u64, geometry.arena_bytes().unwrap());
         assert!(layout.total.is_multiple_of(4096));
         assert!(layout.total >= layout.arena + layout.arena_bytes);
         assert_eq!(layout.descriptor_offset(layout.descriptor_depth), None);
         assert_eq!(layout.completion_offset(layout.block_count), None);
+        assert_eq!(layout.return_offset(layout.return_words), None);
+        assert_eq!(layout.return_offset(0), Some(layout.returns));
         assert_eq!(
             layout.descriptor_offset(1),
             Some(layout.descriptors + DESCRIPTOR_SLOT_BYTES)
         );
         assert_eq!(layout.completion_offset(2), Some(layout.completions + 16));
         assert!(MappingLayout::new(&geometry, 3000).is_err());
+
+        let production = MappingLayout::new(&PoolGeometry::host_payload_pool(), 4096).unwrap();
+        assert_eq!(production.return_words, 3);
+        assert_eq!(production.returns, 5376);
+        assert_eq!(production.arena, 8192);
+        assert_eq!(production.total, 95_825_920);
     }
 }

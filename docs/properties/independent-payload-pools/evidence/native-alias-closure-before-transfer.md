@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `packages/shm-native/src/lib.rs:355`
+- `packages/shm-native/src/lib.rs:353`
 - `packages/shm-native/src/napi_buffers.rs:142`
 - `packages/shm-native/tests/runtime.ts:146`
 
-Witness status: partial - producer aliases detach before commit (`packages/shm-native/src/lib.rs:382`) and consumer aliases detach before return (`packages/shm-native/src/lib.rs:355`); `runNativeLifecycle` in packages/shm-native/tests/runtime.ts asserts subarray, DataView, and Buffer aliases read zero after release, but only when the runtime reports the detachment capability.
+Witness status: partial - producer aliases detach before commit (`packages/shm-native/src/lib.rs:380`) and consumer aliases detach before return (`packages/shm-native/src/lib.rs:353`); `runNativeLifecycle` in packages/shm-native/tests/runtime.ts asserts subarray, DataView, and Buffer aliases read zero after release, but only when the runtime reports the detachment capability.
 
 ## Failure scenario
 

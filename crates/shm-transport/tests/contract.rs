@@ -346,7 +346,7 @@ fn debug_and_errors_redact_every_sentinel() {
         format!("{identity:?}"),
         format!("{descriptor:?}"),
         format!("{completion:?}"),
-        format!("{:?}", DescriptorError::WrongIncarnation),
+        format!("{:?}", DescriptorError::InvalidBlock),
         format!("{ring:?}"),
         format!("{:?}", ring.grant()),
         format!("{:?}", ring.retained()),

@@ -15,7 +15,6 @@ import {
     assertUint32Argument,
     DESCRIPTOR_SCHEMA_VERSION,
     NativeChannel,
-    grantDecodes,
     nativeWireConstants,
     isRingFullError,
     privateBytes,
@@ -89,6 +88,7 @@ describe("native mechanism gate", () => {
 });
 
 interface RawAttachAddon {
+    grantDecodes(hex: string): boolean;
     attach(descriptor: unknown): number;
     activeChannelCount(): number;
     activeExternalRefCount(): number;
@@ -936,8 +936,8 @@ describe("raw N-API descriptor boundary", () => {
         const valid = validRawDescriptor();
         // The unmutated fixture decodes under the current layout, so every rejection below is
         // caused by its mutation rather than by a stale grant encoding.
-        expect(grantDecodes(testGrantHex(0, 0xab))).toBe(true);
-        expect(grantDecodes(testGrantHex(1, 0xcd))).toBe(true);
+        expect(addon.grantDecodes(testGrantHex(0, 0xab))).toBe(true);
+        expect(addon.grantDecodes(testGrantHex(1, 0xcd))).toBe(true);
         const hostileGrants = [
             "\u00e9".repeat(GRANT_BYTES), // UTF-8 length 2 * GRANT_BYTES, non-ASCII
             testGrantHex(0, 0xab).toUpperCase(),
@@ -950,7 +950,7 @@ describe("raw N-API descriptor boundary", () => {
         ];
         // A layout-3 image of the right length is not a current grant.
         const stale = testGrantHex(0, 0xab);
-        expect(grantDecodes(`0300${stale.slice(4)}`)).toBe(false);
+        expect(addon.grantDecodes(`0300${stale.slice(4)}`)).toBe(false);
         hostileGrants.push(`0300${stale.slice(4)}`);
         for (const grant of hostileGrants) {
             expectRejectedWithoutEffects(addon, {
@@ -965,6 +965,17 @@ describe("raw N-API descriptor boundary", () => {
         expectRejectedWithoutEffects(addon, {
             ...validRawDescriptor(),
             peerToHostGrant: testGrantHex(0, 0xab),
+        });
+        // Lanes are fixed per direction: 0 host-to-peer, 1 peer-to-host.
+        expectRejectedWithoutEffects(addon, {
+            ...validRawDescriptor(),
+            hostToPeerGrant: testGrantHex(1, 0xab),
+            peerToHostGrant: testGrantHex(0, 0xcd),
+        });
+        expectRejectedWithoutEffects(addon, {
+            ...validRawDescriptor(),
+            hostToPeerGrant: testGrantHex(2, 0xab),
+            peerToHostGrant: testGrantHex(3, 0xcd),
         });
     });
 

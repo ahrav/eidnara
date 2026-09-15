@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/tests/ring.rs:396`
+- `crates/shm-transport/tests/ring.rs:429`
 - `crates/host-runtime/tests/client.rs:426`
 - `packages/e2e-tests/src/rust-runner/hermetic-host.ts:275`
 
-Witness status: partial - `crates/shm-transport/tests/ring.rs:317` records a completed real cross-process exchange at layout 4, and `crates/host-runtime/tests/client.rs:365` records, through the managed Rust client against a host run in the same test process by `TestHost::start_with` (`crates/host-runtime/tests/support/mod.rs:795`), the sole profile and layout identity from `host.status`, a completed daemon request in each direction at the 64 MiB maximum, the one-over local refusal, and the activation, reclamation, and released-backing counters across a controlled close and reconnect, which is in-process integration evidence and not a cross-process witness; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
+Witness status: partial - `crates/shm-transport/tests/ring.rs:347` records a completed real cross-process exchange at layout 4, and `crates/host-runtime/tests/client.rs:365` records, through the managed Rust client against a host run in the same test process by `TestHost::start_with` (`crates/host-runtime/tests/support/mod.rs:795`), the sole profile and layout identity from `host.status`, a completed daemon request in each direction at the 64 MiB maximum, the one-over local refusal, and the activation, reclamation, and released-backing counters across a controlled close and reconnect, which is in-process integration evidence and not a cross-process witness; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
 
 ## Failure scenario
 

@@ -88,8 +88,6 @@ export interface NativeTestPair {
     second: NativeChannel;
     /** Ordinary descriptor slots per direction: frames a producer can publish before the consumer acknowledges any. */
     descriptorDepth: number;
-    /** Blocks per direction across every class: the bound on live leases. */
-    blockCount: number;
     /** Largest body one block of the smallest ordinary class carries. */
     smallestBodyCapacity: number;
     /** Blocks in the smallest ordinary class. */
@@ -119,7 +117,6 @@ interface NativeAddon {
         first: number;
         second: number;
         descriptorDepth: number;
-        blockCount: number;
         smallestBodyCapacity: number;
         smallestClassCount: number;
     };
@@ -789,7 +786,6 @@ export class NativeChannel {
             first: new NativeChannel(native, pair.first),
             second: new NativeChannel(native, pair.second),
             descriptorDepth: pair.descriptorDepth,
-            blockCount: pair.blockCount,
             smallestBodyCapacity: pair.smallestBodyCapacity,
             smallestClassCount: pair.smallestClassCount,
         };

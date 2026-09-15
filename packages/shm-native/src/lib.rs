@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use napi::bindgen_prelude::{AsyncTask, Buffer, FnArgs, Function, Object};
 use napi::{Env, Error, JsValue, Result, Status, Task, Unknown, ValueType, sys};
 use napi_derive::napi;
-use shm_transport::backend::ring::PoolGrant;
+use shm_transport::backend::ring::{HOST_TO_PEER_LANE, PEER_TO_HOST_LANE, PoolGrant};
 use shm_transport::backend::ring::{ProducerError, ProducerReservation, Ring};
 use shm_transport::descriptor::{WIRE_V3_HEADER_BYTES, check_wire_header};
 use shm_transport::lease::PayloadLease;
@@ -37,8 +37,6 @@ pub struct NativeTestPair {
     /// Ordinary descriptor slots per direction: how many frames a producer can publish before
     /// the consumer acknowledges any.
     pub descriptor_depth: u32,
-    /// Blocks per direction across every class: the bound on live leases.
-    pub block_count: u32,
     /// Largest body one ordinary block of the smallest class carries.
     pub smallest_body_capacity: u32,
     /// Blocks in the smallest ordinary class.
@@ -729,7 +727,8 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
             .chain(peer_to_host_fds)
             .collect::<BTreeSet<_>>();
         if distinct.len() != 6
-            || host_to_peer_grant == peer_to_host_grant
+            || host_to_peer_grant.lane() != HOST_TO_PEER_LANE
+            || peer_to_host_grant.lane() != PEER_TO_HOST_LANE
             || !grant_matches_profile(host_to_peer_grant)
             || !grant_matches_profile(peer_to_host_grant)
         {
@@ -952,13 +951,13 @@ pub fn finish_setup(pending_id: u32) -> Result<AsyncTask<FinishSetupTask>> {
 pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
     {
         let profile = host_payload_pool_profile().map_err(|_| error("test profile unavailable"))?;
-        let first_to_second = Ring::create(&profile, 1)
+        let first_to_second = Ring::create(&profile, HOST_TO_PEER_LANE)
             .map_err(|_| error("shared-memory test pair creation failed"))?;
         let second_from_first = first_to_second
             .attachment()
             .and_then(|attachment| attachment.attach())
             .map_err(|_| error("shared-memory test pair creation failed"))?;
-        let second_to_first = Ring::create(&profile, 2)
+        let second_to_first = Ring::create(&profile, PEER_TO_HOST_LANE)
             .map_err(|_| error("shared-memory test pair creation failed"))?;
         let first_from_second = second_to_first
             .attachment()
@@ -1009,7 +1008,6 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
                 first,
                 second,
                 descriptor_depth: geometry.ordinary_descriptors(),
-                block_count: geometry.block_count(),
                 smallest_body_capacity: u32::try_from(smallest.body_capacity())
                     .map_err(|_| error("test profile unavailable"))?,
                 smallest_class_count: smallest.count,
@@ -1349,7 +1347,7 @@ mod tests {
                 buffers: Vec::new(),
             },
         );
-        let channel = Channel {
+        let mut channel = Channel {
             producers: HashMap::new(),
             active,
             stranded: Vec::new(),
@@ -1362,9 +1360,14 @@ mod tests {
             setup: None,
             _reservation: None,
         };
-        let Channel { mut active, .. } = channel;
-        // The channel and its consumer ring are gone; the lease still reads and returns once.
+        let mut active = std::mem::take(&mut channel.active);
+        drop(channel);
         let held = active.remove(&1).expect("lease").lease;
+        assert_eq!(
+            std::sync::Arc::strong_count(held.retained()),
+            1,
+            "the consumer ring is gone; only the lease holds the backing"
+        );
         assert_eq!(held.to_vec().expect("copy"), b"owned");
         held.release().expect("release");
         drop(producer);

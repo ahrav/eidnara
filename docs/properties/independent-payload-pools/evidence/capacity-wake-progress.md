@@ -10,12 +10,12 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1035`
-- `crates/shm-transport/src/backend/retained.rs:625`
-- `crates/shm-transport/src/backend/ring.rs:75`
-- `crates/host-runtime/src/client.rs:2713`
+- `crates/shm-transport/src/backend/ring.rs:1111`
+- `crates/shm-transport/src/backend/retained.rs:629`
+- `crates/shm-transport/src/backend/ring.rs:95`
+- `crates/host-runtime/src/client.rs:2716`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2559`, `crates/shm-transport/src/backend/ring.rs:2599`, and both two-process tests in crates/shm-transport/tests/ring.rs; at the client, `crates/host-runtime/src/client.rs:7625` parks the managed bridge on the capacity doorbell with ordinary headroom exhausted and shows a host consumption alone, with no inbound data or timer, admits the blocked frame, and `crates/host-runtime/src/client.rs:7799` lands that consumption between the bridge's exhausted attempt and its capacity arm, where no doorbell token is sent, and shows the post-arm attempt publishes the frame within 2 s of a 30 s deadline; `shared_memory_workers_have_no_periodic_polling` in crates/host-runtime/src/ring_transport.rs pins that the bridge has no reservation slice.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2764`, `crates/shm-transport/src/backend/ring.rs:2804`, and both two-process tests in crates/shm-transport/tests/ring.rs; at the client, `crates/host-runtime/src/client.rs:7636` parks the managed bridge on the capacity doorbell with ordinary headroom exhausted and shows a host consumption alone, with no inbound data or timer, admits the blocked frame, and `crates/host-runtime/src/client.rs:7810` lands that consumption between the bridge's exhausted attempt and its capacity arm, where no doorbell token is sent, and shows the post-arm attempt publishes the frame within 2 s of a 30 s deadline; `shared_memory_workers_have_no_periodic_polling` in crates/host-runtime/src/ring_transport.rs pins that the bridge has no reservation slice.
 
 ## Failure scenario
 
@@ -34,7 +34,7 @@ Situation markers that must fire independently of the safety check:
 - `pool.producer_parked_on_capacity`
 - `pool.transition_during_arm_window`
 
-Check semantics: `always` - a `reserve_until` parked on exhaustion returns `Ok` before its deadline once either transition happens, with `parks >= 1` in `syscall_counters`; bounded by the test deadline, never an open-ended eventually.
+Check semantics: `always` - a `reserve_until` parked on exhaustion returns `Ok` before its deadline once either transition happens, with `parks >= 1` in `syscall_counters`; bounded by the test deadline, never an open-ended eventually. The pre-arm window is checked separately: a transition that lands between `try_reserve` and `ParkGuard::arm` makes `arm_capacity_wait` return `Ok(false)` and the retried `try_reserve` succeed without a park, so `parks >= 1` does not apply there (`arm_capacity_wait_refuses_to_park_over_a_return_that_landed_before_arming`). The two-process descriptor witness (`two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return`) arms with `arm_capacity_wait` and asserts the doorbell token arrives on `duplicate_capacity_ready` while the payload is still outstanding; it handshakes the child over stdin so consumption cannot precede the arm, and `parks` is not counted on that explicit path.
 
 ## Investigation log
 

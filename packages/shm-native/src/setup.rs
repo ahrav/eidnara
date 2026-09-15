@@ -10,7 +10,7 @@ use rustix::net::{
     SocketAddrUnix, SocketFlags, SocketType, recvmsg, sockopt,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use shm_transport::backend::ring::PoolGrant;
+use shm_transport::backend::ring::{HOST_TO_PEER_LANE, PEER_TO_HOST_LANE, PoolGrant};
 use shm_transport::descriptor::SETUP_DESCRIPTOR_COUNT;
 use subtle::ConstantTimeEq;
 
@@ -122,7 +122,8 @@ pub fn begin_connect(
     let host_to_peer_grant = decode_grant(&grant.descriptor.host_to_peer_grant)?;
     let peer_to_host_grant = decode_grant(&grant.descriptor.peer_to_host_grant)?;
     if grant.descriptor.profile != super::PROFILE
-        || host_to_peer_grant == peer_to_host_grant
+        || host_to_peer_grant.lane() != HOST_TO_PEER_LANE
+        || peer_to_host_grant.lane() != PEER_TO_HOST_LANE
         || !super::grant_matches_profile(host_to_peer_grant)
         || !super::grant_matches_profile(peer_to_host_grant)
     {

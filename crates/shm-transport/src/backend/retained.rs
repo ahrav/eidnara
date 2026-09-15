@@ -8,7 +8,7 @@ use std::mem::size_of;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// The kernel page size, cached; falls back to `BLOCK_ALIGN` if `sysconf` reports none.
@@ -24,7 +24,7 @@ use crate::backend::sys;
 use crate::descriptor::{Incarnation, WIRE_V3_HEADER_BYTES};
 use crate::pool::{
     CACHELINE, CLASS_COUNT, DESCRIPTOR_SLOT_BYTES, LIFECYCLE_PAGE_BYTES, MappingLayout,
-    PoolGeometry,
+    PoolGeometry, RETURN_WORD_BITS,
 };
 use crate::profile::BackingAdmission;
 
@@ -283,7 +283,7 @@ fn validate_object(fd: &OwnedFd, expected_len: usize) -> Result<(), MappingError
         || stat.size < 0
         || stat.size as usize != expected_len
         || !type_valid
-        || stat.mode & 0o077 != 0
+        || stat.mode & 0o7777 != 0o600
     {
         return Err(MappingError::ObjectValidationFailed);
     }
@@ -334,8 +334,6 @@ pub struct Retained {
     capacity_signal: UnixStream,
     /// Wake tokens sent from this backing, for diagnostics.
     wake_signals: AtomicU64,
-    /// Latched once a wake could not be delivered for a reason other than a pending token.
-    wake_failed: AtomicBool,
     /// Receiver record per block: the generation currently leased, or zero.
     live: Box<[AtomicU64]>,
     /// Receiver record per block: the greatest generation ever accepted.
@@ -375,7 +373,6 @@ impl Retained {
             data_signal,
             capacity_signal,
             wake_signals: AtomicU64::new(0),
-            wake_failed: AtomicBool::new(false),
             live: (0..blocks).map(|_| AtomicU64::new(0)).collect(),
             last_seen: (0..blocks).map(|_| AtomicU64::new(0)).collect(),
             outstanding_returns: AtomicU64::new(0),
@@ -420,20 +417,9 @@ impl Retained {
         let _ = self.charge.set(charge);
     }
 
-    /// The backing charge, if the owner attached one.
-    pub fn charge(&self) -> Option<&Arc<BackingAdmission>> {
-        self.charge.get()
-    }
-
     /// Wake tokens this backing has sent.
     pub fn wake_signals(&self) -> u64 {
         self.wake_signals.load(Ordering::Relaxed)
-    }
-
-    /// Whether a wake failed for a reason other than a pending token. The ring treats this as
-    /// retirement: publication stands, but no uncertain storage is reused.
-    pub fn wake_failed(&self) -> bool {
-        self.wake_failed.load(Ordering::Acquire)
     }
 
     /// Leases live right now across every block.
@@ -483,6 +469,16 @@ impl Retained {
             .completion_offset(block as usize)
             .ok_or(MappingError::InvalidLayout)?;
         // SAFETY: `CompletionCell` is one atomic with no padding.
+        unsafe { self.mapping.shared_page(offset) }
+    }
+
+    /// Return-summary word `word`; bit `b` names block `word * RETURN_WORD_BITS + b`.
+    pub(crate) fn return_word(&self, word: usize) -> Result<&AtomicU64, MappingError> {
+        let offset = self
+            .layout
+            .return_offset(word)
+            .ok_or(MappingError::InvalidLayout)?;
+        // SAFETY: `AtomicU64` is one atomic with no padding.
         unsafe { self.mapping.shared_page(offset) }
     }
 
@@ -604,7 +600,15 @@ impl Retained {
                 // `fetch_max` keeps publication monotonic: a stale return can never lower a
                 // newer completion.
                 cell.generation.fetch_max(generation, Ordering::Release);
-                true
+                let word = block as usize / RETURN_WORD_BITS;
+                let bit = 1u64 << (block as usize % RETURN_WORD_BITS);
+                match self.return_word(word) {
+                    Ok(summary) => {
+                        summary.fetch_or(bit, Ordering::Release);
+                        true
+                    }
+                    Err(_) => false,
+                }
             }
             Err(_) => false,
         };
@@ -620,16 +624,10 @@ impl Retained {
 
     /// Rings the capacity doorbell if the peer is parked on it: bump the wake generation,
     /// clear `parked`, and send one token. `WouldBlock` means a token already waits, which is
-    /// the same outcome. Any other error latches `wake_failed`; publication already happened
-    /// and is never rolled back.
+    /// the same outcome. Any other error is reported to the caller; publication already
+    /// happened and is never rolled back.
     pub(crate) fn signal_capacity(&self) -> Result<(), WakeError> {
-        let wake = match self.capacity_wake() {
-            Ok(wake) => wake,
-            Err(_) => {
-                self.wake_failed.store(true, Ordering::Release);
-                return Err(WakeError::Mapping);
-            }
-        };
+        let wake = self.capacity_wake().map_err(|_| WakeError::Mapping)?;
         wake.generation.fetch_add(1, Ordering::SeqCst);
         if wake.parked.swap(0, Ordering::SeqCst) == 0 {
             return Ok(());
@@ -643,19 +641,13 @@ impl Retained {
             self.wake_signals.fetch_add(1, Ordering::Relaxed);
             let error = match sys::send_token(self.capacity_signal.as_fd(), &token) {
                 Ok(sent) if sent == token.len() => return Ok(()),
-                Ok(_) => {
-                    self.wake_failed.store(true, Ordering::Release);
-                    return Err(WakeError::Doorbell);
-                }
+                Ok(_) => return Err(WakeError::Doorbell),
                 Err(error) => error,
             };
             match error.kind() {
                 std::io::ErrorKind::WouldBlock => return Ok(()),
                 std::io::ErrorKind::Interrupted => continue,
-                _ => {
-                    self.wake_failed.store(true, Ordering::Release);
-                    return Err(WakeError::Doorbell);
-                }
+                _ => return Err(WakeError::Doorbell),
             }
         }
     }
@@ -737,6 +729,14 @@ pub(crate) fn initialize_mapping(
             CompletionCell {
                 generation: AtomicU64::new(0),
             },
+        )?;
+    }
+    for word in 0..layout.return_words {
+        mapping.initialize_page(
+            layout
+                .return_offset(word)
+                .ok_or(MappingError::InvalidLayout)?,
+            AtomicU64::new(0),
         )?;
     }
     let mut class_bytes = [0u64; CLASS_COUNT];

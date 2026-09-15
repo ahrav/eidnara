@@ -90,8 +90,9 @@ descriptor, one per direction:
 Decoding validates the geometry, recomputes the mapping layout at the host page
 size, and refuses a grant whose total disagrees with the computed layout, whose
 reserved tail is nonzero, or whose version is not 4. The setup layer also
-requires both grants to name the sole profile's geometry, to differ from each
-other, and to name pools with no traffic in flight (`Ring::is_fresh`).
+requires both grants to name the sole profile's geometry, to carry lane `0` in
+the host-to-peer field and lane `1` in the peer-to-host field, and to name pools
+with no traffic in flight (`Ring::is_fresh`).
 
 ## 4. Mapping layout
 
@@ -109,6 +110,7 @@ control pages:
 | Lifecycle page | 256 | creator, once; `quarantined: AtomicU8` by either peer |
 | Descriptor slots: 48 x 64 bytes, each `sequence`, `block`, `generation`, `body_len` (`AtomicU64`) | 3,072 | producer |
 | Completion cells: 187 x `AtomicU64`, padded to 128 | 1,536 | the final owner of each block's lease |
+| Return summary: 3 x `AtomicU64`, one bit per block, cacheline aligned | 24 | the final owner of each block's lease sets a bit; the producer clears whole words |
 | Block arena, page aligned | 95,817,728 | producer while reserved; nobody while published |
 
 Total at 4 KiB pages: 95,825,920 bytes per direction. Every byte of every
@@ -128,10 +130,17 @@ and one list of published blocks. The ledger is allocated before activation and
 never grows.
 
 1. **Reclaim.** Before every reservation, and on every capacity wake, the
-   producer scans the completion cell of every published block with `Acquire`.
-   A cell equal to the block's issued generation returns the block to its class
-   free list; a cell ahead of any issued generation is a protocol error that
-   quarantines the pool; a cell behind is a stale return and frees nothing.
+   producer swaps each return-summary word to zero with `Acquire` and visits
+   only the blocks whose bits were set, so a payload a reader keeps holding
+   costs nothing per reservation. Each visited completion cell is checked
+   against the producer's ledger as a `CompletionRecord`: a cell equal to the
+   block's issued generation returns a published block to its class free list;
+   a cell behind, or a flag for a block already reclaimed, is a stale return
+   and frees nothing; a cell ahead of any issued generation, or a flag on a
+   block id outside the geometry, is a protocol error that quarantines the
+   pool. A cell written without its flag is still caught: reservation refuses
+   to reuse a free block whose cell is at or past the generation it would issue,
+   and `Ring::probe` scans every published block's cell.
 2. **Descriptor headroom.** `published - consumed` is read with `Acquire` and
    checked for monotonicity and depth. Ordinary reservations need it below 32;
    reserved reservations need it below 48.
@@ -192,16 +201,21 @@ any thread:
 1. Clear the block's live record (`AcqRel` compare-exchange from the captured
    generation to zero).
 2. Publish the captured generation into the block's completion cell with
-   `fetch_max(Release)`. Publication is monotonic: a stale return can never
-   lower a newer completion.
+   `fetch_max(Release)`, then set the block's bit in its return-summary word
+   with `fetch_or(Release)`. Publication is monotonic: a stale return can never
+   lower a newer completion, and the bit it sets names a cell the producer then
+   finds stale.
 3. Bump the capacity wake generation (`SeqCst`) and, if `parked` was nonzero,
    send one byte on the retained capacity doorbell end. `WouldBlock` is
-   success; any other error latches `wake_failed` on the backing and is
-   reported to an explicit `release` caller.
+   success; any other error is reported to an explicit `release` caller as
+   `WakeFailed` and discarded by drop. The return itself stands either way.
 
-The final drop performs no `Ring` call, allocates no completion node, waits for
-no slot, makes no N-API call, and mutates no free list. Test builds observe all
-five as `unreachable` code points (`lease::observers`).
+The final drop performs no `Ring` call, waits for no slot, and mutates no free
+list; test builds observe those three as `unreachable` code points
+(`lease::observers`). It also allocates no completion node and makes no N-API
+call, but neither has a code point in this crate: the pool publishes into a
+fixed cell, and the N-API boundary lives in the native addon, whose
+detach-before-return rule keeps it out of a final drop.
 
 The backing is unmapped and its admission charge settled when the last holder
 drops. An endpoint exit therefore never unmaps a block a reader still holds,
@@ -245,6 +259,17 @@ quarantined bucket. If quarantine accounting itself fails, the charge stays
 counted as active for the process lifetime; nothing refunds storage whose
 release is unproved.
 
+One connection commits 191,666,800 bytes: two mappings of 95,825,920 bytes and
+two ledgers of 7,480 bytes (187 blocks at 40 bytes). The host admits
+connections under a fixed ceiling of 1 GiB (`MAX_RING_RESIDENT_BYTES` in
+`crates/host-runtime/src/ring_transport.rs`), so the default and maximum
+`max_connections` is 5. The FIFO ring this layout replaced charged 64 MiB per
+direction and fitted 8. Blocks are backed on first touch and no page is ever
+returned to the kernel, so a connection's resident bytes grow toward its charge
+over its lifetime; the ceiling bounds resident bytes, not only the virtual
+commitment. The quarantine bucket counts against the same ceiling, so five
+quarantined connections exhaust the process until it restarts.
+
 ## 10. Source-access contract
 
 The mapping is peer-writable for its whole lifetime. Legal access to shared
@@ -259,8 +284,13 @@ bytes in this crate is:
 
 No `&[u8]` or `&mut [u8]` over the arena is ever formed. A copy stabilizes the
 destination bytes, not the source: a peer that writes a published block after
-publication violates the protocol, and the copy observes stale or torn bytes,
-never undefined behavior. Consumers therefore decode only from private copies,
+publication violates the protocol, and a write that uses the block's exact span
+is observed as stale or torn bytes, never undefined behavior. The no-UB claim is
+conditional on access shape: concurrent accesses to shared bytes must be
+disjoint or share identical boundaries (`LeaseSpan::new`). An overlapping range
+with shifted boundaries assigns another width to the same bytes, which is a
+mixed-size race the shape does not cover and this contract does not protect
+against. Consumers therefore decode only from private copies,
 and validate the copied header against the copied body length before parsing.
 
 The producer's raw-pointer escape is `ProducerReservation::segment`, whose span
