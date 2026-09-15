@@ -214,8 +214,13 @@ For a query `q` and a document `d` whose codes were not clipped,
 |Σ q_j d_j − Σ s_j² c_q,j c_d,j| ≤ Σ_j |q_j| · |d_j − s_j c_d,j| + |s_j c_d,j| · |q_j − s_j c_q,j|
 ```
 
-and each unclipped reconstruction error `|x − s c|` is at most `s / 2`. The
-fixtures assert this bound with the document residual taken as `s_j / 2` and
+in real arithmetic, and each unclipped reconstruction error `|x − s c|` is at
+most `s / 2`. The two f64 scorers each round their terms and partial sums, so
+the difference between the returned scores can exceed this bound by their
+accumulation roundoff, at most about `n · 2⁻⁵³ · Σ|term|` per side for `n`
+coordinates; a two-coordinate fixture in `tests/dense_scalar.rs` meets the
+real bound with equality and lands one ulp past it. The fixtures assert the
+bound plus that allowance with the document residual taken as `s_j / 2` and
 the query residual taken exactly, so a clipped query is covered too, and they
 check that pairs whose exact scores differ by more than both bounds keep
 their order under the int8 score. Pairs closer than the bound may reorder;

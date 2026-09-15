@@ -330,7 +330,10 @@ fn weighted_scoring_refuses_unequal_lengths_instead_of_truncating() {
     let _ = weighted_dot(&scales_of([1.0; 8]), &[1; 8], &[1; 7]);
 }
 
+// `weighted_dot` guards the reserved code with `debug_assert!`, so these two panics exist only in
+// profiles that keep debug assertions.
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "the reserved code -128 never reaches scoring")]
 fn weighted_scoring_refuses_a_reserved_query_code() {
     // A -128 · 127 product is -16256, outside the recipe's [-16129, 16129].
@@ -340,6 +343,7 @@ fn weighted_scoring_refuses_a_reserved_query_code() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "the reserved code -128 never reaches scoring")]
 fn weighted_scoring_refuses_a_reserved_document_code() {
     let mut doc = [0i8; 8];
@@ -399,6 +403,79 @@ fn a_query_encoded_under_another_generations_scales_carries_other_codes_and_scor
     );
 }
 
+/// `|Σ q·d − Σ s²·cq·cd| ≤ Σ_j |q_j|·|d_j − s_j·cd_j| + |s_j·cd_j|·|q_j − s_j·cq_j|` in real arithmetic; an
+/// unclipped document residual is at most `s_j/2`, and the query residual is taken exactly so a
+/// clipped query still bounds.
+fn real_arithmetic_bound(query: &[f32], scales: &Scales, q: &[i8], d: &[i8]) -> f64 {
+    scales
+        .as_slice()
+        .iter()
+        .zip(query)
+        .zip(q)
+        .zip(d)
+        .map(|(((s, x), cq), cd)| {
+            let s = f64::from(*s);
+            let query_residual = (f64::from(*x) - s * f64::from(*cq)).abs();
+            f64::from(*x).abs() * s / 2.0 + (s * f64::from(*cd)).abs() * query_residual
+        })
+        .sum()
+}
+
+/// Both scorers sum `n` once-rounded f64 terms, so each side's roundoff is at most about
+/// `n · 2⁻⁵³ · Σ|term|`; `n · ε` per side doubles that margin.
+fn accumulation_roundoff(query: &[f32], row: &[f32], scales: &Scales, q: &[i8], d: &[i8]) -> f64 {
+    let exact_terms: f64 = query
+        .iter()
+        .zip(row)
+        .map(|(a, b)| (f64::from(*a) * f64::from(*b)).abs())
+        .sum();
+    let approx_terms: f64 = scales
+        .as_slice()
+        .iter()
+        .zip(q)
+        .zip(d)
+        .map(|((s, cq), cd)| {
+            let s = f64::from(*s);
+            s * s * f64::from(i32::from(*cq) * i32::from(*cd)).abs()
+        })
+        .sum();
+    query.len() as f64 * f64::EPSILON * (exact_terms + approx_terms)
+}
+
+#[test]
+fn accumulation_roundoff_can_push_a_computed_score_past_the_real_arithmetic_bound() {
+    // Kilo's analytic counterexample: both document residuals are exactly s_j/2, so the real
+    // bound is met with equality, the oracle's tiny second term rounds away, and the weighted
+    // score's rounds its accumulator up by one ulp.
+    let layout = RowLayout {
+        dimension: 2,
+        metric: Metric::InnerProduct,
+        unit_norm_tolerance: 0.02,
+    };
+    let t = 2f32.powi(-31);
+    let r = [127.0 / 128.0, 1143.0 * t];
+    let d = [251.0 / 256.0, 13.5 * t];
+    let q = [126.0 / 128.0, 18.0 * t];
+    let calibration = calibrate(&layout, [r.as_slice(), d.as_slice()]).unwrap();
+    assert_eq!(calibration.scales.as_slice(), &[1.0 / 128.0, 9.0 * t]);
+    let qc = encode(&layout, &calibration.scales, &q).unwrap();
+    let dc = encode(&layout, &calibration.scales, &d).unwrap();
+    assert_eq!((qc.codes.as_slice(), qc.clipped), ([126, 2].as_slice(), 0));
+    assert_eq!((dc.codes.as_slice(), dc.clipped), ([126, 2].as_slice(), 0));
+
+    let approx = weighted_dot(&calibration.scales, &qc.codes, &dc.codes);
+    let exact = inner_product(&q, &d);
+    let bound = real_arithmetic_bound(&q, &calibration.scales, &qc.codes, &dc.codes);
+    let difference = (approx - exact).abs();
+    assert_eq!(difference, 63.0 / 16384.0 + 512.0 * 2f64.powi(-62));
+    assert!(difference > bound, "{difference} <= {bound}");
+    let roundoff = accumulation_roundoff(&q, &d, &calibration.scales, &qc.codes, &dc.codes);
+    assert!(
+        difference <= bound + roundoff,
+        "{difference} > {bound} + {roundoff}"
+    );
+}
+
 #[test]
 fn weighted_int8_scores_stay_within_the_quantization_bound_and_preserve_separated_orders() {
     let layout = unit_layout();
@@ -422,8 +499,7 @@ fn weighted_int8_scores_stay_within_the_quantization_bound_and_preserve_separate
         .unwrap();
         let q = encode(&layout, &calibration.scales, &query).unwrap();
         clipped_queries += usize::from(q.clipped > 0);
-        // |Σ q·d − Σ s²·cq·cd| ≤ Σ_j |q_j|·|d_j − s_j·cd_j| + |s_j·cd_j|·|q_j − s_j·cq_j|; an unclipped
-        // document residual is at most s_j/2, and the query residual is taken exactly so a clipped query still bounds.
+        // The real-arithmetic bound plus the f64 accumulation roundoff of both scorers.
         let scored: Vec<(String, f64, f64, f64)> = rows
             .iter()
             .zip(&ids)
@@ -431,15 +507,8 @@ fn weighted_int8_scores_stay_within_the_quantization_bound_and_preserve_separate
                 let d = encode(&layout, &calibration.scales, row).unwrap();
                 assert_eq!(d.clipped, 0);
                 let approx = weighted_dot(&calibration.scales, &q.codes, &d.codes);
-                let bound: f64 = (0..8)
-                    .map(|j| {
-                        let s = f64::from(calibration.scales.as_slice()[j]);
-                        let query_residual =
-                            (f64::from(query[j]) - s * f64::from(q.codes[j])).abs();
-                        f64::from(query[j]).abs() * s / 2.0
-                            + (s * f64::from(d.codes[j])).abs() * query_residual
-                    })
-                    .sum();
+                let bound = real_arithmetic_bound(&query, &calibration.scales, &q.codes, &d.codes)
+                    + accumulation_roundoff(&query, row, &calibration.scales, &q.codes, &d.codes);
                 (id.clone(), inner_product(&query, row), approx, bound)
             })
             .collect();
