@@ -442,3 +442,43 @@ async fn a_pure_header_frame_with_a_failed_return_wake_ends_the_read_loop() {
     );
     drop(leases);
 }
+
+/// A request refused before its copy still returns its lease; a failed return doorbell must
+/// retire the generation instead of queueing a rejection over a broken transport.
+#[tokio::test]
+async fn a_rejected_request_whose_return_wake_fails_retires_the_generation() {
+    let CloseFixture {
+        shared,
+        generation,
+        route,
+        mut queue,
+        ..
+    } = fixture();
+    shared.shutdown.cancel();
+    let mut leases = leases_whose_return_wake_fails();
+    let budget = crate::wire::ByteBudget::new(16);
+    let header = crate::wire::EnvelopeHeader {
+        len: 1,
+        ver: crate::wire::PROTOCOL_VERSION,
+        ty: crate::wire::FrameType::Request,
+        flags: crate::wire::response_flags(false, true),
+        channel: route.channel,
+        epoch: route.epoch,
+        corr: 1,
+    };
+    let frame = crate::frame_channel::InboundFrame::new(
+        header,
+        leases.pop().unwrap(),
+        budget.try_charge(1).unwrap(),
+    );
+    crate::dispatch::dispatch_request(&shared, &generation, frame).await;
+    assert!(
+        generation.token.is_cancelled(),
+        "the failed return is a transport fault, not a rejectable request"
+    );
+    assert!(
+        queue.try_recv().is_err(),
+        "no rejection is queued over a transport that cannot be woken"
+    );
+    drop(leases);
+}
