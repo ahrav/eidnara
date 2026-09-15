@@ -659,8 +659,10 @@ impl<'a> EmbeddingDispatcher<'a> {
                         Err(state) => Ok(Some(Blocked::LaneUnavailable(state))),
                     };
                 }
-                // One re-admission per pass keeps the pass finite.
-                PollOutcome::Restarted if readmitted => return Ok(None),
+                // One re-admission per pass keeps the pass finite, and none happens past the row's deadline: replacement inference for a row about to be stopped is not started.
+                PollOutcome::Restarted if readmitted || Instant::now() >= deadline_at => {
+                    return Ok(None);
+                }
                 PollOutcome::Restarted => {
                     match self.readmit(job, &item_id, &host_job_id, pass, observer)? {
                         Ok(rebound) => {

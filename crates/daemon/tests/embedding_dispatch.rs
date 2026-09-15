@@ -912,9 +912,9 @@ async fn a_result_ready_after_the_row_deadline_is_not_published() {
     );
 }
 
-/// A job re-admitted within the pass after the host evicted its result keeps the row's deadline from the pass's start: once that has passed, the replacement is not waited for.
+/// A job whose result the host evicted is not re-admitted once the row's deadline, measured from the pass's start, has passed: no replacement inference starts for a row about to be stopped, and nothing is waited for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_readmitted_job_keeps_the_row_deadline_from_the_pass_start() {
+async fn a_restarted_job_is_not_readmitted_past_the_row_deadline() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
@@ -932,7 +932,7 @@ async fn a_readmitted_job_keeps_the_row_deadline_from_the_pass_start() {
             ..LocalEmbeddingsLimits::default()
         },
     );
-    // A three-second row deadline: a wait renewed after re-admission would add three more seconds, which the bound below does not allow.
+    // A three-second row deadline: a re-admission with a renewed wait would add three more seconds, which the bound below does not allow.
     let near = DispatchBounds {
         grant: grant(3, NOW + 3_000),
         result_wait: Duration::from_millis(50),
@@ -974,7 +974,7 @@ async fn a_readmitted_job_keeps_the_row_deadline_from_the_pass_start() {
         PollOutcome::Restarted
     ));
 
-    // The replacement's call is held; 3.1 s pass inside the pass before the restarted poll, past the row's 3 s, so the re-admitted job is not waited for.
+    // Any replacement call would be held; 3.1 s pass inside the pass before the restarted poll, past the row's 3 s, so no replacement is admitted or waited for.
     let gate = GateGuard(engine.block_calls());
     let started = std::time::Instant::now();
     let (end, events) = pass_delayed_at_poll(
@@ -991,13 +991,16 @@ async fn a_readmitted_job_keeps_the_row_deadline_from_the_pass_start() {
     let elapsed = started.elapsed();
     drop(gate);
     assert_eq!(end, None, "{events:?}");
+    assert_eq!(stages(&events), vec![Stage::Poll], "{events:?}");
+    assert!(admitted(&events).is_empty(), "{events:?}");
     assert_eq!(
-        stages(&events),
-        vec![Stage::Poll, Stage::Admit, Stage::Poll]
+        engine.calls(),
+        2,
+        "one original and one sentinel inference, no replacement"
     );
     assert!(
         elapsed < Duration::from_millis(3_100) + Duration::from_secs(2),
-        "the re-admitted job was waited for {elapsed:?} past the row's deadline"
+        "the restarted job was waited for {elapsed:?} past the row's deadline"
     );
     assert!(published(&events).is_empty());
 }
