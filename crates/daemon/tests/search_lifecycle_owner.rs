@@ -2992,7 +2992,7 @@ fn a_lowered_duration_bound_blocks_an_active_record() {
     records(home);
     let owner = owner(home, &corpus.kernel);
     let _ = owner.run_slice(&slice_budget());
-    // Recorded with a minute's deadline under a generous bound, from one clock reading so the charged duration is exactly a minute; the reload allows one second.
+    // Recorded with a minute's deadline under a generous bound; the request stamps the record at its own clock, a few milliseconds after this reading, so the charged duration is within a few milliseconds of a minute. The reload allows one second.
     let recorded_at = now();
     let mut request = rebuild(home);
     request.deadline = recorded_at + 60_000;
@@ -3007,7 +3007,7 @@ fn a_lowered_duration_bound_blocks_an_active_record() {
     );
     let outcome = owner.run_slice(&slice_budget());
     assert!(
-        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("B_recovery_ms observed at 60000, above 1000")),
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.starts_with("B_recovery_ms observed at 599") | reason.starts_with("B_recovery_ms observed at 60000") && reason.ends_with("above 1000")),
         "{outcome:?}"
     );
     assert!(matches!(control(home), ControlState::Intent(_)));
@@ -3030,6 +3030,43 @@ fn a_request_inside_the_start_margin_is_refused() {
     let outcome = owner.request(&request, at, &slice_budget());
     assert!(
         matches!(outcome, Err(BuildError::Invalid(_))),
+        "{outcome:?}"
+    );
+    assert!(matches!(control(home), ControlState::Absent));
+}
+
+/// A request that waits for a held manager is judged at the clock after the wait: one that entered with time past the margin but spent it waiting is refused, not recorded for every slice to refuse.
+#[test]
+fn a_request_that_waited_for_the_manager_is_judged_after_the_wait() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = Arc::new(owner(home, &corpus.kernel));
+    let _ = owner.run_slice(&slice_budget());
+    // A slice holds the manager at its preparation tap for longer than the request's time past the margin.
+    let (reached_tx, reached) = std::sync::mpsc::channel();
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared { .. }) {
+            let _ = reached_tx.send(());
+            std::thread::sleep(Duration::from_millis(1_200));
+        }
+    });
+    let holder = {
+        let owner = Arc::clone(&owner);
+        std::thread::spawn(move || owner.run_slice(&slice_budget()))
+    };
+    reached
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the slice reaches its pause");
+    let at = now();
+    let mut request = rebuild(home);
+    request.deadline = at + 1_500;
+    let outcome = owner.request(&request, at, &budget(Duration::from_secs(5)));
+    let _ = holder.join().unwrap();
+    assert!(
+        matches!(&outcome, Err(BuildError::Invalid(reason)) if reason.contains("start margin")),
         "{outcome:?}"
     );
     assert!(matches!(control(home), ControlState::Absent));

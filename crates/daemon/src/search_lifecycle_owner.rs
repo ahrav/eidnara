@@ -870,6 +870,7 @@ impl SearchLifecycleOwner {
         budget: &EvalBudget,
     ) -> Result<Option<Recorded>, BuildError> {
         // A slice holds the manager across its whole work, so the wait for it is the request's own budget, like everything after it.
+        let entered = Instant::now();
         let mut managed = self.lock_within(budget)?;
         if self.kernel.database_incarnation_id_within_budget(budget)?
             != request.kernel_incarnation_id
@@ -960,6 +961,9 @@ impl SearchLifecycleOwner {
                 "manifest limits cannot bound the request",
             ));
         }
+        // The time left is judged, and the record stamped, at the clock as it stands after the waits above, not the caller's reading before them: a wait for a held manager can spend most of a short deadline.
+        let now =
+            now.saturating_add(i64::try_from(entered.elapsed().as_millis()).unwrap_or(i64::MAX));
         // A request with no time past the start margin would be recorded only for every slice to refuse it inside the margin until it expires.
         let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
         let bound = limit(inputs.manifest(), request.transition.duration_limit())

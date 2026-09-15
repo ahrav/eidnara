@@ -643,6 +643,10 @@ impl<'a> EmbeddingDispatcher<'a> {
                         }
                     };
                     pass.stage(job, Stage::Publish, observer);
+                    // The stage event is where the supervisor cancels the budget of a withdrawn grant; a vector is not committed under a manifest the grant no longer covers.
+                    if pass.budget.is_exhausted() {
+                        return Ok(Some(Blocked::BudgetExhausted));
+                    }
                     // `page` stays alive through publication so its lease keeps the result bytes counted while the vector is in use.
                     let input = match self.current_input(job, pass)? {
                         Ok(input) => input,
@@ -656,6 +660,12 @@ impl<'a> EmbeddingDispatcher<'a> {
                         input_tokens: admitted.tokens().get(),
                     };
                     return self.publish(job, &host_job_id, &publication, pass, observer);
+                }
+                // A result past the row's deadline, whatever it says, is not the row's disposition: the row stays admitted for a pass whose clock is past the deadline to stop it.
+                PollOutcome::Failed { .. } | PollOutcome::KeyMismatch | PollOutcome::BadCursor
+                    if Instant::now() >= deadline_at =>
+                {
+                    return Ok(None);
                 }
                 PollOutcome::Failed { code, .. } if !failure_is_permanent(&code) => {
                     return self.retry(job, "execution_failure", pass, observer);
@@ -796,14 +806,32 @@ impl<'a> EmbeddingDispatcher<'a> {
                         "database is locked".to_owned(),
                     )))
                 } else {
-                    self.projection.read(|conn| job_ledger(conn, &job.job_id))
+                    // The read waits for the connection only until the row's deadline, like the charge it reconciles.
+                    self.projection
+                        .read_within(pass.row_deadline, |conn| job_ledger(conn, &job.job_id))
                 };
                 match ledger {
+                    // The outcome stays unknown at the row's deadline: the pass ends without a word about the host job, whose claim stays open for a later pass to reconcile.
+                    Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                        return Ok(Err(Some(Blocked::SearchDeadline)));
+                    }
                     Ok(Some(ledger)) => {
                         match lost_charge_resolution(job.attempts, &host_job_id, &item_id, &ledger)
                         {
                             Some(LostChargeResolution::AlreadyCharged) => Admission::AlreadyCharged,
-                            Some(LostChargeResolution::Retry) => self.write(charge)?,
+                            // The ledger shows nothing charged, so the retry runs under the same row deadline as the first charge and orphans the host job when it cannot begin by then.
+                            Some(LostChargeResolution::Retry) => {
+                                match self.projection.write_within(pass.row_deadline, charge) {
+                                    Ok(charged) => charged,
+                                    Err(SearchProjectionError::Store(
+                                        storage::StoreError::Deadline,
+                                    )) => {
+                                        self.orphan(job, &host_job_id, observer);
+                                        return Ok(Err(Some(Blocked::SearchDeadline)));
+                                    }
+                                    Err(error) => return Err(self.store_failure(error)),
+                                }
+                            }
                             Some(LostChargeResolution::Defer) => return Ok(Err(None)),
                             None => {
                                 return Err(self.enter_quarantine(QuarantineKind::Storage, &lost));
@@ -1211,14 +1239,22 @@ impl<'a> EmbeddingDispatcher<'a> {
         f: impl FnOnce(&storage::GuardedConn<'_>) -> Result<T, ProjectionError>,
     ) -> Result<T, DispatchError> {
         self.check_quarantine()?;
-        self.projection.write(f).map_err(|error| match &error {
+        match self.projection.write(f) {
+            Ok(value) => Ok(value),
+            Err(error) => Err(self.store_failure(error)),
+        }
+    }
+
+    /// Quarantines the projection for a write's failure: an integrity refusal is the projection's, anything else the store's.
+    fn store_failure(&mut self, error: SearchProjectionError) -> DispatchError {
+        match &error {
             SearchProjectionError::Projection(refusal)
                 if !matches!(classify(refusal), Refusal::Storage) =>
             {
                 self.enter_quarantine(QuarantineKind::Integrity, &error)
             }
             _ => self.enter_quarantine(QuarantineKind::Storage, &error),
-        })
+        }
     }
 
     fn enter_quarantine(
