@@ -57,7 +57,7 @@ pub enum IncompleteReason {
     AcceptedBound,
     BudgetExhausted,
     KernelIncarnationChanged,
-    /// The kernel snapshot moved between eligibility batches, so later verdicts describe other facts.
+    /// The kernel snapshot changed between eligibility batches, or the current classification generation was unknown.
     SnapshotChanged,
 }
 
@@ -350,10 +350,7 @@ fn judge_batch(
         .is_some_and(|initial| initial != report.incarnation)
     {
         Some(IncompleteReason::KernelIncarnationChanged)
-    } else if retrieval
-        .snapshot
-        .is_some_and(|initial| initial != report.snapshot)
-    {
+    } else if snapshot_moved(retrieval.snapshot, report.snapshot) {
         Some(IncompleteReason::SnapshotChanged)
     } else {
         None
@@ -447,4 +444,30 @@ fn revalidate(
         }
     }
     Ok(())
+}
+
+/// An unknown classification generation counts as a moved snapshot; see [`EgressSnapshot::classification_generation`].
+fn snapshot_moved(initial: Option<EgressSnapshot>, current: EgressSnapshot) -> bool {
+    current.classification_generation.is_none() || initial.is_some_and(|initial| initial != current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_classification_generation_counts_as_a_moved_snapshot() {
+        let stable = EgressSnapshot {
+            tip: 7,
+            classification_generation: Some(4),
+        };
+        let unknown = EgressSnapshot {
+            tip: 7,
+            classification_generation: None,
+        };
+        assert!(!snapshot_moved(None, stable));
+        assert!(!snapshot_moved(Some(stable), stable));
+        assert!(snapshot_moved(None, unknown));
+        assert!(snapshot_moved(Some(unknown), unknown));
+    }
 }

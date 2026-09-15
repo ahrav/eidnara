@@ -255,7 +255,9 @@ Candidates are judged in that order through `eligibility::judge_occurrences`
 in batches of `batch_rows`. An ineligible candidate counts toward `judged` and
 `excluded` and takes no accepted slot, so eligible candidates behind it are
 still reached. Admission stops when `max_accepted` fills, the budget ends, or
-the kernel snapshot or incarnation changes between batches. The accepted set is
+the kernel snapshot or incarnation changes between batches; a batch whose
+`classification_generation` is unknown counts as a snapshot change, since a
+classification merge overlapped the read. The accepted set is
 re-judged once in one batch, and only candidates the kernel still admits are
 returned. A change of snapshot or incarnation at that step marks the result
 incomplete but does not discard the re-judged contributions.
