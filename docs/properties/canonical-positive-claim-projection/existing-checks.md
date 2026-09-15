@@ -20,6 +20,8 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `corrected_claims_report_succession_and_serving_standing_at_the_snapshot` | same | predecessor invalidation, succession, and `NotLiveAtSnapshot`; successor `NeverAdmitted`; served `Hidden` on every surface | unaudited |
 | `a_lineage_admission_binds_every_object_on_the_lineage` | same | lineage row copied; own row unchanged; served `Hidden` on every surface after quarantine | unaudited |
 | `facts_survive_reopen` | same | reopen equality | unaudited |
+| `occurrence_facts_refuse_a_detail_that_disagrees_with_its_guarded_rows` | same | a descriptor detail whose `evidence_id`, `artifact_digest`, `payload_id`, or `lineage_id` differs from the joined row is `CorruptCanonicalRow`; the read succeeds again once the payload is restored | unaudited |
+| `a_registry_class_this_build_cannot_read_is_an_error_not_a_secret_default` | same | an unreadable registry class is `CorruptCanonicalRow` against a `secret` decision row and `MalformedRequiredField` against a matching unreadable one, never a `Secret` default | unaudited |
 
 ## Adjacent kernel checks the records rely on
 

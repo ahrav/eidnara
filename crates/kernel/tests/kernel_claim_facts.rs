@@ -16,9 +16,11 @@ use kernel::source_identity::OccurrenceClass;
 use kernel::{
     AdmissionEvent, AdmissionRequest, CausalClass, ClaimFactBounds, ClaimFactsError, EventKind,
     KernelError, Maturity, POLICY_REVISION, RepositoryProvenance, RepresentationExclusion,
-    ScopeSpec, Sensitivity, ServedStanding, SourceClass, StagingCandidateSpec, SupportingApproval,
-    Surface, SurfaceVisibility, TaintClass, UnknownReason,
+    ScopeSpec, Sensitivity, ServedStanding, SourceClass, SourceDescriptorDetail,
+    StagingCandidateSpec, SupportingApproval, Surface, SurfaceVisibility, TaintClass,
+    UnknownReason,
 };
+use serde_json::Value;
 
 /// The serving route's visibility for `object_id` at `as_of` on `surface`;
 /// `Hidden` when the route lists no row.
@@ -43,6 +45,40 @@ fn served(facts: &kernel::ClaimFacts) -> &kernel::ServedFacts {
         ServedStanding::Served(served) => served,
         other => panic!("expected served facts, found {other:?}"),
     }
+}
+
+fn stored_payload(fixture: &Fixture, object_id: &str) -> Vec<u8> {
+    rusqlite::Connection::open(fixture.root.path().join("kernel.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT observation_payload FROM observations WHERE object_id=?1",
+            [object_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn write_payload(fixture: &Fixture, object_id: &str, payload: &[u8]) {
+    rusqlite::Connection::open(fixture.root.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE observations SET observation_payload=?1 WHERE object_id=?2",
+            rusqlite::params![payload, object_id],
+        )
+        .unwrap();
+}
+
+fn rewrite_detail(
+    fixture: &Fixture,
+    object_id: &str,
+    edit: impl FnOnce(&mut SourceDescriptorDetail),
+) {
+    let mut stored: Value = serde_json::from_slice(&stored_payload(fixture, object_id)).unwrap();
+    let mut detail: SourceDescriptorDetail =
+        serde_json::from_str(stored["detail"].as_str().unwrap()).unwrap();
+    edit(&mut detail);
+    stored["detail"] = Value::String(serde_json::to_string(&detail).unwrap());
+    write_payload(fixture, object_id, &serde_json::to_vec(&stored).unwrap());
 }
 
 #[test]
@@ -589,4 +625,92 @@ fn facts_survive_reopen() {
     ));
     assert_eq!(after.occurrences.len(), 1);
     assert_eq!(after.object.domain_id, DOMAIN);
+}
+
+#[test]
+fn occurrence_facts_refuse_a_detail_that_disagrees_with_its_guarded_rows() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 1);
+    let published = fixture.publish_summary(1, 1);
+    let (other_evidence, other_digest) = fixture.retain("elsewhere", "other bytes");
+    let tip = fixture.tip();
+    let original = stored_payload(&fixture, &published.descriptor_object_id);
+    let read = || {
+        fixture
+            .store
+            .claim_facts_as_of(&["decision-object-1".to_string()], tip, bounds())
+    };
+    assert_eq!(read().unwrap().claims[0].occurrences.len(), 1);
+
+    // Each field the occurrence reports must agree with the column the
+    // liveness query joined on; a detail that names another evidence row,
+    // digest, payload, or lineage is corruption, not a fact.
+    type Edit = fn(&mut SourceDescriptorDetail, &str, &str);
+    let edits: [(&str, Edit); 4] = [
+        ("evidence_id", |detail, evidence, _| {
+            detail.evidence_id = evidence.to_string();
+        }),
+        ("artifact_digest", |detail, _, digest| {
+            detail.artifact_digest = digest.to_string();
+        }),
+        ("payload_id", |detail, _, digest| {
+            detail.payload_id = digest.to_string();
+        }),
+        ("lineage_id", |detail, _, _| {
+            detail.lineage_id = "srclin:other".to_string();
+        }),
+    ];
+    for (field, edit) in edits {
+        rewrite_detail(&fixture, &published.descriptor_object_id, |detail| {
+            edit(detail, &other_evidence, &other_digest);
+        });
+        assert_eq!(
+            read(),
+            Err(ClaimFactsError::Kernel(KernelError::CorruptCanonicalRow)),
+            "{field}"
+        );
+        write_payload(&fixture, &published.descriptor_object_id, &original);
+    }
+    let restored = read().unwrap();
+    assert_eq!(restored.claims[0].occurrences.len(), 1);
+    assert_eq!(
+        restored.claims[0].occurrences[0].evidence_id,
+        published.evidence_id
+    );
+}
+
+#[test]
+fn a_registry_class_this_build_cannot_read_is_an_error_not_a_secret_default() {
+    let fixture = Fixture::open();
+    // Two decision objects whose registry class is unreadable: one whose
+    // decision row says `secret`, the class an unreadable value would default
+    // to, and one whose decision row repeats the unreadable value.
+    fixture.sql(&format!(
+        "PRAGMA foreign_keys=ON;
+         INSERT INTO object_registry(
+             object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+             created_commit_seq,sensitivity_class
+         ) VALUES
+             ('odd-object-1','decision','{DOMAIN}','fixture','odd-1',1,1,'bogus'),
+             ('odd-object-2','decision','{DOMAIN}','fixture','odd-2',1,1,'bogus');
+         INSERT INTO decisions(
+             decision_id,object_id,decision_kind,decision_payload,created_commit_seq,
+             sensitivity_class
+         ) VALUES
+             ('odd-1','odd-object-1','architecture',X'7b7d',1,'secret'),
+             ('odd-2','odd-object-2','architecture',X'7b7d',1,'bogus');"
+    ));
+    let tip = fixture.tip();
+    assert_eq!(
+        fixture
+            .store
+            .claim_facts_as_of(&["odd-object-1".to_string()], tip, bounds()),
+        Err(ClaimFactsError::Kernel(KernelError::CorruptCanonicalRow))
+    );
+    assert_eq!(
+        fixture
+            .store
+            .claim_facts_as_of(&["odd-object-2".to_string()], tip, bounds()),
+        Err(ClaimFactsError::MalformedRequiredField)
+    );
 }

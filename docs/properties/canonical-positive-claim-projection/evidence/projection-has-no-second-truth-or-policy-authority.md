@@ -6,7 +6,7 @@ Specification 'Canonical facts and identity': neither projection nor retrieval m
 
 ## Evidence trail
 
-- `crates/kernel/src/claim_facts.rs`: `admission_sql` selects rows through `served_own_decision_sql` and `served_lineage_decision_sql`, wrappers over the digest-guarded serving definitions; `load_admission` copies the columns; `load_served` calls `admission::served_classes`, the same query `visible_as_of` uses; `load_occurrences` applies the export's liveness rule.
+- `crates/kernel/src/claim_facts.rs`: `admission_sql` selects rows through `served_own_decision_sql` and `served_lineage_decision_sql`, wrappers over the digest-guarded serving definitions; `load_admission` copies the columns; `load_served` calls `admission::served_classes`, the same query `visible_as_of` uses; `load_descriptor` selects descriptors through `Descriptors::LiveAtEnd.predicate`, the export's own liveness predicate, rather than restating it.
 - `crates/kernel/tests/kernel_claim_facts.rs`: served visibility is compared with `visible_as_of(ExplicitSearch)` and own admission with the writer's `AdmissionDecision`.
 
 ## Failure scenario

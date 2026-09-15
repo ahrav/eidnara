@@ -283,13 +283,17 @@ materialization ticket.
 Guarantee: A required claim field that does not decode is an explicit error,
 never a default that implies approval, and never a silently skipped claim.
 Check: `always` - `Err(MalformedRequiredField)` when any required enum or
-sensitivity column of a returned admission row is unrecognized.
+sensitivity column of a returned admission row is unrecognized, or when the
+registry class of a returned decision is unrecognized; `Err(CorruptCanonicalRow)`
+when the decision row's stored class or creation commit differs from the
+registry row's.
 Fault/timing angle: none.
 Required faults and enabling state: corrupted `maturity`, `disposition`, and
 `sensitivity_class` columns; a decision row whose class differs from its
-registry row.
+registry row; a registry row whose class no build reads.
 Confidence: medium - [evidence](evidence/malformed-required-field-stops-projection-progress.md).
-Verified `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`.
+Verified `bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly`
+and `a_registry_class_this_build_cannot_read_is_an_error_not_a_secret_default`.
 Existing check: `crates/kernel/tests/kernel_claim_facts.rs`; status unaudited.
 Impact: a decode failure read as a default admits or hides a claim by accident.
 Open questions: None.
@@ -306,14 +310,19 @@ occurrences; existing `source_identity` tests cover tuple inequality.
 Guarantee: The occurrence inventory of a claim has one entry per published
 (class, representation) at the claim's revision, each identified by the
 encoded tuple, and a representation without a descriptor is an explicit
-exclusion rather than a missing entry.
+exclusion rather than a missing entry. Every id the entry reports equals the
+joined registry, observation, and evidence column it was judged live by.
 Check: `always` - occurrence ids equal the descriptor outcomes the test wrote;
-the exclusion list names every unpublished representation.
+the exclusion list names every unpublished representation; a stored detail
+whose `lineage_id`, `evidence_id`, `artifact_digest`, or `payload_id` differs
+from the joined columns fails the request with `CorruptCanonicalRow`.
 Fault/timing angle: none.
 Required faults and enabling state: a claim with two of three representations
-published under two classes with equal bytes.
+published under two classes with equal bytes; a descriptor detail rewritten
+out of band to name other rows.
 Confidence: medium - [evidence](evidence/occurrence-identity-is-not-payload-or-source-triple.md).
-Verified `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot`.
+Verified `claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot` and
+`occurrence_facts_refuse_a_detail_that_disagrees_with_its_guarded_rows`.
 Existing check: `crates/kernel/tests/kernel_source_descriptors.rs`, `crates/kernel/tests/kernel_claim_facts.rs`; status unaudited.
 Impact: collapsing occurrences by payload or source triple merges independent
 observations into one.
@@ -330,8 +339,8 @@ Guarantee: The facts reader evaluates no admission policy and restates no
 selection rule: the own and lineage rows are chosen by the serving view's own
 SQL (`served_own_decision_sql`, `served_lineage_decision_sql`), their fields
 are copied, served visibility comes from `admission::served_classes`, and the
-occurrence inventory applies the export's liveness rule (registry timestamps
-plus live evidence).
+occurrence inventory selects descriptors through `Descriptors::LiveAtEnd`, the
+export's own liveness predicate.
 Check: `always` - own and lineage admission fields equal the writer's
 `AdmissionDecision`; served visibility equals `visible_as_of` on every surface
 at the same snapshot; the served standing distinguishes a retired object from
