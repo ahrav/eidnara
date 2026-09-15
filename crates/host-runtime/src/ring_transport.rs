@@ -507,10 +507,8 @@ impl RingTransport {
                         .try_send(Err(ReadClose::Corrupt("shared-memory endpoint panicked")));
                 }
                 drop(panic_inbound);
-                // The endpoint has exited; the worker charge refunds with it. The backing charge
-                // settles below, after the peer-release wait, so `io` completion never waits on
-                // the peer.
-                drop(worker_admission);
+                // The endpoint has exited, so `io` completes now; the charges settle below, after
+                // the peer-release wait, without delaying the caller.
                 let _ = done_tx.send(());
                 // The backing refunds only once both doorbells read end-of-file, which proves the
                 // peer dropped its rings and every lease. An orderly peer tears its rings down right
@@ -526,8 +524,10 @@ impl RingTransport {
                     // through to a refund of storage nobody proved released.
                     backing_admission.retain_uncertain();
                 }
-                // The backing charge refunds when the last lease returns and this clone drops.
+                // The backing charge refunds when the last lease returns and this clone drops;
+                // the worker charge refunds with the thread.
                 drop(backing_admission);
+                drop(worker_admission);
             });
         if spawned.is_err() {
             return Err(RingUnavailable);
@@ -939,10 +939,14 @@ fn fail(
 }
 
 // Teardown must not depend on the receiver draining: a full channel under `discard` or `root` cancellation yields instead of blocking the endpoint.
+/// Hands `event` to the receiver. `pending_deadline` is the earliest deadline of a ticket the
+/// publisher still holds, if any: the delivery wait can outlast it while the receiver is not
+/// draining, and a ticket past its deadline retires the generation from here as well.
 async fn deliver(
     inbound: &InboundSender,
     queue: &SenderQueue,
     root: &CancellationToken,
+    pending_deadline: Option<Instant>,
     event: Result<InboundEvent, ReadClose>,
 ) -> Result<(), ReadClose> {
     tokio::select! {
@@ -950,6 +954,9 @@ async fn deliver(
         sent = inbound.send(event) => sent.map_err(|_| ReadClose::Cancelled),
         () = queue.discard.cancelled() => Err(ReadClose::Cancelled),
         () = root.cancelled() => Err(ReadClose::Cancelled),
+        () = tokio::time::sleep_until(pending_deadline.unwrap_or_else(Instant::now)), if pending_deadline.is_some() => {
+            Err(ReadClose::Corrupt("shared-memory publish failed"))
+        }
     }
 }
 
@@ -983,6 +990,9 @@ async fn receive_one(
             inbound,
             queue,
             root,
+            publisher
+                .has_pending()
+                .then(|| publisher.earliest_deadline()),
             Ok(InboundEvent::Rejected(RejectedFrame { corr: header.corr })),
         )
         .await?;
@@ -1060,6 +1070,9 @@ async fn receive_one(
         inbound,
         queue,
         root,
+        publisher
+            .has_pending()
+            .then(|| publisher.earliest_deadline()),
         Ok(InboundEvent::Frame(InboundFrame::new(
             header, lease, charge,
         ))),
@@ -2199,6 +2212,69 @@ mod tests {
         drop(held);
     }
 
+    /// A blocked ticket's frame deadline must still retire the generation while `receive_one`
+    /// waits for inbound delivery space.
+    #[tokio::test]
+    async fn a_blocked_ticket_deadline_retires_the_generation_while_delivery_is_blocked() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let held = exhaust_smallest_class(&rings.first, &consumer);
+        // One blocked ordinary ticket with a short deadline.
+        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_millis(300), None);
+        publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
+        publisher.pump(&rings.first).expect("blocked pump");
+        assert!(publisher.has_pending());
+
+        // The peer commits a request the budget grants at once; delivery is what blocks,
+        // because the inbound channel already holds an undrained event.
+        let header = EnvelopeHeader {
+            len: 1,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 7,
+            epoch: 1,
+            corr: 1,
+        };
+        let mut reservation = rings.second.try_reserve(1, header.encode()).unwrap();
+        reservation.write(&[7]).unwrap();
+        reservation.commit(1).unwrap();
+        let (_sender, mut queue) =
+            frame_sender(1, CancellationToken::new(), Duration::from_secs(1));
+        let (inbound, _received) = mpsc::channel(1);
+        inbound
+            .try_send(Err(ReadClose::CleanEof))
+            .expect("fill the inbound channel");
+        let budget = ByteBudget::new(1024);
+        let capacity = capacity_fd(&rings);
+        let root = CancellationToken::new();
+        let read_cancel = CancellationToken::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            receive_one(
+                &rings,
+                &mut queue,
+                &mut publisher,
+                &capacity,
+                &inbound,
+                &budget,
+                Duration::from_secs(5),
+                &root,
+                &read_cancel,
+            ),
+        )
+        .await
+        .expect("the blocked ticket's deadline ends the delivery wait");
+        assert!(
+            matches!(
+                result,
+                Err(ReadClose::Corrupt("shared-memory publish failed"))
+            ),
+            "a ticket past its deadline retires the generation: {result:?}"
+        );
+        drop(held);
+    }
+
     /// A peer return during the ingress-budget wait publishes the blocked ticket instead of
     /// waiting for the budget or the frame deadline.
     #[tokio::test]
@@ -2820,10 +2896,16 @@ mod tests {
             .await
             .expect("endpoint exits")
             .expect("endpoint task joins");
+        assert_eq!(
+            transport.accounting().unwrap().active.workers,
+            1,
+            "the worker thread is still alive while it waits for the peer to release"
+        );
         let accounting = settled_accounting(&transport, |accounting| {
-            accounting.quarantined != ResourceCharges::ZERO
+            accounting.active == ResourceCharges::ZERO
         })
         .await;
+        assert_eq!(accounting.active, ResourceCharges::ZERO);
         assert_ne!(
             accounting.quarantined,
             ResourceCharges::ZERO,

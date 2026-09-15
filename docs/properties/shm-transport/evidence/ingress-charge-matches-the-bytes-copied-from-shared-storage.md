@@ -42,11 +42,11 @@ At HEAD: The comparison moved into the shared `check_wire_header` (`descriptor.r
 Downstream of the charge, `InboundFrame::into_private` (`frame_channel.rs:107-128`)
 does re-derive it: after `PayloadLease::to_vec` (`:116`) it returns
 `PrivateCopyError::LengthMismatch` when `body.len()` disagrees with `header.len`
-(`:120-122`), and both callers end the generation on that error
+(`:119-121`), and both callers end the generation on that error
 (`crates/host-runtime/src/connection.rs:419-422`,
-`crates/host-runtime/src/dispatch.rs:1004-1011`). The charge is reserved from
-`header.len` before the copy (`ring_transport.rs:963`) and travels with the frame
-(`frame_channel.rs:68`, `:126`), so it matches the copied body whenever the copy
+`crates/host-runtime/src/dispatch.rs:1006-1011`). The charge is reserved from
+`header.len` before the copy (`ring_transport.rs:1004`) and travels with the frame
+(`frame_channel.rs:68`, `:125`), so it matches the copied body whenever the copy
 succeeds; the charge is what the budget later releases, so a divergence that
 escaped both checks would be a durable accounting error rather than a transient
 one.
