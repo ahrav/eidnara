@@ -507,10 +507,16 @@ impl RingTransport {
                         .try_send(Err(ReadClose::Corrupt("shared-memory endpoint panicked")));
                 }
                 drop(panic_inbound);
-                // A quarantined pool may remain mapped by its peer, so its backing charge moves to the quarantined bucket rather than being refunded.
-                // A peer that closed its doorbell ends has dropped its attachment, so its pool is reclaimable even though the backend latched quarantine on the closed doorbell.
-                let quarantined = (rings.first.is_quarantined() || rings.second.is_quarantined())
-                    && !peer_released_ring(&rings);
+                // The endpoint has exited; the worker charge refunds with it. The backing charge
+                // settles below, after the peer-release wait, so `io` completion never waits on
+                // the peer.
+                drop(worker_admission);
+                let _ = done_tx.send(());
+                // The backing refunds only once both doorbells read end-of-file, which proves the
+                // peer dropped its rings and every lease. An orderly peer tears its rings down right
+                // after Goodbye, so the wait is short; a peer that keeps a mapping past the grace
+                // moves the charge to the quarantined bucket rather than refunding storage it holds.
+                let quarantined = !peer_released_ring(&rings, PEER_RELEASE_GRACE);
                 drop(rings);
                 // A backing with no lease in flight unmaps here; one still leased is pruned by
                 // a later registration or snapshot.
@@ -520,11 +526,8 @@ impl RingTransport {
                     // through to a refund of storage nobody proved released.
                     backing_admission.retain_uncertain();
                 }
-                // The backing charge refunds when the last lease returns and this clone drops;
-                // the worker charge refunds now, with the thread.
+                // The backing charge refunds when the last lease returns and this clone drops.
                 drop(backing_admission);
-                drop(worker_admission);
-                let _ = done_tx.send(());
             });
         if spawned.is_err() {
             return Err(RingUnavailable);
@@ -582,11 +585,24 @@ pub(crate) fn worker_descriptor(
     ))
 }
 
+/// How long a retiring endpoint waits for the peer to drop its rings and leases before the
+/// backing charge is treated as retained by the peer.
+const PEER_RELEASE_GRACE: Duration = Duration::from_secs(2);
+
 /// A stream doorbell reads end-of-file only after its peer end is closed, which is how a peer that exited or dropped its attachment appears to the host.
-fn peer_released_ring(rings: &DuplexRing) -> bool {
+fn peer_released_ring(rings: &DuplexRing, grace: Duration) -> bool {
     // A lease the peer keeps from the host-to-peer pool holds that pool's doorbell end open, so
     // both directions must read end-of-file before the backing counts as released.
-    doorbell_at_eof(&rings.first) && doorbell_at_eof(&rings.second)
+    let deadline = StdInstant::now() + grace;
+    loop {
+        if doorbell_at_eof(&rings.first) && doorbell_at_eof(&rings.second) {
+            return true;
+        }
+        if StdInstant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn doorbell_at_eof(ring: &Ring) -> bool {
@@ -1645,6 +1661,31 @@ mod tests {
     use super::*;
     use crate::wire::{Flags, PROTOCOL_VERSION, Priority};
 
+    /// The backing charge settles after `io` completes, once the peer-release wait ends.
+    /// Blocks until the endpoint thread has settled its backing after `io` completed: the
+    /// thread waits for doorbell end-of-file before refunding or quarantining, so accounting
+    /// and the backing registry lag `io` by up to `PEER_RELEASE_GRACE`.
+    fn wait_until(settled: impl Fn() -> bool) {
+        let deadline = StdInstant::now() + Duration::from_secs(5);
+        while !settled() && StdInstant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    async fn settled_accounting(
+        transport: &RingTransport,
+        settled: impl Fn(&shm_transport::profile::AccountingSnapshot) -> bool,
+    ) -> shm_transport::profile::AccountingSnapshot {
+        let deadline = StdInstant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = transport.accounting().unwrap();
+            if settled(&snapshot) || StdInstant::now() >= deadline {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     struct TestCharge {
         used: Arc<std::sync::atomic::AtomicUsize>,
         bytes: usize,
@@ -2634,10 +2675,15 @@ mod tests {
             .expect("root cancellation must stop an endpoint blocked on a full inbound queue")
             .expect("endpoint task joins");
         drop(receiver);
+        drop(peer);
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.active == ResourceCharges::ZERO
+        })
+        .await;
         assert_eq!(
-            transport.accounting().unwrap().active,
+            accounting.active,
             ResourceCharges::ZERO,
-            "a cancelled endpoint over a healthy ring refunds its admission"
+            "a cancelled endpoint over a healthy ring refunds its admission once the peer releases"
         );
     }
 
@@ -2752,6 +2798,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_peer_still_attached_after_an_orderly_close_keeps_the_backing_charge_in_quarantine() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            io,
+            root,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        // The host retires the generation, as a channel-0 Goodbye does, while the peer keeps
+        // both rings attached.
+        root.cancel();
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits")
+            .expect("endpoint task joins");
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.quarantined != ResourceCharges::ZERO
+        })
+        .await;
+        assert_ne!(
+            accounting.quarantined,
+            ResourceCharges::ZERO,
+            "the peer still maps both pools, so nothing is proved released"
+        );
+        drop(peer);
+    }
+
     #[test]
     fn a_doorbell_with_a_queued_token_ahead_of_end_of_file_still_reads_as_released() {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
@@ -2822,7 +2902,10 @@ mod tests {
             .await
             .expect("endpoint exits after the peer closes")
             .expect("endpoint task joins");
-        let accounting = transport.accounting().unwrap();
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.quarantined != ResourceCharges::ZERO
+        })
+        .await;
         assert_eq!(held.to_vec().expect("copy"), [9]);
         assert_ne!(
             accounting.quarantined,
@@ -2878,7 +2961,10 @@ mod tests {
             .expect("endpoint task joins");
         assert!(sender.is_retired());
 
-        let accounting = transport.accounting().unwrap();
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.active == ResourceCharges::ZERO
+        })
+        .await;
         assert_eq!(accounting.active, ResourceCharges::ZERO);
         assert_eq!(
             accounting.quarantined,
@@ -2933,10 +3019,12 @@ mod tests {
             .await
             .expect("root cancellation must end a budget wait well before the frame deadline")
             .expect("endpoint task joins");
-        assert_eq!(
-            transport.accounting().unwrap().active,
-            ResourceCharges::ZERO
-        );
+        drop(peer);
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.active == ResourceCharges::ZERO
+        })
+        .await;
+        assert_eq!(accounting.active, ResourceCharges::ZERO);
     }
 
     #[test]
@@ -3082,7 +3170,10 @@ mod tests {
             .expect("endpoint task joins");
         assert!(sender.is_retired());
 
-        let accounting = transport.accounting().unwrap();
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.active == ResourceCharges::ZERO
+        })
+        .await;
         assert_eq!(accounting.active, ResourceCharges::ZERO);
         assert_eq!(
             accounting.quarantined,
@@ -3624,8 +3715,14 @@ mod tests {
         );
 
         let PreparedRing {
-            sender, io, root, ..
+            sender,
+            io,
+            root,
+            descriptors,
+            ..
         } = first;
+        // No peer ever attached; closing its doorbell ends is what proves the release.
+        drop(descriptors);
         root.cancel();
         drop(sender);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3634,7 +3731,8 @@ mod tests {
             .unwrap();
         runtime.block_on(io);
         // Backing charges end with the last owned lease; the endpoint held none, so the
-        // returned charge admits the next connection.
+        // returned charge admits the next connection once the thread proves the peer released.
+        wait_until(|| transport.accounting().unwrap().active == ResourceCharges::ZERO);
         let recovered = transport.prepare(ByteBudget::new(1 << 20), 4, Duration::from_secs(1));
         assert!(
             recovered.is_ok(),
@@ -3659,6 +3757,7 @@ mod tests {
             root.cancel();
             drop(sender);
             runtime.block_on(io);
+            wait_until(|| transport.accounting().unwrap().active == ResourceCharges::ZERO);
         }
         assert_eq!(
             transport.backings.entries.lock().unwrap().len(),
@@ -3709,6 +3808,7 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(io);
+        wait_until(|| transport.return_snapshot().live_backings == 0);
         let after = transport.return_snapshot();
         assert_eq!(
             after.live_backings, 0,

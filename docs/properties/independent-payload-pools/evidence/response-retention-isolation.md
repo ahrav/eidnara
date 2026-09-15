@@ -10,12 +10,12 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/host-runtime/src/ring_transport.rs:1539`
+- `crates/host-runtime/src/ring_transport.rs:1555`
 - `crates/host-runtime/src/client.rs:477`
 - `packages/opencode-plugin/src/shared/host-client/connection.ts:1057`
 - `packages/opencode-plugin/src/shared/host-client/connection.ts:1088`
 
-Witness status: partial - Rust client: `RingClientEndpoint::try_recv_with` (`crates/host-runtime/src/ring_transport.rs:1539`) copies each body to private bytes and releases the lease before the frame leaves the bridge, and `crates/host-runtime/tests/client.rs:498` holds response A and every B response, more than the 4 KiB class has blocks, and keeps A past close; the stream budget's refusal is covered by `exhausted_retention_cancels_only_the_saturating_stream` in crates/host-runtime/src/client.rs and the unpolled-unary budget, its refusal of a second maximum response, and its charge release by `crates/host-runtime/src/client.rs:7355`. Native/TypeScript retained binary quotas belong to #550; the transport side is proved by `released-block-reuse-preserves-held-bytes`.
+Witness status: partial - Rust client: `RingClientEndpoint::try_recv_with` (`crates/host-runtime/src/ring_transport.rs:1555`) copies each body to private bytes and releases the lease before the frame leaves the bridge, and `crates/host-runtime/tests/client.rs:498` holds response A and every B response, more than the 4 KiB class has blocks, and keeps A past close; the stream budget's refusal is covered by `exhausted_retention_cancels_only_the_saturating_stream` in crates/host-runtime/src/client.rs and the unpolled-unary budget, its refusal of a second maximum response, and its charge release by `crates/host-runtime/src/client.rs:7355`. Native/TypeScript retained binary quotas belong to #550; the transport side is proved by `released-block-reuse-preserves-held-bytes`.
 
 ## Failure scenario
 
