@@ -321,6 +321,7 @@ impl<'a> EmbeddingDispatcher<'a> {
         now: i64,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Option<Blocked>, DispatchError> {
+        let pass_started = Instant::now();
         self.check_quarantine()?;
         let cursor_binding = EligibilityCursorBinding {
             project: eligibility.project.clone(),
@@ -493,6 +494,12 @@ impl<'a> EmbeddingDispatcher<'a> {
                 break;
             }
         }
+        // The position is recorded as soon as the scan ends: a pass blocked or failed while acting on what it selected resumes behind the prefix it already walked, and the selected jobs lie past the safe cursor, so the next pass finds them again.
+        self.scan_position = Some(ScanPosition {
+            binding: cursor_binding,
+            cursor: safe_cursor,
+            revisit_at,
+        });
         if let Some(blocked) = self.obsolete_candidates(&terminal, deadline, now, observer)? {
             return Ok(Some(blocked));
         }
@@ -504,6 +511,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             budget,
             deadline,
             now,
+            started: pass_started,
         };
         for job_id in &selected {
             let job = self.projection.read(|conn| dispatch_job(conn, job_id, now));
@@ -515,11 +523,6 @@ impl<'a> EmbeddingDispatcher<'a> {
                 return Ok(Some(blocked));
             }
         }
-        self.scan_position = Some(ScanPosition {
-            binding: cursor_binding,
-            cursor: safe_cursor,
-            revisit_at,
-        });
         Ok(None)
     }
 
@@ -578,11 +581,11 @@ impl<'a> EmbeddingDispatcher<'a> {
             }
         };
         pass.stage(job, Stage::Poll, observer);
-        // The wait for a result ends at the row's episode deadline, measured from this pass's clock reading, so a result that lands after the deadline is left for a pass that stops the row.
-        let until_deadline = u64::try_from(job.episode_deadline(pass.bounds.grant) - pass.now)
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::ZERO);
-        let result_wait = pass.bounds.result_wait.min(until_deadline);
+        // The wait for a result ends at the row's episode deadline, measured from the pass's clock reading at its start, so a result that lands after the deadline is left for a pass that stops the row; a host restart during the wait renews the result wait but not this deadline.
+        let deadline_at = pass.started
+            + u64::try_from(job.episode_deadline(pass.bounds.grant) - pass.now)
+                .map(Duration::from_millis)
+                .unwrap_or(Duration::ZERO);
         let mut readmitted = false;
         let mut started = Instant::now();
         loop {
@@ -594,7 +597,10 @@ impl<'a> EmbeddingDispatcher<'a> {
                 PollOutcome::Pending { .. } if pass.budget.is_exhausted() => {
                     return Ok(Some(Blocked::BudgetExhausted));
                 }
-                PollOutcome::Pending { .. } if started.elapsed() < result_wait => {
+                PollOutcome::Pending { .. }
+                    if started.elapsed() < pass.bounds.result_wait
+                        && Instant::now() < deadline_at =>
+                {
                     std::thread::sleep(POLL_INTERVAL);
                 }
                 // This job's wait is over; the pass moves on and a later pass polls the held job.
@@ -1191,6 +1197,8 @@ struct Pass<'a> {
     budget: &'a EvalBudget,
     deadline: Instant,
     now: i64,
+    /// When the pass read `now`; the row deadlines it enforces are measured from here.
+    started: Instant,
 }
 
 impl Pass<'_> {

@@ -733,6 +733,109 @@ async fn a_held_job_is_polled_only_until_its_episode_deadline() {
     TestEngine::release(&gate.0);
 }
 
+/// A pass that scans past a long wrong-scope prefix and is then blocked at its first actionable job keeps the scan position it earned, so the next pass does not rescan the prefix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blocked_pass_keeps_the_scan_position_it_reached() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object_b = corpus.publish_scoped("project-b", "project B input", SCOPE_B);
+    let object_a = corpus.publish_scoped("project-a", "project A input", SCOPE);
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence_b = occurrence_of(&rows, &object_b);
+    let _occurrence_a = occurrence_of(&rows, &object_a);
+    insert_wrong_scope_jobs(dir.path(), occurrence_b, 1_024);
+    let project_a = ProjectScope::new(PROJECT).unwrap();
+    let one = DispatchBounds {
+        max_jobs: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    };
+
+    // A pass whose native call returns settles the job and records where the scan stood before it.
+    let settled_engine = TestEngine::new();
+    let settled_lane = component(&settled_engine, LocalEmbeddingsLimits::default());
+    let mut settled = EmbeddingDispatcher::new(&corpus.kernel, &projection, &settled_lane);
+    let end = settled
+        .run_pass(
+            eligibility(&project_a),
+            &one,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(end, None);
+    let expected = settled.scan_position();
+
+    // The same scan on a fresh projection copy, blocked at the job by a held call and a short budget, ends at the same position.
+    let dir2 = tempfile::tempdir().unwrap();
+    let corpus2 = Corpus::open(dir2.path());
+    corpus2.seed();
+    let object_b2 = corpus2.publish_scoped("project-b", "project B input", SCOPE_B);
+    corpus2.publish_scoped("project-a", "project A input", SCOPE);
+    let (projection2, rows2) = corpus2.bootstrap(dir2.path());
+    insert_wrong_scope_jobs(dir2.path(), occurrence_of(&rows2, &object_b2), 1_024);
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let held_lane = component(&engine, LocalEmbeddingsLimits::default());
+    let mut blocked = EmbeddingDispatcher::new(&corpus2.kernel, &projection2, &held_lane);
+    let end = blocked
+        .run_pass(
+            eligibility(&project_a),
+            &one,
+            &budget(Duration::from_millis(500)),
+            NOW,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(end, Some(Blocked::BudgetExhausted));
+    TestEngine::release(&gate.0);
+    assert_eq!(
+        blocked.scan_position(),
+        expected,
+        "a blocked pass keeps the position its scan reached"
+    );
+}
+
+/// The wait for a held job's result ends at the row's episode deadline as measured from the pass's start, and a host restart during the wait does not renew it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_readmitted_job_keeps_the_pass_deadline_for_its_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("m0", "held message");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let near = DispatchBounds {
+        grant: grant(3, NOW + 300),
+        ..bounds()
+    };
+    // The first pass admits the row under the 300 ms deadline and leaves it held.
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &near, NOW);
+    assert_eq!(end, None);
+    assert_eq!(admitted(&events).len(), 1);
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(held.deadline, Some(NOW + 300));
+
+    // A new host incarnation makes the held job poll as restarted; the re-admitted job's wait is still bounded by the row's deadline from the pass start.
+    let restarted_engine = TestEngine::new();
+    let restarted_gate = GateGuard(restarted_engine.block_calls());
+    let restarted_lane = component(&restarted_engine, LocalEmbeddingsLimits::default());
+    let started = std::time::Instant::now();
+    let (end, events) = pass(&corpus, &projection, &restarted_lane, &bounds(), NOW);
+    assert_eq!(end, None, "{events:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the re-admitted job's wait ran {:?} past the row's 300 ms deadline",
+        started.elapsed()
+    );
+    TestEngine::release(&gate.0);
+    TestEngine::release(&restarted_gate.0);
+}
+
 /// AC2, AC4, AC6: a new host incarnation cannot satisfy work the old one admitted; rebinding returns it to pending with its attempt kept, a lane with a different fingerprint blocks admission, and the stored binding follows the host that actually serves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
