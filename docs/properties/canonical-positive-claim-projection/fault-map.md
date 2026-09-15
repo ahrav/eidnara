@@ -43,8 +43,8 @@
 | `claim-cancellation-preserves-durable-work` | cancellation at each boundary | RP2.1 tests |
 | `claim-disable-preserves-consumer-contract` | lagging consumer at disable | no |
 | `claim-recovery-converges-within-approved-bound` | approved bound plus crash cuts | no |
-| `candidate-validation-preserves-surface-policy` | labeled claims validated on two surfaces | yes |
-| `stale-projection-cannot-authorize-current-use` | quarantine and correction between two validations | yes |
+| `candidate-validation-preserves-surface-policy` | claims admitted with `ExplicitLabeled` and `Automatic` visibility rows, validated on all three surfaces, under a foreign project, and at a remote destination | yes |
+| `stale-projection-cannot-authorize-current-use` | approve-then-quarantine and correction between two validations; a descriptor retirement, a forged row digest, a `MarkStale` admission, a causality record, and a kernel of another incarnation between classification and validation | yes |
 | `eligibility-cache-cannot-change-canonical-verdict` | duplicated ordered candidates, two reads | yes |
 | `u5-rejection-and-unknown-accounting-is-lossless` | rejected Unknown and permitted genuine in one batch; one representation purged | yes |
 | `u5-evaluation-keeps-provenance-and-judgment-separate` | equal policy, different classes | yes |
