@@ -146,6 +146,8 @@ const STATUS_SCAN_THREAD_CAP: usize = 4;
 pub struct EvalBudget {
     deadline: Option<Instant>,
     interrupt: Arc<AtomicBool>,
+    /// The flag of the budget this one was linked from; raising it exhausts this budget too, while this budget's own flag leaves it untouched.
+    parent: Option<Arc<AtomicBool>>,
 }
 
 impl EvalBudget {
@@ -153,6 +155,16 @@ impl EvalBudget {
         Self {
             deadline,
             interrupt,
+            parent: None,
+        }
+    }
+
+    /// The same deadline under a private interrupt that this budget's cancellation still raises: cancelling the linked budget does not cancel this one.
+    pub fn linked(&self) -> Self {
+        Self {
+            deadline: self.deadline,
+            interrupt: Arc::new(AtomicBool::new(false)),
+            parent: Some(Arc::clone(&self.interrupt)),
         }
     }
 
@@ -177,6 +189,7 @@ impl EvalBudget {
         Self {
             deadline: Some(self.deadline.map_or(deadline, |own| own.min(deadline))),
             interrupt: Arc::clone(&self.interrupt),
+            parent: self.parent.clone(),
         }
     }
 
@@ -189,6 +202,14 @@ impl EvalBudget {
     /// every gix walk sharing the flag stop without re-reading the clock.
     pub fn is_exhausted(&self) -> bool {
         if self.interrupt.load(Ordering::Relaxed) {
+            return true;
+        }
+        if self
+            .parent
+            .as_ref()
+            .is_some_and(|parent| parent.load(Ordering::Relaxed))
+        {
+            self.interrupt.store(true, Ordering::Relaxed);
             return true;
         }
         match self.deadline {
@@ -213,6 +234,7 @@ impl EvalBudget {
     /// interrupt, so the interrupt travels with the deadline.
     pub(crate) fn acquire_limit(&self) -> crate::open::AcquireLimit {
         crate::open::AcquireLimit::new(self.deadline, Some(Arc::clone(&self.interrupt)))
+            .with_parent(self.parent.clone())
     }
 }
 
@@ -1552,6 +1574,25 @@ fn repository_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_linked_budget_follows_its_parents_cancellation_but_not_the_reverse() {
+        let parent = EvalBudget::unbounded();
+        let linked = parent.linked();
+        linked.cancel();
+        assert!(linked.is_exhausted());
+        assert!(
+            !parent.is_exhausted(),
+            "cancelling the link leaves the parent live"
+        );
+        let linked = parent.linked();
+        parent.cancel();
+        assert!(
+            linked.is_exhausted(),
+            "the parent's cancellation reaches the link"
+        );
+        assert!(linked.acquire_limit().should_stop());
+    }
 
     #[test]
     fn bounded_by_keeps_the_earlier_deadline_and_shares_the_interrupt() {

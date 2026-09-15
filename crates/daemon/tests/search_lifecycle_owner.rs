@@ -1143,6 +1143,154 @@ async fn a_refused_manifest_closes_admission_before_maintenance_drains() {
     owner.shutdown().await.unwrap();
 }
 
+/// A Current family whose catch-up is blocked on a dead hold still rotates its supervisor when the roster changes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_blocked_catch_up_still_reconciles_maintenance() {
+    use support::embedding_fixtures::{PROJECT, PROJECT_B};
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let roster = Arc::new(std::sync::Mutex::new(vec![(
+        "project:a".to_owned(),
+        ProjectScope::new(PROJECT).unwrap(),
+    )]));
+    let owner = {
+        let roster = Arc::clone(&roster);
+        SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+            .with_roster(Arc::new(move || roster.lock().unwrap().clone()))
+    };
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    drive(&owner, 40, || published(&owner).len() == 1).await;
+    owner.shutdown().await.unwrap();
+    drop(owner);
+
+    // The restarted owner's dead hold blocks catch-up while the family continues serving.
+    drop(corpus);
+    let corpus = Corpus::open(home);
+    let owner = {
+        let roster = Arc::clone(&roster);
+        SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+            .with_roster(Arc::new(move || roster.lock().unwrap().clone()))
+    };
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let first = owner.maintenance().expect("the lone project is maintained");
+    assert_eq!(*first.scope, ProjectScope::new(PROJECT).unwrap());
+    corpus.publish("later", "later text");
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::CaughtUp(report) if matches!(report.end, EpisodeEnd::Blocked(Blocked::HoldExtension(_)))),
+        "{outcome:?}"
+    );
+
+    *roster.lock().unwrap() = vec![(
+        "project:b".to_owned(),
+        ProjectScope::new(PROJECT_B).unwrap(),
+    )];
+    let outcome = owner.run_slice(&slice_budget());
+    let SliceOutcome::RotateMaintenance(handle) = outcome else {
+        panic!("a project off the roster loses its supervisor: {outcome:?}");
+    };
+    owner.stop_maintenance(&handle).await.unwrap();
+    owner.shutdown().await.unwrap();
+}
+
+/// Cancelling the caller's budget while a catch-up episode waits for a kernel reader ends the slice promptly.
+#[test]
+fn caller_cancellation_interrupts_a_catch_up_waiting_for_a_kernel_reader() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("catchup_batch_commits", 1), ("catchup_lag_commits", 1_000)],
+        ),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let before = corpus
+        .kernel
+        .outbox_consumer_checkpoint(CONSUMER)
+        .unwrap()
+        .unwrap();
+    for index in 0..40 {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
+
+    let budget = slice_budget();
+    let held = std::sync::Barrier::new(2);
+    let (waited, outcome) = std::thread::scope(|scope| {
+        let slice = {
+            let budget = budget.clone();
+            scope.spawn(move || owner.run_slice(&budget))
+        };
+        let started = Instant::now();
+        loop {
+            if corpus
+                .kernel
+                .outbox_consumer_checkpoint(CONSUMER)
+                .unwrap()
+                .unwrap()
+                > before
+            {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        scope.spawn(|| {
+            corpus
+                .kernel
+                .hold_readers_for_test(&held, Duration::from_secs(3))
+        });
+        held.wait();
+        std::thread::sleep(Duration::from_millis(100));
+        let cancelled = Instant::now();
+        budget.cancel();
+        let outcome = slice.join().unwrap();
+        (cancelled.elapsed(), outcome)
+    });
+    assert!(
+        waited < Duration::from_millis(1_500),
+        "the slice ran {waited:?} after cancellation: {outcome:?}"
+    );
+    assert!(
+        matches!(&outcome, SliceOutcome::CaughtUp(report) if report.end == EpisodeEnd::Blocked(Blocked::Cancelled)),
+        "{outcome:?}"
+    );
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

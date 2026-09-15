@@ -5,7 +5,7 @@ use crate::embedding_supervisor::{
 use crate::projection_lifecycle::{ControlState, DisabledIntent, EpisodeAccounting, IntentRefusal};
 use kernel::CommitIntent;
 use sha2::{Digest, Sha256};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
@@ -69,7 +69,7 @@ pub enum DisableEvent {
 }
 
 impl SearchSelection {
-    /// Starts the selected family's supervisor and retains its reader through native completion.
+    /// Starts the selected family's supervisor and retains its reader through native completion; the kernel reads that validate the start end within `budget`.
     /// The supplied projection must be the selected connection, not a second connection to its path.
     pub fn start_maintenance(
         &mut self,
@@ -77,6 +77,7 @@ impl SearchSelection {
         bounds: SliceBounds,
         now: Arc<dyn Fn() -> i64 + Send + Sync>,
         events: tokio::sync::mpsc::UnboundedSender<SupervisorEvent>,
+        budget: &EvalBudget,
     ) -> Result<(), BuildError> {
         if self.maintenance.as_ref().is_some_and(|owner| !owner.pins()) {
             self.maintenance = None;
@@ -121,11 +122,7 @@ impl SearchSelection {
                 ),
             ],
         )?;
-        let kernel_budget = EvalBudget::new(
-            Some(Instant::now() + bounds.slice),
-            Arc::new(AtomicBool::new(false)),
-        );
-        family.check_kernel(&maintained.kernel, &kernel_budget)?;
+        family.check_kernel(&maintained.kernel, budget)?;
         let scope = maintained.project.clone();
         let supervisor = EmbeddingSupervisor::new(maintained, bounds, now, events);
         let task = supervisor.spawn_pinned(SearchReader { family, grant });

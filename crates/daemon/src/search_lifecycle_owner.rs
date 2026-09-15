@@ -394,7 +394,7 @@ impl SearchLifecycleOwner {
         }
     }
 
-    /// Reports a Current family: `Current` at the kernel tip with maintenance kept for the current tenant, `RotateMaintenance` when that tenant's supervisor must be joined first, `CaughtUp` after one catch-up episode toward the tip, with admission refreshed on the family the episode moved.
+    /// Reports a Current family: `Current` at the kernel tip, `CaughtUp` after one catch-up episode toward the tip with admission refreshed on the family the episode moved, or `RotateMaintenance` when the tenant's supervisor must be joined first. Maintenance is reconciled whether or not the episode advanced, so a family whose hold is dead still rotates.
     fn settle_current(
         &self,
         selection: &mut SearchSelection,
@@ -404,22 +404,22 @@ impl SearchLifecycleOwner {
         identity: &ProjectionIdentity,
         budget: &EvalBudget,
     ) -> SliceOutcome {
-        match self.catch_up(
+        let report = match self.catch_up(
             selection,
             spec,
             &intent.consumer.consumer_id,
             identity,
             budget,
         ) {
-            Ok(None) => match self.maintain(selection, manifest, spec, budget) {
-                Ok(None) => SliceOutcome::Current,
-                Ok(Some(handle)) => SliceOutcome::RotateMaintenance(handle),
-                Err(error) => SliceOutcome::Blocked(error.to_string()),
-            },
-            Ok(Some(report)) => {
-                let _ = self.refresh(selection, identity, budget);
-                SliceOutcome::CaughtUp(report)
-            }
+            Ok(report) => report,
+            Err(error) => return SliceOutcome::Blocked(error.to_string()),
+        };
+        if report.is_some() {
+            let _ = self.refresh(selection, identity, budget);
+        }
+        match self.maintain(selection, manifest, spec, budget) {
+            Ok(Some(handle)) => SliceOutcome::RotateMaintenance(handle),
+            Ok(None) => report.map_or(SliceOutcome::Current, SliceOutcome::CaughtUp),
             Err(error) => SliceOutcome::Blocked(error.to_string()),
         }
     }
@@ -467,17 +467,12 @@ impl SearchLifecycleOwner {
             kernel_incarnation_id: identity.kernel_incarnation_id.clone(),
             generation_id: Some(reader.consumer().generation_id.clone()),
         };
-        // The callback cancels only `episode`, leaving the caller's `budget` unmodified.
-        let episode = EvalBudget::new(
-            budget.deadline(),
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        );
-        let revoked =
-            || budget.is_exhausted() || grants.iter().any(|grant| grant.invalidated.is_cancelled());
+        // The caller's cancellation reaches the linked budget directly; the callback cancels only `episode`, leaving the caller's `budget` unmodified.
+        let episode = budget.linked();
         let report = SearchCatchUp::new(&self.kernel, reader.projection())
             .with_budget(episode.clone())
             .run_episode(&consumer, &spec.episode, crate::now_ms(), &mut |_| {
-                if revoked() {
+                if grants.iter().any(|grant| grant.invalidated.is_cancelled()) {
                     episode.cancel();
                 }
             })?;
@@ -536,6 +531,7 @@ impl SearchLifecycleOwner {
             bounds,
             Arc::new(crate::now_ms),
             tokio::sync::mpsc::unbounded_channel().0,
+            budget,
         )?;
         *tenure = Some((next.clone(), 0, grant_deadline));
         Ok(None)
