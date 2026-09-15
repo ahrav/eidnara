@@ -224,11 +224,13 @@ them is a change to the recipe.
 
 ## The immutable vector generation
 
-`daemon::vector_generation` builds one generation from the rows
-`retrieval::dense::export::live_rows` returns: every live dense-required
+`daemon::vector_generation` builds one generation from a
+`retrieval::dense::export::live_rows` export: every live dense-required
 occurrence with a vector of the generation, validated against the layout, in
-occurrence identifier order. The generation is five files staged through the
-shared `GenerationStore` under target `vector-generation`:
+occurrence identifier order, together with the projection checkpoint the same
+read transaction observed, so the provenance the sidecar records is the state
+the rows came from. The generation is five files staged through the shared
+`GenerationStore` under target `vector-generation`:
 
 | File | Bytes |
 | --- | --- |
@@ -251,21 +253,32 @@ bytes, and the same digest. The `GenerationManifest` schema is unchanged.
 Verification (`vector_generation::verify`) does not trust the manifest to
 describe itself. The store checks inventory, sizes, modes, and hashes; the
 verifier then checks that the manifest is a vector manifest, that the sidecar
-bytes are canonical and hash into the manifest, that every sidecar field
-equals the caller's expectation, and that the rows, scales, codes, and
-identifiers decode and agree with one another: the scales hash to the
-calibration provenance, the identifiers number the rows in order, and the
-codes are exactly the rows encoded under the scales. A generation whose
-hashes were rewritten to match changed bytes is refused when its meaning
-changed. A different model space is refused at an equal dimension.
+bytes are canonical, inventory exactly the four payload files, and hash into
+the manifest, that every identity field of the sidecar equals the caller's
+expectation (model, tokenizer fingerprint, dimension, metric, tolerance,
+recipe, generation identifier and epoch, kernel incarnation, and the
+checkpoint when the caller names one), and that the payload agrees with
+itself under the recipe: the row artifact holds the declared number of rows,
+recalibrating those rows reproduces the scale bytes and the calibrated row
+count and the scales hash the sidecar records, the identifiers number the
+rows in strictly increasing order, and the codes are exactly the rows encoded
+under the scales. A generation whose hashes were rewritten to match changed
+bytes is refused when its meaning changed. A different model space is refused
+at an equal dimension.
 
 The vector selector is `vector-profile.json`, beside the host and search
-selectors. `select_vector` refuses a generation whose manifest target belongs
-to another owner. Pruning retains every owner-selected generation, discard
-refuses one, exchange repair refuses to replace one, and a quarantined owner
-selector stops pruning of generations. Selecting and recovering a complete
+selectors. `select_vector` refuses a generation whose manifest target is not
+`vector-generation`; the search selector keeps its existing behavior and
+checks no target. Pruning retains every owner-selected generation, discard
+refuses one, exchange repair refuses to replace one, and a corrupt or
+quarantined owner selector stops the store's mutators for every caller, as
+the search selector already did. The store's selection primitive checks
+inventory, sizes, modes, and hashes only; the daemon's semantic verification
+of a generation precedes selection, and selecting or recovering a complete
 composition is a separate contract.
 
-Staging charges the whole inventory against the admission manifest's
-`capture_disk_bytes` limit under an `EmbeddingBootstrap` admission; a denial
-stages nothing.
+Staging charges the whole payload inventory against the admission manifest's
+`capture_disk_bytes` limit under the caller's admission; a denial stages
+nothing. The build's work directory is scratch: files are created exclusively
+and not synced there, because the store copies and syncs them when it stages,
+and a retry uses a fresh directory.

@@ -42,6 +42,8 @@ pub const GENERATIONS_DIR_NAME: &str = "generations";
 pub const CURRENT_PROFILE_NAME: &str = "current-profile.json";
 pub const SEARCH_PROFILE_NAME: &str = "search-profile.json";
 pub const VECTOR_PROFILE_NAME: &str = "vector-profile.json";
+/// The manifest target every vector generation is staged under; `select_vector` refuses any other.
+pub const VECTOR_TARGET: &str = "vector-generation";
 
 /// Selectors a daemon component owns. Each names one generation the store must retain, and each is quarantined on its own when its schema is unknown.
 const OWNER_PROFILE_NAMES: [&str; 2] = [SEARCH_PROFILE_NAME, VECTOR_PROFILE_NAME];
@@ -851,15 +853,15 @@ impl GenerationStore {
         self.select_owner(SEARCH_PROFILE_NAME, digest, None, observer)
     }
 
-    /// Points the vector selector at `digest`. A generation whose manifest names another `target` belongs to another owner and is refused, so the vector selector can never name a search seed or a host payload.
+    /// Points the vector selector at `digest`. A generation whose manifest target is not [`VECTOR_TARGET`] belongs to another owner and is refused, so the vector selector can never name a search seed or a host payload.
+    /// The store checks inventory, sizes, modes, and hashes; the daemon's semantic verification of the generation precedes this call and is not repeated here.
     pub fn select_vector(
         &self,
         digest: &str,
-        target: &str,
         _transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
-        self.select_owner(VECTOR_PROFILE_NAME, digest, Some(target), observer)
+        self.select_owner(VECTOR_PROFILE_NAME, digest, Some(VECTOR_TARGET), observer)
     }
 
     fn select_owner(
@@ -1048,7 +1050,9 @@ impl GenerationStore {
     /// `prune` preserves entries with unknown manifest schemas or foreign names.
     /// `prune` returns `UnsupportedStateSchema` when the current profile is quarantined.
     /// A quarantined owner profile may name any digest, so `prune` then counts it as quarantined
-    /// and removes only temps, which no selector can reference.
+    /// and removes only temps, which no selector can reference. Every owner selector gates every
+    /// caller: a corrupt or quarantined vector selector stops the host launcher's prune as a
+    /// corrupt or quarantined search selector already does.
     /// One unremovable entry does not stop the sweep: every reclaimable entry is removed first,
     /// then the first removal error is returned.
     pub fn prune(&self, protected: &BTreeSet<String>) -> Result<PruneReport, GenerationError> {

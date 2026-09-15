@@ -21,7 +21,7 @@ use retrieval::dense::codec::{
     self, ARTIFACT_HEADER_BYTES, ARTIFACT_MAGIC, ARTIFACT_VERSION, ArtifactRejection, Metric,
     RowLayout, RowRejection,
 };
-use retrieval::dense::export::{ExportRefusal, live_rows};
+use retrieval::dense::export::{ExportRefusal, LiveRows, live_rows};
 use retrieval::dense::oracle::exhaustive_with_hook_for_test;
 use retrieval::dense::{
     Completion, DenseCoverage, ExhaustiveQuery, ExhaustiveRanking, IncompleteReason, OracleBounds,
@@ -1854,35 +1854,42 @@ fn live_rows_exports_every_live_vector_in_identifier_order_and_refuses_over_boun
 {
     let fixture = Fixture::all_admitted();
     let generation = generation();
-    let export = |fixture: &Fixture, max: usize, layout: RowLayout| {
-        fixture
-            .store
-            .with_conn(|conn| {
-                Ok(live_rows(
-                    conn,
-                    &generation,
-                    &layout,
-                    NonZeroUsize::new(max).unwrap(),
-                ))
-            })
-            .unwrap()
-    };
-    let rows = export(&fixture, 64, layout()).unwrap();
-    let ids: Vec<&str> = rows.iter().map(|row| row.occurrence_id.as_str()).collect();
+    let export =
+        |fixture: &Fixture, max: usize, layout: RowLayout| -> Result<LiveRows, ExportRefusal> {
+            fixture
+                .store
+                .with_conn(|conn| {
+                    Ok(live_rows(
+                        conn,
+                        &generation,
+                        &fixture.incarnation,
+                        &layout,
+                        NonZeroUsize::new(max).unwrap(),
+                    ))
+                })
+                .unwrap()
+        };
+    let exported = export(&fixture, 64, layout()).unwrap();
+    let ids: Vec<&str> = exported
+        .rows
+        .iter()
+        .map(|row| row.occurrence_id.as_str())
+        .collect();
     let mut expected: Vec<String> = fixture.dense_ids().into_iter().collect();
     expected.sort();
     assert_eq!(ids, expected.iter().map(String::as_str).collect::<Vec<_>>());
-    for row in &rows {
+    for row in &exported.rows {
         let source = fixture
             .rows
             .iter()
             .find(|r| r.occurrence_id() == row.occurrence_id)
             .unwrap();
         assert_eq!(&row.vector, source.vector.as_ref().unwrap());
-        assert_eq!(row.class, source.class);
     }
+    assert_eq!(exported.checkpoint.hold_id, HOLD);
+    assert!(exported.checkpoint.checkpoint_commit_seq >= exported.checkpoint.snapshot_commit_seq);
     assert!(
-        !format!("{rows:?}").contains("0.9"),
+        !format!("{:?}", exported.rows).contains("0.9"),
         "Debug hides coordinates"
     );
 
@@ -1890,7 +1897,7 @@ fn live_rows_exports_every_live_vector_in_identifier_order_and_refuses_over_boun
         export(&fixture, 7, layout()),
         Err(ExportRefusal::OverBound { max: 7 })
     );
-    assert_eq!(export(&fixture, 8, layout()).unwrap().len(), 8);
+    assert_eq!(export(&fixture, 8, layout()).unwrap().rows.len(), 8);
 
     // A missing vector and a tombstoned row leave the export; the export names only rows that carry a vector.
     fixture.drop_vector("beta");
@@ -1901,7 +1908,7 @@ fn live_rows_exports_every_live_vector_in_identifier_order_and_refuses_over_boun
             [fixture.id("gamma")],
         )
         .unwrap();
-    let rows = export(&fixture, 64, layout()).unwrap();
+    let rows = export(&fixture, 64, layout()).unwrap().rows;
     assert_eq!(rows.len(), 6);
     assert!(
         !rows
@@ -1928,6 +1935,17 @@ fn live_rows_exports_every_live_vector_in_identifier_order_and_refuses_over_boun
             generation: 8
         })
     );
+    assert!(matches!(
+        export(
+            &fixture,
+            64,
+            RowLayout {
+                unit_norm_tolerance: f64::NAN,
+                ..layout()
+            }
+        ),
+        Err(ExportRefusal::Layout(RowRejection::Tolerance { .. }))
+    ));
     fixture
         .raw()
         .execute(
@@ -1952,6 +1970,7 @@ fn live_rows_exports_every_live_vector_in_identifier_order_and_refuses_over_boun
             Ok(live_rows(
                 conn,
                 &foreign,
+                &fixture.incarnation,
                 &layout(),
                 NonZeroUsize::new(8).unwrap(),
             ))
@@ -1962,5 +1981,29 @@ fn live_rows_exports_every_live_vector_in_identifier_order_and_refuses_over_boun
         Err(ExportRefusal::Projection(
             ProjectionError::UnknownGeneration { .. }
         ))
+    ));
+    let other_kernel = fixture
+        .store
+        .with_conn(|conn| {
+            Ok(live_rows(
+                conn,
+                &generation,
+                "other-kernel",
+                &layout(),
+                NonZeroUsize::new(8).unwrap(),
+            ))
+        })
+        .unwrap();
+    assert!(matches!(
+        other_kernel,
+        Err(ExportRefusal::Projection(ProjectionError::IdentityMismatch))
+    ));
+    fixture
+        .raw()
+        .execute("DELETE FROM projection_checkpoint", [])
+        .unwrap();
+    assert!(matches!(
+        export(&fixture, 64, layout()),
+        Err(ExportRefusal::NoCheckpoint { .. })
     ));
 }

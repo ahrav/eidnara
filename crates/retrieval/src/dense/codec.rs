@@ -28,6 +28,13 @@ impl Metric {
             Self::InnerProduct => "inner_product",
         }
     }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "inner_product" => Some(Self::InnerProduct),
+            _ => None,
+        }
+    }
 }
 
 /// The shape and normalization predicate every row of one generation satisfies.

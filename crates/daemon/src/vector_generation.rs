@@ -2,7 +2,7 @@
 //!
 //! The generation is five files: the original-row artifact, the int8 codes, the scales, the row identifiers, and a sidecar that names every one of them by size and hash and binds the model, tokenizer, dimension, metric, normalization, recipe, calibration provenance, source checkpoint, and epoch.
 //! The sidecar's hash rides in the outer manifest's inputs slot, so the generation digest is a function of every input; two builds over byte-identical inputs produce the same directory name, the same bytes, and the same digest.
-//! Verification re-derives the codes from the rows and the scales and compares bytes, so a state whose hashes were rewritten to match each other is still refused when its meaning changed.
+//! Verification recalibrates the scales and re-derives the codes from the rows and compares bytes, so a state whose hashes were rewritten to match each other is still refused when its meaning changed.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -11,28 +11,29 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use host_runtime::generation::{
-    GenerationError, GenerationManifest, GenerationStore, ManifestFile, SourceSpec, StageMeta,
+    GenerationError, GenerationManifest, GenerationStore, ManifestFile, StageMeta, VECTOR_TARGET,
     ValidatedGeneration,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 use retrieval::ProjectionIdentity;
 use retrieval::batch::{ProjectionCheckpoint, VectorGeneration};
 use retrieval::dense::codec::{self, Metric, RowLayout};
-use retrieval::dense::export::ExportedRow;
+use retrieval::dense::export::LiveRows;
 use retrieval::dense::scalar::{self, ScalarRecipe, Scales};
 use rustix::fs::OFlags;
 use sha2::{Digest, Sha256};
 
 use crate::projection_gates::{Admission, Denial, HookGate, InvalidationIdentity};
-use crate::search_seed::hex;
+use crate::search_seed::manifest_sources;
 
-pub const VECTOR_TARGET: &str = "vector-generation";
 pub const ROWS_FILE: &str = "rows.f32";
 pub const CODES_FILE: &str = "codes.int8";
 pub const SCALES_FILE: &str = "scales.f32";
 pub const ROW_IDS_FILE: &str = "row-ids.json";
 pub const SIDECAR_FILE: &str = "vector-sidecar.json";
 pub const SIDECAR_SCHEMA: u32 = 1;
+/// Every file the sidecar inventories, in the order the build writes them.
+const PAYLOAD_FILES: [&str; 4] = [ROWS_FILE, CODES_FILE, SCALES_FILE, ROW_IDS_FILE];
 /// The disk limit the admission manifest names for staged bytes; the vector build charges its whole inventory against it.
 const STAGE_DISK_LIMIT: &str = "capture_disk_bytes";
 
@@ -73,26 +74,32 @@ impl VectorSidecar {
     }
 
     pub fn sha256(&self) -> String {
-        hex(&Sha256::digest(self.canonical_bytes()))
-    }
-
-    pub fn metric(&self) -> Option<Metric> {
-        match self.metric.as_str() {
-            "inner_product" => Some(Metric::InnerProduct),
-            _ => None,
-        }
+        sha256_hex(&self.canonical_bytes())
     }
 
     pub fn layout(&self) -> Option<RowLayout> {
         Some(RowLayout {
             dimension: self.vector_dimension,
-            metric: self.metric()?,
+            metric: Metric::from_name(&self.metric)?,
             unit_norm_tolerance: self.unit_norm_tolerance,
         })
     }
 
-    fn file(&self, path: &str) -> Option<&SidecarFile> {
-        self.files.iter().find(|file| file.path == path)
+    pub fn checkpoint(&self) -> ProjectionCheckpoint {
+        ProjectionCheckpoint {
+            snapshot_commit_seq: self.snapshot_commit_seq,
+            checkpoint_commit_seq: self.checkpoint_commit_seq,
+            hold_id: self.hold_id.clone(),
+        }
+    }
+
+    fn inventories_exactly(&self, paths: &[&str]) -> bool {
+        self.files.len() == paths.len()
+            && self
+                .files
+                .iter()
+                .zip(paths)
+                .all(|(file, path)| file.path == *path)
     }
 
     /// The compatibility identity's digest fills the contract slot, the sidecar's hash the inputs slot, and the row artifact's hash the payload slot; no release contract or inputs lock exists for a vector generation.
@@ -109,10 +116,12 @@ impl VectorSidecar {
         .expect("identity serialization cannot fail");
         StageMeta {
             target: VECTOR_TARGET.to_owned(),
-            release_contract_sha256: hex(&Sha256::digest(&compatibility)),
+            release_contract_sha256: sha256_hex(&compatibility),
             inputs_lock_sha256: self.sha256(),
             source_payload_manifest_sha256: self
-                .file(ROWS_FILE)
+                .files
+                .iter()
+                .find(|file| file.path == ROWS_FILE)
                 .map(|file| file.sha256.clone())
                 .unwrap_or_default(),
         }
@@ -134,25 +143,40 @@ impl VectorSidecar {
             path: SIDECAR_FILE.to_owned(),
             mode: 0o600,
             size: sidecar.len() as u64,
-            sha256: hex(&Sha256::digest(&sidecar)),
+            sha256: sha256_hex(&sidecar),
         });
         GenerationManifest::from_files(&self.stage_meta(), files)
     }
 }
 
-/// The identity a caller expects a generation to carry, checked against the sidecar field by field.
+/// What a caller expects a generation to carry, compared with the sidecar field by field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpectedVectors<'a> {
-    pub identity: &'a ProjectionIdentity,
     pub generation: &'a VectorGeneration,
+    pub kernel_incarnation_id: &'a str,
     pub metric: Metric,
     pub unit_norm_tolerance: f64,
     pub recipe: ScalarRecipe,
+    /// The checkpoint the rows were read at; `None` accepts any checkpoint and reads it from the sidecar.
+    pub checkpoint: Option<&'a ProjectionCheckpoint>,
+}
+
+/// Which payload file a verified generation disagrees with itself about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileFault {
+    /// The row artifact holds another number of rows than the sidecar declares.
+    RowCount,
+    /// The scales are not the calibration of the rows, or the sidecar's provenance does not name them.
+    Calibration,
+    /// The identifiers do not number the rows in strictly increasing order.
+    Identifiers,
+    /// The codes are not the rows encoded under the scales.
+    Codes,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum VectorRefusal {
-    #[error("the generation and the identity disagree on {field}")]
+    #[error("the generation and the expectation disagree on {field}")]
     Identity { field: &'static str },
     #[error("no rows were supplied")]
     NoRows,
@@ -164,16 +188,19 @@ pub enum VectorRefusal {
     Calibration(scalar::CalibrationRejection),
     #[error("admission refused staging: {0}")]
     Admission(Denial),
-    #[error("the staged bytes are not the built bytes")]
-    BytesChanged,
     #[error("the lifecycle store refused the generation: {0}")]
     Store(String),
+    #[error("the generation carries a state schema this build does not know")]
+    Quarantined,
     #[error("insufficient storage for the generation")]
     InsufficientStorage,
     #[error("the generation is not a vector generation: {0}")]
     NotVectors(&'static str),
-    #[error("{path}: {detail}")]
-    File { path: &'static str, detail: String },
+    #[error("{path}: {fault:?}")]
+    File {
+        path: &'static str,
+        fault: FileFault,
+    },
     #[error("i/o failure: {0}")]
     Io(String),
 }
@@ -182,6 +209,7 @@ impl From<GenerationError> for VectorRefusal {
     fn from(error: GenerationError) -> Self {
         match error {
             GenerationError::InsufficientStorage => Self::InsufficientStorage,
+            GenerationError::UnsupportedStateSchema => Self::Quarantined,
             other => Self::Store(other.to_string()),
         }
     }
@@ -200,18 +228,19 @@ impl BuiltVectors {
     }
 }
 
-/// Writes rows, codes, scales, and identifiers under `work_dir` and describes them in a sidecar bound to `expected` and `checkpoint`.
+/// Writes rows, codes, scales, and identifiers under `work_dir` and describes them in a sidecar bound to `expected` and the export's checkpoint.
 /// Rows must arrive in strictly increasing identifier order so the artifact, the codes, and the identifier list agree on row numbering across builds.
+/// Files are created exclusively and never synced: the store copies and syncs them when it stages, so the work directory is scratch, and a retry needs a fresh one.
 ///
 /// # Errors
 ///
 /// No rows, rows out of order, a row outside the layout, a calibration refusal, or an I/O failure; nothing is staged.
 pub fn build(
     expected: &ExpectedVectors<'_>,
-    checkpoint: &ProjectionCheckpoint,
-    rows: &[ExportedRow],
+    export: &LiveRows,
     work_dir: &Path,
 ) -> Result<BuiltVectors, VectorRefusal> {
+    let rows = &export.rows;
     if rows.is_empty() {
         return Err(VectorRefusal::NoRows);
     }
@@ -229,51 +258,42 @@ pub fn build(
     let rows_bytes = codec::encode_rows(&layout, vectors.clone()).map_err(VectorRefusal::Rows)?;
     let calibration =
         scalar::calibrate(&layout, vectors.clone()).map_err(VectorRefusal::Calibration)?;
-    let mut codes = Vec::with_capacity(rows.len() * layout.dimension as usize);
-    for row in rows {
-        let encoded =
-            scalar::encode(&layout, &calibration.scales, &row.vector).map_err(|rejection| {
-                VectorRefusal::Rows(codec::ArtifactRejection::Row {
-                    index: 0,
-                    rejection,
-                })
-            })?;
-        codes.extend(scalar::encode_codes(&encoded.codes));
-    }
-    let scales_bytes = calibration.scales.encode();
+    let codes =
+        encode_all(&layout, &calibration.scales, vectors).map_err(|(index, rejection)| {
+            VectorRefusal::Rows(codec::ArtifactRejection::Row { index, rejection })
+        })?;
     let ids: Vec<&str> = rows.iter().map(|row| row.occurrence_id.as_str()).collect();
-    let ids_bytes = serde_json::to_vec(&ids).expect("identifier serialization cannot fail");
-    let files = [
-        (ROWS_FILE, rows_bytes),
-        (CODES_FILE, codes),
-        (SCALES_FILE, scales_bytes),
-        (ROW_IDS_FILE, ids_bytes),
+    let payloads = [
+        rows_bytes,
+        codes,
+        calibration.scales.encode(),
+        serde_json::to_vec(&ids).expect("identifier serialization cannot fail"),
     ];
-    let mut inventory = Vec::with_capacity(files.len());
-    for (path, bytes) in &files {
+    let mut inventory = Vec::with_capacity(payloads.len());
+    for (path, bytes) in PAYLOAD_FILES.iter().zip(&payloads) {
         write_new(&work_dir.join(path), bytes)?;
         inventory.push(SidecarFile {
             path: (*path).to_owned(),
             size: bytes.len() as u64,
-            sha256: hex(&Sha256::digest(bytes)),
+            sha256: sha256_hex(bytes),
         });
     }
     let sidecar = VectorSidecar {
         schema: SIDECAR_SCHEMA,
-        embedding_model: expected.identity.embedding_model.clone(),
-        tokenizer_fingerprint: expected.identity.tokenizer_fingerprint.clone(),
+        embedding_model: expected.generation.embedding_model.clone(),
+        tokenizer_fingerprint: expected.generation.tokenizer_fingerprint.clone(),
         vector_dimension: layout.dimension,
         metric: expected.metric.name().to_owned(),
         unit_norm_tolerance: layout.unit_norm_tolerance,
         quantizer_recipe: expected.recipe.id().to_owned(),
         calibrated_rows: calibration.identity.calibrated_rows,
-        scales_sha256: hex(&calibration.identity.scales_digest),
+        scales_sha256: sha256_hex(&calibration.scales.encode()),
         generation_id: expected.generation.generation_id.clone(),
         generation_epoch: expected.generation.generation_epoch,
-        kernel_incarnation_id: expected.identity.kernel_incarnation_id.clone(),
-        snapshot_commit_seq: checkpoint.snapshot_commit_seq,
-        checkpoint_commit_seq: checkpoint.checkpoint_commit_seq,
-        hold_id: checkpoint.hold_id.clone(),
+        kernel_incarnation_id: expected.kernel_incarnation_id.to_owned(),
+        snapshot_commit_seq: export.checkpoint.snapshot_commit_seq,
+        checkpoint_commit_seq: export.checkpoint.checkpoint_commit_seq,
+        hold_id: export.checkpoint.hold_id.clone(),
         rows: rows.len() as u64,
         files: inventory,
     };
@@ -289,7 +309,7 @@ pub fn build(
 ///
 /// # Errors
 ///
-/// An admission denial, the store's refusal, or a digest that differs from the built manifest's, which means the files changed between build and stage.
+/// An admission denial or the store's refusal.
 pub fn stage(
     built: &BuiltVectors,
     store: &GenerationStore,
@@ -307,21 +327,11 @@ pub fn stage(
         &[(STAGE_DISK_LIMIT, bytes)],
     )
     .map_err(VectorRefusal::Admission)?;
-    let sources: Vec<SourceSpec> = manifest
-        .files
-        .iter()
-        .map(|file| SourceSpec {
-            rel_path: file.path.clone(),
-            source: built.dir.join(&file.path),
-            executable: false,
-            expected_size: Some(file.size),
-            expected_sha256: Some(file.sha256.clone()),
-        })
-        .collect();
+    let sources = manifest_sources(&manifest, |path| Some(built.dir.join(path)))
+        .expect("every manifest path resolves under the work directory");
     let digest = store.stage(&sources, &built.sidecar.stage_meta(), protected)?;
-    if digest != manifest.digest() {
-        return Err(VectorRefusal::BytesChanged);
-    }
+    // The store checked every source against the manifest's size and hash, so the digest it returns is the manifest's.
+    debug_assert_eq!(digest, manifest.digest());
     Ok(digest)
 }
 
@@ -342,7 +352,7 @@ impl std::fmt::Debug for VerifiedVectors {
     }
 }
 
-/// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to the sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers decode and agree with one another under the recipe.
+/// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
 ///
 /// # Errors
 ///
@@ -363,7 +373,13 @@ pub fn verify(
     if sidecar.schema != SIDECAR_SCHEMA {
         return Err(VectorRefusal::NotVectors("sidecar schema"));
     }
-    if sidecar.canonical_bytes() != sidecar_bytes || sidecar.stage_manifest() != *manifest {
+    if sidecar.canonical_bytes() != sidecar_bytes {
+        return Err(VectorRefusal::NotVectors("sidecar not canonical"));
+    }
+    if !sidecar.inventories_exactly(&PAYLOAD_FILES) {
+        return Err(VectorRefusal::NotVectors("inventory"));
+    }
+    if sidecar.stage_manifest() != *manifest {
         return Err(VectorRefusal::NotVectors("manifest binding"));
     }
     check_identity(&sidecar, expected)?;
@@ -372,40 +388,29 @@ pub fn verify(
         .ok_or(VectorRefusal::NotVectors("metric"))?;
     let rows = codec::decode_rows(&read_verified(&generation, ROWS_FILE)?, &layout)
         .map_err(VectorRefusal::Rows)?;
-    let file = |path: &'static str, detail: &str| VectorRefusal::File {
-        path,
-        detail: detail.to_owned(),
-    };
+    let fault = |path, fault| VectorRefusal::File { path, fault };
     if rows.rows.len() as u64 != sidecar.rows {
-        return Err(file(ROWS_FILE, "row count differs from the sidecar"));
+        return Err(fault(ROWS_FILE, FileFault::RowCount));
     }
-    let scales = Scales::decode(&read_verified(&generation, SCALES_FILE)?, layout.dimension)
-        .map_err(|rejection| file(SCALES_FILE, &rejection.to_string()))?;
-    if hex(&scales.digest()) != sidecar.scales_sha256 {
-        return Err(file(
-            SCALES_FILE,
-            "scales differ from the calibration provenance",
-        ));
+    let vectors = rows.rows.iter().map(Vec::as_slice);
+    let calibration =
+        scalar::calibrate(&layout, vectors.clone()).map_err(VectorRefusal::Calibration)?;
+    let scales_bytes = read_verified(&generation, SCALES_FILE)?;
+    if calibration.scales.encode() != scales_bytes
+        || calibration.identity.calibrated_rows != sidecar.calibrated_rows
+        || sha256_hex(&scales_bytes) != sidecar.scales_sha256
+    {
+        return Err(fault(SCALES_FILE, FileFault::Calibration));
     }
     let ids: Vec<String> = serde_json::from_slice(&read_verified(&generation, ROW_IDS_FILE)?)
-        .map_err(|_| file(ROW_IDS_FILE, "not a JSON array of identifiers"))?;
+        .map_err(|_| fault(ROW_IDS_FILE, FileFault::Identifiers))?;
     if ids.len() != rows.rows.len() || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(file(
-            ROW_IDS_FILE,
-            "identifiers do not number the rows in order",
-        ));
+        return Err(fault(ROW_IDS_FILE, FileFault::Identifiers));
     }
-    let mut expected_codes = Vec::with_capacity(rows.rows.len() * layout.dimension as usize);
-    for row in &rows.rows {
-        let encoded = scalar::encode(&layout, &scales, row)
-            .map_err(|rejection| file(CODES_FILE, &rejection.to_string()))?;
-        expected_codes.extend(scalar::encode_codes(&encoded.codes));
-    }
-    if read_verified(&generation, CODES_FILE)? != expected_codes {
-        return Err(file(
-            CODES_FILE,
-            "codes are not the rows encoded under the scales",
-        ));
+    let codes = encode_all(&layout, &calibration.scales, vectors)
+        .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
+    if read_verified(&generation, CODES_FILE)? != codes {
+        return Err(fault(CODES_FILE, FileFault::Codes));
     }
     Ok(VerifiedVectors {
         digest: digest.to_owned(),
@@ -419,54 +424,57 @@ fn check_identity(
     sidecar: &VectorSidecar,
     expected: &ExpectedVectors<'_>,
 ) -> Result<(), VectorRefusal> {
-    let identity = |field| VectorRefusal::Identity { field };
     let generation = expected.generation;
-    let checks: [(&'static str, bool); 10] = [
-        (
-            "embedding_model",
-            sidecar.embedding_model == expected.identity.embedding_model,
-        ),
-        (
-            "tokenizer_fingerprint",
-            sidecar.tokenizer_fingerprint == expected.identity.tokenizer_fingerprint,
-        ),
-        (
-            "vector_dimension",
-            sidecar.vector_dimension == generation.vector_dimension,
-        ),
-        ("metric", sidecar.metric() == Some(expected.metric)),
-        (
-            "unit_norm_tolerance",
-            sidecar.unit_norm_tolerance.to_bits() == expected.unit_norm_tolerance.to_bits(),
-        ),
-        (
-            "quantizer_recipe",
-            ScalarRecipe::from_id(&sidecar.quantizer_recipe) == Some(expected.recipe),
-        ),
-        (
-            "generation_id",
-            sidecar.generation_id == generation.generation_id,
-        ),
-        (
-            "generation_epoch",
-            sidecar.generation_epoch == generation.generation_epoch,
-        ),
-        (
-            "kernel_incarnation_id",
-            sidecar.kernel_incarnation_id == expected.identity.kernel_incarnation_id,
-        ),
-        (
-            "generation identity",
-            generation.embedding_model == expected.identity.embedding_model
-                && generation.tokenizer_fingerprint == expected.identity.tokenizer_fingerprint
-                && generation.vector_dimension == expected.identity.vector_dimension
-                && generation.generation_epoch == expected.identity.generation_epoch,
-        ),
-    ];
-    checks
-        .into_iter()
-        .find(|(_, holds)| !holds)
-        .map_or(Ok(()), |(field, _)| Err(identity(field)))
+    let field = |field| VectorRefusal::Identity { field };
+    if sidecar.embedding_model != generation.embedding_model {
+        return Err(field("embedding_model"));
+    }
+    if sidecar.tokenizer_fingerprint != generation.tokenizer_fingerprint {
+        return Err(field("tokenizer_fingerprint"));
+    }
+    if sidecar.vector_dimension != generation.vector_dimension {
+        return Err(field("vector_dimension"));
+    }
+    if Metric::from_name(&sidecar.metric) != Some(expected.metric) {
+        return Err(field("metric"));
+    }
+    if sidecar.unit_norm_tolerance.to_bits() != expected.unit_norm_tolerance.to_bits() {
+        return Err(field("unit_norm_tolerance"));
+    }
+    if ScalarRecipe::from_id(&sidecar.quantizer_recipe) != Some(expected.recipe) {
+        return Err(field("quantizer_recipe"));
+    }
+    if sidecar.generation_id != generation.generation_id {
+        return Err(field("generation_id"));
+    }
+    if sidecar.generation_epoch != generation.generation_epoch {
+        return Err(field("generation_epoch"));
+    }
+    if sidecar.kernel_incarnation_id != expected.kernel_incarnation_id {
+        return Err(field("kernel_incarnation_id"));
+    }
+    if expected
+        .checkpoint
+        .is_some_and(|checkpoint| sidecar.checkpoint() != *checkpoint)
+    {
+        return Err(field("checkpoint"));
+    }
+    Ok(())
+}
+
+/// The codes of every row, concatenated in row order; the first row the recipe refuses is reported with its index.
+fn encode_all<'a>(
+    layout: &RowLayout,
+    scales: &Scales,
+    rows: impl Iterator<Item = &'a [f32]>,
+) -> Result<Vec<u8>, (usize, codec::RowRejection)> {
+    let mut codes = Vec::new();
+    for (index, row) in rows.enumerate() {
+        let encoded =
+            scalar::encode(layout, scales, row).map_err(|rejection| (index, rejection))?;
+        codes.extend(scalar::encode_codes(&encoded.codes));
+    }
+    Ok(codes)
 }
 
 fn read_verified(
@@ -476,14 +484,12 @@ fn read_verified(
     let fd = generation.open_verified_file(path)?;
     let mut file = fs::File::from(fd);
     let mut bytes = Vec::new();
-    io::Read::read_to_end(&mut file, &mut bytes).map_err(|error| VectorRefusal::File {
-        path,
-        detail: error.kind().to_string(),
-    })?;
+    io::Read::read_to_end(&mut file, &mut bytes)
+        .map_err(|error| VectorRefusal::Io(error.kind().to_string()))?;
     Ok(bytes)
 }
 
-/// `O_EXCL` so a build never overwrites a file another build left behind; the caller owns the work directory.
+/// `O_EXCL` so a build never overwrites a file another build left behind.
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), VectorRefusal> {
     let io = |error: io::Error| VectorRefusal::Io(error.kind().to_string());
     let mut file = fs::OpenOptions::new()
@@ -493,7 +499,9 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), VectorRefusal> {
         .custom_flags((OFlags::NOFOLLOW | OFlags::CLOEXEC).bits() as i32)
         .open(path)
         .map_err(io)?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(io)
+    file.write_all(bytes).map_err(io)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
