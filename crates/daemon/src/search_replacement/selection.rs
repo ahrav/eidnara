@@ -168,6 +168,10 @@ impl SearchSelection {
         &self.identity
     }
 
+    pub fn bounds(&self) -> CoverageBounds {
+        self.bounds
+    }
+
     /// Whether a family is selected in this process; a selected family may still refuse a pin.
     pub fn has_selected(&self) -> bool {
         self.selected.load().is_some()

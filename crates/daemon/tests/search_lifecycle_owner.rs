@@ -39,7 +39,7 @@ use support::embedding_fixtures::{
 };
 use support::kernel_daemon::KernelDaemon;
 use support::projection_gate::{
-    LAG_LIMIT, campaign_json, manifest_json, manifest_json_with, write_records,
+    LAG_LIMIT, LIMIT, campaign_json, manifest_json, manifest_json_with, write_records,
 };
 
 /// The consumer the rebuilt family registers; the corpus fixture already registers `search`.
@@ -1045,6 +1045,102 @@ async fn disabling_an_unregistered_home_completes() {
         owner.run_slice(&slice_budget()),
         SliceOutcome::Disabled
     ));
+}
+
+/// A rebuild request whose deadline lies further out than its transition's bound is refused without a control record.
+#[test]
+fn a_rebuild_request_past_its_transition_bound_records_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    let mut far = rebuild(home);
+    far.deadline = now() + i64::try_from(LIMIT).unwrap() + 10_000;
+    assert!(
+        owner.request(&far, now(), &slice_budget()).is_err(),
+        "a deadline past `B_recovery_ms` is refused"
+    );
+    assert!(matches!(control(home), ControlState::Absent));
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    assert!(matches!(control(home), ControlState::Intent(_)));
+}
+
+/// A manifest that lowers the coverage bounds without changing the identity takes effect on the next slice: the selected family is judged and pinned under the new bounds.
+#[test]
+fn a_manifest_that_changes_the_coverage_bounds_refreshes_the_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("export_page_rows", 2)]),
+        &campaign_json(&identity),
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(
+            outcome,
+            SliceOutcome::Current | SliceOutcome::Advanced(RecoveryProgress::Current)
+        ),
+        "{outcome:?}"
+    );
+    owner
+        .pin(&slice_budget())
+        .expect("the family is admitted under the new bounds");
+}
+
+/// A slice that hands the supervisor back because its inputs were refused closes admission first, so nothing runs under the old records while the supervisor drains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_refused_manifest_closes_admission_before_maintenance_drains() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+        .with_roster(Arc::new(|| {
+            vec![("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap())]
+        }));
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    drive(&owner, 40, || published(&owner).len() == 1).await;
+    assert!(owner.maintenance().is_some());
+
+    std::fs::remove_dir_all(home.join(ADMISSION_DIR)).unwrap();
+    let outcome = owner.run_slice(&slice_budget());
+    let SliceOutcome::RotateMaintenance(handle) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap_err(),
+        Denial::NoManifest,
+        "the old records admit nothing once they are gone"
+    );
+    assert!(owner.pin(&slice_budget()).is_err());
+    owner.stop_maintenance(&handle).await.unwrap();
+    owner.shutdown().await.unwrap();
 }
 
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.

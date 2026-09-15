@@ -222,7 +222,7 @@ impl SearchLifecycleOwner {
         })
     }
 
-    /// Reads the records, derives the identity, and syncs the manager to it. A refusal leaves no manager for another identity behind, except one whose supervisor still runs: that manager is kept and its supervisor handed back for joining, so replacing it never detaches running work.
+    /// Reads the records, derives the identity and coverage bounds, and syncs the manager to both. A refusal leaves no manager for another identity or other bounds behind, except one whose supervisor still runs: that manager is kept and its supervisor handed back for joining, so replacing it never detaches running work.
     fn prepare(
         &self,
         managed: &mut Managed,
@@ -251,7 +251,8 @@ impl SearchLifecycleOwner {
                 return Err(Unprepared::Refused(refusal));
             }
         };
-        if matches!(&*managed, Managed::Selection(current) if *current.identity() != identity) {
+        if matches!(&*managed, Managed::Selection(current) if *current.identity() != identity || current.bounds() != bounds)
+        {
             if let Some(handle) = live {
                 return Err(Unprepared::Rotate(handle));
             }
@@ -275,7 +276,10 @@ impl SearchLifecycleOwner {
         }
         let (inputs, identity, budget) = match self.prepare(&mut managed, budget) {
             Ok(prepared) => prepared,
-            Err(Unprepared::Rotate(handle)) => return SliceOutcome::RotateMaintenance(handle),
+            Err(Unprepared::Rotate(handle)) => {
+                let _ = self.admission.refresh(None);
+                return SliceOutcome::RotateMaintenance(handle);
+            }
             Err(Unprepared::Refused(refusal)) => {
                 let _ = self.admission.refresh(None);
                 return SliceOutcome::Closed(refusal);
@@ -631,6 +635,14 @@ impl SearchLifecycleOwner {
                 &request.consumer.generation_id,
             )
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+            let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
+            let bound = limit(inputs.manifest(), request.transition.duration_limit())
+                .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+            if duration > bound {
+                return Err(BuildError::Invalid(
+                    "the request's deadline lies past its transition's bound",
+                ));
+            }
         }
         match request.transition {
             Transition::Rebuilding => {
