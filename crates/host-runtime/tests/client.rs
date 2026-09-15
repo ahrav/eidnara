@@ -356,3 +356,188 @@ async fn close_rejects_new_sends() {
     assert_eq!(error.code(), "client_closed");
     host.shutdown_gracefully().await;
 }
+
+/// Rust-client in-process witness for the payload-pool layout: a managed client attaches
+/// the sole profile, completes a daemon request in each direction at the maximum body,
+/// refuses one byte over it locally, and records the host's artifact identity and lifecycle
+/// counters through `host.status` before and after a controlled close and reconnect.
+#[tokio::test]
+async fn managed_client_witnesses_current_layout_maximum_bodies_and_controlled_recovery() {
+    const MAX_BODY: usize = 64 * 1024 * 1024;
+    let host = TestHost::start_with(|config| {
+        config.limits.max_resident_bytes = host_runtime::config::MIN_RESIDENT_BYTES + 64 * 1024;
+        config.timing.health_interval = Duration::from_millis(20);
+    })
+    .await;
+    let publication: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(host.publication_path()).unwrap()).unwrap();
+    assert_eq!(
+        publication["daemon_ver"], host.info.daemon_ver,
+        "the publication names the build the client attached to"
+    );
+
+    let client = Client::connect(host.publication_path())
+        .await
+        .expect("managed client attaches the sole profile");
+    let route = client
+        .open_route(target(), identity("witness"))
+        .await
+        .expect("route opens");
+
+    // Both directions at the maximum: a 64 MiB echo request produces a 64 MiB response.
+    let prefix = br#"{"mode":"echo","pad":""#;
+    let suffix = br#""}"#;
+    let mut body = Vec::with_capacity(MAX_BODY);
+    body.extend_from_slice(prefix);
+    body.extend(std::iter::repeat_n(
+        b'a',
+        MAX_BODY - prefix.len() - suffix.len(),
+    ));
+    body.extend_from_slice(suffix);
+    assert_eq!(body.len(), MAX_BODY);
+    let response = client
+        .request(
+            route,
+            body.clone(),
+            RequestOptions {
+                timeout: Duration::from_secs(120),
+                ..RequestOptions::default()
+            },
+        )
+        .await
+        .expect("maximum-size request and response complete");
+    assert_eq!(response.body.len(), MAX_BODY);
+    assert!(
+        response.body == body,
+        "the echoed maximum body is byte-identical"
+    );
+    drop(response);
+
+    // One byte over the maximum is refused locally before any frame exists.
+    let error = client
+        .request(route, vec![b'x'; MAX_BODY + 1], RequestOptions::default())
+        .await
+        .expect_err("a body one byte over the wire maximum is refused");
+    assert_eq!(error.outcome(), SendOutcome::NotSent);
+    assert_eq!(error.code(), "body_too_large");
+
+    let snapshot = client.host_status().await.expect("host.status decodes");
+    let shm = &snapshot.shared_memory;
+    assert_eq!(shm["artifact"]["profile"], "host-payload-pool-v1");
+    assert_eq!(shm["artifact"]["layout_version"], 4);
+    assert_eq!(shm["artifact"]["descriptor_schema"], 4);
+    assert_eq!(shm["artifact"]["wire_version"], 3);
+    assert_eq!(shm["activation"]["completed"], 1);
+    assert_eq!(shm["reclamation"]["completed"], 0);
+    assert_eq!(
+        shm["reclamation"]["meaning"],
+        "connection generations ended"
+    );
+    assert_eq!(
+        shm["returns"]["live_backings"], 2,
+        "both directions are mapped"
+    );
+    assert_eq!(shm["returns"]["released_backings"], 0);
+    assert_eq!(shm["exhaustion"]["observed"], 0);
+    let aggregate = &shm["aggregate"];
+    assert_eq!(
+        aggregate["total"].as_u64().unwrap(),
+        aggregate["transport_bytes"].as_u64().unwrap()
+            + aggregate["host_bytes"].as_u64().unwrap()
+            + aggregate["terminal_bytes"].as_u64().unwrap()
+    );
+
+    client.close_route(route).await.expect("route closes");
+    client.close().await.expect("client closes");
+
+    // Controlled recovery: the closed generation is counted, its backing is released once the
+    // endpoint unmaps, and a fresh client completes a request on new backing.
+    let client = Client::connect(host.publication_path())
+        .await
+        .expect("a second client attaches after the first closed");
+    let route = client
+        .open_route(target(), identity("witness-2"))
+        .await
+        .expect("route opens again");
+    let echoed = client
+        .request(
+            route,
+            mode_body(serde_json::json!({"mode": "echo", "value": 2})),
+            RequestOptions::default(),
+        )
+        .await
+        .expect("request completes after reconnect");
+    assert_eq!(
+        echoed.body,
+        mode_body(serde_json::json!({"mode": "echo", "value": 2}))
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let snapshot = client.host_status().await.expect("host.status decodes");
+        let shm = &snapshot.shared_memory;
+        assert_eq!(shm["activation"]["completed"], 2);
+        if shm["reclamation"]["completed"] == 1 && shm["returns"]["released_backings"] == 2 {
+            assert_eq!(shm["returns"]["live_backings"], 2);
+            assert_eq!(shm["returns"]["outstanding"], 0);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the closed connection's generation never retired or its backing never released: {shm}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    client.close().await.expect("second client closes");
+    host.shutdown_gracefully().await;
+}
+
+/// A retained response is private: while the caller holds A, more B responses than the 4 KiB
+/// class has blocks complete through the same connection and are all held too, so no response
+/// pins transport storage, and A's bytes are unchanged after reuse and after the connection closes.
+#[tokio::test]
+async fn a_retained_response_stays_private_while_transport_storage_is_reused_and_after_close() {
+    let host = TestHost::start().await;
+    let client = Client::connect(host.publication_path()).await.unwrap();
+    let route = client
+        .open_route(target(), identity("retained"))
+        .await
+        .unwrap();
+    let a_body =
+        mode_body(serde_json::json!({"mode": "echo", "value": "A", "pad": "a".repeat(1_000)}));
+    let a = client
+        .request(route, a_body.clone(), RequestOptions::default())
+        .await
+        .expect("A completes");
+    assert_eq!(a.body, a_body);
+
+    // More B responses than the 4 KiB class holds, every one retained alongside A: a response
+    // that pinned its block would exhaust the class before the loop ends and the request would
+    // never complete, so a bounded wait on each B is the witness that retention pins nothing.
+    let block_count = 64 + 8;
+    let mut held = Vec::with_capacity(block_count);
+    for cycle in 0..block_count {
+        let b_body =
+            mode_body(serde_json::json!({"mode": "echo", "value": cycle, "pad": "b".repeat(900)}));
+        let b = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.request(route, b_body.clone(), RequestOptions::default()),
+        )
+        .await
+        .expect("B completes while A and every earlier B are retained")
+        .expect("B completes");
+        assert_eq!(b.body, b_body);
+        held.push(b);
+    }
+    assert_eq!(held.len(), block_count);
+    assert_eq!(
+        a.body, a_body,
+        "A is unchanged by B's reuse of transport storage"
+    );
+
+    client.close().await.expect("client closes");
+    assert_eq!(
+        a.body, a_body,
+        "A survives the connection that delivered it"
+    );
+    host.shutdown_gracefully().await;
+}

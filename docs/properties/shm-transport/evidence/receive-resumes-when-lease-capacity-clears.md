@@ -154,11 +154,16 @@ separation that localises a lost wake.
 
 **That wake arm cannot be built by extending the existing in-process test, and
 needs a harness decision before it is queued as work.** `wait_for_data` blocks
-the calling thread, so the release has to come from somewhere else; but both
-`Ring` (`ring.rs:1001-1034`) and `ReceiveLease` (`crates/shm-transport/src/lease.rs:256`) carry
-`PhantomData<Rc<()>>` and are therefore neither `Send` nor `Sync`, so neither the
-ring nor a held lease can be moved to a second thread to release it there. The
-arm requires one of: a cross-process harness driving the release over raw
+the calling thread, so the release has to come from somewhere else. In the
+source tree this record was written against, both the ring and the lease carried
+`PhantomData<Rc<()>>` and neither could be moved to a second thread. At HEAD
+`Ring` still carries that marker (`ring.rs:573`), but `PayloadLease` is `Send`
+(`crates/shm-transport/src/lease.rs:243-247`) and its return runs on whichever
+thread drops it (`crates/shm-transport/src/backend/retained.rs:584-588`);
+`worker_final_drop_wakes_a_capacity_parked_producer_without_incoming_data`
+(`ring.rs:2559-2597`) already releases from a second thread while the other
+side is parked. The single-threaded form of the arm still requires one of: a
+cross-process harness driving the release over raw
 identities (the shape `tests/ring.rs` already uses for cross-process attach), or
 a scheduling seam inside the wait that lets a single-threaded test interleave a
 release with a parked waiter. Until one is chosen this arm is not implementable
@@ -238,3 +243,24 @@ property from passing vacuously in a configuration that can never saturate.
   - line 201, `:1236-1241` now `ring.rs:1598-1599`: At HEAD `release` signals `capacity_ready` only; `data_ready` is deliberately not touched (`:1519-1523`), so the release does not wake a parked `wait_for_data` waiter.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+### Q: Can a held lease be released from another thread at HEAD?
+
+- Sources examined: `crates/shm-transport/src/lease.rs:239-254`, `:592-604`;
+  `crates/shm-transport/src/backend/retained.rs:584-619`;
+  `crates/shm-transport/src/backend/ring.rs:573`, `:2559-2597`; a search of
+  `crates/shm-transport/src` for `max_leases` and `active_leases`.
+- Findings: yes. `PayloadLease` owns an `Arc<Retained>` and plain integers and is
+  `Send`; `owned_lease_drop_returns_once_after_moving_to_another_thread`
+  (`lease.rs:592-604`) and the parked-producer test above both drop a lease on a
+  worker thread. `Ring` remains `!Send`. The saturation gate this record is
+  built on has no counterpart: `max_leases` and `active_leases` do not appear in
+  `crates/shm-transport/src`, and `try_receive_inner` (`ring.rs:1295-1367`) has
+  only the emptiness gate (`:1298-1300`) and per-block live and generation
+  checks (`:1325-1337`).
+- Missing evidence: which state the record's Guarantee refers to without a lease
+  gate; the nearest analogue is a producer parked on capacity because
+  every block is leased, which the test at `ring.rs:2559-2597` constructs.
+- Conclusion: needs human input - the wake arm is implementable with a second
+  thread, but the record's saturation mechanism is superseded and the catalog
+  record needs re-derivation before the arm is queued.

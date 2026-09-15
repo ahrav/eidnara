@@ -78,10 +78,17 @@ implementation: the peer side has no way to hold work outstanding in both direct
 so the whole duplex property is untestable until the peer grows an independent or
 non-blocking send path. That is worth surfacing as an explicit unreached situation
 rather than discovering it as a silently trivial pass. The same absence explains why
-the two blocking paths found in that record — the synchronous `reserve_until` inside
-`publish_one`, now a parked wait on the `capacity_ready` doorbell, and the untimed
-`inbound.send().await` — have never been observed in a test: neither can be entered
-while the other lane is idle.
+the blocking path that record still carries, the inbound handoff in `deliver`
+(`crates/host-runtime/src/ring_transport.rs:911-923`), and the capacity park it
+replaces the outbound stall with, the `arm_capacity_wait` arm of `run_endpoint`
+(`:788`, `:845-866`) that is armed only while `Publisher` holds a pending frame,
+have never been observed in a test, and the overlap test did not reach either:
+`deliver` blocks only under application backpressure on the inbound lane and
+`arm_capacity_wait` only with a pending outbound frame against exhausted
+capacity, conditions the test does not create, though neither requires the
+other lane to be active. The synchronous `reserve_until` publish that record was written against
+has no host caller at HEAD (`Publisher::try_publish`, `:1221`, reserves with
+`try_reserve_in`).
 
 ## Timing windows and dependencies
 
@@ -119,9 +126,11 @@ no progress — is a distinct predicate asserted separately in
 
 Two refinements worth emitting as the same marker rather than separate ones, since both
 are the same situation at different intensities: overlap while neither lane is at
-capacity, which exercises the alternation at `:552-558`; and overlap while the outbound
-lane is at capacity, which is the state in which `publish_one` parks the shared thread
-on the `capacity_ready` doorbell and is the one that makes the starvation property
+capacity, which exercises the alternation at `:745-755`; and overlap while the outbound
+lane is at capacity, which is the state in which `Publisher::try_publish` returns
+`Ok(false)` on `Exhausted` (`:1240-1242`), the frame stays pending, and `run_endpoint`
+arms `Ring::arm_capacity_wait` and parks in its `select!` on the capacity descriptor
+(`:787-802`, `:845-866`); that is the state that makes the starvation property
 refutable. A campaign that only ever reaches the first has reached the situation but
 not the interesting corner of it, and the test should record which intensity it saw.
 
@@ -184,3 +193,21 @@ not the interesting corner of it, and the test should record which intensity it 
   - line 132, `crates/host-runtime/tests/shm_transport.rs:189-271` (host negotiation lockstep test): `crates/host-runtime/tests/shm_transport.rs` does not exist in this tree; the surviving shared-memory suites are `shm_failure_modes.rs` and `shm_soak.rs`.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+### Q: What is the at-capacity corner under the nonblocking publisher?
+
+- Sources examined: `crates/host-runtime/src/ring_transport.rs:636-894`
+  (`run_endpoint`), `:926-1038` (`receive_one`), `:1159-1217`
+  (`Publisher::pump`), `:1221-1277` (`Publisher::try_publish`).
+- Findings: the host never parks inside `Ring::reserve_until`. A frame that
+  finds no capacity stays in `Publisher.pending` and the endpoint arms
+  `Ring::arm_capacity_wait` (`:788`, `:968-978`) and selects on the duplicated
+  capacity descriptor beside data readiness and the earliest pending deadline
+  (`:810-879`, `:982-1024`). The at-capacity corner is therefore a pending
+  frame plus an armed capacity wait, observable through `Publisher::has_pending`
+  (`:1109-1111`) rather than through a blocked thread.
+- Missing evidence: unchanged; the addon and TypeScript suites were not
+  examined.
+- Conclusion: resolved with answer - the situation and marker are unchanged; the
+  corner the test should record is an armed capacity wait, not a parked
+  `reserve_until`.

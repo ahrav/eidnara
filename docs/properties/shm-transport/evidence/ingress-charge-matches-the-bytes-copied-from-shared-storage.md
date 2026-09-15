@@ -39,11 +39,19 @@ body_len` is already true — proved in `shm-transport`, consumed in `host-runti
 with no assertion, comment, or type linking the two.
 At HEAD: The comparison moved into the shared `check_wire_header` (`descriptor.rs:28-42`), so it now has three callers: `FrameDescriptor::validate` (`:323`), `SamplePrefix::validate` (`crates/shm-transport/src/backend/sample.rs:93`), and the producer's `prepare_commit` (`crates/shm-transport/src/backend/ring.rs:2316`).
 
-Downstream of the charge, nothing re-derives it. `InboundFrame::owned`
-(`frame_channel.rs:117-128`) stores the header, the body vector, and the
-`ByteCharge` side by side without comparing `header.len` to `body.len()`. The
-charge is what the budget later releases, so a divergence would be a durable
-accounting error rather than a transient one.
+Downstream of the charge, `InboundFrame::into_private` (`frame_channel.rs:107-128`)
+does re-derive it: after `PayloadLease::to_vec` (`:116`) it returns
+`PrivateCopyError::LengthMismatch` when `body.len()` disagrees with `header.len`
+(`:119-121`), and both callers end the generation on that error
+(`crates/host-runtime/src/connection.rs:419-422`,
+`crates/host-runtime/src/dispatch.rs:1006-1011`). The charge is reserved from
+`header.len` before the copy (`ring_transport.rs:1004`) and travels with the frame
+(`frame_channel.rs:68`, `:125`), so it matches the copied body whenever
+`InboundFrame::into_private` succeeds; `PayloadLease::to_vec` can copy and still
+return `PrivateCopyError::LengthMismatch`, and that frame never reaches a
+decoder; the charge is what the budget later releases, so a divergence that
+escaped both checks would be a durable accounting error rather than a transient
+one.
 
 The producer path cannot create a divergence: `commit_reservation` applies the
 same equality to the header it is about to publish
@@ -55,7 +63,7 @@ reachable only by a peer writing the shared descriptor page directly, which the
 mapping permits: both `Mapping::create` and `Mapping::attach` map
 `PROT_READ|PROT_WRITE` (`backend/ring.rs:462`, `:481`) and the required seals are
 `F_SEAL_GROW|SHRINK|SEAL` with no `F_SEAL_WRITE` (`:2850`).
-At HEAD: `send` delegates to `send_bounded` (`:901-933`), which is the path that reserves and commits, and the endpoint is no longer test-only: `start_ring_bridge` in `crates/host-runtime/src/client.rs:2489` attaches one in production.
+At HEAD: `send` (`:1520`, blocking, used by test peers) and `try_send_bounded` (`:1543`, the production bridge path) both reserve and then commit through `publish` (`:1580-1604`), and the endpoint is no longer test-only: `start_ring_bridge` in `crates/host-runtime/src/client.rs:2547` attaches one in production.
 
 The peer-side consumer showed what not delegating looks like. In the former
 `packages/plugin/src/shared/host-client/transport-provider.ts:406-426` the
@@ -117,18 +125,24 @@ equality is currently exercised negatively.
 ### Q: Does anything downstream of the charge re-derive `header.len` from the body, so that a divergence would still be caught?
 
 - Sources examined: `ring_transport.rs:731-745`, `frame_channel.rs:117-128` for
-  `InboundFrame::owned`, `lease.rs:330-348` for `to_vec`, and the former
-  `segmented` constructor (pre-#131 `frame_channel.rs:493-501`, since removed).
+  the source tree's owned-frame constructor (`InboundFrame::into_private` at
+  HEAD, `:107-128`), `lease.rs:330-348` for `to_vec`, and the former
+  `segmented` constructor (`frame_channel.rs:493-501` in that tree; removed).
 - Findings: no. `to_vec` checks its own internal consistency — the spans must sum
   to `body_len` (`:344-346`) — but `body_len` is the descriptor's field, so this
   re-proves the descriptor against itself and never against the header.
-  `InboundFrame::owned` performs no comparison. `InboundFrame` no longer has a
-  `segmented` constructor at HEAD (removed with the #131 rewrite), so the
-  shared-memory path uses the owned constructor.
+  The source tree's owned-frame constructor performed no comparison; at HEAD
+  `InboundFrame::into_private` (`frame_channel.rs:120-122`) compares the copied
+  length to `header.len` and fails the frame on mismatch, so the host does
+  re-derive the equality after the copy. `InboundFrame` has no `segmented`
+  constructor at HEAD; the shared-memory path builds
+  `InboundFrame::new(header, lease, charge)` (`ring_transport.rs:1032-1034`) and
+  copies in `into_private`.
 - Missing evidence: whether any consumer above `InboundEvent` compares
   `header.len` to the body it receives. That is Part 2 surface and was not read.
 - Conclusion: within Part 1's boundary the equality has exactly one enforcement
   point, in the crate that does not own the header format.
+  At HEAD: there are two enforcement points, `check_wire_header` in the transport (`descriptor.rs:25-39`) and the post-copy comparison in `InboundFrame::into_private` (`frame_channel.rs:120-122`), the second in the crate that owns the header format.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 

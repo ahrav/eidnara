@@ -6,6 +6,7 @@ use rusqlite::Transaction;
 
 use crate::admission::{EgressCandidate, EgressSnapshot, egress_candidates_tx};
 use crate::cas::{ArtifactDestination, ArtifactEligibility, is_artifact_digest};
+use crate::commit_read::CommitReadIncarnation;
 use crate::envelope::Sensitivity;
 use crate::scope::{
     CanonicalScope, Dimension, MatchOutcome, ScopeMatchContext, ScopeTermSpec, UnknownGraph,
@@ -88,6 +89,8 @@ impl ProjectScope {
 pub struct EligibilityBatch {
     /// The snapshot every verdict was judged at. A `None` classification generation means a classification merge overlapped the read; such a batch is not a reusable grant and must not be cached.
     pub snapshot: EgressSnapshot,
+    /// The database incarnation under which `verdicts` were judged.
+    pub incarnation: CommitReadIncarnation,
     /// `verdicts[i]` judges `candidates[i]` of the call that produced the batch; the two are positionally aligned and equal in length.
     pub verdicts: Vec<EligibilityVerdict>,
 }
@@ -217,9 +220,18 @@ impl KernelStore {
         candidates: &[EligibilityCandidate],
     ) -> Result<EligibilityBatch, KernelError> {
         check_bounds(candidates)?;
-        let (snapshot, verdicts) =
-            self.egress_read(|tx, tip| judge_in_tx(tx, tip, project, destination, candidates))?;
-        Ok(EligibilityBatch { snapshot, verdicts })
+        let (snapshot, (incarnation, verdicts)) = self.egress_read(|tx, tip| {
+            let incarnation = self.incarnation();
+            Ok((
+                incarnation,
+                judge_in_tx(tx, tip, project, destination, candidates)?,
+            ))
+        })?;
+        Ok(EligibilityBatch {
+            snapshot,
+            incarnation,
+            verdicts,
+        })
     }
 
     /// [`Self::judge_eligibility`] whose wait for a reader ends with `budget`, so a caller bounded by a slice is not held by an occupied reader pool.

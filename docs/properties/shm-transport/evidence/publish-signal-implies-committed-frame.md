@@ -42,10 +42,11 @@ input where the orderings differ: a commit that fails after the hook has already
   `let published = false;` (`:296` (source tree; not at HEAD)), and the callback passed as the native before-publish hook sets
   `published = true;` (`:303` (source tree; not at HEAD)) then invokes `hooks?.onPublish?.()` (`:305` (source tree; not at HEAD)). The ticket returned at `:321` (source tree; not at HEAD) is
   `{ cancel: () => !published }`, so once the hook has run the frame is uncancellable by contract.
-- `crates/host-runtime/src/ring_transport.rs:749-786` `publish_one` — the host's ordering is the opposite: the publish
-  attempt is wrapped at `:769-772`, then `if !matches!(result, Ok(Ok(()))) { return Err(()); }` (`:773-775`), and
-  only then `completion.store(COMPLETE, Ordering::Release)` (`:591` (source tree; not at HEAD)) followed by the hook at `:776-780`. The host
-  never marks a failed commit complete.
+- `crates/host-runtime/src/ring_transport.rs:1221-1277` `Publisher::try_publish` - the host's ordering is the
+  opposite: the publish attempt is wrapped in `catch_unwind` at `:1259-1262`, then
+  `if !matches!(result, Ok(Ok(()))) { return Err(()); }` (`:1263-1265`), and only then the terminal credit is
+  stored (`:1266-1268`), the hook runs (`:1269-1271`), the `written` callback runs (`:1272-1274`), and the
+  charge drops (`:1275`). The host never reports a failed commit as published.
 - `crates/shm-transport/src/backend/ring.rs:2536-2570` `commit` — five failure branches, all aborting the
   reservation: `Aborted` (`:2537-2539`), `CommitOutsideReservation` (`:2546-2550`), `Underfill` (`:2551-2555`),
   and, in the source tree, any error from the transport's `Ring::commit_reservation` (`:2562-2566`); at HEAD that
@@ -97,7 +98,7 @@ configuration dependency, no platform gating. This is a client-side property: th
 (`ring_transport.rs:773-780`) is ordered correctly, so a host-only test cannot observe it. It interacts with
 `no-frame-observable-before-commit`, which establishes the other half — the peer really does see nothing — and
 that is what makes the client's signal wrong rather than merely early.
-At HEAD: the host returns Err on a failed publish (`:773-775`) and only then runs the hook (`:776-780`); there is no completion marker left to store after commit.
+At HEAD: the host returns Err on a failed publish (`ring_transport.rs:1263-1265`) and only then runs the hook (`:1269-1271`); there is no completion marker left to store after commit.
 
 ## What a test must construct
 
@@ -146,7 +147,25 @@ the same fault, so the test documents the asymmetry rather than the symptom. Cov
   - line 40, `:303` (published = true inside the before-publish hook): Same missing file.
   - line 40, `:305` (the hooks.onPublish invocation): Same missing file.
   - line 40, `:321` (the returned ticket with cancel): Same missing file.
-  - line 44, `:591` (completion.store(COMPLETE, Ordering::Release)): `publish_one` stores no completion marker at HEAD; after the hook it invokes an optional written(Instant::now()) callback (`:781-783`) and drops the charge.
+  - line 44, `:591` (completion.store(COMPLETE, Ordering::Release)): `Publisher::try_publish` stores no completion marker at HEAD; after the hook it invokes an optional written(Instant::now()) callback (`:1272-1274`) and drops the charge (`:1275`).
   - line 104, `packages/plugin/src/shared/host-client/shm-frame-channel.ts:289-321` (publishFrame): `packages/plugin` is absent from this tree.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+### Q: Does the host-side ordering survive the nonblocking publisher?
+
+- Sources examined: `crates/host-runtime/src/ring_transport.rs:1159-1217`
+  (`Publisher::pump`), `:1221-1277` (`Publisher::try_publish`), `:1280-1318`
+  (`publish_direct`, `publish_owned`, `commit_before`).
+- Findings: the host publishes through `Publisher::try_publish`, called from
+  `Publisher::pump`. It reserves with `Ring::try_reserve_in` (`:1240-1244`),
+  leaves the frame pending on `Exhausted`, and otherwise runs `publish_direct`
+  or `publish_owned` inside `catch_unwind` (`:1259-1262`); the hook and the
+  `written` callback run only after `matches!(result, Ok(Ok(())))`
+  (`:1263-1274`). `commit_before` (`:1308-1318`) rechecks the frame deadline
+  before `reservation.commit`, so a deadline that passes after the body is
+  written is a commit failure that reaches no hook.
+- Missing evidence: none beyond what the record's Exercised field states.
+- Conclusion: resolved with answer - the host half of the asymmetry holds in
+  this form; only the function names and line numbers differ from the trail
+  above.

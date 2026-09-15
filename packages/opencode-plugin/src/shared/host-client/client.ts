@@ -537,7 +537,7 @@ export class HostClient {
         body: unknown,
         options: RequestOptions = {},
     ): Promise<unknown> {
-        const active = this.requireLiveHandle(handle);
+        const active = this.requireOpenForRequests(handle);
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
         const terminal = await this.awaitRequest(active.generation, {
             channel: handle.channel,
@@ -549,13 +549,19 @@ export class HostClient {
         return parseResponseJson(terminal);
     }
 
-    /** Caller releases the returned ReceiveLease. */
+    /**
+     * Caller releases the returned `ReceiveLease`. Until then it pins the transport block the
+     * host published into, counted against `maxRetainedBinaryBytes` / `maxRetainedBinaryResponses`;
+     * a held maximum-size response occupies the only block of its class, so the host cannot
+     * publish another maximum-size response to this connection until the lease is released.
+     * Copy with `takeOwned()` to release the block at once.
+     */
     async requestBinary(
         handle: RouteHandle,
         body: Uint8Array,
         options: RequestOptions = {},
     ): Promise<ReceiveLease> {
-        const active = this.requireLiveHandle(handle);
+        const active = this.requireOpenForRequests(handle);
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
         const terminal = await this.awaitRequest(active.generation, {
             channel: handle.channel,
@@ -584,7 +590,7 @@ export class HostClient {
         body: unknown,
         options: RequestOptions & { maxStreamItems?: number } = {},
     ): Promise<Item[]> {
-        const active = this.requireLiveHandle(handle);
+        const active = this.requireOpenForRequests(handle);
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
         const terminal = await this.awaitRequest(active.generation, {
             channel: handle.channel,
@@ -929,6 +935,12 @@ export class HostClient {
         const conn = this.connectionFor(handle);
         if (conn === null) throw new StaleRouteHandleError(handle);
         return conn;
+    }
+
+    /** Once close begins, a request would queue behind the connection Goodbye; refuse it here. */
+    private requireOpenForRequests(handle: RouteHandle): ActiveConnection {
+        if (this.closeStarted) throw new HostClientError("client closed", "client_closed");
+        return this.requireLiveHandle(handle);
     }
 
     private assertExpectedDaemon(

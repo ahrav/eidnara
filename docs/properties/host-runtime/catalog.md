@@ -291,9 +291,9 @@ Exercised: not yet - nothing exercises admission after cancel.
 Guarantee: After a generation is retired with both `token.cancel()` and
 `writer.discard()`, no byte of any frame admitted after the cancel reaches the
 socket.
-Check: `always` - two interleavings. First, cancel the token and call `writer.discard()`, then have a producer that already passed its `is_cancelled` precheck call send; assert the bytes never appear on the peer socket. Second, the gap the guarantee is really about: place a barrier between `token.cancel()` and `writer.discard()`, and in that gap release both the prechecked producer (so its frame is enqueued) and the endpoint (so it dequeues), then call `discard()` and assert the bytes never appear. `run_endpoint` checks `discard` only before the dequeue (`ring_transport.rs:438-445`) and calls `publish_one` (`:475`) without re-checking it, so a frame dequeued in the gap is published; that is the predicted violation at HEAD and the reason the first interleaving alone cannot fail. Both halves of the precondition are required: `send_ticket_before` gates on the writer's own `retired` token (`frame_channel.rs:640-653`), and the endpoint select services a ready queue before `root.cancelled()` (`ring_transport.rs:438-470`), so cancelling the generation token alone may still publish the newly queued frame. Separately assert `token.cancel()` alone does *not* stop queued frames, because the drain paths depend on that.
-Fault/timing angle: `send_ticket_before` gates on `retired` only, not on the
-generation token or `discard` (`frame_channel.rs:812-825` (source-catalog line, not present at HEAD)). So the guarantee is
+Check: `always` - two interleavings. First, cancel the token and call `writer.discard()`, then have a producer that already passed its `is_cancelled` precheck call send; assert the bytes never appear on the peer socket. Second, the gap the guarantee is really about: place a barrier between `token.cancel()` and `writer.discard()`, and in that gap release both the prechecked producer (so its frame is enqueued) and the endpoint (so it dequeues), then call `discard()` and assert the bytes never appear. `run_endpoint` checks `discard` only at the top of its loop (`ring_transport.rs:743-745`); a frame dequeued afterwards is handed to `Publisher::push` (`:933`) and `Publisher::pump` (`:935`, defined at `:1265`) publishes it through `try_publish` (`:1327`) without re-checking `discard`, so a frame dequeued in the gap is published; that is the predicted violation at HEAD and the reason the first interleaving alone cannot fail. Both halves of the precondition are required: `FrameSender::send_before` gates on the writer's own `retired` token (`frame_channel.rs:230-256`), and the endpoint select services a ready queue (`ring_transport.rs:869`) before `root.cancelled()` (`:929`), so cancelling the generation token alone may still publish the newly queued frame. Separately assert `token.cancel()` alone does *not* stop queued frames, because the drain paths depend on that.
+Fault/timing angle: `FrameSender::send_before` gates on `retired` only, not on the
+generation token or `discard` (`frame_channel.rs:230-256`). So the guarantee is
 enforced downstream by the writer's biased discard arm, not by admission: a
 producer can be admitted after cancel, and it is the writer that must drop it.
 Required faults and enabling state: a producer suspended between its
@@ -2796,7 +2796,11 @@ statement that no in-crate check executes in CI is false of doctests as well:
 `cargo test -p host-runtime --doc` runs at `ci.yml:175` under the step name "Rust
 lease non-escape" (`:174`), and this sub-part has exactly two doctests, both
 `compile_fail`, at `frame_channel.rs:296-301` and `:303-308`. Both were printed
-and confirmed: they assert that `ReceiveLease` is neither `Send` nor `'static`.
+and confirmed: they asserted that the lease type of that revision was neither
+`Send` nor `'static`. HEAD has no doctest in `frame_channel.rs`; the confinement
+doctests are the two `compile_fail` blocks on `Ring` and `ProducerReservation`
+at `crates/shm-transport/src/backend/ring.rs:25-33`, and `PayloadLease` is
+`Send` by design (`:35-38`).
 They were recorded as this sub-part's only CI-executed source-resident checks,
 which the `--lib` finding above supersedes - they are two of many.
 `wire.rs:4-14` is a ```text``` fence and is not compiled.
@@ -2910,8 +2914,10 @@ so a second local thread is immediate undefined behaviour, not a degradation.
 Fault/timing angle: the window is the whole connection. The specific risk is a
 future refactor returning a ring from `prepare` or storing one in
 `PreparedRing`; `Ring` is `!Send`, so the compiler catches the direct move, but
-a raw pointer, an index into a shared arena, or a `ReceiveLease` smuggled out
-through an `unsafe` block would not be caught. `#![deny(unsafe_code)]`
+a raw pointer, an index into a shared arena, or a `LeaseSpan` view
+(`crates/shm-transport/src/lease.rs:17-21`, `!Send`) smuggled out through an
+`unsafe` block would not be caught; a `PayloadLease` crosses threads by design
+(`lease.rs:243-247`) and reaches no `Ring`. `#![deny(unsafe_code)]`
 (`lib.rs:5`) currently forecloses that inside `host-runtime`.
 Required faults and enabling state: none for the structural check. For a
 runtime check, an active connection with both directions carrying traffic, so
@@ -2932,20 +2938,24 @@ worst.
 Open questions:
 
 - Should `PreparedRing` carry a negative marker, or a compile-fail doctest like
-  the two on `frame_channel::ReceiveLease` (`frame_channel.rs:296-308`), so the
+  the two on `Ring` and `ProducerReservation`
+  (`crates/shm-transport/src/backend/ring.rs:25-33`), so the
   confinement is enforced rather than reviewed?
 
 ### ring-a-no-producer-retains-a-committed-release-identity
 
 Type: safety
-Reachability: default-production - the three producer call sites are on the
-host's publication path, which every activated connection runs:
-`ring_transport.rs:615` and `:628` are inside `publish_one`'s helpers
-`publish_direct` (`:604`) and `publish_owned` (`:619`), reached from
-`run_endpoint` (`:479-484`) and from the charge wait (`:533-540`), and
-`:696` is inside `RingClientEndpoint::send` (`:684`), reached in production from
-`client.rs:1878` on the ordinary connect path. No `cfg` gate and no config gate
-stands on any of the three. The `Ring::release` end of the property is likewise
+Reachability: default-production - the two producer `commit` call sites are on
+the host's publication path, which every activated connection runs:
+`ring_transport.rs:1316` is inside `commit_before` (`:1308`), shared by
+`Publisher::try_publish`'s helpers `publish_direct` (`:1280`) and
+`publish_owned` (`:1294`), reached from `Publisher::pump` (`:1159`), which
+`run_endpoint` calls at `:696` and `:884` and `receive_one` calls at `:972`,
+`:1003`, and `:1017`; and `:1601` is inside `RingClientEndpoint::publish`
+(`:1580`), shared by `send` (`:1520`, the blocking test-peer variant) and
+`try_send_bounded` (`:1543`), which production reaches from
+`attempt_pending_writes` (`client.rs:2511`) on every bridge loop pass. No `cfg` gate and no config gate
+stands on either of the two. The `Ring::release` end of the property is likewise
 production: `ring_release_callback` (`ring.rs:1670-1677`) runs on every lease
 drop.
 Status: active
@@ -3170,11 +3180,13 @@ on the erasure of a cause that existed at the failure site.
 ### ring-a-publish-failure-is-reported-as-a-clean-peer-close
 
 Type: safety
-Reachability: default-production - `publish_one` (`ring_transport.rs:560`) is
-called from `run_endpoint` (`:479-484`) and from the charge wait (`:533-540`),
-both on the endpoint thread every authenticated connection runs
-(`connection.rs:148`). `ShmReceiver::recv`'s `CleanEof` mapping (`:354`) and its
-consumer (`connection.rs:401-404`) are on the same ungated path.
+Reachability: default-production - `Publisher::try_publish`
+(`ring_transport.rs:1327`) is reached from `Publisher::pump` (`:1265`), which
+`run_endpoint` calls at `:696` and `:884` and `receive_one` calls at `:972`,
+`:1003`, and `:1017`, all on the endpoint thread every authenticated connection
+runs (`connection.rs:142-143`). `ShmReceiver::recv`'s `CleanEof` mapping
+(`:631`) and its consumer (`connection.rs:364-366`) are on the same ungated
+path.
 Status: active
 Exercised: not yet - needs an outbound publication that fails while the
 connection is otherwise healthy, plus an assertion on the resulting close
@@ -3182,30 +3194,35 @@ disposition rather than on liveness.
 Guarantee: An outbound publication failure is reported to the connection engine
 with a close cause distinct from a clean peer EOF, so a host-side transport
 fault is never attributed to the peer.
-Check: `always` - whenever `publish_one` returns `Err`, the cause delivered on the inbound channel is not `ReadClose::CleanEof`, and the connection's final disposition or operator-visible classification distinguishes the host-side transport fault from a peer close. The second clause is a predicted violation at HEAD: `read_loop` folds `Err(ReadClose::Corrupt(_))` into the same `ReadExit::Peer` arm as `CleanEof` (`crates/host-runtime/src/connection.rs:362-365`, re-verified), so the intermediate enum distinguishes the cause and the disposition does not. `always` fits because the close disposition is a total function of the cause (Part 2a, `close-disposition-is-a-total-function-of-the-read-exit-cause`) and a misclassified cause silently selects the wrong teardown every time it occurs.
+Check: `always` - whenever `Publisher::pump` (`ring_transport.rs:1265`) returns `Err`, the cause delivered on the inbound channel is not `ReadClose::CleanEof`, and the connection's final disposition or operator-visible classification distinguishes the host-side transport fault from a peer close. The first clause holds at HEAD: every caller maps the `Err` to `ReadClose::Corrupt("shared-memory publish failed")` (`:696-704`, `:884-892`, `:973`, `:1004`, `:1018`, `:1022`, and the deadline arm at `:867-877`). The second clause is a predicted violation at HEAD: `read_loop` folds `Err(ReadClose::Corrupt(_))` into the same `ReadExit::Peer` arm as `CleanEof` (`crates/host-runtime/src/connection.rs:364-366`, re-verified), so the intermediate enum distinguishes the cause and the disposition does not. `always` fits because the close disposition is a total function of the cause (Part 2a, `close-disposition-is-a-total-function-of-the-read-exit-cause`) and a misclassified cause silently selects the wrong teardown every time it occurs.
 Fault/timing angle: no interleaving is needed; the misreport is the
-straight-line behaviour. `run_endpoint:479-484` cancels `queue.retired` and
-`root` and returns without sending on `inbound`. Dropping the sender closes the
-channel, and `ShmReceiver::recv` maps a closed channel to
-`Err(ReadClose::CleanEof)` (`:354`), which `connection.rs:401-404` maps to
-`ReadExit::Peer` - a silent retirement with no terminals and no Goodbye
-(`connection.rs:309-315`). The one exception is a publish failure raised from
-inside the charge wait, which does return a distinguishable cause,
-`ReadClose::Corrupt("shared-memory publish failed")` (`:535-537`). So the same
-fault classifies two different ways depending on which loop observed it.
+straight-line behaviour. Superseded in part: the outbound failure path once
+returned from `run_endpoint` without sending on `inbound`, so the dropped sender
+became `CleanEof` at `ShmReceiver::recv`. At HEAD `run_endpoint` routes a
+`Publisher::pump` failure through `fail` (`:897-908`), which sends
+`ReadClose::Corrupt("shared-memory publish failed")` on the reserved terminal
+slot before cancelling `queue.retired` and `root` (`:696-704`, `:884-892`), and
+`receive_one` returns the same cause from inside the ingress wait (`:973`,
+`:1004`, `:1018`, `:1022`). The `CleanEof` mapping at `:631` is therefore not
+reached by a publish failure, and the two loops classify the fault
+identically. What survives is the disposition: `connection.rs:364-366` maps
+`Corrupt` to `ReadExit::Peer`, a silent retirement with no terminals and no
+Goodbye (`connection.rs:309-315`).
 Required faults and enabling state: an outbound publish failure. Four
-mechanisms reach it: reservation deadline expiry under a full host-to-peer ring
-(`reserve_until`, `ring.rs:980`, deadline exits at `:989`, `:1005`, `:1024`,
-`:1044`), a wire-header/length disagreement rejected by
-`commit_reservation` (`ring.rs:1577-1593`), a panic in the direct serializer
-caught at `:584-587`, and `ReservationWriter` exhaustion (`:635-643`). The
+mechanisms reach it: a pending frame that outlives `frame_deadline` while
+`Ring::try_reserve_in` (`ring.rs:940`) keeps returning `Exhausted` under a
+full host-to-peer ring (checked in `pump` at `:1168-1171` and by the
+`sleep_until(publisher.earliest_deadline())` arms at `:867-877` and
+`:1021-1023`), a wire-header/length disagreement rejected by `commit`
+(`ring.rs:1723-1725`), a panic in the direct serializer caught at
+`:1259-1265`, and `ReservationWriter` exhaustion (`:1320-1336`). The
 cheapest to construct is a peer that attaches and then never receives, filling
-the host-to-peer ring until `reserve_until` hits its deadline.
-Confidence: high - [evidence](evidence/ring-a-publish-failure-is-reported-as-a-clean-peer-close.md). Verified by inspection: `publish_one` returns `Result<(), ()>` (`:560-565`), so
-every distinct cause is erased to a unit before `run_endpoint` sees it; the
-`:479-484` block sends nothing; `:354` is the only `CleanEof` producer in the
-crate; `connection.rs:401` is the only `CleanEof` consumer.
-Existing check: none. `connection.rs:401-404` is the consuming match, not a
+the host-to-peer ring until the head frame's publication deadline passes.
+Confidence: high - [evidence](evidence/ring-a-publish-failure-is-reported-as-a-clean-peer-close.md). Verified by inspection: `Publisher::try_publish` returns `Result<bool, ()>` (`:1221`) and `pump` returns `Result<(), ()>` (`:1159`), so
+every distinct cause is erased to a unit before `run_endpoint` sees it; `fail`
+(`:897-908`) sends `Corrupt` before cancelling; `:631` is the only `CleanEof`
+producer in the crate; `connection.rs:364` is the only `CleanEof` consumer.
+Existing check: none. `connection.rs:364-366` is the consuming match, not a
 check.
 Impact: two consequences. Operationally, a host-side ring fault is indexed as a
 peer disconnect, so the diagnostics counters and any operator narrative blame
@@ -3215,10 +3232,15 @@ peer-caused close but means a host-caused close also produces no terminal, so
 every pending correlation becomes `outcome_unknown` with no recorded reason.
 Open questions:
 
-- Should `publish_one` carry a cause enum rather than `()`? The information
-  exists at each of the four failure sites and is discarded at `:588-590`.
-- Is the asymmetry between `:535-537` (`Corrupt`) and `:479-484` (`CleanEof`)
-  for the identical fault deliberate? (needs human input)
+- Should `Publisher::try_publish` carry a cause enum rather than `()`? The
+  information exists at each failure site and is discarded at `:1243`,
+  `:1263-1265`, `:1290`, `:1302-1303`, and `:1316`; `pump` adds a unit deadline
+  failure at `:1169-1171`.
+- Resolved by mechanism change: the `Corrupt`-versus-`CleanEof` asymmetry
+  between the two publishing loops does not exist at HEAD. Both report
+  `ReadClose::Corrupt("shared-memory publish failed")`, through `fail`
+  (`:897-908`) or a direct return (`:973`, `:1004`, `:1018`, `:1022`), so only
+  the check's second clause remains a predicted violation.
 
 ### ring-a-endpoint-thread-panic-is-reported-as-orderly-completion
 
@@ -3244,13 +3266,16 @@ other than a clean completion, and no `QueuedOutboundFrame` remains in state
 a panic on this thread is an optional path that a correct build never takes, but
 it must be safe when it does; `always` would overstate a requirement that the
 path be exercised.
-Fault/timing angle: the exposed window is between `:587` and `:600`. The inner
-`catch_unwind` protects only the reserve-fill-commit block. A panic in the
-publish hook (`:594`), or in the `written` local-completion hook (`:598`),
-unwinds `publish_one` and `run_endpoint`, is swallowed by `let _ =` at `:264`,
-and then `admission.release()` (`:276`) and `done_tx.send(())` (`:277`) run
-exactly as on an orderly exit. Neither `queue.retired` nor `root` is cancelled,
-so `FrameSender::send_ticket_before` keeps admitting frames until its own
+Fault/timing angle: the exposed window is between `:1266` and `:1275`. The inner
+`catch_unwind` (`:1259-1262`) protects only the reserve-fill-commit block. A
+panic in the publish hook (`:1270`), or in the `written` local-completion hook
+(`:1273`), unwinds `Publisher::try_publish` and `run_endpoint`. The rest of
+this field is superseded: the outer `catch_unwind` (`:488-500`) observes
+`Err`, and that branch increments `endpoint_panics`, cancels `queue.retired`
+and `root`, and sends `ReadClose::Corrupt("shared-memory endpoint panicked")`
+on `inbound` (`:501-507`) before `done_tx.send(())` (`:526`). In the
+superseded shape neither `queue.retired` nor `root` was cancelled,
+so `FrameSender::send_ticket_before` kept admitting frames until its own
 admission timeout fires (`frame_channel.rs:742-750` (source-catalog line, not present at HEAD)), and the `io` future
 completes successfully, which `connection.rs:347` reads as a clean join. A
 second, narrower window: a panic inside `on_publish()` (`frame_channel.rs:653-655`)
@@ -3268,16 +3293,20 @@ Confidence: high - [evidence](evidence/ring-a-endpoint-thread-panic-is-reported-
 at `:592-598`; `panic_boundary::redact_sync` wraps only the direct serializer
 (`:610-613`) and not the hooks.
 Existing check: none for the ring thread. `panic_boundary.rs` is Part 2a scope.
-Impact: the host loses its only transport thread and reports success. Frames
-admitted after the panic sit in the queue until each hits its admission
-deadline, so the connection degrades over `frame_deadline` per frame rather than
-retiring, and diagnostics records nothing at all: no `peer_death`, no
-`exhaustion`, and `state: "healthy"`.
+Impact: superseded at HEAD. The host lost its only transport thread and reported success; frames admitted after the panic sat in the queue until each hit its admission deadline, and diagnostics recorded nothing. At HEAD the outer `catch_unwind` retires the generation with `ReadClose::Corrupt`, cancels `queue.retired` and `root` so nothing further is admitted, and `endpoint_panic.observed` in `host.status` counts the panic; the residual impact is the lost thread for that connection alone.
 Open questions:
 
 - Should `:591`'s `COMPLETE` store move after the hooks, or should the hooks
   move inside the inner `catch_unwind`? The two answers differ on whether a
   hook panic should retire the connection.
+- Mechanism changed: the outer boundary reports the panic. The thread closure
+  counts it in `endpoint_panics`, cancels `queue.retired` and `root`, and sends
+  `ReadClose::Corrupt("shared-memory endpoint panicked")` (`:501-507`), so the
+  connection observes a cause other than a clean completion. The record's
+  first clause holds at HEAD; what remains is `read_loop` folding that
+  `Corrupt` into `ReadExit::Peer` (`connection.rs:364-366`), and the
+  `Impact:`, `Confidence:`, and `Exercised:` fields need re-derivation against
+  the HEAD boundary.
 
 ### ring-a-ring-unavailability-fails-closed-without-a-classified-reason
 
@@ -3534,8 +3563,8 @@ Type: safety
 Reachability: default-production - `receive_one` (`ring_transport.rs:487`) runs
 on the endpoint thread of every authenticated connection, and all five
 lease-holding return points (`:509`, `:525`, `:531`, `:539`, `:548`) are on that
-ungated path. `ReceiveLease::Drop` (`lease.rs:201-206` post-#131) is likewise
-unconditional.
+ungated path. `PayloadLease::Drop` (`crates/shm-transport/src/lease.rs:364-370`)
+is likewise unconditional.
 Status: active
 Exercised: not yet - needs a `release` that fails, which needs a quarantined or
 identity-mismatched ring while a lease is held. **Constructible today**; see
@@ -3555,10 +3584,11 @@ rejection and `:546-548` on the delivery path) map `Err` to
 `ReadClose::Corrupt("shared-memory completion failed")`. The three early
 returns that hold a lease do not: `Cancelled` at `:525`, `Overloaded` at
 `:531`, and `Cancelled` at `:539` all drop the lease, and
-`ReceiveLease::Drop` (`crates/shm-transport/src/lease.rs:201-206`) calls
-`release_once` and discards its `Result`. So exactly the paths taken under
-cancellation and overload - the paths most likely to coincide with a stressed or
-quarantined ring - are the ones that cannot report a completion failure.
+`PayloadLease::Drop` (`crates/shm-transport/src/lease.rs:364-370`) calls
+`return_once` (`:346-355`) and discards its `Result`. So exactly the paths taken
+under cancellation and overload - the paths most likely to coincide with a
+stressed or quarantined ring - are the ones that cannot report a completion
+failure.
 Required faults and enabling state: a held lease **and** a release failure.
 `Ring::release` returns `Err` on quarantine (`ring.rs:1176-1178`), wrong incarnation
 (`:1179-1181`), wrong lane (`:1182-1184`), stale sequence (`:1193-1196`), and duplicate
@@ -3616,6 +3646,16 @@ Open questions:
   intended peer authority, or should quarantine be host-initiated only? It is the
   cheapest route to this record's fault and simultaneously a capability the
   threat model may not want. (needs human input)
+- Mechanism changed on the success path: `receive_one` does not release the
+  lease before delivery. The `PayloadLease` travels inside `InboundFrame::new`
+  (`ring_transport.rs:1076-1078`) and is released inside
+  `InboundFrame::into_private`, which propagates a failed release as
+  `PrivateCopyError::Transport` (`frame_channel.rs:118`); both callers end the
+  generation on it, and `into_private_reports_a_failed_return_wake_as_a_transport_error`
+  (`ring_transport.rs:3240`) exercises the failing return. The oversize
+  channel-0 rejection still reports its own release error
+  (`ring_transport.rs:986-988`). The failure paths that drop the lease still
+  discard the `Result`.
 
 ### ring-a-cancellation-close-requires-an-empty-inbound-observation
 
@@ -3716,10 +3756,12 @@ conditional on.
 Confidence: medium - [evidence](evidence/ring-a-cancellation-close-requires-an-empty-inbound-observation.md).
 The code structure is verified by inspection at post-#131 HEAD and the intent
 is stated in the comment at `:449-453`. Re-verified for this pass:
-`frame_deadline` is consumed only at `:519` and `:527-532` inside `receive_one`
-and at `publish_one`'s own reservation deadline (`:583`), and all three
-`inbound.send(..).await` sites (`:402`, `:510-515`, `:551-556`) are
-undeadlined. What I did not verify is the exact behaviour of `read_loop` under
+`frame_deadline` is consumed at `:961` and `:994-999` inside `receive_one` and
+by `Publisher` as each pending frame's publication deadline (set in `push` at
+`:1152`, checked in `pump` at `:1168-1171` and by the
+`sleep_until(publisher.earliest_deadline())` arms at `:867` and `:1021`), and
+both `deliver` sites (`:951-957`, `:1028-1036`; `deliver` itself at `:911-923`)
+are undeadlined. What I did not verify is the exact behaviour of `read_loop` under
 cancellation, so I cannot state whether the host reliably stops draining and
 closes the inbound channel promptly; that is why this is medium and not high,
 and it is the first open question below.
@@ -3920,7 +3962,7 @@ Exercised: not yet - unconstructible from any host path.
 Guarantee: The zero-copy segmented inbound path that the frame-channel
 abstraction and the transport doc both describe has a production producer, so
 the copy accounting and the wrap-around lease handling are exercised.
-Check: `reachable` - when live, the code location `InboundFrame::segmented` is executed at least once per campaign. No live location corresponds to it: the wrap-around case takes the owned conversion (`ring_transport.rs:549`), and only the lease-level `ReceiveLease::segmented` (`frame_channel.rs:300`, reached from `contiguous` at `:297`) remains. `reachable` fit because this was location coverage.
+Check: `reachable` - when live, the code location `InboundFrame::segmented` is executed at least once per campaign. No live location corresponds to it. Superseded twice over: the owned conversion this check once named is also gone, and at HEAD the lease itself travels with the frame (`InboundFrame::new`, `ring_transport.rs:1032-1034`) until `InboundFrame::into_private` (`frame_channel.rs:107-128`) copies it with `PayloadLease::to_vec` (`crates/shm-transport/src/lease.rs:332-338`); no lease-level segmented constructor exists in either crate. `reachable` fit because this was location coverage.
 Fault/timing angle: none. Static producer enumeration. The interesting
 consequence is that a body wrapping the arena end is copied twice on the peer
 side of the in-process client (`client.rs:1878` charges then
@@ -3932,13 +3974,17 @@ body whose descriptor spans two arena ranges, which the transport produces when
 straddles the arena wrap point. But `receive_one` collapses it with
 `lease.to_vec()` (`:544`) before the host ever sees the span structure.
 Confidence: high - [evidence](evidence/ring-a-segmented-inbound-body-has-no-production-producer.md). Verified by grepping: `InboundFrame::segmented` has zero call sites in the
-tree, including tests. `ReceiveBody::Segmented` (`frame_channel.rs:448`) is
-therefore unconstructible, so `with_lease` (`:506-513`) always takes the
-`Owned` arm and `decode_contiguous`'s `None` arm (`connection.rs:586`) is dead.
-`ring_transport.rs:552` is the only `InboundFrame` constructor call on the
-host path and it uses `owned`.
-Existing check: `frame_channel/contract_tests.rs:141` calls `with_lease` and
-asserts `lease.segment(0)`, on a hand-built frame. Status unaudited.
+tree, including tests. `ReceiveBody::Segmented` (`frame_channel.rs:448`) was
+therefore unconstructible, and the borrowing adapter and the connection
+engine's contiguous-or-copy decoder that consumed it are absent from HEAD: the
+only `InboundFrame` constructor call on the host path is `InboundFrame::new`
+at `ring_transport.rs:1032-1034`, which carries the `PayloadLease` itself, and
+a channel-0 body is copied by `decode_control_frame` (`connection.rs:532-543`)
+through `InboundFrame::into_private` (`frame_channel.rs:107-128`).
+Existing check: `frame_channel/contract_tests.rs:137` and `:405` call
+`into_private` on frames received through a real ring and assert the copied
+body; `inbound_payload_ownership_travels_with_the_frame` (`:387-420`) also
+asserts the charge is held until the private copy drops. Status unaudited.
 Impact: two things. First, the attribute at `frame_channel.rs:476` reads
 `#[allow(dead_code, reason = "shared-memory backends supply wrapped bodies")]`
 and that reason is false at `HEAD`: the shared-memory backend supplies `owned`.
@@ -3963,9 +4009,10 @@ Open questions:
 Grouped by shared mechanism rather than by the headings above, because the
 sharpest relationships cross groups. **Every dominance statement below is a
 hypothesis** about which oracle subsumes which, offered to order the work, not a
-verified claim. None has been tested, because no check in this sub-part executes
-in CI beyond the two `compile_fail` doctests, and neither doctest touches any of
-these records.
+verified claim. None has been tested: at HEAD the workspace `--all-targets`
+jobs run every inline test in this sub-part and `cargo test --doc` runs the
+three replacement doctests in `crates/shm-transport/src/backend/ring.rs`, but
+none of those checks targets these records.
 
 - **One charge, four ways to lose track of it.**
   [ring-a-admission-charge-releases-on-every-endpoint-thread-exit](#ring-a-admission-charge-releases-on-every-endpoint-thread-exit),
@@ -3996,13 +4043,18 @@ these records.
   [ring-a-ring-unavailability-fails-closed-without-a-classified-reason](#ring-a-ring-unavailability-fails-closed-without-a-classified-reason),
   [ring-a-host-doctor-emits-one-of-five-declared-terminal-classes](#ring-a-host-doctor-emits-one-of-five-declared-terminal-classes).
   This is one finding attacked from four sides, and it is the cluster an operator
-  would feel first. `publish_one` erases four distinct failure causes to `()`
-  (`:560-565`, discarded at `:588-590`); the outer `catch_unwind` erases a panic
-  with `let _ =` (`:264`); `RingUnavailable` is a unit struct with no cause field
+  would feel first. `Publisher::try_publish` erases every distinct failure
+  cause to `()` (`:1221`, discarded at `:1243`, `:1263-1265`, `:1290`,
+  `:1302-1303`, and `:1316`); the outer `catch_unwind` (`:488-500`) counts a
+  panic in `endpoint_panics` and reports it as
+  `ReadClose::Corrupt("shared-memory endpoint panicked")` (`:501-507`), which
+  `read_loop` folds into `ReadExit::Peer` (`connection.rs:364-366`);
+  `RingUnavailable` is a unit struct with no cause field
   (`:103-112`); and `diagnostics()` has two arms and no counter can move `state`
   off `"healthy"` (`:165-179`), so the client classifier that owns the five-class
   taxonomy only ever sees a terminal condition when its own call fails.
-  Hypothesis: giving `RingUnavailable` and `publish_one` a shared cause enum,
+  Hypothesis: giving `RingUnavailable` and `Publisher::try_publish` a shared
+  cause enum,
   surfaced through `diagnostics()`, would dominate all four, because each
   record's oracle reduces to "a host-observable record names this cause". Fixing
   the client taxonomy alone dominates none of them: the classes already exist and
@@ -4015,9 +4067,10 @@ these records.
   record states in its own `Impact:` line. Reaching the state where a lease is
   held across a saturated budget while an outbound frame publishes is the
   enabling state for observing a release failure on a cancellation or overload
-  path, and it is also where the `Corrupt`-versus-`CleanEof` asymmetry becomes
-  observable, because `:535-537` is the one publish-failure site that returns a
-  distinguishable cause. Hypothesis: constructing the ingress-wait state
+  path, and it was also where the `Corrupt`-versus-`CleanEof` asymmetry was
+  observable; that half is superseded, since at HEAD both publishing loops
+  report `Corrupt` (`:696-704`, `:1003-1005`). Hypothesis: constructing the
+  ingress-wait state
   *dominates* the enabling half of the other two, in the specific sense that
   neither is falsifiable until it exists. It does not dominate their oracles: a
   release failure additionally needs a quarantined ring. That is now known to be
@@ -4035,8 +4088,9 @@ these records.
   `safety`/`always`; the second was retyped from `reachability`/`unreachable`
   under the portfolio disposition, because a provenance restriction on an
   *executed* function is a state and not a forbidden location. Hypothesis: a
-  compile-time enforcement of confinement, on the model of the two `ReceiveLease`
-  `compile_fail` doctests at `frame_channel.rs:296-308`, would dominate the
+  compile-time enforcement of confinement, on the model of the two
+  `compile_fail` doctests on `Ring` and `ProducerReservation` at
+  `crates/shm-transport/src/backend/ring.rs:25-33`, would dominate the
   runtime form of the first record, since those doctests are the only checks here
   CI already runs. Nothing dominates the second: a call-graph absence is proved
   by enumeration, and the only alternative is a debug counter on a path that
@@ -7821,7 +7875,7 @@ fails to publish.
 Guarantee: When a settled terminal fails to publish, the settling path has
 already returned success, the request is recorded as settled, and the client's
 only signal is a clean connection close.
-Check: `always` - whenever `publish_one` returns `Err` for a frame whose
+Check: `always` - whenever `Publisher::try_publish` (`ring_transport.rs:1327`) returns `Err` for a frame whose
 correlation has `won == true`, assert that no `Error` terminal for that
 correlation is emitted afterwards and that the generation's close carries no
 distinguishing reason; and, positively, that the client observes the clean
@@ -7837,11 +7891,13 @@ Required faults and enabling state: A handler that calls
 `RequestCtx::output_from_writer` with an `exact_len` its serializer does not
 match, or a ring reservation that fails under contention.
 `reservation.commit(body_len)` then returns `ProducerError::Underfill`
-(`shm-transport/src/backend/ring.rs:1363-1367`).
+(`shm-transport/src/backend/ring.rs:1719-1721`).
 Confidence: high - [evidence](evidence/req-a-a-response-publication-failure-never-reaches-the-settling-path.md).
 Traced the direct-output path from `dispatch.rs:332-349` through
-`ring_transport.rs:580-593` into `commit`, and confirmed `publish_one` discards
-the `written` hook on failure without touching the settlement.
+`Publisher::try_publish` (`ring_transport.rs:1259-1265`) and `publish_direct`
+(`:1280-1292`) into `commit_before` (`:1308-1318`), and confirmed
+`try_publish` returns `Err` at `:1263-1265` before the `written` hook at
+`:1272-1274`, so the hook is dropped unrun without touching the settlement.
 Existing check: none in this sub-part. Part 2b holds
 `ring-a-publish-failure-is-reported-as-a-clean-peer-close`, which establishes
 the close half but not the settlement half.

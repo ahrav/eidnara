@@ -5,12 +5,14 @@
 `docs/shm-transport.md:19` says the receiver "validates the descriptor
 and header before exposing a scoped lease", and
 `docs/host-wire-protocol.md:294` repeats the obligation as a MUST. The
-frame-channel module doc says the same thing more strongly
-(`crates/host-runtime/src/frame_channel.rs:8-10`): "Receive bytes are visible only
-through a lexical `ReceiveLease`; contiguous consumers use the explicit copying
-adapter before entering asynchronous work." Tracing what the host actually hands
+frame-channel module doc of that revision said the same thing more strongly
+(`crates/host-runtime/src/frame_channel.rs:8-10`): receive bytes were visible
+only through a lexical lease, and contiguous consumers used the explicit copying
+adapter before entering asynchronous work. Tracing what the host actually hands
 the connection engine showed the segmented, non-copying half of that design has
-no producer.
+no producer. At HEAD the module doc (`frame_channel.rs:6-8`) states the
+replacement contract: bodies are owned transport leases, copied into private
+memory through `InboundFrame::into_private` before any decoder sees them.
 
 ## Evidence trail
 
@@ -23,67 +25,54 @@ enum ReceiveBody {
 }
 ```
 
-**The two constructors.** `InboundFrame::owned` (`:462-474`) and
-`InboundFrame::segmented` (`:476-490`). The second carries:
+**The two constructors.** The owned constructor (`:462-474`) and
+`InboundFrame::segmented` (`:476-490`). The second carried:
 
 ```
 #[allow(dead_code, reason = "shared-memory backends supply wrapped bodies")]
 pub(crate) fn segmented(
 ```
 
-**Caller enumeration.** `InboundFrame::segmented` has **zero** call sites in the
+**Caller enumeration.** `InboundFrame::segmented` had **zero** call sites in the
 tree, including tests. The only `InboundFrame` constructor call on the host
-inbound path is `ring_transport.rs:552`:
+inbound path was the owned one at `ring_transport.rs:552`, taking
+`(header, body, charge, copies)`. At HEAD the only constructor is
+`InboundFrame::new(header, lease, charge)` (`frame_channel.rs:81-91`), called
+once, at `ring_transport.rs:1032-1034`, with the `PayloadLease` itself.
 
-```
-inbound.send(Ok(InboundEvent::Frame(InboundFrame::owned(
-    header, body, charge, copies,
-))))
-```
+So `ReceiveBody::Segmented` was unconstructible in production, and the
+suppression reason was false: the shared-memory backend supplied an owned
+body, not a wrapped one.
 
-So `ReceiveBody::Segmented` is unconstructible in production, and the
-suppression reason is false at `HEAD`: the shared-memory backend supplies
-`owned`, not a wrapped body.
+**What that stranded downstream.** The borrowing adapter (`:506-513`) matched
+on the body enum and, for the `Owned` arm, built a contiguous lexical lease over
+the host's own `Vec`; only the `Segmented` arm built a two-segment lease. The
+second arm was dead. So was the `Segmented` arm of the owned conversion
+(`:523-528`). And so was the `None` arm of the connection engine's adapter,
+`connection.rs:583-587`, which decoded the contiguous bytes when the lease
+offered them and otherwise flattened through the copying path. At HEAD none of
+these exist: `decode_control_frame` (`connection.rs:532-543`) calls
+`InboundFrame::into_private` (`frame_channel.rs:107-128`) and decodes the
+private `Vec`, and routed requests copy through the same method under
+`WorkLedgers::run_blocking` (`dispatch.rs:993-1003`).
 
-**What that strands downstream.** `with_lease` (`:506-513`):
-
-```
-pub fn with_lease<T>(&self, decode: impl for<'lease> FnOnce(ReceiveLease<'lease>) -> T) -> T {
-    match &self.body {
-        ReceiveBody::Owned(body) => decode(ReceiveLease::contiguous(body)),
-        ReceiveBody::Segmented(first, second) => {
-            decode(ReceiveLease::segmented(first, Some(second)))
-        }
-    }
-}
-```
-
-The second arm is dead. So is the `Segmented` arm of `into_owned`
-(`:523-528`). And so is the `None` arm of the connection engine's adapter,
-`connection.rs:583-587`:
-
-```
-frame.with_lease(|lease| match lease.contiguous_bytes() {
-    Some(body) => decode(body),
-    None => decode(&lease.to_owned(&copies)),
-})
-```
-
-`contiguous_bytes` (`frame_channel.rs:364-366`) returns `Some` exactly when
-`second.is_none()`, which `ReceiveLease::contiguous` (`:317-319`) always
-arranges. So the `None` arm never runs, and the doc comment above it
+`contiguous_bytes` (`frame_channel.rs:364-366`) returned `Some` exactly when
+`second.is_none()`, which the contiguous lease constructor (`:317-319`) always
+arranged. So the `None` arm never ran, and the doc comment above it
 (`connection.rs:577-579` - "A body that wraps the ring arena end flattens
-through the explicit copying adapter first") describes a path that cannot be
+through the explicit copying adapter first") described a path that could not be
 taken, because the flattening already happened one layer down.
 
-**Where the flattening actually happens.** `receive_one` collapses the span
+**Where the flattening actually happened.** `receive_one` collapsed the span
 structure with `lease.to_vec()` at `ring_transport.rs:543-545`, before the host
-ever sees it. `ReceiveLease::to_vec`
-(`crates/shm-transport/src/lease.rs`; not re-swept post-#131) walks
-the spans and copies each into one contiguous `Vec`. The transport
-does produce two spans when a body straddles the arena wrap
-(`ring.rs:1105-1112` sets `second` when `validated.span_count() == 2`), so the
-segmented case is real at the transport layer and is erased at the host boundary.
+ever saw it. At HEAD there is no span structure to collapse: the pool backend
+writes each frame into one fixed block
+(`crates/shm-transport/src/backend/ring.rs:5-9`), `PayloadLease::body` yields
+one contiguous `LeaseSpan` (`crates/shm-transport/src/lease.rs:308-329`), and
+`PayloadLease::to_vec` (`:332-338`) copies that single span. The transport of
+the superseded revision did produce two spans when a body straddled the arena
+wrap, so the segmented case was real at that transport layer and was erased at
+the host boundary.
 
 **The same erasure on the peer side.** `RingClientEndpoint::try_recv_with`
 (`ring_transport.rs:723-739`) also calls `lease.to_vec()` at `:735`. So neither
@@ -119,26 +108,29 @@ truthful.
 
 The consequences are about what is not tested and what a reader will believe.
 
-First, the zero-copy design the module doc describes is not the design in use.
-`frame_channel.rs:8-10` says receive bytes are "visible only through a lexical
-`ReceiveLease`" - true of the *type*, false of the *storage*: the lease the
-engine sees borrows the host's own `Vec`, so its `!Send` and non-`'static`
-bounds (enforced by the two compile-fail doctests at `:296-308`) protect against
-escaping a copy, not against escaping shared memory. The protection that matters,
-not holding a reference into peer-writable storage, is Part 1's
-`no-rust-reference-over-peer-writable-payload` and it is satisfied by the copy at
-`:544`, not by the lease type.
+First, the zero-copy design the module doc of that revision described was not
+the design in use. It said receive bytes were visible only through a lexical
+lease - true of the *type*, false of the *storage*: the lease the engine saw
+borrowed the host's own `Vec`, so its `!Send` and non-`'static` bounds
+(enforced by two compile-fail doctests at `frame_channel.rs:296-308` in that
+revision) protected against escaping a copy, not against escaping shared
+memory. The protection that matters, not holding a reference into
+peer-writable storage, is Part 1's `no-rust-reference-over-peer-writable-payload`
+and it was satisfied by the copy at `:544`, not by the lease type. At HEAD the
+copy sits in `InboundFrame::into_private` (`frame_channel.rs:113-117`), the
+lease the engine holds is the transport's own `PayloadLease`, and the module
+doc (`:6-8`) says so.
 
-Second, the wrap-around case is untested end to end at the host boundary. A body
-straddling the arena wrap produces two spans in the transport, and the host's
-only handling is `to_vec`'s loop. If that loop were wrong - say it mis-ordered the
-spans - the host would deliver a corrupted body and nothing in `host-runtime` would
-notice, because the only assertion on segment structure is
-`contract_tests.rs:141`, on a hand-built frame:
-
-```
-frame.with_lease(|lease| assert_eq!(lease.segment(0), Some(&b"in"[..])));
-```
+Second, the wrap-around case was untested end to end at the host boundary. A
+body straddling the arena wrap produced two spans in the transport, and the
+host's only handling was `to_vec`'s loop. If that loop were wrong - say it
+mis-ordered the spans - the host would deliver a corrupted body and nothing in
+`host-runtime` would notice, because the only assertion on segment structure
+was `contract_tests.rs:141`, on a hand-built frame, asserting
+`lease.segment(0)` through the borrowing adapter. At HEAD the corresponding
+check is `contract_tests.rs:137`, which calls `into_private` on a frame
+received through a real ring and asserts the copied body, and the pool backend
+has no two-span shape to mis-order.
 
 Third, a stale suppression reason is how a genuinely dead branch survives review.
 `#[allow(dead_code, reason = "shared-memory backends supply wrapped bodies")]`
@@ -165,12 +157,13 @@ Dependencies:
 The `reachable` check as stated cannot pass, so the useful constructions are the
 two things the dead path was standing in for.
 
-1. **Wrap-around body, end to end.** Fill the arena so the next body straddles
-   the wrap point, publish it peer-to-host, and assert the host delivers the
-   exact bytes. This exercises `to_vec`'s two-span loop
-   (`lease.rs`; not re-swept post-#131) through the production path, which is
-   the real
-   obligation. The arena is `shm_transport::MIN_ARENA_BYTES` (asserted at
+1. **Wrap-around body, end to end.** Historical, arena-backend only: fill the
+   arena so the next body straddles the wrap point, publish it peer-to-host, and
+   assert the host delivers the exact bytes. At HEAD the pool backend writes
+   each frame into one fixed block and `PayloadLease::body` yields one
+   contiguous `LeaseSpan`, so no production frame can take this shape and the
+   current-path obligation is the single-span `to_vec` copy that
+   `control_frame_body_is_copied_out_of_the_ring` already exercises. The arena is `shm_transport::MIN_ARENA_BYTES` (asserted at
    `ring_transport.rs:905`) and the descriptor depth is 8 (`:903`), so filling it
    is a matter of publishing and releasing enough frames to advance the write
    cursor near the end.
@@ -194,8 +187,10 @@ contract-test blocks at `contract_tests.rs:527-700`.
 - Sources examined: `frame_channel.rs:1-10` (module doc), `:110-115`
   (`ProducerReservation`'s charge-ownership doc), `:395-397` (`LeaseTracker`'s
   "Testable close gate used by transport implementations"), `:446-490`
-  (`ReceiveBody` and both constructors), `:506-534` (`with_lease`,
-  `into_owned`); `ring_transport.rs:15` (which reservation type the ring
+  (`ReceiveBody` and both constructors), `:506-534` (the borrowing adapter and
+  the owned conversion, both absent from HEAD, where `InboundFrame::into_private`
+  at `:107-128` is the one exit for body bytes); `ring_transport.rs:15` (which
+  reservation type the ring
   actually imports), `:543-556` (the copy and the `owned` construction);
   `connection.rs:577-587`; `contract_tests.rs:527-700` (the
   `ownership_contract` module).
@@ -223,20 +218,24 @@ contract-test blocks at `contract_tests.rs:527-700`.
 ### Q: Does the host boundary satisfy the docs' scoped-lease obligation?
 
 - Sources examined: `docs/shm-transport.md:19`;
+- Sources examined: `docs/shm-transport.md:19`;
   `docs/host-wire-protocol.md:294`; `ring.rs:1076-1134` (the transport's
   validate-then-lease sequence); `ring_transport.rs:503-505` (the host's header
   validation) and `:543-548` (copy then release);
-  `frame_channel.rs:290-314` (the `ReceiveLease` type and its two compile-fail
-  doctests).
+  `frame_channel.rs:290-314` (that revision's host-side lease type and its two
+  compile-fail doctests; at HEAD the host carries the transport's
+  `PayloadLease` directly, `frame_channel.rs:65-69`).
 - Findings: the obligation is satisfied at the layer it names. The transport
   validates offsets, lengths, sequence metadata, header fields, and descriptor
   identity (`ring.rs:1093-1100`) before constructing the lease at `:1119-1133`, which
   is exactly what `:294` requires. The host then adds its own header validation
-  at `:503-505`. What the docs do not say, and a reader would not infer, is that
-  the host does not pass that lease along: it copies and releases, and the
-  `ReceiveLease` the connection engine handles is a different type in a different
-  crate (`frame_channel.rs:309` versus
-  `crates/shm-transport/src/lease.rs:90`) over host-owned storage.
-- Missing evidence: none.
+  at `:503-505`. What the docs did not say, and a reader would not infer, is that
+  the host of that revision did not pass that lease along: it copied and
+  released, and the lease the connection engine handled was a different type in
+  a different crate (`frame_channel.rs:309` versus
+  `crates/shm-transport/src/lease.rs:90`) over host-owned storage. At HEAD the
+  two layers share one type: `receive_one` hands the `PayloadLease` to
+  `InboundFrame::new` (`ring_transport.rs:1032-1034`) and the copy happens in
+  `InboundFrame::into_private` (`frame_channel.rs:107-128`).
 - Conclusion: resolved with answer. The obligation holds; the docs conflate two
   layers and two identically-named types. Recorded as lead L1 in the lens file.

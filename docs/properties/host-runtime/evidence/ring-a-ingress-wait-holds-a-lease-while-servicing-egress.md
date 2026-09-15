@@ -21,43 +21,59 @@ inside the wait - is what nothing constructs.
 
 ## Evidence trail
 
-**The lease is live across the whole wait.** Bound at `:496-501`, released at
-`:546-548`. Between them (`ring_transport.rs:519-542`):
+**The lease is live across the whole wait.** Bound at `:937-943`, handed to
+the connection engine inside `InboundFrame::new` at `:1032-1034`; the release
+happens later, in `InboundFrame::into_private` (`frame_channel.rs:119`).
+Between them (`ring_transport.rs:961-1025`):
 
 ```
 let deadline = Instant::now() + frame_deadline;
+let discard = queue.discard.clone();
 let charge = ingress.charge(header.len);
 tokio::pin!(charge);
 let charge = loop {
+    let capacity_armed = if publisher.has_pending() {
+        match rings.first.arm_capacity_wait() { /* :968-981 */ }
+    } else {
+        false
+    };
     tokio::select! {
         biased;
-        () = read_cancel.cancelled() => return Err(ReadClose::Cancelled),
-        charge = &mut charge => break charge,
+        charge = &mut charge => match charge {
+            Some(charge) => break charge,
+            None => return Err(ReadClose::Overloaded),
+        },
+        () = read_cancel.cancelled() => return Ok(false),
+        () = discard.cancelled() => return Ok(false),
         () = tokio::time::sleep_until(deadline) => {
-            // The peer and transport are healthy; only the ingress budget is
-            // saturated. Overloaded retires the generation without branding
-            // it corrupt, so the admission charge releases cleanly.
             return Err(ReadClose::Overloaded);
         }
-        queued = queue.recv() => match queued {
+        queued = queue.recv(), if publisher.can_accept() => match queued {
             Some(queued) => {
-                if publish_one(&rings.first, queued, frame_deadline, publish_hook).is_err() {
+                publisher.push(queued);
+                if publisher.pump(&rings.first).is_err() {
                     return Err(ReadClose::Corrupt("shared-memory publish failed"));
                 }
             }
             None => return Err(ReadClose::Cancelled),
+        },
+        ready = capacity.readable(), if capacity_armed => { /* :1009-1020, then pump */ },
+        () = tokio::time::sleep_until(publisher.earliest_deadline()), if publisher.has_pending() => {
+            return Err(ReadClose::Corrupt("shared-memory publish failed"));
         }
     }
 };
 ```
 
-Post-#131 the wait parks instead of polling: `ByteBudget::charge`
-(`crates/host-runtime/src/wire.rs:397-407`) is `acquire_many_owned` on a tokio
+The wait parks instead of polling: `ByteBudget::charge`
+(`crates/host-runtime/src/wire.rs:415-428`) is `acquire_many_owned` on a tokio
 semaphore, so the future queues and resolves when another holder's
 `ByteCharge` drops its permits. Egress servicing is likewise event-driven -
 `queue.recv()` is an async receive, not the polling-era `try_recv` - so an
-outbound frame queued at any point during the wait is published from inside
-it (`:533-540`).
+outbound frame queued at any point during the wait is pushed to the
+`Publisher` and pumped from inside it (`:1000-1008`), and a frame the pump
+could not place parks on capacity readiness (`:968-981`, `:1009-1020`) rather
+than inside a blocking reserve.
 
 **The lease budget.** Eight, pinned by the profile rather than by file-local
 constants post-#131: `ring_profile_pins_per_connection_grant_geometry`
@@ -132,10 +148,10 @@ mechanisms are never exercised together:
   connection's sends") was removed with the rewrite; the surviving statement
   of the same intent is `run_endpoint`'s alternation comment at `:416-420`.
   If the arm never runs under real pressure, the claim is unverified. Note
-  that this is the site whose publish failure produces `ReadClose::Corrupt`
-  (`:536`) while the main loop's produces `CleanEof` - the asymmetry in
-  `ring-a-publish-failure-is-reported-as-a-clean-peer-close` - and reaching
-  this state is what makes that asymmetry observable.
+  that this is the site whose publish failure produces `ReadClose::Corrupt`;
+  at HEAD the main loop's publish failure produces `Corrupt` as well, so the
+  `Corrupt`-versus-`CleanEof` asymmetry that
+  `ring-a-publish-failure-is-reported-as-a-clean-peer-close` recorded is gone.
 - The lease's long hold itself, which is the longest any host code holds a
   reference into shared storage, and therefore the widest window for Part 1's
   `quarantine-authority-survives-peer-writes` scenario.
@@ -163,8 +179,9 @@ Dependencies:
 - `ring-a-lease-release-failure-is-observable-only-on-the-success-path` cannot
   be falsified until this state is reached, because its untracked drop-path
   returns are exactly the ones inside this wait (`:525`, `:531`, `:539`).
-- `ring-a-publish-failure-is-reported-as-a-clean-peer-close` needs this state
-  to observe its `Corrupt`-versus-`CleanEof` asymmetry.
+- `ring-a-publish-failure-is-reported-as-a-clean-peer-close` recorded a
+  `Corrupt`-versus-`CleanEof` asymmetry that HEAD no longer has; both paths
+  report `Corrupt`.
 - Part 1 holds `lease-saturation-is-reached-then-drains`,
   `receive-resumes-when-lease-capacity-clears`, and
   `backpressure-converges-in-a-bounded-reclaim-window` at the transport layer,
@@ -198,8 +215,9 @@ but its sender queue is empty (`:1023-1026`), so `:533-540` never runs and the
 test exits through cancellation rather than through the publish arm or the
 success path. Combining them is a small change to an existing test.
 
-Neither runs in CI, since every `-p host-runtime` invocation in `ci.yml` filters to
-an integration binary.
+At HEAD both run in CI: the workspace `--all-targets` jobs execute the
+`host-runtime` library test target, so the filtered-integration-only shape of
+the source workflow no longer applies.
 
 ## Investigation log
 

@@ -21,6 +21,8 @@ import {
     probeCapabilities,
     QUALIFIED_TEST_PROFILE,
     RING_FULL_MESSAGE,
+    setDeleteFailpoint,
+    setDetachFailpoint,
 } from "../index.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "shm-native-"));
@@ -88,6 +90,7 @@ describe("native mechanism gate", () => {
 });
 
 interface RawAttachAddon {
+    grantDecodes(hex: string): boolean;
     attach(descriptor: unknown): number;
     activeChannelCount(): number;
     activeExternalRefCount(): number;
@@ -97,7 +100,6 @@ interface RawAttachAddon {
         channel: number,
         header: Uint8Array,
         capacity: number,
-        timeoutMs: number,
         fill: (segments: Uint8Array[]) => number,
         beforePublish: () => void,
     ): void;
@@ -135,48 +137,56 @@ function supportsMechanismTests(
     return addon !== null && process.platform === "linux";
 }
 
-/** Geometry of the `host-test-ring-v1` profile (`host_test_ring_profile`). */
-const GRANT_DESCRIPTOR_DEPTH = 8n;
-/** `MIN_ARENA_BYTES` == `MAX_FRAME_BYTES` == 64 MiB. */
-const GRANT_ARENA_BYTES = 67_108_864n;
-const GRANT_MAX_LEASES = 8n;
+/** Geometry of the `host-payload-pool-v1` profile (`PoolGeometry::host_payload_pool`). */
+const GRANT_ORDINARY_DESCRIPTORS = 32;
+const GRANT_RESERVED_DESCRIPTORS = 16;
+/** Seven classes, ordinary first: `[block_bytes, count]`. */
+const GRANT_CLASSES: [bigint, number][] = [
+    [4096n, 64],
+    [65_536n, 16],
+    [1_048_576n, 8],
+    [8_388_608n, 2],
+    [67_112_960n, 1],
+    [4096n, 32],
+    [32_768n, 64],
+];
 /**
- * Bytes the ring layout adds around a page-aligned arena: the control
- * region that precedes it (producer, consumer, and reclaim cache lines
- * plus `descriptor_depth` slots, rounded up to a page) and the trailing
- * lifecycle page.
+ * Complete mapping length at 4 KiB pages: five control cache lines and the
+ * 256-byte lifecycle page, 48 descriptor slots of 64 bytes, 187 completion
+ * cells of 8 bytes rounded to a page, then the 95_817_728-byte block arena
+ * rounded to a page.
  *
- * `RingGrant::decode` recomputes the layout and rejects any grant whose
+ * `PoolGrant::decode` recomputes the layout and rejects any grant whose
  * `total_bytes` disagrees, so this value is not decoration: it must track
- * `Layout::new(GRANT_DESCRIPTOR_DEPTH, GRANT_ARENA_BYTES).total`. Growing
- * a control-region struct past a page boundary changes it, and a stale
- * value surfaces as `invalid shared-memory descriptor` from whichever
- * test needs the grant to be *valid* — see the unresolvable-descriptor
- * test below, which is the only case that gets past decoding.
+ * `MappingLayout::new(&PoolGeometry::host_payload_pool(), 4096).total`.
+ * `grantDecodes` proves the unmutated fixture decodes before any mutation
+ * case counts, so a stale value fails there rather than in a rejection case.
  */
-const GRANT_LAYOUT_OVERHEAD_BYTES = 8_192n;
+const GRANT_TOTAL_BYTES = 95_825_920n;
+const GRANT_BYTES = 126;
 
 /**
- * Encodes one RingGrant wire image (layout version 3) as lowercase hex:
- * layout_version u16, incarnation [16], lane u32, descriptor_depth u64,
- * arena_bytes u64, max_leases u64, total_bytes u64, reserved u32 zero —
- * all little-endian.
+ * Encodes one PoolGrant wire image (layout version 4) as lowercase hex:
+ * layout_version u16, incarnation [16], lane u32, ordinary descriptors u32,
+ * reserved descriptors u32, seven (block_bytes u64, count u32) classes,
+ * total_bytes u64, reserved u32 zero — all little-endian.
  */
 function testGrantHex(lane: number, incarnation: number): string {
-    const bytes = new Uint8Array(58);
+    const bytes = new Uint8Array(GRANT_BYTES);
     const view = new DataView(bytes.buffer);
-    view.setUint16(0, 3, true);
+    view.setUint16(0, 4, true);
     bytes[2] = incarnation;
     view.setUint32(18, lane, true);
-    view.setBigUint64(22, GRANT_DESCRIPTOR_DEPTH, true);
-    view.setBigUint64(30, GRANT_ARENA_BYTES, true);
-    view.setBigUint64(38, GRANT_MAX_LEASES, true);
-    view.setBigUint64(
-        46,
-        GRANT_ARENA_BYTES + GRANT_LAYOUT_OVERHEAD_BYTES,
-        true,
-    );
-    view.setUint32(54, 0, true);
+    view.setUint32(22, GRANT_ORDINARY_DESCRIPTORS, true);
+    view.setUint32(26, GRANT_RESERVED_DESCRIPTORS, true);
+    let cursor = 30;
+    for (const [blockBytes, count] of GRANT_CLASSES) {
+        view.setBigUint64(cursor, blockBytes, true);
+        view.setUint32(cursor + 8, count, true);
+        cursor += 12;
+    }
+    view.setBigUint64(cursor, GRANT_TOTAL_BYTES, true);
+    view.setUint32(cursor + 8, 0, true);
     return [...bytes]
         .map((byte) => byte.toString(16).padStart(2, "0"))
         .join("");
@@ -391,7 +401,7 @@ describe("raw N-API descriptor boundary", () => {
                 `const view = new DataView(header.buffer);\n` +
                 `view.setUint32(0, 1, true); view.setUint8(4, 3); view.setUint8(5, 3);\n` +
                 `view.setUint16(7, 1, true); view.setUint32(9, 1, true); view.setBigUint64(13, 7n, true);\n` +
-                `addon.produce(pair.first, header, 1, 0, (segments) => { segments[0][0] = 7; return 1; }, () => {});\n` +
+                `addon.produce(pair.first, header, 1, (segments) => { segments[0][0] = 7; return 1; }, () => {});\n` +
                 `const deadline = Date.now() + 2000;\n` +
                 `while (dispatches === 0 && Date.now() < deadline) {\n` +
                 `  await new Promise((resolve) => setTimeout(resolve, 1));\n` +
@@ -456,7 +466,7 @@ describe("raw N-API descriptor boundary", () => {
                 `const view = new DataView(header.buffer);\n` +
                 `view.setUint32(0, 1, true); view.setUint8(4, 3); view.setUint8(5, 3);\n` +
                 `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
-                `const publish = (channel, value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(channel, header, 1, 0, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
+                `const publish = (channel, value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(channel, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
                 `const until = async (ready) => { const deadline = Date.now() + 2000; while (!ready() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1)); };\n` +
                 `addon.close(dead.first);\n` +
                 `await until(() => !addon.isWatching(dead.second));\n` +
@@ -513,7 +523,7 @@ describe("raw N-API descriptor boundary", () => {
                 `const view = new DataView(header.buffer);\n` +
                 `view.setUint32(0, 1, true); view.setUint8(4, 3); view.setUint8(5, 3);\n` +
                 `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
-                `const publish = (value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(pair.first, header, 1, 0, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
+                `const publish = (value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(pair.first, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
                 `const until = async (ready) => { const deadline = Date.now() + 2000; while (!ready() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1)); };\n` +
                 `publish(1); publish(2); publish(3);\n` +
                 `await until(() => received.length >= 3);\n` +
@@ -567,7 +577,6 @@ describe("raw N-API descriptor boundary", () => {
                 channel,
                 header,
                 1,
-                0,
                 (segments) => {
                     segments[0]![0] = value;
                     return 1;
@@ -681,7 +690,8 @@ describe("raw N-API descriptor boundary", () => {
     test("releasing a lease returns its slot; an unreleased ring fills", () => {
         const addon = loadRawAddon();
         if (!supportsMechanismTests(addon)) return;
-        const depth = 8; // HOST_TEST_RING_DEPTH
+        // Blocks in the smallest ordinary class; holding all of them exhausts that class.
+        const depth = GRANT_CLASSES[0]![1];
         const header = new Uint8Array(21);
         const view = new DataView(header.buffer);
         view.setUint32(0, 1, true);
@@ -695,7 +705,6 @@ describe("raw N-API descriptor boundary", () => {
                 pair.first,
                 header,
                 1,
-                0,
                 (segments) => {
                     segments[0]![0] = value;
                     return 1;
@@ -707,7 +716,7 @@ describe("raw N-API descriptor boundary", () => {
         const released = addon.createTestPair();
         const held = addon.createTestPair();
         try {
-            // Releasing after every receive keeps the ring from filling at any frame count.
+            // Releasing after every receive keeps the pool from filling at any frame count.
             for (let value = 1; value <= depth * 3; value += 1) {
                 publish(released, value);
                 let token = -1;
@@ -720,7 +729,8 @@ describe("raw N-API descriptor boundary", () => {
             }
             expect(addon.poll(released.second, () => {})).toBe(false);
 
-            // Holding every lease exhausts the ring on the depth-th publish.
+            // Holding every block of the class exhausts it on the depth-th publish, although
+            // every descriptor was consumed on receive.
             const tokens: number[] = [];
             for (let value = 1; value <= depth; value += 1) {
                 publish(held, value);
@@ -758,6 +768,268 @@ describe("raw N-API descriptor boundary", () => {
         }
     });
 
+    test("a pure-header control publishes from its reserve while ordinary headroom is exhausted, and a channel-0 Request does not", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const pair = addon.createTestPair();
+        const header = (ty: number, channel: number, corr: number): Uint8Array => {
+            const bytes = new Uint8Array(21);
+            const view = new DataView(bytes.buffer);
+            view.setUint32(0, 0, true);
+            view.setUint8(4, 3);
+            view.setUint8(5, ty);
+            view.setUint16(7, channel, true);
+            view.setUint32(9, 1, true);
+            view.setBigUint64(13, BigInt(corr), true);
+            return bytes;
+        };
+        const publish = (ty: number, channel: number, corr: number): void =>
+            addon.produce(pair.first, header(ty, channel, corr), 0, () => 0, () => {});
+        try {
+            // Every ordinary descriptor slot is outstanding: the peer consumes nothing.
+            for (let corr = 1; corr <= GRANT_ORDINARY_DESCRIPTORS; corr += 1) {
+                publish(0, 1, corr);
+            }
+            let ordinary: unknown;
+            try {
+                publish(0, 1, GRANT_ORDINARY_DESCRIPTORS + 1);
+            } catch (error) {
+                ordinary = error;
+            }
+            expect(isRingFullError(ordinary)).toBe(true);
+            // A channel-0 Request is application traffic, not a bypass control.
+            let channelZero: unknown;
+            try {
+                publish(0, 0, 77);
+            } catch (error) {
+                channelZero = error;
+            }
+            expect(isRingFullError(channelZero)).toBe(true);
+            // Pong, Cancel, and Goodbye take the control reserve.
+            for (const ty of [8, 6, 11]) publish(ty, 0, 1);
+            // The consumer sees them in publication order after the ordinary frames.
+            const types: number[] = [];
+            while (
+                addon.poll(pair.second, (token, wire) => {
+                    types.push(wire[5]!);
+                    addon.release(pair.second, token);
+                })
+            ) {}
+            expect(types.length).toBe(GRANT_ORDINARY_DESCRIPTORS + 3);
+            expect(types.slice(GRANT_ORDINARY_DESCRIPTORS)).toEqual([8, 6, 11]);
+        } finally {
+            addon.close(pair.first);
+            addon.close(pair.second);
+        }
+    });
+
+    test("an armed capacity wait wakes the readiness callback on the peer's consumption or return alone", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const addonPath = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../shm_native.node",
+        );
+        // Runs in a child so the callback under test is the process-wide reactor's own.
+        const script = join(scratch, "capacity-wake.mjs");
+        writeFileSync(
+            script,
+            `import { createRequire } from "node:module";\n` +
+                `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
+                `const DEPTH = ${GRANT_ORDINARY_DESCRIPTORS};\n` +
+                `const pair = addon.createTestPair();\n` +
+                `const header = (corr) => { const b = new Uint8Array(21); const v = new DataView(b.buffer); v.setUint32(0, 1, true); v.setUint8(4, 3); v.setUint16(7, 1, true); v.setUint32(9, 1, true); v.setBigUint64(13, BigInt(corr), true); return b; };\n` +
+                `const publish = (corr) => addon.produce(pair.first, header(corr), 1, (s) => { s[0][0] = corr & 0xff; return 1; }, () => {});\n` +
+                `const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\n` +
+                `const report = { wakes: 0 };\n` +
+                `try { addon.armCapacity(pair.first, header(DEPTH + 1), 1); report.unwatched = "armed"; } catch (error) { report.unwatched = String(error.message); }\n` +
+                `addon.watch(pair.first, () => { report.wakes += 1; addon.readinessHandled(); });\n` +
+                `for (let corr = 1; corr <= DEPTH; corr += 1) publish(corr);\n` +
+                `try { publish(DEPTH + 1); report.full = "published"; } catch (error) { report.full = error.message; }\n` +
+                `report.armed = addon.armCapacity(pair.first, header(DEPTH + 1), 1);\n` +
+                `await sleep(50);\n` +
+                `report.wakesWhileHeld = report.wakes;\n` +
+                `addon.poll(pair.second, (token) => addon.release(pair.second, token));\n` +
+                `let deadline = Date.now() + 2000;\n` +
+                `while (report.wakes === 0 && Date.now() < deadline) await sleep(1);\n` +
+                `report.wakesAfterConsumption = report.wakes;\n` +
+                `publish(DEPTH + 1);\n` +
+                `report.rearmed = addon.armCapacity(pair.first, header(DEPTH + 1), 1);\n` +
+                `await sleep(50);\n` +
+                `report.wakesAfterRearm = report.wakes;\n` +
+                `const tokens = [];\n` +
+                `addon.poll(pair.second, (token) => tokens.push(token));\n` +
+                `deadline = Date.now() + 2000;\n` +
+                `while (report.wakes === 1 && Date.now() < deadline) await sleep(1);\n` +
+                `report.wakesAfterSecondConsumption = report.wakes;\n` +
+                `publish(DEPTH + 2);\n` +
+                `while (addon.poll(pair.second, (token) => tokens.push(token)));\n` +
+                `let corr = DEPTH + 3;\n` +
+                `report.publishedWithBlocksHeld = 0;\n` +
+                `try { for (;; corr += 1) { publish(corr); report.publishedWithBlocksHeld += 1; } } catch (error) { report.blocksExhausted = error.message; }\n` +
+                `report.wakesBeforeReturn = report.wakes;\n` +
+                `report.armedOnBlocks = addon.armCapacity(pair.first, header(DEPTH + 1), 1);\n` +
+                `await sleep(50);\n` +
+                `report.wakesWhileBlocksHeld = report.wakes;\n` +
+                `addon.release(pair.second, tokens.shift());\n` +
+                `deadline = Date.now() + 2000;\n` +
+                `while (report.wakes === report.wakesBeforeReturn && Date.now() < deadline) await sleep(1);\n` +
+                `report.wakesAfterReturn = report.wakes;\n` +
+                `publish(corr);\n` +
+                `for (const token of tokens) addon.release(pair.second, token);\n` +
+                `addon.close(pair.first);\n` +
+                `addon.close(pair.second);\n` +
+                `console.log(JSON.stringify(report));\n`,
+        );
+        const child = spawnSync(process.execPath, [script], {
+            encoding: "utf8",
+            timeout: 10_000,
+        });
+        expect(child.signal).toBeNull();
+        expect(child.stderr).toBe("");
+        expect(child.status).toBe(0);
+        const report = JSON.parse(child.stdout.trim()) as {
+            unwatched: string;
+            full: string;
+            armed: boolean;
+            wakesWhileHeld: number;
+            wakesAfterConsumption: number;
+            rearmed: boolean;
+            wakesAfterRearm: number;
+            wakesAfterSecondConsumption: number;
+            publishedWithBlocksHeld: number;
+            blocksExhausted: string;
+            wakesBeforeReturn: number;
+            armedOnBlocks: boolean;
+            wakesWhileBlocksHeld: number;
+            wakesAfterReturn: number;
+        };
+        // The producer side must be watched before it can park.
+        expect(report.unwatched).toMatch(/not watched/);
+        expect(report.full).toBe(RING_FULL_MESSAGE);
+        expect(report.armed).toBe(true);
+        // Nothing wakes the producer while the peer holds every descriptor.
+        expect(report.wakesWhileHeld).toBe(0);
+        // One consumption by the peer is the only event, and it is enough.
+        expect(report.wakesAfterConsumption).toBe(1);
+        // Headroom is exhausted again, so the re-arm parks, and the consumed wake is not
+        // replayed for a park nobody holds.
+        expect(report.rearmed).toBe(true);
+        expect(report.wakesAfterRearm).toBe(1);
+        expect(report.wakesAfterSecondConsumption).toBe(2);
+        // Every descriptor is acknowledged while the peer holds the blocks, so the 4 KiB class
+        // (64 blocks) runs out with descriptor headroom to spare: 33 held plus 31 published.
+        expect(report.publishedWithBlocksHeld).toBe(
+            GRANT_CLASSES[0]![1] - (GRANT_ORDINARY_DESCRIPTORS + 1),
+        );
+        expect(report.blocksExhausted).toBe(RING_FULL_MESSAGE);
+        expect(report.wakesBeforeReturn).toBe(2);
+        expect(report.armedOnBlocks).toBe(true);
+        expect(report.wakesWhileBlocksHeld).toBe(2);
+        // One lease return, with no descriptor consumed, is the only event, and it is enough.
+        expect(report.wakesAfterReturn).toBe(3);
+    });
+
+    test("injected detach and deletion failures quarantine the backing and conserve tokens", () => {
+        const addon = loadRawAddon();
+        if (!supportsMechanismTests(addon)) return;
+        const raw = addon as RawAttachAddon & {
+            leaseRegistered(channel: number, token: number): boolean;
+            channelRegistered(channel: number): boolean;
+            peerClosed(channel: number): boolean;
+            forceClose(channel: number): void;
+        };
+        const header = new Uint8Array(21);
+        const view = new DataView(header.buffer);
+        view.setUint32(0, 1, true);
+        view.setUint8(4, 3);
+        view.setUint8(5, 3);
+        view.setUint16(7, 1, true);
+        view.setUint32(9, 1, true);
+        const publish = (pair: { first: number }, value: number): void => {
+            view.setBigUint64(13, BigInt(value), true);
+            raw.produce(
+                pair.first,
+                header,
+                1,
+                (segments) => {
+                    segments[0]![0] = value;
+                    return 1;
+                },
+                () => {},
+            );
+        };
+        const receive = (pair: { second: number }): { token: number; segment: Uint8Array } => {
+            let token = -1;
+            let segment: Uint8Array | undefined;
+            expect(
+                raw.poll(pair.second, (t, _header, segments) => {
+                    token = t;
+                    segment = segments[0];
+                }),
+            ).toBe(true);
+            return { token, segment: segment! };
+        };
+        const refsBefore = raw.activeExternalRefCount();
+
+        // Detach failure: the alias stays attached, the lease keeps its token and block, and
+        // the consumer ring is quarantined so no later frame can reuse storage under a view.
+        const detachPair = raw.createTestPair();
+        publish(detachPair, 1);
+        const held = receive(detachPair);
+        setDetachFailpoint(1);
+        expect(() => raw.release(detachPair.second, held.token)).toThrow(
+            /alias state is unknown; storage quarantined/,
+        );
+        expect(held.segment.byteLength).toBe(1);
+        expect(raw.leaseRegistered(detachPair.second, held.token)).toBe(true);
+        expect(raw.peerClosed(detachPair.second)).toBe(true);
+        expect(raw.activeExternalRefCount()).toBe(refsBefore + 1);
+        // A retry with the runtime cooperating detaches, deletes, and returns the block once.
+        raw.release(detachPair.second, held.token);
+        expect(held.segment.byteLength).toBe(0);
+        expect(raw.leaseRegistered(detachPair.second, held.token)).toBe(false);
+        expect(() => raw.release(detachPair.second, held.token)).toThrow(/already released/);
+        expect(raw.activeExternalRefCount()).toBe(refsBefore);
+        raw.close(detachPair.first);
+        raw.close(detachPair.second);
+
+        // Deletion failure after a successful detach: the token is consumed (the wrapper is
+        // told so), the leaked reference stays counted, and the ring is quarantined.
+        const deletePair = raw.createTestPair();
+        publish(deletePair, 2);
+        const leaked = receive(deletePair);
+        setDeleteFailpoint(1);
+        expect(() => raw.release(deletePair.second, leaked.token)).toThrow(
+            /native handle consumed: receive alias cleanup failed; storage quarantined/,
+        );
+        expect(leaked.segment.byteLength).toBe(0);
+        expect(raw.leaseRegistered(deletePair.second, leaked.token)).toBe(false);
+        expect(raw.peerClosed(deletePair.second)).toBe(true);
+        expect(raw.activeExternalRefCount()).toBe(refsBefore + 1);
+        raw.close(deletePair.first);
+        raw.close(deletePair.second);
+
+        // A close whose sweep meets a detach failure retains the channel entry (and its
+        // mapping) instead of unmapping under a possibly live alias; a later close completes
+        // the sweep and removes it.
+        const sweepPair = raw.createTestPair();
+        publish(sweepPair, 3);
+        publish(sweepPair, 4);
+        const first = receive(sweepPair);
+        const second = receive(sweepPair);
+        setDetachFailpoint(1);
+        expect(() => raw.close(sweepPair.second)).toThrow(/storage quarantined/);
+        expect(raw.channelRegistered(sweepPair.second)).toBe(true);
+        // Exactly one alias survived the sweep; the other detached.
+        expect([first.segment.byteLength, second.segment.byteLength].sort()).toEqual([0, 1]);
+        raw.close(sweepPair.second);
+        expect(raw.channelRegistered(sweepPair.second)).toBe(false);
+        expect(first.segment.byteLength + second.segment.byteLength).toBe(0);
+        raw.close(sweepPair.first);
+        expect(raw.activeExternalRefCount()).toBe(refsBefore + 1);
+    });
+
     test("a header that disagrees with the body is refused before beforePublish runs", () => {
         const addon = loadRawAddon();
         if (!supportsMechanismTests(addon)) return;
@@ -778,7 +1050,6 @@ describe("raw N-API descriptor boundary", () => {
                     pair.first,
                     header,
                     2,
-                    0,
                     (segments) => {
                         segments[0]![0] = 1;
                         return 1;
@@ -804,7 +1075,6 @@ describe("raw N-API descriptor boundary", () => {
             reserve(
                 channel: number,
                 capacity: number,
-                timeoutMs: number,
                 deliver: (token: number, segments: Uint8Array[]) => void,
             ): void;
             commitReservation(
@@ -819,7 +1089,7 @@ describe("raw N-API descriptor boundary", () => {
         const pair = raw.createTestPair();
         try {
             let token = -1;
-            raw.reserve(pair.first, 1, 0, (reserved, segments) => {
+            raw.reserve(pair.first, 1, (reserved, segments) => {
                 token = reserved;
                 segments[0]![0] = 5;
             });
@@ -923,16 +1193,24 @@ describe("raw N-API descriptor boundary", () => {
         const addon = loadRawAddon();
         if (!addon || !["linux", "darwin"].includes(process.platform)) return;
         const valid = validRawDescriptor();
+        // The unmutated fixture decodes under the current layout, so every rejection below is
+        // caused by its mutation rather than by a stale grant encoding.
+        expect(addon.grantDecodes(testGrantHex(0, 0xab))).toBe(true);
+        expect(addon.grantDecodes(testGrantHex(1, 0xcd))).toBe(true);
         const hostileGrants = [
-            "\u00e9".repeat(58), // UTF-8 length 116, non-ASCII
+            "\u00e9".repeat(GRANT_BYTES), // UTF-8 length 2 * GRANT_BYTES, non-ASCII
             testGrantHex(0, 0xab).toUpperCase(),
-            testGrantHex(0, 0xab).slice(0, 115), // truncation
+            testGrantHex(0, 0xab).slice(0, GRANT_BYTES * 2 - 1), // truncation
             `${testGrantHex(0, 0xab)}0`, // trailing digit
-            `${testGrantHex(0, 0xab).slice(0, 114)}g0`, // non-hex tail
-            "SENTINEL_GRANT_TEXT".padEnd(116, "0"),
+            `${testGrantHex(0, 0xab).slice(0, GRANT_BYTES * 2 - 2)}g0`, // non-hex tail
+            "SENTINEL_GRANT_TEXT".padEnd(GRANT_BYTES * 2, "0"),
             "",
             42,
         ];
+        // A layout-3 image of the right length is not a current grant.
+        const stale = testGrantHex(0, 0xab);
+        expect(addon.grantDecodes(`0300${stale.slice(4)}`)).toBe(false);
+        hostileGrants.push(`0300${stale.slice(4)}`);
         for (const grant of hostileGrants) {
             expectRejectedWithoutEffects(addon, {
                 ...valid,
@@ -946,6 +1224,17 @@ describe("raw N-API descriptor boundary", () => {
         expectRejectedWithoutEffects(addon, {
             ...validRawDescriptor(),
             peerToHostGrant: testGrantHex(0, 0xab),
+        });
+        // Lanes are fixed per direction: 0 host-to-peer, 1 peer-to-host.
+        expectRejectedWithoutEffects(addon, {
+            ...validRawDescriptor(),
+            hostToPeerGrant: testGrantHex(1, 0xab),
+            peerToHostGrant: testGrantHex(0, 0xcd),
+        });
+        expectRejectedWithoutEffects(addon, {
+            ...validRawDescriptor(),
+            hostToPeerGrant: testGrantHex(2, 0xab),
+            peerToHostGrant: testGrantHex(3, 0xcd),
         });
     });
 

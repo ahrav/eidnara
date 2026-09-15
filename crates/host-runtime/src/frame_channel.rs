@@ -3,13 +3,11 @@
 //! The contract is directional: a cloneable [`FrameSender`] admits complete
 //! outbound frames in FIFO order against one logical writer, and the
 //! single-owner receive side yields complete, structurally validated
-//! inbound frames. Receive bytes are visible only through a lexical
-//! [`ReceiveLease`]; consumers that need owned bytes use the explicit copying
-//! adapter before entering asynchronous work.
+//! inbound frames whose bodies are owned transport leases. Receive bytes are
+//! copied into private memory through [`InboundFrame::into_private`] before any
+//! decoder sees them; nothing exposes a slice over the shared mapping.
 
 use std::io;
-use std::marker::PhantomData;
-use std::rc::Rc;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use tokio::sync::mpsc;
@@ -58,96 +56,86 @@ pub(crate) fn validate_inbound_header(header: EnvelopeHeader) -> Result<(), Read
     Ok(())
 }
 
-/// The `Rc` marker makes this view `!Send`.
-///
-/// The callback can return only values that do not borrow the leased bytes.
-///
-/// ```compile_fail
-/// use host_runtime::frame_channel::ReceiveLease;
-/// fn require_send<T: Send>(_: T) {}
-/// let bytes = [1u8, 2, 3];
-/// require_send(ReceiveLease::contiguous(&bytes));
-/// ```
-///
-/// ```compile_fail
-/// use host_runtime::frame_channel::ReceiveLease;
-/// fn require_static<T: 'static>(_: T) {}
-/// let bytes = [1u8, 2, 3];
-/// require_static(ReceiveLease::contiguous(&bytes));
-/// ```
-pub struct ReceiveLease<'lease> {
-    bytes: &'lease [u8],
-    _not_send: PhantomData<Rc<()>>,
-}
-
-impl<'lease> ReceiveLease<'lease> {
-    pub fn contiguous(bytes: &'lease [u8]) -> Self {
-        Self {
-            bytes,
-            _not_send: PhantomData,
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
-    pub fn bytes(&self) -> &[u8] {
-        self.bytes
-    }
-
-    /// Explicit owned-body adapter for consumers that outlive the lease.
-    pub fn to_owned(&self) -> Vec<u8> {
-        self.bytes.to_vec()
-    }
-}
-
-/// One admitted inbound frame. Body bytes can only be observed through
-/// [`InboundFrame::with_lease`] or moved through [`InboundFrame::into_owned`].
+/// One admitted inbound frame: the validated header, the owned transport lease that holds the
+/// body, and the ingress charge reserved for its private copy. Body bytes leave the transport
+/// only through [`InboundFrame::into_private`], which copies them into stable private memory,
+/// validates the copied length against the header, and returns the block before any parser
+/// runs. The lease is `Send`, so the copy may run on a blocking worker joined by the request's
+/// work ledgers.
 pub struct InboundFrame {
     pub header: EnvelopeHeader,
-    body: Vec<u8>,
+    lease: shm_transport::lease::PayloadLease,
     charge: crate::wire::ByteCharge,
 }
 
+/// Why a frame's body could not become private bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateCopyError {
+    /// The copied body length disagrees with the header's declared length.
+    LengthMismatch,
+    /// The transport view could not be read.
+    Transport,
+}
+
 impl InboundFrame {
-    pub(crate) fn owned(
+    pub(crate) fn new(
         header: EnvelopeHeader,
-        body: Vec<u8>,
+        lease: shm_transport::lease::PayloadLease,
         charge: crate::wire::ByteCharge,
     ) -> Self {
         Self {
             header,
-            body,
+            lease,
             charge,
         }
     }
 
-    /// `with_lease` confines transport-byte decoding to a non-escaping lexical scope.
-    pub fn with_lease<T>(&self, decode: impl for<'lease> FnOnce(ReceiveLease<'lease>) -> T) -> T {
-        decode(ReceiveLease::contiguous(&self.body))
+    /// Body length the transport delivered.
+    pub fn len(&self) -> usize {
+        self.lease.len()
     }
 
-    /// `InboundFrame::into_owned` moves the body without copying.
-    pub fn into_owned(self) -> OwnedInboundFrame {
+    /// Whether the body is empty.
+    pub fn is_empty(&self) -> bool {
+        self.lease.is_empty()
+    }
+
+    /// Returns the transport block without copying. A pure-header frame has no body to copy;
+    /// its lease still returns through the doorbell, and a failed return is `Transport`.
+    pub fn release(self) -> Result<(), PrivateCopyError> {
+        let Self { lease, charge, .. } = self;
+        drop(charge);
+        lease.release().map_err(|_| PrivateCopyError::Transport)
+    }
+
+    /// Copies the body into private bytes and returns the transport block. A pure-header frame
+    /// copies nothing. The copied length is checked against the header before the bytes are
+    /// handed to any decoder, and the lease is released before this returns, so no storage or
+    /// response work ever observes transport input still held.
+    pub fn into_private(self) -> Result<OwnedInboundFrame, PrivateCopyError> {
         let Self {
             header,
-            body,
+            lease,
             charge,
         } = self;
-        OwnedInboundFrame {
+        let body = if lease.is_empty() {
+            Vec::new()
+        } else {
+            lease.to_vec().map_err(|_| PrivateCopyError::Transport)?
+        };
+        lease.release().map_err(|_| PrivateCopyError::Transport)?;
+        if body.len() as u64 != u64::from(header.len) {
+            return Err(PrivateCopyError::LengthMismatch);
+        }
+        Ok(OwnedInboundFrame {
             header,
             body,
             charge,
-        }
+        })
     }
 }
 
-/// Asynchronous handlers receive owned semantic input only.
+/// Asynchronous handlers and control decoders receive private bytes only.
 pub struct OwnedInboundFrame {
     pub header: EnvelopeHeader,
     pub body: Vec<u8>,
@@ -207,6 +195,8 @@ pub struct OutboundFrame {
     pub charge: crate::wire::ByteCharge,
     /// `written` runs after every frame byte reaches local egress.
     pub written: Option<Box<dyn FnOnce(Instant) + Send>>,
+    /// Terminal credit that follows the frame's block until the block physically returns.
+    pub credit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// Senders hold `admission` shared across the retired re-check and the queue push; the finishing endpoint takes it exclusively so its final empty `try_recv` proves no admitted frame is still landing.

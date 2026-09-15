@@ -3,46 +3,54 @@
 ## Discovery trigger
 
 Mapping the outbound failure path in `run_endpoint` for the frame-lifecycle map.
-The inbound failure path sends an explicit `ReadClose` before returning
-(`crates/host-runtime/src/ring_transport.rs:406-411`). The outbound failure path does
-not (`:479-484`). Tracing what the connection engine then observes produced the
-finding.
+The inbound failure path sent an explicit `ReadClose` before returning; the
+outbound failure path of that revision did not. Tracing what the connection
+engine then observed produced the finding. At HEAD both paths go through
+`fail` (`crates/host-runtime/src/ring_transport.rs:897-908`), which sends the
+close first, so the trigger survives only in its second clause: the engine
+still folds the explicit cause into `ReadExit::Peer`.
 
 ## Evidence trail
 
-**The outbound failure path, in full.** `run_endpoint:479-484`:
+**The outbound failure path, in full.** Superseded. The path this trail was
+built on returned from `run_endpoint` without sending on `inbound`. At HEAD
+`run_endpoint:696-704` and `:884-892` read:
 
 ```
-if publish_one(&rings.first, queued, frame_deadline, publish_hook.as_ref()).is_err() {
-    queue.retired.cancel();
-    root.cancel();
+if publisher.pump(&rings.first).is_err() {
+    fail(
+        &mut inbound,
+        &mut queue,
+        &root,
+        ReadClose::Corrupt("shared-memory publish failed"),
+    );
     return;
 }
 ```
 
-Nothing is sent on `inbound`. Compare the inbound path at `:406-411`, which does
-`inbound_sender.send(Err(close)).await` before the same two cancels and the same
-`return`.
+and `fail` (`:897-908`) sends the close through the reserved terminal permit
+(`Inbound::close`, `:621-623`) before cancelling `queue.retired` and `root`.
+So the outbound and inbound failure paths are the same shape at HEAD: an explicit
+`ReadClose` first, then the two cancels, then `return`.
 
 **What the connection engine sees.** `run_endpoint` owns
-`inbound: Option<mpsc::Sender<Result<InboundEvent, ReadClose>>>` (`:382`).
-Returning drops it, closing the channel. `ShmReceiver::recv`
-(`:350-355`) is:
+`inbound: Option<Inbound>` (`:649`), a sender plus one reserved terminal
+permit (`:615-618`). Superseded in part: returning without sending would drop
+the sender and close the channel, and `ShmReceiver::recv` (`:627-633`) is:
 
 ```
 self.inbound.recv().await.unwrap_or(Err(ReadClose::CleanEof))
 ```
 
-So a closed channel becomes `Err(ReadClose::CleanEof)` at `:354`. That is the
-only `CleanEof` producer in the crate.
-
-`connection.rs:401-404` maps it:
+So a closed channel becomes `Err(ReadClose::CleanEof)` at `:631`. That is the
+only `CleanEof` producer in the crate, and at HEAD no publish-failure path
+reaches it, because every one sends `Corrupt` first.
+`connection.rs:364-366` maps it, together with `Corrupt`:
 
 ```
-Err(ReadClose::CleanEof)
-| Err(ReadClose::Corrupt(_))
-| Err(ReadClose::Io(_))
-| Err(ReadClose::Overloaded) => return ReadExit::Peer,
+Err(ReadClose::CleanEof) | Err(ReadClose::Corrupt(_)) | Err(ReadClose::Overloaded) => {
+    return ReadExit::Peer;
+}
 ```
 
 `ReadExit::Peer` takes the silent-retirement arm at `connection.rs:315-318`:
@@ -52,48 +60,63 @@ never receives terminals or a Goodbye after the close decision (protocol §6.3)"
 That is correct handling for a peer-caused close. It is applied here to a
 host-caused one.
 
-**Cause erasure inside `publish_one`.** `publish_one` returns
-`Result<(), ()>` (`:560-565`). Four distinct causes collapse into that unit:
+**Cause erasure inside `Publisher::try_publish`.** `try_publish` returns
+`Result<bool, ()>` (`:1221`) and `pump` returns `Result<(), ()>` (`:1159`).
+Four distinct causes collapse into that unit:
 
-1. `reserve_until` deadline expiry - `:607-609` and `:623-625`, mapping
-   `ProducerError::Deadline` (`ring.rs:1880`) to `()`.
-2. Wire-header/length disagreement - `commit_reservation` rejects it at
-   `ring.rs:1585-1593` with `ProducerError::WireHeaderMismatch`, mapped to `()`
-   at `:615` and `:628`.
+1. Publication deadline expiry - a pending frame whose `deadline`
+   (`Publisher::push`, `:1152`) has passed fails the whole `pump` at
+   `:1168-1171`, and the `sleep_until(publisher.earliest_deadline())` arms at
+   `:867-877` and `:1021-1023` retire the generation with the same string
+   without going through `pump` at all. No `ProducerError::Deadline` is
+   involved: `try_reserve_in` never blocks, and `Exhausted` (`ring.rs:1823`)
+   only leaves the frame pending (`:1242`).
+2. Wire-header/length disagreement - `commit` rejects it at
+   `ring.rs:1723-1725` with `ProducerError::WireHeaderMismatch`, mapped to `()`
+   inside `commit_before` at `:1316`.
 3. A panic in the direct serializer - caught by the inner `catch_unwind` at
-   `:584-587` and turned into `Err(())` by the `!matches!(result, Ok(Ok(())))`
-   test at `:588-590`.
-4. `ReservationWriter` exhaustion - `:635-643` produces
-   `io::ErrorKind::WriteZero`, which `publish_direct` maps to `()` at `:614`.
+   `:1259-1262` and turned into `Err(())` by the `!matches!(result, Ok(Ok(())))`
+   test at `:1263-1265`.
+4. `ReservationWriter` exhaustion - `:1324-1329` produces
+   `io::ErrorKind::WriteZero`, which `publish_direct` maps to `()` at `:1290`.
 
-The erasure happens at `:588-590`, before `run_endpoint` ever sees it.
+Every other `try_reserve_in` error is also erased, at `:1243`. The erasure
+happens before `run_endpoint` ever sees it.
 
-**The asymmetry.** The same publish failure raised from inside the
-ingress-budget wait *does* get a distinguishable cause:
+**The asymmetry.** Superseded. The publish failure raised from inside the
+ingress-budget wait returns the same cause it always did:
 
 ```
-// ring_transport.rs:533-540
-Ok(queued) => {
-    if publish_one(&rings.first, queued, frame_deadline, publish_hook).is_err() {
-        return Err(ReadClose::Corrupt("shared-memory publish failed"));
+// ring_transport.rs:1000-1008
+queued = queue.recv(), if publisher.can_accept() => match queued {
+    Some(queued) => {
+        publisher.push(queued);
+        if publisher.pump(&rings.first).is_err() {
+            return Err(ReadClose::Corrupt("shared-memory publish failed"));
+        }
     }
-}
+    None => return Err(ReadClose::Cancelled),
+},
 ```
 
 That `Err` propagates out of `receive_one` into `run_endpoint`'s `Err(close)`
-arm at `:406-407`, which sends it. So whether a publish failure is reported as
-`Corrupt` or as `CleanEof` depends only on which loop happened to be driving the
-publication at the time.
+arm at `:738-741`, which calls `fail`. The outbound loop calls `fail` with the
+identical string (`:696-704`, `:884-892`), so the cause does not depend on
+which loop was driving the publication.
 
 ## Failure scenario
 
 A peer attaches and then stops receiving. The host-to-peer ring fills to its
-eight-descriptor depth. The next `publish_one` calls
-`reserve_until(body_len, header, deadline)` (`:583`, `:608`), which
-blocks until the deadline and returns `ProducerError::Deadline`. `publish_one`
-returns `Err(())`. `run_endpoint` cancels and returns. The connection engine
-reads `CleanEof`, classifies `ReadExit::Peer`, retires silently, and discards
-the queued frames.
+eight-descriptor depth. The next `Publisher::try_publish` call gets
+`ProducerError::Exhausted` from `try_reserve_in` (`:1240-1242`) and leaves the
+frame pending; `run_endpoint` arms `Ring::arm_capacity_wait` (`:787-802`) and
+parks on the capacity readiness fd and on
+`sleep_until(publisher.earliest_deadline())`. The peer never returns a block,
+so the deadline arm fires (`:867-877`) and calls `fail` with
+`ReadClose::Corrupt("shared-memory publish failed")`. The connection engine
+reads `Corrupt`, classifies `ReadExit::Peer` (`connection.rs:364-366`), retires
+silently, and discards the queued frames. The `CleanEof` reading this scenario
+once described is superseded; the disposition is unchanged.
 
 Consequences:
 
@@ -116,16 +139,19 @@ is reported as the peer going away.
 ## Timing windows and dependencies
 
 No interleaving is required; the misreport is the straight-line behaviour of the
-`:479-484` path.
+`fail` path (`:696-704`, `:884-892`) followed by the fold at
+`connection.rs:364-366`.
 
-There is one ordering subtlety worth stating. `run_endpoint` cancels
-`queue.retired` and `root` *before* returning, so the `FrameSender` is retired
-(`frame_channel.rs:755-757`) and the generation token is cancelled before the
-engine reads `CleanEof`. So the engine's `ReadExit::Peer` arm finds
-`gen.token` already cancelled. That does not change the classification - the
-`ReadExit::HostCancelled if !gen.token.is_cancelled()` guard at
-`connection.rs:298` is not reached because the cause was `CleanEof`, not
-`Cancelled` - but it does mean a host that wanted to distinguish the two cases
+There is one ordering subtlety worth stating. `fail` sends the close and then
+cancels `queue.retired` and `root` *before* `run_endpoint` returns, so the
+`FrameSender` is retired and the generation token is cancelled by the time the
+engine reads `Corrupt`. So the engine's `ReadExit::Peer` arm finds `gen.token`
+already cancelled. That does not change the classification - the
+`ReadExit::HostCancelled` arm at `connection.rs:363` is reached only by
+`ReadClose::Cancelled`, and the cause here is `Corrupt` - but it does mean a
+host that wanted to distinguish the two cases already has the signal available
+in `gen.token`. (The superseded shape reached the same point through
+`CleanEof`.)
 already has the signal available in `gen.token`.
 
 Dependencies: Part 2a's
@@ -144,9 +170,11 @@ Cheapest construction, using the existing harness shape:
    eight descriptor slots (profile-pinned; asserted at `ring_transport.rs:903`)
    are full.
 3. Send one more frame with a short `write_deadline` (`ContractConfig` carries
-   it, `:505`), so `reserve_until` expires quickly.
-4. Assert the cause the receiver observes. Today it is `CleanEof`; the property
-   requires anything else.
+   it, `:505`), so the pending frame's publication deadline
+   (`Publisher::push`, `ring_transport.rs:1152`) expires quickly.
+4. Assert the cause the receiver observes. At HEAD it is
+   `ReadClose::Corrupt("shared-memory publish failed")`, which satisfies the
+   first clause; the superseded shape produced `CleanEof` here.
 5. Carry the scenario through the connection engine and assert the final
    disposition or operator-visible classification is distinct from a peer close.
    The intermediate enum is not enough: in the charge-wait path the receiver can
@@ -167,41 +195,41 @@ not a check.
 
 ## Investigation log
 
-### Q: Should `publish_one` carry a cause enum rather than `()`?
+### Q: Should `Publisher::try_publish` carry a cause enum rather than `()`?
 
-- Sources examined: `ring_transport.rs:560-602` (`publish_one`), `:604-630`
-  (the two publish helpers and their `map_err(|_| ())` sites),
-  `:588-590` (the erasure), `frame_channel.rs:33-48` (the `ReadClose` taxonomy,
-  which already has six variants including two with no producer).
-- Findings: the information exists at every one of the four sites and is thrown
-  away at a single point, `:564-566`. The receiving taxonomy already has the
-  shape to carry it: `ReadClose::Corrupt(&'static str)` takes a static string,
-  and `:536` already uses exactly that for the charge-wait variant of the same
-  failure. So the change is small: give `publish_one` a
-  `Result<(), &'static str>` and have `:479-484` send
-  `Err(ReadClose::Corrupt(reason))` before returning.
-- Missing evidence: whether sending on `inbound` at that point can itself fail,
-  which would need a fallback. Looking at `:406-407`, the inbound path already
-  does `let _ = inbound_sender.send(Err(close)).await`, discarding the send
-  result, so the pattern is established.
+- Sources examined: `ring_transport.rs:1221-1277` (`try_publish`),
+  `:1280-1318` (the two publish helpers, `commit_before`, and their
+  `map_err(|_| ())` sites), `:1159-1217` (`pump`, including the unit deadline
+  failure at `:1168-1171`), `frame_channel.rs:24-37` (the `ReadClose`
+  taxonomy, four variants).
+- Findings: the information exists at every failure site and is thrown away
+  at `:1243`, `:1263-1265`, `:1290`, `:1302-1303`, and `:1316`. The receiving
+  taxonomy already has the shape to carry it: `ReadClose::Corrupt(&'static
+  str)` takes a static string, and every caller already passes exactly one
+  such string, `"shared-memory publish failed"` (`:701`, `:889`, `:973`,
+  `:1004`, `:1018`, `:1022`, `:874`). So the change is small: give `pump` a
+  `Result<(), &'static str>` and have the callers forward the reason into
+  `fail` and the direct returns.
+- Missing evidence: none on the sending side. `fail` (`:897-908`) already
+  sends through the reserved terminal permit, which cannot fail for lack of
+  capacity, so the pattern the superseded shape lacked is the only one at HEAD.
 - Conclusion: resolved with answer. The change is mechanical and the receiving
   side already handles it. Whether to make it is a fix decision, out of scope
   for this catalog.
 
-### Q: Is the asymmetry between `:535-537` and `:479-484` for the identical fault deliberate?
+### Q: Is the asymmetry between the two publishing loops for the identical fault deliberate?
 
-- Sources examined: both sites; the polling-era comment that explained why the
-  budget wait serviced outbound frames (removed by PR #131; the surviving
-  intent statement is the alternation comment at `:416-420`).
-- Findings: both comments explain the *scheduling* rationale and neither
-  mentions error reporting. `:535-537` returning `Corrupt` looks like a
-  consequence of being inside a function that already returns
-  `Result<bool, ReadClose>` - the ergonomic path - rather than a deliberate
-  classification choice. `:479-484` is in a function returning `()`, where
-  sending the close requires an extra `.await`, and the code takes the shorter
-  route.
-- Missing evidence: intent. No comment addresses it.
-- Conclusion: needs human input, but the evidence leans strongly toward
-  accident: the two sites differ exactly where the enclosing function's return
-  type differs, which is the signature of an ergonomic default rather than a
-  decision.
+- Sources examined: at the time, both sites and the polling-era comment that
+  explained why the budget wait serviced outbound frames; at HEAD,
+  `run_endpoint:696-704` and `:884-892`, `receive_one:1000-1008` and
+  `:1021-1023`, and `fail` (`:897-908`).
+- Findings: the superseded shape returned `Corrupt` from inside `receive_one`
+  and `CleanEof` (by dropping the sender) from the outbound loop, and the two
+  sites differed exactly where the enclosing function's return type differed,
+  which read as an ergonomic default rather than a decision. At HEAD both
+  loops report `ReadClose::Corrupt("shared-memory publish failed")`, and the
+  outbound loop does so through `fail`, which sends before it cancels.
+- Missing evidence: none.
+- Conclusion: resolved by mechanism change. The asymmetry does not exist at
+  HEAD; the record keeps only its second clause, the `ReadExit::Peer` fold at
+  `connection.rs:364-366`.

@@ -1,4 +1,8 @@
+//! Real-endpoint witnesses for the payload-pool ring: setup identity, sealed-object
+//! attachment, and the two-process exchange that proves independent reuse, descriptor wakes,
+//! maximum frames, and owned returns across a process boundary.
 #![deny(clippy::undocumented_unsafe_blocks)]
+use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::process::{Child, Command, Stdio};
@@ -6,274 +10,57 @@ use std::time::Duration;
 use std::time::Instant;
 
 use shm_transport::MAX_FRAME_BYTES;
-use shm_transport::backend::ring::{ProducerError, Ring, RingError, RingGrant, wire_v3_header};
-use shm_transport::descriptor::{HardwareProfileId, TransportDescriptor};
-use shm_transport::lease::LeaseError;
-use shm_transport::profile::{ProfileConfig, TargetProfile, WorkerTopology, ring_profile};
+use shm_transport::backend::ring::{
+    PoolGrant, ProducerError, Ring, RingAttachment, RingError, wire_v3_header,
+};
+use shm_transport::descriptor::HardwareProfileId;
+use shm_transport::lease::PayloadLease;
+use shm_transport::pool::{ClassSpec, Inventory, PoolGeometry};
+use shm_transport::profile::{TargetProfile, host_payload_pool_profile, pool_profile};
 
-fn profile() -> TargetProfile {
-    ring_profile(HardwareProfileId::new("ring-contract-host").unwrap()).unwrap()
-}
-
-fn lease_limited_profile() -> TargetProfile {
-    TargetProfile::new(ProfileConfig {
-        descriptor: TransportDescriptor::new(HardwareProfileId::new("ring-lease-limit").unwrap()),
-        descriptor_depth: 2,
-        arena_bytes: MAX_FRAME_BYTES,
-        max_spans: 2,
-        max_leases: 1,
-        mappings: 2,
-        pinned_workers: 0,
-        worker_topology: WorkerTopology::CallerThread,
-    })
+/// Two ordinary descriptors and three 4 KiB blocks, so laps and class exhaustion are cheap.
+fn small_geometry() -> PoolGeometry {
+    PoolGeometry::new(
+        2,
+        1,
+        [
+            ClassSpec::new(4096, 3),
+            ClassSpec::new(64 * 1024, 2),
+            ClassSpec::new(1024 * 1024, 1),
+            ClassSpec::new(8 * 1024 * 1024, 1),
+            ClassSpec::new(64 * 1024 * 1024 + 4096, 1),
+        ],
+        ClassSpec::new(4096, 2),
+        ClassSpec::new(32 * 1024, 2),
+    )
     .unwrap()
 }
 
-fn publish(ring: &Ring, body: &[u8]) {
+fn profile() -> TargetProfile {
+    pool_profile(
+        HardwareProfileId::new("ring-contract-host").unwrap(),
+        small_geometry(),
+    )
+    .unwrap()
+}
+
+fn publish(ring: &Ring, body: &[u8]) -> u32 {
     let mut reservation = ring
         .try_reserve(body.len(), wire_v3_header(body.len()).unwrap())
         .unwrap();
     reservation.write(body).unwrap();
-    reservation.commit(body.len()).unwrap();
+    reservation.commit(body.len()).unwrap().block()
 }
 
-#[test]
-fn boundary_round_trips_include_wrap_and_exact_maximum() {
-    let ring = Ring::create(&profile(), 7).unwrap();
-
-    let mut underfilled = ring.try_reserve(8, wire_v3_header(8).unwrap()).unwrap();
-    underfilled.write(&[1, 2, 3, 4]).unwrap();
-    assert_eq!(underfilled.commit(8), Err(ProducerError::Underfill));
-    assert!(ring.try_receive().unwrap().is_none());
-
-    let mut overflow = ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap();
-    assert_eq!(overflow.write(&[1, 2]), Err(ProducerError::Overflow));
-    assert!(ring.try_receive().unwrap().is_none());
-
-    let mut exact = ring.try_reserve(8, wire_v3_header(4).unwrap()).unwrap();
-    exact.write(&[1, 2, 3, 4]).unwrap();
-    exact.commit(4).unwrap();
-    assert_eq!(
-        ring.try_receive().unwrap().unwrap().to_vec().unwrap(),
-        [1, 2, 3, 4]
-    );
-
-    let boundaries = [
-        0,
-        1,
-        63,
-        64,
-        65,
-        69,
-        255,
-        256,
-        257,
-        4095,
-        4096,
-        4097,
-        16 * 1024 - 1,
-        16 * 1024,
-        16 * 1024 + 1,
-        64 * 1024 - 1,
-        64 * 1024,
-        64 * 1024 + 1,
-        1024 * 1024,
-        2 * 1024 * 1024 - 1,
-        2 * 1024 * 1024,
-        2 * 1024 * 1024 + 1,
-    ];
-    for len in boundaries {
-        let body: Vec<u8> = (0..len).map(|index| index as u8).collect();
-        publish(&ring, &body);
-        let lease = ring.try_receive().unwrap().unwrap();
-        assert_eq!(lease.len(), len);
-        assert_eq!(lease.to_vec().unwrap(), body);
-        lease.release().unwrap();
+fn receive(ring: &Ring, deadline: Instant) -> PayloadLease {
+    loop {
+        if let Some(lease) = ring.try_receive().unwrap() {
+            return lease;
+        }
+        assert!(ring.wait_for_data(deadline).unwrap(), "no frame arrived");
     }
-
-    let mut reservation = ring
-        .try_reserve(MAX_FRAME_BYTES, wire_v3_header(MAX_FRAME_BYTES).unwrap())
-        .unwrap();
-    let chunk = vec![0xa5; 1024 * 1024];
-    for _ in 0..64 {
-        reservation.write(&chunk).unwrap();
-    }
-    reservation.commit(MAX_FRAME_BYTES).unwrap();
-    let lease = ring.try_receive().unwrap().unwrap();
-    assert_eq!(lease.len(), MAX_FRAME_BYTES);
-    assert_eq!(lease.segment(0).unwrap().read_byte(0), Some(0xa5));
-    let last = lease.segment(lease.segment_count() - 1).unwrap();
-    assert_eq!(last.read_byte(last.len() - 1), Some(0xa5));
-    lease.release().unwrap();
-
-    assert_eq!(
-        ring.try_reserve(MAX_FRAME_BYTES + 1, [0; 21]).unwrap_err(),
-        ProducerError::BoundExceedsSpans
-    );
-    ring.try_reserve(0, wire_v3_header(0).unwrap())
-        .unwrap()
-        .abort();
-    let (descriptors, bytes) = ring.conservation().unwrap();
-    assert!(descriptors.conserves(32));
-    assert!(bytes.conserves(MAX_FRAME_BYTES as u64));
-    assert_eq!(descriptors.free, 32);
-    assert_eq!(bytes.free, MAX_FRAME_BYTES as u64);
 }
 
-#[test]
-fn retained_oldest_lease_enforces_fifo_reclamation() {
-    let ring = Ring::create(&profile(), 11).unwrap();
-    let first_len = 40 * 1024 * 1024;
-    let second_len = MAX_FRAME_BYTES - first_len;
-
-    let mut first = ring
-        .try_reserve(first_len, wire_v3_header(first_len).unwrap())
-        .unwrap();
-    let chunk = vec![1; 1024 * 1024];
-    for _ in 0..40 {
-        first.write(&chunk).unwrap();
-    }
-    first.commit(first_len).unwrap();
-    let first_lease = ring.try_receive().unwrap().unwrap();
-
-    let mut second = ring
-        .try_reserve(second_len, wire_v3_header(second_len).unwrap())
-        .unwrap();
-    for _ in 0..24 {
-        second.write(&chunk).unwrap();
-    }
-    second.commit(second_len).unwrap();
-    ring.try_receive().unwrap().unwrap().release().unwrap();
-
-    assert_eq!(
-        ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap_err(),
-        ProducerError::Exhausted
-    );
-    assert_eq!(
-        ring.reserve_until(1, wire_v3_header(1).unwrap(), Instant::now())
-            .unwrap_err(),
-        ProducerError::Deadline
-    );
-    let (descriptors, bytes) = ring.conservation().unwrap();
-    assert_eq!(descriptors.receiver_leased, 1);
-    assert_eq!(descriptors.release_pending, 1);
-    assert_eq!(bytes.free, 0);
-
-    first_lease.release().unwrap();
-    let mut reservation = ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap();
-    assert_eq!(
-        ring.resident_arena_pages().unwrap(),
-        0,
-        "releasing oldest lease must make all completed full pages removable",
-    );
-    reservation.write(&[9]).unwrap();
-    reservation.commit(1).unwrap();
-    let lease = ring.try_receive().unwrap().unwrap();
-    assert_eq!(lease.segment(0).unwrap().read_byte(0), Some(9));
-    lease.release().unwrap();
-}
-
-#[test]
-fn quarantine_rejects_all_operations_and_reports_conservation() {
-    let ring = Ring::create(&profile(), 17).unwrap();
-    publish(&ring, &[1, 2, 3]);
-    let lease = ring.try_receive().unwrap().unwrap();
-    ring.enter_quarantine();
-
-    assert_eq!(
-        ring.try_reserve(1, wire_v3_header(1).unwrap()).unwrap_err(),
-        ProducerError::Quarantined
-    );
-    assert!(matches!(ring.try_receive(), Err(RingError::Quarantined)));
-    assert!(matches!(
-        ring.wait_for_data(Instant::now() + Duration::from_secs(5)),
-        Err(RingError::Quarantined)
-    ));
-    assert_eq!(lease.release(), Err(LeaseError::Quarantined));
-    let (descriptors, bytes) = ring.conservation().unwrap();
-    assert_eq!(descriptors.quarantined, profile().descriptor_depth() as u64);
-    assert_eq!(bytes.quarantined, MAX_FRAME_BYTES as u64);
-    assert!(descriptors.conserves(profile().descriptor_depth() as u64));
-    assert!(bytes.conserves(MAX_FRAME_BYTES as u64));
-}
-
-#[test]
-fn probe_reads_shared_state_without_consuming_a_frame() {
-    let ring = Ring::create(&profile(), 27).unwrap();
-    publish(&ring, &[7]);
-    ring.probe().unwrap();
-    let lease = ring.try_receive().unwrap().unwrap();
-    assert_eq!(lease.segment(0).unwrap().read_byte(0), Some(7));
-    lease.release().unwrap();
-    ring.probe().unwrap();
-    ring.enter_quarantine();
-    assert!(matches!(ring.probe(), Err(RingError::Quarantined)));
-}
-
-#[test]
-fn lease_limit_reports_backpressure_then_recovers_after_release() {
-    let ring = Ring::create(&lease_limited_profile(), 18).unwrap();
-    publish(&ring, &[1]);
-    publish(&ring, &[2]);
-
-    let first = ring.try_receive().unwrap().unwrap();
-    assert!(
-        ring.try_receive().unwrap().is_none(),
-        "full lease set must read as no-frame backpressure, not an error"
-    );
-    first.release().unwrap();
-    let second = ring.try_receive().unwrap().unwrap();
-    assert_eq!(second.segment(0).unwrap().read_byte(0), Some(2));
-    second.release().unwrap();
-}
-
-#[test]
-fn sealed_sparse_object_repeated_setup_and_stress_conservation() {
-    for lane in 0..3 {
-        let ring = Ring::create(&profile(), lane).unwrap();
-        assert_eq!(ring.mapping_count(), 1);
-        assert_eq!(ring.resident_arena_pages().unwrap(), 0);
-        let smaller = (ring.object_size() - 1) as libc::off_t;
-        let larger = (ring.object_size() + 1) as libc::off_t;
-        // SAFETY: `ring` keeps the descriptor open for the call; ftruncate takes no pointers.
-        let shrink = unsafe { libc::ftruncate(ring.raw_fd(), smaller) };
-        // SAFETY: same descriptor and contract as above.
-        let grow = unsafe { libc::ftruncate(ring.raw_fd(), larger) };
-        assert_eq!(shrink, -1);
-        assert_eq!(grow, -1);
-    }
-
-    let ring = Ring::create(&profile(), 19).unwrap();
-    let mut state = 0x1234_5678u64;
-    for _ in 0..2_000 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let len = (state as usize % 4096) + 1;
-        let body = vec![state as u8; len];
-        publish(&ring, &body);
-        let lease = ring.try_receive().unwrap().unwrap();
-        assert_eq!(lease.len(), len);
-        assert_eq!(lease.segment(0).unwrap().read_byte(0), Some(state as u8));
-        lease.release().unwrap();
-        ring.try_reserve(0, wire_v3_header(0).unwrap())
-            .unwrap()
-            .abort();
-        let (descriptors, bytes) = ring.conservation().unwrap();
-        assert_eq!(descriptors.free, 32);
-        assert_eq!(descriptors.published, 0);
-        assert_eq!(bytes.free, MAX_FRAME_BYTES as u64);
-    }
-    ring.try_reserve(0, wire_v3_header(0).unwrap())
-        .unwrap()
-        .abort();
-    let (descriptors, bytes) = ring.conservation().unwrap();
-    assert_eq!(descriptors.free, 32);
-    assert_eq!(bytes.free, MAX_FRAME_BYTES as u64);
-}
-
-/// Mappings of the memfd named `name` in this process. Other tests in this binary map their
-/// own rings concurrently, so a caller counts the object it created rather than every ring.
 fn mapped_region_count(name: &str) -> usize {
     let marker = format!("/memfd:{name}");
     std::fs::read_to_string("/proc/self/maps")
@@ -284,42 +71,65 @@ fn mapped_region_count(name: &str) -> usize {
 }
 
 #[test]
+fn production_profile_round_trips_a_maximum_frame_in_both_directions() {
+    let profile = host_payload_pool_profile().unwrap();
+    let host = shm_transport::backend::ring::DuplexRing::create(&profile).unwrap();
+    let peer_first = host.first.attachment().unwrap().attach().unwrap();
+    let peer_second = host.second.attachment().unwrap().attach().unwrap();
+    let body: Vec<u8> = (0..MAX_FRAME_BYTES)
+        .map(|index| (index % 253) as u8)
+        .collect();
+    // Host to peer.
+    publish(&host.first, &body);
+    let lease = receive(&peer_first, Instant::now() + Duration::from_secs(5));
+    assert_eq!(lease.len(), MAX_FRAME_BYTES);
+    assert_eq!(lease.to_vec().unwrap(), body);
+    lease.release().unwrap();
+    // Peer to host.
+    publish(&peer_second, &body);
+    let lease = receive(&host.second, Instant::now() + Duration::from_secs(5));
+    assert_eq!(lease.to_vec().unwrap(), body);
+    lease.release().unwrap();
+    for ring in [&host.first, &peer_second] {
+        assert!(matches!(
+            ring.try_reserve(MAX_FRAME_BYTES + 1, wire_v3_header(1).unwrap()),
+            Err(ProducerError::BoundExceedsClass)
+        ));
+    }
+    host.first.probe().unwrap();
+    assert!(host.first.inventory().conserves(profile.geometry()));
+}
+
+#[test]
 fn artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected() {
     let ring = Ring::create(&profile(), 21).unwrap();
     let base = ring.grant().encode();
+    let total_offset = PoolGrant::encoded_len() - 12;
 
-    // Layout-identity and geometry mismatches fail in the pure decoder before
-    // an object descriptor can reach mapping or attachment.
+    // Layout-identity and geometry mismatches fail in the pure decoder before an object
+    // descriptor can reach mapping or attachment.
     let mut version = base;
     version[0..2].copy_from_slice(&1u16.to_le_bytes());
-    let mut zero_depth = base;
-    zero_depth[22..30].copy_from_slice(&0u64.to_le_bytes());
-    let mut small_arena = base;
-    small_arena[30..38].copy_from_slice(&(MAX_FRAME_BYTES as u64 - 1).to_le_bytes());
-    let mut zero_leases = base;
-    zero_leases[38..46].copy_from_slice(&0u64.to_le_bytes());
-    let mut excess_leases = base;
-    excess_leases[38..46].copy_from_slice(&u64::MAX.to_le_bytes());
-    let mut depth = base;
-    depth[22..30].copy_from_slice(&31u64.to_le_bytes());
-    let mut arena = base;
-    arena[30..38].copy_from_slice(&(MAX_FRAME_BYTES as u64 + 4096).to_le_bytes());
+    let mut zero_descriptors = base;
+    zero_descriptors[22..26].copy_from_slice(&0u32.to_le_bytes());
+    let mut empty_class = base;
+    empty_class[30 + 8..30 + 12].copy_from_slice(&0u32.to_le_bytes());
+    let mut unaligned_class = base;
+    unaligned_class[30..38].copy_from_slice(&4000u64.to_le_bytes());
     let mut total = base;
-    total[46..54].copy_from_slice(&(ring.object_size() as u64 + 1).to_le_bytes());
+    total[total_offset..total_offset + 8]
+        .copy_from_slice(&(ring.object_size() as u64 + 1).to_le_bytes());
     let mut reserved = base;
-    reserved[54] = 1;
+    reserved[PoolGrant::encoded_len() - 1] = 1;
     for bytes in [
         version,
-        zero_depth,
-        small_arena,
-        zero_leases,
-        excess_leases,
-        depth,
-        arena,
+        zero_descriptors,
+        empty_class,
+        unaligned_class,
         total,
         reserved,
     ] {
-        assert_eq!(RingGrant::decode(bytes), Err(RingError::InvalidGrant));
+        assert_eq!(PoolGrant::decode(bytes), Err(RingError::InvalidGrant));
     }
 
     let mut incarnation = base;
@@ -327,7 +137,7 @@ fn artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected() {
     let mut lane = base;
     lane[18] ^= 1;
     for bytes in [incarnation, lane] {
-        let grant = RingGrant::decode(bytes).unwrap();
+        let grant = PoolGrant::decode(bytes).unwrap();
         let ring = Ring::create(&profile(), 21).unwrap();
         assert!(matches!(
             Ring::attach(ring.attachment().unwrap().into_parts().0, grant),
@@ -368,6 +178,19 @@ fn artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected() {
 }
 
 #[test]
+fn attachment_object_must_carry_exactly_the_owner_read_write_mode() {
+    let ring = Ring::create(&profile(), 43).unwrap();
+    let [object, data_ready, capacity_ready] = ring.attachment().unwrap().into_parts().0;
+    // SAFETY: `object` is open for the call; fchmod takes no pointers.
+    let owner_read_only = unsafe { libc::fchmod(object.as_raw_fd(), 0o400) };
+    assert_eq!(owner_read_only, 0);
+    assert!(matches!(
+        Ring::attach([object, data_ready, capacity_ready], ring.grant()),
+        Err(RingError::ObjectValidationFailed)
+    ));
+}
+
+#[test]
 fn non_regular_attachment_object_is_rejected_before_mapping() {
     let ring = Ring::create(&profile(), 41).unwrap();
     let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
@@ -379,32 +202,11 @@ fn non_regular_attachment_object_is_rejected_before_mapping() {
 }
 
 #[test]
-fn grant_slice_rejects_every_truncation_point_and_one_byte_suffix() {
-    let encoded_len = RingGrant::encoded_len();
-    let valid = {
-        let ring = Ring::create(&profile(), 25).unwrap();
-        ring.grant().encode()
-    };
-    assert!(RingGrant::decode_slice(&valid).is_ok());
-
-    for cut in 0..encoded_len {
-        assert_eq!(
-            RingGrant::decode_slice(&valid[..cut]),
-            Err(RingError::InvalidGrant),
-            "truncation at byte {cut} must be rejected"
-        );
-    }
-    let mut suffixed = valid.to_vec();
-    suffixed.push(0);
-    assert_eq!(
-        RingGrant::decode_slice(&suffixed),
-        Err(RingError::InvalidGrant),
-        "one-byte suffix must be rejected"
-    );
-    assert_eq!(
-        RingGrant::decode_slice(&[]),
-        Err(RingError::InvalidGrant),
-        "empty grant must be rejected"
+fn ring_memfd_carries_the_registered_name() {
+    let _ring = Ring::create(&profile(), 29).unwrap();
+    assert!(
+        mapped_region_count("shm-transport") >= 1,
+        "ring mapping must appear under the registered memfd name"
     );
 }
 
@@ -444,15 +246,6 @@ impl Drop for ChildGuard {
     }
 }
 
-#[test]
-fn ring_memfd_carries_the_registered_name() {
-    let _ring = Ring::create(&profile(), 29).unwrap();
-    assert!(
-        mapped_region_count("shm-transport") >= 1,
-        "ring mapping must appear under the registered memfd name"
-    );
-}
-
 /// Clears `FD_CLOEXEC` so the descriptor survives `exec` into the child.
 fn make_inheritable(fd: &OwnedFd) {
     // SAFETY: F_GETFD and F_SETFD act on a live owned descriptor.
@@ -466,73 +259,47 @@ fn make_inheritable(fd: &OwnedFd) {
     }
 }
 
-#[test]
-fn two_process_zero_copy_exchange_uses_authenticated_grant() {
-    if std::env::var_os("EIDNARA_SHM_SKIP_TWO_PROCESS").is_some() {
-        eprintln!("skipped: EIDNARA_SHM_SKIP_TWO_PROCESS is set");
-        return;
-    }
-    let ring = Ring::create(&profile(), 23).unwrap();
-    let (descriptors, grant) = ring.attachment().unwrap().into_parts();
+/// Passes one attachment to the child through inheritable descriptors and the environment.
+/// Returns the parent's descriptor copies, which the caller drops once the child has spawned
+/// so the child becomes the sole holder of the peer ends.
+fn export_attachment(
+    command: &mut Command,
+    prefix: &str,
+    attachment: RingAttachment,
+) -> [OwnedFd; 3] {
+    let (descriptors, grant) = attachment.into_parts();
     for descriptor in &descriptors {
         make_inheritable(descriptor);
     }
     let [mapping, data_ready, capacity_ready] = descriptors.each_ref().map(AsRawFd::as_raw_fd);
-    let child = Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "ring_child_exchange", "--nocapture"])
-        .env("EIDNARA_SHM_CHILD_FD", mapping.to_string())
-        .env("EIDNARA_SHM_CHILD_DATA_READY_FD", data_ready.to_string())
+    command
+        .env(format!("EIDNARA_SHM_{prefix}_FD"), mapping.to_string())
         .env(
-            "EIDNARA_SHM_CHILD_CAPACITY_READY_FD",
+            format!("EIDNARA_SHM_{prefix}_DATA_READY_FD"),
+            data_ready.to_string(),
+        )
+        .env(
+            format!("EIDNARA_SHM_{prefix}_CAPACITY_READY_FD"),
             capacity_ready.to_string(),
         )
-        .env("EIDNARA_SHM_CHILD_GRANT", hex(&grant.encode()))
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let child = ChildGuard(Some(child));
-    // The child owns the peer ends now; closing the parent's copies is what lets the parent
-    // observe the child's exit through the doorbells.
-    drop(descriptors);
-
-    let mut reservation = ring
-        .try_reserve(MAX_FRAME_BYTES, wire_v3_header(MAX_FRAME_BYTES).unwrap())
-        .unwrap();
-    let chunk = vec![7; 1024 * 1024];
-    for _ in 0..64 {
-        reservation.write(&chunk).unwrap();
-    }
-    reservation.commit(MAX_FRAME_BYTES).unwrap();
-
-    // The child holds the whole arena until it releases, so this reservation parks on the
-    // capacity doorbell. The conservation check below proves the release was reclaimed.
-    ring.reserve_until(
-        1,
-        wire_v3_header(1).unwrap(),
-        Instant::now() + Duration::from_secs(5),
-    )
-    .unwrap()
-    .abort();
-
-    let output = child.into_inner().wait_with_output().unwrap();
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("EIDNARA_SHM_CHILD_EXCHANGE_OK"), "{stdout}");
-    let (descriptors, bytes) = ring.conservation().unwrap();
-    assert_eq!(descriptors.free, profile().descriptor_depth() as u64);
-    assert_eq!(bytes.free, MAX_FRAME_BYTES as u64);
+        .env(format!("EIDNARA_SHM_{prefix}_GRANT"), hex(&grant.encode()));
+    descriptors
 }
 
-#[test]
-#[ignore = "child role for two_process_zero_copy_exchange_uses_authenticated_grant"]
-fn ring_child_exchange() {
-    let Ok(fd) = std::env::var("EIDNARA_SHM_CHILD_FD") else {
-        return;
-    };
-    let data_ready = std::env::var("EIDNARA_SHM_CHILD_DATA_READY_FD").unwrap();
-    let capacity_ready = std::env::var("EIDNARA_SHM_CHILD_CAPACITY_READY_FD").unwrap();
-    let grant = std::env::var("EIDNARA_SHM_CHILD_GRANT").unwrap();
-    let grant = RingGrant::decode(decode_hex(&grant)).unwrap();
+fn child_command(role: &str) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--ignored", "--exact", role, "--nocapture"])
+        .stdout(Stdio::piped());
+    command
+}
+
+fn child_attach(prefix: &str) -> Ring {
+    let fd = std::env::var(format!("EIDNARA_SHM_{prefix}_FD")).unwrap();
+    let data_ready = std::env::var(format!("EIDNARA_SHM_{prefix}_DATA_READY_FD")).unwrap();
+    let capacity_ready = std::env::var(format!("EIDNARA_SHM_{prefix}_CAPACITY_READY_FD")).unwrap();
+    let grant = std::env::var(format!("EIDNARA_SHM_{prefix}_GRANT")).unwrap();
+    let grant = PoolGrant::decode(decode_hex(&grant)).unwrap();
     // SAFETY: the parent process opened these descriptors, left them inheritable, and named
     // them in the environment; this child is their only owner.
     let descriptors = unsafe {
@@ -542,18 +309,278 @@ fn ring_child_exchange() {
             OwnedFd::from_raw_fd(capacity_ready.parse().unwrap()),
         ]
     };
-    let ring = Ring::attach(descriptors, grant).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    Ring::attach(descriptors, grant).unwrap()
+}
+
+fn poll_readable(fd: &OwnedFd, timeout_ms: libc::c_int) -> bool {
+    let mut descriptor = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `descriptor` is one initialized pollfd and the count passed is one.
+    let ready = unsafe { libc::poll(&raw mut descriptor, 1, timeout_ms) };
     assert!(
-        ring.wait_for_data(deadline).unwrap(),
-        "parent never published frame"
+        ready >= 0,
+        "poll failed: {}",
+        std::io::Error::last_os_error()
     );
-    let lease = ring.try_receive().unwrap().unwrap();
-    assert_eq!(lease.len(), MAX_FRAME_BYTES);
-    let first = lease.segment(0).unwrap();
-    assert_eq!(first.read_byte(0), Some(7));
-    assert_eq!(first.read_byte(first.len() - 1), Some(7));
-    std::thread::sleep(Duration::from_millis(50));
-    lease.release().unwrap();
-    println!("EIDNARA_SHM_CHILD_EXCHANGE_OK");
+    ready > 0
+}
+
+fn two_process_skipped() -> bool {
+    if std::env::var_os("EIDNARA_SHM_SKIP_TWO_PROCESS").is_some() {
+        eprintln!("skipped: EIDNARA_SHM_SKIP_TWO_PROCESS is set");
+        return true;
+    }
+    false
+}
+
+const CHILD_DEADLINE: Duration = Duration::from_secs(10);
+const REUSE_CYCLES: usize = 2 * 3 + 1;
+
+/// Parent produces on `TO_CHILD` and consumes on `FROM_CHILD`; the child mirrors that. The
+/// child holds A across `REUSE_CYCLES` reuses of B, verifies a maximum frame, and reports
+/// every observed block id back before waiting for the parent's goodbye, so the parent reads
+/// the report while both doorbells are still open.
+#[test]
+fn two_process_exchange_holds_a_reuses_b_and_wakes_on_return() {
+    if two_process_skipped() {
+        return;
+    }
+    let geometry = small_geometry();
+    let to_child = Ring::create(&profile(), 0).unwrap();
+    let from_child = Ring::create(&profile(), 1).unwrap();
+    let mut command = child_command("ring_child_exchange");
+    let to_child_fds = export_attachment(&mut command, "TO_CHILD", to_child.attachment().unwrap());
+    let from_child_fds =
+        export_attachment(&mut command, "FROM_CHILD", from_child.attachment().unwrap());
+    let child = ChildGuard(Some(command.spawn().unwrap()));
+    // The child owns the peer ends now; closing the parent's copies is what lets the parent
+    // observe the child's exit through the doorbells.
+    drop(to_child_fds);
+    drop(from_child_fds);
+    let deadline = Instant::now() + CHILD_DEADLINE;
+
+    let a_bytes: Vec<u8> = (0..1000).map(|index| (index % 7) as u8).collect();
+    let a_block = publish(&to_child, &a_bytes);
+    let mut b_blocks = Vec::new();
+    for cycle in 0..REUSE_CYCLES {
+        let b_bytes = vec![cycle as u8 + 1; 900];
+        // Three 4 KiB blocks: A plus two B generations fit, so the third cycle parks on the
+        // capacity doorbell until the child returns an earlier B from its own process.
+        let mut reservation = to_child
+            .reserve_until(
+                b_bytes.len(),
+                wire_v3_header(b_bytes.len()).unwrap(),
+                deadline,
+            )
+            .unwrap();
+        reservation.write(&b_bytes).unwrap();
+        b_blocks.push(reservation.commit(b_bytes.len()).unwrap().block());
+    }
+    assert!(b_blocks.iter().all(|block| *block != a_block));
+    assert!(
+        (1..b_blocks.len()).any(|index| b_blocks[..index].contains(&b_blocks[index])),
+        "a B block is reused while A is held; the LIFO free list picks which one: {b_blocks:?}"
+    );
+    let max: Vec<u8> = (0..MAX_FRAME_BYTES)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let mut reservation = to_child
+        .reserve_until(
+            MAX_FRAME_BYTES,
+            wire_v3_header(MAX_FRAME_BYTES).unwrap(),
+            deadline,
+        )
+        .unwrap();
+    reservation.write(&max).unwrap();
+    reservation.commit(MAX_FRAME_BYTES).unwrap();
+
+    let report = receive(&from_child, deadline);
+    let text = String::from_utf8(report.to_vec().unwrap()).unwrap();
+    report.release().unwrap();
+    let mut fields = text.split(',');
+    assert_eq!(fields.next(), Some("EIDNARA_SHM_CHILD_EXCHANGE_OK"));
+    assert_eq!(fields.next(), Some(a_block.to_string().as_str()));
+    let child_b: Vec<u32> = fields
+        .next()
+        .unwrap()
+        .split(' ')
+        .map(|id| id.parse().unwrap())
+        .collect();
+    assert_eq!(child_b, b_blocks, "the child saw every B block in order");
+    // A is still held by the child, so its block is outstanding; every B has returned.
+    let inventory = to_child.inventory();
+    assert!(inventory.conserves(&geometry));
+    assert_eq!(
+        inventory.classes[0].published, 1,
+        "only A remains outstanding"
+    );
+    assert_eq!(
+        inventory.classes[4].published, 0,
+        "the maximum frame returned"
+    );
+    publish(&to_child, b"bye");
+
+    let output = child.into_inner().wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("EIDNARA_SHM_CHILD_DONE"), "{stdout}");
+    // A returned on the child's exit path; the block is reusable here.
+    to_child.probe().unwrap();
+    assert!(
+        to_child
+            .inventory()
+            .classes
+            .iter()
+            .all(|class| class.published == 0)
+    );
+}
+
+#[test]
+#[ignore = "child role for two_process_exchange_holds_a_reuses_b_and_wakes_on_return"]
+fn ring_child_exchange() {
+    if std::env::var_os("EIDNARA_SHM_TO_CHILD_FD").is_none() {
+        return;
+    }
+    let from_parent = child_attach("TO_CHILD");
+    let to_parent = child_attach("FROM_CHILD");
+    let deadline = Instant::now() + CHILD_DEADLINE;
+    let a = receive(&from_parent, deadline);
+    let a_bytes = a.to_vec().unwrap();
+    let a_block = a.identity().block();
+    let mut b_blocks = Vec::new();
+    for cycle in 0..REUSE_CYCLES {
+        let b = receive(&from_parent, deadline);
+        assert_eq!(b.to_vec().unwrap(), vec![cycle as u8 + 1; 900]);
+        b_blocks.push(b.identity().block());
+        // Returned from another thread: the owned lease crosses without the ring.
+        std::thread::spawn(move || drop(b)).join().unwrap();
+        assert_eq!(a.to_vec().unwrap(), a_bytes, "A changed under B's reuse");
+    }
+    let max = receive(&from_parent, deadline);
+    assert_eq!(max.len(), MAX_FRAME_BYTES);
+    let body = max.body().unwrap();
+    assert_eq!(body.read_byte(0), Some(0));
+    assert_eq!(
+        body.read_byte(MAX_FRAME_BYTES - 1),
+        Some(((MAX_FRAME_BYTES - 1) % 251) as u8)
+    );
+    assert_eq!(max.to_vec().unwrap().len(), MAX_FRAME_BYTES);
+    max.release().unwrap();
+    let ids: Vec<String> = b_blocks.iter().map(u32::to_string).collect();
+    let report = format!("EIDNARA_SHM_CHILD_EXCHANGE_OK,{a_block},{}", ids.join(" "));
+    publish(&to_parent, report.as_bytes());
+    let bye = receive(&from_parent, deadline);
+    assert_eq!(bye.to_vec().unwrap(), b"bye");
+    bye.release().unwrap();
+    drop(a);
+    println!("EIDNARA_SHM_CHILD_DONE");
+}
+
+/// One ordinary descriptor: the parent's second reservation parks solely on descriptor
+/// exhaustion and is woken by the child's consumption while the child still holds the payload.
+/// The child consumes only after the parent writes `b"go"` to its stdin.
+#[test]
+fn two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return() {
+    if two_process_skipped() {
+        return;
+    }
+    let geometry = PoolGeometry::new(
+        1,
+        1,
+        [
+            ClassSpec::new(4096, 4),
+            ClassSpec::new(64 * 1024, 1),
+            ClassSpec::new(1024 * 1024, 1),
+            ClassSpec::new(8 * 1024 * 1024, 1),
+            ClassSpec::new(64 * 1024 * 1024 + 4096, 1),
+        ],
+        ClassSpec::new(4096, 1),
+        ClassSpec::new(32 * 1024, 1),
+    )
+    .unwrap();
+    let profile = pool_profile(
+        HardwareProfileId::new("ring-descriptor-wake").unwrap(),
+        geometry,
+    )
+    .unwrap();
+    let to_child = Ring::create(&profile, 0).unwrap();
+    let from_child = Ring::create(&profile, 1).unwrap();
+    let mut command = child_command("ring_child_hold");
+    command.stdin(Stdio::piped());
+    let to_child_fds = export_attachment(&mut command, "TO_CHILD", to_child.attachment().unwrap());
+    let from_child_fds =
+        export_attachment(&mut command, "FROM_CHILD", from_child.attachment().unwrap());
+    let mut child = ChildGuard(Some(command.spawn().unwrap()));
+    let mut go = child.0.as_mut().unwrap().stdin.take().unwrap();
+    drop(to_child_fds);
+    drop(from_child_fds);
+    let deadline = Instant::now() + CHILD_DEADLINE;
+
+    publish(&to_child, b"held");
+    assert!(matches!(
+        to_child.try_reserve(4, wire_v3_header(4).unwrap()),
+        Err(ProducerError::Exhausted)
+    ));
+    assert_eq!(
+        to_child.arm_capacity_wait(Inventory::Ordinary, 4),
+        Ok(true),
+        "the producer parks on the one ordinary descriptor"
+    );
+    let ready = to_child.duplicate_capacity_ready().unwrap();
+    assert!(
+        !poll_readable(&ready, 0),
+        "no token before the child consumes"
+    );
+    go.write_all(b"go").unwrap();
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    assert!(
+        poll_readable(&ready, remaining.as_millis().try_into().unwrap()),
+        "the child's consumption rang the capacity doorbell"
+    );
+    assert_eq!(
+        to_child.inventory().classes[0].published,
+        1,
+        "the held payload is still outstanding at the wake"
+    );
+    to_child.complete_capacity_wait().unwrap();
+    to_child
+        .try_reserve(4, wire_v3_header(4).unwrap())
+        .unwrap()
+        .abort();
+    publish(&to_child, b"release");
+    let report = receive(&from_child, deadline);
+    assert_eq!(report.to_vec().unwrap(), b"EIDNARA_SHM_CHILD_RELEASED");
+    report.release().unwrap();
+    publish(&to_child, b"bye");
+    let output = child.into_inner().wait_with_output().unwrap();
+    assert!(output.status.success());
+    to_child.probe().unwrap();
+    assert_eq!(to_child.inventory().classes[0].published, 0);
+}
+
+#[test]
+#[ignore = "child role for two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return"]
+fn ring_child_hold() {
+    if std::env::var_os("EIDNARA_SHM_TO_CHILD_FD").is_none() {
+        return;
+    }
+    let from_parent = child_attach("TO_CHILD");
+    let to_parent = child_attach("FROM_CHILD");
+    let deadline = Instant::now() + CHILD_DEADLINE;
+    let mut go = [0u8; 2];
+    std::io::stdin().read_exact(&mut go).unwrap();
+    assert_eq!(&go, b"go");
+    let held = receive(&from_parent, deadline);
+    assert_eq!(held.to_vec().unwrap(), b"held");
+    let release = receive(&from_parent, deadline);
+    assert_eq!(release.to_vec().unwrap(), b"release");
+    release.release().unwrap();
+    held.release().unwrap();
+    publish(&to_parent, b"EIDNARA_SHM_CHILD_RELEASED");
+    let bye = receive(&from_parent, deadline);
+    assert_eq!(bye.to_vec().unwrap(), b"bye");
+    bye.release().unwrap();
 }

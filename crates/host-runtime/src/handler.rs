@@ -607,17 +607,25 @@ impl RequestCtx {
         &self,
         work: impl FnOnce() -> T + Send + 'static,
     ) -> impl Future<Output = Result<T, BlockingWorkFailed>> + Send + 'static {
+        self.work.run_blocking(work)
+    }
+}
+
+/// The one seam every piece of request-scoped blocking work enters: the request's private
+/// input copy and every handler `run_blocking` call register in the same three trackers, so
+/// cancellation, route close, and host shutdown join all of it.
+impl WorkLedgers {
+    pub(crate) fn run_blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> impl Future<Output = Result<T, BlockingWorkFailed>> + Send + 'static {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         // Registration precedes the closed check so accepted work holds the drain open.
         let captured = BlockingTaskValue {
             value: RedactedValue(Some(work)),
-            completion: (
-                self.work.host.token(),
-                self.work.request.token(),
-                self.work.route.token(),
-            ),
+            completion: (self.host.token(), self.request.token(), self.route.token()),
         };
-        if self.work.route.is_closed() {
+        if self.route.is_closed() {
             drop(captured);
             drop(result_tx);
             return blocking_result(result_rx, BlockingWorkFailed::RouteClosing);
@@ -639,7 +647,7 @@ impl RequestCtx {
             }
         });
         // Work and unobserved output retain tokens even if runtime shutdown drops the observer.
-        let join_task = self.work.request.track_future(async move {
+        let join_task = self.request.track_future(async move {
             let _join_work = join_work;
             if let Ok(mut output) = blocking.await {
                 let outcome = output
@@ -799,6 +807,9 @@ mod tests {
             pending: Default::default(),
             pings: Default::default(),
             busy_rejects: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            terminal_credits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                crate::config::TERMINAL_CREDITS_PER_CONNECTION,
+            )),
             next_ping_corr: 1.into(),
         });
         let route = RouteHandle {
@@ -815,7 +826,7 @@ mod tests {
             binary: false,
             cancel: cancel.clone(),
             stream: crate::dispatch::StreamSink {
-                settlement: crate::dispatch::Settlement::new(),
+                settlement: crate::dispatch::Settlement::with_credit(None),
                 generation,
                 budget: budget.clone(),
                 route,

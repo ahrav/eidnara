@@ -42,14 +42,15 @@ CAS. The host maps this to `ReadClose::Corrupt("shared-memory receive failed")`
 At HEAD: try_receive_inner returns RingError::Descriptor and the try_receive wrapper quarantines through quarantine_with (`:1399-1401`); no enter_quarantine call remains in the validation arm.
 
 **Host-caught.** `decode_header` failure gives
-`ReadClose::Corrupt("invalid shared-memory header")` (`ring_transport.rs:681-682`)
+`ReadClose::Corrupt("invalid shared-memory header")` (`ring_transport.rs:944-945`)
 and `validate_inbound_header` failure gives one of `"body over interoperability
 cap"`, `"invalid pure-header flags"`, or `"role-invalid frame type"`
-(`frame_channel.rs:42-57`). Both propagate with `?`, which drops the local
-`lease`; `ReceiveLease::Drop` calls `release_once` and discards the result
-(`lease.rs:366-372`). The slot therefore moves to `RELEASE_PENDING`, `consumed`
-has already advanced at `ring.rs:1453`, and the ring's `quarantined` byte is never
-touched.
+(`frame_channel.rs:39-57`). Both propagate with `?`, which drops the local
+`lease`; `PayloadLease::Drop` calls `return_once` and discards the result
+(`lease.rs:364-370`), which publishes the block's completion cell and rings the
+capacity doorbell (`crates/shm-transport/src/backend/retained.rs:588-619`).
+`consumed` has already advanced at `ring.rs:1349-1352`, and the ring's
+quarantine flag is never touched.
 
 **Where they rejoin.** The endpoint loop computes `clean = matches!(close,
 ReadClose::Cancelled | ReadClose::Overloaded)` (former `shm_provider.rs:498`), so every

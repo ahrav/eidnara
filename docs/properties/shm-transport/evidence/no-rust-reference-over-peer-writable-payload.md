@@ -5,8 +5,9 @@
 `crates/shm-transport/src/lease.rs` reads arena bytes three ways in one file,
 and one of them differs from the other two. `read_byte` uses `read_volatile`,
 `copy_to` uses `copy_nonoverlapping`, and `checksum` builds a `&[u8]` with
-`std::slice::from_raw_parts`. The file's own doc comment on `ReceiveLease`
-(`:88-89` (source tree; not at HEAD)) states the intent: "Raw span access avoids creating a long-lived safe
+`std::slice::from_raw_parts`. The file's own doc comment on the receive lease
+(`:88-89` (source tree; not at HEAD); at HEAD the type is `PayloadLease`,
+`lease.rs:247`) states the intent: "Raw span access avoids creating a long-lived safe
 reference to memory a trusted peer could still address." `checksum` creates one.
 At HEAD: All three readers now load through relaxed atomics whose width `AccessShape` fixes per byte, so none of them forms a Rust reference over arena memory.
 
@@ -37,7 +38,7 @@ At HEAD: All three readers now load through relaxed atomics whose width `AccessS
   by-value `self`, so nothing in the type system limits how many live mutable
   pointers exist for one span.
 - `crates/shm-transport/src/lib.rs:45` — `pub use lease::{LeaseSpan,
-  ReceiveLease};`. Both the slice-building method and `as_mut_ptr` are crate
+  PayloadLease};`. Both the span's read methods and `as_mut_ptr` are crate
   public API, not internal helpers.
 - `packages/shm-native/src/lib.rs:1431-1435` — the receive path calls
   `lease.segment(index)` then `napi_buffers::create_external_view(env,
@@ -87,9 +88,9 @@ At HEAD: Both mappings go through `sys::mmap_shared` (`crates/shm-transport/src/
 ## What a test must construct
 
 The audit form needs no fault: enumerate every method on `LeaseSpan` and
-`ReceiveLease` that touches arena bytes (`read_byte` at `lease.rs:63`, `copy_to`
-at `:85`, `checksum` at `:96`, `to_vec` at `:330`, and the shared `copy_out` at
-`:186`) and assert two things of each: it forms no Rust reference, `&[u8]` or
+`PayloadLease` that touches arena bytes (`read_byte` at `lease.rs:65`, `copy_to`
+at `:87`, `checksum` at `:98`, `to_vec` at `:332`, and the shared `copy_out` at
+`:188`) and assert two things of each: it forms no Rust reference, `&[u8]` or
 `&mut [u8]`, over arena memory (`rg from_raw_parts crates/shm-transport/src/lease.rs`
 must stay empty), and every load goes through the `AtomicU8` or `AtomicU64`
 width that `AccessShape::of(base, len)` (`:140-175`) assigns to that byte, so two
@@ -97,6 +98,16 @@ parties over the same range use the same access partition. That is a
 source-level or review-level check; in the source tree this record was written
 against it failed at `lease.rs:71` (source tree; not at HEAD), where `checksum`
 built a slice, and at HEAD every reader passes it.
+
+A separate checklist item is the pointer escape: `LeaseSpan::as_mut_ptr`
+(`lease.rs:55`) hands out a raw `*mut u8` whose doc comment forbids a long-lived
+slice. Its consumers are in `packages/shm-native/src/lib.rs`, where
+`create_external_view(env, span.as_mut_ptr(), span.len())` (`:1061`, `:1143`,
+`:1526`) exposes the span to JavaScript as an external `ArrayBuffer` on the
+producer and receive paths. The audit must trace each of those views for
+lifetime beyond the lease and for reads the peer can race, since no Rust
+reference is formed but the same aliasing hazard reaches the addon boundary.
+This is an audit-scope gap this record now names, not a demonstrated defect.
 
 The impact demonstration needs a peer that writes leased bytes concurrently,
 which is fault class F2 and does not exist. Under Miri or ThreadSanitizer the
@@ -106,7 +117,7 @@ second thread writes it, under `-Zsanitizer=thread`.
 
 ## Investigation log
 
-### Q: Is `checksum` reachable from any non-bench caller? If it is bench-only, gating it removes the finding; if it is part of the intended read API, the slice needs to go.
+### Q: Is `checksum` reachable from any non-bench caller? If it is bench-only, gating it removes the finding; if it is part of the intended read API, the slice needs to go
 
 - Sources examined: `grep -rn "checksum" crates/shm-transport/` and
   `packages/shm-native/`; `grep -rn "\.checksum()" crates/ packages/`
@@ -156,7 +167,7 @@ second thread writes it, under `-Zsanitizer=thread`.
   - line 123, `crates/shm-transport/src/lease.rs:70-77` now `crates/shm-transport/src/lease.rs:96-123`: `checksum` sums relaxed `AtomicU8` and `AtomicU64` loads rather than one `read_volatile` per byte, and still forms no `&[u8]`.
   - line 123, `:60-67` now `:85-93`: `copy_to` delegates to `copy_out`, not to a `volatile_copy` helper.
   Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
-  - line 9, `:88-89` (the ReceiveLease doc comment about long-lived safe references): That sentence is gone; the same intent now sits in the `LeaseSpan` doc comment at `crates/shm-transport/src/lease.rs:10-13`, which states there is no `&[u8]` accessor.
+  - line 9, `:88-89` (the receive-lease doc comment about long-lived safe references): That sentence is gone; the same intent now sits in the `LeaseSpan` doc comment at `crates/shm-transport/src/lease.rs:12-15`, which states there is no `&[u8]` accessor, and the lease type is `PayloadLease` (`:247`), whose `body()` (`:308-329`) hands out the span.
   - line 20, `docs/shm-transport.md:116` (the mutable-payload disclaimer): `docs/shm-transport.md` is 98 lines at HEAD and carries no immutability disclaimer of that wording.
   - line 84, `lease.rs:71` (the from_raw_parts slice in checksum): No `from_raw_parts` remains in `lease.rs`, so the audit form of this check passes at HEAD.
 - Missing evidence: none beyond what the record's Exercised field states.

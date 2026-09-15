@@ -43,8 +43,9 @@ at once.
   thread named `host-shm-endpoint` carrying a `new_current_thread` Tokio runtime.
   `:331-341` runs `run_endpoint` under `block_on` inside `catch_unwind`. One task, one
   thread, both directions.
-- `:505-631` — the loop. Each iteration does at most one `receive_one` (`:521-531`)
-  and at most one `publish_one` (`:622`).
+- `:636-894` — `run_endpoint`. Each iteration runs `Publisher::pump` at the top
+  (`:696`), at most one `receive_one` (`:713-725`), and `Publisher::pump` again
+  after any push (`:882-884`).
 - `:552-558` — the alternation the comment claims. When a frame was received, the loop
   takes at most one queued outbound frame with a non-blocking `queue.try_recv().ok()`.
   This is the inbound-cannot-starve-outbound direction, and it holds: a receive is
@@ -55,16 +56,24 @@ at once.
   wrapping the duplicated `data_ready` eventfd (`:485-488`). There is no idle sleep
   and no poll interval: the loop is woken by the peer's doorbell signal or by its own
   cancellation and queue events.
-- **First starvation path, outbound blocks inbound.** `publish_one` at `:749` is a
-  synchronous function. It calls `publish_direct` (`:788-800`) or `publish_owned`
-  (`:802-812`), both of which call `Ring::reserve_until` (`:792`, `:807`) with a
-  deadline of `now + frame_deadline` (`:768`). `reserve_until`
-  (`crates/shm-transport/src/backend/ring.rs:1345-1390`) parks the calling thread
-  on the `capacity_ready` doorbell (`:1381`) between rechecks. There is no `.await`
-  anywhere in that path, so while the outbound ring is full no `try_receive` runs at
-  all. The stall is bounded by `frame_deadline` per frame, and on expiry
-  `publish_one` returns `Err` and the loop cancels and returns
-  (`ring_transport.rs:622-630`).
+- **First starvation path, outbound blocks inbound: superseded at HEAD.** The
+  host publish is `Publisher::try_publish` (`:1221-1277`), called from
+  `Publisher::pump` (`:1159-1217`). It reserves with the nonblocking
+  `Ring::try_reserve_in` (`:1240-1244`) and returns `Ok(false)` on `Exhausted`,
+  leaving the frame in the pending set with a deadline of
+  `now + frame_deadline` (`:1152`). `run_endpoint` arms `Ring::arm_capacity_wait`
+  (`:788`) only while frames are pending and selects on the capacity descriptor
+  (`:845-866`) beside data readiness (`:823-844`) and
+  `sleep_until(publisher.earliest_deadline())` (`:867-877`), so a full outbound
+  ring does not stop `try_receive`. The stall that remains is per frame and
+  bounded by `frame_deadline`: `pump` returns `Err` when any pending frame passes
+  its deadline (`:1168-1171`) and the loop calls `fail` and returns (`:696-704`,
+  `:884-892`). `Ring::reserve_until`
+  (`crates/shm-transport/src/backend/ring.rs:1025-1086`) still parks the calling
+  thread on `capacity_ready` (`:1075-1078`); its remaining Rust caller is the
+  test-only `RingClientEndpoint::send` (`ring_transport.rs:1520`) through
+  `reserve_until_in`, not the endpoint; the production bridge uses
+  `try_send_bounded` (`:1543`) and parks on `arm_capacity_wait` instead.
 - **Second starvation path, inbound blocks outbound.** `receive_one` ends with
   `inbound.send(Ok(InboundEvent::Frame(..))).await` (`:737-745`) on the bounded
   channel created at `:283` with `mpsc::channel(queue_frames)`. That await has no
@@ -78,8 +87,10 @@ at once.
   not a hang.
 - **Where the design does defend itself.** The ingress-budget wait inside
   `receive_one` explicitly services outbound frames rather than blocking on the
-  budget alone: the select at `:703-729` includes a `queue.recv()` arm that calls
-  `publish_one` (`:721-728`). Under eventfd it is a pure select with no sleep arm.
+  budget alone: the select at `:982-1024` includes a `queue.recv()` arm that
+  pushes the frame and runs `Publisher::pump` (`:1000-1008`), a capacity
+  readiness arm that pumps after a peer return (`:1009-1020`), and a
+  `sleep_until(deadline)` arm for the budget itself (`:994-999`).
   That path is the counterexample to the claim that the loop never yields to the
   other direction, and it is why the property is a bounded ratio rather than a flat
   prohibition.
@@ -95,11 +106,11 @@ at once.
   (`crates/shm-transport/tests/ring.rs:488-543`) uses a single ring in a single
   direction.
   At HEAD: recv is cfg(test)-only at HEAD, so no shipped host code calls wait_for_data.
-  At HEAD: send delegates to send_bounded (`:901-933`), which reserves, writes, rechecks the frame deadline, checks quarantine, then commits, and reports a SendFailure stage instead of an opaque error.
+  At HEAD: `send` (`:1520`) reserves through `reserve_until_in` and `try_send_bounded` (`:1543`) through `try_reserve_in`; both hand the reservation to `publish` (`:1580-1604`), which writes, rechecks the frame deadline, checks quarantine, then commits, and reports a `SendFailure` stage instead of an opaque error.
   At HEAD: send_ticket_before and the publication ticket are gone; the admission select! lives in send_before and reserves a permit with self.tx.reserve().
   At HEAD: The inbound channel is sized queue_frames plus one and the extra slot is held as an owned permit for the terminal event, so a fault or cancellation is delivered even when the receiver has stopped draining (`:279-291`).
   At HEAD: The handoff goes through `deliver`, a biased select! over inbound.send, queue.discard.cancelled(), and root.cancelled(), so it is cancellable and no longer an unselected untimed await.
-  At HEAD: A failed publish_one now calls `fail`, which sends ReadClose::Corrupt("shared-memory publish failed") on the inbound channel before cancelling `retired` and `root`.
+  At HEAD: A failed `Publisher::pump` calls `fail` (`:696-704`, `:884-892`), which sends ReadClose::Corrupt("shared-memory publish failed") on the inbound channel before cancelling `retired` and `root` (`:897-908`).
   At HEAD: The data_ready doorbell is one end of a connected AF_UNIX stream socketpair, not an eventfd (`crates/shm-transport/src/backend/ring.rs:710-728`).
 
 ## Failure scenario
@@ -110,7 +121,12 @@ The scenario below was derived against the source tree this record was written f
    both directions have work.
 2. The peer stops draining host-to-peer, or drains it slower than the host fills it.
    The outbound ring reaches depth or its arena fills.
-3. The next `publish_one` enters `reserve_until` and parks on the `capacity_ready`
+3. Superseded at HEAD: the next `Publisher::try_publish` gets `Exhausted` from
+   `try_reserve_in` (`ring_transport.rs:1240-1242`) and leaves the frame pending;
+   the host keeps calling `try_receive` and parks only in the `select!` over data
+   readiness, capacity readiness, and the earliest pending deadline (`:810-879`).
+   In the source tree this record was written against, the next publish enters
+   `reserve_until` and parks on the `capacity_ready`
    doorbell. For up to `frame_deadline` the host performs no `try_receive`, so
    inbound frames accumulate in `SLOT_PUBLISHED`. Unlike the pre-eventfd design,
    the host is not spinning: it is asleep in `wait_until` (`ring.rs:1381`) and only
@@ -185,8 +201,10 @@ timeout rather than an unbounded stall. Coverage check to emit:
   outbound through the receive path, because every received frame is followed by one
   non-blocking outbound attempt (`ring_transport.rs:552-558`) and the ingress-budget wait also services
   outbound (`:721-728`) — the comment's claim is accurate for the case it describes.
-  Outbound *can* starve inbound, because `publish_one` blocks the single thread inside
-  `reserve_until` with no yield, for up to `frame_deadline` per frame. And inbound
+  Outbound *can* starve inbound in the source tree, because its publish blocks the
+  single thread inside `reserve_until` with no yield, for up to `frame_deadline`
+  per frame; at HEAD `Publisher::try_publish` (`ring_transport.rs:1221`) is
+  nonblocking and this arm does not apply. And inbound
   *can* starve outbound through a path the comment does not cover: the unbounded
   `inbound.send().await` at `:737-745`, which is neither timed nor selected against the
   outbound queue. Neither stall is infinite — the first ends in an unclean close, the
@@ -212,8 +230,9 @@ timeout rather than an unbounded stall. Coverage check to emit:
   `:1476-1499`, `:1598-1599`, `:2026-2037`, `:2376`;
   `crates/host-runtime/src/frame_channel.rs:243-245`, `:253-265`.
 - Findings: both starvation mechanisms survive PR #131 unchanged in shape.
-  `publish_one` is still synchronous on the endpoint thread; its wait is now a
-  parked `capacity_ready.wait_until` instead of a 50-microsecond retry sleep, so
+  the host publish in that tree is still synchronous on the endpoint thread; its
+  wait is a parked `capacity_ready.wait_until` instead of a 50-microsecond retry
+  sleep, so
   the outbound-blocks-inbound stall is identical in bound (`frame_deadline`) but
   different in failure texture: a lost `capacity_ready` wake presents as the full
   deadline. The untimed `inbound.send().await` is unchanged. The idle loop no
@@ -231,7 +250,8 @@ timeout rather than an unbounded stall. Coverage check to emit:
   `frame_deadline` alone, and the drain arm gains a second job as a lost-wake
   detector.
   At HEAD: The doorbell is a connected AF_UNIX stream socketpair end held in a UnixStream, not an eventfd, and its syscalls go through backend/sys.rs.
-  At HEAD: The main impl block holds send, send_bounded, try_recv, and try_recv_with; recv moved into a separate cfg(test) impl at `:1013-1032`.
+  At HEAD: The main impl block holds `send`, `try_send_bounded`, `publish`, `try_recv`, and `try_recv_with`; `recv` lives in a separate `cfg(test)` impl at `:1695-1712`.
+  At HEAD: The host publish is `Publisher::try_publish` (`ring_transport.rs:1221`), which is nonblocking; the outbound-blocks-inbound stall this entry describes does not exist, and only the per-frame deadline (`:1168-1171`) survives from it.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 
@@ -239,7 +259,7 @@ timeout rather than an unbounded stall. Coverage check to emit:
 - Findings:
   Mechanisms whose citation moved and whose surrounding claim needed restating:
   - line 55, `:371-374` now `:485-488`: The data_ready doorbell is one end of a connected AF_UNIX stream socketpair, not an eventfd (`crates/shm-transport/src/backend/ring.rs:710-728`).
-  - line 67, `ring_transport.rs:479-483` now `ring_transport.rs:622-630`: A failed publish_one now calls `fail`, which sends ReadClose::Corrupt("shared-memory publish failed") on the inbound channel before cancelling `retired` and `root`.
+  - line 67, `ring_transport.rs:479-483` now `ring_transport.rs:696-704`: A failed `Publisher::pump` calls `fail`, which sends ReadClose::Corrupt("shared-memory publish failed") on the inbound channel before cancelling `retired` and `root`.
   - line 69, `:551-556` now `:737-745`: The handoff goes through `deliver`, a biased select! over inbound.send, queue.discard.cancelled(), and root.cancelled(), so it is cancellable and no longer an unselected untimed await.
   - line 70, `:230` now `:283`: The inbound channel is sized queue_frames plus one and the extra slot is held as an owned permit for the terminal event, so a fault or cancellation is delivered even when the receiver has stopped draining (`:279-291`).
   - line 74, `crates/host-runtime/src/frame_channel.rs:640-652` now `crates/host-runtime/src/frame_channel.rs:253-265`: send_ticket_before and the publication ticket are gone; the admission select! lives in send_before and reserves a permit with self.tx.reserve().
@@ -251,3 +271,30 @@ timeout rather than an unbounded stall. Coverage check to emit:
   - line 200, `crates/shm-transport/src/backend/ring.rs:384-467` now `crates/shm-transport/src/backend/ring.rs:714-842`: The doorbell is a connected AF_UNIX stream socketpair end held in a UnixStream, not an eventfd, and its syscalls go through backend/sys.rs.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+### Q: Does the outbound-blocks-inbound mechanism survive the nonblocking publisher?
+
+- Sources examined: `crates/host-runtime/src/ring_transport.rs:636-894`
+  (`run_endpoint`), `:926-1038` (`receive_one`), `:1075-1278` (`Publisher`),
+  `:1520-1604` (`RingClientEndpoint::send`, `try_send_bounded`, `publish`);
+  `crates/shm-transport/src/backend/ring.rs:887-922` (`arm_capacity_wait`,
+  `complete_capacity_wait`, `duplicate_capacity_ready`), `:940-1020`
+  (`try_reserve_in`), `:1025-1086` (`reserve_until`), `:1506-1524`
+  (`take_reclaimed`).
+- Findings: no. The endpoint never enters `Ring::reserve_until`; every publish
+  attempt is `Ring::try_reserve_in` from `Publisher::try_publish`, and a frame
+  that finds no capacity stays pending while `run_endpoint` and the budget loop
+  in `receive_one` keep receiving and park only in a `select!` that includes the
+  duplicated capacity descriptor and the earliest pending deadline. `pump`
+  first calls `Ring::take_reclaimed` to drop terminal credits at the physical
+  block return (`:1161-1167`), then fails the generation if any pending frame is
+  past its deadline (`:1168-1171`), then publishes every eligible frame. The
+  inbound-blocks-outbound arm is unchanged in shape: `deliver` (`:911-923`)
+  parks until the application drains or a lifecycle token cancels.
+- Missing evidence: the ratio arm of the catalog record assumed two blocking
+  paths; with one gone, whether a bounded ratio is still the right check or the
+  record reduces to the inbound stall plus the per-frame deadline is a catalog
+  decision.
+- Conclusion: resolved with answer - the outbound stall is superseded by a
+  per-frame deadline that retires the generation without parking the thread;
+  the catalog record's Check and Fault/timing angle carry a mechanism note.

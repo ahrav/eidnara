@@ -10,7 +10,7 @@ use rustix::net::{
     SocketAddrUnix, SocketFlags, SocketType, recvmsg, sockopt,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use shm_transport::backend::ring::RingGrant;
+use shm_transport::backend::ring::{HOST_TO_PEER_LANE, PEER_TO_HOST_LANE, PoolGrant};
 use shm_transport::descriptor::SETUP_DESCRIPTOR_COUNT;
 use subtle::ConstantTimeEq;
 
@@ -86,8 +86,8 @@ enum ServerMessage {
 pub struct PendingSetup {
     stream: UnixStream,
     descriptors: Option<[OwnedFd; SETUP_DESCRIPTOR_COUNT]>,
-    pub host_to_peer_grant: RingGrant,
-    pub peer_to_host_grant: RingGrant,
+    pub host_to_peer_grant: PoolGrant,
+    pub peer_to_host_grant: PoolGrant,
     wire_version: u8,
     descriptor_schema: u16,
     activation_token: String,
@@ -122,7 +122,8 @@ pub fn begin_connect(
     let host_to_peer_grant = decode_grant(&grant.descriptor.host_to_peer_grant)?;
     let peer_to_host_grant = decode_grant(&grant.descriptor.peer_to_host_grant)?;
     if grant.descriptor.profile != super::PROFILE
-        || host_to_peer_grant == peer_to_host_grant
+        || host_to_peer_grant.lane() != HOST_TO_PEER_LANE
+        || peer_to_host_grant.lane() != PEER_TO_HOST_LANE
         || !super::grant_matches_profile(host_to_peer_grant)
         || !super::grant_matches_profile(peer_to_host_grant)
     {
@@ -559,9 +560,9 @@ fn set_timeout(stream: &UnixStream, deadline: Instant) -> io::Result<()> {
     stream.set_write_timeout(Some(remaining))
 }
 
-fn decode_grant(text: &str) -> io::Result<RingGrant> {
+fn decode_grant(text: &str) -> io::Result<PoolGrant> {
     let bytes = super::strict_hex(text).ok_or_else(invalid)?;
-    RingGrant::decode(bytes).map_err(|_| invalid())
+    PoolGrant::decode(bytes).map_err(|_| invalid())
 }
 
 fn invalid() -> io::Error {
@@ -611,7 +612,7 @@ mod tests {
             "descriptor_schema": shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
             "activation_token": "token",
             "descriptor": {
-                "profile": "host-test-ring-v1",
+                "profile": "host-payload-pool-v1",
                 "host_to_peer_grant": "aa",
                 "peer_to_host_grant": "bb"
             }

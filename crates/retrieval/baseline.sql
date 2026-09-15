@@ -70,6 +70,21 @@ CREATE TABLE occurrence_tombstones(
     recorded_at INTEGER NOT NULL
 ) STRICT;
 
+-- Exact selector keys the versioned source mapping derives for an occurrence.
+-- The primary key serves equality and prefix range scans in stable binary
+-- order; the occurrence index serves physical cleanup.
+CREATE TABLE exact_associations(
+    family TEXT NOT NULL CHECK(family IN ('id','sha','path','symbol','command','config','error')),
+    namespace TEXT NOT NULL,
+    key BLOB NOT NULL,
+    occurrence_id TEXT NOT NULL REFERENCES occurrences(occurrence_id) ON DELETE RESTRICT,
+    target_id TEXT NOT NULL,
+    extraction_version INTEGER NOT NULL CHECK(extraction_version>0),
+    created_commit_seq INTEGER NOT NULL CHECK(created_commit_seq>0),
+    PRIMARY KEY(family,namespace,key,occurrence_id)
+) STRICT;
+CREATE INDEX idx_exact_associations_occurrence ON exact_associations(occurrence_id);
+
 -- The fixed S the projection was built at and the canonical commit it has
 -- applied through. The canonical consumer checkpoint never moves ahead of this.
 CREATE TABLE projection_checkpoint(

@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn descriptor_count_matches_setup_contract() {
         // The admission charge and the setup transfer count describe the same descriptors.
-        let profile = crate::profile::host_test_ring_profile().unwrap();
+        let profile = crate::profile::host_payload_pool_profile().unwrap();
         assert_eq!(
             profile.charges().file_descriptors,
             RING_DESCRIPTOR_COUNT as u64

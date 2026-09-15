@@ -307,11 +307,11 @@ The interoperability body maximum is exactly 64 MiB (`67,108,864` bytes). A conf
 
 Aggregate resource policy takes effect between frames, before admitting more connections/work, or after a complete frame reaches a profile/application limit. For example, `Handler` may return terminal `invalid_params` for its 1 MiB facade or 32 MiB transform limits after transport framing accepts the body. Local limits never change header bytes.
 
-Waiting for the next frame on an idle connection is unbounded at the framing layer; idle lifetime is governed separately by liveness policy (Section 9.3). A published ring descriptor names one complete header and body. The receiver MUST validate all offsets, lengths, sequence metadata, header fields, and descriptor identity before exposing a scoped receive lease.
+Waiting for the next frame on an idle connection is unbounded at the framing layer; idle lifetime is governed separately by liveness policy (Section 9.3). A published pool descriptor names one block that holds one complete header and body. The receiver MUST validate the publication sequence, block id, reuse generation, body length, and copied header against its own geometry and per-block records before exposing an owned payload lease, as `docs/payload-pool-protocol.md` Section 6 specifies. The lease keeps its block mapped until its single return, independently of the endpoint that received it.
 
-Clean `Goodbye` followed by joined teardown is orderly connection close. Unexpected setup-socket EOF, an invalid ring descriptor, truncated declared frame, unsupported version, unknown type, invalid flags, nonzero channel-0 epoch, zero epoch on a routed channel, pure-header body, or body declaration above 64 MiB retires the connection without resynchronization or reuse of uncertain storage.
+Clean `Goodbye` followed by joined teardown is orderly connection close. Unexpected setup-socket EOF, an invalid pool descriptor, truncated declared frame, unsupported version, unknown type, invalid flags, nonzero channel-0 epoch, zero epoch on a routed channel, pure-header body, or body declaration above 64 MiB retires the connection without resynchronization or reuse of uncertain storage.
 
-Writers MUST verify header `len` equals body length, reserve enough bounded ring capacity for the complete frame, fill the reservation, and publish exactly once. Each direction has one logical writer and FIFO publication order. A failed or underfilled reservation aborts without publication. Once publication begins, a missing terminal leaves the request outcome unknown.
+Writers MUST verify header `len` equals body length, reserve one block from the smallest fitting class of the frame's inventory, fill the reservation, and publish exactly once. Each direction has one logical writer. Descriptor consumption is FIFO by publication sequence, and a class or descriptor exhaustion is backpressure, not a smaller frame limit. Queued admission order is not a cross-class publication promise: a writer MAY publish an eligible pure-header control or an unrelated terminal from the reserved control and terminal inventories while an ordinary frame waits for ordinary capacity, subject to the ordering rules of Sections 8-10 (increasing consumer Request correlations, per-stream data before its terminal, shutdown terminals before `Goodbye`). A channel-0 `Request` is not such a control. A failed or underfilled reservation aborts without publication. Once publication begins, a missing terminal leaves the request outcome unknown.
 
 ### 6.4 Byte examples
 
@@ -568,6 +568,22 @@ activation, starting components refresh on a bounded 50 ms cadence; after
 activation settles, polling returns to the configured health interval.
 Handler detail strings are tainted and omitted.
 
+The response also carries a `shared_memory` diagnostics object for the
+payload-pool transport. Its quantities are distinct and sampled independently,
+not as one atomic snapshot:
+`reclamation.completed` counts connection generations that ended (its
+`reclamation.meaning` field states this; the key is a wire name and does not
+mean released storage); `returns` reports the payload leases the host itself
+still holds (`outstanding`, its own return obligations to the peer, not leases
+the peer holds), live backings, and backings proved released with their
+bytes; `exhaustion.observed`
+and `exhaustion.by_resource` count admission refusals in total and by the
+resource that ran out; `accounting` reports active and quarantined
+commitment; and `aggregate` reports the transport, host-resident, and terminal
+encoding ceilings with their checked total. The aggregate is a commitment
+figure, not a resident-set claim. No field carries a socket path, descriptor,
+address, token, or key.
+
 The `context` component additionally carries a sanitized
 `metrics.epochs` object holding exactly these five compatibility epochs, in
 this order:
@@ -642,11 +658,11 @@ The host owns one shutdown commit latch per incarnation with phases `open -> res
 
 Commit runs inside retained host work (the connection writer task), so cancelling the requester's task after enqueue cannot lose an acknowledged shutdown. `host.shutdown` performs no PID signaling and no publication cleanup of its own: stop-side effects are exactly the Section 12 sequence, and stop verification (publication removal, instance-lock release) is observed through Section 4.3 evidence.
 
-### 7.7 Mandatory ring setup
+### 7.7 Mandatory payload-pool setup
 
-Transport setup is complete before the application wire becomes active. The owner-only Unix setup socket authenticates the peer and transfers exactly two memfds plus four nonblocking eventfds, profile `host-test-ring-v1`, wire version 3, descriptor schema 3, grants, and a one-use activation token. The client validates and attaches both directions, then commits activation. Memfds carry ring metadata and application bytes. Eventfds carry coalesced data-ready and capacity-ready notifications only. The ring is the only application frame channel.
+Transport setup is complete before the application wire becomes active. The owner-only Unix setup socket authenticates the peer and transfers exactly two memfds plus four connected `AF_UNIX` stream socketpair ends, profile `host-payload-pool-v1`, wire version 3, descriptor schema 4, one 126-byte grant per direction, and a one-use activation token. The client validates both grants against the sole profile's geometry, attaches both directions while they are fresh, then commits activation. Memfds carry pool metadata, descriptor slots, completion cells, and the fixed block arena. The socketpair ends are doorbells and carry coalesced data-ready and capacity-ready tokens only; an eventfd, datagram, seqpacket, or unconnected socket is rejected before traffic. The pool is the only application frame channel. `docs/payload-pool-protocol.md` is the normative low-level authority for the layout, descriptor, completion, wake, and access rules; this section links to it and does not restate them.
 
-Missing native support, malformed ancillary data, duplicate or extra descriptors, identity mismatch, token mismatch, admission failure, attachment failure, timeout, or setup-socket loss retires the connection before application traffic. Runtime ring corruption or unexpected setup-socket EOF also retires the connection. No setup or runtime failure changes transport or replays an uncertain request.
+Missing native support, malformed ancillary data, duplicate or extra descriptors, identity mismatch, token mismatch, admission failure, attachment failure, timeout, or setup-socket loss retires the connection before application traffic. Runtime pool corruption or unexpected setup-socket EOF also retires the connection. No setup or runtime failure changes transport or replays an uncertain request.
 
 ```mermaid
 stateDiagram-v2
@@ -663,7 +679,7 @@ stateDiagram-v2
 
 `Failed` and `Closed` are terminal for that connection. A caller may establish a fresh connection, which reruns discovery, authentication, descriptor transfer, validation, and attachment from the beginning.
 
-Producers publish before signaling readiness. Consumers arm by generation, recheck after arming, block only when still empty, drain the coalesced token, and recheck the ring. Capacity readiness uses the same lost-wake-safe order. No timed ring poll, prefault, runtime scheduling selector, or fallback path exists.
+Producers publish before signaling readiness. Consumers arm by generation, recheck after arming, block only when still empty, drain the coalesced token, and recheck the pool. Capacity readiness uses the same lost-wake-safe order and is signaled twice per frame: once when the consumer acknowledges the descriptor, and once when the payload's final owner returns the block. Doorbell EOF proves the peer closed its doorbell holders, not that it unmapped the pool. No timed pool poll, prefault, runtime scheduling selector, or fallback path exists.
 
 `transport.negotiate`, `transport.activate`, and `transport.commit` are not operations of this protocol. A host advertises exactly four channel-0 operations in `host_ops`: `route.open`, `catalog.list`, `host.shutdown`, and `host.status`. Any other operation receives terminal `unsupported_operation` while the host stays connected if framing remains valid.
 
@@ -831,8 +847,13 @@ Managed Rust and TypeScript client defaults:
 | client shutdown and cleanup | one 5 s absolute deadline |
 | ordinary queued data frames | 256 slots |
 | reserved pure-header `Pong`, `Cancel`, and `Goodbye` frames | 32 slots |
+| TypeScript data frames waiting for pool capacity | 64 frames, each holding its byte charge |
+| TypeScript pure-header `Cancel` and `Goodbye` frames waiting for pool capacity | 32 frames, at most 16 of them `Cancel`, each holding its byte charge |
+| TypeScript binary unary responses held by the caller | one maximum body plus 1 MiB, and 64 leases, charged until the caller releases each lease |
 
 Data and reserved-control frames share one queued-byte budget; reserved admission is not a byte-budget bypass. Data traffic cannot consume control slots. Exhausting control reserve retires the generation and deterministically settles pending work. Backoff counts the first attempt, and retry delay or a later stage never resets the owning deadline.
+
+Both managed clients publish without waiting on the pool. A frame whose inventory is exhausted waits in admission order, the TypeScript client copying its body at admission so the caller may reuse its buffer, and the client parks on the host's capacity doorbell, so a host consumption or block return resumes publication without inbound data or a timer. The park follows the arm-and-recheck rule of the payload-pool protocol: a reservation is retried after the arm, because a return that lands before the park is recorded rings no doorbell. A pure-header `Pong` publishes from the control reserve past waiting data and is never refused by the client's aggregate memory cap, which waiting data may fill; `Cancel` and `Goodbye` publish after the frames queued ahead of them. A waiting frame that reaches its deadline is dropped unpublished and settles `not_sent`. A data frame past the TypeScript data queue bound is refused as `not_sent` with code `ring_full`. A `Cancel` past its bound is dropped as `not_sent` and counted, and the generation stays open; a `Goodbye` past the control bound retires the generation as `control_exhausted`. A binary unary response past either retained-response ceiling is released unread and fails with `retained_response_limit`; the host's work completed, so the outcome is a terminal, not a retry.
 
 The 2-second handshake deadline spans discovery, setup-socket authentication, descriptor transfer, validation, and ring attachment together, while Section 5.1's recommended host authentication deadline is also 2 seconds. A deployment that needs the full host window for authentication MUST raise the client handshake deadline above it, because these two values are not independent.
 
@@ -878,7 +899,7 @@ An authenticated `host.shutdown` (Section 7.6) initiates this same graceful orde
 
 1. Host locks runtime state, creates fresh credentials, initializes directly linked components, binds the owner-only setup socket, and publishes schema 2 with `wire_version: 3`.
 2. Client validates one descriptor-anchored snapshot and completes all three auth messages.
-3. Client receives two memfds and four eventfds, validates both grants, attaches, and commits activation.
+3. Client receives two memfds and four stream-socket doorbells, validates both grants, attaches, and commits activation.
 4. Client sends channel-0 `route.open` correlation 1 through the ring.
 5. Host allocates global channel 7, epoch 77, binds the component, and returns the tagged response.
 6. Client sends an opaque request on `(7,77,3)`.
@@ -914,7 +935,7 @@ Every scenario has one required outcome. These are review vectors; executable fi
 
 | ID | Scenario | Expected result |
 | --- | --- | --- |
-| AE1 | Fresh authenticated call | Valid version-3 file, three-message auth, fixed ring attachment, tagged route response, and matching terminal succeed |
+| AE1 | Fresh authenticated call | Valid version-3 file, three-message auth, fixed payload-pool attachment, tagged route response, and matching terminal succeed |
 | AE2 | Malformed envelope or setup | Unsupported frame version, type, flags, oversize, truncation, invalid descriptor, identity mismatch, or attachment failure closes the generation; no application dispatch or alternate transport |
 | AE3 | Caller-supplied identity | Key holder may select identity; fields scope handler state and add no authority |
 | AE4 | Temporarily unavailable module | Each `unknown_module` terminates one correlation; policy retry uses a new correlation and never sends body early |
@@ -979,8 +1000,8 @@ Every scenario has one required outcome. These are review vectors; executable fi
 | V50 | Child shutdown failure | A ModelExecution shutdown panic or returned error still drains LocalEmbeddings and Eidnara; the incarnation reports one deterministic redacted non-graceful failure |
 | V51 | Missing, null, string, fractional, or non-3 `wire_version` | Client rejects before setup-socket dial |
 | V52 | Setup socket receives an application envelope | Host retires setup; zero application dispatch |
-| V53 | Descriptor count, identity, token, or ring geometry is invalid | Client retires setup before mapping or application traffic |
-| V54 | Native addon, attachment, or ring operation fails | Connection fails terminally; no alternate transport or frame replay |
+| V53 | Descriptor count, identity, token, or pool geometry is invalid | Client retires setup before mapping or application traffic |
+| V54 | Native addon, attachment, or pool operation fails | Connection fails terminally; no alternate transport or frame replay |
 | V55 | Authenticated `host.status` after ring activation | One route-free response reports separate closed component states and shared-memory diagnostics; no routed application body is sent, handler detail is omitted, and starting storage refreshes until ready or unavailable |
 
 ### 14.1 Fixture oracle
@@ -1006,14 +1027,14 @@ Fixtures MUST use committed literal bytes and an independent decoder/oracle; imp
 | strict descriptor version and secure snapshot | 4 | V1-V7, V51 |
 | authentication and secret handling | 5 | V8-V11, V23-V24, V39 |
 | framing, control, and canonical literals | 6-7 | V12-V17, V40-V42 |
-| mandatory fixed-ring attachment and fail-closed setup | 7.7 | AE1-AE2, V52-V54 |
+| mandatory payload-pool attachment and fail-closed setup | 7.7 | AE1-AE2, V52-V54 |
 | full route handles, correlation, and terminal ownership | 8-10 | V18-V22, V27-V38, V43-V44 |
 | managed-client deadlines, control reserve, cancellation, and liveness | 9-11 | AE4-AE9, V23, V29-V30, V33-V37 |
 | restart and shutdown cleanup | 12-13 | AE7, AE13, V45-V50 |
 
 ## 17. Scope boundaries
 
-This direct boundary owns secure connection-file primitives, version-3 wire and authentication, mandatory fixed-ring attachment, host-owned Rust and TypeScript API names, static composition, route epochs, managed-client behavior, and focused direct-host fixture proof.
+This direct boundary owns secure connection-file primitives, version-3 wire and authentication, mandatory payload-pool attachment, host-owned Rust and TypeScript API names, static composition, route epochs, managed-client behavior, and focused direct-host fixture proof.
 
 The product daemon crate owns the production host executable and launcher, production connection-file orchestration during startup and teardown, user-facing configuration and doctor behavior, packaging, and distribution. This contract does not claim those lifecycle flows are delivered here.
 

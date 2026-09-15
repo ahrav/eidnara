@@ -4,10 +4,14 @@
 
 `crates/host-runtime/src/ring_transport.rs:264` wraps the whole of `run_endpoint` in
 `std::panic::catch_unwind` and discards the result with `let _ =`. Reading what
-runs after it - `admission.release()` at `:276` and `done_tx.send(())` at `:277`
-- showed that the panic and the orderly exit produce identical observable
-effects. A second, narrower `catch_unwind` inside `publish_one` (`:584-587`)
-then raised the question of what sits outside it.
+runs after it, `admission.release()` at `:276` and `done_tx.send(())` at `:277`,
+showed that the panic and the orderly exit produce identical observable
+effects. A second, narrower `catch_unwind` inside `Publisher::try_publish`
+(`:1259-1262` at HEAD) then raised the question of what sits outside it. The
+outer boundary this trigger describes is superseded: at HEAD the closure
+observes the `catch_unwind` result (`:488-500`) and on `Err` counts the panic,
+cancels `queue.retired` and `root`, and sends
+`ReadClose::Corrupt("shared-memory endpoint panicked")` (`:501-507`).
 
 ## Evidence trail
 
@@ -108,21 +112,25 @@ A `written` completion hook panics. `dispatch.rs` supplies these hooks through
 defect in the completion path.
 
 Sequence: frame published to the ring, peer can see it, `COMPLETE` stored, hook
-panics, unwind through `publish_one` and `run_endpoint`, `DuplexRing` dropped
-during unwind (it is owned by `run_endpoint`'s frame, `:359-368`), `catch_unwind`
-swallows, charge released, `done_tx` fired, thread gone.
+panics, unwind through `Publisher::try_publish` and `run_endpoint`, `DuplexRing`
+dropped after the closure's `catch_unwind` returns (`rings` is owned by the
+thread closure, `:465-468`, and dropped at `:513`). The rest of this scenario
+is superseded: the closure does not swallow the panic. It increments
+`endpoint_panics`, cancels `queue.retired` and `root`, and sends
+`ReadClose::Corrupt("shared-memory endpoint panicked")` on the inbound channel
+(`:501-507`) before `done_tx` fires (`:526`), so the read loop observes
+`Corrupt`, not `CleanEof`, and `read_loop` folds it into `ReadExit::Peer`
+(`connection.rs:364-366`).
 
-Now the connection has no transport thread and does not know it. Inbound: the
-`inbound` sender was dropped during unwind, so `ShmReceiver::recv` yields
-`Err(ReadClose::CleanEof)` (`:354`) and the read loop retires as
-`ReadExit::Peer` - the same misattribution as
-`ring-a-publish-failure-is-reported-as-a-clean-peer-close`. Outbound: frames
-admitted between the panic and the read loop noticing sit in the mpsc and each
-eventually fails its own admission deadline.
-
-Diagnostics: `state: "healthy"`, all four counters unchanged (post-#131 the
-`attachment` counter is removed). Nothing anywhere
-records that a thread panicked.
+Superseded at HEAD, kept as the historical scenario: the connection knew
+nothing of the lost thread, the dropped `inbound` sender surfaced as
+`Err(ReadClose::CleanEof)` and `ReadExit::Peer`, frames admitted before the
+read loop noticed sat in the mpsc until their admission deadlines, and
+diagnostics stayed `state: "healthy"` with no counter recording the panic. At
+HEAD the outer `catch_unwind` sends `ReadClose::Corrupt("shared-memory endpoint
+panicked")`, cancels `queue.retired` and `root` so no further frame is admitted,
+and increments `endpoint_panics`, which `host.status` reports under
+`endpoint_panic.observed`.
 
 ## Timing windows and dependencies
 
@@ -138,8 +146,8 @@ which covers completion-hook panics on the *writer task*. This is a different
 owner - the endpoint OS thread - with a different boundary, namely none. The two
 records are complementary and neither subsumes the other. Part 2a also owns
 `a-cancelled-emission-releases-every-permit-it-held`; note that on this path the
-`charge` local of `publish_one` (destructured at `:568-574`) is dropped by the
-unwinding machinery, so
+`charge` local of `Publisher::try_publish` (destructured at `:1251-1258`) is
+dropped by the unwinding machinery, so
 the byte charge does return, which is worth stating because it is the one thing
 the panic path gets right by accident.
 

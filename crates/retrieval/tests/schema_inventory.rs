@@ -290,8 +290,15 @@ fn the_baseline_matches_the_frozen_inventory_field_for_field() {
         .parse()
         .unwrap();
     assert_eq!(documented_version, retrieval::SCHEMA_VERSION);
+    let documented_extraction: u32 = inventory
+        .split_once("The exact\nextraction version is ")
+        .and_then(|(_, suffix)| suffix.split(';').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(documented_extraction, retrieval::exact::EXTRACTION_VERSION);
     let documented = with_implied_not_null(documented());
-    assert_eq!(documented.len(), 11, "every baseline table is documented");
+    assert_eq!(documented.len(), 12, "every baseline table is documented");
     let stored = with_implied_not_null(stored(retrieval::BASELINE));
     assert_eq!(compare(&documented, &stored), Vec::<String>::new());
     // The inventory gives every persistence field of the contract a home.
@@ -303,6 +310,8 @@ fn the_baseline_matches_the_frozen_inventory_field_for_field() {
         ("occurrences", "tuple"),
         ("occurrences", "payload_id"),
         ("occurrence_tombstones", "invalidated_commit_seq"),
+        ("exact_associations", "key"),
+        ("exact_associations", "target_id"),
         ("projection_checkpoint", "checkpoint_commit_seq"),
         ("embedding_jobs", "attempts"),
         ("embedding_jobs", "state"),
@@ -378,6 +387,14 @@ fn the_check_vocabularies_equal_the_rust_enums() {
     assert_eq!(
         check("occurrence_tombstones", "reason"),
         format!("CHECK(reason IN ({}))", list(&reasons))
+    );
+    let families: Vec<&str> = retrieval::exact::Family::ALL
+        .iter()
+        .map(|f| f.keyword())
+        .collect();
+    assert_eq!(
+        check("exact_associations", "family"),
+        format!("CHECK(family IN ({}))", list(&families))
     );
 }
 
