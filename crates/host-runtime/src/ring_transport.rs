@@ -194,23 +194,32 @@ pub struct ReturnSnapshot {
 /// still in flight, not by the number of connections ever prepared.
 #[derive(Default)]
 struct BackingRegistry {
-    entries: Mutex<Vec<std::sync::Weak<shm_transport::backend::retained::Retained>>>,
+    entries: Mutex<Vec<BackingEntry>>,
     /// Backings observed unmapped and pruned from `entries`.
     released: AtomicU64,
 }
 
+struct BackingEntry {
+    backing: std::sync::Weak<shm_transport::backend::retained::Retained>,
+    /// The connection's charge moved to quarantine, so this backing's unmapping proves nothing
+    /// about the storage and never counts as released; it stays observable while it lives.
+    quarantined: bool,
+}
+
 impl BackingRegistry {
-    /// Drops entries that no longer upgrade, counting each as a released backing, and folds
-    /// `live` over the rest.
+    /// Drops entries that no longer upgrade, counting each non-quarantined one as a released
+    /// backing, and folds `live` over the rest.
     fn prune(&self, mut live: impl FnMut(&shm_transport::backend::retained::Retained)) {
         let mut entries = self.entries.lock().expect("backing registry lock");
-        entries.retain(|weak| match weak.upgrade() {
+        entries.retain(|entry| match entry.backing.upgrade() {
             Some(retained) => {
                 live(&retained);
                 true
             }
             None => {
-                self.released.fetch_add(1, Ordering::Relaxed);
+                if !entry.quarantined {
+                    self.released.fetch_add(1, Ordering::Relaxed);
+                }
                 false
             }
         });
@@ -218,24 +227,32 @@ impl BackingRegistry {
 
     fn register(&self, rings: &DuplexRing) {
         self.prune(|_| {});
-        self.entries.lock().expect("backing registry lock").extend([
-            Arc::downgrade(rings.first.retained()),
-            Arc::downgrade(rings.second.retained()),
-        ]);
+        self.entries.lock().expect("backing registry lock").extend(
+            [rings.first.retained(), rings.second.retained()].map(|retained| BackingEntry {
+                backing: Arc::downgrade(retained),
+                quarantined: false,
+            }),
+        );
     }
 
-    /// Removes both of `rings`' backings without counting them released. A quarantined
-    /// connection's peer still maps the pools, so the host-side handles unmapping later proves
-    /// nothing about the storage.
+    /// Marks both of `rings`' backings quarantined. A quarantined connection's peer still maps
+    /// the pools, so the host-side handles unmapping later proves nothing about the storage;
+    /// a lease the host still holds stays visible as an outstanding return until it goes.
     fn forget(&self, rings: &DuplexRing) {
         let quarantined = [
             Arc::downgrade(rings.first.retained()),
             Arc::downgrade(rings.second.retained()),
         ];
-        self.entries
+        for entry in self
+            .entries
             .lock()
             .expect("backing registry lock")
-            .retain(|weak| !quarantined.iter().any(|gone| weak.ptr_eq(gone)));
+            .iter_mut()
+        {
+            if quarantined.iter().any(|gone| entry.backing.ptr_eq(gone)) {
+                entry.quarantined = true;
+            }
+        }
     }
 }
 
@@ -2974,9 +2991,77 @@ mod tests {
         );
         assert_eq!(
             snapshot.live_backings, 0,
-            "the registry no longer tracks it either"
+            "no host-side handle or lease keeps the quarantined backing mapped"
         );
         assert_eq!(transport.diagnostics()["returns"]["released_backings"], 0);
+        drop(peer);
+    }
+
+    /// A frame the host still holds when its connection quarantines is an outstanding return on
+    /// a live backing; quarantine must keep that obligation visible without ever counting the
+    /// backing released.
+    #[tokio::test]
+    async fn a_host_held_lease_stays_observable_after_its_backing_quarantines() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            mut receiver,
+            io,
+            root,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        peer.send(
+            EnvelopeHeader {
+                len: 1,
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Request,
+                flags: Flags::new(false, Priority::Interactive, false),
+                channel: 7,
+                epoch: 1,
+                corr: 1,
+            },
+            &[1],
+            StdInstant::now() + Duration::from_secs(1),
+        )
+        .expect("peer publishes");
+        let Ok(InboundEvent::Frame(held)) = receiver.recv().await else {
+            panic!("the host receives the frame");
+        };
+        root.cancel();
+        drop(sender);
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits")
+            .expect("endpoint task joins");
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.quarantined != ResourceCharges::ZERO
+        })
+        .await;
+        assert_ne!(accounting.quarantined, ResourceCharges::ZERO);
+        let snapshot = transport.return_snapshot();
+        assert_eq!(
+            snapshot.outstanding, 1,
+            "the host still owes the peer this frame's return"
+        );
+        assert_eq!(
+            snapshot.live_backings, 1,
+            "the backing the held frame maps is still live"
+        );
+        assert_eq!(snapshot.released_backings, 0);
+        held.release().expect("release");
+        let snapshot = transport.return_snapshot();
+        assert_eq!(snapshot.outstanding, 0);
+        assert_eq!(
+            snapshot.released_backings, 0,
+            "a quarantined backing is never proved released, even after the host's last return"
+        );
         drop(peer);
     }
 

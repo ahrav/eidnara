@@ -63,7 +63,7 @@ reachable only by a peer writing the shared descriptor page directly, which the
 mapping permits: both `Mapping::create` and `Mapping::attach` map
 `PROT_READ|PROT_WRITE` (`backend/ring.rs:462`, `:481`) and the required seals are
 `F_SEAL_GROW|SHRINK|SEAL` with no `F_SEAL_WRITE` (`:2850`).
-At HEAD: `send` (`:1503`, blocking, used by test peers) and `try_send_bounded` (`:1526`, the production bridge path) both reserve and then commit through `publish` (`:1563-1587`), and the endpoint is no longer test-only: `start_ring_bridge` in `crates/host-runtime/src/client.rs:2547` attaches one in production.
+At HEAD: `send` (`:1520`, blocking, used by test peers) and `try_send_bounded` (`:1543`, the production bridge path) both reserve and then commit through `publish` (`:1580-1604`), and the endpoint is no longer test-only: `start_ring_bridge` in `crates/host-runtime/src/client.rs:2547` attaches one in production.
 
 The peer-side consumer showed what not delegating looks like. In the former
 `packages/plugin/src/shared/host-client/transport-provider.ts:406-426` the

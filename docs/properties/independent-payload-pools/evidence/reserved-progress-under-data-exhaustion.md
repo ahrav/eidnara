@@ -12,9 +12,9 @@ Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/backend/ring.rs:1042`
 - `crates/shm-transport/src/pool.rs:31`
-- `crates/host-runtime/src/ring_transport.rs:1333`
+- `crates/host-runtime/src/ring_transport.rs:1350`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2468` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:3438` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return; `crates/host-runtime/src/client.rs:7636` shows the Rust client's `Pong` publishing from the control reserve while its data frame waits on ordinary headroom. Native/TypeScript publication selection belongs to #550.
+Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2468` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:3523` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return; `crates/host-runtime/src/client.rs:7636` shows the Rust client's `Pong` publishing from the control reserve while its data frame waits on ordinary headroom. Native/TypeScript publication selection belongs to #550.
 
 ## Failure scenario
 

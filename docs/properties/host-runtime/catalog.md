@@ -2951,9 +2951,9 @@ the host's publication path, which every activated connection runs:
 `Publisher::try_publish`'s helpers `publish_direct` (`:1280`) and
 `publish_owned` (`:1294`), reached from `Publisher::pump` (`:1159`), which
 `run_endpoint` calls at `:696` and `:884` and `receive_one` calls at `:972`,
-`:1003`, and `:1017`; and `:1584` is inside `RingClientEndpoint::publish`
-(`:1563`), shared by `send` (`:1503`, the blocking test-peer variant) and
-`try_send_bounded` (`:1526`), which production reaches from
+`:1003`, and `:1017`; and `:1601` is inside `RingClientEndpoint::publish`
+(`:1580`), shared by `send` (`:1520`, the blocking test-peer variant) and
+`try_send_bounded` (`:1543`), which production reaches from
 `attempt_pending_writes` (`client.rs:2511`) on every bridge loop pass. No `cfg` gate and no config gate
 stands on either of the two. The `Ring::release` end of the property is likewise
 production: `ring_release_callback` (`ring.rs:1670-1677`) runs on every lease
