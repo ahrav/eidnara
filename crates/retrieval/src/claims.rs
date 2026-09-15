@@ -29,6 +29,7 @@ use kernel::{
 use rusqlite::params;
 use storage::GuardedConn;
 
+use crate::batch::read_checkpoint;
 use crate::exact::selector::Family;
 use crate::exact::{CANONICAL_OBJECT_NAMESPACE, Coverage, EXTRACTION_VERSION, coverage};
 use crate::{ProjectionError, decode_span, read_identity};
@@ -126,6 +127,10 @@ pub enum ClaimCandidateError {
     NoIdentity,
     #[error("the projection was built for kernel incarnation {kernel_incarnation_id}")]
     ForeignKernel { kernel_incarnation_id: String },
+    #[error("the projection has no checkpoint")]
+    NoCheckpoint,
+    #[error("the kernel tip {tip} lies behind the projection checkpoint {checkpoint}")]
+    KernelBehindProjection { tip: i64, checkpoint: i64 },
     #[error(transparent)]
     Projection(#[from] ProjectionError),
     #[error(transparent)]
@@ -348,12 +353,14 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
 ///
 /// # Errors
 ///
-/// `NoIdentity` and `ForeignKernel` before any row is read; projection
-/// refusals from [`live_claim_candidates`]; `TooManyClaims` before the facts
-/// read when the rows name more distinct objects than
+/// `NoIdentity`, `ForeignKernel`, and `NoCheckpoint` before any row is read;
+/// projection refusals from [`live_claim_candidates`]; `TooManyClaims` before
+/// the facts read when the rows name more distinct objects than
 /// `bounds.facts.max_claims`; `Facts(IncarnationMismatch)` when the kernel was
-/// restored during the read; other facts refusals from `claim_facts_at`;
-/// kernel errors, including `Deadline` from `budget`, as `Facts(Kernel(_))`.
+/// restored during the read; `KernelBehindProjection` when the kernel tip is
+/// behind the projection checkpoint; other facts refusals from
+/// `claim_facts_at`; kernel errors, including `Deadline` from `budget`, as
+/// `Facts(Kernel(_))`.
 pub fn classify_live_claims(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
@@ -372,6 +379,7 @@ pub fn classify_live_claims(
             kernel_incarnation_id: identity.kernel_incarnation_id,
         });
     }
+    let checkpoint = read_checkpoint(conn, &database)?.ok_or(ClaimCandidateError::NoCheckpoint)?;
     let rows = live_claim_candidates(conn, bounds.max_rows)?;
     let mut seen = BTreeSet::new();
     let object_ids: Vec<String> = rows
@@ -391,6 +399,15 @@ pub fn classify_live_claims(
         .map_err(ClaimFactsError::from)?;
     if target.incarnation != entry.incarnation {
         return Err(ClaimFactsError::IncarnationMismatch.into());
+    }
+    // A kernel restored from an older backup of the same database keeps its
+    // identity and generation but not the commits the projection applied;
+    // rows past its tip would read as Retracted instead of as another history.
+    if target.through_commit < checkpoint.checkpoint_commit_seq {
+        return Err(ClaimCandidateError::KernelBehindProjection {
+            tip: target.through_commit,
+            checkpoint: checkpoint.checkpoint_commit_seq,
+        });
     }
     let snapshot =
         kernel.claim_facts_at_within_budget(&object_ids, target, bounds.facts, budget)?;

@@ -528,6 +528,22 @@ mod live_rows {
             .unwrap()
     }
 
+    /// Binds the projection to `kernel` with a checkpoint at its tip.
+    fn bind(store: &SqliteStore, kernel: &kernel::KernelStore) {
+        let tip = kernel.tip().unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                install_identity(conn, &identity(&database_id(kernel)), 1)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                conn.execute(
+                    "INSERT INTO projection_checkpoint(singleton,snapshot_commit_seq,checkpoint_commit_seq,hold_id,updated_at)
+                     VALUES (1,?1,?1,'hold',0)",
+                    [tip],
+                )
+            })
+            .unwrap();
+    }
+
     fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
         ProjectionIdentity {
             schema_version: retrieval::SCHEMA_VERSION,
@@ -893,12 +909,7 @@ mod live_rows {
         // The kernel's own identity is the one compared, not a caller's claim.
         let matching = open(&dir.path().join("matching"));
         seed(&matching, 2);
-        matching
-            .with_conn_fenced(|conn| {
-                Ok(install_identity(conn, &identity(&database_id(&kernel)), 1))
-            })
-            .unwrap()
-            .unwrap();
+        bind(&matching, &kernel);
         assert!(matches!(
             matching
                 .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, &budget, bounds)))
@@ -909,8 +920,12 @@ mod live_rows {
         ));
     }
 
+    /// A kernel restored from an older backup of the same database keeps its
+    /// identity and generation, but its tip can fall behind the projection's
+    /// checkpoint; the two then describe different histories and the read
+    /// refuses rather than classifying newer rows as Retracted.
     #[test]
-    fn an_exhausted_budget_is_refused_before_the_projection_is_read() {
+    fn a_kernel_tip_behind_the_projection_checkpoint_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
         seed(&store, 2);
@@ -921,6 +936,60 @@ mod live_rows {
             })
             .unwrap()
             .unwrap();
+        let budget = EvalBudget::unbounded();
+        let bounds = bounds();
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, &budget, bounds)))
+                .unwrap(),
+            Err(ClaimCandidateError::NoCheckpoint)
+        ));
+        let tip = kernel.tip().unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "INSERT INTO projection_checkpoint(singleton,snapshot_commit_seq,checkpoint_commit_seq,hold_id,updated_at)
+                     VALUES (1,?1,?1,'hold',0)",
+                    [tip + 5],
+                )
+            })
+            .unwrap();
+        match store
+            .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, &budget, bounds)))
+            .unwrap()
+        {
+            Err(ClaimCandidateError::KernelBehindProjection {
+                tip: seen,
+                checkpoint,
+            }) => {
+                assert_eq!(seen, tip);
+                assert_eq!(checkpoint, tip + 5);
+            }
+            other => panic!("expected KernelBehindProjection, got {other:?}"),
+        }
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE projection_checkpoint SET checkpoint_commit_seq=?1, snapshot_commit_seq=?1",
+                    [tip],
+                )
+            })
+            .unwrap();
+        let batch = store
+            .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, &budget, bounds)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch.known_as_of, tip);
+        assert_eq!(batch.candidates.len(), 2);
+    }
+
+    #[test]
+    fn an_exhausted_budget_is_refused_before_the_projection_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        seed(&store, 2);
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        bind(&store, &kernel);
         let budget = EvalBudget::unbounded();
         budget.cancel();
         let bounds = ClaimCandidateBounds {
@@ -947,12 +1016,7 @@ mod live_rows {
         let store = open(dir.path());
         seed(&store, 3);
         let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
-        store
-            .with_conn_fenced(|conn| {
-                Ok(install_identity(conn, &identity(&database_id(&kernel)), 1))
-            })
-            .unwrap()
-            .unwrap();
+        bind(&store, &kernel);
         let budget = EvalBudget::unbounded();
         // Renaming the registry makes the facts read fail while the tip and
         // identity reads still work; TooManyClaims must win over that Io.

@@ -423,6 +423,7 @@ impl KernelStore {
     ) -> Result<SurfaceEligibilityWithClaims, ClaimFactsError> {
         check_bounds(candidates)?;
         check_claim_bounds(object_ids, bounds)?;
+        let limit = budget.acquire_limit();
         let read = |tx: &Transaction<'_>, tip: i64| {
             if classified_in != self.incarnation() {
                 return Ok((
@@ -432,11 +433,10 @@ impl KernelStore {
                 ));
             }
             let verdicts = judge_surface_in_tx(tx, tip, project, destination, surface, candidates)?;
-            let claims = load_claims_in_tx(tx, tip, object_ids, bounds);
+            let claims = load_claims_in_tx(tx, tip, object_ids, bounds, &limit);
             Ok((self.incarnation(), verdicts, claims))
         };
-        let (snapshot, (incarnation, verdicts, claims)) =
-            self.egress_read_within(&budget.acquire_limit(), read)?;
+        let (snapshot, (incarnation, verdicts, claims)) = self.egress_read_within(&limit, read)?;
         let (claims, missing) = claims?;
         Ok(SurfaceEligibilityWithClaims {
             batch: SurfaceEligibilityBatch {
