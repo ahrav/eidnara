@@ -229,48 +229,17 @@ pub(crate) fn judge_in_tx(
     destination: ArtifactDestination,
     candidates: &[EligibilityCandidate],
 ) -> Result<Vec<EligibilityVerdict>, KernelError> {
-    Ok(
-        judge_facts_in_tx(tx, tip, project, destination, candidates)?
-            .into_iter()
-            .map(|(verdict, _)| verdict)
-            .collect(),
-    )
-}
-
-/// [`judge_in_tx`] keeping each candidate's egress facts beside its verdict.
-fn judge_facts_in_tx(
-    tx: &Transaction<'_>,
-    tip: i64,
-    project: &ProjectScope,
-    destination: ArtifactDestination,
-    candidates: &[EligibilityCandidate],
-) -> Result<Vec<(EligibilityVerdict, EgressCandidate)>, KernelError> {
-    let named: Vec<(&str, Option<&str>)> = candidates
-        .iter()
-        .map(|candidate| {
-            (
-                candidate.object_id.as_str(),
-                candidate.artifact_digest.as_deref(),
-            )
-        })
-        .collect();
-    let facts = egress_candidates_tx(tx, tip, &named, destination)?;
-    let mut scopes = ScopeVerdicts {
+    Ok(judge_surface_in_tx(
+        tx,
+        tip,
         project,
-        verdicts: HashMap::new(),
-    };
-    candidates
-        .iter()
-        .zip(facts)
-        .map(|(candidate, facts)| {
-            let scope_id = facts
-                .state
-                .as_ref()
-                .and_then(|state| state.scope_id.as_deref());
-            let in_scope = scopes.matches(tx, scope_id)?;
-            Ok((judge(candidate, &facts, destination, in_scope), facts))
-        })
-        .collect()
+        destination,
+        Surface::ExplicitSearch,
+        candidates,
+    )?
+    .into_iter()
+    .map(|verdict| verdict.verdict)
+    .collect())
 }
 
 /// The batch verdicts at the widest surface, each paired with the visibility
@@ -286,17 +255,35 @@ pub(crate) fn judge_surface_in_tx(
     surface: Surface,
     candidates: &[EligibilityCandidate],
 ) -> Result<Vec<SurfaceVerdict>, KernelError> {
-    Ok(
-        judge_facts_in_tx(tx, tip, project, destination, candidates)?
-            .into_iter()
-            .map(|(verdict, facts)| SurfaceVerdict {
-                verdict,
-                visibility: facts.served.map_or(SurfaceVisibility::Hidden, |served| {
-                    served.visibility_on(surface)
-                }),
-            })
-            .collect(),
-    )
+    let named: Vec<(&str, Option<&str>)> = candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.object_id.as_str(),
+                candidate.artifact_digest.as_deref(),
+            )
+        })
+        .collect();
+    let facts = egress_candidates_tx(tx, tip, &named, destination)?;
+    let mut scopes = ScopeVerdicts {
+        project,
+        verdicts: HashMap::new(),
+    };
+    let mut verdicts = Vec::with_capacity(candidates.len());
+    for (candidate, facts) in candidates.iter().zip(facts) {
+        let scope_id = facts
+            .state
+            .as_ref()
+            .and_then(|state| state.scope_id.as_deref());
+        let in_scope = scopes.matches(tx, scope_id)?;
+        verdicts.push(SurfaceVerdict {
+            verdict: judge(candidate, &facts, destination, in_scope),
+            visibility: facts.served.map_or(SurfaceVisibility::Hidden, |served| {
+                served.visibility_on(surface)
+            }),
+        });
+    }
+    Ok(verdicts)
 }
 
 /// Runs before any reader is acquired; `egress_candidates_tx` repeats the digest check because it also serves callers that skip this gate.

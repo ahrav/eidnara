@@ -634,11 +634,16 @@ pub fn validate_for_surface(
         } else {
             UseVerdict::Denied(UseDenial::State(candidate.state))
         };
-        match verdict {
-            UseVerdict::Permitted(_) => accounting.permitted_objects.insert(object_id.to_owned()),
-            UseVerdict::Denied(_) => accounting.rejected_objects.insert(object_id.to_owned()),
+        let objects = match verdict {
+            UseVerdict::Permitted(_) => &mut accounting.permitted_objects,
+            UseVerdict::Denied(_) => &mut accounting.rejected_objects,
         };
-        if fresh.is_none_or(|claim| claim.causality.is_unknown()) {
+        if !objects.contains(object_id) {
+            objects.insert(object_id.to_owned());
+        }
+        if fresh.is_none_or(|claim| claim.causality.is_unknown())
+            && !accounting.unknown_objects.contains(object_id)
+        {
             accounting.unknown_objects.insert(object_id.to_owned());
         }
         validated.push(ValidatedCandidate {
