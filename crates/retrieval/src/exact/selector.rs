@@ -101,6 +101,31 @@ pub enum Intent {
     Hybrid(Vec<Mention>),
 }
 
+impl Intent {
+    /// Lexical analysis consumes the text outside selector mentions, never selector syntax as prose; a `Direct` request has no such text.
+    ///
+    /// # Panics
+    ///
+    /// `request` must be the string this intent was classified from; mention spans index into it.
+    pub fn lexical_segments<'a>(&self, request: &'a str) -> Vec<&'a str> {
+        let Self::Hybrid(mentions) = self else {
+            return Vec::new();
+        };
+        let mut segments = Vec::new();
+        let mut at = 0;
+        for mention in mentions {
+            if mention.span.start > at {
+                segments.push(&request[at..mention.span.start]);
+            }
+            at = mention.span.end;
+        }
+        if at < request.len() {
+            segments.push(&request[at..]);
+        }
+        segments
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathRefusal {
     Absolute,

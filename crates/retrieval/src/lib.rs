@@ -17,6 +17,7 @@ pub mod dispatch;
 pub mod eligibility;
 pub mod exact;
 pub mod identity_sweep;
+pub mod lexical;
 pub mod message_cleanup;
 pub mod retirement;
 pub mod vectors;
