@@ -100,6 +100,28 @@ fn combining_marks_inherit_the_class_of_their_base() {
     );
     golden("ab\u{301}Cd", &["ab\u{301}Cd"], &["ab\u{301}", "Cd"]);
     golden("1\u{301}a", &["1\u{301}a"], &["1\u{301}", "a"]);
+    golden("a_\u{301}b", &["a_\u{301}b"], &["a", "b"]);
+}
+
+/// A mark attaches to its base and is never a letter of its own, so the acronym tail rule counts the same letters in NFC and NFD.
+#[test]
+fn combining_marks_never_count_toward_a_boundary() {
+    golden("IDs\u{301}", &["IDs\u{301}"], &[]);
+    golden("IDś", &["IDś"], &[]);
+    golden("HTTPSe\u{301}", &["HTTPSe\u{301}"], &[]);
+    golden("HTTPSé", &["HTTPSé"], &[]);
+    golden("aE\u{301}cd", &["aE\u{301}cd"], &["a", "E\u{301}cd"]);
+    golden("aÉcd", &["aÉcd"], &["a", "Écd"]);
+    golden("AB\u{301}cd", &["AB\u{301}cd"], &["A", "B\u{301}cd"]);
+    golden("ABcd", &["ABcd"], &["A", "Bcd"]);
+    for text in ["IDs\u{301}", "aE\u{301}cd", "AB\u{301}cd", "a_\u{301}b"] {
+        assert!(
+            analyzed(text)
+                .parts()
+                .all(|part| !part.starts_with('\u{301}')),
+            "a part of {text:?} starts with a combining mark"
+        );
+    }
 }
 
 #[test]
@@ -249,7 +271,7 @@ fn byte_bound_is_checked_before_analysis_at_exact_and_over_bound_sizes() {
     assert_eq!(
         analyze("a\0bcde", exact),
         Err(LexicalRefusal::InputTooLong { bytes: 6, bound: 5 }),
-        "the byte bound is checked before the NUL scan"
+        "NUL counts as an input byte like any other"
     );
 }
 
@@ -274,12 +296,26 @@ fn atom_bound_refuses_the_next_atom_at_exact_and_over_bound_counts() {
 }
 
 #[test]
-fn nul_is_refused_before_analysis() {
-    assert_eq!(analyze("ab\0cd", bounds()), Err(LexicalRefusal::Nul));
+fn nul_is_an_atom_separator_and_never_reaches_a_probe_or_column_text() {
+    let analysis = analyze("ab\0cd", bounds()).unwrap();
+    assert_eq!(analysis.atoms().collect::<Vec<_>>(), ["ab", "cd"]);
+    assert_eq!(analysis.original_text(), "ab cd");
+    assert_eq!(probes("ab\0cd"), ["\"ab\"", "\"cd\""]);
     assert_eq!(
-        analyze_segments(&["abc", "d\0"], bounds()),
-        Err(LexicalRefusal::Nul)
+        analyze_segments(&["abc", "d\0"], bounds())
+            .unwrap()
+            .atoms()
+            .collect::<Vec<_>>(),
+        ["abc", "d"]
     );
+    let analysis = analyze("snake_case\0HTTPServer \0\0 \0", bounds()).unwrap();
+    assert!(
+        analysis
+            .atoms()
+            .chain(analysis.parts())
+            .all(|term| !term.contains('\0'))
+    );
+    assert_eq!(analyze("\0", bounds()).unwrap(), analyzed(""));
 }
 
 fn selector_bounds() -> SelectorBounds {

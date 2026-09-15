@@ -98,6 +98,31 @@ fn parts_conserve_their_atom_and_are_additive() {
 }
 
 #[test]
+fn combining_marks_are_transparent_to_part_boundaries() {
+    runner()
+        .run(&atom(), |atom| {
+            let atom = atom.trim_start_matches('\u{301}').to_string();
+            prop_assume!(!atom.is_empty());
+            let stripped = atom.replace('\u{301}', "");
+            prop_assume!(!stripped.is_empty());
+            let marked = analyze(&atom, unbounded()).unwrap();
+            let plain = analyze(&stripped, unbounded()).unwrap();
+            prop_assert!(
+                marked.parts().all(|part| !part.starts_with('\u{301}')),
+                "a part starts with a mark: {:?}",
+                marked.parts().collect::<Vec<_>>()
+            );
+            let marked_parts: Vec<String> = marked
+                .parts()
+                .map(|part| part.replace('\u{301}', ""))
+                .collect();
+            prop_assert_eq!(marked_parts, plain.parts().collect::<Vec<_>>());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn atoms_are_in_order_substrings_and_reanalyze_to_themselves() {
     runner()
         .run(&text(), |text| {
@@ -140,7 +165,7 @@ fn segments_analyze_independently() {
 }
 
 #[test]
-fn bounds_refuse_in_declared_order() {
+fn bounds_refuse_in_declared_order_and_nul_only_separates() {
     runner()
         .run(
             &(text(), 1usize..=8, 1usize..=32, any::<bool>()),
@@ -156,15 +181,16 @@ fn bounds_refuse_in_declared_order() {
                 if text.len() > max_bytes {
                     let too_long = matches!(outcome, Err(LexicalRefusal::InputTooLong { .. }));
                     prop_assert!(too_long, "{:?}", outcome);
-                } else if nul {
-                    prop_assert_eq!(outcome, Err(LexicalRefusal::Nul));
                 } else if unbounded_atoms > max_atoms {
                     prop_assert_eq!(
                         outcome,
                         Err(LexicalRefusal::TooManyAtoms { bound: max_atoms })
                     );
                 } else {
-                    prop_assert_eq!(outcome.unwrap().atoms().len(), unbounded_atoms);
+                    let analysis = outcome.unwrap();
+                    prop_assert_eq!(analysis.atoms().len(), unbounded_atoms);
+                    prop_assert!(analysis.atoms().all(|atom| !atom.contains('\0')));
+                    prop_assert_eq!(&analysis, &analyze(&clean, bounds).unwrap());
                 }
                 Ok(())
             },

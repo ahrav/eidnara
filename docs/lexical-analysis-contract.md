@@ -50,9 +50,10 @@ The mark and private-use rules exist so that the analyzer never separates
 what the engine would fold into one term: `cre\u0301me` and `crème` are one
 engine term each, and both stay one atom.
 
-Atoms never contain whitespace, `"`, or NUL. `"` is not a token character.
-Input that contains NUL is refused before analysis because the engine reads the
-bound MATCH text as a C string and would silently truncate it.
+Atoms never contain whitespace, `"`, or NUL, because none of them is a token
+character. NUL therefore separates atoms like any other punctuation and is not
+refused: a probe and a column text are built only from atoms and parts, so the
+C-string reading the engine gives bound MATCH text never sees one.
 
 Examples:
 
@@ -84,9 +85,13 @@ so `Ωmega` and `Über` stay whole. Letters without case and private-use
 characters are letters for these rules and never split on their own, so
 `日本語Server` stays whole while `日本語2024` splits at the digit.
 
-A combining mark takes the class of the character before it. `e\u0301Bar` and
-`éBar` therefore split identically, and a mark directly after `_` is dropped
-with the `_`.
+A combining mark attaches to the character before it and is invisible to the
+boundary rules. It shares that character's class, it never opens a part, and
+it is not a letter when the acronym rule counts the lowercase tail. `e\u0301Bar`
+and `éBar` therefore split identically, `IDs\u0301` stays whole exactly as `IDś`
+does, `aE\u0301cd` gives `a` and `E\u0301cd` exactly as `aÉcd` gives `a` and
+`Écd`, and a mark directly after `_` is dropped with the `_`. No part ever
+begins with a combining mark.
 
 Parts keep their original bytes. The engine folds them.
 
@@ -114,7 +119,8 @@ Examples:
 | `TLSv1` | `TLSv`, `1` |
 | `ERR_CONN_REFUSED` | `ERR`, `CONN`, `REFUSED` |
 | `ÜberServer` | `Über`, `Server` |
-| `IDs`, `ENOENT`, `ab`, `A` | none |
+| `aE\u0301cd`, `aÉcd` | `a`, `E\u0301cd` and `a`, `Écd` |
+| `IDs`, `IDs\u0301`, `IDś`, `ENOENT`, `ab`, `A` | none |
 
 ## Short terms
 
@@ -173,10 +179,30 @@ ranking unchanged. A probe's position in the vector is its ordinal.
 - `max_atoms`: atoms are counted as they are found; the atom after the last
   permitted one is refused before it is retained.
 
-Refusals are checked in that order, with the NUL check between them. On the
-query side the same approved query-byte limit must feed both
-`SelectorBounds::max_input_bytes` and `LexicalBounds::max_input_bytes`; the
-two fields are one limit applied at two stages, not two limits.
+Refusals are checked in that order. On the query side the same approved
+query-byte limit must feed both `SelectorBounds::max_input_bytes` and
+`LexicalBounds::max_input_bytes`; the two fields are one limit applied at two
+stages, not two limits.
+
+### The client-side operand pre-check is not this contract
+
+`packages/opencode-plugin/src/tools/eidnara-search/bounds.ts` refuses a search
+request before it reaches the daemon when `countQueryAtoms` exceeds
+`MAX_QUERY_ATOMS`. That count splits on `/[^\p{L}\p{N}_]+/u`, which is not the
+atom rule above: it treats private-use code points, combining marks in
+`U+0300..=U+036F`, and marks Rust classifies as alphabetic (an Indic vowel
+sign, for example) as separators, while this analyzer keeps them inside an
+atom. `cre\u0301me` is two operands there and one atom here; a lone private-use
+character between spaces is zero operands there and one atom here. Neither
+count bounds the other.
+
+The plugin count is a coarse pre-check, not a second definition of an atom. The
+analyzer owns the atom rule; a query that passes the pre-check can still be
+refused with `TooManyAtoms`, and the pre-check must never be tightened on the
+assumption that it matches this rule. The query lane that binds probes is
+responsible for reconciling the two counts, either by dropping the pre-check or
+by documenting it as an upper bound with a fixture shared between
+`bounds.test.ts` and `tests/lexical_analysis.rs`.
 
 `analyze` and `compile` are pure and perform no I/O, so they take no
 `EvalBudget`. The caller checks the shared request budget at entry and never

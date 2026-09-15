@@ -2,7 +2,7 @@
 //! The engine tokenizes every atom itself, so its output is the effective term; the analyzer only fixes which characters stay adjacent, and the same analyzer runs on both the indexed text and the probe.
 //!
 //! Parts split one atom at `_`, at a lower-to-upper case change, at a letter-to-digit or digit-to-letter change, and before the last uppercase letter of an uppercase run that two or more lowercase letters follow (`HTTPServer` yields `HTTP` and `Server`; `IDs` stays whole).
-//! A combining mark takes the class of the character before it, so `e\u{301}Bar` and `éBar` split identically.
+//! A combining mark attaches to the character before it and is invisible to the boundary rules: it shares that character's class, never opens a part, and is not a letter when the acronym rule counts the lowercase tail, so `e\u{301}Bar` and `éBar`, and `IDs\u{301}` and `IDś`, split identically.
 //! Parts keep their original bytes; the engine folds case and diacritics.
 //! Parts are additive: an atom whose parts are exactly itself contributes nothing to the parts column, so a term is never counted twice for one atom.
 
@@ -22,9 +22,6 @@ pub struct LexicalBounds {
 pub enum LexicalRefusal {
     #[error("the input carries {bytes} bytes, over the {bound} byte bound")]
     InputTooLong { bytes: usize, bound: usize },
-    /// The engine reads bound MATCH text as a C string, so a NUL would silently truncate the probe.
-    #[error("the input contains NUL")]
-    Nul,
     #[error("the input analyzes to more than {bound} atoms")]
     TooManyAtoms { bound: usize },
 }
@@ -75,7 +72,7 @@ pub fn analyze(text: &str, bounds: LexicalBounds) -> Result<Analysis, LexicalRef
 ///
 /// # Errors
 ///
-/// The total byte length is checked against `bounds.max_input_bytes` and every segment is checked for NUL before any atom is scanned.
+/// The total byte length is checked against `bounds.max_input_bytes` before any atom is scanned.
 /// The atom after `bounds.max_atoms` is refused before it is retained.
 pub fn analyze_segments(
     segments: &[&str],
@@ -87,9 +84,6 @@ pub fn analyze_segments(
             bytes,
             bound: bounds.max_input_bytes.get(),
         });
-    }
-    if segments.iter().any(|segment| segment.contains('\0')) {
-        return Err(LexicalRefusal::Nul);
     }
     let mut analysis = Analysis::default();
     for segment in segments {
@@ -153,33 +147,40 @@ fn class(c: char) -> Class {
     }
 }
 
+/// Boundary rules see only base characters: a combining mark shares its base's class, glues to it, and never counts as a letter when the acronym rule looks ahead, so NFC and NFD spellings split identically.
 fn parts(atom: &str) -> Vec<String> {
-    let mut classes: Vec<Class> = Vec::with_capacity(atom.len());
+    let mut bases: Vec<Class> = Vec::with_capacity(atom.len());
+    let mut chars: Vec<(char, usize, bool)> = Vec::with_capacity(atom.len());
     for c in atom.chars() {
-        let inherited = classes
-            .last()
-            .copied()
-            .filter(|_| COMBINING_MARKS.contains(&c));
-        classes.push(inherited.unwrap_or_else(|| class(c)));
+        let is_mark = COMBINING_MARKS.contains(&c) && !bases.is_empty();
+        if !is_mark {
+            bases.push(class(c));
+        }
+        chars.push((c, bases.len() - 1, is_mark));
     }
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut previous = None;
-    for (index, (c, class)) in atom.chars().zip(&classes).enumerate() {
-        if *class == Class::Separator {
+    for (c, base, is_mark) in chars {
+        let class = bases[base];
+        if class == Class::Separator {
             if !current.is_empty() {
                 parts.push(std::mem::take(&mut current));
             }
             previous = None;
             continue;
         }
+        if is_mark {
+            current.push(c);
+            continue;
+        }
         if let Some(previous) = previous
-            && splits(previous, *class, &classes[index + 1..])
+            && splits(previous, class, &bases[base + 1..])
         {
             parts.push(std::mem::take(&mut current));
         }
         current.push(c);
-        previous = Some(*class);
+        previous = Some(class);
     }
     if !current.is_empty() {
         parts.push(current);
@@ -187,6 +188,7 @@ fn parts(atom: &str) -> Vec<String> {
     parts
 }
 
+/// `rest` holds the classes of the base characters after `current`, marks excluded.
 fn splits(previous: Class, current: Class, rest: &[Class]) -> bool {
     let letter = |class: Class| matches!(class, Class::Upper | Class::Lower | Class::Uncased);
     match (previous, current) {
