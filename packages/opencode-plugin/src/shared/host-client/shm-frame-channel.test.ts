@@ -1076,7 +1076,7 @@ describe("mandatory shared-memory channel", () => {
         expect(budget.used).toBe(0);
     });
 
-    function parkingNative(state: { full: boolean; arm: () => boolean }): {
+    function parkingNative(state: { full: boolean; arm: () => boolean; peerClosed?: boolean }): {
         native: NativeChannel;
         published: bigint[];
         written: Uint8Array[];
@@ -1110,7 +1110,7 @@ describe("mandatory shared-memory channel", () => {
             },
             drainOne: () => false,
             close: () => {},
-            peerClosed: () => false,
+            peerClosed: () => state.peerClosed === true,
         } as unknown as NativeChannel;
         return { native, published, written, arms: () => arms, readiness: () => readiness };
     }
@@ -1275,6 +1275,64 @@ describe("mandatory shared-memory channel", () => {
         state.full = false;
         mock.readiness()?.();
         expect(mock.published).toEqual([1n, 0n]);
+        expect(budget.used).toBe(0);
+    });
+
+    test("a wake that finds the peer closed retires the channel without publishing queued frames", () => {
+        const budget = new ByteBudget(1 << 20);
+        const closes: FrameChannelCloseReason[] = [];
+        const state = { full: true, arm: () => true, peerClosed: false };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: (reason) => closes.push(reason) },
+        });
+        channel.beginFrames();
+        const ticket = channel.produce(responseHeader(FrameType.Request, 1n, 4), {
+            byteLength: 4,
+            fill: (cursor: ProducerCursor) => cursor.write(new Uint8Array(4)),
+        });
+        expect(channel.stats().queuedDataFrames).toBe(1);
+        // Capacity and the peer's hangup arrive in the same readiness turn.
+        state.full = false;
+        state.peerClosed = true;
+        mock.readiness()?.();
+        expect(mock.published).toEqual([]);
+        expect(closes).toEqual(["eof"]);
+        expect(ticket.cancel()).toBe(true);
+        expect(budget.used).toBe(0);
+    });
+
+    test("a failing fill that queued a frame behind itself leaves that frame pumped", async () => {
+        const budget = new ByteBudget(1 << 20);
+        const state = { full: true, arm: () => true };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        channel.beginFrames();
+        expect(() =>
+            channel.produce(responseHeader(FrameType.Request, 1n, 4), {
+                byteLength: 4,
+                fill: (cursor: ProducerCursor) => {
+                    channel.sendControl(responseHeader(FrameType.Goodbye, 0n, 0));
+                    cursor.write(new Uint8Array(1));
+                },
+            }),
+        ).toThrow(RangeError);
+        expect(channel.stats().queuedDataFrames).toBe(0);
+        expect(channel.stats().queuedControlFrames).toBe(1);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        // The exposed head has parked on capacity, so a host return can publish it.
+        expect(mock.arms()).toBe(1);
+        state.full = false;
+        mock.readiness()?.();
+        expect(mock.published).toEqual([0n]);
         expect(budget.used).toBe(0);
     });
 

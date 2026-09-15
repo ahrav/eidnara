@@ -321,7 +321,13 @@ export class ShmFrameChannel implements SetupFrameChannel {
         }
         // The queue position is taken before the fill runs, so a control the fill enqueues
         // waits behind this frame as the wire contract's admission order requires.
-        const snapshot = new Uint8Array(body.byteLength);
+        let snapshot: Uint8Array;
+        try {
+            snapshot = new Uint8Array(body.byteLength);
+        } catch (error) {
+            this.releasePublication(reservedBytes);
+            throw error;
+        }
         const pending: PendingPublication = {
             header,
             body: { byteLength: body.byteLength, fill: (cursor) => cursor.write(snapshot) },
@@ -354,8 +360,6 @@ export class ShmFrameChannel implements SetupFrameChannel {
             cancel: () => {
                 if (pending.state === "queued") {
                     this.dropPending(pending);
-                    // Removing the head rings no doorbell, so the successor is retried here.
-                    if (this.pendingPublications.length > 0) this.schedulePump();
                     return true;
                 }
                 return pending.state === "dropped";
@@ -366,8 +370,11 @@ export class ShmFrameChannel implements SetupFrameChannel {
     private dropPending(pending: PendingPublication): void {
         if (pending.state !== "queued") return;
         pending.state = "dropped";
+        const wasHead = this.pendingPublications[0] === pending;
         this.removePending(pending);
         this.releasePublication(pending.reservedBytes);
+        // Removing the head rings no doorbell, so the successor is retried from the loop.
+        if (wasHead && !this.closed && this.pendingPublications.length > 0) this.schedulePump();
     }
 
     private removePending(pending: PendingPublication): void {
@@ -755,7 +762,17 @@ export class ShmFrameChannel implements SetupFrameChannel {
         if (this.closed) return;
         // A wake may be capacity readiness for the outbound side, inbound data, or both; the
         // outbound queue is served first so a host return is not left waiting behind a drain.
-        this.pumpPending();
+        // Once the peer has hung up, queued frames stay queued: publishing them would turn a
+        // provable `not_sent` into `outcome_unknown`, and the drain below still delivers an
+        // inbound Goodbye before the channel retires.
+        let peerClosed: boolean;
+        try {
+            peerClosed = this.attached().peerClosed();
+        } catch (error) {
+            this.failClose("protocol_violation", error);
+            return;
+        }
+        if (!peerClosed) this.pumpPending();
         if (this.closed) return;
         try {
             for (let frames = 0; frames < DRAIN_BATCH_FRAMES; frames += 1) {
