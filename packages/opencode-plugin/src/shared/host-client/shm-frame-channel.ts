@@ -16,6 +16,7 @@ import {
     type FrameChannelCloseReason,
     type FrameChannelHandlers,
     type FrameChannelStats,
+    type FrameProducerCursor,
     type FrameSendHooks,
     type FrameSendTicket,
     headerViolation,
@@ -79,6 +80,32 @@ const PENDING_CANCEL_FRAMES = PENDING_CONTROL_FRAMES / 2;
  * after this many rounds instead of spinning.
  */
 const PUMP_REARM_ROUNDS = 8;
+
+/** Writes a deferred frame's body into private bytes so the caller may reuse its buffer. */
+class SnapshotCursor implements FrameProducerCursor {
+    written = 0;
+
+    constructor(private readonly bytes: Uint8Array) {}
+
+    get remaining(): number {
+        return this.bytes.byteLength - this.written;
+    }
+
+    view(): Uint8Array {
+        return this.bytes.subarray(this.written);
+    }
+
+    advance(count: number): void {
+        if (count < 0 || count > this.remaining) throw new RangeError("producer overflow");
+        this.written += count;
+    }
+
+    write(source: Uint8Array): void {
+        if (source.byteLength > this.remaining) throw new RangeError("producer overflow");
+        this.bytes.set(source, this.written);
+        this.written += source.byteLength;
+    }
+}
 
 interface PendingPublication {
     header: ProducerFrameHeader;
@@ -292,9 +319,20 @@ export class ShmFrameChannel implements SetupFrameChannel {
             this.releasePublication(reservedBytes);
             throw ringFullError(undefined);
         }
+        // The fill runs now, as it would have on a direct publication, so bytes the caller
+        // edits after `produce` returns do not reach the ring.
+        const snapshot = new Uint8Array(body.byteLength);
+        try {
+            const cursor = new SnapshotCursor(snapshot);
+            body.fill(cursor);
+            if (cursor.written !== body.byteLength) throw new RangeError("producer underfill");
+        } catch (error) {
+            this.releasePublication(reservedBytes);
+            throw error;
+        }
         const pending: PendingPublication = {
             header,
-            body,
+            body: { byteLength: body.byteLength, fill: (cursor) => cursor.write(snapshot) },
             hooks,
             deadline,
             reservedBytes,

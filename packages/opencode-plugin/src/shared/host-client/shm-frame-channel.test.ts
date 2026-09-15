@@ -1079,10 +1079,12 @@ describe("mandatory shared-memory channel", () => {
     function parkingNative(state: { full: boolean; arm: () => boolean }): {
         native: NativeChannel;
         published: bigint[];
+        written: Uint8Array[];
         arms: () => number;
         readiness: () => (() => void) | undefined;
     } {
         const published: bigint[] = [];
+        const written: Uint8Array[] = [];
         let arms = 0;
         let readiness: (() => void) | undefined;
         const native = {
@@ -1093,7 +1095,9 @@ describe("mandatory shared-memory channel", () => {
                 beforePublish: () => void,
             ) => {
                 if (state.full) throw new Error(RING_FULL_MESSAGE);
-                fill({ write: () => {} } as unknown as ProducerCursor);
+                fill({
+                    write: (bytes: Uint8Array) => written.push(Uint8Array.from(bytes)),
+                } as unknown as ProducerCursor);
                 beforePublish();
                 published.push(decodeHeader(header).corr);
             },
@@ -1108,7 +1112,7 @@ describe("mandatory shared-memory channel", () => {
             close: () => {},
             peerClosed: () => false,
         } as unknown as NativeChannel;
-        return { native, published, arms: () => arms, readiness: () => readiness };
+        return { native, published, written, arms: () => arms, readiness: () => readiness };
     }
 
     test("an arm that finds capacity already visible retries the queued head at once", () => {
@@ -1175,7 +1179,7 @@ describe("mandatory shared-memory channel", () => {
         expect(ticket.cancel()).toBe(false);
     });
 
-    test("a cancel that lands inside a queued frame's fill reports the publication it cannot stop and refunds once", () => {
+    test("a queued frame publishes the bytes its caller supplied, not later edits to the caller's buffer", () => {
         const budget = new ByteBudget(1 << 20);
         const state = { full: true, arm: () => true };
         const mock = parkingNative(state);
@@ -1186,19 +1190,32 @@ describe("mandatory shared-memory channel", () => {
             handlers: { onFrame: () => {}, onClosed: () => {} },
         });
         channel.beginFrames();
-        let cancelled: boolean | undefined;
-        const ticket = channel.produce(responseHeader(FrameType.Request, 1n, 4), {
+        const bytes = Uint8Array.of(1, 2, 3, 4);
+        let fills = 0;
+        channel.produce(responseHeader(FrameType.Request, 1n, 4), {
             byteLength: 4,
             fill: (cursor: ProducerCursor) => {
-                cursor.write(new Uint8Array(4));
-                cancelled = ticket.cancel();
+                fills += 1;
+                cursor.write(bytes);
             },
         });
         expect(channel.stats().queuedDataFrames).toBe(1);
+        // The caller reuses its buffer once `produce` has returned.
+        bytes.fill(9);
         state.full = false;
         mock.readiness()?.();
         expect(mock.published).toEqual([1n]);
-        expect(cancelled).toBe(false);
+        expect(mock.written).toEqual([Uint8Array.of(1, 2, 3, 4)]);
+        expect(fills).toBe(1);
+        expect(budget.used).toBe(0);
+        // A fill that writes short of its declared length is refused at admission with nothing charged.
+        state.full = true;
+        expect(() =>
+            channel.produce(responseHeader(FrameType.Request, 2n, 4), {
+                byteLength: 4,
+                fill: (cursor: ProducerCursor) => cursor.write(Uint8Array.of(1)),
+            }),
+        ).toThrow(RangeError);
         expect(channel.stats().queuedDataFrames).toBe(0);
         expect(budget.used).toBe(0);
     });
@@ -1409,7 +1426,7 @@ describe("mandatory shared-memory channel", () => {
         expect(channel.isClosed()).toBe(true);
         expect(nativeCloseCalls).toBe(1);
         expect(closes.map((entry) => entry.reason)).toEqual(["control_exhausted"]);
-        expect((closes[0]?.error as HostCallError).code).toBe("ring_full");
+        expect((closes[0] as { error: HostCallError }).error.code).toBe("ring_full");
     });
 
     test("control frames are charged to the shared budget and refusal retires the channel", () => {
@@ -1455,7 +1472,7 @@ describe("mandatory shared-memory channel", () => {
         ).not.toThrow();
         expect(starvedChannel.isClosed()).toBe(true);
         expect(closes.map((entry) => entry.reason)).toEqual(["control_exhausted"]);
-        expect((closes[0]?.error as HostCallError).code).toBe("memory_cap");
+        expect((closes[0] as { error: HostCallError }).error.code).toBe("memory_cap");
     });
 
     test("the channel is closed before onClosed runs so a callback publish is refused", () => {
@@ -1530,7 +1547,7 @@ describe("mandatory shared-memory channel", () => {
         expect(nativeCloseCalls).toBe(0);
     });
 
-    test("a refused send does not count an adapter copy", () => {
+    test("a queued send copies once at admission and not again at publication", () => {
         let full = true;
         let readiness: (() => void) | undefined;
         const native = {
@@ -1558,10 +1575,10 @@ describe("mandatory shared-memory channel", () => {
         });
         channel.beginFrames();
         const frame = { header: responseHeader(FrameType.Request, 1n, 2), body: new Uint8Array(2) };
-        // A queued send has not copied anything yet: the copy happens at publication.
+        // A queued send copies once, at admission, into the bytes it later publishes.
         channel.send(frame);
         channel.send(frame);
-        expect(channel.stats().ownedAdapterCopies).toBe(0);
+        expect(channel.stats().ownedAdapterCopies).toBe(2);
         expect(channel.stats().queuedDataFrames).toBe(2);
         full = false;
         readiness?.();
