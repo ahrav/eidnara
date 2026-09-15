@@ -151,13 +151,10 @@ enum ScanStop {
 
 impl From<rusqlite::Error> for ScanStop {
     fn from(error: rusqlite::Error) -> Self {
-        match &error {
-            rusqlite::Error::SqliteFailure(failure, _)
-                if failure.code == rusqlite::ErrorCode::OperationInterrupted =>
-            {
-                Self::Budget
-            }
-            _ => Self::Projection(error.into()),
+        if storage::is_interrupted(&error) {
+            Self::Budget
+        } else {
+            Self::Projection(error.into())
         }
     }
 }

@@ -11,7 +11,7 @@ pub mod analysis;
 pub mod compile;
 pub mod identity;
 pub mod index;
-pub mod retrieve;
+mod retrieve;
 
 pub use analysis::{Analysis, LexicalBounds, LexicalRefusal, analyze, analyze_segments};
 pub use compile::{Probe, compile};
@@ -19,8 +19,10 @@ pub use identity::AnalysisIdentity;
 pub use index::{EngineIdentity, OCCURRENCE_ID_COLUMN, probe_engine, rowid, verify_rows};
 pub use retrieve::{
     Authority, Completion, Consumed, Contribution, IncompleteReason, Retrieval, RetrievalBounds,
-    RetrievalRefusal, Window, retrieve,
+    RetrievalRefusal, retrieve,
 };
+#[cfg(feature = "test-support")]
+pub use retrieve::{Window, retrieve_with_hook_for_test};
 
 /// `_` is a token character so `snake_case` stays one engine token, and `remove_diacritics 2` folds precomposed Latin diacritics.
 pub const TOKENIZER: &str = "unicode61 remove_diacritics 2 tokenchars '_'";

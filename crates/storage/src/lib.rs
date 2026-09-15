@@ -652,14 +652,22 @@ mod sqlite_backend {
         StoreError::Backend(e.to_string())
     }
 
-    fn store_error(e: rusqlite::Error) -> StoreError {
-        match &e {
+    /// The progress handler in [`SqliteStore::with_conn_interruptible`] is the only source of
+    /// `SQLITE_INTERRUPT` on a store connection, so a match means the caller's stop condition
+    /// ended the statement.
+    pub fn is_interrupted(error: &rusqlite::Error) -> bool {
+        matches!(
+            error,
             rusqlite::Error::SqliteFailure(failure, _)
-                if failure.code == rusqlite::ErrorCode::OperationInterrupted =>
-            {
-                StoreError::Deadline
-            }
-            _ => backend_error(e),
+                if failure.code == rusqlite::ErrorCode::OperationInterrupted
+        )
+    }
+
+    fn store_error(e: rusqlite::Error) -> StoreError {
+        if is_interrupted(&e) {
+            StoreError::Deadline
+        } else {
+            backend_error(e)
         }
     }
 
@@ -3028,8 +3036,8 @@ pub use sqlite_backend::library_memory_used;
 pub use sqlite_backend::{
     APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
     SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject, SqliteStore, USER_VERSION,
-    delete_sqlite_family, immutable_uri, inspection_scratch_tag, open_sqlite, schema_inventory,
-    verify_baseline, verify_sqlite_family_removed,
+    delete_sqlite_family, immutable_uri, inspection_scratch_tag, is_interrupted, open_sqlite,
+    schema_inventory, verify_baseline, verify_sqlite_family_removed,
 };
 
 #[cfg(all(test, feature = "sqlite"))]

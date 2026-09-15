@@ -13,10 +13,9 @@ use kernel::{
     SourceClass, TaintClass,
 };
 use retrieval::batch::{BatchBounds, MutationIdentity, ProjectionBatch, apply_batch};
-use retrieval::lexical::retrieve::retrieve_with_hook_for_test;
 use retrieval::lexical::{
     Authority, Completion, IncompleteReason, LexicalBounds, Probe, Retrieval, RetrievalBounds,
-    RetrievalRefusal, Window, analyze, compile, retrieve,
+    RetrievalRefusal, Window, analyze, compile, retrieve, retrieve_with_hook_for_test,
 };
 use retrieval::{OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, install_identity};
 use rusqlite::Connection;
