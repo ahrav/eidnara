@@ -1938,16 +1938,7 @@ async fn a_drain_after_the_records_vanish_keeps_the_approved_grace() {
     let corpus = Corpus::open(home);
     corpus.seed();
     corpus.publish("held-row", "held text");
-    let identity = identity(&kernel_incarnation_id(home));
-    write_records(
-        home,
-        &manifest_json_with(
-            &identity,
-            &ProjectionHook::ALL,
-            &[("physical_drain_ms", 3_000)],
-        ),
-        &campaign_json(&identity),
-    );
+    records(home);
     let engine = TestEngine::new();
     let held = engine.block_calls();
     let scope = ProjectScope::new(PROJECT).unwrap();
@@ -1960,9 +1951,9 @@ async fn a_drain_after_the_records_vanish_keeps_the_approved_grace() {
         vec![("project:a".to_owned(), scope.clone())]
     }));
     let _ = owner.run_slice(&slice_budget());
-    let mut short = rebuild(home);
-    short.deadline = now() + 2_500;
-    owner.request(&short, now(), &slice_budget()).unwrap();
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
     for _ in 0..2 {
         let _ = owner.run_slice(&slice_budget());
     }
@@ -1974,6 +1965,19 @@ async fn a_drain_after_the_records_vanish_keeps_the_approved_grace() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
+    // A reload approves a short drain grace, one slice reads it, then the records vanish.
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("physical_drain_ms", 500)],
+        ),
+        &campaign_json(&identity),
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Current), "{outcome:?}");
     std::fs::remove_dir_all(home.join(ADMISSION_DIR)).unwrap();
     let SliceOutcome::RotateMaintenance(handle) = owner.run_slice(&slice_budget()) else {
         panic!("refused records hand the supervisor back");
@@ -1988,8 +1992,8 @@ async fn a_drain_after_the_records_vanish_keeps_the_approved_grace() {
         "the held call outlives the grace: {stopped:?}"
     );
     assert!(
-        waited < Duration::from_millis(4_200),
-        "the drain waited {waited:?} against a 3 s grace"
+        waited < Duration::from_secs(2),
+        "the drain waited {waited:?} against a 500 ms grace"
     );
 }
 
