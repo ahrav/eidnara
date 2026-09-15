@@ -4364,7 +4364,7 @@ that capacity `RingClientEndpoint::try_send_bounded`
 (`ring_transport.rs:1433`) returns `Exhausted` without blocking, the write
 stays in its lane slot (`client.rs:2515`), and the bridge arms the peer's
 capacity doorbell for that lane through `Ring::arm_capacity_wait`
-(`ring.rs:903`, `client.rs:2711-2716`), then parks in one `poll` on the
+(`ring.rs:903`, `client.rs:2711-2718`), then parks in one `poll` on the
 doorbell beside the worker wake, data readiness, and the setup socket, bounded
 by the earliest pending `commit_by` (`client.rs:2753-2765`); inbound frames
 drain before every retry. The wait is still a *peer* wake, and it is required
@@ -4372,8 +4372,8 @@ before `wrote` is ever set at `client.rs:2640`, so neither the k-passes bound
 nor "no further wake" holds across a capacity stall. A pass that publishes
 continues at `:2697` without arming anything.
 Check: `always` — a bridge loop pass that completed a write re-polls the write
-queue without arming or blocking (`wrote` at `:2520`/`:2612`, checked at
-`:2673-2675`), so per-write completion latency is bounded in loop passes, not
+queue without arming or blocking (`wrote` set at `:2640`, checked at
+`:2697`), so per-write completion latency is bounded in loop passes, not
 in external events, **given ring capacity**. `always` because the property must
 hold on every pass; the bound (k passes, no second worker signal) is what a
 finite test asserts, and the test must provision enough ring capacity for the
@@ -4395,7 +4395,7 @@ Confidence: high — [evidence](evidence/queued-write-needs-no-second-wake.md).
 The loop order (one write, inbound drain, `wrote` check, arm, block) was read
 directly, as was the test's deliberate bypass of the signaling sender.
 Existing check: `ring_bridge_drains_inbound_and_queued_writes`
-(`client.rs:7597-7681`); status unaudited.
+(`client.rs:7443-7526`); status unaudited.
 Impact: burst writes complete with unbounded latency or expire at their
 deadlines on a healthy channel; the host attributes the timeout to the
 transport and cancels work the peer would have absorbed.
