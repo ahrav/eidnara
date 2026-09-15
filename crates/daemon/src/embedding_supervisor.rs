@@ -17,6 +17,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::embedding_dispatch::{
     Blocked, DispatchBounds, DispatchError, DispatchEvent, DispatchFault, EmbeddingDispatcher,
+    ScanPosition,
 };
 use crate::identity_sweep::{IdentitySweeper, SweepError, SweepReport};
 use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
@@ -153,6 +154,8 @@ pub struct EmbeddingSupervisor {
     admitted: Mutex<BTreeMap<String, HostJob>>,
     /// Where the next identity sweep resumes its selection; `None` starts a pass over the table.
     sweep_cursor: Mutex<Option<String>>,
+    /// Where the next backfill pass resumes its eligibility scan.
+    scan_position: Mutex<Option<ScanPosition>>,
     panic_next_slice: AtomicBool,
     dispatch_faults: Mutex<Vec<DispatchFault>>,
     #[cfg(feature = "test-support")]
@@ -184,6 +187,7 @@ impl EmbeddingSupervisor {
             stop: Mutex::new(None),
             admitted: Mutex::new(BTreeMap::new()),
             sweep_cursor: Mutex::new(None),
+            scan_position: Mutex::new(None),
             panic_next_slice: AtomicBool::new(false),
             dispatch_faults: Mutex::new(Vec::new()),
             #[cfg(feature = "test-support")]
@@ -340,7 +344,8 @@ impl EmbeddingSupervisor {
         match kind {
             SliceKind::Backfill => {
                 let mut dispatcher =
-                    EmbeddingDispatcher::new(&m.kernel, &m.projection, &m.local_embeddings);
+                    EmbeddingDispatcher::new(&m.kernel, &m.projection, &m.local_embeddings)
+                        .resuming(self.lock_scan_position().take());
                 for fault in std::mem::take(
                     &mut *self
                         .dispatch_faults
@@ -443,6 +448,7 @@ impl EmbeddingSupervisor {
                         }
                     },
                 );
+                *self.lock_scan_position() = dispatcher.scan_position();
                 // Host jobs the host has settled and no row expects leave the census here, so it holds only live obligations rather than every job ever submitted.
                 self.native_census();
                 match end {
@@ -612,6 +618,12 @@ impl EmbeddingSupervisor {
 
     fn lock_sweep_cursor(&self) -> std::sync::MutexGuard<'_, Option<String>> {
         self.sweep_cursor
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_scan_position(&self) -> std::sync::MutexGuard<'_, Option<ScanPosition>> {
+        self.scan_position
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }

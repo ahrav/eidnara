@@ -22,9 +22,9 @@ use daemon::search_replacement::selection::disable::DisableEvent;
 use daemon::search_replacement::selection::recovery::RecoveryProgress;
 use host_runtime::lifecycle::LifecycleTransactionLock;
 use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsLimits};
-use kernel::KernelStore;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
+use kernel::{KernelStore, ProjectScope};
 use serde_json::Value;
 use support::embedding_fixtures::{
     Corpus, GENERATION, TestEngine, budget, component, identity, kernel_incarnation_id,
@@ -204,8 +204,8 @@ fn a_recorded_rebuild_reaches_current_across_scheduled_slices() {
 }
 
 /// AC2, AC4: a restarted owner resumes the Current record without a new request and without renewing its allowance; a kernel of another incarnation is refused rather than adopted.
-#[test]
-fn a_restart_resumes_current_and_refuses_another_kernel() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_resumes_current_and_refuses_another_kernel() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path();
     let corpus = Corpus::open(home);
@@ -227,7 +227,7 @@ fn a_restart_resumes_current_and_refuses_another_kernel() {
                 SliceOutcome::Advanced(_)
             ));
         }
-        owner.shutdown();
+        owner.shutdown().await.unwrap();
         match control(home) {
             ControlState::Current(intent) => intent,
             state => panic!("not Current: {state:?}"),
@@ -421,8 +421,8 @@ async fn the_running_daemon_converges_a_recorded_rebuild_and_pins_it() {
 }
 
 /// AC1, AC7: an active record bounds every slice by its own deadline, so a caller's unbounded budget still yields the finite budget selection requires, a record about to expire starts nothing and consumes no episode, and a restart between selection and completion resumes the same record without renewing its allowance.
-#[test]
-fn slices_are_bounded_by_the_records_deadline_and_a_restart_renews_nothing() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slices_are_bounded_by_the_records_deadline_and_a_restart_renews_nothing() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path();
     let corpus = Corpus::open(home);
@@ -459,7 +459,7 @@ fn slices_are_bounded_by_the_records_deadline_and_a_restart_renews_nothing() {
     let ControlState::Intent(selected) = control(home) else {
         panic!("one slice selects only");
     };
-    owner.shutdown();
+    owner.shutdown().await.unwrap();
 
     let resumed = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane());
     assert!(matches!(
@@ -477,8 +477,8 @@ fn slices_are_bounded_by_the_records_deadline_and_a_restart_renews_nothing() {
 }
 
 /// A Current family within the freshness limit catches up in the next slice under the hold its checkpoint names and is at the tip afterwards; after the kernel lease changes, the hold is dead, so the same slice reports the blocked episode while the family still serves; and a family that trails the kernel past the freshness limit is denied on its own coverage, so nothing runs on stale rows until a rebuild is requested.
-#[test]
-fn a_current_family_catches_up_under_its_hold_until_the_lease_changes() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_current_family_catches_up_under_its_hold_until_the_lease_changes() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path();
     let corpus = Corpus::open(home);
@@ -534,7 +534,7 @@ fn a_current_family_catches_up_under_its_hold_until_the_lease_changes() {
         owner.run_slice(&slice_budget()),
         SliceOutcome::Current
     ));
-    owner.shutdown();
+    owner.shutdown().await.unwrap();
     drop(owner);
 
     drop(corpus);
@@ -979,4 +979,226 @@ fn limits_too_small_to_bound_a_slice_refuse_the_specification() {
         assert!(matches!(control(home), ControlState::Intent(_)));
         assert!(owner.pin(&slice_budget()).is_err());
     }
+}
+
+/// Vectors published in the selected family, keyed by source object.
+fn published(owner: &SearchLifecycleOwner) -> Vec<String> {
+    owner
+        .pin(&slice_budget())
+        .unwrap()
+        .read(&slice_budget(), |conn| {
+            Ok(conn
+                .prepare(
+                    "SELECT o.source_object_id FROM occurrence_vectors v JOIN occurrences o USING(occurrence_id) ORDER BY o.source_object_id",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap()
+}
+
+/// Runs slices until `done` holds or `limit` slices ran, joining every supervisor a slice hands back as the daemon's loop does.
+async fn drive(
+    owner: &SearchLifecycleOwner,
+    limit: usize,
+    mut done: impl FnMut() -> bool,
+) -> usize {
+    for slice in 1..=limit {
+        if done() {
+            return slice - 1;
+        }
+        match owner.run_slice(&slice_budget()) {
+            SliceOutcome::RotateMaintenance(handle) => {
+                owner.stop_maintenance(&handle).await.unwrap();
+            }
+            SliceOutcome::Blocked(reason) => panic!("blocked: {reason}"),
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+    limit
+}
+
+/// AC1, S1, S2: with two bound projects each holding pending rows, one supervisor at a time rotates between them by tenure, and both projects' rows are embedded within a bounded number of slices; a project that leaves the roster loses its supervisor at the next slice, a lone project keeps its supervisor past the tenure, and no roster starts nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn maintenance_rotates_one_supervisor_across_bound_projects() {
+    use support::embedding_fixtures::{PROJECT, PROJECT_B, SCOPE_B};
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let a = corpus.publish("a-row", "alpha text");
+    let b = corpus.publish_scoped("b-row", "beta text", SCOPE_B);
+    records(home);
+    let engine = TestEngine::new();
+    let roster = Arc::new(std::sync::Mutex::new(vec![
+        ("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap()),
+        (
+            "project:b".to_owned(),
+            ProjectScope::new(PROJECT_B).unwrap(),
+        ),
+    ]));
+    let owner = {
+        let roster = Arc::clone(&roster);
+        SearchLifecycleOwner::for_home(
+            home,
+            Arc::clone(&corpus.kernel),
+            component(&engine, LocalEmbeddingsLimits::default()),
+        )
+        .with_roster(Arc::new(move || roster.lock().unwrap().clone()))
+    };
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    assert!(
+        owner.maintenance().is_none(),
+        "nothing starts before Current is observed"
+    );
+
+    let slices = drive(&owner, 40, || published(&owner).len() == 2).await;
+    assert!(slices <= 40, "both projects embedded within the bound");
+    assert_eq!(published(&owner), {
+        let mut both = vec![a.clone(), b.clone()];
+        both.sort();
+        both
+    });
+    assert!(engine.calls() >= 2);
+
+    roster.lock().unwrap().truncate(1);
+    let live = owner.maintenance();
+    drive(&owner, 12, || {
+        owner
+            .maintenance()
+            .is_none_or(|current| *current.scope == ProjectScope::new(PROJECT).unwrap())
+    })
+    .await;
+    let last = owner.run_slice(&slice_budget());
+    let lone = owner
+        .maintenance()
+        .unwrap_or_else(|| panic!("the lone project keeps a supervisor: {last:?}"));
+    assert_eq!(*lone.scope, ProjectScope::new(PROJECT).unwrap());
+    assert!(
+        live.is_none_or(|earlier| {
+            *earlier.scope != ProjectScope::new(PROJECT_B).unwrap() || {
+                owner
+                    .maintenance()
+                    .is_some_and(|c| c.scope != earlier.scope)
+            }
+        }),
+        "the unbound project's supervisor is gone"
+    );
+    for _ in 0..(daemon::search_lifecycle_owner::MAINTENANCE_TENURE_SLICES + 2) {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Current
+        ));
+    }
+    assert!(
+        owner.maintenance().is_some(),
+        "a lone tenant is not rotated"
+    );
+
+    roster.lock().unwrap().clear();
+    let SliceOutcome::RotateMaintenance(handle) = owner.run_slice(&slice_budget()) else {
+        panic!("an emptied roster hands the supervisor back");
+    };
+    owner.stop_maintenance(&handle).await.unwrap();
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    assert!(owner.maintenance().is_none());
+    owner.shutdown().await.unwrap();
+}
+
+/// AC8, S3, S4: shutdown while the supervisor holds a native call waits for the grace and reports the drain unresolved without dropping the manager, then joins once the call returns; a disable while maintenance runs closes admission first and reconciles through the same supervisor, so nothing starts a second one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn shutdown_and_disable_join_the_running_supervisor() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("held-row", "held text");
+    records(home);
+    let engine = TestEngine::new();
+    let held = engine.block_calls();
+    let scope = ProjectScope::new(PROJECT).unwrap();
+    let make_owner = || {
+        let scope = scope.clone();
+        let owner = SearchLifecycleOwner::for_home(
+            home,
+            Arc::clone(&corpus.kernel),
+            component(&engine, LocalEmbeddingsLimits::default()),
+        )
+        .with_roster(Arc::new(move || {
+            vec![("project:a".to_owned(), scope.clone())]
+        }));
+        owner.set_drain_grace_for_test(Duration::from_millis(300));
+        owner
+    };
+    let owner = make_owner();
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Current), "{outcome:?}");
+    let started = Instant::now();
+    while engine.calls() == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the supervisor submits the row"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let unresolved = owner.shutdown().await;
+    assert!(unresolved.is_err(), "a held native call outlives the grace");
+    assert!(
+        owner.maintenance().is_some(),
+        "an unresolved supervisor keeps its manager and task"
+    );
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Disabled
+    ));
+    TestEngine::release(&held);
+    owner.shutdown().await.unwrap();
+    assert!(
+        owner.maintenance().is_none(),
+        "the released call let the supervisor join"
+    );
+
+    let owner = make_owner();
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    assert!(owner.maintenance().is_some());
+    let mut events = Vec::new();
+    owner
+        .disable(&slice_budget(), &mut |event| events.push(event))
+        .await
+        .unwrap();
+    assert!(matches!(
+        events.first(),
+        Some(DisableEvent::AdmissionClosed)
+    ));
+    assert!(events.contains(&DisableEvent::WorkersJoined));
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Disabled
+    ));
+    assert!(owner.maintenance().is_none());
 }
