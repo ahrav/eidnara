@@ -779,6 +779,27 @@ mod live_rows {
     }
 
     #[test]
+    fn an_association_created_in_another_commit_than_its_row_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        seed(&store, 2);
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE exact_associations SET created_commit_seq=2 WHERE occurrence_id=?1",
+                    [occ(1)],
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(live_claim_candidates(conn, bound(8))))
+                .unwrap(),
+            Err(ProjectionError::CorruptRow)
+        ));
+    }
+
+    #[test]
     fn a_second_canonical_object_association_on_one_row_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
