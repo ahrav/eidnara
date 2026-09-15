@@ -1079,8 +1079,14 @@ struct PendingFrame {
 }
 
 impl PendingFrame {
+    /// The request stream this frame belongs to, for the data-before-terminal rule. Pure-header
+    /// controls carry host correlations from their own namespace and are never a stream
+    /// prefix, so a `Ping` sharing a number with a consumer request does not hold its
+    /// terminal back.
     fn stream_key(&self) -> Option<(u16, u64)> {
-        self.header.map(|header| (header.channel, header.corr))
+        self.header
+            .filter(|header| !header.ty.is_pure_header())
+            .map(|header| (header.channel, header.corr))
     }
 }
 
@@ -1985,6 +1991,60 @@ mod tests {
                 consumer.try_receive().unwrap().expect("filled terminal")
             })
             .collect()
+    }
+
+    /// Holds every control-class block on the consumer side so a pure-header control blocks
+    /// on its own inventory.
+    fn exhaust_control_class(
+        producer: &Ring,
+        consumer: &Ring,
+    ) -> Vec<shm_transport::lease::PayloadLease> {
+        let count = producer
+            .geometry()
+            .class(shm_transport::pool::BlockClass::Control)
+            .count;
+        (0..count)
+            .map(|_| {
+                let reservation = producer
+                    .try_reserve_in(
+                        Inventory::Control,
+                        0,
+                        shm_transport::backend::ring::wire_v3_header(0).unwrap(),
+                    )
+                    .expect("fill control reservation");
+                reservation.commit(0).unwrap();
+                consumer.try_receive().unwrap().expect("filled control")
+            })
+            .collect()
+    }
+
+    /// A blocked host `Ping` whose correlation equals a channel-0 `Error`'s consumer
+    /// correlation is not that error's stream prefix; the error still bypasses.
+    #[test]
+    fn a_blocked_ping_sharing_a_correlation_does_not_hold_back_a_channel_zero_error() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let ordinary = exhaust_smallest_class(&rings.first, &consumer);
+        let controls = exhaust_control_class(&rings.first, &consumer);
+        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
+        publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
+        publisher.push(frame(FrameType::Ping, 0, 5, b""));
+        publisher.push(frame(FrameType::Error, 0, 5, b"{}"));
+        publisher.pump(&rings.first).expect("pump");
+        assert_eq!(
+            publisher.pending.len(),
+            2,
+            "the ordinary head and the Ping stay blocked; the error publishes"
+        );
+        assert!(
+            publisher
+                .pending
+                .iter()
+                .all(|pending| pending.inventory != Inventory::Terminal),
+            "no terminal remains pending"
+        );
+        drop(ordinary);
+        drop(controls);
     }
 
     /// `Publisher::arm_capacity_wait` must return `Ok(false)` and publish an eligible terminal
