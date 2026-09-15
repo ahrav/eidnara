@@ -1156,7 +1156,8 @@ impl<'a> EmbeddingDispatcher<'a> {
                 job_id,
                 reason: EXHAUSTED.to_owned(),
             }),
-            Some(Disposition::NotOpen) | None => {}
+            Some(Disposition::NotOpen) => {}
+            None => return Ok(Some(Blocked::SearchDeadline)),
         }
         Ok(None)
     }
@@ -1169,18 +1170,18 @@ impl<'a> EmbeddingDispatcher<'a> {
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Option<Blocked>, DispatchError> {
         let now = pass.now;
-        if self.write_disposition(pass, |conn| stop_job(conn, &job.job_id, reason, now))?
-            == Some(true)
-        {
-            observer(DispatchEvent::Stopped {
+        match self.write_disposition(pass, |conn| stop_job(conn, &job.job_id, reason, now))? {
+            Some(true) => observer(DispatchEvent::Stopped {
                 job_id: job.job_id.clone(),
                 reason: reason.to_owned(),
-            });
+            }),
+            Some(false) => {}
+            None => return Ok(Some(Blocked::SearchDeadline)),
         }
         Ok(None)
     }
 
-    /// A retry or stop written within the job's disposition deadline; at the deadline the connection was still held and the row is left as it was, for a later pass to judge under its own clock.
+    /// A retry or stop written within the job's disposition deadline. `None` means the connection was still held at the deadline: the row is left as it was for a later pass to judge under its own clock, and the caller ends the pass, since the next disposition would wait on the same held connection.
     fn write_disposition<T>(
         &mut self,
         pass: &Pass<'_>,

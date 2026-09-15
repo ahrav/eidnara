@@ -1303,3 +1303,29 @@ async fn a_sweep_quarantine_stops_a_fresh_writer_of_the_projection() {
         "a quarantined writer does no work"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unbounded_budget_is_refused_before_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let gone = corpus.publish("gone", "gone text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    assert_eq!(embed_all(&corpus, &projection, &local_embeddings), 1);
+    tombstone(&projection, occurrence_of(&rows, &gone), 50);
+    let before = inventory(dir.path());
+
+    let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
+    let error = tokio::task::block_in_place(|| sweeper.run_sweep(ten(), &EvalBudget::unbounded()))
+        .unwrap_err();
+    assert!(matches!(error, SweepError::Unbounded), "{error:?}");
+    assert_eq!(sweeper.cursor(), None);
+    assert_eq!(
+        inventory(dir.path()),
+        before,
+        "a refused sweep reclaims nothing"
+    );
+    assert!(projection.quarantine().is_none());
+}

@@ -2000,6 +2000,62 @@ async fn charge_rollback_cannot_skip_a_failed_host_attempt() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disposition_held_past_its_deadline_ends_the_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let over = corpus.publish("m0", "fifteen bytes!!");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &over);
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut limits = bounds();
+    limits.input = daemon::embedding_dispatch::InputEnvelope {
+        bytes: 8,
+        tokens: u64::MAX,
+    };
+    // The stop for the refused input is the pass's first write after binding; a lock taken at the binding holds it to the deadline.
+    let short_guard = budget(Duration::from_millis(300));
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
+    let mut write_lock = None;
+    let mut events = Vec::new();
+
+    let end = dispatcher
+        .run_pass(
+            eligibility(&project),
+            &limits,
+            &short_guard,
+            NOW,
+            &mut |event| {
+                if matches!(event, DispatchEvent::Bound(_)) {
+                    let conn = Connection::open(search_path(dir.path())).unwrap();
+                    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    write_lock = Some(conn);
+                }
+                events.push(event);
+            },
+        )
+        .unwrap();
+    assert_eq!(end, Some(Blocked::SearchDeadline));
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!((row.state.as_str(), row.attempts), ("pending", 0));
+    assert!(stopped(&events).is_empty());
+    assert_eq!(engine.calls(), 0);
+    assert!(projection.quarantine().is_none());
+
+    drop(write_lock);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &limits, NOW + 1);
+    assert_eq!(end, None);
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!(
+        stopped(&events),
+        vec![(row.job_id.clone(), "input_over_limit".to_string())]
+    );
+    assert_eq!(row.state, "failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_search_deadline_preserves_the_candidate_for_retry() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());

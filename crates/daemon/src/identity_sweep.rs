@@ -35,6 +35,9 @@ pub enum SweepError {
     /// Candidate selection failed before anything was decided; the sweep may simply run again.
     #[error(transparent)]
     Read(SearchProjectionError),
+    /// The budget has no deadline, so nothing would bound a wait for the projection connection; the sweep selected nothing.
+    #[error("identity sweep requires a budget with a deadline")]
+    Unbounded,
 }
 
 /// Sweeps one projection against one in-process host. `run_sweep` blocks on the projection and belongs on a blocking thread.
@@ -101,7 +104,7 @@ impl<'a> IdentitySweeper<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`SweepError::Read`] when selection fails and [`SweepError::Quarantined`] once a reclamation is refused, its outcome cannot be reconciled, or any writer has quarantined the projection.
+    /// Returns [`SweepError::Unbounded`] when the budget has no deadline, [`SweepError::Read`] when selection fails, and [`SweepError::Quarantined`] once a reclamation is refused, its outcome cannot be reconciled, or any writer has quarantined the projection.
     pub fn run_sweep(
         &mut self,
         max_jobs: NonZeroUsize,
@@ -116,15 +119,14 @@ impl<'a> IdentitySweeper<'a> {
                 ..SweepReport::default()
             });
         }
+        // Both connection acquisitions end at the budget's deadline; a connection still held then leaves the page and cursor for the next sweep. A budget without one could wait on a held connection past any grant or shutdown.
+        let Some(deadline) = budget.deadline() else {
+            return Err(SweepError::Unbounded);
+        };
         let mut report = SweepReport::default();
-        // Both connection acquisitions end at the budget's deadline when it has one; a connection still held then leaves the page and cursor for the next sweep.
         let select =
             |conn: &storage::GuardedConn<'_>| candidates(conn, max_jobs, self.cursor.as_deref());
-        let page = match budget.deadline() {
-            Some(deadline) => self.projection.read_within(deadline, select),
-            None => self.projection.read(select),
-        };
-        let page = match page {
+        let page = match self.projection.read_within(deadline, select) {
             Ok(page) => page,
             Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
                 return Ok(SweepReport {
@@ -167,11 +169,7 @@ impl<'a> IdentitySweeper<'a> {
             }
             reclaim(conn, &free).map(Some)
         };
-        let reclaimed = match budget.deadline() {
-            Some(deadline) => self.projection.write_within(deadline, ended),
-            None => self.projection.write(ended),
-        };
-        let reclaimed = match reclaimed {
+        let reclaimed = match self.projection.write_within(deadline, ended) {
             Ok(Some(reclaimed)) => Ok(reclaimed),
             // Nothing was applied: at the deadline the connection was still held, or the budget ended once it was ours. The cursor returns to before this page.
             Ok(None) | Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {

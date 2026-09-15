@@ -495,7 +495,9 @@ impl EmbeddingSupervisor {
                 *self.lock_sweep_cursor() = sweeper.cursor().map(str::to_owned);
                 match swept {
                     Ok(report) => Ok(SliceOutcome::Sweep(report)),
-                    Err(SweepError::Read(error)) => Ok(SliceOutcome::ReadFailed(error.to_string())),
+                    Err(error @ (SweepError::Read(_) | SweepError::Unbounded)) => {
+                        Ok(SliceOutcome::ReadFailed(error.to_string()))
+                    }
                     Err(SweepError::Quarantined(quarantine)) => Err(Stop::Quarantined(quarantine)),
                 }
             }
