@@ -7,7 +7,7 @@ Specification 'Echo provenance and use authority': poisoned retrieved content ne
 ## Evidence trail
 
 - `crates/kernel/src/slice/write.rs`: `insert_observation` and `correct_observation` refuse `uses_causality_namespace` specs and refuse to correct a reserved-kind row.
-- `crates/kernel/tests/kernel_claim_facts.rs`: `forged_records_and_copied_strings_grant_nothing` attempts kind, observation-id, and object-id forgeries and a generic correction of a real record.
+- `crates/kernel/tests/kernel_claim_causality.rs`: `forged_records_and_copied_strings_grant_nothing` attempts kind, observation-id, and object-id forgeries and a generic correction of a real record.
 
 ## Failure scenario
 

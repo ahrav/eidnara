@@ -183,26 +183,25 @@ impl KernelStore {
         if !object_ids.iter().all(|id| distinct.insert(id.as_str())) {
             return Err(ClaimFactsError::DuplicateClaim);
         }
-        let (tip, (claims, missing)) = self.read_snapshot(requested, |tx, _| {
-            let mut claims: Vec<Result<ClaimFacts, ClaimFactsError>> =
-                Vec::with_capacity(object_ids.len());
+        let (tip, loaded) = self.read_snapshot(requested, |tx, _| {
+            let mut claims = Vec::with_capacity(object_ids.len());
             let mut missing = Vec::new();
             let mut served = load_served(tx, requested, object_ids)?;
             for object_id in object_ids {
                 match registry_row_at(tx, requested, object_id)? {
                     None => missing.push(object_id.clone()),
-                    Some(object) => claims.push(load_claim(
-                        tx,
-                        requested,
-                        object,
-                        served.remove(object_id),
-                        bounds,
-                    )),
+                    Some(object) => {
+                        // A `load_claim` error aborts the request before later `object_ids` are read.
+                        match load_claim(tx, requested, object, served.remove(object_id), bounds) {
+                            Ok(claim) => claims.push(claim),
+                            Err(error) => return Ok(Err(error)),
+                        }
+                    }
                 }
             }
-            Ok((claims, missing))
+            Ok(Ok((claims, missing)))
         })?;
-        let claims = claims.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let (claims, missing) = loaded?;
         Ok(ClaimFactsSnapshot {
             known_as_of: requested,
             tip,
@@ -487,6 +486,9 @@ fn load_occurrences(
                     let reencoded =
                         reencoded_identity(&detail).ok_or(KernelError::CorruptCanonicalRow)?;
                     if reencoded.occurrence_id != encoded.occurrence_id
+                        || raw.source_kind != class.code()
+                        || raw.source_revision != object.source_revision
+                        || raw.sensitivity != raw.registry_sensitivity
                         || raw.created_commit_seq != raw.observation_created
                         || raw.invalidated_commit_seq != raw.observation_invalidated
                         || detail.lineage_id != raw.source_id
@@ -516,6 +518,10 @@ fn load_occurrences(
 
 struct RawDescriptor {
     payload: Vec<u8>,
+    source_kind: String,
+    source_revision: i64,
+    sensitivity: String,
+    registry_sensitivity: String,
     created_commit_seq: i64,
     invalidated_commit_seq: Option<i64>,
     observation_created: i64,
@@ -533,7 +539,8 @@ fn load_descriptor(
 ) -> Result<Option<RawDescriptor>, KernelError> {
     static SQL: LazyLock<String> = LazyLock::new(|| {
         format!(
-            "SELECT b.observation_payload,o.created_commit_seq,o.invalidated_commit_seq,
+            "SELECT b.observation_payload,o.source_kind,o.source_revision,b.sensitivity_class,
+                    o.sensitivity_class,o.created_commit_seq,o.invalidated_commit_seq,
                     b.created_commit_seq,b.invalidated_commit_seq,o.source_id,
                     b.evidence_id,e.artifact_digest
              FROM object_registry o
@@ -550,13 +557,17 @@ fn load_descriptor(
             |row| {
                 Ok(RawDescriptor {
                     payload: row.get(0)?,
-                    created_commit_seq: row.get(1)?,
-                    invalidated_commit_seq: row.get(2)?,
-                    observation_created: row.get(3)?,
-                    observation_invalidated: row.get(4)?,
-                    source_id: row.get(5)?,
-                    evidence_id: row.get(6)?,
-                    artifact_digest: row.get(7)?,
+                    source_kind: row.get(1)?,
+                    source_revision: row.get(2)?,
+                    sensitivity: row.get(3)?,
+                    registry_sensitivity: row.get(4)?,
+                    created_commit_seq: row.get(5)?,
+                    invalidated_commit_seq: row.get(6)?,
+                    observation_created: row.get(7)?,
+                    observation_invalidated: row.get(8)?,
+                    source_id: row.get(9)?,
+                    evidence_id: row.get(10)?,
+                    artifact_digest: row.get(11)?,
                 })
             },
         )

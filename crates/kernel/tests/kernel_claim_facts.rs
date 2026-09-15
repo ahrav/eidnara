@@ -628,6 +628,96 @@ fn facts_survive_reopen() {
 }
 
 #[test]
+fn a_partial_span_publication_is_outside_the_whole_buffer_inventory() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 1);
+    let partial = fixture.publish_span(
+        "canonical_claims",
+        "decision_summary",
+        1,
+        1,
+        "decision 1",
+        Some((0, 8)),
+    );
+    let tip = fixture.tip();
+    let facts = fixture.facts("decision-object-1", tip);
+    assert!(facts.occurrences.is_empty());
+    assert!(
+        facts
+            .excluded_representations
+            .contains(&kernel::ExcludedRepresentation {
+                class: OccurrenceClass::CanonicalClaims,
+                representation: "decision_summary",
+                reason: RepresentationExclusion::NoDescriptor,
+            })
+    );
+
+    let whole = fixture.publish_summary(1, 1);
+    assert_ne!(whole.lineage_id, partial.lineage_id);
+    let facts = fixture.facts("decision-object-1", fixture.tip());
+    assert_eq!(facts.occurrences.len(), 1);
+    assert_eq!(facts.occurrences[0].occurrence_id, whole.occurrence_id);
+    assert_eq!(facts.occurrences[0].payload_id, whole.digest);
+}
+
+#[test]
+fn served_facts_follow_the_cited_evidence_class_read_today() {
+    let fixture = Fixture::open();
+    let (evidence_id, _) = fixture.retain("later-secret", "normal now, secret later");
+    fixture
+        .store
+        .commit(intent("decision-1"), |envelope| {
+            let mut spec = decision(1, 1);
+            spec.evidence_id = Some(evidence_id.clone());
+            envelope.insert_decision(spec)?;
+            envelope.record_admission(admission("decision-object-1"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    fixture.publish_summary(1, 1);
+    let fenced = fixture.tip();
+    let before = fixture.facts("decision-object-1", fenced);
+    assert_eq!(served(&before).sensitivity, Sensitivity::Normal);
+    assert_eq!(served(&before).explicit_search, SurfaceVisibility::Labeled);
+
+    // Reasserting the same bytes as secret rewrites the evidence row in place,
+    // so a reread of the older snapshot sees today's class.
+    fixture.retain_as(
+        "later-secret",
+        "normal now, secret later",
+        Sensitivity::Secret,
+    );
+    let after = fixture.facts("decision-object-1", fenced);
+    assert_eq!(
+        served(&after).sensitivity,
+        Sensitivity::Secret,
+        "served facts are not fixed by the snapshot"
+    );
+    assert_eq!(
+        served(&after).explicit_search,
+        served_visibility(
+            &fixture,
+            "decision-object-1",
+            fenced,
+            Surface::ExplicitSearch
+        )
+    );
+    assert_ne!(after.served, before.served);
+    // The revisioned rows are unchanged.
+    assert_eq!(after.object, before.object);
+    assert_eq!(after.decision, before.decision);
+    assert_eq!(after.own_admission, before.own_admission);
+    assert_eq!(after.lineage_admission, before.lineage_admission);
+    assert_eq!(after.occurrences, before.occurrences);
+    assert_eq!(
+        after.excluded_representations,
+        before.excluded_representations
+    );
+    assert_eq!(after.causality, before.causality);
+    assert_eq!(after.causal_record, before.causal_record);
+}
+
+#[test]
 fn occurrence_facts_refuse_a_detail_that_disagrees_with_its_guarded_rows() {
     let fixture = Fixture::open();
     fixture.admit_decision(1, 1);
@@ -670,6 +760,33 @@ fn occurrence_facts_refuse_a_detail_that_disagrees_with_its_guarded_rows() {
             "{field}"
         );
         write_payload(&fixture, &published.descriptor_object_id, &original);
+    }
+    let scope = format!(" WHERE object_id='{}'", published.descriptor_object_id);
+    fixture.sql("DROP TRIGGER object_registry_append_only_update;");
+    for (field, tamper, restore) in [
+        (
+            "observation sensitivity",
+            "UPDATE observations SET sensitivity_class='secret'",
+            "UPDATE observations SET sensitivity_class='normal'",
+        ),
+        (
+            "registry source_revision",
+            "UPDATE object_registry SET source_revision=2",
+            "UPDATE object_registry SET source_revision=1",
+        ),
+        (
+            "registry source_kind",
+            "UPDATE object_registry SET source_kind='promoted_memory'",
+            "UPDATE object_registry SET source_kind='canonical_claims'",
+        ),
+    ] {
+        fixture.sql(&format!("{tamper}{scope};"));
+        assert_eq!(
+            read(),
+            Err(ClaimFactsError::Kernel(KernelError::CorruptCanonicalRow)),
+            "{field}"
+        );
+        fixture.sql(&format!("{restore}{scope};"));
     }
     let restored = read().unwrap();
     assert_eq!(restored.claims[0].occurrences.len(), 1);

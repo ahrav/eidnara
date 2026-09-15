@@ -9,7 +9,7 @@ Specification 'Echo provenance and use authority': `DirectObservation` and `Deri
 - `crates/kernel/src/claim_causality.rs`: `check_acquisition` requires a live `evidence_meta` row, equal digest, and exact retention; `check_parents` requires live registered parents at the stated revision.
 - `crates/kernel/src/claim_causality.rs`: `uses_causality_namespace` is checked by `insert_observation` and `correct_observation` in `crates/kernel/src/slice/write.rs`.
 - `crates/kernel/src/claim_causality.rs`: `causal_class_at` only consults rows with `observation_kind = claim_causality` and `source_kind = claim_causality`.
-- `crates/kernel/tests/kernel_claim_facts.rs`: `forged_records_and_copied_strings_grant_nothing`, `direct_observation_rests_on_live_exact_evidence`, `derived_reinjection_rests_on_exact_live_parents`.
+- `crates/kernel/tests/kernel_claim_causality.rs`: `forged_records_and_copied_strings_grant_nothing`, `direct_observation_rests_on_live_exact_evidence`, `derived_reinjection_rests_on_exact_live_parents`.
 
 ## Failure scenario
 

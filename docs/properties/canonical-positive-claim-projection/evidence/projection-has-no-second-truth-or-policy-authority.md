@@ -25,7 +25,7 @@ Compare reader output with an independent kernel read at the same snapshot.
 
 ### Q: Where does the A4 production identifier check live?
 
-- Sources examined: the files in the evidence trail, the specification text, and the ticket bodies.
-- Findings: see the evidence trail.
-- Missing evidence: the construction named under 'What a test must construct' where it is not yet in the tree.
-- Conclusion: unresolved, needs a repository-level test for deleted claim machinery names
+- Sources examined: the files in the evidence trail, the specification text, the ticket bodies, and `.github/workflows/ci.yml`.
+- Findings: the `gates` job's `Retired memory-plane identifiers` step greps production content, tracked pathnames, and whole index blobs for the retired names (`claim_mirror`, `claim_operation`, and the rest of its token list) and fails the job on a match; crate `tests/`, `*.test.ts`, `docs/`, `NOTICE`, and `*.md` are excluded.
+- Missing evidence: an audit that the token list names every deleted claim-machinery identifier.
+- Conclusion: the check exists as a CI gate; its coverage is unaudited.
