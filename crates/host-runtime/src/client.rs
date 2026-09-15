@@ -2465,7 +2465,7 @@ mod bridge_hooks {
 
     type Hook = Box<dyn FnOnce() + Send>;
 
-    static BEFORE_CAPACITY_ARM: Mutex<Option<(RawFd, Hook)>> = Mutex::new(None);
+    static BEFORE_CAPACITY_ARM: Mutex<Vec<(RawFd, Hook)>> = Mutex::new(Vec::new());
 
     /// Runs `hook` once on the bridge whose wake eventfd is `wake`, immediately before that
     /// bridge's next `arm_capacity_wait`.
@@ -2473,16 +2473,16 @@ mod bridge_hooks {
         wake: &OwnedFd,
         hook: impl FnOnce() + Send + 'static,
     ) {
-        *super::lock_unpoisoned(&BEFORE_CAPACITY_ARM) = Some((wake.as_raw_fd(), Box::new(hook)));
+        super::lock_unpoisoned(&BEFORE_CAPACITY_ARM).push((wake.as_raw_fd(), Box::new(hook)));
     }
 
     pub(super) fn before_capacity_arm(wake: &OwnedFd) {
         let hook = {
-            let mut slot = super::lock_unpoisoned(&BEFORE_CAPACITY_ARM);
-            match slot.as_ref() {
-                Some((key, _)) if *key == wake.as_raw_fd() => slot.take().map(|(_, hook)| hook),
-                _ => None,
-            }
+            let mut pending = super::lock_unpoisoned(&BEFORE_CAPACITY_ARM);
+            pending
+                .iter()
+                .position(|(key, _)| *key == wake.as_raw_fd())
+                .map(|index| pending.swap_remove(index).1)
         };
         if let Some(hook) = hook {
             hook();
