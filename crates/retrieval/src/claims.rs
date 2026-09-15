@@ -21,7 +21,8 @@ use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactDestination, ClaimFactBounds, ClaimFacts, ClaimFactsError, CommitReadIncarnation,
     Disposition, EgressSnapshot, EligibilityCandidate, EligibilityVerdict, KernelError,
-    KernelStore, ProjectScope, ServedStanding, Surface, SurfaceVisibility,
+    KernelStore, MAX_ELIGIBILITY_CANDIDATES, MAX_ELIGIBILITY_OBJECT_ID_BYTES, ProjectScope,
+    ServedStanding, Surface, SurfaceVisibility,
 };
 use rusqlite::params;
 use storage::GuardedConn;
@@ -379,12 +380,14 @@ impl SurfaceValidation {
 /// and again on the exact survivors immediately before handoff; the second
 /// call reads a newer snapshot and denies anything restricted since the first.
 /// `batch` supplies the lineage facts for the accounting; candidates are
-/// matched to it by object id.
+/// matched to it by object id. Cancellation is cooperative: local loops poll
+/// between rows, but a single row copy and cleanup are not interruptible.
+/// Callers remain responsible for bounding total rows and their owned bytes.
 ///
 /// # Errors
 ///
 /// `Eligibility(InvalidInput)` when more than `MAX_ELIGIBILITY_CANDIDATES`
-/// candidates are `Current` or a row's object id fails the candidate bounds;
+/// candidates are `Current` or a Current row's identity fields are invalid;
 /// `Eligibility(Deadline)` when the budget runs out; other kernel read errors
 /// as `Eligibility(_)`.
 pub fn validate_for_surface(
@@ -396,32 +399,58 @@ pub fn validate_for_surface(
     surface: Surface,
     budget: &EvalBudget,
 ) -> Result<SurfaceValidation, ClaimCandidateError> {
-    let current = |candidate: &&ClaimCandidate| candidate.state == CandidateState::Current;
-    let submitted: Vec<EligibilityCandidate> = candidates
-        .iter()
-        .filter(current)
-        .map(|candidate| EligibilityCandidate {
+    let check_budget = || {
+        budget
+            .check()
+            .map_err(|_| ClaimCandidateError::Eligibility(KernelError::Deadline))
+    };
+    check_budget()?;
+    let mut submitted = Vec::new();
+    for candidate in candidates {
+        check_budget()?;
+        if candidate.state != CandidateState::Current {
+            continue;
+        }
+        if submitted.len() == MAX_ELIGIBILITY_CANDIDATES
+            || candidate.row.object_id.len() > MAX_ELIGIBILITY_OBJECT_ID_BYTES
+            || candidate.row.artifact_digest.len() != 64
+        {
+            return Err(ClaimCandidateError::Eligibility(KernelError::InvalidInput));
+        }
+        let candidate = EligibilityCandidate {
             object_id: candidate.row.object_id.clone(),
             source_revision: candidate.row.revision,
             artifact_digest: Some(candidate.row.artifact_digest.clone()),
-        })
-        .collect();
+        };
+        candidate
+            .validate()
+            .map_err(ClaimCandidateError::Eligibility)?;
+        submitted.push(candidate);
+    }
     let judged = kernel
         .judge_surface_eligibility_within_budget(project, destination, surface, &submitted, budget)
         .map_err(ClaimCandidateError::Eligibility)?;
-    let lineage: HashMap<&str, &ClaimFacts> = batch
-        .claims
-        .iter()
-        .map(|claim| (claim.object.object_id.as_str(), claim))
-        .collect();
+    #[cfg(test)]
+    tests::CANCEL_AFTER_JUDGMENT.with(|slot| {
+        if let Some(budget) = slot.take() {
+            budget.cancel();
+        }
+    });
+    check_budget()?;
+    let mut lineage: HashMap<&str, &ClaimFacts> = HashMap::new();
+    for claim in &batch.claims {
+        check_budget()?;
+        lineage.insert(claim.object.object_id.as_str(), claim);
+    }
     let mut accounting = UseAccounting {
         attempted_rows: candidates.len(),
         ..UseAccounting::default()
     };
     let mut verdicts = judged.verdicts.iter();
-    let mut validated = Vec::with_capacity(candidates.len());
+    let mut validated = Vec::new();
     for candidate in candidates {
-        let verdict = if current(&candidate) {
+        check_budget()?;
+        let verdict = if candidate.state == CandidateState::Current {
             // `submitted` was filtered by the same predicate over the same
             // slice, so the kernel returned exactly one verdict per `Current`
             // candidate in order.
@@ -452,6 +481,7 @@ pub fn validate_for_surface(
             verdict,
         });
     }
+    check_budget()?;
     Ok(SurfaceValidation {
         snapshot: judged.snapshot,
         incarnation: judged.incarnation,
@@ -459,4 +489,182 @@ pub fn validate_for_surface(
         candidates: validated,
         accounting,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::sync::{Arc, atomic::AtomicBool};
+    use std::time::Instant;
+
+    thread_local! {
+        pub(super) static CANCEL_AFTER_JUDGMENT: Cell<Option<EvalBudget>> = const { Cell::new(None) };
+    }
+
+    fn fixture() -> (
+        tempfile::TempDir,
+        KernelStore,
+        ClaimCandidateBatch,
+        ProjectScope,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = KernelStore::open(dir.path()).unwrap();
+        let batch = ClaimCandidateBatch {
+            known_as_of: 0,
+            claims: Vec::new(),
+            candidates: vec![ClaimCandidate {
+                row: ClaimCandidateRow {
+                    occurrence_id: "occ".into(),
+                    class: OccurrenceClass::CanonicalClaims,
+                    representation: "decision_summary".into(),
+                    object_id: "decision-object-1".into(),
+                    revision: 1,
+                    artifact_digest: "0".repeat(64),
+                },
+                state: CandidateState::Hidden,
+                claim: None,
+            }],
+        };
+        (
+            dir,
+            kernel,
+            batch,
+            ProjectScope::new(&"0".repeat(64)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn exhausted_validation_stops_before_candidate_preparation() {
+        let (_dir, kernel, mut batch, project) = fixture();
+        batch.candidates[0].state = CandidateState::Current;
+        batch.candidates[0].row.object_id.clear();
+        let cancelled = EvalBudget::unbounded();
+        cancelled.cancel();
+        let expired = EvalBudget::new(Some(Instant::now()), Arc::new(AtomicBool::new(false)));
+        for budget in [cancelled, expired] {
+            assert!(matches!(
+                validate_for_surface(
+                    &kernel,
+                    &batch,
+                    &batch.candidates,
+                    &project,
+                    ArtifactDestination::Local,
+                    Surface::AutoInject,
+                    &budget,
+                ),
+                Err(ClaimCandidateError::Eligibility(KernelError::Deadline))
+            ));
+        }
+    }
+
+    #[test]
+    fn validation_bounds_only_current_submissions_and_preserves_denied_duplicates() {
+        let (_dir, kernel, batch, project) = fixture();
+        let validate = |candidates: &[ClaimCandidate]| {
+            validate_for_surface(
+                &kernel,
+                &batch,
+                candidates,
+                &project,
+                ArtifactDestination::Local,
+                Surface::AutoInject,
+                &EvalBudget::unbounded(),
+            )
+        };
+        let mut current = batch.candidates[0].clone();
+        current.state = CandidateState::Current;
+        let at_limit = vec![current.clone(); MAX_ELIGIBILITY_CANDIDATES];
+        assert_eq!(
+            validate(&at_limit).unwrap().candidates.len(),
+            MAX_ELIGIBILITY_CANDIDATES
+        );
+        let mut over_limit = at_limit;
+        over_limit.push(current.clone());
+        assert!(matches!(
+            validate(&over_limit),
+            Err(ClaimCandidateError::Eligibility(KernelError::InvalidInput))
+        ));
+        for (object_id, digest) in [
+            (String::new(), "0".repeat(64)),
+            (
+                "x".repeat(MAX_ELIGIBILITY_OBJECT_ID_BYTES + 1),
+                "0".repeat(64),
+            ),
+            ("object".into(), "0".repeat(65)),
+            ("object".into(), "g".repeat(64)),
+        ] {
+            current.row.object_id = object_id;
+            current.row.artifact_digest = digest;
+            assert!(matches!(
+                validate(std::slice::from_ref(&current)),
+                Err(ClaimCandidateError::Eligibility(KernelError::InvalidInput))
+            ));
+        }
+        let denied = vec![batch.candidates[0].clone(); MAX_ELIGIBILITY_CANDIDATES + 1];
+        let result = validate(&denied).unwrap();
+        assert_eq!(result.accounting.attempted_rows, denied.len());
+        assert_eq!(result.candidates.len(), denied.len());
+        assert!(
+            result
+                .candidates
+                .iter()
+                .zip(&denied)
+                .all(|(result, input)| result.candidate == *input
+                    && result.verdict
+                        == UseVerdict::Denied(UseDenial::State(CandidateState::Hidden)))
+        );
+        assert!(result.accounting.permitted_objects.is_empty());
+        assert_eq!(
+            result.accounting.rejected_objects,
+            BTreeSet::from(["decision-object-1".into()])
+        );
+        assert_eq!(
+            result.accounting.unknown_objects,
+            result.accounting.rejected_objects
+        );
+    }
+
+    #[test]
+    fn cancellation_after_judgment_refuses_empty_and_non_current_results() {
+        let (_dir, kernel, batch, project) = fixture();
+        for candidates in [&batch.candidates[..0], &batch.candidates[..]] {
+            let budget = EvalBudget::unbounded();
+            let control = validate_for_surface(
+                &kernel,
+                &batch,
+                candidates,
+                &project,
+                ArtifactDestination::Local,
+                Surface::AutoInject,
+                &budget,
+            )
+            .unwrap();
+            assert_eq!(control.accounting.attempted_rows, candidates.len());
+            assert_eq!(control.candidates.len(), candidates.len());
+            assert!(control.candidates.iter().all(|candidate| candidate.verdict
+                == UseVerdict::Denied(UseDenial::State(CandidateState::Hidden))));
+            assert!(!budget.is_exhausted());
+            CANCEL_AFTER_JUDGMENT.with(|slot| slot.set(Some(budget.clone())));
+            let result = validate_for_surface(
+                &kernel,
+                &batch,
+                candidates,
+                &project,
+                ArtifactDestination::Local,
+                Surface::AutoInject,
+                &budget,
+            );
+            let unconsumed = CANCEL_AFTER_JUDGMENT.with(Cell::take);
+            assert!(
+                unconsumed.is_none(),
+                "successful kernel read must reach cancellation hook"
+            );
+            assert!(budget.is_exhausted());
+            assert!(matches!(
+                result,
+                Err(ClaimCandidateError::Eligibility(KernelError::Deadline))
+            ));
+        }
+    }
 }
