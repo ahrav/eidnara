@@ -28,10 +28,12 @@ wake". Lead only; the mechanism was re-read at HEAD.
   to deliver them.
 - `RingWriteSender::drop` also signals (`:2416-2420`), so channel teardown
   cannot strand the final pass.
-  At HEAD: a pass whose lanes are both empty arms nothing; a pass with an
-  exhausted lane parks on the capacity doorbell for that lane instead of the
-  writer queue, and the continuation at `:2697` still runs first whenever a
-  lane published.
+  At HEAD: a pass whose lanes are both empty arms no capacity wait but still
+  arms the data doorbell (`:2703`) and polls `worker_wake`, `data_ready`, and
+  the setup socket; a pass with an exhausted lane arms the capacity doorbell for
+  that lane and adds it to the same poll set (`:2758-2764`), so `worker_wake`
+  stays watched and newly queued controls still wake a capacity-blocked bridge.
+  The continuation at `:2697` still runs first whenever a lane published.
 
 ## Failure scenario
 
