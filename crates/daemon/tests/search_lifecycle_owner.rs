@@ -2982,6 +2982,50 @@ fn a_refused_request_still_installs_the_records_it_read() {
     );
 }
 
+/// A request naming another kernel is refused only after the records are installed: a reload that withdrew a hook cancels the running grant through that request too, rather than waiting for the next scheduled slice.
+#[test]
+fn a_foreign_kernel_request_still_installs_the_reloaded_records() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[]),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    let backfill = owner
+        .admission()
+        .gate()
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .unwrap();
+    let without_backfill: Vec<ProjectionHook> = ProjectionHook::ALL
+        .iter()
+        .copied()
+        .filter(|hook| *hook != ProjectionHook::EmbeddingBackfill)
+        .collect();
+    write_records(
+        home,
+        &manifest_json_with(&identity, &without_backfill, &[]),
+        &campaign_json(&identity),
+    );
+    let mut foreign = rebuild(home);
+    foreign.kernel_incarnation_id = "another-kernel".to_owned();
+    let outcome = owner.request(&foreign, now(), &slice_budget());
+    assert!(
+        matches!(&outcome, Err(BuildError::Invalid(reason)) if reason.contains("another kernel incarnation")),
+        "{outcome:?}"
+    );
+    assert!(
+        backfill.invalidated.is_cancelled(),
+        "the withdrawn hook's grant is cancelled by the records the refused request read"
+    );
+    assert!(matches!(control(home), ControlState::Absent));
+}
+
 /// A reload that lowers the transition's duration bound below an active record's own duration stops that record's slices: the record's duration is charged against the bound at every admission.
 #[test]
 fn a_lowered_duration_bound_blocks_an_active_record() {

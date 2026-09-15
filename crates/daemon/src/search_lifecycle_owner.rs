@@ -876,13 +876,6 @@ impl SearchLifecycleOwner {
         #[cfg(feature = "test-support")]
         self.tap(SliceEvent::RequestEntered);
         let mut managed = self.lock_within(budget)?;
-        if self.kernel.database_incarnation_id_within_budget(budget)?
-            != request.kernel_incarnation_id
-        {
-            return Err(BuildError::Invalid(
-                "the request names another kernel incarnation",
-            ));
-        }
         // The records and lane are read now rather than trusted from the evidence an earlier slice installed; unavailable ones close the gate and refuse the request.
         let inputs = match AdmissionInputs::read(&self.home) {
             Ok(inputs) => inputs,
@@ -929,6 +922,14 @@ impl SearchLifecycleOwner {
                 Closed::ShutDown => "the owner is shut down",
                 _ => "admission is closed",
             }));
+        }
+        // Judged after the records are installed, so a request for another kernel still leaves the gate on the current records rather than on the evidence a reload replaced.
+        if self.kernel.database_incarnation_id_within_budget(budget)?
+            != request.kernel_incarnation_id
+        {
+            return Err(BuildError::Invalid(
+                "the request names another kernel incarnation",
+            ));
         }
         // Whether the manifest still bounds the operation already recorded, as its next slice would check. A replacement that fits the reduced limits may replace what no longer does; a request that does not fit either leaves the gate closed, as that slice would.
         let recorded = ProjectionLifecycle::read_at(&self.home);
