@@ -188,8 +188,6 @@ mod sqlite_backend {
         gate: Arc<AuthorityGate>,
     }
 
-    /// Progress-handler poll interval for interruptible reads.
-    /// One thousand steps is far below one FTS or index scan and above the per-poll cost of an atomic load.
     const READ_INTERRUPT_STEPS: i32 = 1_000;
 
     /// Dropping the guard clears the holder record before the connection lock releases.
@@ -383,7 +381,7 @@ mod sqlite_backend {
         }
 
         /// [`Self::with_conn_within`] whose statements are also interrupted once `stop` returns `true`.
-        /// SQLite polls `stop` every thousand virtual-machine steps, so a long scan ends within one poll interval.
+        /// SQLite's [progress callback](https://www.sqlite.org/c3ref/progress_handler.html) uses an approximate VM-instruction interval, not a wall-clock timeout.
         /// The handler is removed before the transaction ends, including when `f` unwinds, so a later read on the same connection cannot be interrupted by an earlier caller's `stop`.
         ///
         /// # Errors

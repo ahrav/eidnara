@@ -268,6 +268,9 @@ fn retrieve_inner(
     )?;
     hook(Window::BeforeRevalidation);
     revalidate(kernel, authority, budget, accepted, &mut retrieval)?;
+    if budget.is_exhausted() {
+        return exhausted(retrieval);
+    }
     Ok(retrieval)
 }
 
@@ -275,12 +278,13 @@ fn exhausted(mut retrieval: Retrieval) -> Result<Retrieval, RetrievalRefusal> {
     if retrieval.consumed.probes == 0 {
         return Err(RetrievalRefusal::BudgetExhausted);
     }
+    retrieval.contributions.clear();
     incomplete(&mut retrieval, IncompleteReason::BudgetExhausted);
     Ok(retrieval)
 }
 
 fn incomplete(retrieval: &mut Retrieval, reason: IncompleteReason) {
-    if retrieval.completion == Completion::Complete {
+    if reason == IncompleteReason::BudgetExhausted || retrieval.completion == Completion::Complete {
         retrieval.completion = Completion::Incomplete(reason);
     }
 }

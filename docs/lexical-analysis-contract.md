@@ -270,10 +270,21 @@ past `scan_rows`, so `Completion::Incomplete(ScanBound)` means a probe matched
 more rows than the bound, not that it filled the bound exactly. A budget that is
 exhausted before any probe completes is `RetrievalRefusal::BudgetExhausted`; one
 that ends later yields `Completion::Incomplete(BudgetExhausted)` with no
-contributions. A statement that SQLite interrupts (`SQLITE_INTERRUPT`, raised by
+contributions, including when no hits were accepted. Budget exhaustion overrides
+an earlier scan or accepted bound. The budget is checked again after final
+revalidation; contributions are discarded if it ended during that check.
+A statement that SQLite interrupts (`SQLITE_INTERRUPT`, raised by
 the progress handler `SqliteStore::with_conn_interruptible` installs) ends the
 request the same way regardless of the budget's own state. The host-side query
 limits that feed these bounds are not defined in this repository.
+
+`scan_rows` bounds returned rows, not rows visited or sorted by SQLite. The
+[progress handler](https://www.sqlite.org/c3ref/progress_handler.html) polls at
+approximate VM-instruction intervals, not wall-clock intervals. Lock waits, I/O,
+and work inside a VM instruction can delay cancellation. The storage method's
+`deadline` bounds connection acquisition; its `stop` closure must check the
+execution budget. This closure must not block or panic. No hard query-latency
+bound follows from either the row limit or the progress-handler interval.
 
 ## Analysis identity
 

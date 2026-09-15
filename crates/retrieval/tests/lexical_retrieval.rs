@@ -961,6 +961,46 @@ fn a_budget_that_ends_after_a_probe_yields_an_incomplete_result_with_no_contribu
     assert!(before_revalidation.contributions.is_empty());
     assert_eq!(before_revalidation.consumed.batches, 3);
 
+    for (text, limits, completion) in [
+        (
+            "parse",
+            RetrievalBounds {
+                scan_rows: NonZeroUsize::new(1).unwrap(),
+                ..bounds()
+            },
+            Completion::Incomplete(IncompleteReason::ScanBound),
+        ),
+        (
+            "parse",
+            RetrievalBounds {
+                max_accepted: NonZeroUsize::new(1).unwrap(),
+                ..bounds()
+            },
+            Completion::Incomplete(IncompleteReason::AcceptedBound),
+        ),
+        ("absent", bounds(), Completion::Complete),
+    ] {
+        let request = probes(text);
+        let control = fixture
+            .retrieve(&request, limits, &EvalBudget::unbounded())
+            .unwrap();
+        assert_eq!(control.completion, completion);
+        let budget = EvalBudget::unbounded();
+        let cancelled = fixture
+            .retrieve_with_hook(&request, limits, &budget, |window| {
+                if window == Window::BeforeRevalidation {
+                    budget.cancel();
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            cancelled.completion,
+            Completion::Incomplete(IncompleteReason::BudgetExhausted),
+            "cancellation after {completion:?} must remain distinguishable"
+        );
+        assert!(cancelled.contributions.is_empty());
+    }
+
     let started = Instant::now();
     fixture
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
@@ -1054,4 +1094,40 @@ fn an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion
     assert_eq!(control.completion, Completion::Complete);
     assert_eq!(control.consumed.scanned_rows, 2504);
     assert_eq!(control.contributions.len(), 4);
+
+    let polls = Arc::new(AtomicUsize::new(0));
+    let stop = {
+        let polls = Arc::clone(&polls);
+        move || polls.fetch_add(1, Ordering::Relaxed) >= 10
+    };
+    let budget = EvalBudget::unbounded();
+    let interrupted = fixture
+        .store
+        .with_conn_interruptible(Instant::now() + Duration::from_secs(30), stop, |conn| {
+            Ok(retrieve(
+                conn,
+                &fixture.kernel,
+                &probes("fetch parse"),
+                fixture.authority(),
+                RetrievalBounds {
+                    scan_rows: NonZeroUsize::new(1).unwrap(),
+                    ..bounds()
+                },
+                &budget,
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert!(!budget.is_exhausted(), "only the SQLite handler stopped");
+    assert!(polls.load(Ordering::Relaxed) >= 11);
+    assert_eq!(
+        interrupted.consumed.probes, 1,
+        "fetch completed before parse stopped"
+    );
+    assert_eq!(interrupted.consumed.scanned_rows, 1);
+    assert_eq!(
+        interrupted.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert!(interrupted.contributions.is_empty());
 }
