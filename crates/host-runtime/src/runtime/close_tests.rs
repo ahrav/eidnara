@@ -297,3 +297,46 @@ async fn post_abort_snapshot_does_not_resettle_rejection() {
         );
     }
 }
+
+/// A registration-race rejection settles a credited request, so its credit must ride the
+/// rejection frame to its block instead of returning when the settlement drops.
+#[tokio::test]
+async fn registration_race_rejection_carries_the_terminal_credit() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        route,
+        key,
+        ..
+    } = fixture();
+    let credit = generation
+        .terminal_credits
+        .clone()
+        .try_acquire_owned()
+        .unwrap();
+    let before = generation.terminal_credits.available_permits();
+    let settlement = Settlement::with_credit(Some(credit));
+    emit_pending_rejection(
+        &shared,
+        &generation,
+        &settlement,
+        FrameId::routed(route, key.2),
+        "unknown_channel",
+        "no live route for this channel and epoch",
+    )
+    .await;
+    drop(settlement);
+    let rejected = queue.recv().await.unwrap();
+    assert_eq!(
+        generation.terminal_credits.available_permits(),
+        before,
+        "the credit must still be held while the rejection frame is unreturned"
+    );
+    assert!(
+        rejected.credit.is_some(),
+        "the rejection frame carries the credit to its block"
+    );
+    drop(rejected);
+    assert_eq!(generation.terminal_credits.available_permits(), before + 1);
+}
