@@ -291,7 +291,7 @@ Exercised: not yet - nothing exercises admission after cancel.
 Guarantee: After a generation is retired with both `token.cancel()` and
 `writer.discard()`, no byte of any frame admitted after the cancel reaches the
 socket.
-Check: `always` - two interleavings. First, cancel the token and call `writer.discard()`, then have a producer that already passed its `is_cancelled` precheck call send; assert the bytes never appear on the peer socket. Second, the gap the guarantee is really about: place a barrier between `token.cancel()` and `writer.discard()`, and in that gap release both the prechecked producer (so its frame is enqueued) and the endpoint (so it dequeues), then call `discard()` and assert the bytes never appear. `run_endpoint` checks `discard` only at the top of its loop (`ring_transport.rs:689-691`); a frame dequeued afterwards is handed to `Publisher::push` (`:882`) and `Publisher::pump` (`:884`, defined at `:1159`) publishes it through `try_publish` (`:1221`) without re-checking `discard`, so a frame dequeued in the gap is published; that is the predicted violation at HEAD and the reason the first interleaving alone cannot fail. Both halves of the precondition are required: `send_ticket_before` gates on the writer's own `retired` token (`frame_channel.rs:640-653`), and the endpoint select services a ready queue (`ring_transport.rs:818`) before `root.cancelled()` (`:878`), so cancelling the generation token alone may still publish the newly queued frame. Separately assert `token.cancel()` alone does *not* stop queued frames, because the drain paths depend on that.
+Check: `always` - two interleavings. First, cancel the token and call `writer.discard()`, then have a producer that already passed its `is_cancelled` precheck call send; assert the bytes never appear on the peer socket. Second, the gap the guarantee is really about: place a barrier between `token.cancel()` and `writer.discard()`, and in that gap release both the prechecked producer (so its frame is enqueued) and the endpoint (so it dequeues), then call `discard()` and assert the bytes never appear. `run_endpoint` checks `discard` only at the top of its loop (`ring_transport.rs:724-726`); a frame dequeued afterwards is handed to `Publisher::push` (`:913`) and `Publisher::pump` (`:915`, defined at `:1245`) publishes it through `try_publish` (`:1307`) without re-checking `discard`, so a frame dequeued in the gap is published; that is the predicted violation at HEAD and the reason the first interleaving alone cannot fail. Both halves of the precondition are required: `send_ticket_before` gates on the writer's own `retired` token (`frame_channel.rs:640-653`), and the endpoint select services a ready queue (`ring_transport.rs:849`) before `root.cancelled()` (`:909`), so cancelling the generation token alone may still publish the newly queued frame. Separately assert `token.cancel()` alone does *not* stop queued frames, because the drain paths depend on that.
 Fault/timing angle: `send_ticket_before` gates on `retired` only, not on the
 generation token or `discard` (`frame_channel.rs:812-825` (source-catalog line, not present at HEAD)). So the guarantee is
 enforced downstream by the writer's biased discard arm, not by admission: a
@@ -3181,7 +3181,7 @@ on the erasure of a cause that existed at the failure site.
 
 Type: safety
 Reachability: default-production - `Publisher::try_publish`
-(`ring_transport.rs:1221`) is reached from `Publisher::pump` (`:1159`), which
+(`ring_transport.rs:1307`) is reached from `Publisher::pump` (`:1245`), which
 `run_endpoint` calls at `:696` and `:884` and `receive_one` calls at `:972`,
 `:1003`, and `:1017`, all on the endpoint thread every authenticated connection
 runs (`connection.rs:142-143`). `ShmReceiver::recv`'s `CleanEof` mapping
@@ -3194,7 +3194,7 @@ disposition rather than on liveness.
 Guarantee: An outbound publication failure is reported to the connection engine
 with a close cause distinct from a clean peer EOF, so a host-side transport
 fault is never attributed to the peer.
-Check: `always` - whenever `Publisher::pump` (`ring_transport.rs:1159`) returns `Err`, the cause delivered on the inbound channel is not `ReadClose::CleanEof`, and the connection's final disposition or operator-visible classification distinguishes the host-side transport fault from a peer close. The first clause holds at HEAD: every caller maps the `Err` to `ReadClose::Corrupt("shared-memory publish failed")` (`:696-704`, `:884-892`, `:973`, `:1004`, `:1018`, `:1022`, and the deadline arm at `:867-877`). The second clause is a predicted violation at HEAD: `read_loop` folds `Err(ReadClose::Corrupt(_))` into the same `ReadExit::Peer` arm as `CleanEof` (`crates/host-runtime/src/connection.rs:364-366`, re-verified), so the intermediate enum distinguishes the cause and the disposition does not. `always` fits because the close disposition is a total function of the cause (Part 2a, `close-disposition-is-a-total-function-of-the-read-exit-cause`) and a misclassified cause silently selects the wrong teardown every time it occurs.
+Check: `always` - whenever `Publisher::pump` (`ring_transport.rs:1245`) returns `Err`, the cause delivered on the inbound channel is not `ReadClose::CleanEof`, and the connection's final disposition or operator-visible classification distinguishes the host-side transport fault from a peer close. The first clause holds at HEAD: every caller maps the `Err` to `ReadClose::Corrupt("shared-memory publish failed")` (`:696-704`, `:884-892`, `:973`, `:1004`, `:1018`, `:1022`, and the deadline arm at `:867-877`). The second clause is a predicted violation at HEAD: `read_loop` folds `Err(ReadClose::Corrupt(_))` into the same `ReadExit::Peer` arm as `CleanEof` (`crates/host-runtime/src/connection.rs:364-366`, re-verified), so the intermediate enum distinguishes the cause and the disposition does not. `always` fits because the close disposition is a total function of the cause (Part 2a, `close-disposition-is-a-total-function-of-the-read-exit-cause`) and a misclassified cause silently selects the wrong teardown every time it occurs.
 Fault/timing angle: no interleaving is needed; the misreport is the
 straight-line behaviour. Superseded in part: the outbound failure path once
 returned from `run_endpoint` without sending on `inbound`, so the dropped sender
@@ -3652,12 +3652,14 @@ Open questions:
   threat model may not want. (needs human input)
 - Mechanism changed on the success path: `receive_one` does not release the
   lease before delivery. The `PayloadLease` travels inside `InboundFrame::new`
-  (`ring_transport.rs:1032-1034`) and is released inside
-  `InboundFrame::into_private` with `let _ = lease.release()`
-  (`frame_channel.rs:119`), which discards the `Result` exactly as the drop
-  path does. The only host release that still reports is the oversize
-  channel-0 rejection (`ring_transport.rs:948-950`). The `Guarantee:` and
-  `Check:` fields presuppose a reporting success path and need re-derivation.
+  (`ring_transport.rs:1076-1078`) and is released inside
+  `InboundFrame::into_private`, which propagates a failed release as
+  `PrivateCopyError::Transport` (`frame_channel.rs:118`); both callers end the
+  generation on it, and `into_private_reports_a_failed_return_wake_as_a_transport_error`
+  (`ring_transport.rs:3240`) exercises the failing return. The oversize
+  channel-0 rejection still reports its own release error
+  (`ring_transport.rs:986-988`). The failure paths that drop the lease still
+  discard the `Result`.
 
 ### ring-a-cancellation-close-requires-an-empty-inbound-observation
 
@@ -7876,7 +7878,7 @@ fails to publish.
 Guarantee: When a settled terminal fails to publish, the settling path has
 already returned success, the request is recorded as settled, and the client's
 only signal is a clean connection close.
-Check: `always` - whenever `Publisher::try_publish` (`ring_transport.rs:1221`) returns `Err` for a frame whose
+Check: `always` - whenever `Publisher::try_publish` (`ring_transport.rs:1307`) returns `Err` for a frame whose
 correlation has `won == true`, assert that no `Error` terminal for that
 correlation is emitted afterwards and that the generation's close carries no
 distinguishing reason; and, positively, that the client observes the clean
