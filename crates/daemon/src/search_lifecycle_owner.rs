@@ -274,6 +274,10 @@ impl SearchLifecycleOwner {
 
     /// One attempt at the manager: the guard, `None` while another holder has it and `budget` still allows waiting, or `Expired`.
     fn try_lock(&self, budget: &EvalBudget) -> Result<Option<MutexGuard<'_, Managed>>, BuildError> {
+        // An operation whose budget is already over gets no manager even when it is free, so it cannot act past its deadline.
+        if budget.is_exhausted() {
+            return Err(BuildError::Expired);
+        }
         match self.managed.try_lock() {
             Ok(guard) => Ok(Some(guard)),
             Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(Some(poisoned.into_inner())),
@@ -380,9 +384,11 @@ impl SearchLifecycleOwner {
     pub fn run_slice(&self, budget: &EvalBudget) -> SliceOutcome {
         // The manifest's slice bound runs from here, across the wait for the manager and the slice's work, and within the caller's budget; a cancelled slice returns rather than outliving its caller's cancellation. The bound is read before the manager is held, so a held manager cannot delay reading it.
         let slice_started = Instant::now();
+        // A zero bound is not applied here: preparation refuses it, and that refusal needs the manager.
         let slice = AdmissionInputs::read(&self.home)
             .ok()
             .and_then(|inputs| limit(inputs.manifest(), "supervisor_slice_ms").ok())
+            .filter(|slice_ms| *slice_ms > 0)
             .map_or(SLICE_IDLE, Duration::from_millis);
         let wait = budget.bounded_by(slice_started + slice);
         let mut managed = match self.lock_within(&wait) {

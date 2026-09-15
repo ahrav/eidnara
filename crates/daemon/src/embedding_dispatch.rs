@@ -581,11 +581,22 @@ impl<'a> EmbeddingDispatcher<'a> {
             }
         };
         pass.stage(job, Stage::Poll, observer);
-        // The wait for a result ends at the row's episode deadline, measured from the pass's clock reading at its start, so a result that lands after the deadline is left for a pass that stops the row; a host restart during the wait renews the result wait but not this deadline.
-        let deadline_at = pass.started
-            + u64::try_from(job.episode_deadline(pass.bounds.grant) - pass.now)
-                .map(Duration::from_millis)
-                .unwrap_or(Duration::ZERO);
+        // The row's episode deadline as an instant, measured from the pass's clock reading at its start and never past the pass's own deadline. Polling, re-admission, and publication all end there: a result that lands after it is left for a pass that stops the row, and a host restart during the wait renews the result wait but not this deadline.
+        let remaining = u64::try_from(
+            job.episode_deadline(pass.bounds.grant)
+                .saturating_sub(pass.now),
+        )
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::ZERO);
+        let deadline_at = pass
+            .started
+            .checked_add(remaining)
+            .unwrap_or(pass.deadline)
+            .min(pass.deadline);
+        let pass = &Pass {
+            deadline: deadline_at,
+            ..*pass
+        };
         let mut readmitted = false;
         let mut started = Instant::now();
         loop {
@@ -605,6 +616,8 @@ impl<'a> EmbeddingDispatcher<'a> {
                 }
                 // This job's wait is over; the pass moves on and a later pass polls the held job.
                 PollOutcome::Pending { .. } => return Ok(None),
+                // A result ready only after the row's deadline is not published under it; the row stays admitted for a pass whose clock is past the deadline to stop it.
+                PollOutcome::Page(_) if Instant::now() >= deadline_at => return Ok(None),
                 PollOutcome::Page(page) => {
                     let Some((_, _, vector)) =
                         page.vectors.iter().find(|(id, _, _)| id == &item_id)

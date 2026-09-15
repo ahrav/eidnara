@@ -797,13 +797,64 @@ async fn a_blocked_pass_keeps_the_scan_position_it_reached() {
     );
 }
 
-/// The wait for a held job's result ends at the row's episode deadline as measured from the pass's start, and a host restart during the wait does not renew it.
+/// One pass whose observer sleeps `delay` at the first poll stage, so the row's deadline passes inside the pass before its result is looked at.
+fn pass_delayed_at_poll(
+    corpus: &Corpus,
+    projection: &SearchProjection,
+    local_embeddings: &LocalEmbeddingsComponent,
+    bounds: &DispatchBounds,
+    now: i64,
+    delay: Duration,
+) -> (Option<Blocked>, Vec<DispatchEvent>) {
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut events = Vec::new();
+    let mut delayed = false;
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, projection, local_embeddings);
+    let end = tokio::task::block_in_place(|| {
+        dispatcher
+            .run_pass(
+                eligibility(&project),
+                bounds,
+                &budget(Duration::from_secs(10)),
+                now,
+                &mut |event| {
+                    if matches!(
+                        event,
+                        DispatchEvent::Stage {
+                            stage: Stage::Poll,
+                            ..
+                        }
+                    ) && !delayed
+                    {
+                        delayed = true;
+                        std::thread::sleep(delay);
+                    }
+                    events.push(event);
+                },
+            )
+            .unwrap()
+    });
+    (end, events)
+}
+
+fn stages(events: &[DispatchEvent]) -> Vec<Stage> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            DispatchEvent::Stage { stage, .. } => Some(*stage),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A result that is ready once the row's own deadline has passed inside the pass is not published: the row stays admitted for a pass that stops it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_readmitted_job_keeps_the_pass_deadline_for_its_result() {
+async fn a_result_ready_after_the_row_deadline_is_not_published() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
-    let object = corpus.publish("m0", "held message");
+    let text = "ready too late";
+    let object = corpus.publish("m0", text);
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
@@ -813,27 +864,141 @@ async fn a_readmitted_job_keeps_the_pass_deadline_for_its_result() {
         grant: grant(3, NOW + 300),
         ..bounds()
     };
-    // The first pass admits the row under the 300 ms deadline and leaves it held.
     let (end, events) = pass(&corpus, &projection, &local_embeddings, &near, NOW);
     assert_eq!(end, None);
     assert_eq!(admitted(&events).len(), 1);
     let held = ledger(dir.path(), occurrence);
     assert_eq!(held.deadline, Some(NOW + 300));
+    drop(gate);
+    let host_job = held.host_job_id.clone().unwrap();
+    assert!(matches!(
+        wait_for_host_result(
+            &local_embeddings,
+            &host_job,
+            &held.episode.clone().unwrap(),
+            text
+        ),
+        PollOutcome::Page(_)
+    ));
 
-    // A new host incarnation makes the held job poll as restarted; the re-admitted job's wait is still bounded by the row's deadline from the pass start.
-    let restarted_engine = TestEngine::new();
-    let restarted_gate = GateGuard(restarted_engine.block_calls());
-    let restarted_lane = component(&restarted_engine, LocalEmbeddingsLimits::default());
-    let started = std::time::Instant::now();
-    let (end, events) = pass(&corpus, &projection, &restarted_lane, &bounds(), NOW);
-    assert_eq!(end, None, "{events:?}");
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "the re-admitted job's wait ran {:?} past the row's 300 ms deadline",
-        started.elapsed()
+    // The pass runs under a day-long grant, but 400 ms pass inside it before the ready result is looked at, past the row's 300 ms.
+    let (end, events) = pass_delayed_at_poll(
+        &corpus,
+        &projection,
+        &local_embeddings,
+        &bounds(),
+        NOW,
+        Duration::from_millis(400),
     );
-    TestEngine::release(&gate.0);
-    TestEngine::release(&restarted_gate.0);
+    assert_eq!(end, None, "{events:?}");
+    assert!(published(&events).is_empty(), "{events:?}");
+    let still_held = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (still_held.state.as_str(), still_held.vector.is_none()),
+        ("admitted", true)
+    );
+
+    // A pass whose clock stands past the deadline stops the row.
+    let (_, events) = pass(
+        &corpus,
+        &projection,
+        &local_embeddings,
+        &bounds(),
+        NOW + 301,
+    );
+    assert_eq!(
+        stopped(&events),
+        vec![(held.job_id.clone(), "deadline_expired".to_owned())]
+    );
+}
+
+/// A job re-admitted within the pass after the host evicted its result keeps the row's deadline from the pass's start: once that has passed, the replacement is not waited for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_readmitted_job_keeps_the_row_deadline_from_the_pass_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let text = "evicted before polled";
+    let object = corpus.publish("m0", text);
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let local_embeddings = component(
+        &engine,
+        LocalEmbeddingsLimits {
+            max_retained_jobs: 1,
+            max_queued_jobs: 1,
+            ..LocalEmbeddingsLimits::default()
+        },
+    );
+    let near = DispatchBounds {
+        grant: grant(3, NOW + 300),
+        result_wait: Duration::from_millis(50),
+        ..bounds()
+    };
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &near, NOW);
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(admitted(&events), vec![(held.job_id.clone(), 1)]);
+    let evicted_host_job = held.host_job_id.clone().unwrap();
+    let item = held.episode.clone().unwrap();
+    drop(gate);
+    assert!(matches!(
+        wait_for_host_result(&local_embeddings, &evicted_host_job, &item, text),
+        PollOutcome::Page(_)
+    ));
+    // A sentinel evicts the retained result, so the held job polls as restarted.
+    let sentinel = local_embeddings
+        .preflight_embedding_for_lane(&lane(FINGERPRINT), "eviction sentinel")
+        .unwrap();
+    let SubmitOutcome::Queued {
+        job_id: sentinel_host,
+    } = local_embeddings
+        .submit_admitted(&sentinel, "sentinel")
+        .unwrap()
+    else {
+        panic!("sentinel must be admitted");
+    };
+    assert!(matches!(
+        wait_for_host_result(
+            &local_embeddings,
+            &sentinel_host,
+            "sentinel",
+            "eviction sentinel"
+        ),
+        PollOutcome::Page(_)
+    ));
+    assert!(matches!(
+        local_embeddings.poll_admitted(&lane(FINGERPRINT), &evicted_host_job, &item, text),
+        PollOutcome::Restarted
+    ));
+
+    // The replacement's call is held; 400 ms pass inside the pass before the restarted poll, past the row's 300 ms, so the re-admitted job is not waited for.
+    let gate = GateGuard(engine.block_calls());
+    let started = std::time::Instant::now();
+    let (end, events) = pass_delayed_at_poll(
+        &corpus,
+        &projection,
+        &local_embeddings,
+        &DispatchBounds {
+            result_wait: Duration::from_secs(5),
+            ..bounds()
+        },
+        NOW,
+        Duration::from_millis(400),
+    );
+    let elapsed = started.elapsed();
+    drop(gate);
+    assert_eq!(end, None, "{events:?}");
+    assert_eq!(
+        stages(&events),
+        vec![Stage::Poll, Stage::Admit, Stage::Poll]
+    );
+    assert!(
+        elapsed < Duration::from_millis(400) + Duration::from_secs(2),
+        "the re-admitted job was waited for {elapsed:?} past the row's deadline"
+    );
+    assert!(published(&events).is_empty());
 }
 
 /// AC2, AC4, AC6: a new host incarnation cannot satisfy work the old one admitted; rebinding returns it to pending with its attempt kept, a lane with a different fingerprint blocks admission, and the stored binding follows the host that actually serves.
