@@ -4,11 +4,11 @@ Status: proposed contract, implemented in `crates/retrieval/src/dense/`.
 
 This document states the rules the dense retrieval path applies to the
 original f32 vectors of one generation: how a row is stored, which rows a
-generation admits, how a score is computed, how rows are ordered, and what
-the exhaustive oracle reports when it cannot stand for the whole population.
-Every later dense path (rescoring, compressed scoring, compaction) is checked
-against this oracle, so these rules change only with a deliberate contract
-edit.
+generation admits, how a score is computed, how rows are ordered, what the
+exhaustive oracle reports when it cannot stand for the whole population, and
+how the scalar int8 recipe derives from those rows. Every later dense path
+(rescoring, compressed scoring, compaction) is checked against this oracle, so
+these rules change only with a deliberate contract edit.
 
 Numeric limits are not part of this contract. Callers supply `OracleBounds`
 with no default; a missing bound is a compile error, not an experimental
@@ -133,3 +133,82 @@ The oracle reads `occurrences`, `occurrence_tombstones`, `occurrence_vectors`,
 `dense::score::rescore` ranks an already-selected set of original rows with
 the same arithmetic and order after validating the query and every row
 against the layout, for rescoring candidates from another path.
+
+## The scalar int8 recipe
+
+`dense::scalar` implements recipe `scalar-int8-symmetric.v1`
+(`ScalarRecipe::SymmetricInt8V1`). A change to any rule below is a new recipe
+identifier; persisted codes are never reinterpreted under another recipe.
+
+### Calibration
+
+`dense::scalar::calibrate(layout, rows)` takes the generation's original rows,
+each of which must satisfy `N_gen`, and produces one scale per coordinate:
+
+- `max_abs_j` is the largest `|x_j|` over the calibration rows, taken in f32.
+- `s_j = max_abs_j / 127`, computed once in f32 so the stored scale is the
+  single correctly rounded quotient. Nothing is computed in f64 and narrowed.
+- A coordinate that is zero in every row takes `s_j = 1`.
+- A coordinate whose `max_abs_j` is nonzero but whose quotient is `0` in f32
+  is refused (`ScaleUnderflow`); a scale of zero would make every value of
+  that coordinate a division by zero.
+- Zero calibration rows are refused (`NoRows`). An empty generation has no
+  calibration provenance, so it has no scales.
+
+The calibration identity is the recipe, the number of calibrated rows, and
+the SHA-256 of the encoded scales. Scales encode as four little-endian bytes
+per coordinate, the same word encoding as a row; decoding refuses a truncated
+word, a wrong dimension, and any scale that is not a positive finite number.
+
+### Encoding
+
+`dense::scalar::encode(layout, scales, row)` validates the row against
+`N_gen` and the scales against the layout's dimension, then for each
+coordinate:
+
+- forms `x_j / s_j` in f64 from the two f32 values,
+- rounds it to the nearest integer with ties to even (`f64::round_ties_even`),
+- clamps it to `[-127, 127]`, counting the coordinate as clipped when the
+  clamp changed the value,
+- and stores the result as an `i8`.
+
+The code `-128` is never produced. Clipping never changes a scale. Query and
+document rows are encoded with the same stored scales of the owning
+generation; a query encoded under another generation's scales carries other
+codes. Codes encode as one two's-complement byte per coordinate; decoding
+refuses a wrong dimension and the reserved byte `0x80`.
+
+### Scoring
+
+`dense::scalar::weighted_dot(scales, query_codes, doc_codes)` computes
+
+```text
+sum_j (s_j * s_j) * (i32(c_query_j) * i32(c_doc_j))
+```
+
+- The integer product is formed in i32 and lies in `[-16129, 16129]`.
+- The weight `s_j * s_j` is formed in f64 from the f32 scale.
+- Each term is `weight * f64(product)`, written to a local before it is added.
+- Terms are summed into one f64 accumulator in increasing coordinate order,
+  starting from `+0.0`, with no fused multiply-add and no reassociation.
+- Unequal lengths panic; they never truncate.
+
+A plain integer dot is not this score: with per-coordinate scales the two
+rank differently, and the fixtures show a pair they order oppositely.
+Reconstructed vectors are never renormalized and no other metric is
+substituted. Ranking over these scores uses `dense::score::rank_order`, the
+same order as the f32 oracle.
+
+### Fidelity
+
+For a query `q` and a document `d`, neither clipped,
+
+```text
+|Σ q_j d_j − Σ s_j² c_q,j c_d,j| ≤ Σ_j |q_j| s_j / 2 + |s_j c_d,j| s_j / 2
+```
+
+because each reconstruction error is at most half a scale. The fixtures assert
+this bound and check that pairs whose exact scores differ by more than both
+bounds keep their order under the int8 score. Pairs closer than the bound may
+reorder; that is the loss the RP2.9 fidelity campaign measures, and it is not
+decided here.

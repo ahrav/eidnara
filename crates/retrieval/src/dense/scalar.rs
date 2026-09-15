@@ -1,0 +1,261 @@
+//! Symmetric per-coordinate int8 quantization over unit-normalized rows.
+//!
+//! Calibration fixes one positive finite f32 scale per coordinate, `s_j = max_abs_j / 127`, computed once in f32.
+//! Encoding widens `x_j / s_j` to f64, rounds ties to even, clamps to `[-127, 127]`, and counts every clamp; `-128` is never produced.
+//! Scoring sums `(s_j * s_j) * (c_query_j * c_doc_j)` in f64 in increasing coordinate order with the integer product formed in i32, so the same scales and codes yield the same f64 everywhere.
+
+use sha2::{Digest, Sha256};
+
+use super::codec::{self, RowLayout, RowRejection};
+
+/// The recipe every persisted code was produced under; a new recipe is a new variant, never a reinterpretation of old bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarRecipe {
+    SymmetricInt8V1,
+}
+
+impl ScalarRecipe {
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::SymmetricInt8V1 => "scalar-int8-symmetric.v1",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "scalar-int8-symmetric.v1" => Some(Self::SymmetricInt8V1),
+            _ => None,
+        }
+    }
+}
+
+pub const CODE_MAX: i8 = 127;
+pub const CODE_MIN: i8 = -127;
+
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum CalibrationRejection {
+    #[error("no calibration rows were supplied")]
+    NoRows,
+    #[error("calibration row {index}: {rejection}")]
+    Row {
+        index: usize,
+        rejection: RowRejection,
+    },
+    #[error("coordinate {coordinate} has a nonzero maximum whose scale underflows to zero")]
+    ScaleUnderflow { coordinate: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum ScaleRejection {
+    #[error("{bytes} bytes is not a whole number of f32 words")]
+    TruncatedWord { bytes: usize },
+    #[error("the scales have {actual} coordinates, not {expected}")]
+    Dimension { expected: u32, actual: usize },
+    #[error("scale {coordinate} is not a positive finite number")]
+    NotPositiveFinite { coordinate: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum CodeRejection {
+    #[error("the codes have {actual} coordinates, not {expected}")]
+    Dimension { expected: u32, actual: usize },
+    #[error("code {coordinate} is the reserved value -128")]
+    Reserved { coordinate: usize },
+}
+
+/// One positive finite f32 per coordinate.
+#[derive(Clone, PartialEq)]
+pub struct Scales {
+    scales: Vec<f32>,
+}
+
+impl std::fmt::Debug for Scales {
+    /// Scales derive from row content and stay out of diagnostics.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scales")
+            .field("dimension", &self.scales.len())
+            .finish()
+    }
+}
+
+impl Scales {
+    pub fn dimension(&self) -> u32 {
+        u32::try_from(self.scales.len()).expect("a dimension is a u32")
+    }
+
+    pub fn as_slice(&self) -> &[f32] {
+        &self.scales
+    }
+
+    /// Four little-endian bytes per scale, the same word encoding as a row.
+    pub fn encode(&self) -> Vec<u8> {
+        codec::encode(&self.scales)
+    }
+
+    pub fn decode(bytes: &[u8], dimension: u32) -> Result<Self, ScaleRejection> {
+        let (words, rest) = bytes.as_chunks::<4>();
+        if !rest.is_empty() {
+            return Err(ScaleRejection::TruncatedWord { bytes: bytes.len() });
+        }
+        Self::from_values(
+            words.iter().map(|word| f32::from_le_bytes(*word)).collect(),
+            dimension,
+        )
+    }
+
+    fn from_values(scales: Vec<f32>, dimension: u32) -> Result<Self, ScaleRejection> {
+        if scales.len() != dimension as usize {
+            return Err(ScaleRejection::Dimension {
+                expected: dimension,
+                actual: scales.len(),
+            });
+        }
+        if let Some(coordinate) = scales
+            .iter()
+            .position(|scale| !(scale.is_finite() && *scale > 0.0))
+        {
+            return Err(ScaleRejection::NotPositiveFinite { coordinate });
+        }
+        Ok(Self { scales })
+    }
+
+    /// SHA-256 of the encoded scales, for binding a calibration to the generation that carries it.
+    pub fn digest(&self) -> [u8; 32] {
+        Sha256::digest(self.encode()).into()
+    }
+}
+
+/// The recipe, the rows it saw, and the digest of the scales it produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalibrationIdentity {
+    pub recipe: ScalarRecipe,
+    pub calibrated_rows: u64,
+    pub scales_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Calibration {
+    pub scales: Scales,
+    pub identity: CalibrationIdentity,
+}
+
+/// `max_abs_j / 127` is computed once in f32 so the stored scale is the single correctly rounded quotient; an all-zero coordinate takes scale 1.
+///
+/// # Errors
+///
+/// No rows, a row outside `layout`, or a nonzero coordinate whose scale rounds to zero.
+pub fn calibrate<'a>(
+    layout: &RowLayout,
+    rows: impl IntoIterator<Item = &'a [f32]>,
+) -> Result<Calibration, CalibrationRejection> {
+    let dimension = layout.dimension as usize;
+    let mut max_abs = vec![0.0f32; dimension];
+    let mut count = 0u64;
+    for (index, row) in rows.into_iter().enumerate() {
+        codec::validate(row, layout)
+            .map_err(|rejection| CalibrationRejection::Row { index, rejection })?;
+        for (max, value) in max_abs.iter_mut().zip(row) {
+            *max = max.max(value.abs());
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return Err(CalibrationRejection::NoRows);
+    }
+    let mut scales = Vec::with_capacity(dimension);
+    for (coordinate, max) in max_abs.into_iter().enumerate() {
+        let scale = if max == 0.0 { 1.0 } else { max / 127.0 };
+        if scale == 0.0 {
+            return Err(CalibrationRejection::ScaleUnderflow { coordinate });
+        }
+        scales.push(scale);
+    }
+    let scales = Scales { scales };
+    let identity = CalibrationIdentity {
+        recipe: ScalarRecipe::SymmetricInt8V1,
+        calibrated_rows: count,
+        scales_digest: scales.digest(),
+    };
+    Ok(Calibration { scales, identity })
+}
+
+/// The codes of one row and how many coordinates were clamped into range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Encoded {
+    pub codes: Vec<i8>,
+    pub clipped: u32,
+}
+
+/// Each quotient is formed in f64 from the f32 value and scale, rounded ties to even, then clamped; the scale is never changed to fit the value.
+///
+/// # Errors
+///
+/// A row outside `layout`, or scales of another dimension.
+pub fn encode(layout: &RowLayout, scales: &Scales, row: &[f32]) -> Result<Encoded, RowRejection> {
+    codec::validate(row, layout)?;
+    if scales.dimension() != layout.dimension {
+        return Err(RowRejection::Dimension {
+            expected: layout.dimension,
+            actual: scales.scales.len(),
+        });
+    }
+    let mut codes = Vec::with_capacity(row.len());
+    let mut clipped = 0u32;
+    for (value, scale) in row.iter().zip(&scales.scales) {
+        let rounded = (f64::from(*value) / f64::from(*scale)).round_ties_even();
+        let code = rounded.clamp(f64::from(CODE_MIN), f64::from(CODE_MAX));
+        if code != rounded {
+            clipped += 1;
+        }
+        // The clamp bounds the value to i8 range, so the cast is exact.
+        codes.push(code as i8);
+    }
+    Ok(Encoded { codes, clipped })
+}
+
+/// One byte per code, two's complement.
+pub fn encode_codes(codes: &[i8]) -> Vec<u8> {
+    codes.iter().map(|code| code.to_le_bytes()[0]).collect()
+}
+
+/// Rejects the reserved code `-128` so a corrupt byte cannot widen into a product outside the recipe's range.
+pub fn decode_codes(bytes: &[u8], dimension: u32) -> Result<Vec<i8>, CodeRejection> {
+    if bytes.len() != dimension as usize {
+        return Err(CodeRejection::Dimension {
+            expected: dimension,
+            actual: bytes.len(),
+        });
+    }
+    let codes: Vec<i8> = bytes
+        .iter()
+        .map(|byte| i8::from_le_bytes([*byte]))
+        .collect();
+    if let Some(coordinate) = codes.iter().position(|code| *code == i8::MIN) {
+        return Err(CodeRejection::Reserved { coordinate });
+    }
+    Ok(codes)
+}
+
+/// `sum_j (s_j * s_j) * (c_query_j * c_doc_j)` in f64, increasing coordinate order, starting at `+0.0`; the integer product is formed in i32 and lies in `[-16129, 16129]`.
+///
+/// Panics on unequal lengths so a shape error can never become a silently truncated score.
+pub fn weighted_dot(scales: &Scales, query: &[i8], doc: &[i8]) -> f64 {
+    assert_eq!(
+        scales.scales.len(),
+        query.len(),
+        "codes of one calibration have one length"
+    );
+    assert_eq!(
+        query.len(),
+        doc.len(),
+        "codes of one calibration have one length"
+    );
+    let mut sum = 0.0f64;
+    for ((scale, q), d) in scales.scales.iter().zip(query).zip(doc) {
+        let weight = f64::from(*scale) * f64::from(*scale);
+        let product = i32::from(*q) * i32::from(*d);
+        let term = weight * f64::from(product);
+        sum += term;
+    }
+    sum
+}

@@ -39,3 +39,7 @@ harness = false
 [[bench]]
 name = "lexical_index"
 harness = false
+
+[[bench]]
+name = "dense_scalar"
+harness = false
