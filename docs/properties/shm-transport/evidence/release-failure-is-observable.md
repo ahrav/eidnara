@@ -17,29 +17,40 @@ no successor. See the refresh note in [../catalog.md](../catalog.md).
 
 ## Discovery trigger
 
-Two `let _ =` sites on completion paths. `ReceiveLease::Drop` discards whatever
-`release_once` returns, and the host's clean-close branch discards whatever
-`custody.release()` returns. Both are on paths that only run when everything else
+Two `let _ =` sites on completion paths. `PayloadLease::Drop` discards whatever
+`return_once` returns (`crates/shm-transport/src/lease.rs:367`), and the host's
+`InboundFrame::into_private` discards whatever `lease.release()` returns
+(`crates/host-runtime/src/frame_channel.rs:119`); in the source tree this record
+was written against, the second site was the clean-close branch discarding
+`custody.release()`. Both are on paths that only run when everything else
 looked fine, which is exactly where a lost signal is least likely to be noticed by
 anything else.
 
 ## Evidence trail
 
-- `crates/shm-transport/src/lease.rs:366-372` — the drop-path discard:
+- `crates/shm-transport/src/lease.rs:364-370` — the drop-path discard:
   ```rust
-  impl Drop for ReceiveLease<'_> {
+  impl Drop for PayloadLease {
       fn drop(&mut self) {
-          if !self.released {
-              let _ = self.release_once();
+          if !self.returned {
+              let _ = self.return_once();
           }
       }
   }
   ```
-  `release_once` (`:350-357`, span re-verified at post-#131 HEAD) calls through
-  to `Ring::release`, so every error that function can produce — `Quarantined`
-  (`ring.rs:1530`), `WrongIncarnation` (`:1538`), `WrongLane` (`:1541`),
-  `InvalidSequence` (`:1545`, `:1557`, `:1573`, `:1586`), `DuplicateRelease` (`:1584`) —
-  is silently dropped here.
+  `return_once` (`:346-355`) calls through to `Retained::complete`
+  (`crates/shm-transport/src/backend/retained.rs:588-619`), so every error that
+  path can produce - `DuplicateRelease` (`lease.rs:348`) and `WakeFailed`
+  (`:354`), the latter covering `WakeError::Mapping` from an unaddressable
+  completion cell (`retained.rs:609-614`) and any doorbell failure in
+  `signal_capacity` (`:625-638`) or `send_capacity_token` (`:640-661`) - is
+  silently dropped here. `complete` does not quarantine; a doorbell failure
+  latches `Retained::wake_failed` (`:629`, `:647`, `:656`), which nothing
+  outside `retained.rs` reads.
+- `crates/host-runtime/src/frame_channel.rs:119` - the host copy-path discard:
+  `InboundFrame::into_private` copies the body with `PayloadLease::to_vec`
+  (`:116`) and then runs `let _ = lease.release();`, so a failed return after a
+  successful copy is unreported and the frame proceeds to its decoder.
 - former `crates/host-runtime/src/shm_provider.rs:363-371` — the clean-close branch:
   `if clean && !quarantine_next_close.swap(false, Ordering::AcqRel) { let _ = custody.release(); } else { recovery.report_suspect(custody); }`. The suspect path
   is the `else`, so on a clean close no recovery record is created regardless of what
@@ -187,9 +198,9 @@ this the cheapest of the group to make non-vacuous.
 `Reaches production:` moved from `yes` to `no`; `Status:` stays `active`. This
 record had two discard sites and the refactor removed one of them.
 
-The transport-side site is unchanged and verified at `e447c927`:
-`ReceiveLease::Drop` calls `release_once()` and discards the result
-(`crates/shm-transport/src/lease.rs:366-372`).
+The transport-side site was verified at `e447c927` and keeps its shape at HEAD:
+`PayloadLease::Drop` calls `return_once()` and discards the result
+(`crates/shm-transport/src/lease.rs:364-370`).
 
 The host-side site is gone. `let _ = custody.release()` at the former
 `crates/host-runtime/src/shm_provider.rs:365` is now `admission.release()` at
@@ -226,3 +237,32 @@ lease drop path, and no shipped configuration selects the shared-memory transpor
   - line 156, `lib.rs:1256` (std::mem::forget(lease) in poll): The lease is stored in `channel.active` instead (`packages/shm-native/src/lib.rs:1445-1451`).
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+### Q: Is a failed lease return observable with completion in `Retained::complete`?
+
+- Sources examined: `crates/shm-transport/src/lease.rs:239-370` (`PayloadLease`,
+  `release`, `return_once`, `Drop`); `crates/shm-transport/src/backend/retained.rs:433-437`
+  (`wake_failed()`), `:584-661` (`complete`, `signal_capacity`,
+  `send_capacity_token`); `crates/host-runtime/src/frame_channel.rs:103-128`
+  (`InboundFrame::into_private`); `crates/host-runtime/src/ring_transport.rs:947-959`
+  (the control-cap release in `receive_one`); `packages/shm-native/src/lib.rs:355-380`
+  (`detach_active`); a repository search for `wake_failed(`.
+- Findings: no. `Retained::complete` reaches no `Ring` and quarantines nothing;
+  a failed doorbell write latches `wake_failed`, and no caller in `crates/` or
+  `packages/` reads `Retained::wake_failed()`. The `Result` reaches a reporter
+  only where `PayloadLease::release` is called explicitly and checked: the
+  control-cap branch of `receive_one` maps it to
+  `ReadClose::Corrupt("shared-memory completion failed")`, and the addon's
+  `detach_active` maps it to `consumed_error("receive completion failed")`. The
+  drop path and `InboundFrame::into_private` discard it. The quarantine-on-error
+  wrapping the catalog record's Guarantee was verified against has no
+  counterpart, so the documented guarantee and the code disagree at HEAD.
+  Arm 1 of the test recipe above does not produce a failing return, because
+  `complete` does not consult the ring's quarantine flag; a failing return needs
+  a closed capacity doorbell or an unaddressable completion cell.
+- Missing evidence: a test that drives `complete` into `WakeError::Doorbell` and
+  observes anything other than the latch.
+- Conclusion: resolved with answer - the failure is dropped silently on both
+  discard paths; the catalog record's Confidence is medium and its Existing
+  check is none. Whether the intended response is a quarantine, a counter, or
+  the latch needs human input.

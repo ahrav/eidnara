@@ -43,14 +43,14 @@ Delivery path, `:546-548`: the identical form.
 - `:539` - the sender queue closes while the charge is pending, returning
   `Err(ReadClose::Cancelled)`.
 
-All three return while `lease` is a live local, so `ReceiveLease`'s `Drop` runs.
-`crates/shm-transport/src/lease.rs:201-206`:
+All three return while `lease` is a live local, so `PayloadLease`'s `Drop` runs.
+`crates/shm-transport/src/lease.rs:364-370`:
 
 ```
-impl Drop for ReceiveLease<'_> {
+impl Drop for PayloadLease {
     fn drop(&mut self) {
-        if !self.released {
-            let _ = self.release_once();
+        if !self.returned {
+            let _ = self.return_once();
         }
     }
 }
@@ -172,7 +172,7 @@ Preconditions, all three needed:
 3. An oracle that can see the discarded `Result`. Since `Drop` discards it, the
    test cannot observe it directly. Two options: assert the *consequence* -
    `active_leases` on the consumer page did not decrease - or add a
-   `#[cfg(debug_assertions)]` counter inside `ReceiveLease::drop` for failed
+   `#[cfg(debug_assertions)]` counter inside `PayloadLease::drop` for failed
    drop-path releases. The second is the honest oracle; the first is a proxy that
    also fires for unrelated reasons.
 
@@ -227,3 +227,30 @@ the host's handling of it on the drop paths.
   in the lens file overstates this and should be read together with this entry;
   the corrected reading is recorded here rather than silently reworded, per the
   method's rule about not restating an unconfirmed claim as fact.
+
+### Q: Does the success path still report a release failure at HEAD?
+
+- Sources examined: `ring_transport.rs:926-1038` (`receive_one`),
+  `:1026-1036` (the lease travels inside `InboundFrame::new`),
+  `frame_channel.rs:103-128` (`InboundFrame::into_private`),
+  `crates/shm-transport/src/lease.rs:342-355` (`release` and `return_once`) and
+  `:364-370` (`Drop`), `connection.rs:532-543` (`decode_control_frame`),
+  `dispatch.rs:993-1027` (the routed copy under `WorkLedgers::run_blocking`).
+- Findings: no. `receive_one` does not copy or release on the delivery
+  path; it hands the `PayloadLease` to the connection engine inside the frame.
+  The release happens in `InboundFrame::into_private` as
+  `let _ = lease.release();` (`frame_channel.rs:119`), which discards the
+  `Result` exactly as `Drop` does, and `into_private` reports only a copy
+  failure or a length mismatch (`PrivateCopyError`, `:73-78`). The one host
+  release that still routes its error is the oversize channel-0 rejection at
+  `ring_transport.rs:948-950`. The paths that drop the lease are also more
+  numerous: the `Ok(false)` exits on `read_cancel` and `discard` (`:991`,
+  `:993`) join the `Overloaded` (`:988`, `:998`) and `Cancelled` (`:1007`)
+  returns.
+- Missing evidence: whether the routed copy running on a blocking worker
+  (`dispatch.rs:1002`) changes what a release failure could mean there; the
+  block returns from a thread that holds no `Ring`.
+- Conclusion: unresolved, needs the record re-derived. The asymmetry this
+  record names has collapsed into a uniform silence: no host path other than
+  the oversize rejection reports a release failure, so the `Guarantee:` and
+  `Check:` fields describe a reporting success path that HEAD does not have.

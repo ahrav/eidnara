@@ -989,6 +989,13 @@ impl Ring {
         let Some(block) = ledger.free[class.index()].pop() else {
             return Err(ProducerError::Exhausted);
         };
+        if let Some(position) = ledger
+            .reclaimed
+            .iter()
+            .position(|&returned| returned == block)
+        {
+            ledger.reclaimed.swap_remove(position);
+        }
         let Some(generation) = ledger.generations[block as usize].checked_add(1) else {
             ledger.free[class.index()].push(block);
             ledger.retired = true;
@@ -1498,9 +1505,8 @@ impl Ring {
 
     /// Scans completion cells now and hands every block returned since the previous call to
     /// `settle`, in return order. A caller that ties a credit or record to a published block
-    /// releases it here, at the physical return, not when a callback finishes. The list is
-    /// bounded by the block count, so a caller that never drains loses only the oldest
-    /// notifications, never a return.
+    /// releases it here, at the physical return, not when a callback finishes. `try_reserve_in`
+    /// removes a returned block it reuses, so `settle` never sees a block the peer holds again.
     pub fn take_reclaimed(&self, mut settle: impl FnMut(u32)) -> Result<(), RingError> {
         if self.ledger.borrow().allowed && !self.is_quarantined() {
             self.reclaim_completions()?;
@@ -2357,6 +2363,34 @@ mod tests {
             producer.try_reserve_in(Inventory::Control, 4096, wire_v3_header(4096).unwrap()),
             Err(ProducerError::BoundExceedsClass)
         ));
+    }
+
+    /// A reused block is not reportable until its new holder releases it.
+    #[test]
+    fn take_reclaimed_never_reports_a_block_reserved_since_its_return() {
+        let (producer, consumer) = pair(tiny_geometry());
+        let first = publish(&producer, b"first");
+        receive(&consumer).release().unwrap();
+        let second = publish(&producer, b"second");
+        assert_eq!(second, first, "the returned block is reused first");
+        let held = receive(&consumer);
+        let mut settled = Vec::new();
+        producer
+            .take_reclaimed(|block| settled.push(block))
+            .unwrap();
+        assert!(
+            settled.is_empty(),
+            "a block published and held by the peer has no reportable return: {settled:?}"
+        );
+        held.release().unwrap();
+        producer
+            .take_reclaimed(|block| settled.push(block))
+            .unwrap();
+        assert_eq!(settled, vec![first], "the physical return is reported once");
+        producer
+            .take_reclaimed(|block| settled.push(block))
+            .unwrap();
+        assert_eq!(settled, vec![first], "a drained return is not repeated");
     }
 
     #[test]

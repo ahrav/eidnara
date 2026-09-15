@@ -10,12 +10,12 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1028`
+- `crates/shm-transport/src/backend/ring.rs:1035`
 - `crates/shm-transport/src/backend/retained.rs:625`
 - `crates/shm-transport/src/backend/ring.rs:75`
 - `crates/host-runtime/src/client.rs:2713`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2525`, `crates/shm-transport/src/backend/ring.rs:2565`, and both two-process tests in crates/shm-transport/tests/ring.rs; at the client, `crates/host-runtime/src/client.rs:7623` parks the managed bridge on the capacity doorbell with ordinary headroom exhausted and shows a host consumption alone, with no inbound data or timer, admits the blocked frame, and `crates/host-runtime/src/client.rs:7797` lands that consumption between the bridge's exhausted attempt and its capacity arm, where no doorbell token is sent, and shows the post-arm attempt publishes the frame within 2 s of a 30 s deadline; `shared_memory_workers_have_no_periodic_polling` in crates/host-runtime/src/ring_transport.rs pins that the bridge has no reservation slice.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2559`, `crates/shm-transport/src/backend/ring.rs:2599`, and both two-process tests in crates/shm-transport/tests/ring.rs; at the client, `crates/host-runtime/src/client.rs:7623` parks the managed bridge on the capacity doorbell with ordinary headroom exhausted and shows a host consumption alone, with no inbound data or timer, admits the blocked frame, and `crates/host-runtime/src/client.rs:7797` lands that consumption between the bridge's exhausted attempt and its capacity arm, where no doorbell token is sent, and shows the post-arm attempt publishes the frame within 2 s of a 30 s deadline; `shared_memory_workers_have_no_periodic_polling` in crates/host-runtime/src/ring_transport.rs pins that the bridge has no reservation slice.
 
 ## Failure scenario
 

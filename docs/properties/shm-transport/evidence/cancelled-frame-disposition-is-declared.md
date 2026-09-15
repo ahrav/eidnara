@@ -32,9 +32,11 @@ inbound channel.
   `SLOT_RECEIVER_LEASED` (`:1452`), stores `consumed = sequence` with `Release`
   (`:1453`), and increments `active_leases` (`:1454`). All three happen before the
   lease value is constructed at `:1462-1470` and returned.
-- `crates/shm-transport/src/lease.rs:366-372` — `impl Drop for ReceiveLease`
-  calls `release_once()` if `!self.released`, discarding the result with
-  `let _ =`. Dropping a lease is a full release, not an abandonment.
+- `crates/shm-transport/src/lease.rs:364-370` — `impl Drop for PayloadLease`
+  calls `return_once()` if `!self.returned`, discarding the result with
+  `let _ =`. Dropping a lease is a full release, not an abandonment; the return
+  runs in `Retained::complete` (`crates/shm-transport/src/backend/retained.rs:588-619`)
+  on whichever thread drops the lease.
 - `crates/shm-transport/src/backend/ring.rs:1591-1597` — `release` stores the
   `completion_sequence` and decrements `active_leases`, which makes the slot
   eligible for `reclaim_completed`. Nothing records that the body was never read.
@@ -47,6 +49,7 @@ inbound channel.
 - `crates/host-runtime/src/ring_transport.rs:731-736` — the only path that reads the
   body: `lease.to_vec()` then an explicit `lease.release()`. Reaching it requires
   the charge loop to have broken with a charge.
+  At HEAD: `receive_one` reads no body; it delivers the lease inside `InboundFrame::new(header, lease, charge)` (`ring_transport.rs:1028-1036`) and releases explicitly only on the control-cap branch (`:947-959`). The body read is `PayloadLease::to_vec` inside `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:107-128`), reached from `decode_control_frame` (`crates/host-runtime/src/connection.rs:538`) or from `dispatch_request` on a blocking worker (`crates/host-runtime/src/dispatch.rs:1002`); a frame dropped between delivery and that copy returns its block through `PayloadLease::Drop` with no record that the body went unread.
 - former `crates/host-runtime/src/shm_provider.rs:498` — `let clean = matches!(close,
   ReadClose::Cancelled | ReadClose::Overloaded);` classifies exactly these two
   as clean.

@@ -11,10 +11,10 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/tests/contract.rs:217`
-- `crates/host-runtime/src/config.rs:31`
+- `crates/host-runtime/src/config.rs:33`
 - `crates/host-runtime/src/runtime.rs:107`
 
-Witness status: yes - `crates/shm-transport/tests/contract.rs:187` checks the 32 KiB terminal block holds 25,406 body and 25,427 frame bytes; `crates/host-runtime/src/dispatch.rs:1569` serializes the worst-escaped 128-byte code, 4,096-byte message, and `u64::MAX` retry hint and shows the frame is exactly `TERMINAL_FRAME_BYTES` (25,427) and fits the terminal class body; terminal bodies charge `HostShared::terminal_budget`, sized from `TERMINAL_RESERVED_BYTES_PER_CONNECTION`, never the ordinary egress budget.
+Witness status: yes - `crates/shm-transport/tests/contract.rs:187` checks the 32 KiB terminal block holds 25,406 body and 25,427 frame bytes; `crates/host-runtime/src/dispatch.rs:1579` serializes the worst-escaped 128-byte code, 4,096-byte message, and `u64::MAX` retry hint and shows the frame is exactly `TERMINAL_FRAME_BYTES` (25,427) and fits the terminal class body; terminal bodies charge `HostShared::terminal_budget`, sized from `TERMINAL_RESERVED_BYTES_PER_CONNECTION`, never the ordinary egress budget.
 
 ## Failure scenario
 
