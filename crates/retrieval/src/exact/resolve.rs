@@ -593,8 +593,9 @@ pub fn validate_for_use(
     validate_for_use_inner(conn, kernel, proof, authority, budget, || ())
 }
 
-/// `after_judgement` runs once the kernel batch returns, before the budget is
-/// rechecked, so a test can expire the budget inside that window.
+/// `after_judgement` runs after the kernel batch returns and before
+/// `capture_commit_read_target_within_budget` rechecks the budget and kernel
+/// incarnation, allowing tests to change either value in that window.
 #[cfg(feature = "test-support")]
 pub fn validate_for_use_with_hook_for_test(
     conn: &GuardedConn<'_>,
@@ -662,8 +663,13 @@ fn validate_for_use_inner(
         Err(error) => return Err(error.into()),
     };
     after_judgement();
-    if budget.is_exhausted() {
-        return Ok(Err(ProofInvalidation::BudgetExhausted));
+    let after = match kernel.capture_commit_read_target_within_budget(budget) {
+        Ok(target) => target,
+        Err(KernelError::Deadline) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
+        Err(error) => return Err(error.into()),
+    };
+    if after.incarnation != proof.kernel.incarnation {
+        return Ok(Err(ProofInvalidation::IncarnationChanged));
     }
     if report.snapshot != proof.snapshot {
         return Ok(Err(ProofInvalidation::SnapshotChanged));

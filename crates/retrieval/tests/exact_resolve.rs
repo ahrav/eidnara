@@ -1318,6 +1318,56 @@ fn final_use_revalidation_defeats_every_later_change() {
     );
 }
 
+/// A restore that completes during the final-use batch invalidates the proof.
+#[test]
+fn final_use_refuses_a_restore_that_lands_during_its_kernel_batch() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = fixture
+        .kernel
+        .backup(BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
+    let certificate = fixture.certificate();
+    let budget = EvalBudget::unbounded();
+    let proof = fixture
+        .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+        .unwrap()
+        .proof
+        .expect("a healthy singleton proves");
+    let outcome = fixture
+        .store
+        .with_conn(|conn| {
+            Ok(validate_for_use_with_hook_for_test(
+                conn,
+                &fixture.kernel,
+                &proof,
+                Authority {
+                    project: &fixture.project,
+                    destination: ArtifactDestination::Local,
+                    inventory_epoch: EPOCH,
+                },
+                &budget,
+                || {
+                    fixture.kernel.restore(&manifest.destination_path).unwrap();
+                },
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome, Err(ProofInvalidation::IncarnationChanged));
+}
+
 #[test]
 fn a_certificate_past_the_restored_kernel_tip_defeats_proof() {
     let fixture = Fixture::new();
