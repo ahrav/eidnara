@@ -1291,6 +1291,134 @@ fn caller_cancellation_interrupts_a_catch_up_waiting_for_a_kernel_reader() {
     );
 }
 
+/// A manifest that lowers a maintenance limit without changing the identity or coverage bounds hands the running supervisor back so the next one starts under the new bounds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_manifest_that_changes_the_maintenance_bounds_rotates_the_supervisor() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+        .with_roster(Arc::new(|| {
+            vec![("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap())]
+        }));
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    drive(&owner, 40, || published(&owner).len() == 1).await;
+    assert!(owner.maintenance().is_some());
+
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("pending_count", 100)]),
+        &campaign_json(&identity),
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    let SliceOutcome::RotateMaintenance(handle) = outcome else {
+        panic!("changed maintenance bounds hand the supervisor back: {outcome:?}");
+    };
+    owner.stop_maintenance(&handle).await.unwrap();
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    assert!(
+        owner.maintenance().is_some(),
+        "a supervisor restarts under the new bounds"
+    );
+    owner.shutdown().await.unwrap();
+}
+
+/// Holds the selected family's projection connection on another thread for `hold`, so anything reading the projection waits.
+fn hold_projection<'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    reader: &'scope daemon::search_replacement::selection::SearchReader,
+    held: &'scope std::sync::Barrier,
+    hold: Duration,
+) {
+    scope.spawn(move || {
+        reader
+            .read(&budget(Duration::from_secs(30)), |_| {
+                held.wait();
+                std::thread::sleep(hold);
+                Ok(())
+            })
+            .unwrap();
+    });
+}
+
+/// A slice on an active record whose deadline is nearer than the slice bound ends by that deadline even while the projection connection is held.
+#[test]
+fn a_slice_ends_by_the_records_deadline_while_the_projection_is_held() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let ControlState::Current(current) = control(home) else {
+        panic!("the rebuild reached Current");
+    };
+    let mut again = rebuild(home);
+    again.selected_generation = current.staged_seed_digest.clone().unwrap();
+    again.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    again.attempt_id = "rebuild-again".to_owned();
+    again.deadline = now() + 2_500;
+    owner.request(&again, now(), &slice_budget()).unwrap();
+
+    let reader = owner.pin(&slice_budget()).unwrap();
+    let held = std::sync::Barrier::new(2);
+    let (waited, outcome) = std::thread::scope(|scope| {
+        hold_projection(scope, &reader, &held, Duration::from_secs(6));
+        held.wait();
+        let started = Instant::now();
+        let outcome = owner.run_slice(&slice_budget());
+        (started.elapsed(), outcome)
+    });
+    assert!(
+        waited < Duration::from_secs(4),
+        "the slice ran {waited:?} on a record with 2.5 s left: {outcome:?}"
+    );
+    assert!(matches!(outcome, SliceOutcome::Blocked(_)), "{outcome:?}");
+}
+
+/// A pin with a short budget returns within that budget while a slice holds the owner across a long projection read.
+#[test]
+fn a_pin_waits_for_the_owner_only_within_its_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let reader = owner.pin(&slice_budget()).unwrap();
+    let held = std::sync::Barrier::new(2);
+    let (waited, pinned) = std::thread::scope(|scope| {
+        hold_projection(scope, &reader, &held, Duration::from_secs(4));
+        held.wait();
+        // The slice takes `managed` and then waits for the held projection connection.
+        scope.spawn(|| owner.run_slice(&slice_budget()));
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        let pinned = owner.pin(&budget(Duration::from_millis(300)));
+        (started.elapsed(), pinned.map(|_| ()))
+    });
+    assert!(
+        waited < Duration::from_secs(2),
+        "the pin waited {waited:?} for the owner: {pinned:?}"
+    );
+    assert!(pinned.is_err(), "{pinned:?}");
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

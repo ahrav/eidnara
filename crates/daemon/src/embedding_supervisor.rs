@@ -36,7 +36,7 @@ pub struct Maintained {
 }
 
 /// Finite bounds every slice runs under. `slice` is the absolute budget of one slice; `idle` is the wait once both a backfill and a sweep have found nothing to do.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SliceBounds {
     pub dispatch: DispatchBounds,
     pub sweep_candidates: NonZeroUsize,

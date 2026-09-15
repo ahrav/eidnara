@@ -52,6 +52,8 @@ const MAX_TUPLE_BYTES: u64 = 4096;
 pub const SLICE_IDLE: Duration = Duration::from_secs(5);
 /// How long a repeated report of one kind waits before its changed detail is printed again.
 const REPORT_REPEAT_INTERVAL: Duration = Duration::from_secs(60);
+/// How often a budgeted wait for the manager retries while a slice holds it.
+const LOCK_POLL: Duration = Duration::from_millis(1);
 /// Owner slices one project's supervisor runs before the next bound project takes over.
 pub const MAINTENANCE_TENURE_SLICES: u32 = 4;
 /// The daemon's own projection serves local reads, so maintenance judges eligibility for local egress; a remote destination would retire every non-normal row as provider-sensitive.
@@ -124,8 +126,8 @@ pub struct SearchLifecycleOwner {
     admission: ProjectionAdmission,
     managed: Mutex<Managed>,
     roster: ProjectRoster,
-    /// The project digest whose supervisor ran last, how many slices it has had, and the deadline of the episode grant it started with; `None` before the first tenure.
-    tenure: Mutex<Option<(String, u32, i64)>>,
+    /// The project digest whose supervisor ran last, how many slices it has had, and the bounds it started under; `None` before the first tenure.
+    tenure: Mutex<Option<(String, u32, SliceBounds)>>,
     #[cfg(feature = "test-support")]
     drain_grace_override: Mutex<Option<Duration>>,
 }
@@ -185,6 +187,24 @@ impl SearchLifecycleOwner {
 
     fn lock(&self) -> MutexGuard<'_, Managed> {
         self.managed.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Takes the manager within `budget`; a slice holds it across its whole work, so a reader waits only as long as its own budget allows.
+    fn lock_within(&self, budget: &EvalBudget) -> Result<MutexGuard<'_, Managed>, BuildError> {
+        loop {
+            match self.managed.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    return Ok(poisoned.into_inner());
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if budget.is_exhausted() {
+                        return Err(BuildError::Expired);
+                    }
+                    std::thread::sleep(LOCK_POLL);
+                }
+            }
+        }
     }
 
     /// The identity the daemon runs with: the ready lane's model, tokenizer, dimension, and epoch; the manifest's limit protocol; and the kernel's incarnation. The manifest supplies only the protocol version, so its identity fields are still judged against this one.
@@ -311,6 +331,18 @@ impl SearchLifecycleOwner {
             ControlState::Intent(intent) => (intent, false),
             ControlState::Current(intent) => (intent, true),
         };
+        // Work on an active record ends within the record's own deadline, which no slice renews; a completed record is revalidated under the slice's bound alone.
+        let remaining = (!completed).then(|| {
+            u64::try_from(intent.episodes.deadline.saturating_sub(crate::now_ms()))
+                .unwrap_or(0)
+                .saturating_sub(DEADLINE_MARGIN_MS)
+        });
+        let budget = match remaining {
+            Some(remaining) if remaining > 0 => {
+                budget.bounded_by(Instant::now() + Duration::from_millis(remaining))
+            }
+            _ => budget,
+        };
         let spec = match replacement_spec(
             inputs.manifest(),
             identity.clone(),
@@ -342,18 +374,9 @@ impl SearchLifecycleOwner {
                 Err(error) => SliceOutcome::Blocked(error.to_string()),
             };
         }
-        // Work on an active record ends within the record's own deadline, which no slice renews; a completed record is revalidated under the slice's bound alone.
-        let budget = if completed {
-            budget
-        } else {
-            let remaining = u64::try_from(intent.episodes.deadline.saturating_sub(crate::now_ms()))
-                .unwrap_or(0)
-                .saturating_sub(DEADLINE_MARGIN_MS);
-            if remaining == 0 {
-                return SliceOutcome::Blocked("the record's deadline has passed".to_owned());
-            }
-            budget.bounded_by(Instant::now() + Duration::from_millis(remaining))
-        };
+        if remaining == Some(0) {
+            return SliceOutcome::Blocked("the record's deadline has passed".to_owned());
+        }
         if let Some(handle) = selection.maintenance() {
             return SliceOutcome::RotateMaintenance(handle);
         }
@@ -479,7 +502,7 @@ impl SearchLifecycleOwner {
         Ok(Some(report))
     }
 
-    /// Keeps one supervisor maintaining the selected family for the current tenant. A running tenant within its tenure and still on the roster is left alone; one past its tenure or off the roster, or whose episode grant has expired, is handed back for joining; with none running, the next roster project in sorted order after the last tenant starts through [`SearchSelection::start_maintenance`], which admits and charges it. No roster means no maintenance.
+    /// Keeps one supervisor maintaining the selected family for the current tenant. A running tenant within its tenure and still on the roster is left alone; one past its tenure or off the roster, whose episode grant has expired, or whose bounds the manifest no longer yields is handed back for joining; with none running, the next roster project in sorted order after the last tenant starts through [`SearchSelection::start_maintenance`], which admits and charges it. No roster means no maintenance.
     fn maintain(
         &self,
         selection: &mut SearchSelection,
@@ -490,15 +513,18 @@ impl SearchLifecycleOwner {
         let roster: BTreeMap<String, ProjectScope> = (self.roster)().into_iter().collect();
         let mut tenure = self.tenure.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(live) = selection.maintenance() {
-            let Some((tenant, slices, grant_deadline)) = tenure.as_mut() else {
+            let Some((tenant, slices, started)) = tenure.as_mut() else {
                 return Ok(Some(live));
             };
             *slices += 1;
-            // A lone project keeps its supervisor; rotating it would only pay a restart. An expired episode grant restarts its supervisor regardless of roster membership.
+            // A lone project keeps its supervisor; rotating it would only pay a restart. An expired episode grant, or bounds the manifest no longer yields, restarts its supervisor regardless of roster membership.
             let over = *slices >= MAINTENANCE_TENURE_SLICES && roster.len() > 1;
-            let expired = crate::now_ms() >= *grant_deadline;
+            let expired = crate::now_ms() >= started.dispatch.grant.deadline;
+            let changed = !maintenance_bounds(manifest, spec).is_ok_and(|fresh| {
+                without_grant_deadline(fresh) == without_grant_deadline(*started)
+            });
             let bound = roster.get(tenant.as_str()) == Some(&*live.scope);
-            return Ok((over || expired || !bound).then_some(live));
+            return Ok((over || expired || changed || !bound).then_some(live));
         }
         let last = tenure.as_ref().map(|(tenant, _, _)| tenant.as_str());
         let Some((next, scope)) = last
@@ -518,7 +544,6 @@ impl SearchLifecycleOwner {
                 _ => "maintenance bounds",
             })
         })?;
-        let grant_deadline = bounds.dispatch.grant.deadline;
         selection.start_maintenance(
             Maintained {
                 gate: Arc::clone(self.admission.gate()),
@@ -533,7 +558,7 @@ impl SearchLifecycleOwner {
             tokio::sync::mpsc::unbounded_channel().0,
             budget,
         )?;
-        *tenure = Some((next.clone(), 0, grant_deadline));
+        *tenure = Some((next.clone(), 0, bounds));
         Ok(None)
     }
 
@@ -672,7 +697,7 @@ impl SearchLifecycleOwner {
     ///
     /// Returns the selection's error, including unavailability when no family is selected or no slice has run.
     pub fn pin(&self, budget: &EvalBudget) -> Result<SearchReader, BuildError> {
-        let managed = self.lock();
+        let managed = self.lock_within(budget)?;
         let Managed::Selection(selection) = &*managed else {
             return Err(BuildError::Invalid("search unavailable; no slice has run"));
         };
@@ -783,6 +808,12 @@ fn nonzero_usize(name: &'static str, value: u64) -> Result<NonZeroUsize, SpecRef
 
 fn nonzero_u64(name: &'static str, value: u64) -> Result<NonZeroU64, SpecRefusal> {
     NonZeroU64::new(value).ok_or(SpecRefusal::TooSmall(name))
+}
+
+/// The bounds with the grant deadline cleared, so two derivations of the same manifest compare equal.
+fn without_grant_deadline(mut bounds: SliceBounds) -> SliceBounds {
+    bounds.dispatch.grant.deadline = 0;
+    bounds
 }
 
 /// Supervisor slice bounds within the limits `start_maintenance` charges: `embedding_recovery_attempts`, `pending_count`, `supervisor_slice_ms`, and `local_transaction_rows`. The episode deadline is the recovery bound from now, and a result is awaited for one lease before the pass moves on.
