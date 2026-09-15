@@ -11,6 +11,7 @@ mod anchor;
 pub mod applicability;
 mod backup;
 mod cas;
+mod claim_causality;
 mod commit_read;
 mod consumer_obligations;
 mod current_input;
@@ -64,6 +65,12 @@ pub use cas::{
 pub use cas::{
     ArtifactDeletionFault, ArtifactDeletionHook, ArtifactGcFault, ArtifactIngestFault,
     ArtifactIngestHook,
+};
+pub use claim_causality::{
+    CLAIM_CAUSALITY_DETAIL_VERSION, CLAIM_CAUSALITY_KIND, CausalClass, CausalEvidence,
+    CausalOperation, CausalReading, CausalRecord, ClaimCausalityError, ClaimCausalityOutcome,
+    ClaimCausalityRequest, DERIVED_FROM_DEPENDENCY_KIND, MAX_DERIVATION_PARENTS, ParentReference,
+    UnknownReason,
 };
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
