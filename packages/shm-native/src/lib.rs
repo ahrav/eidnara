@@ -951,13 +951,13 @@ pub fn finish_setup(pending_id: u32) -> Result<AsyncTask<FinishSetupTask>> {
 pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
     {
         let profile = host_payload_pool_profile().map_err(|_| error("test profile unavailable"))?;
-        let first_to_second = Ring::create(&profile, 1)
+        let first_to_second = Ring::create(&profile, HOST_TO_PEER_LANE)
             .map_err(|_| error("shared-memory test pair creation failed"))?;
         let second_from_first = first_to_second
             .attachment()
             .and_then(|attachment| attachment.attach())
             .map_err(|_| error("shared-memory test pair creation failed"))?;
-        let second_to_first = Ring::create(&profile, 2)
+        let second_to_first = Ring::create(&profile, PEER_TO_HOST_LANE)
             .map_err(|_| error("shared-memory test pair creation failed"))?;
         let first_from_second = second_to_first
             .attachment()

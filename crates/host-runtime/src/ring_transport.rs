@@ -450,8 +450,14 @@ pub(crate) fn worker_descriptor(
 
 /// A stream doorbell reads end-of-file only after its peer end is closed, which is how a peer that exited or dropped its attachment appears to the host.
 fn peer_released_ring(rings: &DuplexRing) -> bool {
+    // A lease the peer keeps from the host-to-peer pool holds that pool's doorbell end open, so
+    // both directions must read end-of-file before the backing counts as released.
+    doorbell_at_eof(&rings.first) && doorbell_at_eof(&rings.second)
+}
+
+fn doorbell_at_eof(ring: &Ring) -> bool {
     use std::io::Read;
-    let Ok(doorbell) = rings.second.duplicate_data_ready() else {
+    let Ok(doorbell) = ring.duplicate_data_ready() else {
         return false;
     };
     let mut doorbell = std::os::unix::net::UnixStream::from(doorbell);
@@ -1839,6 +1845,68 @@ mod tests {
             ),
             "the panic reason follows the queued frame instead of a bare channel drop"
         );
+    }
+
+    #[tokio::test]
+    async fn a_lease_the_peer_keeps_after_closing_holds_the_backing_charge_in_quarantine() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            mut receiver,
+            io,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        let frame = OutboundFrame {
+            bytes: crate::wire::encode_frame(
+                FrameType::Response,
+                Flags::new(false, Priority::Interactive, false),
+                crate::wire::FrameId {
+                    channel: 7,
+                    epoch: 1,
+                    corr: 1,
+                },
+                &[9],
+            )
+            .expect("frame encodes"),
+            tail: Vec::new(),
+            direct: None,
+            charge: crate::wire::ByteCharge::none(),
+            written: None,
+        };
+        sender.send(frame).await.expect("frame admits");
+        let deadline = StdInstant::now() + Duration::from_secs(1);
+        let held = loop {
+            if let Some(lease) = peer.from_host.try_receive().expect("receive") {
+                break lease;
+            }
+            assert!(
+                peer.from_host.wait_for_data(deadline).expect("wait"),
+                "frame arrives"
+            );
+        };
+        let RingClientEndpoint { to_host, from_host } = peer;
+        drop(to_host);
+        drop(from_host);
+        assert!(matches!(receiver.recv().await, Err(ReadClose::Corrupt(_))));
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits after the peer closes")
+            .expect("endpoint task joins");
+        let accounting = transport.accounting().unwrap();
+        assert_eq!(held.to_vec().expect("copy"), [9]);
+        assert_ne!(
+            accounting.quarantined,
+            ResourceCharges::ZERO,
+            "the peer still maps the host-to-peer pool through its lease"
+        );
+        held.release().expect("release");
     }
 
     #[tokio::test]
