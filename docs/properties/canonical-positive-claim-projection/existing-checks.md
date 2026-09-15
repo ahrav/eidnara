@@ -41,6 +41,9 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `live_rows::an_association_whose_target_disagrees_with_its_key_or_row_is_refused` | same | `CorruptRow` when the association target, its key, or the occurrence tuple name different objects | unaudited |
 | `live_rows::a_projection_from_another_kernel_incarnation_is_refused_before_any_read` | same | `NoIdentity`, then `ForeignKernel` against the kernel's own database identity, before the row bound is checked | unaudited |
 | `live_rows::an_exhausted_budget_is_refused_before_the_projection_is_read` | same | a cancelled `EvalBudget` refuses `Kernel(Deadline)` before the row bound | unaudited |
+| `live_rows::rows_are_bounded_ordered_and_keyed_to_the_decision_object` | same | `(class, occurrence_id)` order, the decision object key per row, and `TooManyRecords` past the row bound | unaudited |
+| `live_rows::a_claim_row_without_its_association_or_with_another_extractor_is_refused` | same | `ExtractionVersionMismatch` for another extractor and `CorruptRow` for a claim row with no `canonical_object` association | unaudited |
+| `live_rows::distinct_objects_past_the_facts_bound_are_refused_before_the_kernel_is_read` | same | `TooManyClaims` before the facts read, and the kernel error once the bound admits every distinct object | unaudited |
 | `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees` | `crates/daemon/tests/claim_sources.rs` | lagging rows classify Superseded, Retracted, Hidden from canonical facts against an independent oracle; catch-up tombstones; quarantine stays live and Hidden; the classified map is equal before and after a causality record on the successor; a fresh rebuild classifies identically | unaudited |
 
 ## Adjacent kernel checks the records rely on
