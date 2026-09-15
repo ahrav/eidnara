@@ -58,14 +58,16 @@ and `:169` - all transport-crate tests, deliberately probing
 stale, duplicate, and quarantined release. (Pre-#131 there were five such
 sites; the rewritten test file has three.)
 
-Every other entry to `Ring::release` in the tree goes through
-`ring_release_callback` (`ring.rs:1670-1677`), which is installed on the lease at
-`ring.rs:1130` and invoked from `ReceiveLease::release_once`
-(`crates/shm-transport/src/lease.rs:184-192`) with `self.identity`, the
-consumer-derived value the lease was built with at `ring.rs:1127`. The host's two release calls,
-`ring_transport.rs:508` and `:547`, plus the peer's two at `:732` and `:736`, are
-all this form. `packages/shm-native/src/lib.rs:330` is the native side's
-equivalent, releasing `active.identity`.
+Every other block return in the tree goes through `PayloadLease::return_once`
+(`crates/shm-transport/src/lease.rs:346-355`), reached from `release` (`:342`)
+or `Drop` (`:364-370`), which calls `Retained::complete` with the lease's own
+`block` and `generation` (`crates/shm-transport/src/backend/retained.rs:588`),
+the consumer-derived values captured at construction (`lease.rs:259-274`). The
+host's release calls, `ring_transport.rs:948-950` on the oversize control
+rejection and `frame_channel.rs:119` inside `InboundFrame::into_private`, plus
+the peer's two at `ring_transport.rs:1451` and `:1455`, are all this form.
+`packages/shm-native/src/lib.rs:374-377` is the native side's
+equivalent, releasing `active.lease`.
 
 ## Failure scenario
 

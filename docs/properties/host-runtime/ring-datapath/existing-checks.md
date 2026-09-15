@@ -54,12 +54,16 @@ confirmed at `HEAD`:
 
 | Location | What it asserts |
 | --- | --- |
-| `frame_channel.rs:296-301` | `ReceiveLease::contiguous(&bytes)` cannot be passed to `fn require_send<T: Send>`, so `ReceiveLease` is not `Send` |
-| `frame_channel.rs:303-308` | the same value cannot be passed to `fn require_static<T: 'static>`, so `ReceiveLease` is not `'static` |
+| `frame_channel.rs:296-301` | Superseded. This doctest asserted that the lease type of that revision could not be passed to `fn require_send<T: Send>`. HEAD has no doctest in `frame_channel.rs`; `PayloadLease` is `Send` by design, and the positive doctest at `crates/shm-transport/src/backend/ring.rs:35-38` asserts it |
+| `frame_channel.rs:303-308` | Superseded. This doctest asserted the same value could not be passed to `fn require_static<T: 'static>`. The confinement doctests at HEAD are the two `compile_fail` blocks at `crates/shm-transport/src/backend/ring.rs:25-33`, which assert `Ring` and `ProducerReservation` are not `Send`; the body view `LeaseSpan` carries `PhantomData<Rc<()>>` (`crates/shm-transport/src/lease.rs:21`) and is `!Send` without a doctest |
 
-The step name names them precisely. Together they hold the one claim in this
-sub-part that has mechanical enforcement in CI: receive bytes are visible only
-through a lexical, thread-confined lease. `wire.rs:4-14` is a ```text``` fence
+The step name names them precisely. Together they held the one claim in this
+sub-part that had mechanical enforcement in CI: receive bytes are visible only
+through a lexical, thread-confined lease. At HEAD that claim is stated
+differently and enforced elsewhere: the owned `PayloadLease` crosses threads,
+and body bytes leave the transport only through `InboundFrame::into_private`
+(`frame_channel.rs:107-128`), which copies then releases before any decoder
+runs. `wire.rs:4-14` is a ```text``` fence
 and is not compiled, so it is not a check.
 
 So the correct statement is: **no inline unit test in this sub-part runs in CI,

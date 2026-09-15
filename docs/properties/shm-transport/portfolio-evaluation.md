@@ -1041,8 +1041,12 @@ Each test below has no citing record in the catalog.
    source; whether a record that restates a documented invariant earns a place
    in the catalog, or whether the catalog should point at the comment and stop.
 5. `Reaches production: yes` rests on the shipped addon's `poll`, which arms and
-   releases in the order the record describes; whether the bridge endpoint, which
-   releases through `ReceiveLease` drop, shares the same exposure was not traced.
+   releases in the order the record describes; whether the host endpoint, which
+   returns leases through `PayloadLease::release` inside
+   `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:119`)
+   or through `PayloadLease::Drop` (`crates/shm-transport/src/lease.rs:364-370`)
+   on a blocking worker or the receive task, shares the same exposure was not
+   traced.
 6. The record's Impact says "forever" for an idle channel; whether the reactor's
    readiness path or a setup-socket event bounds that in practice was not
    established.

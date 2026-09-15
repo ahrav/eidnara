@@ -274,7 +274,7 @@ Anchor verification against HEAD. Every anchor below was read; none is off.
 | `crates/daemon/src/transform.rs:7883-7884`, `:2083-2100`, `:2951` | verified | `Arc::make_mut`, the clone-producing normalizer, the shadow |
 | `crates/shm-transport/src/backend/ring.rs:2129-2134`, `:2158-2161`, `:48` | verified | punch decision; batch is `(arena_bytes / 4).max(page)`; divisor 4 |
 | `crates/shm-transport/src/lease.rs:328-348` | verified | zero-fill at `:331`; both `LengthMismatch` arms |
-| `crates/host-runtime/src/ring_transport.rs:57-58`, `:749-786`, `:788-800` | verified | constant comment says virtual bytes; `publish_one` and `publish_direct` |
+| `crates/host-runtime/src/ring_transport.rs:57-58`, `:1221-1277`, `:1280-1293` | verified | constant comment says virtual bytes; `Publisher::try_publish` and `publish_direct` |
 | `crates/host-runtime/src/frame_channel.rs:166-200`, `:248-275` | verified | `DirectFrame` owns a boxed `'static` serializer; `send_before` |
 | `crates/kernel/src/cas/ingest.rs:333-342`, `:591-608` | verified | lock then `check_budget`; walk, presence, projected cap |
 | `crates/daemon/src/token_cache.rs:135-137`, `:57` | verified | `u32` bypass; thread-local counters |
@@ -457,7 +457,7 @@ Required faults and enabling state: A slow egress or a held ring reservation
 ahead of the direct frame, to lengthen the window so the marker can observe
 it; a handler that returns immediately after
 [`output_from_writer`][from-writer]; observation of handler completion (the
-joined future) and of the `publish_one` commit as separate events.
+joined future) and of the `Publisher::try_publish` commit as separate events.
 ```
 
 ### W10, Exercised

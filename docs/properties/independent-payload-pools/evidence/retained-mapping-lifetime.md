@@ -12,9 +12,9 @@ Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/lease.rs:248`
 - `crates/shm-transport/src/backend/retained.rs:270`
-- `crates/host-runtime/src/ring_transport.rs:408`
+- `crates/host-runtime/src/ring_transport.rs:426`
 
-Witness status: yes - `crates/shm-transport/src/lease.rs:625` (Miri) and `crates/shm-transport/src/backend/ring.rs:2501`.
+Witness status: yes - `crates/shm-transport/src/lease.rs:625` (Miri) and `crates/shm-transport/src/backend/ring.rs:2535`.
 
 ## Failure scenario
 

@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1217`
+- `crates/shm-transport/src/backend/ring.rs:1224`
 - `crates/shm-transport/src/backend/retained.rs:629`
 - `crates/shm-transport/src/backend/retained.rs:653`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2607`; the return-side latch is exercised by `crates/shm-transport/src/backend/ring.rs:2501` whose peer end is closed.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2641`; the return-side latch is exercised by `crates/shm-transport/src/backend/ring.rs:2535` whose peer end is closed.
 
 ## Failure scenario
 

@@ -64,9 +64,11 @@ is a future change that keeps the types legal while breaking confinement:
 
 - `prepare` is changed to return a ring handle for a diagnostics or test path,
   making the endpoint thread one of two owners.
-- A `ReceiveLease` or a span pointer is returned from the endpoint thread
-  through a channel that carries a raw address as an integer, which no type
-  system catches.
+- A `LeaseSpan` view (`crates/shm-transport/src/lease.rs:17-21`, `!Send`) or a
+  span pointer is returned from the endpoint thread through a channel that
+  carries a raw address as an integer, which no type system catches. The owned
+  `PayloadLease` itself is `Send` by design (`lease.rs:243-247`) and carries no
+  path back to a `Ring`, so its crossing is not a confinement break.
 - The endpoint thread's current-thread Tokio runtime (`:242-246`) is changed to
   a multi-thread runtime, at which point `run_endpoint`'s futures could migrate
   between worker threads. `run_endpoint` holds `&rings` across `await` points
@@ -95,7 +97,8 @@ Two options, and the static one is the better buy.
 
 Static: a test or lint asserting that `PreparedRing` has no field whose type
 transitively owns a `Ring`, plus compile-fail doctests in the style of the two
-already on `frame_channel::ReceiveLease` (`frame_channel.rs:296-308`), one
+already on `Ring` and `ProducerReservation`
+(`crates/shm-transport/src/backend/ring.rs:25-33`), one
 requiring `Send` and one requiring `'static`, applied to `DuplexRing` as
 returned from any host-visible function. That closes the refactor risk without
 needing a running connection.
@@ -117,11 +120,14 @@ Neither runs in CI today: every `-p host-runtime` invocation in `ci.yml` carries
 
 - Sources examined: `ring_transport.rs:93-101` (`PreparedRing` fields),
   `:238-277` (thread closure), `:359-368` (`run_endpoint` signature),
-  `frame_channel.rs:296-308` (the two existing compile-fail doctests on
-  `ReceiveLease`; not re-swept post-#131), `lib.rs:5` (`deny(unsafe_code)`).
-- Findings: the crate already uses compile-fail doctests for exactly this kind
-  of confinement claim, on `ReceiveLease`, where the two doctests assert
-  `!Send` and `!'static`. So the technique is established in this codebase and
+  `crates/shm-transport/src/backend/ring.rs:25-33` (the two existing
+  compile-fail doctests, on `Ring` and `ProducerReservation`), `lib.rs:5`
+  (`deny(unsafe_code)`).
+- Findings: the transport crate already uses compile-fail doctests for exactly
+  this kind of confinement claim, on `Ring` and `ProducerReservation`, where the
+  two doctests assert `!Send`; a third, positive doctest at `ring.rs:35-38`
+  asserts `PayloadLease` is `Send`. So the technique is established in this
+  codebase and
   would be consistent rather than novel. `PreparedRing` is `pub(crate)`, so a
   doctest cannot name it; the assertion would have to be a unit test using
   `static_assertions`-style trait probes, or a doctest on a `pub` wrapper.

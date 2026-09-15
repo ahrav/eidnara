@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1339`
-- `crates/host-runtime/src/ring_transport.rs:928`
+- `crates/shm-transport/src/backend/ring.rs:1346`
+- `crates/host-runtime/src/ring_transport.rs:946`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2363` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
+Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2397` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
 
 ## Failure scenario
 
