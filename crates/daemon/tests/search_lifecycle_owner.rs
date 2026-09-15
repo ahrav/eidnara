@@ -17,8 +17,8 @@ use daemon::search_catchup::{
     Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeEvent, SearchCatchUp,
 };
 use daemon::search_lifecycle_owner::{
-    IDENTITY_CONTRACT_VERSION, PROJECTION_POLICY_VERSION, SearchLifecycleOwner, SliceOutcome,
-    SpecRefusal,
+    IDENTITY_CONTRACT_VERSION, PROJECTION_POLICY_VERSION, SearchLifecycleOwner, SliceEvent,
+    SliceOutcome, SpecRefusal,
 };
 use daemon::search_replacement::BuildError;
 use daemon::search_replacement::selection::disable::DisableEvent;
@@ -953,9 +953,11 @@ fn pause_at_second_window(
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = std::sync::Mutex::new(release_rx);
     let windows = std::sync::atomic::AtomicUsize::new(0);
-    owner.tap_episode_events_for_test(move |event| {
-        if matches!(event, EpisodeEvent::HoldExtensionRequested { .. })
-            && windows.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(
+            event,
+            SliceEvent::Episode(EpisodeEvent::HoldExtensionRequested { .. })
+        ) && windows.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
         {
             let _ = reached_tx.send(());
             let _ = release_rx
@@ -1646,14 +1648,27 @@ fn a_slice_installs_the_manifest_it_derived_its_bounds_from() {
     corpus.seed();
     let owner = current_owner(home, &corpus);
     let identity = identity(&kernel_incarnation_id(home));
-    let reader = owner.pin(&slice_budget()).unwrap();
-    let held = std::sync::Barrier::new(2);
+    // The slice pauses after it has read the records and before it refreshes admission.
+    let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let paused = std::sync::atomic::AtomicBool::new(false);
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared)
+            && !paused.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let _ = reached_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+        }
+    });
     let outcome = std::thread::scope(|scope| {
-        hold_projection(scope, &reader, &held, Duration::from_millis(1_500));
-        held.wait();
-        // The slice reads the manifest, then waits on the held projection before it refreshes admission.
         let slice = scope.spawn(|| owner.run_slice(&slice_budget()));
-        std::thread::sleep(Duration::from_millis(300));
+        reached
+            .recv_timeout(PAUSE_WAIT)
+            .expect("the slice read the records");
         write_records(
             home,
             &manifest_json_with(
@@ -1663,6 +1678,7 @@ fn a_slice_installs_the_manifest_it_derived_its_bounds_from() {
             ),
             &campaign_json(&identity),
         );
+        release.send(()).expect("the paused slice is waiting");
         slice.join().unwrap()
     });
     assert!(matches!(outcome, SliceOutcome::Current), "{outcome:?}");
@@ -1842,6 +1858,139 @@ async fn shutdown_waits_for_an_in_flight_disable() {
     let _ = disabling.join().unwrap();
     owner.shutdown().await.unwrap();
     assert!(matches!(control(home), ControlState::Disabled(_)));
+}
+
+/// An active record that expires after selection keeps the evidence a cleanup needs, so a disable that follows reconciles the selected family.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_record_keeps_the_evidence_a_disable_needs() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    let mut short = rebuild(home);
+    short.deadline = now() + 2_500;
+    owner.request(&short, now(), &slice_budget()).unwrap();
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Advanced(RecoveryProgress::Selected)
+    ));
+    tokio::time::sleep(Duration::from_millis(2_600)).await;
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline")),
+        "{outcome:?}"
+    );
+    owner
+        .disable(&slice_budget(), &mut |_| {})
+        .await
+        .expect("the records still approve the cleanup");
+    assert!(matches!(control(home), ControlState::Disabled(_)));
+}
+
+/// A refresh that returns inside the deadline margin starts no recovery work and consumes no episode.
+#[test]
+fn a_refresh_that_ends_inside_the_margin_starts_no_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let ControlState::Current(current) = control(home) else {
+        panic!("the rebuild reached Current");
+    };
+    let mut again = rebuild(home);
+    again.selected_generation = current.staged_seed_digest.clone().unwrap();
+    again.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    again.attempt_id = "rebuild-again".to_owned();
+    again.deadline = now() + 2_500;
+    owner.request(&again, now(), &slice_budget()).unwrap();
+
+    let reader = owner.pin(&slice_budget()).unwrap();
+    let held = std::sync::Barrier::new(2);
+    let outcome = std::thread::scope(|scope| {
+        hold_projection(scope, &reader, &held, Duration::from_millis(1_800));
+        held.wait();
+        owner.run_slice(&slice_budget())
+    });
+    assert!(
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline")),
+        "{outcome:?}"
+    );
+    let ControlState::Intent(intent) = control(home) else {
+        panic!("the record stays active");
+    };
+    assert_eq!(
+        intent.episodes.consumed, 0,
+        "no episode starts inside the margin"
+    );
+}
+
+/// Stopping a supervisor after the admission records disappear waits the grace the last readable manifest approved, not the scheduler's idle delay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_drain_after_the_records_vanish_keeps_the_approved_grace() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("held-row", "held text");
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("physical_drain_ms", 3_000)],
+        ),
+        &campaign_json(&identity),
+    );
+    let engine = TestEngine::new();
+    let held = engine.block_calls();
+    let scope = ProjectScope::new(PROJECT).unwrap();
+    let owner = SearchLifecycleOwner::for_home(
+        home,
+        Arc::clone(&corpus.kernel),
+        component(&engine, LocalEmbeddingsLimits::default()),
+    )
+    .with_roster(Arc::new(move || {
+        vec![("project:a".to_owned(), scope.clone())]
+    }));
+    let _ = owner.run_slice(&slice_budget());
+    let mut short = rebuild(home);
+    short.deadline = now() + 2_500;
+    owner.request(&short, now(), &slice_budget()).unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Current), "{outcome:?}");
+    let started = Instant::now();
+    while engine.calls() == 0 {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    std::fs::remove_dir_all(home.join(ADMISSION_DIR)).unwrap();
+    let SliceOutcome::RotateMaintenance(handle) = owner.run_slice(&slice_budget()) else {
+        panic!("refused records hand the supervisor back");
+    };
+    let started = Instant::now();
+    let stopped = owner.stop_maintenance(&handle).await;
+    let waited = started.elapsed();
+    TestEngine::release(&held);
+    let _ = owner.shutdown().await;
+    assert!(
+        stopped.is_err(),
+        "the held call outlives the grace: {stopped:?}"
+    );
+    assert!(
+        waited < Duration::from_millis(4_200),
+        "the drain waited {waited:?} against a 3 s grace"
+    );
 }
 
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.

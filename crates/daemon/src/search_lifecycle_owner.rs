@@ -137,11 +137,22 @@ pub struct SearchLifecycleOwner {
     #[cfg(feature = "test-support")]
     drain_grace_override: Mutex<Option<Duration>>,
     #[cfg(feature = "test-support")]
-    episode_tap: Mutex<Option<EpisodeTap>>,
+    slice_tap: Mutex<Option<SliceTap>>,
+    /// The drain grace the last readable manifest approved, kept for a stop whose records are gone.
+    last_grace: Mutex<Option<Duration>>,
 }
 
 #[cfg(feature = "test-support")]
-type EpisodeTap = Arc<dyn Fn(&EpisodeEvent) + Send + Sync>;
+type SliceTap = Arc<dyn Fn(&SliceEvent) + Send + Sync>;
+
+/// A point a slice passes that a test may observe or hold.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy)]
+pub enum SliceEvent {
+    /// The records and identity are read and the manager synced; admission is not yet refreshed.
+    Prepared,
+    Episode(EpisodeEvent),
+}
 
 /// Puts the manager a disable took back unless the owner shut down meanwhile, whether the disable finished or its future was dropped.
 struct Restore<'a> {
@@ -187,14 +198,27 @@ impl SearchLifecycleOwner {
             #[cfg(feature = "test-support")]
             drain_grace_override: Mutex::new(None),
             #[cfg(feature = "test-support")]
-            episode_tap: Mutex::new(None),
+            slice_tap: Mutex::new(None),
+            last_grace: Mutex::new(None),
         }
     }
 
-    /// Observes every catch-up episode event on the slice thread, before the owner acts on it, so a test can hold the episode at a boundary.
+    /// Observes slice points and catch-up episode events on the slice thread, before the owner acts on them, so a test can hold a slice at a boundary.
     #[cfg(feature = "test-support")]
-    pub fn tap_episode_events_for_test(&self, tap: impl Fn(&EpisodeEvent) + Send + Sync + 'static) {
-        *self.episode_tap.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(tap));
+    pub fn tap_slice_events_for_test(&self, tap: impl Fn(&SliceEvent) + Send + Sync + 'static) {
+        *self.slice_tap.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(tap));
+    }
+
+    #[cfg(feature = "test-support")]
+    fn tap(&self, event: SliceEvent) {
+        let tap = self
+            .slice_tap
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(tap) = tap {
+            tap(&event);
+        }
     }
 
     /// Replaces the manifest's drain grace so a test can observe an unresolved drain without a manifest that no retirement could admit.
@@ -336,6 +360,12 @@ impl SearchLifecycleOwner {
                 return SliceOutcome::Closed(refusal);
             }
         };
+        if let Ok(grace) = limit(inputs.manifest(), "physical_drain_ms") {
+            *self.last_grace.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(Duration::from_millis(grace));
+        }
+        #[cfg(feature = "test-support")]
+        self.tap(SliceEvent::Prepared);
         let Managed::Selection(selection) = &mut *managed else {
             return SliceOutcome::Disabled;
         };
@@ -362,16 +392,24 @@ impl SearchLifecycleOwner {
             ControlState::Intent(intent) => (intent, false),
             ControlState::Current(intent) => (intent, true),
         };
-        // Work on an active record ends within the record's own deadline, which no slice renews, and starts only outside the margin before it; a completed record is revalidated under the slice's bound alone. A record whose deadline has passed is observed under nothing: the gate closes and the record is refused.
-        let until_deadline = (!completed).then(|| {
-            u64::try_from(intent.episodes.deadline.saturating_sub(crate::now_ms())).unwrap_or(0)
+        // Work on an active record ends within the record's own deadline, which no slice renews, and starts only outside the margin before it; a completed record is revalidated under the slice's bound alone. A record whose deadline has passed is observed under nothing, but the records stay installed with no coverage so a cleanup keeps its evidence while every hook is denied.
+        let deadline_at = (!completed).then(|| {
+            let until = u64::try_from(intent.episodes.deadline.saturating_sub(crate::now_ms()))
+                .unwrap_or(0);
+            Instant::now() + Duration::from_millis(until)
         });
-        let budget = match until_deadline {
-            Some(0) => {
-                let _ = self.admission.refresh(None);
+        let budget = match deadline_at {
+            Some(at) if at <= Instant::now() => {
+                let _ = self.admission.refresh_with(
+                    inputs.clone(),
+                    SelectedProjection {
+                        identity: &identity,
+                        coverage: None,
+                    },
+                );
                 return SliceOutcome::Blocked("the record's deadline has passed".to_owned());
             }
-            Some(until) => budget.bounded_by(Instant::now() + Duration::from_millis(until)),
+            Some(at) => budget.bounded_by(at),
             None => budget,
         };
         let spec = match replacement_spec(
@@ -400,12 +438,12 @@ impl SearchLifecycleOwner {
                 Err(error) => SliceOutcome::Blocked(error.to_string()),
             };
         }
-        let budget = match until_deadline {
-            Some(until) if until <= DEADLINE_MARGIN_MS => {
-                return SliceOutcome::Blocked("the record's deadline has passed".to_owned());
-            }
-            Some(until) => budget
-                .bounded_by(Instant::now() + Duration::from_millis(until - DEADLINE_MARGIN_MS)),
+        // Measured again here: the refresh above may have waited, and the margin is from the deadline, not from the read.
+        let budget = match deadline_at {
+            Some(at) => match at.checked_sub(Duration::from_millis(DEADLINE_MARGIN_MS)) {
+                Some(start_by) if start_by > Instant::now() => budget.bounded_by(start_by),
+                _ => return SliceOutcome::Blocked("the record's deadline has passed".to_owned()),
+            },
             None => budget,
         };
         if let Some(handle) = selection.maintenance() {
@@ -520,19 +558,11 @@ impl SearchLifecycleOwner {
         };
         // The caller's cancellation reaches the linked budget directly; the callback cancels only `episode`, leaving the caller's `budget` unmodified.
         let episode = budget.linked();
-        #[cfg(feature = "test-support")]
-        let tap = self
-            .episode_tap
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
         let report = SearchCatchUp::new(&self.kernel, reader.projection())
             .with_budget(episode.clone())
             .run_episode(&consumer, &spec.episode, crate::now_ms(), &mut |event| {
                 #[cfg(feature = "test-support")]
-                if let Some(tap) = &tap {
-                    tap(&event);
-                }
+                self.tap(SliceEvent::Episode(event));
                 #[cfg(not(feature = "test-support"))]
                 let _ = event;
                 if grants.iter().any(|grant| grant.invalidated.is_cancelled()) {
@@ -602,7 +632,7 @@ impl SearchLifecycleOwner {
         Ok(None)
     }
 
-    /// The drain grace maintenance stops are given: the manifest's `physical_drain_ms`, or one slice when no manifest is readable.
+    /// The drain grace maintenance stops are given: the manifest's `physical_drain_ms`, the last readable manifest's when the records are gone, or one slice when none was ever read.
     fn drain_grace(&self) -> Duration {
         #[cfg(feature = "test-support")]
         if let Some(grace) = *self
@@ -615,7 +645,9 @@ impl SearchLifecycleOwner {
         AdmissionInputs::read(&self.home)
             .ok()
             .and_then(|inputs| limit(inputs.manifest(), "physical_drain_ms").ok())
-            .map_or(SLICE_IDLE, Duration::from_millis)
+            .map(Duration::from_millis)
+            .or(*self.last_grace.lock().unwrap_or_else(|p| p.into_inner()))
+            .unwrap_or(SLICE_IDLE)
     }
 
     /// Joins the supervisor a slice handed back. A resolved drain frees the slot for the next tenant; an unresolved one leaves the supervisor owned by its task and reported.
