@@ -190,7 +190,10 @@ refuses a wrong dimension and the reserved byte `0x80`.
 sum_j (s_j * s_j) * (i32(c_query_j) * i32(c_doc_j))
 ```
 
-- The integer product is formed in i32 and lies in `[-16129, 16129]`.
+- The integer product is formed in i32 and lies in `[-16129, 16129]`. That
+  range holds because scoring accepts only codes in `[-127, 127]`: the
+  reserved code `-128` widens to a product outside it, so `weighted_dot`
+  rejects `-128` with a debug assertion instead of scoring it.
 - The weight `s_j * s_j` is formed in f64 from the f32 scale.
 - Each term is `weight * f64(product)`.
 - Terms are summed into one f64 accumulator in increasing coordinate order,

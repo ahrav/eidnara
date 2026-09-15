@@ -103,8 +103,10 @@ impl Scales {
     }
 
     pub fn decode(bytes: &[u8], dimension: u32) -> Result<Self, ScalarBytesRejection> {
-        let values = codec::decode_words(bytes)
-            .map_err(|_| ScalarBytesRejection::TruncatedWord { bytes: bytes.len() })?;
+        let values = codec::decode_words(bytes).map_err(|rejection| match rejection {
+            RowRejection::TruncatedWord { bytes } => ScalarBytesRejection::TruncatedWord { bytes },
+            other => unreachable!("decode_words rejects only a trailing partial word: {other}"),
+        })?;
         if values.len() != dimension as usize {
             return Err(ScalarBytesRejection::Dimension {
                 expected: dimension,
@@ -232,6 +234,9 @@ pub fn decode_codes(bytes: &[u8], dimension: u32) -> Result<Vec<i8>, ScalarBytes
 
 /// `sum_j (s_j * s_j) * (c_query_j * c_doc_j)` in f64, increasing coordinate order, starting at `+0.0`; the integer product is formed in i32 and lies in `[-16129, 16129]`.
 ///
+/// Inputs must not contain the reserved `-128`: it widens to a product outside the recipe's
+/// range, so debug assertions reject it before scoring.
+///
 /// Panics on unequal lengths so a shape error can never become a silently truncated score.
 pub fn weighted_dot(scales: &Scales, query: &[i8], doc: &[i8]) -> f64 {
     assert_eq!(
@@ -246,6 +251,10 @@ pub fn weighted_dot(scales: &Scales, query: &[i8], doc: &[i8]) -> f64 {
     );
     let mut sum = 0.0f64;
     for ((scale, q), d) in scales.scales.iter().zip(query).zip(doc) {
+        debug_assert!(
+            *q != i8::MIN && *d != i8::MIN,
+            "the reserved code -128 never reaches scoring"
+        );
         let weight = f64::from(*scale) * f64::from(*scale);
         let product = i32::from(*q) * i32::from(*d);
         let term = weight * f64::from(product);

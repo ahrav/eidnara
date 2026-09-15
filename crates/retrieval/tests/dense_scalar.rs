@@ -331,6 +331,23 @@ fn weighted_scoring_refuses_unequal_lengths_instead_of_truncating() {
 }
 
 #[test]
+#[should_panic(expected = "the reserved code -128 never reaches scoring")]
+fn weighted_scoring_refuses_a_reserved_query_code() {
+    // A -128 · 127 product is -16256, outside the recipe's [-16129, 16129].
+    let mut query = [0i8; 8];
+    query[3] = i8::MIN;
+    let _ = weighted_dot(&scales_of([1.0; 8]), &query, &[127; 8]);
+}
+
+#[test]
+#[should_panic(expected = "the reserved code -128 never reaches scoring")]
+fn weighted_scoring_refuses_a_reserved_document_code() {
+    let mut doc = [0i8; 8];
+    doc[7] = i8::MIN;
+    let _ = weighted_dot(&scales_of([1.0; 8]), &[127; 8], &doc);
+}
+
+#[test]
 fn nonuniform_scales_rank_differently_from_a_raw_integer_dot() {
     // Coordinate 0 carries small values (small scale); coordinate 1 carries large ones.
     let scales = scales_of([0.01, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
