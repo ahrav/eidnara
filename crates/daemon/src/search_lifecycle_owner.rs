@@ -30,6 +30,8 @@ use crate::projection_lifecycle::{
     ControlState, LifecycleIntent, LifecycleRequest, MAX_RECORD_BYTES, ProjectionLifecycle,
     Recorded, Transition,
 };
+#[cfg(feature = "test-support")]
+use crate::search_catchup::EpisodeEvent;
 use crate::search_catchup::{
     CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeReport, SearchCatchUp,
 };
@@ -130,7 +132,12 @@ pub struct SearchLifecycleOwner {
     tenure: Mutex<Option<(String, u32, SliceBounds)>>,
     #[cfg(feature = "test-support")]
     drain_grace_override: Mutex<Option<Duration>>,
+    #[cfg(feature = "test-support")]
+    episode_tap: Mutex<Option<EpisodeTap>>,
 }
+
+#[cfg(feature = "test-support")]
+type EpisodeTap = Arc<dyn Fn(&EpisodeEvent) + Send + Sync>;
 
 /// Puts the manager a disable took back unless the owner shut down meanwhile, whether the disable finished or its future was dropped.
 struct Restore<'a> {
@@ -163,7 +170,15 @@ impl SearchLifecycleOwner {
             tenure: Mutex::new(None),
             #[cfg(feature = "test-support")]
             drain_grace_override: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            episode_tap: Mutex::new(None),
         }
+    }
+
+    /// Observes every catch-up episode event on the slice thread, before the owner acts on it, so a test can hold the episode at a boundary.
+    #[cfg(feature = "test-support")]
+    pub fn tap_episode_events_for_test(&self, tap: impl Fn(&EpisodeEvent) + Send + Sync + 'static) {
+        *self.episode_tap.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(tap));
     }
 
     /// Replaces the manifest's drain grace so a test can observe an unresolved drain without a manifest that no retirement could admit.
@@ -417,7 +432,7 @@ impl SearchLifecycleOwner {
         }
     }
 
-    /// Reports a Current family: `Current` at the kernel tip, `CaughtUp` after one catch-up episode toward the tip with admission refreshed on the family the episode moved, or `RotateMaintenance` when the tenant's supervisor must be joined first. Maintenance is reconciled whether or not the episode advanced, so a family whose hold is dead still rotates.
+    /// Reports a Current family: `Current` at the kernel tip, `CaughtUp` after one catch-up episode toward the tip with admission refreshed on the family the episode moved, or `RotateMaintenance` when the tenant's supervisor must be joined first. Maintenance is reconciled whether or not the episode advanced, so a family whose hold is dead still rotates; a maintenance start that fails after an episode ran leaves that episode's report in place.
     fn settle_current(
         &self,
         selection: &mut SearchSelection,
@@ -443,7 +458,11 @@ impl SearchLifecycleOwner {
         match self.maintain(selection, manifest, spec, budget) {
             Ok(Some(handle)) => SliceOutcome::RotateMaintenance(handle),
             Ok(None) => report.map_or(SliceOutcome::Current, SliceOutcome::CaughtUp),
-            Err(error) => SliceOutcome::Blocked(error.to_string()),
+            // The episode's progress decides the loop's next step; maintenance is attempted again next slice.
+            Err(error) => report.map_or_else(
+                || SliceOutcome::Blocked(error.to_string()),
+                SliceOutcome::CaughtUp,
+            ),
         }
     }
 
@@ -492,9 +511,21 @@ impl SearchLifecycleOwner {
         };
         // The caller's cancellation reaches the linked budget directly; the callback cancels only `episode`, leaving the caller's `budget` unmodified.
         let episode = budget.linked();
+        #[cfg(feature = "test-support")]
+        let tap = self
+            .episode_tap
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let report = SearchCatchUp::new(&self.kernel, reader.projection())
             .with_budget(episode.clone())
-            .run_episode(&consumer, &spec.episode, crate::now_ms(), &mut |_| {
+            .run_episode(&consumer, &spec.episode, crate::now_ms(), &mut |event| {
+                #[cfg(feature = "test-support")]
+                if let Some(tap) = &tap {
+                    tap(&event);
+                }
+                #[cfg(not(feature = "test-support"))]
+                let _ = event;
                 if grants.iter().any(|grant| grant.invalidated.is_cancelled()) {
                     episode.cancel();
                 }

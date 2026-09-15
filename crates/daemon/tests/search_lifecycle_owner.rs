@@ -913,13 +913,8 @@ async fn a_lone_supervisor_is_renewed_when_its_grant_expires() {
     owner.shutdown().await.unwrap();
 }
 
-/// Closing the gate cancels a running catch-up episode before it acknowledges every pending window.
-#[test]
-fn a_revoked_grant_stops_a_running_catch_up_episode() {
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path();
-    let corpus = Corpus::open(home);
-    corpus.seed();
+/// A Current family under one-commit windows with `count` later rows, so a catch-up episode crosses many boundaries.
+fn owner_with_many_windows(home: &Path, corpus: &Corpus, count: usize) -> SearchLifecycleOwner {
     corpus.publish("kept", "kept text");
     let identity = identity(&kernel_incarnation_id(home));
     write_records(
@@ -943,35 +938,47 @@ fn a_revoked_grant_stops_a_running_catch_up_episode() {
         owner.run_slice(&slice_budget()),
         SliceOutcome::Current
     ));
-    let before = corpus
-        .kernel
-        .outbox_consumer_checkpoint(CONSUMER)
-        .unwrap()
-        .unwrap();
-    for index in 0..40 {
+    for index in 0..count {
         corpus.publish(&format!("later-{index}"), "later text");
     }
+    owner
+}
+
+/// Pauses the episode at the second window's first boundary: `reached` fires once, then the episode waits on `release`.
+fn pause_at_second_window(
+    owner: &SearchLifecycleOwner,
+    reached: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+) {
+    let windows = std::sync::atomic::AtomicUsize::new(0);
+    owner.tap_episode_events_for_test(move |event| {
+        if matches!(event, EpisodeEvent::HoldExtensionRequested { .. })
+            && windows.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+        {
+            reached.wait();
+            release.wait();
+        }
+    });
+}
+
+/// Closing the gate cancels a running catch-up episode before it acknowledges every pending window.
+#[test]
+fn a_revoked_grant_stops_a_running_catch_up_episode() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = owner_with_many_windows(home, &corpus, 8);
     let tip = corpus.tip();
+    let reached = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    pause_at_second_window(&owner, Arc::clone(&reached), Arc::clone(&release));
 
     let outcome = std::thread::scope(|scope| {
         let slice = scope.spawn(|| owner.run_slice(&slice_budget()));
-        let started = Instant::now();
-        loop {
-            let acknowledged = corpus
-                .kernel
-                .outbox_consumer_checkpoint(CONSUMER)
-                .unwrap()
-                .unwrap();
-            if acknowledged > before {
-                break;
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "the episode never acknowledged a window"
-            );
-            std::thread::sleep(Duration::from_micros(200));
-        }
+        reached.wait();
         owner.admission().gate().close();
+        release.wait();
         slice.join().unwrap()
     });
     let SliceOutcome::CaughtUp(report) = outcome else {
@@ -982,6 +989,7 @@ fn a_revoked_grant_stops_a_running_catch_up_episode() {
         EpisodeEnd::Blocked(Blocked::Cancelled),
         "{report:?}"
     );
+    assert_eq!(report.batches_applied, 1, "{report:?}");
     assert!(report.acknowledged_through < tip, "{report:?}");
     assert_eq!(
         corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
@@ -1216,37 +1224,10 @@ fn caller_cancellation_interrupts_a_catch_up_waiting_for_a_kernel_reader() {
     let home = root.path();
     let corpus = Corpus::open(home);
     corpus.seed();
-    corpus.publish("kept", "kept text");
-    let identity = identity(&kernel_incarnation_id(home));
-    write_records(
-        home,
-        &manifest_json_with(
-            &identity,
-            &ProjectionHook::ALL,
-            &[("catchup_batch_commits", 1), ("catchup_lag_commits", 1_000)],
-        ),
-        &campaign_json(&identity),
-    );
-    let owner = owner(home, &corpus.kernel);
-    let _ = owner.run_slice(&slice_budget());
-    owner
-        .request(&rebuild(home), now(), &slice_budget())
-        .unwrap();
-    for _ in 0..2 {
-        let _ = owner.run_slice(&slice_budget());
-    }
-    assert!(matches!(
-        owner.run_slice(&slice_budget()),
-        SliceOutcome::Current
-    ));
-    let before = corpus
-        .kernel
-        .outbox_consumer_checkpoint(CONSUMER)
-        .unwrap()
-        .unwrap();
-    for index in 0..40 {
-        corpus.publish(&format!("later-{index}"), "later text");
-    }
+    let owner = owner_with_many_windows(home, &corpus, 8);
+    let reached = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    pause_at_second_window(&owner, Arc::clone(&reached), Arc::clone(&release));
 
     let budget = slice_budget();
     let held = std::sync::Barrier::new(2);
@@ -1255,27 +1236,16 @@ fn caller_cancellation_interrupts_a_catch_up_waiting_for_a_kernel_reader() {
             let budget = budget.clone();
             scope.spawn(move || owner.run_slice(&budget))
         };
-        let started = Instant::now();
-        loop {
-            if corpus
-                .kernel
-                .outbox_consumer_checkpoint(CONSUMER)
-                .unwrap()
-                .unwrap()
-                > before
-            {
-                break;
-            }
-            assert!(started.elapsed() < Duration::from_secs(10));
-            std::thread::sleep(Duration::from_micros(200));
-        }
+        reached.wait();
+        // The readers are held before the episode resumes, so its next kernel read waits on the pool.
         scope.spawn(|| {
             corpus
                 .kernel
                 .hold_readers_for_test(&held, Duration::from_secs(3))
         });
         held.wait();
-        std::thread::sleep(Duration::from_millis(100));
+        release.wait();
+        std::thread::sleep(Duration::from_millis(150));
         let cancelled = Instant::now();
         budget.cancel();
         let outcome = slice.join().unwrap();
@@ -1417,6 +1387,50 @@ fn a_pin_waits_for_the_owner_only_within_its_budget() {
         "the pin waited {waited:?} for the owner: {pinned:?}"
     );
     assert!(pinned.is_err(), "{pinned:?}");
+}
+
+/// A catch-up episode that applied batches is reported as such even when maintenance cannot start afterwards, so the loop reschedules without idling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn catch_up_progress_is_reported_when_maintenance_cannot_start() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    let identity = identity(&kernel_incarnation_id(home));
+    let without_backfill: Vec<ProjectionHook> = ProjectionHook::ALL
+        .iter()
+        .copied()
+        .filter(|hook| *hook != ProjectionHook::EmbeddingBackfill)
+        .collect();
+    write_records(
+        home,
+        &manifest_json(&identity, &without_backfill),
+        &campaign_json(&identity),
+    );
+    let owner = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+        .with_roster(Arc::new(|| {
+            vec![("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap())]
+        }));
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    corpus.publish("later", "later text");
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::CaughtUp(report) if report.batches_applied >= 1 && report.end == EpisodeEnd::ReachedTarget),
+        "{outcome:?}"
+    );
+    assert!(owner.maintenance().is_none(), "backfill is disabled");
+    owner.shutdown().await.unwrap();
 }
 
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
