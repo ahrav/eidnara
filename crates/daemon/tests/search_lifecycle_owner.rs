@@ -1730,6 +1730,45 @@ async fn retirement_verifies_a_long_commit_span_page_by_page() {
     owner.shutdown().await.unwrap();
 }
 
+/// A request made after a manifest reload disabled its hook is refused, even though the previous slice's evidence admitted it.
+#[test]
+fn a_request_is_judged_on_the_records_it_reads_not_on_cached_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let ControlState::Current(current) = control(home) else {
+        panic!("the rebuild reached Current");
+    };
+    let identity = identity(&kernel_incarnation_id(home));
+    let without_bootstrap: Vec<ProjectionHook> = ProjectionHook::ALL
+        .iter()
+        .copied()
+        .filter(|hook| *hook != ProjectionHook::EmbeddingBootstrap)
+        .collect();
+    write_records(
+        home,
+        &manifest_json(&identity, &without_bootstrap),
+        &campaign_json(&identity),
+    );
+    let mut again = rebuild(home);
+    again.selected_generation = current.staged_seed_digest.clone().unwrap();
+    again.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    again.attempt_id = "rebuild-again".to_owned();
+    assert!(
+        matches!(
+            owner.request(&again, now(), &slice_budget()),
+            Err(BuildError::Intent(_))
+        ),
+        "a disabled hook refuses the request"
+    );
+    assert!(
+        matches!(control(home), ControlState::Current(done) if done.attempt_id == current.attempt_id),
+        "nothing was recorded"
+    );
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

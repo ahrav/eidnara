@@ -691,7 +691,7 @@ impl SearchLifecycleOwner {
         };
         replacement_spec(
             inputs.manifest(),
-            identity,
+            identity.clone(),
             request.transition,
             request.allowance,
             &request.consumer.generation_id,
@@ -704,6 +704,15 @@ impl SearchLifecycleOwner {
             return Err(BuildError::Invalid(
                 "the request's deadline lies past its transition's bound",
             ));
+        }
+        // The gate judges the request on the records just read, not on the evidence the last slice installed.
+        if let Managed::Selection(selection) = &*managed
+            && let Refresh::Closed(closed) = self.refresh(&inputs, selection, &identity, budget)
+        {
+            return Err(BuildError::Invalid(match closed {
+                Closed::ShutDown => "the owner is shut down",
+                _ => "admission is closed",
+            }));
         }
         match request.transition {
             Transition::Rebuilding => {
