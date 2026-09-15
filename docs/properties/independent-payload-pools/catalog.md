@@ -415,7 +415,6 @@ Existing check: `crates/host-runtime/src/ring_transport.rs:1937` shows the ring 
 Impact: Decoding shared bytes would let a peer change a message under the parser.
 Open questions:
 
-
 - Handoff: #552 and #550 for client-side decoding of host output.
 
 ### request-conversion-completion-ownership
@@ -432,7 +431,6 @@ Confidence: high - [evidence](evidence/request-conversion-completion-ownership.m
 Existing check: `crates/host-runtime/src/ring_transport.rs:3059` holds a real `into_private` copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once. `crates/host-runtime/tests/dispatch.rs:749` and `crates/host-runtime/tests/dispatch.rs:805` drive the production Cancel and route-close paths against handler blocking work (`blocking_hold`), which starts after `dispatch_request` has already completed the inbound copy; no test pauses the production copy itself under Cancel, route close, or shutdown.
 Impact: An early return would reuse a block a worker is still copying.
 Open questions:
-
 
 - Handoff: none for this task.
 
@@ -521,7 +519,6 @@ Existing check: `crates/shm-transport/tests/profile.rs:261` checks the charge eq
 Impact: An under-charged connection oversubscribes the process ceiling.
 Open questions:
 
-
 - Handoff: #552 for Rust-client retention; #550 for native/TypeScript retention.
 
 ### terminal-credit-follows-storage
@@ -538,7 +535,6 @@ Confidence: high - [evidence](evidence/terminal-credit-follows-storage.md). Veri
 Existing check: `crates/host-runtime/src/ring_transport.rs:3019` publishes a terminal carrying a credit and shows the credit outstanding until `Ring::take_reclaimed` observes the block's return; `crates/host-runtime/tests/dispatch.rs:1649` admits 63 unsettled requests, refuses the 64th with `server_busy`/`terminal capacity exhausted` and zero dispatch while pending slots remain, then dispatches again only after the cancelled terminal's block is consumed.
 Impact: A credit refunded on callback completion lets terminals exceed the reserved inventory.
 Open questions:
-
 
 - Handoff: none for this task.
 
@@ -557,7 +553,6 @@ Existing check: `crates/shm-transport/src/backend/ring.rs:2462` proves control a
 Impact: A draining peer that cannot exchange controls under data backpressure never recovers.
 Open questions:
 
-
 - Handoff: #552, #550 for client publication selection.
 
 ### reserved-publication-order
@@ -574,7 +569,6 @@ Confidence: medium - [evidence](evidence/reserved-publication-order.md). Verifie
 Existing check: `crates/host-runtime/src/ring_transport.rs:2778` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:3012` pins that a channel-0 Request is never a bypass control. Client publishers belong to #552 and #550.
 Impact: A reordered terminal or correlation breaks the application contract.
 Open questions:
-
 
 - Handoff: #552, #550 for client publishers.
 
@@ -593,7 +587,6 @@ Existing check: `crates/shm-transport/tests/profile.rs:215` covers worker/backin
 Impact: Refunding storage a peer may have mapped lets a later connection map over it.
 Open questions:
 
-
 - Handoff: the last implementation task injects a descriptor-duplication failure in the combined matrix.
 
 ### bounded-refusal-and-recovery
@@ -610,7 +603,6 @@ Confidence: high - [evidence](evidence/bounded-refusal-and-recovery.md). Verifie
 Existing check: `crates/shm-transport/src/backend/ring.rs:2356` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:3310` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:3128` bounds a stalled peer by the frame deadline.
 Impact: An unbounded or unrecoverable refusal is a hang the peer cannot diagnose.
 Open questions:
-
 
 - Handoff: #552 for Rust-client refusal recovery; #550 for native.
 
@@ -629,7 +621,6 @@ Existing check: `crates/host-runtime/src/ring_transport.rs:2967` counts serializ
 Impact: Serializing into class slack or without a reservation would write bytes no descriptor accounts for.
 Open questions:
 
-
 - Handoff: none for this task.
 
 ### terminal-encoding-reserve-bound
@@ -646,7 +637,6 @@ Confidence: high - [evidence](evidence/terminal-encoding-reserve-bound.md). Veri
 Existing check: `crates/shm-transport/tests/contract.rs:187` checks the 32 KiB terminal block holds 25,406 body and 25,427 frame bytes; `crates/host-runtime/src/dispatch.rs:1594` serializes the worst-escaped 128-byte code, 4,096-byte message, and `u64::MAX` retry hint and shows the frame is exactly `TERMINAL_FRAME_BYTES` (25,427) and fits the terminal class body; terminal bodies charge `HostShared::terminal_budget`, sized from `TERMINAL_RESERVED_BYTES_PER_CONNECTION`, never the ordinary egress budget.
 Impact: A terminal that does not fit its reserve is truncated or replaced, hiding the real error.
 Open questions:
-
 
 - Handoff: none for this task.
 
@@ -665,7 +655,6 @@ Existing check: `crates/host-runtime/src/ring_transport.rs:1511` classifies `Dea
 Impact: A replayed uncertain request executes twice.
 Open questions:
 
-
 - Handoff: #552, #550.
 
 ### reclamation-diagnostics-meaning
@@ -682,7 +671,6 @@ Confidence: high - [evidence](evidence/reclamation-diagnostics-meaning.md). Veri
 Existing check: `crates/host-runtime/src/ring_transport.rs:3382` takes one snapshot of live backings, outstanding leases, and released backing bytes while the endpoint runs and again after it ends, and shows `reclamation.completed` advancing for the generation end without advancing released backing; `RingTransport::return_snapshot` (`crates/host-runtime/src/ring_transport.rs:262`) reads both quantities under one lock and `diagnostics()` reports `reclamation.meaning`, `returns`, and `exhaustion.by_resource` as distinct objects under the existing wire names.
 Impact: A counter read as released storage misleads operators about reclaimable capacity.
 Open questions:
-
 
 - Handoff: none for this task.
 
