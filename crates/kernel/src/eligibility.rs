@@ -399,12 +399,16 @@ impl KernelStore {
     /// [`Self::judge_surface_eligibility_within_budget`] plus
     /// [`Self::claim_facts_as_of`] for `object_ids` from the one snapshot the
     /// verdicts come from, so a final-use gate can deny a row whose occurrence
-    /// the kernel no longer lists at the tip it judged.
+    /// the kernel no longer lists at the tip it judged. `classified_in` is the
+    /// incarnation the candidates were classified against; a store of another
+    /// incarnation refuses under the reader guard, so a restore between
+    /// classification and this judgement cannot match displaced candidates to
+    /// reused identifiers.
     ///
     /// # Errors
     ///
-    /// The facts request errors before any read; kernel errors as
-    /// `ClaimFactsError::Kernel`.
+    /// The facts request errors before any read; `IncarnationMismatch` before
+    /// any row is read; kernel errors as `ClaimFactsError::Kernel`.
     #[allow(clippy::too_many_arguments)] // Splitting the call would split the snapshot.
     pub fn judge_surface_eligibility_with_claims(
         &self,
@@ -414,11 +418,19 @@ impl KernelStore {
         candidates: &[EligibilityCandidate],
         object_ids: &[String],
         bounds: ClaimFactBounds,
+        classified_in: CommitReadIncarnation,
         budget: &crate::applicability::EvalBudget,
     ) -> Result<SurfaceEligibilityWithClaims, ClaimFactsError> {
         check_bounds(candidates)?;
         check_claim_bounds(object_ids, bounds)?;
         let read = |tx: &Transaction<'_>, tip: i64| {
+            if classified_in != self.incarnation() {
+                return Ok((
+                    self.incarnation(),
+                    Vec::new(),
+                    Err(ClaimFactsError::IncarnationMismatch),
+                ));
+            }
             let verdicts = judge_surface_in_tx(tx, tip, project, destination, surface, candidates)?;
             let claims = load_claims_in_tx(tx, tip, object_ids, bounds);
             Ok((self.incarnation(), verdicts, claims))

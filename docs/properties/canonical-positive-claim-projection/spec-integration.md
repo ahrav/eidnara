@@ -61,7 +61,10 @@ Ticket numbers here are tracking metadata, not names of anything in the tree.
   permitted row is reclassified against them, so a projection digest is never
   the authority for which artifact is judged, a representation retired since
   classification is denied at the fresh tip, and the lineage accounting is the
-  snapshot's. One `EvalBudget` bounds the kernel read. The same call serves
+  snapshot's. The batch carries the incarnation it was classified in, and the
+  read refuses a kernel of another incarnation under the reader guard, as
+  `claim_facts_at` does for the classification read. One `EvalBudget` bounds
+  the kernel read. The same call serves
   preselection admission and the final revalidation of packed survivors; the
   second call reads a newer snapshot and denies whatever was restricted since.
 - Not wired in this change: a daemon route or plugin path that calls the gate,

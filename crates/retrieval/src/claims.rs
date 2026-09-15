@@ -93,6 +93,9 @@ pub struct ClaimCandidate {
 pub struct ClaimCandidateBatch {
     /// The kernel snapshot the canonical facts were read at.
     pub known_as_of: i64,
+    /// The kernel incarnation `known_as_of` belongs to; `validate_for_surface`
+    /// refuses a kernel of another incarnation.
+    pub incarnation: CommitReadIncarnation,
     /// The facts of every distinct claim object the rows name, in the order the
     /// objects were first seen.
     pub claims: Vec<ClaimFacts>,
@@ -391,6 +394,7 @@ pub fn classify_live_claims(
         .collect();
     Ok(ClaimCandidateBatch {
         known_as_of,
+        incarnation: target.incarnation,
         claims: snapshot.claims,
         candidates,
     })
@@ -489,8 +493,12 @@ impl SurfaceValidation {
 /// `Eligibility(InvalidInput)` when more than `MAX_ELIGIBILITY_CANDIDATES`
 /// candidates are `Current` or a Current row's identity fields are invalid;
 /// `Facts(TooManyClaims)` when the candidates name more distinct objects than
-/// `bounds.max_claims`; `Eligibility(Deadline)` when the budget runs out;
-/// other kernel read errors as `Eligibility(_)`.
+/// `bounds.max_claims`; `Facts(IncarnationMismatch)` when `kernel` is not the
+/// incarnation `classified_in` (the batch's `incarnation`) names, so a kernel
+/// restored since classification cannot judge displaced candidates;
+/// `Eligibility(Deadline)` when the budget runs out; other kernel read errors
+/// as `Eligibility(_)`.
+#[allow(clippy::too_many_arguments)] // The gate's inputs are one judgement; a struct would be built once and read once.
 pub fn validate_for_surface(
     kernel: &KernelStore,
     candidates: &[ClaimCandidate],
@@ -498,6 +506,7 @@ pub fn validate_for_surface(
     destination: ArtifactDestination,
     surface: Surface,
     bounds: ClaimFactBounds,
+    classified_in: CommitReadIncarnation,
     budget: &EvalBudget,
 ) -> Result<SurfaceValidation, ClaimCandidateError> {
     let check_budget = || {
@@ -541,6 +550,7 @@ pub fn validate_for_surface(
             &submitted,
             &object_ids,
             bounds,
+            classified_in,
             budget,
         )
         .map_err(|error| match error {
@@ -638,6 +648,7 @@ mod tests {
         let kernel = KernelStore::open(dir.path()).unwrap();
         let batch = ClaimCandidateBatch {
             known_as_of: 0,
+            incarnation: kernel.capture_commit_read_target().unwrap().incarnation,
             claims: Vec::new(),
             candidates: vec![ClaimCandidate {
                 row: ClaimCandidateRow {
@@ -677,6 +688,7 @@ mod tests {
                     ArtifactDestination::Local,
                     Surface::AutoInject,
                     bounds(),
+                    batch.incarnation,
                     &budget,
                 ),
                 Err(ClaimCandidateError::Eligibility(KernelError::Deadline))
@@ -695,6 +707,7 @@ mod tests {
                 ArtifactDestination::Local,
                 Surface::AutoInject,
                 bounds(),
+                batch.incarnation,
                 &EvalBudget::unbounded(),
             )
         };
@@ -763,6 +776,7 @@ mod tests {
                 ArtifactDestination::Local,
                 Surface::AutoInject,
                 bounds(),
+                batch.incarnation,
                 &budget,
             )
             .unwrap();
@@ -779,6 +793,7 @@ mod tests {
                 ArtifactDestination::Local,
                 Surface::AutoInject,
                 bounds(),
+                batch.incarnation,
                 &budget,
             );
             let unconsumed = CANCEL_AFTER_JUDGMENT.with(Cell::take);

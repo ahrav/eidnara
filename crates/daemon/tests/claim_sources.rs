@@ -1848,6 +1848,7 @@ fn validate_scoped(
         destination,
         surface,
         candidate_bounds().facts,
+        batch.incarnation,
         &EvalBudget::unbounded(),
     )
     .unwrap();
@@ -2059,6 +2060,7 @@ fn final_use_is_judged_per_surface_from_current_canonical_policy() {
             ArtifactDestination::Local,
             Surface::ExplicitSearch,
             candidate_bounds().facts,
+            batch.incarnation,
             &EvalBudget::unbounded(),
         )
         .unwrap()
@@ -2138,6 +2140,7 @@ fn final_use_is_judged_per_surface_from_current_canonical_policy() {
         ArtifactDestination::Local,
         Surface::ExplicitSearch,
         candidate_bounds().facts,
+        batch.incarnation,
         &EvalBudget::unbounded(),
     )
     .unwrap();
@@ -2215,6 +2218,7 @@ fn a_purged_representation_splits_row_verdicts_and_both_accounting_sets_keep_the
         ArtifactDestination::Local,
         Surface::ExplicitSearch,
         candidate_bounds().facts,
+        batch.incarnation,
         &EvalBudget::unbounded(),
     )
     .unwrap();
@@ -2274,7 +2278,11 @@ fn one_decision_validated(
     (corpus, projection, batch, before)
 }
 
-fn revalidate(corpus: &Corpus, candidates: &[ClaimCandidate]) -> SurfaceValidation {
+fn revalidate(
+    corpus: &Corpus,
+    batch: &ClaimCandidateBatch,
+    candidates: &[ClaimCandidate],
+) -> SurfaceValidation {
     validate_for_surface(
         &corpus.kernel,
         candidates,
@@ -2282,6 +2290,7 @@ fn revalidate(corpus: &Corpus, candidates: &[ClaimCandidate]) -> SurfaceValidati
         ArtifactDestination::Local,
         Surface::ExplicitSearch,
         candidate_bounds().facts,
+        batch.incarnation,
         &EvalBudget::unbounded(),
     )
     .unwrap()
@@ -2295,7 +2304,7 @@ fn a_row_whose_digest_disagrees_with_its_canonical_occurrence_is_not_permitted()
     let (corpus, _projection, batch, _) = one_decision_validated(dir.path());
     let mut forged = batch.candidates[0].clone();
     forged.row.artifact_digest = "a".repeat(64);
-    let after = revalidate(&corpus, std::slice::from_ref(&forged));
+    let after = revalidate(&corpus, &batch, std::slice::from_ref(&forged));
     assert_eq!(
         after.candidates[0].verdict,
         UseVerdict::Denied(UseDenial::State(CandidateState::Stale)),
@@ -2327,7 +2336,7 @@ fn a_descriptor_retired_after_classification_is_denied_at_the_fresh_snapshot() {
             Ok(String::new())
         })
         .unwrap();
-    let after = revalidate(&corpus, &batch.candidates);
+    let after = revalidate(&corpus, &batch, &batch.candidates);
     assert!(after.snapshot.tip > before.snapshot.tip);
     let labeled = UseVerdict::Permitted(kernel::SurfaceVisibility::Labeled);
     for validated in &after.candidates {
@@ -2391,7 +2400,7 @@ fn use_accounting_reads_causality_at_the_validation_snapshot() {
             Ok(String::new())
         })
         .unwrap();
-    let after = revalidate(&corpus, &batch.candidates);
+    let after = revalidate(&corpus, &batch, &batch.candidates);
     assert!(after.snapshot.tip > before.snapshot.tip);
     assert!(
         after.accounting.unknown_objects.is_empty(),
@@ -2422,7 +2431,7 @@ fn an_admission_marked_stale_after_classification_is_denied_at_the_fresh_snapsho
             Ok(String::new())
         })
         .unwrap();
-    let after = revalidate(&corpus, &batch.candidates);
+    let after = revalidate(&corpus, &batch, &batch.candidates);
     assert!(after.snapshot.tip > before.snapshot.tip);
     for validated in &after.candidates {
         assert_eq!(
@@ -2435,5 +2444,44 @@ fn an_admission_marked_stale_after_classification_is_denied_at_the_fresh_snapsho
     assert_eq!(
         after.accounting.rejected_objects,
         BTreeSet::from(["rule".to_string()])
+    );
+}
+
+/// A batch classified against one kernel history is refused by a kernel of
+/// another incarnation, so a restore between classification and handoff cannot
+/// judge displaced candidates against reused identifiers.
+#[test]
+fn validation_refuses_a_kernel_of_another_incarnation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_corpus, _projection, batch, _) = one_decision_validated(dir.path());
+    let other_dir = tempfile::tempdir().unwrap();
+    let other = Corpus::open(other_dir.path());
+    other.seed();
+    other.decide(Seed::scoped(
+        "rule",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        CONTRACT,
+        "Relied on.",
+    ));
+    let result = validate_for_surface(
+        &other.kernel,
+        &batch.candidates,
+        &ProjectScope::new(PROJECT).unwrap(),
+        ArtifactDestination::Local,
+        Surface::ExplicitSearch,
+        candidate_bounds().facts,
+        batch.incarnation,
+        &EvalBudget::unbounded(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(retrieval::claims::ClaimCandidateError::Facts(
+                kernel::ClaimFactsError::IncarnationMismatch
+            ))
+        ),
+        "{result:?}"
     );
 }

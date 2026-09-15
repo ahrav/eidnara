@@ -430,8 +430,11 @@ fn a_row_outside_the_live_descriptor_inventory_is_retracted() {
 fn a_candidate_from_another_batch_reads_no_facts() {
     let mut other = Facts::current().build();
     other.object.object_id = "decision-object-2".to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel::KernelStore::open(dir.path()).unwrap();
     let batch = ClaimCandidateBatch {
         known_as_of: 7,
+        incarnation: kernel.capture_commit_read_target().unwrap().incarnation,
         claims: vec![other],
         candidates: Vec::new(),
     };
