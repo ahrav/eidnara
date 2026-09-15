@@ -41,6 +41,17 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `live_rows::a_projection_from_another_kernel_incarnation_is_refused_before_any_read` | same | `NoIdentity` and `ForeignKernel` before the row bound is checked | unaudited |
 | `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees` | `crates/daemon/tests/claim_sources.rs` | lagging rows classify Superseded, Retracted, Hidden from canonical facts against an independent oracle; catch-up tombstones; quarantine stays live and Hidden; the classified map is equal before and after a causality record on the successor; a fresh rebuild classifies identically | unaudited |
 
+## Final-use validation
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `final_use_is_judged_per_surface_from_current_canonical_policy` | `crates/daemon/tests/claim_sources.rs` | explicit search permitted with label while AutoInject is `SurfaceHidden` on the same batch `Ok`; a foreign project digest denies every candidate `WrongScope`; genuine and Unknown permitted alike; separate overlapping rejected and Unknown sets; ordered duplicates; two reads agree; quarantine and correction deny at classification and at revalidation of earlier survivors | unaudited |
+| `a_purged_representation_splits_row_verdicts_and_both_accounting_sets_keep_the_object` | `crates/daemon/tests/claim_sources.rs` | a purge of one representation's artifact between selection and handoff denies that row and leaves the others permitted; the object is in both the permitted and the rejected set | unaudited |
+| `a_row_whose_digest_disagrees_with_its_canonical_occurrence_is_not_permitted` | `crates/daemon/tests/claim_sources.rs` | a candidate whose row digest names an artifact other than the one the kernel lists for its occurrence is denied `Stale` although the kernel permits the object and the local artifact gate would allow a digest with no evidence rows | unaudited |
+| `a_descriptor_retired_after_classification_is_denied_at_the_fresh_snapshot` | `crates/daemon/tests/claim_sources.rs` | retiring one representation's descriptor between classification and validation denies that row `Retracted` at the validation snapshot while the projection still holds it; the other representations stay permitted | unaudited |
+| `an_admission_marked_stale_after_classification_is_denied_at_the_fresh_snapshot` | `crates/daemon/tests/claim_sources.rs` | a `MarkStale` admission between classification and validation denies every row `Stale` although the kernel batch, which reads the revision, still answers `Ok` | unaudited |
+| `use_accounting_reads_causality_at_the_validation_snapshot` | `crates/daemon/tests/claim_sources.rs` | a causality record committed between classification and validation leaves `unknown_objects` at the validation snapshot and reports the fresh class through `SurfaceValidation.claims`, beside verdicts from the same snapshot | unaudited |
+
 ## Adjacent kernel checks the records rely on
 
 | Check | Location | Covers | Status |
@@ -54,6 +65,9 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 
 - No production caller of `claim_facts_as_of`, `record_claim_causality`, or
   `classify_live_claims`, so no route-level check exists.
+- No daemon route calls `validate_for_surface`; no harness delivers a claim, so
+  the six independent delivery witnesses the delivery ticket requires do not
+  exist; no claim path invokes the checkout applicability engine.
 - No claim-specific process-crash cut, recovery bound, or disable path; the
   RP2.1 shared checks named in the records cover the mechanisms the claim
   rows travel through.

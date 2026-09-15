@@ -19,6 +19,7 @@ fn occurrence(revision: i64) -> ClaimCandidateRow {
         representation: "decision_summary".to_string(),
         object_id: "decision-object-1".to_string(),
         revision,
+        artifact_digest: "0".repeat(64),
     }
 }
 
@@ -61,6 +62,8 @@ struct Facts {
     served: ServedStanding,
     /// Whether the kernel's live descriptor inventory lists the row `occurrence` builds.
     listed: bool,
+    /// The artifact the listed descriptor names.
+    listed_digest: String,
     causality: CausalClass,
 }
 
@@ -74,6 +77,7 @@ impl Facts {
             lineage: None,
             served: served(SurfaceVisibility::Labeled),
             listed: true,
+            listed_digest: "0".repeat(64),
             causality: CausalClass::Unknown(UnknownReason::NoRecord),
         }
     }
@@ -111,7 +115,7 @@ impl Facts {
                     occurrence_id: "occ".to_string(),
                     lineage_id: "lineage".to_string(),
                     payload_id: "payload".to_string(),
-                    artifact_digest: "0".repeat(64),
+                    artifact_digest: self.listed_digest,
                     evidence_id: "evidence".to_string(),
                     descriptor_commit_seq: 3,
                 }]
@@ -295,6 +299,14 @@ fn state_follows_the_documented_precedence() {
                 ..Facts::current()
             }),
             CandidateState::Hidden,
+        ),
+        (
+            "listed with another artifact is stale",
+            Some(Facts {
+                listed_digest: "1".repeat(64),
+                ..Facts::current()
+            }),
+            CandidateState::Stale,
         ),
         ("current", Some(Facts::current()), CandidateState::Current),
         (
