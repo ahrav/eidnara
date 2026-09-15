@@ -15,16 +15,18 @@ use std::collections::{HashMap, HashSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::LazyLock;
 
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::admission::{
     Disposition, EventKind, Maturity, Outcome, ServedRow, SourceClass, Surface, SurfaceVisibility,
     TaintClass, VisibilityRow, served_classes, served_lineage_decision_sql,
     served_own_decision_sql, supporting_approval_valid_sql,
 };
+use super::applicability::EvalBudget;
 use super::claim_causality::{CausalClass, CausalRecord, causal_class_at, registry_row_at};
-use super::commit_read::{CommitReadIncarnation, CommitReadTarget};
+use super::commit_read::{CommitReadIncarnation, CommitReadTarget, tip};
 use super::envelope::{ObjectRow, Sensitivity};
+use super::open::AcquireLimit;
 use super::source_descriptor::{
     OCCURRENCE_ID_PREFIX, SOURCE_DESCRIPTOR_KIND, descriptor_object_id, reencoded_identity,
     stored_detail,
@@ -182,7 +184,13 @@ impl KernelStore {
         requested: i64,
         bounds: ClaimFactBounds,
     ) -> Result<ClaimFactsSnapshot, ClaimFactsError> {
-        self.claim_facts_inner(object_ids, requested, bounds, None)
+        self.claim_facts_inner(
+            object_ids,
+            requested,
+            bounds,
+            None,
+            &AcquireLimit::default(),
+        )
     }
 
     /// [`Self::claim_facts_as_of`] at `target.through_commit`, refused with
@@ -207,7 +215,35 @@ impl KernelStore {
             target.through_commit,
             bounds,
             Some(target.incarnation),
+            &AcquireLimit::default(),
         )
+    }
+
+    /// [`Self::claim_facts_at`] under `budget`: reader acquisition and every
+    /// statement stop at the deadline or on cancellation with
+    /// `KernelError::Deadline`.
+    ///
+    /// # Errors
+    ///
+    /// `Kernel(Deadline)` from an exhausted budget, then every refusal of
+    /// [`Self::claim_facts_at`].
+    pub fn claim_facts_at_within_budget(
+        &self,
+        object_ids: &[String],
+        target: CommitReadTarget,
+        bounds: ClaimFactBounds,
+        budget: &EvalBudget,
+    ) -> Result<ClaimFactsSnapshot, ClaimFactsError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            self.claim_facts_inner(
+                object_ids,
+                target.through_commit,
+                bounds,
+                Some(target.incarnation),
+                &limit,
+            )
+        })
     }
 
     fn claim_facts_inner(
@@ -216,17 +252,26 @@ impl KernelStore {
         requested: i64,
         bounds: ClaimFactBounds,
         incarnation: Option<CommitReadIncarnation>,
+        limit: &AcquireLimit,
     ) -> Result<ClaimFactsSnapshot, ClaimFactsError> {
         check_claim_bounds(object_ids, bounds)?;
-        let (tip, loaded) = self.read_snapshot(requested, |tx, _| {
-            // The closure runs under the reader guard, so a restore cannot
-            // land between this comparison and the rows read below.
-            if incarnation.is_some_and(|expected| expected != self.incarnation()) {
-                return Ok(Err(ClaimFactsError::IncarnationMismatch));
-            }
-            Ok(load_claims_in_tx(tx, requested, object_ids, bounds))
-        })?;
-        let (claims, missing) = loaded?;
+        if requested < 0 {
+            return Err(KernelError::InvalidInput.into());
+        }
+        let mut reader = self.reader_with_limit(limit)?;
+        let tx = reader.transaction(TransactionBehavior::Deferred)?;
+        let tip = tip(&tx).map_err(map_sqlite)?;
+        if requested > tip {
+            return Err(KernelError::FutureSnapshot.into());
+        }
+        // The reader guard is held, so a restore cannot land between this
+        // comparison and the rows read below.
+        if incarnation.is_some_and(|expected| expected != self.incarnation()) {
+            return Err(ClaimFactsError::IncarnationMismatch);
+        }
+        let (claims, missing) = load_claims_in_tx(&tx, requested, object_ids, bounds)?;
+        tx.commit()?;
+        limit.check()?;
         Ok(ClaimFactsSnapshot {
             known_as_of: requested,
             tip,

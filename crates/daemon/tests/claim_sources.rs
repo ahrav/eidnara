@@ -1582,12 +1582,11 @@ fn candidate_bounds() -> ClaimCandidateBounds {
 fn classified(
     projection: &SearchProjection,
     kernel: &KernelStore,
-    kernel_incarnation_id: &str,
 ) -> BTreeMap<String, CandidateState> {
     let batch = projection
         .read(|conn| {
             Ok(
-                classify_live_claims(conn, kernel, kernel_incarnation_id, candidate_bounds())
+                classify_live_claims(conn, kernel, &EvalBudget::unbounded(), candidate_bounds())
                     .unwrap_or_else(|error| panic!("{error}")),
             )
         })
@@ -1634,11 +1633,10 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
     corpus.materialize();
     let hold = corpus.capture();
     let (projection, _) = corpus.bootstrap(dir.path(), &hold);
-    let kernel_incarnation_id = corpus.kernel_incarnation_id();
     let live = live_rows(dir.path());
     assert_eq!(live.len(), 9);
     assert_eq!(
-        classified(&projection, &corpus.kernel, &kernel_incarnation_id),
+        classified(&projection, &corpus.kernel),
         expected_states(&[
             (rule, CandidateState::Current),
             (anti, CandidateState::Current),
@@ -1674,7 +1672,7 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
     }
     assert_eq!(live_rows(dir.path()), live, "the projection has not moved");
     assert_eq!(
-        classified(&projection, &corpus.kernel, &kernel_incarnation_id),
+        classified(&projection, &corpus.kernel),
         expected_states(&[
             (rule, CandidateState::Superseded),
             (anti, CandidateState::Retracted),
@@ -1694,7 +1692,7 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
         .unwrap();
     let delta = corpus.export_window(&hold, ExportWindow::CatchUp { through });
     corpus.apply(&projection, &hold, &delta, through);
-    let caught_up = classified(&projection, &corpus.kernel, &kernel_incarnation_id);
+    let caught_up = classified(&projection, &corpus.kernel);
     assert_eq!(
         caught_up,
         expected_states(&[
@@ -1745,7 +1743,7 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
         })
         .unwrap();
     assert_eq!(
-        classified(&projection, &corpus.kernel, &kernel_incarnation_id),
+        classified(&projection, &corpus.kernel),
         caught_up,
         "a causality record changes no state"
     );
@@ -1753,7 +1751,10 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
     bounds.facts.max_claims = NonZeroUsize::new(3).unwrap();
     let batch = projection
         .read(|conn| {
-            Ok(classify_live_claims(conn, &corpus.kernel, &kernel_incarnation_id, bounds).unwrap())
+            Ok(
+                classify_live_claims(conn, &corpus.kernel, &EvalBudget::unbounded(), bounds)
+                    .unwrap(),
+            )
         })
         .unwrap();
     assert_eq!(batch.known_as_of, corpus.kernel.tip().unwrap());
@@ -1813,10 +1814,7 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
     let rebuilt_dir = tempfile::tempdir().unwrap();
     let rebuilt_hold = corpus.capture();
     let (rebuilt, _) = corpus.bootstrap(rebuilt_dir.path(), &rebuilt_hold);
-    assert_eq!(
-        classified(&rebuilt, &corpus.kernel, &kernel_incarnation_id),
-        caught_up
-    );
+    assert_eq!(classified(&rebuilt, &corpus.kernel), caught_up);
     assert_eq!(
         live_rows(rebuilt_dir.path()).len(),
         live_rows(dir.path()).len()
@@ -1835,7 +1833,7 @@ fn validate_scoped(
             Ok(classify_live_claims(
                 conn,
                 &corpus.kernel,
-                &corpus.kernel_incarnation_id(),
+                &EvalBudget::unbounded(),
                 candidate_bounds(),
             )
             .unwrap())

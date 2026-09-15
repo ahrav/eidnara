@@ -339,28 +339,35 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
 }
 
 /// Reads every live claim row, then the kernel's facts for the objects they
-/// name at a kernel tip captured with its incarnation before the facts read,
-/// and classifies each.
-/// `kernel_incarnation_id` names the incarnation of `kernel`; a projection
-/// built for another incarnation is refused before any row is read, since a
-/// reused object id there would classify from an unrelated history.
+/// name at a kernel tip captured with its incarnation after the row read, and
+/// classifies each. The projection identity is compared with the kernel's own
+/// database identity, and the kernel incarnation is captured before and after
+/// the row read, so a projection built for another kernel or a kernel restored
+/// during the read is refused rather than classified from an unrelated
+/// history. `budget` bounds every kernel read.
 ///
 /// # Errors
 ///
 /// `NoIdentity` and `ForeignKernel` before any row is read; projection
-/// refusals from [`live_claim_candidates`]; `TooManyClaims` before kernel
-/// access when the rows name more distinct objects than
+/// refusals from [`live_claim_candidates`]; `TooManyClaims` before the facts
+/// read when the rows name more distinct objects than
 /// `bounds.facts.max_claims`; `Facts(IncarnationMismatch)` when the kernel was
-/// restored between the tip capture and the facts read; other facts refusals
-/// from `claim_facts_at`; kernel errors as `Facts(Kernel(_))`.
+/// restored during the read; other facts refusals from `claim_facts_at`;
+/// kernel errors, including `Deadline` from `budget`, as `Facts(Kernel(_))`.
 pub fn classify_live_claims(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
-    kernel_incarnation_id: &str,
+    budget: &EvalBudget,
     bounds: ClaimCandidateBounds,
 ) -> Result<ClaimCandidateBatch, ClaimCandidateError> {
     let identity = read_identity(conn)?.ok_or(ClaimCandidateError::NoIdentity)?;
-    if identity.kernel_incarnation_id != kernel_incarnation_id {
+    let entry = kernel
+        .capture_commit_read_target_within_budget(budget)
+        .map_err(ClaimFactsError::from)?;
+    let database = kernel
+        .database_incarnation_id_within_budget(budget)
+        .map_err(ClaimFactsError::from)?;
+    if identity.kernel_incarnation_id != database {
         return Err(ClaimCandidateError::ForeignKernel {
             kernel_incarnation_id: identity.kernel_incarnation_id,
         });
@@ -376,13 +383,17 @@ pub fn classify_live_claims(
     if object_ids.len() > bounds.facts.max_claims.get() {
         return Err(ClaimFactsError::TooManyClaims.into());
     }
-    // The target carries the tip and the incarnation it was read from; the
-    // facts read refuses a store restored in between, so one history's tip
-    // cannot be paired with another's rows.
+    // The target carries the tip and the incarnation it was read from. A
+    // restore during the row read changes the incarnation since `entry`; one
+    // between here and the facts read is refused by `claim_facts_at`.
     let target = kernel
-        .capture_commit_read_target()
+        .capture_commit_read_target_within_budget(budget)
         .map_err(ClaimFactsError::from)?;
-    let snapshot = kernel.claim_facts_at(&object_ids, target, bounds.facts)?;
+    if target.incarnation != entry.incarnation {
+        return Err(ClaimFactsError::IncarnationMismatch.into());
+    }
+    let snapshot =
+        kernel.claim_facts_at_within_budget(&object_ids, target, bounds.facts, budget)?;
     let known_as_of = target.through_commit;
     let index: HashMap<&str, usize> = snapshot
         .claims

@@ -39,7 +39,8 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `live_rows::a_second_canonical_object_association_on_one_row_is_refused` | same | `CorruptRow` for a second `canonical_object` association on one occurrence | unaudited |
 | `a_candidate_from_another_batch_reads_no_facts` | same | `ClaimCandidateBatch::claim` returns `None` for a candidate whose index is out of range or names another object | unaudited |
 | `live_rows::an_association_whose_target_disagrees_with_its_key_or_row_is_refused` | same | `CorruptRow` when the association target, its key, or the occurrence tuple name different objects | unaudited |
-| `live_rows::a_projection_from_another_kernel_incarnation_is_refused_before_any_read` | same | `NoIdentity` and `ForeignKernel` before the row bound is checked | unaudited |
+| `live_rows::a_projection_from_another_kernel_incarnation_is_refused_before_any_read` | same | `NoIdentity`, then `ForeignKernel` against the kernel's own database identity, before the row bound is checked | unaudited |
+| `live_rows::an_exhausted_budget_is_refused_before_the_projection_is_read` | same | a cancelled `EvalBudget` refuses `Kernel(Deadline)` before the row bound | unaudited |
 | `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees` | `crates/daemon/tests/claim_sources.rs` | lagging rows classify Superseded, Retracted, Hidden from canonical facts against an independent oracle; catch-up tombstones; quarantine stays live and Hidden; the classified map is equal before and after a causality record on the successor; a fresh rebuild classifies identically | unaudited |
 
 ## Final-use validation
