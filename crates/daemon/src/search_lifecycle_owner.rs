@@ -130,6 +130,8 @@ pub struct SearchLifecycleOwner {
     admission: ProjectionAdmission,
     managed: Mutex<Managed>,
     roster: ProjectRoster,
+    /// Woken when a disable hands the manager back, so a shutdown that found the manager disabling can retry.
+    disabled: tokio::sync::Notify,
     /// The project digest whose supervisor ran last, how many slices it has had, and the bounds it started under; `None` before the first tenure.
     tenure: Mutex<Option<(String, u32, SliceBounds)>>,
     #[cfg(feature = "test-support")]
@@ -153,7 +155,18 @@ impl Drop for Restore<'_> {
         if let (Managed::Disabling, Some(selection)) = (&*managed, self.selection.take()) {
             *managed = Managed::Selection(selection);
         }
+        drop(managed);
+        self.owner.disabled.notify_waiters();
     }
+}
+
+/// Why a shutdown did not release the manager.
+#[derive(Debug, thiserror::Error)]
+pub enum ShutdownUnresolved {
+    #[error(transparent)]
+    Drain(#[from] Unresolved),
+    #[error("a disable was still reconciling after the grace period")]
+    Disabling,
 }
 
 impl SearchLifecycleOwner {
@@ -170,6 +183,7 @@ impl SearchLifecycleOwner {
             managed: Mutex::new(Managed::None),
             roster: Arc::new(Vec::new),
             tenure: Mutex::new(None),
+            disabled: tokio::sync::Notify::new(),
             #[cfg(feature = "test-support")]
             drain_grace_override: Mutex::new(None),
             #[cfg(feature = "test-support")]
@@ -804,19 +818,38 @@ impl SearchLifecycleOwner {
             .map(|_| ())
     }
 
-    /// Closes admission for good, joins the running supervisor within the drain grace, and releases the selection manager; the durable record and every kernel obligation stay for the next start. A supervisor that does not drain in time keeps its manager, so its task and native work stay owned, and the unresolved drain is returned. Idempotent, and a disable that returns afterwards restores nothing.
-    pub async fn shutdown(&self) -> Result<(), Unresolved> {
+    /// Closes admission for good, joins the running supervisor within the drain grace, and releases the selection manager; the durable record and every kernel obligation stay for the next start. A disable still reconciling is waited for within the same grace and otherwise reported, with the manager left to it. A supervisor that does not drain in time keeps its manager, so its task and native work stay owned, and the unresolved drain is returned. Idempotent, and a disable that returns afterwards restores nothing.
+    pub async fn shutdown(&self) -> Result<(), ShutdownUnresolved> {
         self.admission.close();
-        let taken = {
-            let mut managed = self.lock();
-            match std::mem::take(&mut *managed) {
-                Managed::Selection(selection) | Managed::ShutDown(Some(selection)) => {
-                    *managed = Managed::ShutDown(None);
-                    Some(selection)
+        let taken = loop {
+            // Registered before the manager is inspected, so a disable that finishes in between still wakes the wait.
+            let handed_back = self.disabled.notified();
+            let taken = {
+                let mut managed = self.lock();
+                match std::mem::take(&mut *managed) {
+                    Managed::Disabling => {
+                        *managed = Managed::Disabling;
+                        None
+                    }
+                    Managed::Selection(selection) | Managed::ShutDown(Some(selection)) => {
+                        *managed = Managed::ShutDown(None);
+                        Some(Some(selection))
+                    }
+                    _ => {
+                        *managed = Managed::ShutDown(None);
+                        Some(None)
+                    }
                 }
-                _ => {
-                    *managed = Managed::ShutDown(None);
-                    None
+            };
+            match taken {
+                Some(taken) => break taken,
+                None => {
+                    if tokio::time::timeout(self.drain_grace(), handed_back)
+                        .await
+                        .is_err()
+                    {
+                        return Err(ShutdownUnresolved::Disabling);
+                    }
                 }
             }
         };
@@ -830,7 +863,7 @@ impl SearchLifecycleOwner {
         if outcome.is_err() {
             *self.lock() = Managed::ShutDown(Some(selection));
         }
-        outcome.map(|_| ())
+        outcome.map(|_| ()).map_err(ShutdownUnresolved::from)
     }
 }
 
