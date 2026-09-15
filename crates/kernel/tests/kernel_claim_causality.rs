@@ -859,3 +859,39 @@ fn a_fold_in_the_subjects_own_commit_leaves_its_insert_operation_intact() {
         Some(CausalOperation::Insert)
     );
 }
+
+#[test]
+fn a_detail_that_redaction_would_rewrite_is_refused_and_keeps_the_prior_record() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 1);
+    // The raw id passes the identity scan; its JSON escape does not.
+    let parent = "password=1\n";
+    fixture
+        .store
+        .commit(intent("parent"), |envelope| {
+            let mut spec = decision(2, 1);
+            spec.object_id = parent.to_string();
+            envelope.insert_decision(spec)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let first = fixture
+        .record(
+            "derived",
+            request("decision-object-1", 1, derived(&[("domain-object", 1)])),
+        )
+        .unwrap();
+    let expected = CausalClass::DerivedReinjection {
+        parents: parents(&[("domain-object", 1)]),
+    };
+    assert_eq!(fixture.class("decision-object-1", fixture.tip()), expected);
+
+    let refused = fixture.record(
+        "rewritten",
+        request("decision-object-1", 1, derived(&[(parent, 1)])),
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    let reading = fixture.reading("decision-object-1", fixture.tip());
+    assert_eq!(reading.class, expected);
+    assert_eq!(reading.record.unwrap().object_id, first.object_id);
+}

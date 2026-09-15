@@ -245,7 +245,11 @@ impl Envelope<'_> {
             operation,
             evidence: request.evidence.clone(),
         };
-        let detail_json = serde_json::to_string(&detail).map_err(|_| KernelError::InvalidInput)?;
+        // The observation writer redacts the detail again; a serialization the
+        // redactor would rewrite is refused here so the stored text equals the
+        // parents the dependency rows name.
+        let detail_json =
+            identity(&serde_json::to_string(&detail).map_err(|_| KernelError::InvalidInput)?)?;
         let object_id = record_object_id(&subject_id, self.commit_seq);
         let observation_id = format!("{OBSERVATION_ID_PREFIX}{subject_id}:{}", self.commit_seq);
         let predecessor = self.live_record(&subject_id)?;
