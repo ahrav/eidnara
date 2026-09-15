@@ -15,10 +15,10 @@ use claim_fixture::{
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     AdmissionEvent, AdmissionRequest, CausalClass, ClaimFactBounds, ClaimFactsError, EventKind,
-    KernelError, Maturity, POLICY_REVISION, RepositoryProvenance, RepresentationExclusion,
-    ScopeSpec, Sensitivity, ServedStanding, SourceClass, SourceDescriptorDetail,
-    StagingCandidateSpec, SupportingApproval, Surface, SurfaceVisibility, TaintClass,
-    UnknownReason,
+    KernelError, MAX_CLAIM_OBJECT_ID_BYTES, Maturity, POLICY_REVISION, RepositoryProvenance,
+    RepresentationExclusion, ScopeSpec, Sensitivity, ServedStanding, SourceClass,
+    SourceDescriptorDetail, StagingCandidateSpec, SupportingApproval, Surface, SurfaceVisibility,
+    TaintClass, UnknownReason,
 };
 use serde_json::Value;
 
@@ -523,6 +523,36 @@ fn bounds_apply_before_decoding_and_malformed_required_fields_fail_explicitly() 
     assert_eq!(
         read(),
         Err(ClaimFactsError::Kernel(KernelError::CorruptCanonicalRow))
+    );
+    fixture.sql(
+        "UPDATE decisions SET sensitivity_class='normal', invalidated_commit_seq=created_commit_seq+1
+         WHERE object_id='decision-object-1';",
+    );
+    assert_eq!(
+        read(),
+        Err(ClaimFactsError::Kernel(KernelError::CorruptCanonicalRow)),
+        "decision liveness disagrees with the registry row"
+    );
+    fixture.sql(
+        "UPDATE decisions SET invalidated_commit_seq=NULL WHERE object_id='decision-object-1';",
+    );
+    assert!(read().is_ok());
+
+    // `claim_facts_as_of` validates each identifier before acquiring a reader, including missing identifiers.
+    for id in [String::new(), "x".repeat(MAX_CLAIM_OBJECT_ID_BYTES + 1)] {
+        assert_eq!(
+            fixture.store.claim_facts_as_of(&[id], tip, bounds()),
+            Err(ClaimFactsError::Kernel(KernelError::InvalidInput))
+        );
+    }
+    let longest = ["x".repeat(MAX_CLAIM_OBJECT_ID_BYTES)];
+    assert_eq!(
+        fixture
+            .store
+            .claim_facts_as_of(&longest, tip, bounds())
+            .unwrap()
+            .missing,
+        longest
     );
 }
 

@@ -31,6 +31,8 @@ use super::source_hold::Descriptors;
 use super::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
 use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 
+pub const MAX_CLAIM_OBJECT_ID_BYTES: usize = 512;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClaimFactBounds {
     pub max_claims: NonZeroUsize,
@@ -179,6 +181,12 @@ impl KernelStore {
         if object_ids.len() > bounds.max_claims.get() {
             return Err(ClaimFactsError::TooManyClaims);
         }
+        if object_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > MAX_CLAIM_OBJECT_ID_BYTES)
+        {
+            return Err(KernelError::InvalidInput.into());
+        }
         let mut distinct = HashSet::with_capacity(object_ids.len());
         if !object_ids.iter().all(|id| distinct.insert(id.as_str())) {
             return Err(ClaimFactsError::DuplicateClaim);
@@ -274,24 +282,33 @@ fn sensitivity_field(value: &str) -> Result<Sensitivity, ClaimFactsError> {
 }
 
 /// The decision row is written from the same spec as its registry row, so a
-/// disagreement on creation commit or class is corruption, not a fact.
+/// disagreement on creation commit, invalidation, or class is corruption, not a fact.
 /// `ObjectRow` decodes an unrecognized class as `Secret`; compare raw stored
 /// values.
 fn load_decision(
     tx: &Transaction<'_>,
     object: &ObjectRow,
 ) -> Result<ClaimDecisionFacts, ClaimFactsError> {
-    let row: Option<(ClaimDecisionFacts, i64, String, String)> = tx
+    struct Raw {
+        decision: ClaimDecisionFacts,
+        created: i64,
+        invalidated: Option<i64>,
+        registry_invalidated: Option<i64>,
+        sensitivity: String,
+        registry_sensitivity: String,
+    }
+    let row = tx
         .query_row_cached(
             "SELECT d.decision_id,d.decision_kind,d.proposition_id,d.scope_id,d.anchor_id,
-                    d.evidence_id,d.created_commit_seq,d.sensitivity_class,o.sensitivity_class
+                    d.evidence_id,d.created_commit_seq,d.invalidated_commit_seq,
+                    o.invalidated_commit_seq,d.sensitivity_class,o.sensitivity_class
              FROM decisions d
              JOIN object_registry o ON o.object_id=d.object_id
              WHERE d.object_id=?1",
             [&object.object_id],
             |row| {
-                Ok((
-                    ClaimDecisionFacts {
+                Ok(Raw {
+                    decision: ClaimDecisionFacts {
                         decision_id: row.get(0)?,
                         decision_kind: row.get(1)?,
                         proposition_id: row.get(2)?,
@@ -299,21 +316,25 @@ fn load_decision(
                         anchor_id: row.get(4)?,
                         evidence_id: row.get(5)?,
                     },
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                ))
+                    created: row.get(6)?,
+                    invalidated: row.get(7)?,
+                    registry_invalidated: row.get(8)?,
+                    sensitivity: row.get(9)?,
+                    registry_sensitivity: row.get(10)?,
+                })
             },
         )
         .optional()
         .map_err(map_sqlite)?;
-    let (decision, created_commit_seq, sensitivity, registry_sensitivity) =
-        row.ok_or(KernelError::CorruptCanonicalRow)?;
-    if created_commit_seq != object.created_commit_seq || sensitivity != registry_sensitivity {
+    let raw = row.ok_or(KernelError::CorruptCanonicalRow)?;
+    if raw.created != object.created_commit_seq
+        || raw.invalidated != raw.registry_invalidated
+        || raw.sensitivity != raw.registry_sensitivity
+    {
         return Err(KernelError::CorruptCanonicalRow.into());
     }
-    sensitivity_field(&registry_sensitivity)?;
-    Ok(decision)
+    sensitivity_field(&raw.registry_sensitivity)?;
+    Ok(raw.decision)
 }
 
 #[derive(Clone, Copy)]
