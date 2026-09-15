@@ -549,7 +549,13 @@ export class HostClient {
         return parseResponseJson(terminal);
     }
 
-    /** Caller releases the returned ReceiveLease. */
+    /**
+     * Caller releases the returned `ReceiveLease`. Until then it pins the transport block the
+     * host published into, counted against `maxRetainedBinaryBytes` / `maxRetainedBinaryResponses`;
+     * a held maximum-size response occupies the only block of its class, so the host cannot
+     * publish another maximum-size response to this connection until the lease is released.
+     * Copy with `takeOwned()` to release the block at once.
+     */
     async requestBinary(
         handle: RouteHandle,
         body: Uint8Array,

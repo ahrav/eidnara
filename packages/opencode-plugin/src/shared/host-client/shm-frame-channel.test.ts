@@ -1336,6 +1336,31 @@ describe("mandatory shared-memory channel", () => {
         expect(budget.used).toBe(0);
     });
 
+    test("queued data that fills the byte budget cannot refuse a Pong", () => {
+        const budget = new ByteBudget(HEADER_LEN + 4);
+        const closes: FrameChannelCloseReason[] = [];
+        const state = { full: true, arm: () => true };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: (reason) => closes.push(reason) },
+        });
+        channel.beginFrames();
+        channel.produce(responseHeader(FrameType.Request, 1n, 4), {
+            byteLength: 4,
+            fill: (cursor: ProducerCursor) => cursor.write(new Uint8Array(4)),
+        });
+        expect(budget.used).toBe(budget.cap);
+        state.full = false;
+        channel.sendControl(responseHeader(FrameType.Pong, 7n, 0));
+        expect(closes).toEqual([]);
+        expect(mock.published).toEqual([7n]);
+        expect(channel.stats().queuedDataFrames).toBe(1);
+        expect(budget.used).toBe(budget.cap);
+    });
+
     test("cancelling the queue head publishes its successor without a readiness wake", async () => {
         const budget = new ByteBudget(1 << 20);
         const state = { full: true, arm: () => true };
@@ -1570,8 +1595,8 @@ describe("mandatory shared-memory channel", () => {
         expect(budget.used).toBe(0);
         expect(channel.isClosed()).toBe(false);
 
-        // An outstanding reservation that holds the whole cap leaves no room
-        // for the header; the control refusal is control exhaustion.
+        // An outstanding reservation that holds the whole cap leaves no room for a
+        // Goodbye header; that control refusal is control exhaustion. A Pong is exempt.
         const starved = new ByteBudget(HEADER_LEN);
         starved.charge(HEADER_LEN);
         const starvedChannel = new ShmFrameChannel({
@@ -1583,8 +1608,11 @@ describe("mandatory shared-memory channel", () => {
                 onClosed: (reason, error) => closes.push({ reason, error }),
             },
         });
+        starvedChannel.sendControl(responseHeader(FrameType.Pong, 2n, 0));
+        expect(starvedChannel.isClosed()).toBe(false);
+        expect(starved.used).toBe(HEADER_LEN);
         expect(() =>
-            starvedChannel.sendControl(responseHeader(FrameType.Pong, 2n, 0)),
+            starvedChannel.sendControl(responseHeader(FrameType.Goodbye, 0n, 0)),
         ).not.toThrow();
         expect(starvedChannel.isClosed()).toBe(true);
         expect(closes.map((entry) => entry.reason)).toEqual(["control_exhausted"]);

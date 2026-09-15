@@ -275,7 +275,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
         // charge covers the synchronous publication window and is returned
         // once the ring owns the bytes.
         const reservedBytes = HEADER_LEN + body.byteLength;
-        this.admitPublication(reservedBytes);
+        this.admitPublication(reservedBytes, isLivenessControl(header, body.byteLength));
         // A liveness reply takes the control reserve and never waits behind data. Every other
         // frame keeps admission order: it publishes now only when nothing is queued ahead of
         // it, and otherwise waits its turn for capacity.
@@ -741,8 +741,9 @@ export class ShmFrameChannel implements SetupFrameChannel {
         return { cancel: () => !published };
     }
 
-    private admitPublication(bytes: number): void {
-        if (this.options.budget.wouldExceed(bytes)) {
+    /** A liveness reply is a bare header; queued data that fills the cap must not refuse it. */
+    private admitPublication(bytes: number, liveness = false): void {
+        if (!liveness && this.options.budget.wouldExceed(bytes)) {
             throw new HostCallError(
                 "not_sent",
                 "aggregate connection memory cap would be exceeded",
