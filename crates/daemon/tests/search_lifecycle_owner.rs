@@ -1584,6 +1584,144 @@ fn a_window_of_rows_created_and_invalidated_within_it_catches_up() {
     );
 }
 
+/// A window is never wider than the rows one batch admits, so a run of single-row commits beyond the batch capacity splits across windows and catches up.
+#[test]
+fn commit_pages_are_bounded_by_the_batch_row_capacity() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[
+                ("local_transaction_bytes", 131_200),
+                ("catchup_lag_commits", 1_000),
+            ],
+        ),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+
+    // Nine rows against an eight-row batch.
+    for index in 0..9 {
+        corpus.publish(&format!("many-{index}"), "many text");
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::CaughtUp(report) if report.end == EpisodeEnd::ReachedTarget && report.acknowledged_through == corpus.tip() && report.batches_applied >= 2),
+        "{outcome:?}"
+    );
+}
+
+/// The evidence a slice installs and the bounds it runs under come from one manifest read: a manifest replaced mid-slice takes effect on the next slice.
+#[test]
+fn a_slice_installs_the_manifest_it_derived_its_bounds_from() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let identity = identity(&kernel_incarnation_id(home));
+    let reader = owner.pin(&slice_budget()).unwrap();
+    let held = std::sync::Barrier::new(2);
+    let outcome = std::thread::scope(|scope| {
+        hold_projection(scope, &reader, &held, Duration::from_millis(1_500));
+        held.wait();
+        // The slice reads the manifest, then waits on the held projection before it refreshes admission.
+        let slice = scope.spawn(|| owner.run_slice(&slice_budget()));
+        std::thread::sleep(Duration::from_millis(300));
+        write_records(
+            home,
+            &manifest_json_with(
+                &identity,
+                &ProjectionHook::ALL,
+                &[("catchup_batch_source_bytes", 1_024)],
+            ),
+            &campaign_json(&identity),
+        );
+        slice.join().unwrap()
+    });
+    assert!(matches!(outcome, SliceOutcome::Current), "{outcome:?}");
+    let gate = owner.admission().gate();
+    let grant = gate
+        .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Dispatch)
+        .unwrap();
+    let expected = daemon::projection_gates::InvalidationIdentity::from(&identity);
+    assert!(
+        gate.check_limits(&grant, &expected, &[("catchup_batch_source_bytes", LIMIT)])
+            .is_ok(),
+        "the slice installed the manifest it read at its start"
+    );
+    let _ = owner.run_slice(&slice_budget());
+    let grant = gate
+        .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Dispatch)
+        .unwrap();
+    assert!(
+        gate.check_limits(&grant, &expected, &[("catchup_batch_source_bytes", LIMIT)])
+            .is_err(),
+        "the next slice installs the replaced manifest"
+    );
+}
+
+/// A rebuild over a family that trails the target by more commit pages than a window has source pages still retires the old consumer and completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn retirement_verifies_a_long_commit_span_page_by_page() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let first = owner_with_many_windows(home, &corpus, 0);
+    first.shutdown().await.unwrap();
+    drop(first);
+
+    drop(corpus);
+    let corpus = Corpus::open(home);
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    // The dead hold blocks catch-up, so the family trails the target commits.
+    for index in 0..50 {
+        corpus.publish(&format!("trail-{index}"), "trail text");
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::CaughtUp(report) if matches!(report.end, EpisodeEnd::Blocked(Blocked::HoldExtension(_)))),
+        "{outcome:?}"
+    );
+    let ControlState::Current(current) = control(home) else {
+        panic!("the first rebuild reached Current");
+    };
+    let mut again = rebuild(home);
+    again.selected_generation = current.staged_seed_digest.clone().unwrap();
+    again.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    again.attempt_id = "rebuild-again".to_owned();
+    owner.request(&again, now(), &slice_budget()).unwrap();
+    let slices = drive(&owner, 20, || {
+        matches!(control(home), ControlState::Current(done) if done.attempt_id == "rebuild-again")
+    })
+    .await;
+    assert!(slices < 20, "the second rebuild reached Current");
+    owner.shutdown().await.unwrap();
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

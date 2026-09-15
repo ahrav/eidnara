@@ -330,13 +330,13 @@ impl SearchLifecycleOwner {
         let blocked = |closed: Closed| SliceOutcome::Blocked(closed.to_string());
         let (intent, completed) = match control {
             ControlState::Absent => {
-                return match self.refresh(selection, &identity, &budget) {
+                return match self.refresh(&inputs, selection, &identity, &budget) {
                     Refresh::Installed(_) => SliceOutcome::Unregistered,
                     Refresh::Closed(closed) => blocked(closed),
                 };
             }
             ControlState::Disabled(_) => {
-                return match self.refresh(selection, &identity, &budget) {
+                return match self.refresh(&inputs, selection, &identity, &budget) {
                     Refresh::Installed(_) => SliceOutcome::Disabled,
                     Refresh::Closed(closed) => blocked(closed),
                 };
@@ -374,20 +374,15 @@ impl SearchLifecycleOwner {
             }
         };
         // Hooks are judged on this slice's observation before the record decides anything, so an expired or blocked record cannot leave the previous slice's evidence installed.
-        if let Refresh::Closed(closed) = self.refresh(selection, &identity, &budget) {
+        if let Refresh::Closed(closed) = self.refresh(&inputs, selection, &identity, &budget) {
             return blocked(closed);
         }
         if completed && selection.holds_operation(&intent) {
             // The family was reopened and revalidated when this owner first held it; a later slice judges it on its coverage and kernel without reopening it.
             return match selection.check_selected(&self.kernel, self.admission.gate(), &budget) {
-                Ok(()) => self.settle_current(
-                    selection,
-                    inputs.manifest(),
-                    &spec,
-                    &intent,
-                    &identity,
-                    &budget,
-                ),
+                Ok(()) => {
+                    self.settle_current(selection, &inputs, &spec, &intent, &identity, &budget)
+                }
                 Err(error) => SliceOutcome::Blocked(error.to_string()),
             };
         }
@@ -412,18 +407,11 @@ impl SearchLifecycleOwner {
         match progress {
             Ok(progress) => {
                 // The family the slice opened or selected is what later hooks are judged against.
-                let _ = self.refresh(selection, &identity, &budget);
+                let _ = self.refresh(&inputs, selection, &identity, &budget);
                 if !(completed && progress == RecoveryProgress::Current) {
                     return SliceOutcome::Advanced(progress);
                 }
-                self.settle_current(
-                    selection,
-                    inputs.manifest(),
-                    &spec,
-                    &intent,
-                    &identity,
-                    &budget,
-                )
+                self.settle_current(selection, &inputs, &spec, &intent, &identity, &budget)
             }
             Err(RecoveryFailure::Build(mut failure)) => {
                 // Cleanup runs under the same budget; a deferred cleanup keeps its owner's locks until the next slice retries.
@@ -443,7 +431,7 @@ impl SearchLifecycleOwner {
     fn settle_current(
         &self,
         selection: &mut SearchSelection,
-        manifest: &RuntimeManifest,
+        inputs: &AdmissionInputs,
         spec: &ReplacementSpec,
         intent: &LifecycleIntent,
         identity: &ProjectionIdentity,
@@ -460,9 +448,9 @@ impl SearchLifecycleOwner {
             Err(error) => return SliceOutcome::Blocked(error.to_string()),
         };
         if report.is_some() {
-            let _ = self.refresh(selection, identity, budget);
+            let _ = self.refresh(inputs, selection, identity, budget);
         }
-        match self.maintain(selection, manifest, spec, budget) {
+        match self.maintain(selection, inputs.manifest(), spec, budget) {
             Ok(Some(handle)) => SliceOutcome::RotateMaintenance(handle),
             Ok(None) => report.map_or(SliceOutcome::Current, SliceOutcome::CaughtUp),
             // The episode's progress decides the loop's next step; maintenance is attempted again next slice.
@@ -634,9 +622,10 @@ impl SearchLifecycleOwner {
         }
     }
 
-    /// Refreshes admission from the selected family's coverage, with no coverage when that family cannot be read, or from the unregistered observation at `tip` when no family is selected. Coverage is read outside gate admission so a denial does not block the next observation.
+    /// Refreshes admission from the records the slice read and the selected family's coverage, with no coverage when that family cannot be read, or from the unregistered observation at `tip` when no family is selected. Coverage is read outside gate admission so a denial does not block the next observation.
     fn refresh(
         &self,
+        inputs: &AdmissionInputs,
         selection: &SearchSelection,
         identity: &ProjectionIdentity,
         budget: &EvalBudget,
@@ -657,10 +646,13 @@ impl SearchLifecycleOwner {
         } else {
             Some(ProjectionCoverage::unregistered(identity, tip))
         };
-        self.admission.refresh(Some(SelectedProjection {
-            identity,
-            coverage: coverage.as_ref(),
-        }))
+        self.admission.refresh_with(
+            inputs.clone(),
+            SelectedProjection {
+                identity,
+                coverage: coverage.as_ref(),
+            },
+        )
     }
 
     /// Records a rebuild request, or begins an authorized recovery, without running a slice. A request naming another kernel incarnation, one made while the admission records or the lane are unavailable, or one the installed manifest's limits cannot bound, is refused before anything is recorded.
@@ -1034,7 +1026,8 @@ fn replacement_spec(
                     "catchup_batch_commits",
                     limit(manifest, "catchup_batch_commits")?,
                 )?,
-                max_rows: half_rows,
+                // A window never holds more rows than one batch admits, so it can always be applied.
+                max_rows: batch_rows,
                 max_payload_bytes: commit_bytes,
             },
             hold_admission: admission,

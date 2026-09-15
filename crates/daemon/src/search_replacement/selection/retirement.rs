@@ -226,10 +226,8 @@ impl SearchSelection {
                     "old checkpoint exceeds retirement target",
                 ));
             }
-            for _ in 0..spec.episode.max_source_pages.get() {
-                if after == target.through_commit {
-                    break;
-                }
+            // Every page advances at least one commit or reports the commit it cannot fit, so the span itself bounds the walk.
+            while after < target.through_commit {
                 check()?;
                 let span = kernel
                     .verify_complete_commits_within_budget(
@@ -243,6 +241,9 @@ impl SearchSelection {
                         spec.episode.commits,
                     )
                     .map_err(|error| BuildError::Blocked(super::super::Blocked::Read(error)))?;
+                if span.through <= after {
+                    return Err(BuildError::InventoryBound);
+                }
                 after = span.through;
                 match span.end {
                     PageEnd::Exhausted => {

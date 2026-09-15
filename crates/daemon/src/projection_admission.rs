@@ -264,6 +264,22 @@ impl ProjectionAdmission {
         }
     }
 
+    /// [`Self::refresh`] from records already read, so the evidence installed and the bounds derived from `inputs` come from one read.
+    pub fn refresh_with(
+        &self,
+        inputs: AdmissionInputs,
+        selected: SelectedProjection<'_>,
+    ) -> Refresh {
+        let closed = self.closed.lock().unwrap_or_else(|p| p.into_inner());
+        if *closed {
+            return Refresh::Closed(Closed::ShutDown);
+        }
+        Refresh::Installed(
+            self.gate
+                .renew(inputs.evaluator(selected.identity, selected.coverage.cloned())),
+        )
+    }
+
     /// Closes the gate for good: every grant is cancelled and no refresh reopens it.
     pub fn close(&self) {
         let mut closed = self.closed.lock().unwrap_or_else(|p| p.into_inner());
