@@ -38,8 +38,8 @@ pub enum StoreError {
     /// A backend (database driver) operation failed.
     #[error("storage backend: {0}")]
     Backend(String),
-    /// A bounded write reached its deadline before `BEGIN` ran, so it applied nothing.
-    #[error("storage write lock was not acquired before the deadline")]
+    /// A bounded write that reaches its deadline before `BEGIN` runs applies nothing.
+    #[error("storage operation did not complete before its deadline or was stopped by its caller")]
     Deadline,
     /// An io failure preparing the store location.
     #[error("storage io: {0}")]

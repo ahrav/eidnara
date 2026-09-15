@@ -827,6 +827,46 @@ fn a_snapshot_that_moves_between_admission_batches_stops_admission() {
 }
 
 #[test]
+fn a_moved_snapshot_batch_still_tallies_its_exclusions() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse");
+    let reference = fixture.reference(&request);
+    let second = fixture
+        .rows
+        .iter()
+        .find(|row| row.occurrence_id() == reference[1])
+        .unwrap()
+        .object
+        .clone();
+    let one_per_batch = RetrievalBounds {
+        batch_rows: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    };
+    let retrieval = fixture
+        .retrieve_with_hook(
+            &request,
+            one_per_batch,
+            &EvalBudget::unbounded(),
+            |window| {
+                if window == Window::AfterBatch(1) {
+                    fixture.retire(&second);
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::SnapshotChanged)
+    );
+    assert_eq!(ids_of(&retrieval), vec![reference[0].clone()]);
+    assert_eq!(retrieval.consumed.judged, 3);
+    assert_eq!(
+        retrieval.consumed.excluded,
+        vec![(EligibilityVerdict::Retracted, 1)]
+    );
+}
+
+#[test]
 fn a_kernel_restore_before_revalidation_marks_the_incarnation_change() {
     let fixture = Fixture::all_admitted();
     let backup_dir = tempfile::tempdir().unwrap();

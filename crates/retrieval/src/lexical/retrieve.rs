@@ -392,6 +392,12 @@ fn admit(
         let (report, moved) = judge_batch(kernel, authority, &batch, retrieval)?;
         if let Some(reason) = moved {
             incomplete(retrieval, reason);
+            // The moved batch's verdicts describe other facts, so none is accepted; its exclusions are still judged work.
+            for judged in report.occurrences {
+                if let Disposition::PolicyExcluded(verdict) = judged.disposition {
+                    retrieval.consumed.exclude(verdict);
+                }
+            }
             break;
         }
         for ((occurrence_id, hit), judged) in batch.into_iter().zip(report.occurrences) {
