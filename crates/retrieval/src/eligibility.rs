@@ -2,10 +2,11 @@
 
 use std::num::NonZeroUsize;
 
+use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, CommitReadIncarnation, EgressSnapshot, EligibilityCandidate,
-    EligibilityVerdict, KernelError, KernelStore, ProjectScope,
+    ArtifactDestination, CommitReadIncarnation, EgressSnapshot, EligibilityBatch,
+    EligibilityCandidate, EligibilityVerdict, KernelError, KernelStore, ProjectScope,
 };
 use rusqlite::params;
 use storage::GuardedConn;
@@ -190,13 +191,41 @@ pub fn judge_occurrences(
     destination: ArtifactDestination,
     candidates: &[OccurrenceCandidate],
 ) -> Result<EligibilityReport, KernelError> {
-    let kernel_candidates: Vec<EligibilityCandidate> = candidates
+    let batch = kernel.judge_eligibility(project, destination, &kernel_candidates(candidates))?;
+    Ok(report(candidates, batch))
+}
+
+/// [`judge_occurrences`] whose reader wait and read stop at `budget` with [`KernelError::Deadline`].
+///
+/// # Errors
+///
+/// As [`judge_occurrences`], plus [`KernelError::Deadline`] once `budget` ends.
+pub fn judge_occurrences_within_budget(
+    kernel: &KernelStore,
+    project: &ProjectScope,
+    destination: ArtifactDestination,
+    candidates: &[OccurrenceCandidate],
+    budget: &EvalBudget,
+) -> Result<EligibilityReport, KernelError> {
+    let batch = kernel.judge_eligibility_within_budget(
+        project,
+        destination,
+        &kernel_candidates(candidates),
+        budget,
+    )?;
+    Ok(report(candidates, batch))
+}
+
+fn kernel_candidates(candidates: &[OccurrenceCandidate]) -> Vec<EligibilityCandidate> {
+    candidates
         .iter()
         .map(|candidate| candidate.candidate.clone())
-        .collect();
-    let batch = kernel.judge_eligibility(project, destination, &kernel_candidates)?;
+        .collect()
+}
+
+fn report(candidates: &[OccurrenceCandidate], batch: EligibilityBatch) -> EligibilityReport {
     debug_assert_eq!(batch.verdicts.len(), candidates.len());
-    Ok(EligibilityReport {
+    EligibilityReport {
         snapshot: batch.snapshot,
         incarnation: batch.incarnation,
         occurrences: candidates
@@ -208,7 +237,7 @@ pub fn judge_occurrences(
                 disposition: verdict.into(),
             })
             .collect(),
-    })
+    }
 }
 
 #[cfg(test)]

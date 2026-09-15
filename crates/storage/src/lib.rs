@@ -38,8 +38,8 @@ pub enum StoreError {
     /// A backend (database driver) operation failed.
     #[error("storage backend: {0}")]
     Backend(String),
-    /// A bounded write reached its deadline before `BEGIN` ran, so it applied nothing.
-    #[error("storage write lock was not acquired before the deadline")]
+    /// A bounded write that reaches its deadline before `BEGIN` runs applies nothing.
+    #[error("storage operation did not complete before its deadline or was stopped by its caller")]
     Deadline,
     /// An io failure preparing the store location.
     #[error("storage io: {0}")]
@@ -187,6 +187,8 @@ mod sqlite_backend {
         pub(crate) conn: Connection,
         gate: Arc<AuthorityGate>,
     }
+
+    const READ_INTERRUPT_STEPS: i32 = 1_000;
 
     /// Dropping the guard clears the holder record before the connection lock releases.
     struct ConnGuard<'a> {
@@ -356,7 +358,7 @@ mod sqlite_backend {
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
             let guard = self.lock_conn()?;
-            self.read_on(guard, f)
+            self.read_on(guard, None::<fn() -> bool>, f)
         }
 
         /// [`Self::with_conn`] whose connection acquisition ends at `deadline`.
@@ -375,12 +377,30 @@ mod sqlite_backend {
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
             let guard = self.lock_conn_within(deadline)?;
-            self.read_on(guard, f)
+            self.read_on(guard, None::<fn() -> bool>, f)
+        }
+
+        /// [`Self::with_conn_within`] whose statements are also interrupted once `stop` returns `true`.
+        /// SQLite's [progress callback](https://www.sqlite.org/c3ref/progress_handler.html) uses an approximate VM-instruction interval, not a wall-clock timeout.
+        /// The handler is removed before the transaction ends, including when `f` unwinds, so a later read on the same connection cannot be interrupted by an earlier caller's `stop`.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`StoreError::Deadline`] when `stop` interrupted a statement that `f` propagated, or when the connection was not acquired by `deadline`; otherwise as [`Self::with_conn_within`].
+        pub fn with_conn_interruptible<T>(
+            &self,
+            deadline: Instant,
+            stop: impl FnMut() -> bool + Send + 'static,
+            f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
+            let guard = self.lock_conn_within(deadline)?;
+            self.read_on(guard, Some(stop), f)
         }
 
         fn read_on<T>(
             &self,
             mut guard: ConnGuard<'_>,
+            stop: Option<impl FnMut() -> bool + Send + 'static>,
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
             let tx = guard
@@ -388,13 +408,18 @@ mod sqlite_backend {
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             // `scope` is declared after `tx` so its mode leaves before `tx` issues `ROLLBACK` during unwinding.
             let scope = CallbackScope::read_only(&tx, &self.gate)?;
-            let out = f(&GuardedConn::new(&tx, &self.gate))
-                .map_err(|e| StoreError::Backend(e.to_string()));
+            let interrupt = InterruptScope::install(&tx, stop)?;
+            let out = f(&GuardedConn::new(&tx, &self.gate)).map_err(store_error);
+            // The scope release and the rollback that finishes the read must not be interrupted.
+            let cleared = interrupt.clear();
             let restored = scope.release();
             // Finishing the read transaction releases its snapshot; there is nothing to
             // commit.
             let finished = tx.finish().map_err(|e| StoreError::Backend(e.to_string()));
-            with_cleanup_failure(with_cleanup_failure(out, restored), finished)
+            with_cleanup_failure(
+                with_cleanup_failure(with_cleanup_failure(out, cleared), restored),
+                finished,
+            )
         }
 
         /// SQLite refuses `VACUUM` inside a transaction, and both
@@ -623,6 +648,64 @@ mod sqlite_backend {
 
     fn backend_error(e: rusqlite::Error) -> StoreError {
         StoreError::Backend(e.to_string())
+    }
+
+    /// The progress handler in [`SqliteStore::with_conn_interruptible`] is the only source of
+    /// `SQLITE_INTERRUPT` on a store connection, so a match means the caller's stop condition
+    /// ended the statement.
+    pub fn is_interrupted(error: &rusqlite::Error) -> bool {
+        matches!(
+            error,
+            rusqlite::Error::SqliteFailure(failure, _)
+                if failure.code == rusqlite::ErrorCode::OperationInterrupted
+        )
+    }
+
+    fn store_error(e: rusqlite::Error) -> StoreError {
+        if is_interrupted(&e) {
+            StoreError::Deadline
+        } else {
+            backend_error(e)
+        }
+    }
+
+    /// Prevents later operations on the connection from inheriting the progress handler.
+    /// `Drop` clears the handler on unwinding; the success path clears it through [`Self::clear`] so a failure to clear is reported.
+    struct InterruptScope<'c> {
+        conn: &'c Connection,
+        armed: bool,
+    }
+
+    impl<'c> InterruptScope<'c> {
+        fn install(
+            conn: &'c Connection,
+            stop: Option<impl FnMut() -> bool + Send + 'static>,
+        ) -> Result<Self, StoreError> {
+            let armed = stop.is_some();
+            if let Some(stop) = stop {
+                conn.progress_handler(READ_INTERRUPT_STEPS, Some(stop))
+                    .map_err(backend_error)?;
+            }
+            Ok(Self { conn, armed })
+        }
+
+        fn clear(mut self) -> Result<(), StoreError> {
+            if !self.armed {
+                return Ok(());
+            }
+            self.armed = false;
+            self.conn
+                .progress_handler(0, None::<fn() -> bool>)
+                .map_err(backend_error)
+        }
+    }
+
+    impl Drop for InterruptScope<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                let _ = self.conn.progress_handler(0, None::<fn() -> bool>);
+            }
+        }
     }
 
     /// Folds a cleanup result into the callback result without discarding either error.
@@ -2951,8 +3034,8 @@ pub use sqlite_backend::library_memory_used;
 pub use sqlite_backend::{
     APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
     SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject, SqliteStore, USER_VERSION,
-    delete_sqlite_family, immutable_uri, inspection_scratch_tag, open_sqlite, schema_inventory,
-    verify_baseline, verify_sqlite_family_removed,
+    delete_sqlite_family, immutable_uri, inspection_scratch_tag, is_interrupted, open_sqlite,
+    schema_inventory, verify_baseline, verify_sqlite_family_removed,
 };
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -5448,6 +5531,52 @@ mod tests {
                 c.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
             })
             .expect("a live deadline reads");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_interruptible_read_stops_a_running_statement_and_a_later_read_is_untouched() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let long_scan = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<50000000) SELECT count(*) FROM n";
+        let polled = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) SELECT count(*) FROM n";
+        let count =
+            |c: &GuardedConn<'_>, sql: &str| c.query_row(sql, [], |row| row.get::<_, i64>(0));
+        let far = || Instant::now() + Duration::from_secs(60);
+
+        let r = store.with_conn_interruptible(far(), || true, |c| count(c, long_scan));
+        assert!(matches!(r, Err(StoreError::Deadline)), "{r:?}");
+        assert_eq!(
+            store
+                .with_conn_within(far(), |c| count(c, polled))
+                .expect("the next read runs without the earlier caller's handler"),
+            20_000
+        );
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with_conn_interruptible(
+                far(),
+                || true,
+                |_| -> rusqlite::Result<i64> {
+                    panic!("the callback unwinds while the handler is installed")
+                },
+            )
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(
+            store
+                .with_conn_within(far(), |c| count(c, polled))
+                .expect("unwinding cleared the handler"),
+            20_000
+        );
+
+        assert_eq!(
+            store
+                .with_conn_interruptible(far(), || false, |c| count(c, polled))
+                .expect("a stop that never fires leaves a polled read complete"),
+            20_000
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
