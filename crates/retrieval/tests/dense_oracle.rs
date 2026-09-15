@@ -17,7 +17,11 @@ use retrieval::batch::{
     BatchBounds, MutationIdentity, ProjectionBatch, VectorGeneration, apply_batch,
     register_generation,
 };
-use retrieval::dense::codec::{self, Metric, RowLayout, RowRejection};
+use retrieval::dense::codec::{
+    self, ARTIFACT_HEADER_BYTES, ARTIFACT_MAGIC, ARTIFACT_VERSION, ArtifactRejection, Metric,
+    RowLayout, RowRejection,
+};
+use retrieval::dense::export::{ExportRefusal, live_rows};
 use retrieval::dense::oracle::exhaustive_with_hook_for_test;
 use retrieval::dense::{
     Completion, DenseCoverage, ExhaustiveQuery, ExhaustiveRanking, IncompleteReason, OracleBounds,
@@ -1711,4 +1715,252 @@ fn row_rejections_name_shape_and_magnitude_only() {
         .check(),
         Ok(())
     );
+}
+
+#[test]
+fn the_original_row_artifact_round_trips_and_binds_dimension_and_metric() {
+    let rows = vec![
+        axis(0),
+        unit([-0.0, 0.6, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0]),
+        axis(7),
+    ];
+    let bytes = codec::encode_rows(&layout(), rows.iter().map(Vec::as_slice)).unwrap();
+    assert_eq!(bytes.len(), ARTIFACT_HEADER_BYTES + 3 * 32);
+    assert_eq!(&bytes[..8], &ARTIFACT_MAGIC);
+    assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), ARTIFACT_VERSION);
+    assert_eq!(bytes[10], Metric::InnerProduct.code());
+    assert_eq!(bytes[11], 0);
+    assert_eq!(
+        u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+        DIMENSION
+    );
+    assert_eq!(u64::from_le_bytes(bytes[16..24].try_into().unwrap()), 3);
+    let decoded = codec::decode_rows(&bytes, &layout()).unwrap();
+    assert_eq!(decoded.layout, layout());
+    assert_eq!(decoded.rows, rows);
+    assert_eq!(
+        codec::encode_rows(&layout(), rows.iter().map(Vec::as_slice)).unwrap(),
+        bytes,
+        "byte-identical inputs yield byte-identical artifacts"
+    );
+    assert!(
+        !format!("{decoded:?}").contains("0.6"),
+        "Debug reports counts, not coordinates"
+    );
+
+    let empty = codec::encode_rows(&layout(), std::iter::empty()).unwrap();
+    assert_eq!(empty.len(), ARTIFACT_HEADER_BYTES);
+    assert!(
+        codec::decode_rows(&empty, &layout())
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+
+    let other_dimension = RowLayout {
+        dimension: 4,
+        ..layout()
+    };
+    assert_eq!(
+        codec::decode_rows(&bytes, &other_dimension),
+        Err(ArtifactRejection::Dimension {
+            declared: 8,
+            expected: 4
+        })
+    );
+
+    let mut bad_metric = bytes.clone();
+    bad_metric[10] = 7;
+    assert_eq!(
+        codec::decode_rows(&bad_metric, &layout()),
+        Err(ArtifactRejection::Metric {
+            code: 7,
+            expected: Metric::InnerProduct
+        })
+    );
+    let mut bad_version = bytes.clone();
+    bad_version[8] = 2;
+    assert_eq!(
+        codec::decode_rows(&bad_version, &layout()),
+        Err(ArtifactRejection::Version { version: 2 })
+    );
+    let mut bad_reserved = bytes.clone();
+    bad_reserved[11] = 1;
+    assert_eq!(
+        codec::decode_rows(&bad_reserved, &layout()),
+        Err(ArtifactRejection::Reserved { reserved: 1 })
+    );
+    let mut bad_magic = bytes.clone();
+    bad_magic[0] = b'X';
+    assert_eq!(
+        codec::decode_rows(&bad_magic, &layout()),
+        Err(ArtifactRejection::Magic)
+    );
+    assert_eq!(
+        codec::decode_rows(&bytes[..ARTIFACT_HEADER_BYTES - 1], &layout()),
+        Err(ArtifactRejection::ShortHeader {
+            bytes: ARTIFACT_HEADER_BYTES - 1
+        })
+    );
+    assert_eq!(
+        codec::decode_rows(&bytes[..bytes.len() - 1], &layout()),
+        Err(ArtifactRejection::RowBytes {
+            declared: 3,
+            bytes: 3 * 32 - 1
+        })
+    );
+    let mut extra = bytes.clone();
+    extra.extend_from_slice(&[0; 32]);
+    assert_eq!(
+        codec::decode_rows(&extra, &layout()),
+        Err(ArtifactRejection::RowBytes {
+            declared: 3,
+            bytes: 4 * 32
+        })
+    );
+
+    let mut nan_row = bytes.clone();
+    nan_row[ARTIFACT_HEADER_BYTES + 32..ARTIFACT_HEADER_BYTES + 36]
+        .copy_from_slice(&f32::NAN.to_le_bytes());
+    assert_eq!(
+        codec::decode_rows(&nan_row, &layout()),
+        Err(ArtifactRejection::Row {
+            index: 1,
+            rejection: RowRejection::NonFinite { coordinate: 0 }
+        })
+    );
+    let zero = vec![0.0f32; 8];
+    assert_eq!(
+        codec::encode_rows(&layout(), [axis(0).as_slice(), zero.as_slice()]),
+        Err(ArtifactRejection::Row {
+            index: 1,
+            rejection: RowRejection::ZeroNorm
+        })
+    );
+    assert_eq!(
+        codec::encode_rows(
+            &RowLayout {
+                dimension: 0,
+                ..layout()
+            },
+            std::iter::empty()
+        ),
+        Err(ArtifactRejection::ZeroDimension)
+    );
+}
+
+#[test]
+fn live_rows_exports_every_live_vector_in_identifier_order_and_refuses_over_bound_and_invalid_rows()
+{
+    let fixture = Fixture::all_admitted();
+    let generation = generation();
+    let export = |fixture: &Fixture, max: usize, layout: RowLayout| {
+        fixture
+            .store
+            .with_conn(|conn| {
+                Ok(live_rows(
+                    conn,
+                    &generation,
+                    &layout,
+                    NonZeroUsize::new(max).unwrap(),
+                ))
+            })
+            .unwrap()
+    };
+    let rows = export(&fixture, 64, layout()).unwrap();
+    let ids: Vec<&str> = rows.iter().map(|row| row.occurrence_id.as_str()).collect();
+    let mut expected: Vec<String> = fixture.dense_ids().into_iter().collect();
+    expected.sort();
+    assert_eq!(ids, expected.iter().map(String::as_str).collect::<Vec<_>>());
+    for row in &rows {
+        let source = fixture
+            .rows
+            .iter()
+            .find(|r| r.occurrence_id() == row.occurrence_id)
+            .unwrap();
+        assert_eq!(&row.vector, source.vector.as_ref().unwrap());
+        assert_eq!(row.class, source.class);
+    }
+    assert!(
+        !format!("{rows:?}").contains("0.9"),
+        "Debug hides coordinates"
+    );
+
+    assert_eq!(
+        export(&fixture, 7, layout()),
+        Err(ExportRefusal::OverBound { max: 7 })
+    );
+    assert_eq!(export(&fixture, 8, layout()).unwrap().len(), 8);
+
+    // A missing vector and a tombstoned row leave the export; the export names only rows that carry a vector.
+    fixture.drop_vector("beta");
+    fixture
+        .raw()
+        .execute(
+            "INSERT INTO occurrence_tombstones(occurrence_id, invalidated_commit_seq, reason, recorded_at) VALUES (?1, 99, 'retired', 0)",
+            [fixture.id("gamma")],
+        )
+        .unwrap();
+    let rows = export(&fixture, 64, layout()).unwrap();
+    assert_eq!(rows.len(), 6);
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.occurrence_id == fixture.id("beta"))
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.occurrence_id == fixture.id("gamma"))
+    );
+
+    assert_eq!(
+        export(
+            &fixture,
+            64,
+            RowLayout {
+                dimension: 4,
+                ..layout()
+            }
+        ),
+        Err(ExportRefusal::LayoutMismatch {
+            layout: 4,
+            generation: 8
+        })
+    );
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2 WHERE occurrence_id=?1",
+            rusqlite::params![
+                fixture.id("delta"),
+                codec::encode(&[0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            ],
+        )
+        .unwrap();
+    assert!(matches!(
+        export(&fixture, 64, layout()),
+        Err(ExportRefusal::StoredRow { occurrence_id, rejection: RowRejection::Normalization { .. } }) if occurrence_id == fixture.id("delta")
+    ));
+    let foreign = VectorGeneration {
+        generation_id: "gen-9".to_string(),
+        ..generation.clone()
+    };
+    let unknown = fixture
+        .store
+        .with_conn(|conn| {
+            Ok(live_rows(
+                conn,
+                &foreign,
+                &layout(),
+                NonZeroUsize::new(8).unwrap(),
+            ))
+        })
+        .unwrap();
+    assert!(matches!(
+        unknown,
+        Err(ExportRefusal::Projection(
+            ProjectionError::UnknownGeneration { .. }
+        ))
+    ));
 }

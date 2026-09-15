@@ -4,6 +4,7 @@
 //! The scalar recipe calibrates, encodes, and scores int8 codes whose ranking is checked against that oracle.
 
 pub mod codec;
+pub mod export;
 pub mod oracle;
 pub mod scalar;
 pub mod score;

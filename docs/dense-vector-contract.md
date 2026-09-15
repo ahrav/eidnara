@@ -221,3 +221,51 @@ here.
 
 Pinned bytes for a fixed corpus live in `tests/dense_scalar.rs`. A change to
 them is a change to the recipe.
+
+## The immutable vector generation
+
+`daemon::vector_generation` builds one generation from the rows
+`retrieval::dense::export::live_rows` returns: every live dense-required
+occurrence with a vector of the generation, validated against the layout, in
+occurrence identifier order. The generation is five files staged through the
+shared `GenerationStore` under target `vector-generation`:
+
+| File | Bytes |
+| --- | --- |
+| `rows.f32` | The original-row artifact: header (`EIDF32R\0`, version `1`, metric code, reserved zero byte, dimension, row count), then the rows in identifier order. |
+| `codes.int8` | One two's-complement byte per coordinate per row, in the same row order, encoded under the generation's scales. |
+| `scales.f32` | The calibration scales, four little-endian bytes each. |
+| `row-ids.json` | A JSON array of the occurrence identifiers, in row order. |
+| `vector-sidecar.json` | The sidecar, in its canonical byte form. |
+
+The sidecar names every other file by size and SHA-256 and binds the model,
+tokenizer fingerprint, dimension, metric, unit-norm tolerance, quantizer
+recipe, calibrated row count and scales digest, generation identifier and
+epoch, kernel incarnation, and the projection checkpoint the rows were taken
+at. Its hash fills the manifest's inputs slot, the compatibility identity's
+digest fills the contract slot, and the row artifact's hash fills the payload
+slot, so the generation digest is a function of every declared input and two
+builds over byte-identical inputs yield the same directory name, the same
+bytes, and the same digest. The `GenerationManifest` schema is unchanged.
+
+Verification (`vector_generation::verify`) does not trust the manifest to
+describe itself. The store checks inventory, sizes, modes, and hashes; the
+verifier then checks that the manifest is a vector manifest, that the sidecar
+bytes are canonical and hash into the manifest, that every sidecar field
+equals the caller's expectation, and that the rows, scales, codes, and
+identifiers decode and agree with one another: the scales hash to the
+calibration provenance, the identifiers number the rows in order, and the
+codes are exactly the rows encoded under the scales. A generation whose
+hashes were rewritten to match changed bytes is refused when its meaning
+changed. A different model space is refused at an equal dimension.
+
+The vector selector is `vector-profile.json`, beside the host and search
+selectors. `select_vector` refuses a generation whose manifest target belongs
+to another owner. Pruning retains every owner-selected generation, discard
+refuses one, exchange repair refuses to replace one, and a quarantined owner
+selector stops pruning of generations. Selecting and recovering a complete
+composition is a separate contract.
+
+Staging charges the whole inventory against the admission manifest's
+`capture_disk_bytes` limit under an `EmbeddingBootstrap` admission; a denial
+stages nothing.

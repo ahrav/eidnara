@@ -791,6 +791,6 @@ fn file_sha256(path: &Path, ended: &Ended) -> Result<String, SeedRefusal> {
     Ok(hex(&hasher.finalize()))
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
