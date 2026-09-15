@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::OccurrenceClass;
+use kernel::source_identity::{OccurrenceClass, Span, derived_lineage_id, identity_digest};
 use rusqlite::params;
 use storage::GuardedConn;
 
@@ -199,7 +199,7 @@ const PAGE_COLUMNS: &str =
     "a.key,a.target_id,a.occurrence_id,a.extraction_version,a.created_commit_seq,
      o.lineage_id,o.class,o.revision,o.representation,o.span_start,o.span_end,o.payload_id,
      o.source_object_id,o.source_evidence_id,o.source_artifact_digest,o.created_commit_seq,
-     t.invalidated_commit_seq,t.reason";
+     t.invalidated_commit_seq,t.reason,o.tuple";
 
 const PAGE_FROM: &str = "FROM exact_associations a
      JOIN occurrences o ON o.occurrence_id=a.occurrence_id
@@ -305,15 +305,30 @@ impl AssociationRow {
             occurrence_created_commit_seq,
         )?;
         let class: String = row.get(6)?;
+        let occurrence_id: String = row.get(2)?;
+        let lineage_id: String = row.get(5)?;
+        let revision: i64 = row.get(7)?;
+        let representation: String = row.get(8)?;
+        let tuple: Vec<u8> = row.get(18)?;
+        let lineage = derived_lineage_id(
+            &tuple,
+            &class,
+            revision,
+            &representation,
+            span.map(|(start, end)| Span { start, end }),
+        );
+        if identity_digest(&tuple) != occurrence_id || lineage.as_deref() != Some(&*lineage_id) {
+            return Err(corrupt().into());
+        }
         Ok(Self {
             key: row.get(0)?,
             target_id: row.get(1)?,
-            occurrence_id: row.get(2)?,
+            occurrence_id,
             created_commit_seq: row.get(4)?,
-            lineage_id: row.get(5)?,
+            lineage_id,
             class: OccurrenceClass::from_code(&class).ok_or_else(corrupt)?,
-            revision: row.get(7)?,
-            representation: row.get(8)?,
+            revision,
+            representation,
             span,
             payload_id: row.get(11)?,
             source_object_id: row.get(12)?,

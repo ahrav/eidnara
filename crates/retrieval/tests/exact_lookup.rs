@@ -901,6 +901,65 @@ fn a_page_refuses_the_same_damaged_rows_as_the_occurrence_reader() {
             })
             .unwrap();
     }
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "DELETE FROM occurrence_tombstones WHERE occurrence_id=?1",
+                [&damaged],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for (name, sql) in [
+        (
+            "lineage",
+            "UPDATE occurrences SET lineage_id='elsewhere' WHERE occurrence_id=?1",
+        ),
+        (
+            "tuple",
+            "UPDATE occurrences SET tuple=x'00' WHERE occurrence_id=?1",
+        ),
+    ] {
+        let original: (String, Vec<u8>) = store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT lineage_id,tuple FROM occurrences WHERE occurrence_id=?1",
+                    [&damaged],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(sql, [&damaged])?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    retrieval::read_occurrence(conn, &damaged).unwrap_err(),
+                    ProjectionError::CorruptRow,
+                    "{name}: the occurrence reader refuses the row"
+                );
+                assert_eq!(
+                    page(conn, &context(8), &query, None).unwrap_err(),
+                    LookupRefusal::Projection(ProjectionError::CorruptRow),
+                    "{name}: the page reader applies the same rule"
+                );
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE occurrences SET lineage_id=?2,tuple=?3 WHERE occurrence_id=?1",
+                    rusqlite::params![damaged, original.0, original.1],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
 }
 
 fn association_rows(conn: &GuardedConn<'_>) -> Vec<(String, String, Vec<u8>, String, String)> {
