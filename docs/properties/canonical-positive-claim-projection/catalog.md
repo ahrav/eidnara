@@ -714,9 +714,11 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: yes - `validate_for_surface` judges `Current` candidates through
-`KernelStore::judge_surface_eligibility_within_budget`, which pairs each batch
+`KernelStore::judge_surface_eligibility_with_claims`, which pairs each batch
 verdict with the serving view's visibility on the requested surface from the
-same read; the daemon test shows labeled claims permitted only on explicit
+same read and returns the claim facts of every named object from that read, so
+the gate reclassifies each permitted row against the occurrence inventory of
+the snapshot it was judged at; the daemon test shows labeled claims permitted only on explicit
 search and an automatic one visible on all three surfaces from one batch
 verdict, a foreign project denied `WrongScope`, and a remote destination
 denied `ProviderSensitive` through the artifact gate.
@@ -815,17 +817,18 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: partial - the validation verdict is computed without reading the
-causal class, and the class is reported through the batch's facts beside the
-verdict; relevance judgments and application outcomes are not modeled in this
-change.
+causal class, and the class is reported through `SurfaceValidation.claims`,
+the facts read at the validation snapshot, beside the verdict; relevance
+judgments and application outcomes are not modeled in this change.
 Guarantee: The causal class of a candidate is reported beside, and never
 folded into, its use verdict.
 Check: `always` - `validate_for_surface` reads no causal class when computing
-`UseVerdict`; `unknown_objects` is filled from the facts independently.
+`UseVerdict`; `unknown_objects` and `claims` are filled from the facts
+independently, at the validation snapshot.
 Fault/timing angle: none.
 Required faults and enabling state: a genuine and an Unknown claim with equal policy.
 Confidence: medium - [evidence](evidence/u5-evaluation-keeps-provenance-and-judgment-separate.md).
-Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`; `crates/retrieval/tests/claims.rs` - `causal_class_changes_no_state`; status unaudited.
+Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`, `use_accounting_reads_causality_at_the_validation_snapshot`; `crates/retrieval/tests/claims.rs` - `causal_class_changes_no_state`; status unaudited.
 Impact: provenance leaks into relevance or authorization.
 Open questions:
 - How are relevance judgments and external-application outcomes recorded beside these counts? (unresolved, needs the RP2.9 accounting protocol)

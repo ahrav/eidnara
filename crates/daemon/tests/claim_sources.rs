@@ -2397,6 +2397,14 @@ fn use_accounting_reads_causality_at_the_validation_snapshot() {
         after.accounting.unknown_objects.is_empty(),
         "the verdicts are from the fresh snapshot; the accounting must be too"
     );
+    // The class itself travels with the validation, so a caller reports it
+    // from this snapshot rather than from the classification batch.
+    assert!(batch.claims[0].causality.is_unknown());
+    assert_eq!(after.claims.len(), 1);
+    assert!(matches!(
+        after.claims[0].causality,
+        CausalClass::DirectObservation { .. }
+    ));
 }
 
 /// `MarkStale` leaves the revision alone, so the kernel batch still says `Ok`;

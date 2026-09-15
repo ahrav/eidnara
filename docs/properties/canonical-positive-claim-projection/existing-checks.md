@@ -50,7 +50,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `a_row_whose_digest_disagrees_with_its_canonical_occurrence_is_not_permitted` | `crates/daemon/tests/claim_sources.rs` | a candidate whose row digest names an artifact other than the one the kernel lists for its occurrence is denied `Stale` although the kernel permits the object and the local artifact gate would allow a digest with no evidence rows | unaudited |
 | `a_descriptor_retired_after_classification_is_denied_at_the_fresh_snapshot` | `crates/daemon/tests/claim_sources.rs` | retiring one representation's descriptor between classification and validation denies that row `Retracted` at the validation snapshot while the projection still holds it; the other representations stay permitted | unaudited |
 | `an_admission_marked_stale_after_classification_is_denied_at_the_fresh_snapshot` | `crates/daemon/tests/claim_sources.rs` | a `MarkStale` admission between classification and validation denies every row `Stale` although the kernel batch, which reads the revision, still answers `Ok` | unaudited |
-| `use_accounting_reads_causality_at_the_validation_snapshot` | `crates/daemon/tests/claim_sources.rs` | a causality record committed between classification and validation leaves `unknown_objects` at the validation snapshot, beside verdicts from the same snapshot | unaudited |
+| `use_accounting_reads_causality_at_the_validation_snapshot` | `crates/daemon/tests/claim_sources.rs` | a causality record committed between classification and validation leaves `unknown_objects` at the validation snapshot and reports the fresh class through `SurfaceValidation.claims`, beside verdicts from the same snapshot | unaudited |
 
 ## Adjacent kernel checks the records rely on
 

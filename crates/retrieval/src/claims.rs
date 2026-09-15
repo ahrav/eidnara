@@ -448,8 +448,15 @@ pub struct SurfaceValidation {
     pub snapshot: EgressSnapshot,
     pub incarnation: CommitReadIncarnation,
     pub surface: Surface,
-    /// Positionally aligned with the validated slice.
+    /// Positionally aligned with the validated slice. Each `candidate` is the
+    /// caller's input as given; its `claim` index still refers to the caller's
+    /// classification batch, not to `claims` below.
     pub candidates: Vec<ValidatedCandidate>,
+    /// The canonical facts of every object the candidates name, read with the
+    /// verdicts, so a caller can report the causal class at this snapshot
+    /// beside each verdict without a second read. An object with no registry
+    /// row at the snapshot has no entry.
+    pub claims: Vec<ClaimFacts>,
     pub accounting: UseAccounting,
 }
 
@@ -598,6 +605,7 @@ pub fn validate_for_surface(
         incarnation: judged.batch.incarnation,
         surface: judged.batch.surface,
         candidates: validated,
+        claims: judged.claims,
         accounting,
     })
 }
