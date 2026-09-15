@@ -25,7 +25,12 @@ test-support = []
 retrieval = { path = ".", features = ["test-support"] }
 tempfile = { workspace = true }
 criterion = { workspace = true }
+proptest = { workspace = true }
 
 [[bench]]
 name = "exact_lookup"
+harness = false
+
+[[bench]]
+name = "lexical_analysis"
 harness = false
