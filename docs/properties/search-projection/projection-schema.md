@@ -166,10 +166,12 @@ creates (`lexical_data`, `lexical_idx`, `lexical_content`, `lexical_docsize`,
 `lexical_config`) are engine-owned and outside this inventory. `PRAGMA
 integrity_check` verifies the inverted index; `retrieval::lexical::verify_rows`
 checks that live occurrences and lexical rows correspond one to one and that
-every row sits at one of its occurrence's words. Batch replay and
-`batch_status`, which hold the source records, also compare a row's stored
-text with the analyzer's output for its payload and refuse other text as a
-corrupt row, as they refuse other payload bytes.
+every row sits at one of its occurrence's words. It also compares both indexed
+columns with the analyzed payload. Reopen, construction verification, and
+closed-seed certification run this check under a consistent snapshot. Batch
+replay and `batch_status` compare the indexed text with their source records;
+a different text is corruption, not a successful replay. Within a batch,
+tombstones release their lexical rowids before replacements are placed.
 
 Virtual table: `fts5(original, parts, occurrence_id UNINDEXED, tokenize = 'unicode61 remove_diacritics 2 tokenchars ''_''', detail = full)`
 

@@ -186,7 +186,7 @@ pub(crate) fn stores(
 }
 
 /// Every live occurrence has exactly one lexical row, and every lexical row sits at one of its occurrence's rowids and names a live occurrence.
-/// `PRAGMA integrity_check` verifies the inverted index itself; this check covers the join the engine cannot see.
+/// Requires a consistent snapshot.
 ///
 /// # Errors
 ///
@@ -203,18 +203,36 @@ pub fn verify_rows(conn: &impl QueryRow) -> Result<(), ProjectionError> {
     if live != rows || rows != distinct {
         return Err(ProjectionError::CorruptRow);
     }
-    let mut rows = conn.prepare("SELECT rowid, occurrence_id FROM lexical")?;
+    let mut statement =
+        conn.prepare("SELECT rowid, occurrence_id, original, parts FROM lexical")?;
     let mut live = conn.prepare(
-        "SELECT EXISTS(SELECT 1 FROM occurrences o WHERE o.occurrence_id=?1
-                AND NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id))",
+        "SELECT CASE WHEN length(p.bytes)<=?2 THEN p.bytes END
+         FROM occurrences o JOIN payloads p USING(payload_id) WHERE o.occurrence_id=?1
+         AND NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id)",
     )?;
-    for row in rows.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-    })? {
-        let (stored, occurrence_id) = row?;
-        if !rowids(&occurrence_id).is_some_and(|words| words.contains(&stored))
-            || !live.query_row([&occurrence_id], |row| row.get::<_, bool>(0))?
-        {
+    let max_payload_bytes =
+        i64::try_from(kernel::MAX_PAYLOAD_BYTES).map_err(|_| ProjectionError::CorruptRow)?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let stored: i64 = row.get(0)?;
+        let occurrence_id: String = row.get(1)?;
+        if !rowids(&occurrence_id).is_some_and(|words| words.contains(&stored)) {
+            return Err(ProjectionError::CorruptRow);
+        }
+        let payload: Vec<u8> = live
+            .query_row(params![occurrence_id, max_payload_bytes], |row| {
+                row.get::<_, Option<Vec<u8>>>(0)
+            })
+            .optional()?
+            .flatten()
+            .ok_or(ProjectionError::CorruptRow)?;
+        let text = std::str::from_utf8(&payload).map_err(|_| ProjectionError::CorruptRow)?;
+        let bound = NonZeroUsize::new(payload.len()).unwrap_or(NonZeroUsize::MIN);
+        if !same_text(
+            &analyzed(text, bound)?,
+            &row.get::<_, String>(2)?,
+            &row.get::<_, String>(3)?,
+        ) {
             return Err(ProjectionError::CorruptRow);
         }
     }
@@ -248,10 +266,17 @@ pub fn probe_engine(conn: &impl QueryRow) -> Result<EngineIdentity, ProjectionEr
             ProjectionError::from(error)
         }
     })?;
-    let (sqlite_version, sqlite_source_id) =
+    let (sqlite_version, sqlite_source_id): (String, String) =
         conn.query_row("SELECT sqlite_version(), sqlite_source_id()", [], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })?;
+    if sqlite_version.as_bytes() != rusqlite::ffi::SQLITE_VERSION.to_bytes()
+        || sqlite_source_id.as_bytes() != rusqlite::ffi::SQLITE_SOURCE_ID.to_bytes()
+    {
+        return Err(ProjectionError::Unsupported {
+            reason: "the linked SQLite differs from the bundled build in the analysis identity",
+        });
+    }
     Ok(EngineIdentity {
         sqlite_version,
         sqlite_source_id,

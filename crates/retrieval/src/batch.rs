@@ -630,7 +630,21 @@ fn apply_batch_inner(
     }
     phase!(fault, AfterAssociations);
 
-    // The lexical row follows liveness, not this batch's insert: a tombstoned occurrence gains no row on replay, and a live occurrence that lacks one gains it, which is the same predicate `batch_status` reads. An occurrence this batch also invalidates is skipped: its tombstone below would delete the row at once.
+    for invalidation in &batch.invalidations {
+        let tombstoned = tombstone_occurrence(
+            conn,
+            &invalidation.occurrence_id,
+            invalidation.tombstone,
+            now,
+        )?;
+        if tombstoned.recorded {
+            outcome.tombstones_recorded += 1;
+        }
+        outcome.lexical_rows_deleted += tombstoned.lexical_rows_deleted;
+    }
+    phase!(fault, AfterTombstones);
+
+    // Retire holders before placing replacements so their rowids are available in this transaction.
     for (row, selected) in persisted.iter().zip(&admission.selected) {
         if admission.tombstoned.contains(row.occurrence_id.as_str())
             || has_tombstone(conn, &row.occurrence_id)?
@@ -647,20 +661,6 @@ fn apply_batch_inner(
         }
     }
     phase!(fault, AfterLexical);
-
-    for invalidation in &batch.invalidations {
-        let tombstoned = tombstone_occurrence(
-            conn,
-            &invalidation.occurrence_id,
-            invalidation.tombstone,
-            now,
-        )?;
-        if tombstoned.recorded {
-            outcome.tombstones_recorded += 1;
-        }
-        outcome.lexical_rows_deleted += tombstoned.lexical_rows_deleted;
-    }
-    phase!(fault, AfterTombstones);
 
     let tombstoned = &admission.tombstoned;
     if let Some(generation) = batch.generation_id {

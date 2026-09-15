@@ -150,17 +150,20 @@ adversary who can choose identifiers can produce a shared word with about 2 to
 the 32nd trials but cannot exhaust another occurrence's four words without a
 preimage. An occurrence whose four words are all held by other live occurrences
 is refused as `ProjectionError::LexicalRowidCollision`, which names every
-holder; the batch that would have stored it persists nothing. That refusal is
-deterministic: rebuilding replays it, so the projection stays unavailable until
-an operator retires one of the occurrences involved. `lexical::verify_rows`
-accepts a row at any of its occurrence's words.
+holder; the batch that would have stored it persists nothing. Within a batch,
+tombstones remove their holders before new lexical rows are placed. If all four
+holders remain live, an operator must retire a holder or rebuild from canonical
+input that excludes one. `lexical::verify_rows` accepts a row at any of its
+occurrence's words.
 
 The lexical row follows liveness rather than the batch that stores the
 occurrence: a record whose occurrence is live and has no row gains one, and a
 record whose occurrence is tombstoned gains none, whether or not the occurrence
 row itself was new. `batch_status` reads the same predicate, so a live record
 without its row reports the batch as not applied and reapplying the batch
-restores the row.
+restores the row. A present row with different `original` or `parts` text is
+corrupt, not an applied batch or a successful replay. Both paths compare those
+columns with the selected payload analyzed under the current contract.
 
 The index analyzes the occurrence's selected payload bytes under the payload
 byte bound, which also bounds the atom count because every atom is at least one
@@ -173,12 +176,15 @@ The projection identity records `AnalysisIdentity::current()` in
 `analysis_identity`. A projection whose stored identity differs from the current
 one is incompatible and is rebuilt, exactly as a tokenizer or schema mismatch
 is. `lexical::verify_rows` checks that live occurrences and lexical rows
-correspond one to one; `PRAGMA integrity_check` verifies the inverted index
-itself, and both run wherever the projection is reopened or its construction is
-verified. `lexical::probe_engine` proves at open that the linked SQLite has
-FTS5 and that the `lexical` table's tokenizer loads, and reports the engine's
-version and source id as `EngineIdentity`; a missing module or tokenizer is
-`ProjectionError::Unsupported`, and `install_identity` and
+correspond one to one and that both indexed columns equal the analyzed payload.
+`PRAGMA integrity_check` verifies the inverted index against its own content.
+The row check runs under one snapshot at reopen, construction verification, and
+closed-seed certification. It scans every lexical row and reanalyzes each live
+payload; `CoverageBounds` does not bound this work. `lexical::probe_engine`
+checks FTS5, tokenizer availability, and agreement between the linked engine
+and bundled version/source identity at open and closed-seed certification.
+It reports the engine as `EngineIdentity`; a missing module, tokenizer, or
+mismatched build is `ProjectionError::Unsupported`. `install_identity` and
 `require_compatible` pin `analysis_identity` to this build's
 `AnalysisIdentity::current()` the way they pin the schema version.
 
@@ -238,8 +244,9 @@ creates or renews one for analysis.
 
 `AnalysisIdentity::current()` is the SHA-256 of a length-delimited manifest:
 the contract epoch, the toolchain's `char::UNICODE_VERSION`, the tokenizer
-string, the detail mode, the column names in order, and the linked SQLite
-version. Changing any of them changes the identity, even when a given fixture
+string, the detail mode, the column names in order, the linked SQLite version,
+and the bundled SQLite source identity. Changing any of them changes the
+identity, even when a given fixture
 still analyzes to the same terms. The Unicode version is included because atom
 and part boundaries come from the toolchain's character classification tables,
 so a toolchain upgrade that changes those tables changes what the analyzer
@@ -253,9 +260,11 @@ same change as the code, the updated goldens, and the updated pinned digest in
 `crates/retrieval/tests/lexical_analysis.rs`.
 
 Because the projection identity pins `analysis_identity` to the running build,
-a projection indexed under another SQLite version is incompatible and is
-rebuilt; `EngineIdentity` from `probe_engine` reports the engine but is not a
-second pin.
+a projection indexed under another SQLite version or source identity is
+incompatible and is rebuilt. `probe_engine` checks that the running engine
+matches the bundled version and source identity used in the manifest. Rebuild
+from canonical input; do not relabel old rows with a new digest. Restoring a
+prior binary requires a projection built under its prior identity.
 
 ## Known behaviour to keep in mind
 

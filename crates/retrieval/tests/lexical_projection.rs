@@ -1088,7 +1088,29 @@ fn probe_engine_reports_the_linked_engine_and_classifies_a_missing_module() {
         let engine = probe_engine(conn).unwrap();
         assert_eq!(engine.sqlite_version, rusqlite::version());
         assert!(engine.sqlite_source_id.len() > 20);
+        let options = conn
+            .prepare("PRAGMA compile_options")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        eprintln!("SQLite review engine: {engine:?}; compile_options={options:?}");
     });
+    let skewed = Connection::open_in_memory().unwrap();
+    skewed.execute_batch(retrieval::BASELINE).unwrap();
+    skewed
+        .create_scalar_function(
+            "sqlite_source_id",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| Ok("another-build".to_string()),
+        )
+        .unwrap();
+    assert!(matches!(
+        probe_engine(&skewed),
+        Err(ProjectionError::Unsupported { .. })
+    ));
     // A file whose lexical table names a module this build does not link is what an engine without FTS5 sees.
     let raw = Connection::open_in_memory().unwrap();
     raw.execute_batch(
@@ -1291,40 +1313,116 @@ fn tombstone_occurrence_itself_removes_the_lexical_row() {
 }
 
 #[test]
-fn a_row_storing_other_text_is_corrupt_on_replay_and_in_status() {
+fn retiring_collision_holders_frees_replacement_slots_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());
     let sources = [Source {
-        class: "messages",
-        key: "m1",
-        text: "genuine text",
-        created: 1,
+        class: "raw_tool_spans",
+        key: "new",
+        text: "replacement",
+        created: 2,
     }];
     let arena = Arena {
         identities: sources.iter().map(Source::identity).collect(),
     };
     let borrowed = borrow(&arena);
     let records = records(&sources, &borrowed);
-    let batch = collision_batch(&records);
+    let id = occurrence_id(&records[0]);
+    let holders: Vec<String> = rowids(&id)
+        .unwrap()
+        .iter()
+        .map(|word| format!("{word:016x}{}", "0".repeat(48)))
+        .collect();
+    store.with_conn_fenced(|conn| {
+        // The digest seam forces collisions without moving a row outside its allowed slots.
+        let mut holder = records[0].clone();
+        holder.created_commit_seq = 1;
+        holder.payload = Payload::Whole("holder");
+        for holder_id in &holders {
+            retrieval::persist_occurrences_with_digests_for_test(
+                conn, &[holder.clone()], bounds().persist, 1,
+                &|_, bytes| (holder_id.clone(), kernel::source_identity::identity_digest(bytes)),
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO lexical(rowid, original, parts, occurrence_id) VALUES (?1,'holder','',?2)",
+                params![rowid(holder_id).unwrap(), holder_id],
+            )?;
+        }
+        assert_eq!(verify_rows(conn), Ok(()));
+        Ok(())
+    }).unwrap();
+    let batch = ProjectionBatch {
+        identity: mutation(0, 2),
+        records,
+        invalidations: holders
+            .into_iter()
+            .map(|occurrence_id| Invalidation {
+                occurrence_id,
+                tombstone: Tombstone {
+                    invalidated_commit_seq: 2,
+                    reason: TombstoneReason::Retired,
+                },
+            })
+            .collect(),
+        generation_id: Some(GENERATION),
+    };
+    let before = with_conn(&store, lexical_rows);
+    assert!(apply(&store, &batch, Some(BatchFault::AfterLexical)).is_err());
+    assert_eq!(
+        with_conn(&store, lexical_rows),
+        before,
+        "a later failure restores all holders"
+    );
     apply(&store, &batch, None).unwrap();
-    let raw = Connection::open(dir.path().join("search").join("search.sqlite")).unwrap();
-    raw.execute(
-        "UPDATE lexical SET original='forged text' WHERE occurrence_id=?1",
-        [&occurrence_id(&records[0])],
-    )
-    .unwrap();
-    assert_eq!(
-        raw.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
-            .unwrap(),
-        "ok",
-        "a coherent update keeps the inverted index consistent"
-    );
-    drop(raw);
     with_conn(&store, |conn| {
-        assert_eq!(batch_status(conn, &batch), Err(ProjectionError::CorruptRow));
+        assert_eq!(
+            lexical_rows(conn),
+            [(rowid(&id).unwrap(), "replacement".into(), "".into(), id)]
+        );
+        assert_eq!(batch_status(conn, &batch), Ok(BatchStatus::Applied));
+        assert_eq!(verify_rows(conn), Ok(()));
     });
-    assert_eq!(
-        apply(&store, &batch, None),
-        Err(ProjectionError::CorruptRow)
-    );
+}
+
+#[test]
+fn a_row_storing_other_text_is_corrupt_on_replay_and_in_status() {
+    for column in ["original", "parts"] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let sources = [Source {
+            class: "messages",
+            key: "m1",
+            text: "genuine text",
+            created: 1,
+        }];
+        let arena = Arena {
+            identities: sources.iter().map(Source::identity).collect(),
+        };
+        let borrowed = borrow(&arena);
+        let records = records(&sources, &borrowed);
+        let batch = collision_batch(&records);
+        apply(&store, &batch, None).unwrap();
+        let raw = Connection::open(dir.path().join("search").join("search.sqlite")).unwrap();
+        raw.execute(
+            &format!("UPDATE lexical SET {column}='forged text' WHERE occurrence_id=?1"),
+            [&occurrence_id(&records[0])],
+        )
+        .unwrap();
+        assert_eq!(
+            raw.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok",
+            "a coherent update keeps the inverted index consistent"
+        );
+        drop(raw);
+        with_conn(&store, |conn| {
+            assert_eq!(batch_status(conn, &batch), Err(ProjectionError::CorruptRow));
+            assert_eq!(verify_rows(conn), Err(ProjectionError::CorruptRow));
+            assert_eq!(verify_pages(conn), Err(ProjectionError::CorruptRow));
+        });
+        assert_eq!(
+            apply(&store, &batch, None),
+            Err(ProjectionError::CorruptRow)
+        );
+    }
 }

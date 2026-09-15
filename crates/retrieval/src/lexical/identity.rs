@@ -1,5 +1,4 @@
 //! The identity digests a fixed-order, length-delimited manifest of every mechanical component the indexed terms depend on, so a change to any of them changes the digest even when a particular fixture still analyzes to the same terms.
-//! The linked SQLite version is a component: the engine's tokenizer defines the effective term, and the projection pins this identity, so an engine change rebuilds the rows.
 
 use sha2::{Digest, Sha256};
 
@@ -37,6 +36,10 @@ impl AnalysisIdentity {
             PARTS_COLUMN,
             "sqlite",
             rusqlite::version(),
+            "sqlite_source_id",
+            rusqlite::ffi::SQLITE_SOURCE_ID
+                .to_str()
+                .expect("SQLite's source identity is ASCII"),
         ] {
             preimage.push_str(&field.len().to_string());
             preimage.push(':');

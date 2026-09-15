@@ -799,7 +799,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     };
-    let cases: [(&str, &str, SeedRefusal); 17] = [
+    let cases: [(&str, &str, SeedRefusal); 20] = [
         (
             "corrupt identity",
             "UPDATE projection_identity SET embedding_model='other'",
@@ -891,6 +891,21 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         (
             "orphan lexical row",
             "INSERT INTO lexical(rowid, original, parts, occurrence_id) VALUES (7, 'ghost', '', 'ghost')",
+            SeedRefusal::LexicalRows,
+        ),
+        (
+            "lexical text disagrees with payload",
+            "UPDATE lexical SET original='unrelated text'",
+            SeedRefusal::LexicalRows,
+        ),
+        (
+            "misplaced lexical row",
+            "UPDATE lexical SET rowid=7 WHERE rowid=(SELECT min(rowid) FROM lexical)",
+            SeedRefusal::LexicalRows,
+        ),
+        (
+            "duplicate lexical occurrence",
+            "UPDATE lexical SET occurrence_id=(SELECT occurrence_id FROM lexical ORDER BY rowid LIMIT 1)",
             SeedRefusal::LexicalRows,
         ),
     ];

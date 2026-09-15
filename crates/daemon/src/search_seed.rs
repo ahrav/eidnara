@@ -78,7 +78,7 @@ pub enum SeedRefusal {
     Baseline(String),
     #[error("{0} foreign-key violations")]
     ForeignKeys(u64),
-    #[error("lexical rows do not correspond to live occurrences")]
+    #[error("lexical rows do not match live occurrences and their payloads")]
     LexicalRows,
     #[error("the projection identity row is missing or corrupt")]
     Identity,
@@ -522,15 +522,6 @@ fn verify_closed_until(
     if violations > 0 {
         return Err(SeedRefusal::ForeignKeys(violations));
     }
-    retrieval::lexical::verify_rows(&conn).map_err(|error| {
-        if ended() {
-            SeedRefusal::Cancelled
-        } else if error == retrieval::ProjectionError::CorruptRow {
-            SeedRefusal::LexicalRows
-        } else {
-            SeedRefusal::Store(error.to_string())
-        }
-    })?;
     // The projection's own readers define the identity and checkpoint rows, so the certifier and the writer read them by one rule.
     // A statement the handler interrupted is the cancellation, not a corrupt control row.
     let interrupted = |refusal: SeedRefusal| {
@@ -548,6 +539,17 @@ fn verify_closed_until(
     identity
         .require_compatible(expected)
         .map_err(|_| SeedRefusal::IdentityMismatch)?;
+    retrieval::lexical::probe_engine(&conn)
+        .and_then(|_| retrieval::lexical::verify_rows(&conn))
+        .map_err(|error| {
+            if ended() {
+                SeedRefusal::Cancelled
+            } else if error == retrieval::ProjectionError::CorruptRow {
+                SeedRefusal::LexicalRows
+            } else {
+                SeedRefusal::Store(error.to_string())
+            }
+        })?;
     // A retired generation is one the projection refuses to queue work for, and several live generations of one identity would leave the certificate naming an arbitrary one; the seed's generation is the single live row.
     let mut live: Vec<(String, String)> = conn
         .prepare(
