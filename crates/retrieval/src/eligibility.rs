@@ -4,8 +4,8 @@ use std::num::NonZeroUsize;
 
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, EgressSnapshot, EligibilityCandidate, EligibilityVerdict, KernelError,
-    KernelStore, ProjectScope,
+    ArtifactDestination, CommitReadIncarnation, EgressSnapshot, EligibilityCandidate,
+    EligibilityVerdict, KernelError, KernelStore, ProjectScope,
 };
 use rusqlite::params;
 use storage::GuardedConn;
@@ -17,6 +17,26 @@ pub struct OccurrenceCandidate {
     pub occurrence_id: String,
     pub class: OccurrenceClass,
     pub candidate: EligibilityCandidate,
+}
+
+impl OccurrenceCandidate {
+    pub fn new(
+        occurrence_id: String,
+        class: OccurrenceClass,
+        object_id: String,
+        source_revision: i64,
+        artifact_digest: String,
+    ) -> Self {
+        Self {
+            occurrence_id,
+            class,
+            candidate: EligibilityCandidate {
+                object_id,
+                source_revision,
+                artifact_digest: Some(artifact_digest),
+            },
+        }
+    }
 }
 
 const LIVE_CANDIDATES_SQL: &str =
@@ -75,15 +95,13 @@ pub fn live_candidates(
     rows.into_iter()
         .map(
             |(occurrence_id, class, source_object_id, revision, digest)| {
-                Ok(OccurrenceCandidate {
+                Ok(OccurrenceCandidate::new(
                     occurrence_id,
-                    class: OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?,
-                    candidate: EligibilityCandidate {
-                        object_id: source_object_id,
-                        source_revision: revision,
-                        artifact_digest: Some(digest),
-                    },
-                })
+                    OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?,
+                    source_object_id,
+                    revision,
+                    digest,
+                ))
             },
         )
         .collect()
@@ -122,6 +140,7 @@ pub struct ClassExclusion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EligibilityReport {
     pub snapshot: EgressSnapshot,
+    pub incarnation: CommitReadIncarnation,
     pub occurrences: Vec<JudgedOccurrence>,
 }
 
@@ -179,6 +198,7 @@ pub fn judge_occurrences(
     debug_assert_eq!(batch.verdicts.len(), candidates.len());
     Ok(EligibilityReport {
         snapshot: batch.snapshot,
+        incarnation: batch.incarnation,
         occurrences: candidates
             .iter()
             .zip(batch.verdicts)

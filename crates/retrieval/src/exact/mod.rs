@@ -1,5 +1,6 @@
 pub mod association;
 pub mod lookup;
+pub mod resolve;
 pub mod selector;
 
 pub use association::{
@@ -9,6 +10,13 @@ pub use association::{
 pub use lookup::{
     AssociationRow, Cursor, ExactQuery, LookupContext, LookupRefusal, ObjectFormat, Page,
     ShaPrefixQuery, ShaQueryRefusal, page,
+};
+#[cfg(feature = "test-support")]
+pub use resolve::validate_for_use_with_hook_for_test;
+pub use resolve::{
+    Authority, CertificateRefusal, CompletenessCertificate, Completion, Consumed, Disqualification,
+    ExactProof, IncompleteReason, Observations, ProofInvalidation, RequestIntent, Resolution,
+    ResolveBounds, ResolveRefusal, ResolveRequest, resolve, validate_for_use,
 };
 pub use selector::{
     Family, HexPrefix, Intent, MAX_SHA_HEX, Mention, PathRefusal, Selector, SelectorBounds,
