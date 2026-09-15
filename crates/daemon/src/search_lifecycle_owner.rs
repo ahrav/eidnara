@@ -872,6 +872,9 @@ impl SearchLifecycleOwner {
         let bound = limit(inputs.manifest(), request.transition.duration_limit())
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
         if duration > bound {
+            if !current_fits {
+                let _ = self.admission.refresh(None);
+            }
             return Err(BuildError::Invalid(
                 "the request's deadline lies past its transition's bound",
             ));

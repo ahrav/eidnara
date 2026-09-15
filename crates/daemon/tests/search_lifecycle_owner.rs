@@ -2876,6 +2876,27 @@ fn a_replacement_that_fits_reduced_limits_is_recorded_when_the_current_operation
     smaller.selected_generation = current.staged_seed_digest.clone().unwrap();
     smaller.consumer.consumer_id = "search-lifecycle-again".to_owned();
     smaller.attempt_id = "rebuild-again".to_owned();
+    // A replacement that fits the limits but asks for a deadline past its transition's bound is refused, and the family whose operation no longer fits is left with admission closed, as its next slice would leave it.
+    let mut too_long = smaller.clone();
+    too_long.deadline = now() + 2 * i64::try_from(LIMIT).unwrap();
+    let outcome = owner.request(&too_long, now(), &slice_budget());
+    assert!(
+        matches!(outcome, Err(BuildError::Invalid(_))),
+        "{outcome:?}"
+    );
+    assert!(
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .is_err(),
+        "no fresh grant while the recorded operation does not fit"
+    );
+    assert!(owner.pin(&slice_budget()).is_err());
+    assert!(
+        matches!(control(home), ControlState::Current(done) if done.attempt_id == current.attempt_id)
+    );
+
     let outcome = owner.request(&smaller, now(), &slice_budget());
     assert!(outcome.is_ok(), "{outcome:?}");
     assert!(
