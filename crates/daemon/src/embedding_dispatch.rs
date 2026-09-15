@@ -175,8 +175,9 @@ struct EligibilityCursorBinding {
     destination: kernel::ArtifactDestination,
 }
 
+/// Where a pass over one eligibility binding resumes. A dispatcher built for the next slice takes the previous slice's position through [`EmbeddingDispatcher::resuming`], so a backlog longer than one pass's page bound is walked across slices instead of restarting from the top each time.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ScanPosition {
+pub struct ScanPosition {
     binding: EligibilityCursorBinding,
     cursor: Option<DispatchCursor>,
     revisit_at: Option<i64>,
@@ -255,6 +256,17 @@ impl<'a> EmbeddingDispatcher<'a> {
             faults: Vec::new(),
             scan_position: None,
         }
+    }
+
+    /// Continues from `position`; a position for another binding is replaced at the next pass.
+    pub fn resuming(mut self, position: Option<ScanPosition>) -> Self {
+        self.scan_position = position;
+        self
+    }
+
+    /// The position the next pass over the same binding resumes from.
+    pub fn scan_position(&self) -> Option<ScanPosition> {
+        self.scan_position.clone()
     }
 
     /// Arms `fault` for the next store call it names; each armed fault is consumed when it fires, so several can be armed for one pass.

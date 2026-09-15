@@ -1,5 +1,6 @@
-//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. Nothing here records intent on its own: a rebuild or recovery starts from an explicit request, and a restart resumes the record it finds without renewing its allowance. A Current family catches up in the same slices: the construction hold outlives completion, so each slice applies the commits since the family's checkpoint under that hold and acknowledges them. Holds die with the kernel's lease, so after a restart the family serves what it has until it trails the kernel past the freshness limit, at which point every hook is denied until a rebuild is requested.
+//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. Nothing here records intent on its own: a rebuild or recovery starts from an explicit request, and a restart resumes the record it finds without renewing its allowance. A Current family catches up in the same slices: the construction hold outlives completion, so each slice applies the commits since the family's checkpoint under that hold and acknowledges them. Holds die with the kernel's lease, so after a restart the family serves what it has until it trails the kernel past the freshness limit, at which point every hook is denied until a rebuild is requested. Embedding maintenance runs one supervisor at a time, rotated round-robin across the bound projects the daemon reports through a roster, each for a fixed tenure of slices; a slice that finds the tenure over or the roster changed hands the supervisor back to the loop, which joins it before the next slice starts the next one.
 
+use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -8,15 +9,18 @@ use std::time::{Duration, Instant};
 use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsStatus};
 use kernel::applicability::EvalBudget;
 use kernel::{
-    CommitPageBounds, KernelStore, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
-    SourcePageBounds,
+    ArtifactDestination, CommitPageBounds, KernelStore, ProjectScope, SourceHoldAdmission,
+    SourceHoldBinding, SourceHoldBounds, SourcePageBounds,
 };
 use retrieval::batch::{BatchBounds, VectorGeneration};
 use retrieval::coverage::CoverageBounds;
+use retrieval::dispatch::EpisodeGrant;
 use retrieval::{PersistBounds, ProjectionIdentity};
 use tokio_util::sync::CancellationToken;
 
 use crate::coverage::ProjectionCoverage;
+use crate::embedding_dispatch::DispatchBounds;
+use crate::embedding_supervisor::{DrainReport, Maintained, SliceBounds, Unresolved};
 use crate::projection_admission::{
     AdmissionInputs, Closed, InputRefusal, ProjectionAdmission, Refresh, SelectedProjection,
 };
@@ -28,7 +32,7 @@ use crate::projection_lifecycle::{
 use crate::search_catchup::{
     CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeReport, SearchCatchUp,
 };
-use crate::search_replacement::selection::disable::DisableEvent;
+use crate::search_replacement::selection::disable::{DisableEvent, MaintenanceHandle};
 use crate::search_replacement::selection::recovery::{RecoveryFailure, RecoveryProgress};
 use crate::search_replacement::selection::retirement::DISPOSITION_ROW_BYTES;
 use crate::search_replacement::selection::{SearchReader, SearchSelection};
@@ -45,6 +49,13 @@ const DEADLINE_MARGIN_MS: u64 = 1_000;
 const MAX_TUPLE_BYTES: u64 = 4096;
 /// How long the scheduler waits after a slice that did not advance the record, so a blocked record is retried without spinning.
 pub const SLICE_IDLE: Duration = Duration::from_secs(5);
+/// Owner slices one project's supervisor runs before the next bound project takes over.
+pub const MAINTENANCE_TENURE_SLICES: u32 = 4;
+/// The daemon's own projection serves local reads, so maintenance judges eligibility for local egress; a remote destination would retire every non-normal row as provider-sensitive.
+const MAINTENANCE_DESTINATION: ArtifactDestination = ArtifactDestination::Local;
+
+/// The bound projects maintenance rotates across, each under the project digest that orders the rotation, read at each slice so bindings take effect at the next one.
+pub type ProjectRoster = Arc<dyn Fn() -> Vec<(String, ProjectScope)> + Send + Sync>;
 
 /// Why a slice could not derive a projection identity or a bounded specification from the daemon's inputs.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -59,6 +70,12 @@ pub enum SpecRefusal {
     LimitRange(&'static str),
     #[error("the kernel incarnation could not be read: {0}")]
     Kernel(String),
+}
+
+/// Why `prepare` produced no identity: the records refused, or a manager with a running supervisor must be joined before it can be replaced.
+enum Unprepared {
+    Refused(SpecRefusal),
+    Rotate(MaintenanceHandle),
 }
 
 /// What one scheduled slice found or did.
@@ -76,6 +93,8 @@ pub enum SliceOutcome {
     CaughtUp(EpisodeReport),
     /// The record is disabled, a disable is reconciling, or the owner is shut down; only explicit recovery reopens a disabled record.
     Disabled,
+    /// A supervisor must be joined before the slice can go on: its tenure ended, its project left the roster, or the family it maintained is being replaced. The loop stops it and runs the next slice without idling.
+    RotateMaintenance(MaintenanceHandle),
     /// The record could not be trusted.
     Unavailable(String),
     /// The recorded operation did not advance in this slice; the record stays as it was.
@@ -90,8 +109,8 @@ enum Managed {
     Selection(Box<SearchSelection>),
     /// A disable took the manager to reconcile across an await; slices and pins see nothing until it returns.
     Disabling,
-    /// The owner shut down; nothing takes or rebuilds the manager again.
-    ShutDown,
+    /// The owner shut down; nothing takes or rebuilds the manager again. A manager whose supervisor did not drain within the grace stays here so its task, reader, and native work remain owned.
+    ShutDown(Option<Box<SearchSelection>>),
 }
 
 /// One owner per data home.
@@ -101,6 +120,11 @@ pub struct SearchLifecycleOwner {
     local_embeddings: LocalEmbeddingsComponent,
     admission: ProjectionAdmission,
     managed: Mutex<Managed>,
+    roster: ProjectRoster,
+    /// The project digest whose supervisor ran last and how many slices it has had; `None` before the first tenure.
+    tenure: Mutex<Option<(String, u32)>>,
+    #[cfg(feature = "test-support")]
+    drain_grace_override: Mutex<Option<Duration>>,
 }
 
 /// Puts the manager a disable took back unless the owner shut down meanwhile, whether the disable finished or its future was dropped.
@@ -130,7 +154,26 @@ impl SearchLifecycleOwner {
             local_embeddings,
             admission: ProjectionAdmission::for_home(home),
             managed: Mutex::new(Managed::None),
+            roster: Arc::new(Vec::new),
+            tenure: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            drain_grace_override: Mutex::new(None),
         }
+    }
+
+    /// Replaces the manifest's drain grace so a test can observe an unresolved drain without a manifest that no retirement could admit.
+    #[cfg(feature = "test-support")]
+    pub fn set_drain_grace_for_test(&self, grace: Duration) {
+        *self
+            .drain_grace_override
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(grace);
+    }
+
+    /// Supplies the bound projects maintenance rotates across; without one, no supervisor starts.
+    pub fn with_roster(mut self, roster: ProjectRoster) -> Self {
+        self.roster = roster;
+        self
     }
 
     pub fn admission(&self) -> &ProjectionAdmission {
@@ -175,12 +218,12 @@ impl SearchLifecycleOwner {
         })
     }
 
-    /// Reads the records, derives the identity, and syncs the manager to it. A refusal leaves no manager for another identity behind.
+    /// Reads the records, derives the identity, and syncs the manager to it. A refusal leaves no manager for another identity behind, except one whose supervisor still runs: that manager is kept and its supervisor handed back for joining, so replacing it never detaches running work.
     fn prepare(
         &self,
         managed: &mut Managed,
         budget: &EvalBudget,
-    ) -> Result<(AdmissionInputs, ProjectionIdentity, EvalBudget), SpecRefusal> {
+    ) -> Result<(AdmissionInputs, ProjectionIdentity, EvalBudget), Unprepared> {
         let prepared = AdmissionInputs::read(&self.home)
             .map_err(SpecRefusal::from)
             .and_then(|inputs| {
@@ -189,14 +232,24 @@ impl SearchLifecycleOwner {
                 let slice = Duration::from_millis(limit(inputs.manifest(), "supervisor_slice_ms")?);
                 Ok((inputs, identity, bounds, slice))
             });
+        let live = match &mut *managed {
+            Managed::Selection(current) => current.maintenance(),
+            _ => None,
+        };
         let (inputs, identity, bounds, slice) = match prepared {
             Ok(prepared) => prepared,
             Err(refusal) => {
+                if let Some(handle) = live {
+                    return Err(Unprepared::Rotate(handle));
+                }
                 *managed = Managed::None;
-                return Err(refusal);
+                return Err(Unprepared::Refused(refusal));
             }
         };
         if matches!(&*managed, Managed::Selection(current) if *current.identity() != identity) {
+            if let Some(handle) = live {
+                return Err(Unprepared::Rotate(handle));
+            }
             *managed = Managed::None;
         }
         if matches!(*managed, Managed::None) {
@@ -212,12 +265,13 @@ impl SearchLifecycleOwner {
     /// Refreshes admission from the records and the daemon's current observation, then advances the lifecycle record one step. The slice ends within the manifest's `supervisor_slice_ms`, within `budget`, and, for an active record, within that record's own deadline.
     pub fn run_slice(&self, budget: &EvalBudget) -> SliceOutcome {
         let mut managed = self.lock();
-        if matches!(*managed, Managed::Disabling | Managed::ShutDown) {
+        if matches!(*managed, Managed::Disabling | Managed::ShutDown(_)) {
             return SliceOutcome::Disabled;
         }
         let (inputs, identity, budget) = match self.prepare(&mut managed, budget) {
             Ok(prepared) => prepared,
-            Err(refusal) => {
+            Err(Unprepared::Rotate(handle)) => return SliceOutcome::RotateMaintenance(handle),
+            Err(Unprepared::Refused(refusal)) => {
                 let _ = self.admission.refresh(None);
                 return SliceOutcome::Closed(refusal);
             }
@@ -287,7 +341,11 @@ impl SearchLifecycleOwner {
                     return SliceOutcome::Advanced(progress);
                 }
                 match self.catch_up(selection, &spec, &identity, &budget) {
-                    Ok(None) => SliceOutcome::Current,
+                    Ok(None) => match self.maintain(selection, inputs.manifest(), &spec, &budget) {
+                        Ok(None) => SliceOutcome::Current,
+                        Ok(Some(handle)) => SliceOutcome::RotateMaintenance(handle),
+                        Err(error) => SliceOutcome::Blocked(error.to_string()),
+                    },
                     Ok(Some(report)) => {
                         let _ = self.refresh(selection, &identity, &budget);
                         SliceOutcome::CaughtUp(report)
@@ -349,6 +407,94 @@ impl SearchLifecycleOwner {
             .with_budget(budget.clone())
             .run_episode(&consumer, &spec.episode, crate::now_ms(), &mut |_| {})?;
         Ok(Some(report))
+    }
+
+    /// Keeps one supervisor maintaining the selected family for the current tenant. A running tenant within its tenure and still on the roster is left alone; one past its tenure or off the roster is handed back for joining; with none running, the next roster project in sorted order after the last tenant starts through [`SearchSelection::start_maintenance`], which admits and charges it. No roster means no maintenance.
+    fn maintain(
+        &self,
+        selection: &mut SearchSelection,
+        manifest: &RuntimeManifest,
+        spec: &ReplacementSpec,
+        budget: &EvalBudget,
+    ) -> Result<Option<MaintenanceHandle>, BuildError> {
+        let roster: BTreeMap<String, ProjectScope> = (self.roster)().into_iter().collect();
+        let mut tenure = self.tenure.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(live) = selection.maintenance() {
+            let Some((tenant, slices)) = tenure.as_mut() else {
+                return Ok(Some(live));
+            };
+            *slices += 1;
+            // A lone project keeps its supervisor; rotating it would only pay a restart.
+            let over = *slices >= MAINTENANCE_TENURE_SLICES && roster.len() > 1;
+            let bound = roster.get(tenant.as_str()) == Some(&*live.scope);
+            return Ok((over || !bound).then_some(live));
+        }
+        let last = tenure.as_ref().map(|(tenant, _)| tenant.as_str());
+        let Some((next, scope)) = last
+            .and_then(|last| {
+                roster
+                    .range::<str, _>((std::ops::Bound::Excluded(last), std::ops::Bound::Unbounded))
+                    .next()
+            })
+            .or_else(|| roster.iter().next())
+        else {
+            return Ok(None);
+        };
+        let reader = selection.pin(&self.kernel, self.admission.gate(), budget)?;
+        selection.start_maintenance(
+            Maintained {
+                gate: Arc::clone(self.admission.gate()),
+                kernel: Arc::clone(&self.kernel),
+                projection: Arc::clone(reader.projection()),
+                local_embeddings: Arc::new(self.local_embeddings.clone()),
+                project: scope.clone(),
+                destination: MAINTENANCE_DESTINATION,
+            },
+            maintenance_bounds(manifest, spec).map_err(|refusal| {
+                BuildError::Invalid(match refusal {
+                    SpecRefusal::TooSmall(_) => "manifest limits cannot bound maintenance",
+                    _ => "maintenance bounds",
+                })
+            })?,
+            Arc::new(crate::now_ms),
+            tokio::sync::mpsc::unbounded_channel().0,
+        )?;
+        *tenure = Some((next.clone(), 0));
+        Ok(None)
+    }
+
+    /// The drain grace maintenance stops are given: the manifest's `physical_drain_ms`, or one slice when no manifest is readable.
+    fn drain_grace(&self) -> Duration {
+        #[cfg(feature = "test-support")]
+        if let Some(grace) = *self
+            .drain_grace_override
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+        {
+            return grace;
+        }
+        AdmissionInputs::read(&self.home)
+            .ok()
+            .and_then(|inputs| limit(inputs.manifest(), "physical_drain_ms").ok())
+            .map_or(SLICE_IDLE, Duration::from_millis)
+    }
+
+    /// Joins the supervisor a slice handed back. A resolved drain frees the slot for the next tenant; an unresolved one leaves the supervisor owned by its task and reported.
+    pub async fn stop_maintenance(
+        &self,
+        handle: &MaintenanceHandle,
+    ) -> Result<DrainReport, Unresolved> {
+        handle.stop(self.drain_grace()).await
+    }
+
+    /// The supervisor still running on the selected family, if any.
+    pub fn maintenance(&self) -> Option<MaintenanceHandle> {
+        match &mut *self.lock() {
+            Managed::Selection(selection) | Managed::ShutDown(Some(selection)) => {
+                selection.maintenance()
+            }
+            _ => None,
+        }
     }
 
     /// Refreshes admission with the selected family's own coverage when one is open; with no coverage when a selected family refuses to be read, so its hooks are denied rather than judged on a report about nothing; and with the unregistered observation at `tip` when nothing is selected.
@@ -477,10 +623,33 @@ impl SearchLifecycleOwner {
             .map(|_| ())
     }
 
-    /// Closes admission for good and releases the selection manager; the durable record and every kernel obligation stay for the next start. Idempotent, and a disable that returns afterwards restores nothing.
-    pub fn shutdown(&self) {
+    /// Closes admission for good, joins the running supervisor within the drain grace, and releases the selection manager; the durable record and every kernel obligation stay for the next start. A supervisor that does not drain in time keeps its manager, so its task and native work stay owned, and the unresolved drain is returned. Idempotent, and a disable that returns afterwards restores nothing.
+    pub async fn shutdown(&self) -> Result<(), Unresolved> {
         self.admission.close();
-        *self.lock() = Managed::ShutDown;
+        let taken = {
+            let mut managed = self.lock();
+            match std::mem::take(&mut *managed) {
+                Managed::Selection(selection) | Managed::ShutDown(Some(selection)) => {
+                    *managed = Managed::ShutDown(None);
+                    Some(selection)
+                }
+                _ => {
+                    *managed = Managed::ShutDown(None);
+                    None
+                }
+            }
+        };
+        let Some(mut selection) = taken else {
+            return Ok(());
+        };
+        let Some(handle) = selection.maintenance() else {
+            return Ok(());
+        };
+        let outcome = self.stop_maintenance(&handle).await;
+        if outcome.is_err() {
+            *self.lock() = Managed::ShutDown(Some(selection));
+        }
+        outcome.map(|_| ())
     }
 }
 
@@ -508,6 +677,37 @@ fn nonzero_usize(name: &'static str, value: u64) -> Result<NonZeroUsize, SpecRef
 
 fn nonzero_u64(name: &'static str, value: u64) -> Result<NonZeroU64, SpecRefusal> {
     NonZeroU64::new(value).ok_or(SpecRefusal::TooSmall(name))
+}
+
+/// Supervisor slice bounds within the limits `start_maintenance` charges: `embedding_recovery_attempts`, `pending_count`, `supervisor_slice_ms`, and `local_transaction_rows`. The episode deadline is the recovery bound from now, and a result is awaited for one lease before the pass moves on.
+fn maintenance_bounds(
+    manifest: &RuntimeManifest,
+    spec: &ReplacementSpec,
+) -> Result<SliceBounds, SpecRefusal> {
+    let slice_ms = limit(manifest, "supervisor_slice_ms")?;
+    let lease_ms = limit(manifest, "lease_duration_ms")?;
+    Ok(SliceBounds {
+        dispatch: DispatchBounds {
+            max_jobs: spec.episode.batch.max_pending,
+            grant: EpisodeGrant {
+                allowance: u32::try_from(limit(manifest, "embedding_recovery_attempts")?)
+                    .ok()
+                    .and_then(NonZeroU32::new)
+                    .ok_or(SpecRefusal::TooSmall("embedding_recovery_attempts"))?,
+                deadline: crate::now_ms().saturating_add(
+                    i64::try_from(limit(manifest, "B_recovery_ms")?).unwrap_or(i64::MAX),
+                ),
+            },
+            retry_after: i64::try_from(lease_ms).unwrap_or(i64::MAX),
+            result_wait: Duration::from_millis(lease_ms.min(slice_ms / 2)),
+        },
+        sweep_candidates: nonzero_usize(
+            "local_transaction_rows",
+            limit(manifest, "local_transaction_rows")? / 10,
+        )?,
+        slice: Duration::from_millis(slice_ms),
+        idle: SLICE_IDLE,
+    })
 }
 
 /// Coverage observation bounds that stay within the limits `SearchSelection` charges for one observation: five classes of live rows plus five of tombstones within `local_transaction_rows`, and a class within `export_page_rows`.
@@ -681,7 +881,7 @@ fn replacement_spec(
     })
 }
 
-/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first. A panicking slice closes admission and ends the loop, since its state is no longer known.
+/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record, applied commits, or handed back a supervisor to join runs the next one without waiting; every other outcome idles first. A panicking slice closes admission and ends the loop, since its state is no longer known. The running supervisor is joined by [`SearchLifecycleOwner::shutdown`], which the daemon awaits after this loop returns.
 pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
     let mut last_reported = None;
     loop {
@@ -698,6 +898,19 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
             }
         };
         let outcome = match outcome {
+            Ok(SliceOutcome::RotateMaintenance(handle)) => {
+                match owner.stop_maintenance(&handle).await {
+                    Ok(_) => {
+                        if !cancel.is_cancelled() {
+                            continue;
+                        }
+                        return;
+                    }
+                    Err(unresolved) => {
+                        SliceOutcome::Blocked(format!("maintenance did not drain: {unresolved}"))
+                    }
+                }
+            }
             Ok(outcome) => outcome,
             Err(join) => {
                 eprintln!("daemon: search lifecycle slice ended abnormally: {join}");
@@ -718,6 +931,7 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
             | SliceOutcome::Advanced(_)
             | SliceOutcome::Current
             | SliceOutcome::CaughtUp(_)
+            | SliceOutcome::RotateMaintenance(_)
             | SliceOutcome::Disabled => None,
         };
         if report != last_reported {

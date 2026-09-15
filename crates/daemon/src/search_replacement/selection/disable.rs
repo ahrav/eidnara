@@ -1,5 +1,7 @@
 use super::*;
-use crate::embedding_supervisor::{EmbeddingSupervisor, Maintained, SliceBounds, SupervisorEvent};
+use crate::embedding_supervisor::{
+    DrainReport, EmbeddingSupervisor, Maintained, SliceBounds, SupervisorEvent, Unresolved,
+};
 use crate::projection_lifecycle::{ControlState, DisabledIntent, EpisodeAccounting, IntentRefusal};
 use kernel::CommitIntent;
 use sha2::{Digest, Sha256};
@@ -10,12 +12,40 @@ use tokio::task::JoinHandle;
 pub(super) struct Maintenance {
     supervisor: Arc<EmbeddingSupervisor>,
     task: JoinHandle<()>,
+    scope: ProjectScope,
 }
 
 impl Maintenance {
     /// A finished task has dropped its reader, so this owner pins nothing.
     pub(super) fn pins(&self) -> bool {
         !self.task.is_finished()
+    }
+}
+
+/// A live supervisor and the project scope it maintains. The supervisor can be joined through the handle after the selection that started it has been taken elsewhere.
+#[derive(Clone)]
+pub struct MaintenanceHandle {
+    supervisor: Arc<EmbeddingSupervisor>,
+    // A scope is about a kilobyte; the handle travels inside slice outcomes, which stay small.
+    pub scope: Box<ProjectScope>,
+}
+
+impl std::fmt::Debug for MaintenanceHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MaintenanceHandle")
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MaintenanceHandle {
+    /// Stops the supervisor and waits up to `grace` for its slice and native work to exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the drain the supervisor could not resolve within `grace`; its work stays owned by its task.
+    pub async fn stop(&self, grace: Duration) -> Result<DrainReport, Unresolved> {
+        self.supervisor.shutdown(grace).await
     }
 }
 
@@ -96,10 +126,26 @@ impl SearchSelection {
             Arc::new(AtomicBool::new(false)),
         );
         family.check_kernel(&maintained.kernel, &kernel_budget)?;
+        let scope = maintained.project.clone();
         let supervisor = EmbeddingSupervisor::new(maintained, bounds, now, events);
         let task = supervisor.spawn_pinned(SearchReader { family, grant });
-        self.maintenance = Some(Maintenance { supervisor, task });
+        self.maintenance = Some(Maintenance {
+            supervisor,
+            task,
+            scope,
+        });
         Ok(())
+    }
+
+    /// The supervisor still pinning the selected family, if any; a finished one is reaped.
+    pub fn maintenance(&mut self) -> Option<MaintenanceHandle> {
+        if self.maintenance.as_ref().is_some_and(|owner| !owner.pins()) {
+            self.maintenance = None;
+        }
+        self.maintenance.as_ref().map(|owner| MaintenanceHandle {
+            supervisor: Arc::clone(&owner.supervisor),
+            scope: Box::new(owner.scope.clone()),
+        })
     }
 
     /// Closes admission before filesystem I/O. A failed persistence leaves this process closed.

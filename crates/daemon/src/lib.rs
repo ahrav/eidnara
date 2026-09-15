@@ -309,6 +309,17 @@ impl RouteBindings {
             .max_by_key(|(seq, _)| *seq)
     }
 
+    /// The project of every bound root, keyed by its scope identifier; roots sharing a project collapse to one entry.
+    fn bound_projects(&self) -> Vec<(String, kernel::ProjectScope)> {
+        let mut projects: BTreeMap<String, kernel::ProjectScope> = BTreeMap::new();
+        for (_, binding) in self.latest_per_root().into_values() {
+            projects
+                .entry(binding.kernel_project.scope_id())
+                .or_insert_with(|| binding.kernel_project.scope().clone());
+        }
+        projects.into_iter().collect()
+    }
+
     /// The returned sequence orders bindings by insertion time.
     fn latest_per_root(&self) -> BTreeMap<&Path, (u64, &SessionBinding)> {
         let mut latest: BTreeMap<&Path, (u64, &SessionBinding)> = BTreeMap::new();
@@ -3983,7 +3994,7 @@ impl HandlerCore {
                     let host: Arc<dyn memory_classifier_scheduler::SchedulerHost> =
                         Arc::new(SchedulerBridge {
                             store,
-                            bindings,
+                            bindings: Arc::clone(&bindings),
                             memory_classifier,
                         });
                     let scheduler = memory_classifier_scheduler::MemoryClassifierScheduler::new(
@@ -4003,6 +4014,7 @@ impl HandlerCore {
                                 &search_lifecycle,
                                 &kernel,
                                 local_embeddings,
+                                &bindings,
                                 path,
                             )
                         {
@@ -4150,6 +4162,7 @@ impl HandlerCore {
         slot: &OnceLock<Arc<search_lifecycle_owner::SearchLifecycleOwner>>,
         kernel: &kernel_routes::KernelOpenCoordinator,
         local_embeddings: Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>,
+        bindings: &Arc<Mutex<RouteBindings>>,
         sqlite_path: &str,
     ) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
         let Some(home) = sqlite_store_data_home(sqlite_path) else {
@@ -4171,11 +4184,20 @@ impl HandlerCore {
         let mut bound = false;
         let owner = slot.get_or_init(|| {
             bound = true;
-            Arc::new(search_lifecycle_owner::SearchLifecycleOwner::for_home(
-                home,
-                kernel,
-                local_embeddings,
-            ))
+            let roster = Arc::clone(bindings);
+            Arc::new(
+                search_lifecycle_owner::SearchLifecycleOwner::for_home(
+                    home,
+                    kernel,
+                    local_embeddings,
+                )
+                .with_roster(Arc::new(move || {
+                    roster
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .bound_projects()
+                })),
+            )
         });
         bound.then(|| Arc::clone(owner))
     }
@@ -12605,8 +12627,10 @@ impl CompositeComponent for Handler {
             owner.admission().close();
         }
         self.tasks.wait().await;
-        if let Some(owner) = self.search_lifecycle.get() {
-            owner.shutdown();
+        if let Some(owner) = self.search_lifecycle.get()
+            && let Err(unresolved) = owner.shutdown().await
+        {
+            eprintln!("daemon: search maintenance did not drain at shutdown: {unresolved}");
         }
 
         self.bindings.lock().expect("bindings mutex").clear();
@@ -19243,6 +19267,7 @@ mod tests {
             owner.run_slice(&kernel::applicability::EvalBudget::unbounded()),
             SliceOutcome::Disabled
         ));
+        assert!(owner.maintenance().is_none());
     }
 
     fn handler_with_blocking_lifecycle(
