@@ -915,15 +915,17 @@ impl SearchLifecycleOwner {
                 "manifest limits cannot bound the request",
             ));
         }
-        // A request with no time left would be recorded only for the next slice to find it expired.
+        // A request with no time past the start margin would be recorded only for every slice to refuse it inside the margin until it expires.
         let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
         let bound = limit(inputs.manifest(), request.transition.duration_limit())
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
-        if duration == 0 && !replay {
+        if duration <= DEADLINE_MARGIN_MS && !replay {
             if !current_fits {
                 let _ = self.admission.refresh(None);
             }
-            return Err(BuildError::Invalid("the request's deadline has passed"));
+            return Err(BuildError::Invalid(
+                "the request's deadline leaves no time past the start margin",
+            ));
         }
         if duration > bound {
             if !current_fits {

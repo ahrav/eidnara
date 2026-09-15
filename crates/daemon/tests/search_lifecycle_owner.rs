@@ -440,9 +440,11 @@ async fn slices_are_bounded_by_the_records_deadline_and_a_restart_renews_nothing
     let owner = owner(home, &corpus.kernel);
     let _ = owner.run_slice(&slice_budget());
 
+    // Recorded with half a second past the start margin; by the time the slice runs, only the margin is left.
     let mut expiring = rebuild(home);
-    expiring.deadline = now() + 500;
+    expiring.deadline = now() + 1_500;
     owner.request(&expiring, now(), &slice_budget()).unwrap();
+    std::thread::sleep(Duration::from_millis(600));
     assert!(matches!(
         owner.run_slice(&slice_budget()),
         SliceOutcome::Blocked(_)
@@ -1504,7 +1506,7 @@ fn a_slice_inside_the_deadline_margin_is_bounded_by_the_record_deadline() {
     again.selected_generation = current.staged_seed_digest.clone().unwrap();
     again.consumer.consumer_id = "search-lifecycle-again".to_owned();
     again.attempt_id = "rebuild-again".to_owned();
-    again.deadline = now() + 600;
+    again.deadline = now() + 1_600;
     owner.request(&again, now(), &slice_budget()).unwrap();
 
     let reader = owner.pin(&slice_budget()).unwrap();
@@ -3004,6 +3006,27 @@ fn a_lowered_duration_bound_blocks_an_active_record() {
     assert!(owner.pin(&slice_budget()).is_err(), "no family was opened");
 }
 
+/// A request whose deadline leaves no time past the start margin is refused rather than recorded for every slice to refuse inside the margin.
+#[test]
+fn a_request_inside_the_start_margin_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    let at = now();
+    let mut request = rebuild(home);
+    request.deadline = at + 900;
+    let outcome = owner.request(&request, at, &slice_budget());
+    assert!(
+        matches!(outcome, Err(BuildError::Invalid(_))),
+        "{outcome:?}"
+    );
+    assert!(matches!(control(home), ControlState::Absent));
+}
+
 /// A request whose deadline has already arrived is refused rather than recorded for the next slice to find expired.
 #[test]
 fn a_request_with_no_remaining_duration_is_refused() {
@@ -3062,7 +3085,7 @@ async fn a_replay_after_the_deadline_still_reconciles_the_record() {
     recovery.consumer.consumer_id = "search-recovered".to_owned();
     recovery.consumer.generation_id = "gen-2".to_owned();
     recovery.authorization_ref = Some("operator:recovery-ticket".to_owned());
-    recovery.deadline = at + 200;
+    recovery.deadline = at + 2_000;
     let unknown = owner.request(&recovery, at, &slice_budget());
     assert!(
         matches!(
@@ -3076,11 +3099,11 @@ async fn a_replay_after_the_deadline_still_reconciles_the_record() {
     );
 
     // The same request after the deadline reconciles the visible record without a fresh deadline or allowance.
-    let replayed = owner.request(&recovery, at + 250, &slice_budget());
+    let replayed = owner.request(&recovery, at + 2_500, &slice_budget());
     assert!(replayed.is_ok(), "{replayed:?}");
     assert!(matches!(
         control(home),
-        ControlState::Intent(intent) if intent.attempt_id == "recovery-attempt" && intent.episodes.deadline == at + 200
+        ControlState::Intent(intent) if intent.attempt_id == "recovery-attempt" && intent.episodes.deadline == at + 2_000
     ));
 }
 
