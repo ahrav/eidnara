@@ -22,8 +22,8 @@ use retrieval::exact::{
     resolve, validate_for_use, validate_for_use_with_hook_for_test,
 };
 use retrieval::{
-    OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, Tombstone, TombstoneReason,
-    install_identity,
+    OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity, Tombstone,
+    TombstoneReason, install_identity,
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -1150,6 +1150,41 @@ fn certificates_must_name_this_projection_and_kernel_and_lag_defeats_proof() {
         refused,
         ResolveRefusal::Certificate(CertificateRefusal::IncarnationMismatch),
         "a certificate for another kernel never reaches the rows"
+    );
+}
+
+/// The kernel judges the occurrence's source object; the proof names the
+/// association target. A target column altered independently of the tuple
+/// must refuse the attempt rather than prove another object.
+#[test]
+fn an_association_target_altered_independently_of_its_tuple_refuses_the_attempt() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1"), ok("obj-2")]);
+    fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
+    let certificate = fixture.certificate();
+    fixture
+        .store
+        .with_conn_fenced(|conn| {
+            let altered = conn
+                .execute(
+                    "UPDATE exact_associations SET target_id='obj-2' WHERE key=?1",
+                    [b"obj-1".as_slice()],
+                )
+                .unwrap();
+            assert_eq!(altered, 1);
+            Ok(())
+        })
+        .unwrap();
+    let outcome = fixture.resolve(
+        object_query("obj-1"),
+        true,
+        &certificate,
+        bounds(),
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        outcome,
+        Err(ResolveRefusal::Projection(ProjectionError::CorruptRow))
     );
 }
 

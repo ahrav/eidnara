@@ -41,8 +41,8 @@ pub enum ShaQueryRefusal {
 /// A SHA lookup is only meaningful inside one repository's object format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShaPrefixQuery<'a> {
-    repository_id: &'a str,
-    object_format: ObjectFormat,
+    pub(super) repository_id: &'a str,
+    pub(super) object_format: ObjectFormat,
     prefix: &'a HexPrefix,
 }
 
