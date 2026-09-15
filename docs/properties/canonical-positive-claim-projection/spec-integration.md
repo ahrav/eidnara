@@ -21,17 +21,17 @@ Ticket numbers here are tracking metadata, not names of anything in the tree.
 | `revision-domains-remain-distinct-and-supported` | Canonical facts and identity | #458, #460, #466 | `claim_facts.rs` |
 | `served-sensitivity-and-artifact-policy-govern-egress` | Echo provenance and use authority | #458, #466 | `claim_facts.rs`, `crates/kernel/src/eligibility.rs` |
 | `supporting-authority-is-preserved-not-recomputed` | Canonical facts and identity | #458, #460, #466 | `claim_facts.rs`, `crates/kernel/src/admission.rs` |
-| `claim-cancellation-preserves-durable-work` | Bounds; Recovery | #460, #466 | pending |
-| `claim-consumer-replay-includes-published-history` | Projection, progress and recovery | #460 | pending |
-| `claim-disable-preserves-consumer-contract` | Projection, progress and recovery | #460 | pending |
-| `claim-export-retention-fence` | Projection, progress and recovery | #460 | pending |
-| `claim-local-commit-before-ack` | Projection, progress and recovery | #460 | pending |
-| `claim-rebuild-incremental-parity` | A3 | #460 | pending |
-| `claim-recovery-converges-within-approved-bound` | Recovery | #460 | pending |
-| `claim-tombstone-masks-all-representations` | Projection, progress and recovery | #460 | pending |
-| `claim-worker-result-cannot-outlive-identity` | Projection, progress and recovery | #460 | pending |
-| `eligible-positive-and-unknown-claims-remain-reachable` | Outcome; Useful-path coverage | #460, #466 | pending |
-| `unknown-echo-state-is-policy-neutral` | Echo provenance and use authority; A2 | #460, #466 | pending |
+| `claim-cancellation-preserves-durable-work` | Bounds; Recovery | #460, #466 | `crates/daemon/src/search_catchup.rs` (shared) |
+| `claim-consumer-replay-includes-published-history` | Projection, progress and recovery | #460 | `crates/daemon/src/claim_sources.rs`, `crates/daemon/src/commit_stream.rs` (shared) |
+| `claim-disable-preserves-consumer-contract` | Projection, progress and recovery | #460 | `crates/kernel/src/outbox.rs` (shared); no claim path |
+| `claim-export-retention-fence` | Projection, progress and recovery | #460 | `crates/kernel/src/source_hold.rs` (shared) |
+| `claim-local-commit-before-ack` | Projection, progress and recovery | #460 | `crates/daemon/src/search_catchup.rs` (shared) |
+| `claim-rebuild-incremental-parity` | A3 | #460 | `crates/retrieval/src/claims.rs` |
+| `claim-recovery-converges-within-approved-bound` | Recovery | #460 | `crates/daemon/src/search_replacement.rs` (shared); no approved bound |
+| `claim-tombstone-masks-all-representations` | Projection, progress and recovery | #460 | `crates/daemon/src/claim_sources.rs`, `crates/retrieval/src/claims.rs` |
+| `claim-worker-result-cannot-outlive-identity` | Projection, progress and recovery | #460 | `crates/kernel/src/current_input.rs`, `crates/retrieval/src/vectors.rs` (shared) |
+| `eligible-positive-and-unknown-claims-remain-reachable` | Outcome; Useful-path coverage | #460, #466 | `crates/retrieval/src/claims.rs` |
+| `unknown-echo-state-is-policy-neutral` | Echo provenance and use authority; A2 | #460, #466 | `crates/retrieval/src/claims.rs` |
 | `bound-project-scope-cannot-be-widened-by-candidate` | Echo provenance and use authority | #466 | pending |
 | `candidate-validation-preserves-surface-policy` | U4 | #466 | pending |
 | `checkout-applicability-is-revalidated-without-relevance-refresh` | U4 | #466 | pending |
@@ -41,6 +41,26 @@ Ticket numbers here are tracking metadata, not names of anything in the tree.
 | `u5-class-transition-situations-are-witnessed` | U5 | #466 | pending |
 | `u5-evaluation-keeps-provenance-and-judgment-separate` | U5 | #466 | pending |
 | `u5-rejection-and-unknown-accounting-is-lossless` | U5 | #466 | pending |
+
+## Design decisions carried by the projection side
+
+- The projection stores no claim state. `retrieval::claims::classify_live_claims`
+  is the snapshot-bound read: it checks the projection identity against the
+  kernel's incarnation, reads the live rows, captures the tip and kernel
+  incarnation together with `capture_commit_read_target`, reads
+  `claim_facts_at` that target (refused under the reader guard if the store
+  was restored in between), and maps each row through `classify`, so a
+  lagging projection cannot revive a claim the kernel withdrew and a rebuild
+  cannot disagree with the projection it replaces. `classify` is the state
+  mapping over already-loaded facts: Current, Superseded, Retracted, Hidden, or
+  Stale from the registry row, the own and lineage admission rows, the served
+  surface, and the live descriptor inventory. It takes no causal class;
+  Unknown neutrality is a property of its signature.
+- Materialization, tombstones, checkpoints, pending work, acknowledgement,
+  retention fences, and recovery reuse the RP2.1 shared paths unchanged. The
+  claim-specific checks prove classification and parity over those paths; the
+  crash, cancellation, disable, and bounded-recovery campaigns remain the
+  shared harness's, and their claim-specific runs wait on RP2.9 bounds.
 
 ## Design decisions carried by the kernel side
 

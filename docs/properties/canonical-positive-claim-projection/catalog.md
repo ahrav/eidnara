@@ -9,10 +9,12 @@ than line numbers because both files were authored in the same change.
 
 The kernel side of RP2.4: the claim facts reader (`KernelStore::claim_facts_as_of`),
 the trusted causality write path (`Envelope::record_claim_causality`), and the
-snapshot-bound causal classifier (`claim_causality::causal_class_at`). The shared
-search projection, eligibility per surface, checkout applicability, and harness
-delivery are separate implementation boundaries; their records join this catalog
-with the ticket that lands them.
+snapshot-bound causal classifier (`claim_causality::causal_class_at`); and the
+projection side: `retrieval::claims`, which classifies live claim occurrences
+into Current, Superseded, Retracted, Hidden, or Stale from those facts at one
+kernel snapshot and stores no state. Eligibility per surface, checkout
+applicability, and harness delivery are separate implementation boundaries;
+their records join this catalog with the ticket that lands them.
 
 ## Reachability classes
 
@@ -34,23 +36,23 @@ Every slug the specification and its three implementation tickets assign. The
 | `canonical-claim-fields-match-fenced-source` | #458 | yes |
 | `canonical-provenance-survives-approved-write-read-path` | #458 | yes |
 | `checkout-applicability-is-revalidated-without-relevance-refresh` | #466 | pending |
-| `claim-cancellation-preserves-durable-work` | #460 | pending |
+| `claim-cancellation-preserves-durable-work` | #460 | yes |
 | `claim-capacity-failure-is-atomic` | #458 | yes |
-| `claim-consumer-replay-includes-published-history` | #460 | pending |
-| `claim-disable-preserves-consumer-contract` | #460 | pending |
+| `claim-consumer-replay-includes-published-history` | #460 | yes |
+| `claim-disable-preserves-consumer-contract` | #460 | yes |
 | `claim-enablement-requires-approved-evidence` | #458 | yes |
 | `claim-export-predecode-bounds` | #458 | yes |
-| `claim-export-retention-fence` | #460 | pending |
+| `claim-export-retention-fence` | #460 | yes |
 | `claim-format-rollback-preserves-canonical-state` | #458 | yes |
-| `claim-local-commit-before-ack` | #460 | pending |
-| `claim-rebuild-incremental-parity` | #460 | pending |
-| `claim-recovery-converges-within-approved-bound` | #460 | pending |
+| `claim-local-commit-before-ack` | #460 | yes |
+| `claim-rebuild-incremental-parity` | #460 | yes |
+| `claim-recovery-converges-within-approved-bound` | #460 | yes |
 | `claim-replay-preserves-newest-canonical-state` | #458 | yes |
-| `claim-tombstone-masks-all-representations` | #460 | pending |
-| `claim-worker-result-cannot-outlive-identity` | #460 | pending |
+| `claim-tombstone-masks-all-representations` | #460 | yes |
+| `claim-worker-result-cannot-outlive-identity` | #460 | yes |
 | `echo-classification-requires-canonical-causality` | #458 | yes |
 | `eligibility-cache-cannot-change-canonical-verdict` | #466 | pending |
-| `eligible-positive-and-unknown-claims-remain-reachable` | #460 | pending |
+| `eligible-positive-and-unknown-claims-remain-reachable` | #460 | yes |
 | `malformed-required-field-stops-projection-progress` | #458 | yes |
 | `occurrence-identity-is-not-payload-or-source-triple` | #458 | yes |
 | `optional-edits-require-host-capability-and-survival-proof` | #466 | pending |
@@ -63,7 +65,7 @@ Every slug the specification and its three implementation tickets assign. The
 | `u5-class-transition-situations-are-witnessed` | #466 | pending |
 | `u5-evaluation-keeps-provenance-and-judgment-separate` | #466 | pending |
 | `u5-rejection-and-unknown-accounting-is-lossless` | #466 | pending |
-| `unknown-echo-state-is-policy-neutral` | #460 | pending |
+| `unknown-echo-state-is-policy-neutral` | #460 | yes |
 
 ## Records
 
@@ -477,6 +479,233 @@ Impact: recomputing support from a cited approval grants maturity the kernel
 withdrew.
 Open questions: None.
 
+### claim-tombstone-masks-all-representations
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - correction and retirement tombstone every representation
+of the predecessor in the shared projection, and a projection that has not
+caught up still classifies those rows as Superseded or Retracted from
+canonical facts; the vector side reuses RP2.1 obsoletion, whose existing
+checks are listed below.
+Guarantee: Once a claim decision is corrected or retired, no representation of
+it under either class remains a Current candidate: caught-up rows are
+tombstoned and lagging rows classify as Superseded or Retracted.
+Check: `always(!current)` - after correction or retirement, every occurrence of
+the predecessor is either tombstoned or classified as Superseded or Retracted
+by `classify`, whichever projection state is read.
+Fault/timing angle: the window between a kernel correction and the projection's catch-up.
+Required faults and enabling state: a corrected and a retired decision with three and two representations; a projection frozen before catch-up.
+Confidence: medium - [evidence](evidence/claim-tombstone-masks-all-representations.md).
+Existing check: `crates/daemon/tests/claim_sources.rs` - `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees` and `correction_retirement_and_replay_cannot_resurrect_stale_rows`; `crates/daemon/tests/embedding_publication.rs` - `the_projection_itself_obsoletes_tombstoned_or_replaced_inputs`; status unaudited.
+Impact: a lexical or vector candidate of a retired claim keeps ranking after the kernel withdrew it.
+Open questions: None.
+
+### claim-rebuild-incremental-parity
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - a projection built from a fresh snapshot after
+correction, retirement, quarantine, and a causality record classifies every
+live claim occurrence identically to the incrementally caught-up projection,
+with the same live row count; tombstones and job rows are compared by the
+RP2.1 checks listed below, not by the claim test.
+Guarantee: A projection rebuilt from a fresh export snapshot yields the same
+classified claim candidates as the incremental projection at the same kernel
+tip.
+Check: `always` - the `(occurrence_id, state)` map from `classify_live_claims`
+is equal for the rebuilt and the incremental projection, and the live row
+counts match.
+Fault/timing angle: none.
+Required faults and enabling state: an incremental projection that has applied a catch-up window and a fresh bootstrap at a later snapshot.
+Confidence: medium - [evidence](evidence/claim-rebuild-incremental-parity.md).
+Existing check: `crates/daemon/tests/claim_sources.rs` - `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees`; `crates/retrieval/tests/lexical_projection.rs` (rebuild from one snapshot equals incremental) and `crates/daemon/tests/search_replacement/recovery.rs` for the RP2.1 rebuild path; status unaudited.
+Impact: a rebuild that silently classifies a claim differently from the projection it replaces.
+Open questions:
+- Which tombstone and job identities must a claim-specific parity check compare beyond live rows? (unresolved, needs the normalization rule the specification leaves to the RP2.1 owner)
+
+### unknown-echo-state-is-policy-neutral
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `causal_class_changes_no_state` runs every state-relevant
+fact combination under `Unknown`, `DirectObservation`, and
+`DerivedReinjection` and asserts equal states; `classify` takes no causal
+class by signature; the daemon test classifies the caught-up projection,
+records a `DirectObservation` on the successor, classifies again, and asserts
+the two maps are equal.
+Guarantee: The causal class of a claim never changes its candidate state, and
+no field of a candidate carries a score, boost, corroboration count, or
+suppression flag derived from it.
+Check: `always` - for fixed canonical facts, `classify` returns one state
+whatever `causality` holds; `ClaimCandidate` has no ranking field.
+Fault/timing angle: none.
+Required faults and enabling state: claims with equal facts and different causal classes.
+Confidence: high - [evidence](evidence/unknown-echo-state-is-policy-neutral.md).
+Existing check: `crates/retrieval/tests/claims.rs` - `causal_class_changes_no_state`; `crates/daemon/tests/claim_sources.rs` - `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees`; status unaudited.
+Impact: Unknown lineage would earn or lose standing it has no evidence for.
+Open questions: None.
+
+### eligible-positive-and-unknown-claims-remain-reachable
+
+Type: reachability
+Reachability: test-only
+Status: active
+Exercised: partial - an admitted, served claim with no causality record
+classifies Current alongside one with a `DirectObservation` record, so both
+reach the candidate set; delivery through a harness belongs to the delivery
+ticket.
+Guarantee: An otherwise eligible claim whose lineage is Unknown is a Current
+candidate exactly as a genuine one is.
+Check: `reachable` - `classify_live_claims` returns Current for a served claim
+with `Unknown(NoRecord)` causality.
+Fault/timing angle: none.
+Required faults and enabling state: a served claim with no causality record.
+Confidence: medium - [evidence](evidence/eligible-positive-and-unknown-claims-remain-reachable.md).
+Existing check: `crates/daemon/tests/claim_sources.rs` - `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees` (the quiet and anti claims before their transitions); `crates/retrieval/tests/claims.rs`; status unaudited.
+Impact: an all-Unknown corpus would deliver nothing, failing the useful-path requirement.
+Open questions: None.
+
+### claim-local-commit-before-ack
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - claim rows travel through the RP2.1 shared catch-up,
+whose existing checks release the local transaction before acknowledgement;
+no claim-specific crash cut was added.
+Guarantee: Claim rows, tombstones, checkpoint, and pending work are committed
+locally and the transaction released before the kernel consumer is
+acknowledged.
+Check: `always` - the `EpisodeEvent` sequence shows `LocalReleased` before every
+acknowledgement, as the RP2.1 harness asserts.
+Fault/timing angle: the window between local commit and acknowledgement.
+Required faults and enabling state: a process kill between the two.
+Confidence: medium - [evidence](evidence/claim-local-commit-before-ack.md).
+Existing check: `crates/daemon/tests/search_catchup.rs` - `crash_cuts_recover_to_the_ledger_after_two_reopens_and_never_acknowledge_early`, `released_before_every_acknowledgement`; status unaudited.
+Impact: an acknowledgement ahead of durable local progress loses rows on restart.
+Open questions: None.
+
+### claim-consumer-replay-includes-published-history
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - the claim materializer replays from receipts after lost
+and skipped acknowledgements; the shared catch-up's reconciliation of a lost
+acknowledgement is an RP2.1 check.
+Guarantee: Replaying the claim consumer after a lost or skipped acknowledgement
+re-drives already-published commits from receipts and moves the inventory by
+nothing.
+Check: `always` - after a lost or skipped acknowledgement, the next episode
+reaches the target and the kernel inventory equals the pre-fault inventory.
+Fault/timing angle: a lost acknowledgement reply; a page published but never acknowledged.
+Required faults and enabling state: the `EpisodeFault` variants of the materializer.
+Confidence: medium - [evidence](evidence/claim-consumer-replay-includes-published-history.md).
+Existing check: `crates/daemon/tests/claim_sources.rs` - `lost_and_skipped_acknowledgements_replay_from_receipts`, `unresolved_acknowledgement_blocks_and_the_next_episode_recovers`; `crates/daemon/tests/search_catchup.rs` - `lost_ack_with_cancelled_reconciliation_keeps_unknown_outcome_and_local_prefix`; status unaudited.
+Impact: a replay that skips already-published history leaves a projection missing rows it acknowledged.
+Open questions: None.
+
+### claim-export-retention-fence
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - the claim tests capture a source hold before every
+export and extend it through catch-up; the fence itself is an RP2.1 mechanism
+with its own checks.
+Guarantee: Every claim export window runs under a source hold registered before
+the snapshot, so the evidence behind exported descriptors cannot be pruned
+under the reader.
+Check: `always` - `export_source_page` refuses a window whose hold is missing,
+released, or expired.
+Fault/timing angle: pruning between hold capture and export.
+Required faults and enabling state: a released or expired hold.
+Confidence: medium - [evidence](evidence/claim-export-retention-fence.md).
+Existing check: `crates/kernel/tests/kernel_source_holds.rs`, `crates/kernel/tests/kernel_source_export.rs`; status unaudited.
+Impact: a rebuild reads descriptors whose bytes are gone and publishes a partial replacement.
+Open questions: None.
+
+### claim-worker-result-cannot-outlive-identity
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - embedding work for claim occurrences is queued and
+obsoleted by the shared batch and guarded publication paths; their checks are
+RP2.1's.
+Guarantee: An embedding result for a claim occurrence that was tombstoned or
+whose input changed is obsoleted, never published against the new identity.
+Check: `always` - `complete_embedding_observed` marks the job obsolete when the
+occurrence is tombstoned; `guard_current_input` refuses a stale pre-read.
+Fault/timing angle: a tombstone landing between dispatch and publication.
+Required faults and enabling state: a job dispatched before a correction.
+Confidence: medium - [evidence](evidence/claim-worker-result-cannot-outlive-identity.md).
+Existing check: `crates/daemon/tests/embedding_publication.rs` - `canonical_mutations_wait_behind_the_guard_and_stale_inputs_become_obsolete`, `the_projection_itself_obsoletes_tombstoned_or_replaced_inputs`; status unaudited.
+Impact: a vector for a retired revision serves as if current.
+Open questions: None.
+
+### claim-cancellation-preserves-durable-work
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: not yet at the claim level - the shared catch-up's cancellation
+checks cover the mechanism; request-level cancellation belongs to the delivery
+ticket.
+Guarantee: Cancelling a claim episode at any write boundary neither
+acknowledges unapplied work nor loses work already committed locally.
+Check: `always` - after cancellation the local prefix and the kernel checkpoint
+are unchanged from the last completed boundary.
+Fault/timing angle: cancellation at each `EpisodeEvent` boundary.
+Required faults and enabling state: a cancelled episode at every boundary.
+Confidence: medium - [evidence](evidence/claim-cancellation-preserves-durable-work.md).
+Existing check: `crates/daemon/tests/search_catchup.rs` - `cancellation_at_write_boundaries_never_quarantines_or_acknowledges`, `cancellation_in_the_second_window_preserves_the_first_acknowledged_prefix`; status unaudited.
+Impact: a cancelled request drops durable rows or acknowledges work it never applied.
+Open questions: None.
+
+### claim-disable-preserves-consumer-contract
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: not yet - no claim-specific disable path exists; the RP2.1
+lifecycle tests cover deregistration and pending-consumer refusal.
+Guarantee: Disabling claim projection never acknowledges unapplied work to
+release retention; a lagging consumer is refused normal deregistration.
+Check: `always` - `deregister_outbox_consumer` returns `ConsumerPending` while
+the checkpoint lags the tip.
+Fault/timing angle: none.
+Required faults and enabling state: a lagging consumer at disable time.
+Confidence: low - [evidence](evidence/claim-disable-preserves-consumer-contract.md).
+Existing check: `crates/kernel/tests/kernel_outbox.rs`; `crates/daemon/tests/search_replacement/recovery.rs` - `explicit_recovery_bootstraps_deregistered_and_pending_disabled_consumers`; status unaudited.
+Impact: disabling releases retention for history a consumer never applied.
+Open questions:
+- What is the legal pending-consumer transition for the default-deregister plan? (needs human input)
+
+### claim-recovery-converges-within-approved-bound
+
+Type: liveness
+Reachability: test-only
+Status: active
+Exercised: not yet - RP2.9 has approved no recovery window for claims; the
+generic recovery harness exists and is listed below.
+Guarantee: After a fault-free window of approved length, a claim projection
+recovering from a crash, corruption, or incompatibility reaches the kernel
+tip with canonical authority intact.
+Check: `always` - within the approved bound, the projection checkpoint equals
+the kernel tip and the classified candidates equal the oracle.
+Fault/timing angle: recovery after each crash cut.
+Required faults and enabling state: an approved RP2.9 recovery bound; a crash at each boundary.
+Confidence: low - [evidence](evidence/claim-recovery-converges-within-approved-bound.md).
+Existing check: `crates/daemon/tests/search_replacement/recovery.rs`, `crates/daemon/tests/search_catchup.rs` process-crash harness; status unaudited.
+Impact: recovery that never converges leaves stale candidates authoritative.
+Open questions:
+- Which numeric recovery bound does RP2.9 approve for claim projections? (needs human input)
+
 ## Relationship map
 
 - `echo-classification-requires-canonical-causality` is the load-bearing record;
@@ -490,3 +719,9 @@ Open questions: None.
   reader copies rows and reuses the serving query.
 - `claim-export-predecode-bounds` and `claim-capacity-failure-is-atomic` share
   the bound-before-read discipline.
+- `claim-tombstone-masks-all-representations`,
+  `claim-rebuild-incremental-parity`, and
+  `unknown-echo-state-is-policy-neutral` share one mechanism: the projection
+  stores candidates and `retrieval::claims::classify` derives state from the
+  kernel's facts each time, so lag, rebuild, and lineage cannot change what a
+  claim is allowed to be.

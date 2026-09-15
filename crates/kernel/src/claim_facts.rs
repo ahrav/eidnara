@@ -23,6 +23,7 @@ use super::admission::{
     served_own_decision_sql, supporting_approval_valid_sql,
 };
 use super::claim_causality::{CausalClass, CausalRecord, causal_class_at, registry_row_at};
+use super::commit_read::{CommitReadIncarnation, CommitReadTarget};
 use super::envelope::{ObjectRow, Sensitivity};
 use super::source_descriptor::{
     OCCURRENCE_ID_PREFIX, SOURCE_DESCRIPTOR_KIND, descriptor_object_id, reencoded_identity,
@@ -50,6 +51,8 @@ pub enum ClaimFactsError {
     NotADecision,
     #[error("claim facts row holds a required field this build cannot interpret")]
     MalformedRequiredField,
+    #[error("claim facts target names another kernel incarnation")]
+    IncarnationMismatch,
     #[error(transparent)]
     Kernel(#[from] KernelError),
 }
@@ -179,6 +182,41 @@ impl KernelStore {
         requested: i64,
         bounds: ClaimFactBounds,
     ) -> Result<ClaimFactsSnapshot, ClaimFactsError> {
+        self.claim_facts_inner(object_ids, requested, bounds, None)
+    }
+
+    /// [`Self::claim_facts_as_of`] at `target.through_commit`, refused with
+    /// `IncarnationMismatch` under the reader guard when the store is not the
+    /// incarnation `target` was captured from, so a restore between capturing
+    /// the tip and reading the facts cannot pair one history's tip with
+    /// another's rows.
+    ///
+    /// # Errors
+    ///
+    /// `IncarnationMismatch` before any claim row is read (`FutureSnapshot`
+    /// precedes it when the replacement's tip is below the target), then every
+    /// refusal of [`Self::claim_facts_as_of`].
+    pub fn claim_facts_at(
+        &self,
+        object_ids: &[String],
+        target: CommitReadTarget,
+        bounds: ClaimFactBounds,
+    ) -> Result<ClaimFactsSnapshot, ClaimFactsError> {
+        self.claim_facts_inner(
+            object_ids,
+            target.through_commit,
+            bounds,
+            Some(target.incarnation),
+        )
+    }
+
+    fn claim_facts_inner(
+        &self,
+        object_ids: &[String],
+        requested: i64,
+        bounds: ClaimFactBounds,
+        incarnation: Option<CommitReadIncarnation>,
+    ) -> Result<ClaimFactsSnapshot, ClaimFactsError> {
         if object_ids.len() > bounds.max_claims.get() {
             return Err(ClaimFactsError::TooManyClaims);
         }
@@ -193,6 +231,11 @@ impl KernelStore {
             return Err(ClaimFactsError::DuplicateClaim);
         }
         let (tip, loaded) = self.read_snapshot(requested, |tx, _| {
+            // The closure runs under the reader guard, so a restore cannot
+            // land between this comparison and the rows read below.
+            if incarnation.is_some_and(|expected| expected != self.incarnation()) {
+                return Ok(Err(ClaimFactsError::IncarnationMismatch));
+            }
             let mut claims = Vec::with_capacity(object_ids.len());
             let mut missing = Vec::new();
             let mut served = load_served(tx, requested, object_ids)?;

@@ -13,16 +13,18 @@ use daemon::harness_sources::{CANONICAL_ROLE, PublishError, Representation, Sour
 use daemon::search_projection::SearchProjection;
 use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
 use kernel::{
-    AdmissionEvent, AdmissionRequest, CommitIntent, CommitPageBounds, DecisionPayload, DecisionRow,
-    DecisionSpec, Dimension, DomainSpec, EventKind, ExportWindow, KernelError, KernelStore,
-    ObservationPayload, ObservationSpec, ProviderEgress, RemediationTarget, ScopeSpec,
-    ScopeTermSpec, Sensitivity, SourceClass, SourceHold, SourceHoldAdmission, SourceHoldBinding,
-    SourceHoldBounds, SourcePageBounds, SourceRow, TaintClass,
+    AdmissionEvent, AdmissionRequest, CausalClass, CausalEvidence, ClaimCausalityRequest,
+    ClaimFactBounds, CommitIntent, CommitPageBounds, DecisionPayload, DecisionRow, DecisionSpec,
+    Dimension, DomainSpec, EventKind, ExportWindow, KernelError, KernelStore, ObservationPayload,
+    ObservationSpec, ProviderEgress, RemediationTarget, ScopeSpec, ScopeTermSpec, Sensitivity,
+    SourceClass, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+    SourcePageBounds, SourceRow, TaintClass,
 };
 use retrieval::batch::{
     BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
     row_identities,
 };
+use retrieval::claims::{CandidateState, ClaimCandidateBounds, classify_live_claims};
 use retrieval::{PersistBounds, ProjectionIdentity, install_identity};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -1557,5 +1559,260 @@ fn mismatched_object_and_decision_are_refused() {
     assert_eq!(
         ClaimSubject::from_object(&observation).unwrap_err(),
         KernelError::InvalidInput
+    );
+}
+
+fn candidate_bounds() -> ClaimCandidateBounds {
+    ClaimCandidateBounds {
+        max_rows: NonZeroUsize::new(256).unwrap(),
+        facts: ClaimFactBounds {
+            max_claims: NonZeroUsize::new(64).unwrap(),
+            max_causal_payload_bytes: NonZeroU64::new(1 << 16).unwrap(),
+        },
+    }
+}
+
+/// Every live claim row with its state, keyed by occurrence id.
+fn classified(
+    projection: &SearchProjection,
+    kernel: &KernelStore,
+    kernel_incarnation_id: &str,
+) -> BTreeMap<String, CandidateState> {
+    let batch = projection
+        .read(|conn| {
+            Ok(
+                classify_live_claims(conn, kernel, kernel_incarnation_id, candidate_bounds())
+                    .unwrap_or_else(|error| panic!("{error}")),
+            )
+        })
+        .unwrap();
+    batch
+        .candidates
+        .into_iter()
+        .map(|candidate| (candidate.row.occurrence_id, candidate.state))
+        .collect()
+}
+
+/// The state the ticket text assigns to every representation of each seed.
+fn expected_states(assignments: &[(Seed<'_>, CandidateState)]) -> BTreeMap<String, CandidateState> {
+    assignments
+        .iter()
+        .flat_map(|(seed, state)| {
+            seed.ledger()
+                .0
+                .into_iter()
+                .map(move |row| (row.occurrence_id(), *state))
+        })
+        .collect()
+}
+
+/// A1, A3, U2: the projection stores candidates and never a state. A retire, a
+/// correction, a quarantine, and a stale mark the projection has not caught up
+/// with classify from canonical facts as Retracted, Superseded, Hidden, and
+/// Stale while their rows are still live; catch-up tombstones the retired and
+/// corrected rows and the successor is Current; a rebuild from a fresh snapshot
+/// classifies identically to the incremental projection; and a causality record
+/// changes no state.
+#[test]
+fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let rule = Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+    let anti = Seed::scoped("anti", MEMORY, "PROJECT_RULES", 1, "Shelve it.", "");
+    let quiet = Seed::scoped("quiet", MEMORY, "PROJECT_RULES", 1, "Keep quiet.", "");
+    let aging = Seed::scoped("aging", MEMORY, "PROJECT_RULES", 1, "Getting old.", "");
+    for seed in [rule, anti, quiet, aging] {
+        corpus.decide(seed);
+    }
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(dir.path(), &hold);
+    let kernel_incarnation_id = corpus.kernel_incarnation_id();
+    let live = live_rows(dir.path());
+    assert_eq!(live.len(), 9);
+    assert_eq!(
+        classified(&projection, &corpus.kernel, &kernel_incarnation_id),
+        expected_states(&[
+            (rule, CandidateState::Current),
+            (anti, CandidateState::Current),
+            (quiet, CandidateState::Current),
+            (aging, CandidateState::Current),
+        ])
+    );
+
+    // The kernel moves on; the projection has not caught up.
+    let successor = Seed::scoped(
+        "rule-v2",
+        MEMORY,
+        "PROJECT_RULES",
+        2,
+        CONTRACT,
+        "Relied on.",
+    );
+    corpus.correct("rule", successor);
+    corpus.retire("anti");
+    for (object, kind) in [
+        ("quiet", EventKind::Quarantine),
+        ("aging", EventKind::MarkStale),
+    ] {
+        corpus
+            .kernel
+            .commit(intent(&format!("{kind:?}:{object}")), |envelope| {
+                let mut request = admission(object);
+                request.event.kind = kind;
+                envelope.record_admission(request)?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+    assert_eq!(live_rows(dir.path()), live, "the projection has not moved");
+    assert_eq!(
+        classified(&projection, &corpus.kernel, &kernel_incarnation_id),
+        expected_states(&[
+            (rule, CandidateState::Superseded),
+            (anti, CandidateState::Retracted),
+            (quiet, CandidateState::Hidden),
+            (aging, CandidateState::Stale),
+        ])
+    );
+
+    // Catch-up tombstones the corrected and retired rows. Quarantine and stale
+    // marks are admission-only dispositions: the materializer leaves those rows
+    // live and the classifier keeps hiding or staling them from canonical facts.
+    corpus.materialize();
+    let through = corpus.kernel.tip().unwrap();
+    corpus
+        .kernel
+        .extend_source_hold(&corpus.binding(), &hold.hold_id, through, hold_admission())
+        .unwrap();
+    let delta = corpus.export_window(&hold, ExportWindow::CatchUp { through });
+    corpus.apply(&projection, &hold, &delta, through);
+    let caught_up = classified(&projection, &corpus.kernel, &kernel_incarnation_id);
+    assert_eq!(
+        caught_up,
+        expected_states(&[
+            (successor, CandidateState::Current),
+            (quiet, CandidateState::Hidden),
+            (aging, CandidateState::Stale),
+        ])
+    );
+
+    let (evidence_id, digest) = {
+        let handle = corpus
+            .kernel
+            .ingest_exact_artifact(kernel::ArtifactIngestRequest {
+                intent: intent("acquisition"),
+                payload: b"observed".to_vec(),
+                evidence_id: "evidence-acquisition".to_string(),
+                object_id: "evidence-object-acquisition".to_string(),
+                object_kind: "evidence".to_string(),
+                domain_id: MEMORY.to_string(),
+                source_kind: "tool_output".to_string(),
+                source_id: "native/acquisition".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: "canonical".to_string(),
+                retain_until: None,
+                asserted_sensitivity: Sensitivity::Normal,
+                provider_egress: ProviderEgress::RemoteAllowed,
+                provenance: None,
+            })
+            .unwrap();
+        (handle.evidence_id, handle.digest)
+    };
+    corpus
+        .kernel
+        .commit(intent("causality:rule-v2"), |envelope| {
+            envelope
+                .record_claim_causality(&ClaimCausalityRequest {
+                    subject_object_id: "rule-v2",
+                    subject_revision: 2,
+                    evidence: CausalEvidence::DirectObservation {
+                        acquisition_evidence_id: evidence_id.clone(),
+                        artifact_digest: digest.clone(),
+                    },
+                    observed_at: NOW,
+                })
+                .unwrap();
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        classified(&projection, &corpus.kernel, &kernel_incarnation_id),
+        caught_up,
+        "a causality record changes no state"
+    );
+    let mut bounds = candidate_bounds();
+    bounds.facts.max_claims = NonZeroUsize::new(3).unwrap();
+    let batch = projection
+        .read(|conn| {
+            Ok(classify_live_claims(conn, &corpus.kernel, &kernel_incarnation_id, bounds).unwrap())
+        })
+        .unwrap();
+    assert_eq!(batch.known_as_of, corpus.kernel.tip().unwrap());
+    assert!(batch.candidates.len() > 3, "multiple rows share an object");
+    assert_eq!(batch.claims.len(), 3, "one facts entry per distinct object");
+    let mut first_seen = Vec::new();
+    for candidate in &batch.candidates {
+        let id = candidate.row.object_id.as_str();
+        if !first_seen.contains(&id) {
+            first_seen.push(id);
+        }
+    }
+    assert!(
+        !first_seen.is_sorted(),
+        "fixture must distinguish first-seen order from lexical order"
+    );
+    assert_eq!(
+        batch
+            .claims
+            .iter()
+            .map(|claim| claim.object.object_id.as_str())
+            .collect::<Vec<_>>(),
+        first_seen
+    );
+    for candidate in &batch.candidates {
+        let facts = batch
+            .claim(candidate)
+            .expect("every live row names a registered object");
+        let (causality, disposition) = match candidate.row.object_id.as_str() {
+            "rule-v2" => (
+                CausalClass::DirectObservation {
+                    acquisition_evidence_id: evidence_id.clone(),
+                    artifact_digest: digest.clone(),
+                },
+                kernel::Disposition::Active,
+            ),
+            "quiet" => (
+                CausalClass::Unknown(kernel::UnknownReason::NoRecord),
+                kernel::Disposition::Quarantined,
+            ),
+            "aging" => (
+                CausalClass::Unknown(kernel::UnknownReason::NoRecord),
+                kernel::Disposition::Stale,
+            ),
+            other => panic!("unexpected object {other}"),
+        };
+        assert_eq!(facts.causality, causality, "{:?}", candidate.row);
+        assert_eq!(
+            facts.own_admission.as_ref().map(|row| row.disposition),
+            Some(disposition),
+            "{:?}",
+            candidate.row
+        );
+    }
+
+    // A second projection built from a fresh snapshot classifies identically.
+    let rebuilt_dir = tempfile::tempdir().unwrap();
+    let rebuilt_hold = corpus.capture();
+    let (rebuilt, _) = corpus.bootstrap(rebuilt_dir.path(), &rebuilt_hold);
+    assert_eq!(
+        classified(&rebuilt, &corpus.kernel, &kernel_incarnation_id),
+        caught_up
+    );
+    assert_eq!(
+        live_rows(rebuilt_dir.path()).len(),
+        live_rows(dir.path()).len()
     );
 }
