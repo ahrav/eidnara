@@ -1506,8 +1506,15 @@ fn a_slice_inside_the_deadline_margin_is_bounded_by_the_record_deadline() {
     again.selected_generation = current.staged_seed_digest.clone().unwrap();
     again.consumer.consumer_id = "search-lifecycle-again".to_owned();
     again.attempt_id = "rebuild-again".to_owned();
+    // Recorded outside the start margin, then waited into it: the slice starts with about 600 ms left.
     again.deadline = now() + 1_600;
     owner.request(&again, now(), &slice_budget()).unwrap();
+    std::thread::sleep(Duration::from_millis(1_000));
+    let remaining = again.deadline - now();
+    assert!(
+        remaining > 0 && remaining < 1_000,
+        "the slice starts inside the margin with {remaining} ms left"
+    );
 
     let reader = owner.pin(&slice_budget()).unwrap();
     let held = std::sync::Barrier::new(2);
@@ -3073,6 +3080,8 @@ async fn a_replay_after_the_deadline_still_reconciles_the_record() {
     };
     owner.disable(&slice_budget(), &mut |_| {}).await.unwrap();
     assert!(matches!(control(home), ControlState::Disabled(_)));
+    // Observed through one handle opened now: opening syncs the directory, and a later open would repair the injected failure before the replay reaches it.
+    let lifecycle = ProjectionLifecycle::open(home).unwrap();
 
     // The recovery's record is renamed into place, then its directory sync fails once: durability is unknown.
     owner.fail_next_recovery_directory_sync_for_test();
@@ -3094,17 +3103,35 @@ async fn a_replay_after_the_deadline_still_reconciles_the_record() {
         ),
         "{unknown:?}"
     );
-    assert!(
-        matches!(control(home), ControlState::Intent(intent) if intent.attempt_id == "recovery-attempt")
+    let ControlState::Intent(before) = lifecycle.read() else {
+        panic!("the recovery record is visible");
+    };
+    assert_eq!(before.attempt_id, "recovery-attempt");
+    assert_eq!(
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+            .unwrap_err(),
+        Denial::RecoveryRequired,
+        "the gate stays latched while durability is unknown"
     );
 
-    // The same request after the deadline reconciles the visible record without a fresh deadline or allowance.
+    // The same request after the deadline reconciles the visible record, reopening admission without a fresh deadline or allowance.
     let replayed = owner.request(&recovery, at + 2_500, &slice_budget());
     assert!(replayed.is_ok(), "{replayed:?}");
-    assert!(matches!(
-        control(home),
-        ControlState::Intent(intent) if intent.attempt_id == "recovery-attempt" && intent.episodes.deadline == at + 2_000
-    ));
+    owner
+        .admission()
+        .gate()
+        .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+        .expect("reconciliation reopens admission");
+    let ControlState::Intent(after) = lifecycle.read() else {
+        panic!("the reconciled record is visible");
+    };
+    assert_eq!(
+        after, before,
+        "reconciliation preserves the record's accounting"
+    );
 }
 
 /// A refused request made while the lifecycle record is unreadable leaves admission closed, as the next slice would.
