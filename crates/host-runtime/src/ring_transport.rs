@@ -590,7 +590,7 @@ fn peer_released_ring(rings: &DuplexRing) -> bool {
 }
 
 fn doorbell_at_eof(ring: &Ring) -> bool {
-    use std::io::Read;
+    use std::io::{ErrorKind, Read};
     let Ok(doorbell) = ring.duplicate_data_ready() else {
         return false;
     };
@@ -598,8 +598,20 @@ fn doorbell_at_eof(ring: &Ring) -> bool {
     if doorbell.set_nonblocking(true).is_err() {
         return false;
     }
-    // The ring is already retired, so consuming a pending wake token here has no reader to starve.
-    matches!(doorbell.read(&mut [0u8; 1]), Ok(0))
+    // The ring is already retired, so consuming pending wake tokens here has no reader to
+    // starve. A peer that exited with a token unread surfaces as `ECONNRESET` once, then EOF.
+    let mut buffer = [0u8; 64];
+    for _ in 0..1024 {
+        match doorbell.read(&mut buffer) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(error) => match error.kind() {
+                ErrorKind::ConnectionReset | ErrorKind::Interrupted => {}
+                _ => return false,
+            },
+        }
+    }
+    false
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -2625,6 +2637,23 @@ mod tests {
             ),
             "the panic reason follows the queued frame instead of a bare channel drop"
         );
+    }
+
+    #[test]
+    fn a_doorbell_with_a_queued_token_ahead_of_end_of_file_still_reads_as_released() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let peer = rings.first.attachment().unwrap().attach().unwrap();
+        assert_eq!(peer.arm_data_wait(), Ok(true), "the peer parks on data");
+        let mut reservation = rings
+            .first
+            .try_reserve(1, shm_transport::backend::ring::wire_v3_header(1).unwrap())
+            .unwrap();
+        reservation.write(&[1]).unwrap();
+        reservation.commit(1).unwrap();
+        // The peer exits with the publication's token unread, which Linux reports to the host's
+        // end as `ECONNRESET` on the first read and end-of-file on the next.
+        drop(peer);
+        assert!(doorbell_at_eof(&rings.first));
     }
 
     #[tokio::test]

@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/host-runtime/src/ring_transport.rs:1442`
+- `crates/host-runtime/src/ring_transport.rs:1480`
 - `crates/shm-transport/src/backend/ring.rs:1019`
 
-Witness status: partial - `crates/host-runtime/src/ring_transport.rs:1511` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:3128` retires a host ticket that missed its deadline as `not_sent` with nothing published. Stop/restart witnesses for the clients belong to #552 and #550.
+Witness status: partial - `crates/host-runtime/src/ring_transport.rs:1543` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:3261` retires a host ticket that missed its deadline as `not_sent` with nothing published. Stop/restart witnesses for the clients belong to #552 and #550.
 
 ## Failure scenario
 
