@@ -565,6 +565,57 @@ fn verification_refuses_rehashed_state_whose_meaning_changed() {
         }
     );
 
+    // Tombstones edited, every hash rewritten to match: a listed row cannot also be masked, and the count must be the sidecar's.
+    let listed_tombstone = fixture.restaged(&digest, |dir| {
+        let ids: Vec<String> =
+            serde_json::from_slice(&fs::read(dir.join(ROW_IDS_FILE)).unwrap()).unwrap();
+        rehash_file(
+            dir,
+            TOMBSTONES_FILE,
+            &serde_json::to_vec(&[&ids[0]]).unwrap(),
+        );
+        let mut sidecar = read_sidecar(dir);
+        sidecar.tombstones = 1;
+        write_bound(dir, &sidecar);
+    });
+    assert!(fixture.store.validate(&listed_tombstone).is_ok());
+    assert_eq!(
+        fixture.verify(&listed_tombstone).unwrap_err(),
+        VectorRefusal::File {
+            path: TOMBSTONES_FILE,
+            fault: FileFault::Identifiers
+        }
+    );
+    let tombstone_count = fixture.restaged(&digest, |dir| {
+        let mut sidecar = read_sidecar(dir);
+        sidecar.tombstones = 1;
+        write_bound(dir, &sidecar);
+    });
+    assert_eq!(
+        fixture.verify(&tombstone_count).unwrap_err(),
+        VectorRefusal::File {
+            path: TOMBSTONES_FILE,
+            fault: FileFault::Identifiers
+        }
+    );
+    let disordered_tombstones = fixture.restaged(&digest, |dir| {
+        rehash_file(
+            dir,
+            TOMBSTONES_FILE,
+            &serde_json::to_vec(&["ff".repeat(32), "ee".repeat(32)]).unwrap(),
+        );
+        let mut sidecar = read_sidecar(dir);
+        sidecar.tombstones = 2;
+        write_bound(dir, &sidecar);
+    });
+    assert_eq!(
+        fixture.verify(&disordered_tombstones).unwrap_err(),
+        VectorRefusal::File {
+            path: TOMBSTONES_FILE,
+            fault: FileFault::Identifiers
+        }
+    );
+
     let row_count = fixture.restaged(&digest, |dir| {
         let mut sidecar = read_sidecar(dir);
         sidecar.rows = 5;

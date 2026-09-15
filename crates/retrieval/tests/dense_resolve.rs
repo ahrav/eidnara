@@ -1,12 +1,15 @@
 //! The resolver against hand-written layer maps: every expectation below is the map itself, never a resolver trace.
 
+mod support;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use retrieval::batch::ProjectionCheckpoint;
-use retrieval::dense::{Layer, Precedence, ResolveRefusal, Resolved, Winner, resolve};
+use retrieval::dense::{Layer, ResolveRefusal, Resolved, Winner, resolve};
+use support::layers::{OwnedLayer as Owned, layers};
 
 const MAX: usize = 4096;
 
@@ -18,46 +21,16 @@ fn checkpoint(snapshot: i64, checkpoint: i64) -> ProjectionCheckpoint {
     }
 }
 
-/// A layer whose rows are one coordinate each, so a test can read a row's value as its identity.
-struct Owned {
-    precedence: Precedence,
-    checkpoint: ProjectionCheckpoint,
-    ids: Vec<String>,
-    rows: Vec<Vec<f32>>,
-    tombstones: Vec<String>,
-}
-
-impl Owned {
-    fn new(ordinal: u32, rows: &[(&str, f32)], tombstones: &[&str]) -> Self {
-        Self::at(1, ordinal, 10 + i64::from(ordinal) * 10, rows, tombstones)
-    }
-
-    fn at(epoch: u64, ordinal: u32, seq: i64, rows: &[(&str, f32)], tombstones: &[&str]) -> Self {
-        Self {
-            precedence: Precedence {
-                base_epoch: epoch,
-                delta_ordinal: ordinal,
-            },
-            checkpoint: checkpoint(seq, seq),
-            ids: rows.iter().map(|(id, _)| (*id).to_owned()).collect(),
-            rows: rows.iter().map(|(_, value)| vec![*value]).collect(),
-            tombstones: tombstones.iter().map(|id| (*id).to_owned()).collect(),
-        }
-    }
-
-    fn layer(&self) -> Layer<'_> {
-        Layer {
-            precedence: self.precedence,
-            checkpoint: &self.checkpoint,
-            occurrence_ids: &self.ids,
-            rows: &self.rows,
-            tombstones: &self.tombstones,
-        }
-    }
-}
-
-fn layers(owned: &[Owned]) -> Vec<Layer<'_>> {
-    owned.iter().map(Owned::layer).collect()
+/// A layer under epoch 1 whose rows are one coordinate each, so a test can read a row's value as its identity.
+fn layer(ordinal: u32, rows: &[(&str, f32)], tombstones: &[&str]) -> Owned {
+    Owned::new(
+        1,
+        ordinal,
+        rows.iter()
+            .map(|(id, value)| ((*id).to_owned(), vec![*value]))
+            .collect(),
+        tombstones.iter().map(|id| (*id).to_owned()).collect(),
+    )
 }
 
 fn run(owned: &[Owned]) -> Result<Resolved, ResolveRefusal> {
@@ -84,7 +57,7 @@ fn expect(pairs: &[(&str, f32)]) -> Vec<(String, f32)> {
 
 #[test]
 fn a_base_alone_resolves_to_its_own_rows_in_identifier_order() {
-    let base = Owned::new(0, &[("a", 1.0), ("b", 2.0), ("c", 3.0)], &[]);
+    let base = layer(0, &[("a", 1.0), ("b", 2.0), ("c", 3.0)], &[]);
     let resolved = run(&[base]).unwrap();
     assert_eq!(
         resolved.winners,
@@ -107,18 +80,18 @@ fn a_base_alone_resolves_to_its_own_rows_in_identifier_order() {
         ]
     );
     assert_eq!((resolved.superseded, resolved.masked), (0, 0));
-    let empty = Owned::new(0, &[], &[]);
+    let empty = layer(0, &[], &[]);
     assert_eq!(run(&[empty]).unwrap().winners, Vec::<Winner>::new());
 }
 
 #[test]
 fn a_newer_row_replaces_an_older_one_whatever_its_value_and_a_newer_tombstone_masks_every_older_row()
  {
-    let base = Owned::new(0, &[("a", 9.0), ("b", 9.0), ("c", 9.0), ("d", 9.0)], &[]);
+    let base = layer(0, &[("a", 9.0), ("b", 9.0), ("c", 9.0), ("d", 9.0)], &[]);
     // The delta's replacement for `a` is worse by value; value decides nothing.
-    let first = Owned::new(1, &[("a", 1.0), ("e", 5.0)], &["b"]);
+    let first = layer(1, &[("a", 1.0), ("e", 5.0)], &["b"]);
     // `b` comes back in a later delta after the tombstone: the newer row wins over the older tombstone.
-    let second = Owned::new(2, &[("b", 2.0)], &["c", "e"]);
+    let second = layer(2, &[("b", 2.0)], &["c", "e"]);
     let owned = [base, first, second];
     let resolved = run(&owned).unwrap();
     assert_eq!(
@@ -133,9 +106,9 @@ fn a_newer_row_replaces_an_older_one_whatever_its_value_and_a_newer_tombstone_ma
 
 #[test]
 fn a_tombstone_over_nothing_and_a_tombstone_repeated_by_a_later_layer_change_no_winner() {
-    let base = Owned::new(0, &[("a", 1.0)], &[]);
-    let first = Owned::new(1, &[], &["a", "zz"]);
-    let second = Owned::new(2, &[], &["a"]);
+    let base = layer(0, &[("a", 1.0)], &[]);
+    let first = layer(1, &[], &["a", "zz"]);
+    let second = layer(2, &[], &["a"]);
     let owned = [base, first, second];
     let resolved = run(&owned).unwrap();
     assert_eq!(resolved.winners, Vec::<Winner>::new());
@@ -144,9 +117,9 @@ fn a_tombstone_over_nothing_and_a_tombstone_repeated_by_a_later_layer_change_no_
 
 #[test]
 fn the_order_layers_are_handed_in_decides_nothing() {
-    let base = Owned::new(0, &[("a", 9.0), ("b", 9.0), ("c", 9.0)], &[]);
-    let first = Owned::new(1, &[("a", 1.0)], &["c"]);
-    let second = Owned::new(2, &[("c", 2.0)], &["a"]);
+    let base = layer(0, &[("a", 9.0), ("b", 9.0), ("c", 9.0)], &[]);
+    let first = layer(1, &[("a", 1.0)], &["c"]);
+    let second = layer(2, &[("c", 2.0)], &["a"]);
     let forward = [base, first, second];
     let reference = values(&forward, &run(&forward).unwrap());
     assert_eq!(reference, expect(&[("b", 9.0), ("c", 2.0)]));
@@ -171,8 +144,8 @@ fn the_order_layers_are_handed_in_decides_nothing() {
 
 #[test]
 fn malformed_layer_sets_are_refused_whole() {
-    let base = || Owned::new(0, &[("a", 1.0)], &[]);
-    let delta = || Owned::new(1, &[("b", 1.0)], &[]);
+    let base = || layer(0, &[("a", 1.0)], &[]);
+    let delta = || layer(1, &[("b", 1.0)], &[]);
 
     assert_eq!(run(&[]).unwrap_err(), ResolveRefusal::NoBase);
     assert_eq!(run(&[delta()]).unwrap_err(), ResolveRefusal::NoBase);
@@ -193,17 +166,31 @@ fn malformed_layer_sets_are_refused_whole() {
             second: 2
         }
     );
-    let mut other_epoch = delta();
-    other_epoch.precedence.base_epoch = 2;
-    assert_eq!(
-        run(&[base(), other_epoch]).unwrap_err(),
-        ResolveRefusal::EpochMismatch {
-            index: 1,
-            epoch: 2,
-            base_epoch: 1
-        }
-    );
-    let both = Owned::new(1, &[("b", 1.0), ("c", 1.0)], &["c"]);
+    for epoch in [0u64, 2] {
+        let mut other_epoch = delta();
+        other_epoch.precedence.base_epoch = epoch;
+        assert_eq!(
+            run(&[base(), other_epoch]).unwrap_err(),
+            ResolveRefusal::EpochMismatch {
+                index: 1,
+                epoch,
+                base_epoch: 1
+            },
+            "an epoch on either side of the base's is refused"
+        );
+        let mut other_epoch = delta();
+        other_epoch.precedence.base_epoch = epoch;
+        assert_eq!(
+            run(&[other_epoch, base()]).unwrap_err(),
+            ResolveRefusal::EpochMismatch {
+                index: 0,
+                epoch,
+                base_epoch: 1
+            },
+            "whichever position the layer is handed in at"
+        );
+    }
+    let both = layer(1, &[("b", 1.0), ("c", 1.0)], &["c"]);
     assert_eq!(
         run(&[base(), both]).unwrap_err(),
         ResolveRefusal::ListedAndTombstoned {
@@ -240,7 +227,8 @@ fn malformed_layer_sets_are_refused_whole() {
             rows: 0
         }
     );
-    let unsorted = Owned::new(0, &[("b", 1.0), ("a", 1.0)], &[]);
+    let mut unsorted = layer(0, &[("a", 1.0), ("b", 1.0)], &[]);
+    unsorted.ids.reverse();
     assert_eq!(
         run(&[unsorted]).unwrap_err(),
         ResolveRefusal::Order {
@@ -249,12 +237,13 @@ fn malformed_layer_sets_are_refused_whole() {
             entry: 1
         }
     );
-    let repeated = Owned::new(0, &[("a", 1.0), ("a", 2.0)], &[]);
+    let repeated = layer(0, &[("a", 1.0), ("a", 2.0)], &[]);
     assert!(matches!(
         run(&[repeated]).unwrap_err(),
         ResolveRefusal::Order { index: 0, .. }
     ));
-    let tombstones = Owned::new(1, &[], &["b", "b"]);
+    let mut tombstones = layer(1, &[], &["b", "c"]);
+    tombstones.tombstones[1] = "b".to_owned();
     assert_eq!(
         run(&[base(), tombstones]).unwrap_err(),
         ResolveRefusal::Order {
@@ -264,7 +253,7 @@ fn malformed_layer_sets_are_refused_whole() {
         }
     );
     // Three entries under a bound of three pass; a fourth is over it, counting rows and tombstones together.
-    let wide = || Owned::new(1, &[("b", 1.0), ("c", 1.0)], &["d"]);
+    let wide = || layer(1, &[("b", 1.0), ("c", 1.0)], &["d"]);
     assert_eq!(
         resolve(&layers(&[base(), wide()]), NonZeroUsize::new(3).unwrap()).unwrap_err(),
         ResolveRefusal::OverBound { max: 3 }
@@ -363,7 +352,7 @@ fn any_layer_set_resolves_to_the_model_in_every_enumeration_order() {
                         .map(|id| (id.as_str(), f32::from(*ordinal as u8)))
                         .collect();
                     let tombstones: Vec<&str> = tombstones.iter().map(String::as_str).collect();
-                    Owned::new(*ordinal, &rows, &tombstones)
+                    layer(*ordinal, &rows, &tombstones)
                 })
                 .collect();
             // Any enumeration order of the same layers.

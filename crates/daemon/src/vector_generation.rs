@@ -263,7 +263,7 @@ pub enum FileFault {
     RowCount,
     /// The scales are not the calibration of the rows, or the sidecar's provenance does not name them.
     Calibration,
-    /// The identifiers do not number the rows in strictly increasing order.
+    /// The identifiers do not number the rows in strictly increasing order, or the tombstones are not as many as declared, strictly increasing, and disjoint from them.
     Identifiers,
     /// The codes are not the rows encoded under the scales.
     Codes,

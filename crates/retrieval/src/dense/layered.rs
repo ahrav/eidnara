@@ -13,14 +13,12 @@ use storage::GuardedConn;
 
 use super::codec::{self, Metric, RowLayout};
 use super::oracle::{
-    self, Completion, ExhaustiveRanking, IncompleteReason, OracleBounds, OracleRefusal, PageRow,
-    RowSource, Walk, Window,
+    self, ExhaustiveRanking, OracleBounds, OracleRefusal, PageRow, RowSource, Walk, Window,
 };
 use super::resolve::{self, Layer, ResolveRefusal, Winner};
 use crate::batch::VectorGeneration;
 use crate::coverage::CURRENT_PENDING;
 use crate::eligibility::Authority;
-use crate::scan::ScanStop;
 
 /// Not `Debug`: the query row is embedding content.
 pub struct LayeredQuery<'a> {
@@ -43,7 +41,7 @@ pub struct LayerAccount {
     pub masked: usize,
     /// Winners the projection no longer lists as live; never scored and never replaced by an older row.
     pub revoked: usize,
-    /// Winners past the visited prefix of a walk that stopped early; whether they are live is unknown.
+    /// Winners past the last row of a walk that ended before the population did; whether they are live is unknown.
     pub unvisited: usize,
 }
 
@@ -57,6 +55,8 @@ pub struct LayeredRanking {
 pub enum LayeredRefusal {
     #[error("the layers do not resolve: {0}")]
     Resolve(#[from] ResolveRefusal),
+    #[error("the layers carry base epoch {layers}, not the generation's {generation}")]
+    Epoch { layers: u64, generation: u64 },
     #[error(transparent)]
     Oracle(#[from] OracleRefusal),
 }
@@ -81,18 +81,17 @@ struct ResolvedRows<'a> {
     winners: Vec<Winner>,
     next: usize,
     revoked: usize,
+    /// The last page read had no rows after it, so every winner still ahead of the cursor is past the live population.
+    exhausted: bool,
 }
 
 impl RowSource for ResolvedRows<'_> {
-    fn page(
-        &mut self,
-        conn: &GuardedConn<'_>,
-        generation_id: &str,
-        after: &str,
-        take: usize,
-        budget: &EvalBudget,
-    ) -> Result<(Vec<PageRow>, bool), ScanStop> {
-        oracle::read_page(conn, &LIVE_SQL, generation_id, after, take, budget)
+    fn page_sql(&self) -> &str {
+        &LIVE_SQL
+    }
+
+    fn after_page(&mut self, more: bool) {
+        self.exhausted = !more;
     }
 
     /// Winners before the visited row are not live any more; the winner at it is its vector; a winner after it waits.
@@ -158,6 +157,17 @@ fn rank_layers_inner(
     hook: impl FnMut(Window<'_>),
 ) -> Result<LayeredRanking, LayeredRefusal> {
     let resolved = resolve::resolve(request.layers, request.max_entries)?;
+    // The resolver made every epoch equal to the base's; the layers must also be the generation's.
+    if let Some(layer) = request
+        .layers
+        .iter()
+        .find(|layer| layer.precedence.base_epoch != request.generation.generation_epoch)
+    {
+        return Err(LayeredRefusal::Epoch {
+            layers: layer.precedence.base_epoch,
+            generation: request.generation.generation_epoch,
+        });
+    }
     let mut account = LayerAccount {
         winners: resolved.winners.len(),
         superseded: resolved.superseded,
@@ -170,6 +180,7 @@ fn rank_layers_inner(
         winners: resolved.winners,
         next: 0,
         revoked: 0,
+        exhausted: false,
     };
     let walk = Walk {
         generation: request.generation,
@@ -185,12 +196,11 @@ fn rank_layers_inner(
     let ranking = oracle::walk(conn, kernel, &walk, budget, &mut source, hook)?;
     let remaining = source.winners.len() - source.next;
     account.revoked = source.revoked;
-    // Only a walk that visited every live required row knows that the winners after its last row are not live.
-    match ranking.completion {
-        Completion::Complete | Completion::Incomplete(IncompleteReason::DenseCoverageShortfall) => {
-            account.revoked += remaining;
-        }
-        Completion::Incomplete(_) => account.unvisited = remaining,
+    // Only a walk whose last page had nothing after it knows that the winners past its last row are not live; how the walk then ended does not matter.
+    if source.exhausted {
+        account.revoked += remaining;
+    } else {
+        account.unvisited = remaining;
     }
     Ok(LayeredRanking {
         ranking,

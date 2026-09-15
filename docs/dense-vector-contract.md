@@ -251,8 +251,9 @@ lists and tombstones; and more rows and tombstones together than the caller's
 bound. Equal-precedence conflicts are refused, not decided: the owners have
 not chosen a rule, and a refusal is not a default.
 
-`dense::layered::rank_layers` ranks the resolved winners through the oracle's
-own walk. The population, visit order, paging, eligibility batches, top-`k`
+`dense::layered::rank_layers` refuses layers whose base epoch is not the
+request generation's epoch, then ranks the resolved winners through the
+oracle's own walk. The population, visit order, paging, eligibility batches, top-`k`
 admission, final re-judgment, coverage, budget, and completion rules are the
 oracle's without change; only the source of each visited row's vector
 differs. The walk reads the projection's live dense-required rows in
@@ -263,9 +264,10 @@ shortfall, pending or not as the oracle counts it, whether no layer ever held
 it or a newer tombstone masked it; a winner whose occurrence the projection
 no longer lists as live, or whose class requires no vector, is `revoked` and
 never scored, and no older row of its occurrence stands in for it. A walk
-that stops early (`RowBound`, an ended budget, a moved authority) reports the
-winners past its last visited row as `unvisited` rather than claiming they
-are live or not. Canonical eligibility is judged on winners only, and the
+whose last page still had rows after it reports the winners past its last
+visited row as `unvisited` rather than claiming they are live or not; a walk
+that read the last page knows the winners past it are revoked, however the
+walk then ended. Canonical eligibility is judged on winners only, and the
 final re-judgment rejects a winner whose authority moved after admission
 without falling back to any other row of its occurrence. `LayerAccount`
 carries the winner, superseded, masked, revoked, and unvisited counts beside
@@ -305,7 +307,9 @@ and the row and tombstone counts. A build refuses rows or tombstones out of
 identifier order and an occurrence the layer both lists and tombstones, so a
 layer never contradicts itself. A full export of the live population carries
 no tombstones; a delta export lists the occurrences tombstoned since the layer
-before it. Its hash fills the manifest's inputs slot, the compatibility identity's
+before it. A build still needs at least one row, since the scales are the
+calibration of the rows and calibration over no rows is an open owner
+question, so a delta that only masks cannot be built until that is settled. Its hash fills the manifest's inputs slot, the compatibility identity's
 digest fills the contract slot, and the row artifact's hash fills the payload
 slot, so the generation digest is a function of every declared input and two
 builds over byte-identical inputs yield the same directory name, the same

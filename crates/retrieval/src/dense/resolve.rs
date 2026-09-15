@@ -3,13 +3,12 @@
 //! The order layers are handed in and the order rows sit in a layer decide nothing; only precedence does.
 //! An occurrence a layer both lists and tombstones, or two layers of equal precedence, is a conflict the owners have not decided; the resolver refuses it rather than choosing.
 
-use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
 use crate::batch::ProjectionCheckpoint;
 
-/// Position of a layer in the newest-first order; the base is ordinal zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Where a layer stands: every layer of one composition shares the base epoch, the base is ordinal zero, and a higher ordinal is newer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Precedence {
     pub base_epoch: u64,
     pub delta_ordinal: u32,
@@ -71,7 +70,9 @@ pub enum ResolveRefusal {
     EqualPrecedence { first: usize, second: usize },
     #[error("layer {index} both lists and tombstones occurrence {occurrence_id}")]
     ListedAndTombstoned { index: usize, occurrence_id: String },
-    #[error("layer {index}'s checkpoint moves backwards from the layer before it")]
+    #[error(
+        "layer {index}'s checkpoint moves backwards, from the layer before it or within itself"
+    )]
     CheckpointOrder { index: usize },
     #[error("layer {index} names {ids} occurrences but holds {rows} rows")]
     IncompleteView {
@@ -101,36 +102,68 @@ pub fn resolve(
     max_entries: NonZeroUsize,
 ) -> Result<Resolved, ResolveRefusal> {
     let order = check_topology(layers, max_entries)?;
-    let mut seen: BTreeMap<&str, Option<Winner>> = BTreeMap::new();
+    // Every entry of every layer, keyed by identifier then by age, so one pass over the sorted entries sees each occurrence's entries together with the newest last.
+    let mut entries: Vec<Entry<'_>> = Vec::new();
+    for (age, index) in order.into_iter().enumerate() {
+        let layer = &layers[index];
+        entries.extend(
+            layer
+                .occurrence_ids
+                .iter()
+                .enumerate()
+                .map(|(row, id)| Entry {
+                    occurrence_id: id,
+                    age,
+                    layer: index,
+                    row: Some(row),
+                }),
+        );
+        entries.extend(layer.tombstones.iter().map(|id| Entry {
+            occurrence_id: id,
+            age,
+            layer: index,
+            row: None,
+        }));
+    }
+    entries.sort_unstable_by(|a, b| {
+        a.occurrence_id
+            .as_bytes()
+            .cmp(b.occurrence_id.as_bytes())
+            .then(a.age.cmp(&b.age))
+    });
     let mut resolved = Resolved {
         winners: Vec::new(),
         superseded: 0,
         masked: 0,
     };
-    for index in order.into_iter().rev() {
-        let layer = &layers[index];
-        for occurrence_id in layer.tombstones {
-            seen.entry(occurrence_id).or_insert(None);
-        }
-        for (row, occurrence_id) in layer.occurrence_ids.iter().enumerate() {
-            match seen.get(occurrence_id.as_str()) {
-                Some(None) => resolved.masked += 1,
-                Some(Some(_)) => resolved.superseded += 1,
-                None => {
-                    seen.insert(
-                        occurrence_id,
-                        Some(Winner {
-                            occurrence_id: occurrence_id.clone(),
-                            layer: index,
-                            row,
-                        }),
-                    );
-                }
+    for group in entries.chunk_by(|a, b| a.occurrence_id == b.occurrence_id) {
+        let newest = group.last().expect("a group has at least one entry");
+        let older_rows = group[..group.len() - 1]
+            .iter()
+            .filter(|entry| entry.row.is_some())
+            .count();
+        match newest.row {
+            Some(row) => {
+                resolved.superseded += older_rows;
+                resolved.winners.push(Winner {
+                    occurrence_id: newest.occurrence_id.to_owned(),
+                    layer: newest.layer,
+                    row,
+                });
             }
+            None => resolved.masked += older_rows,
         }
     }
-    resolved.winners = seen.into_values().flatten().collect();
     Ok(resolved)
+}
+
+/// One row or tombstone of one layer; `age` is the layer's position oldest first.
+struct Entry<'a> {
+    occurrence_id: &'a str,
+    age: usize,
+    layer: usize,
+    /// `None` for a tombstone.
+    row: Option<usize>,
 }
 
 /// Layer indexes oldest first: the base, then deltas by ascending ordinal.
@@ -140,49 +173,52 @@ fn check_topology(
 ) -> Result<Vec<usize>, ResolveRefusal> {
     let mut entries = 0usize;
     for (index, layer) in layers.iter().enumerate() {
-        if layer.checkpoint.snapshot_commit_seq > layer.checkpoint.checkpoint_commit_seq {
-            return Err(ResolveRefusal::CheckpointOrder { index });
-        }
-        if layer.occurrence_ids.len() != layer.rows.len() {
-            return Err(ResolveRefusal::IncompleteView {
-                index,
-                ids: layer.occurrence_ids.len(),
-                rows: layer.rows.len(),
-            });
-        }
-        for (list, ids) in [
-            ("occurrence identifiers", layer.occurrence_ids),
-            ("tombstones", layer.tombstones),
-        ] {
-            if let Some(entry) =
-                (1..ids.len()).find(|i| ids[*i - 1].as_bytes() >= ids[*i].as_bytes())
-            {
-                return Err(ResolveRefusal::Order { index, list, entry });
-            }
-        }
-        if let Some(occurrence_id) = layer
-            .occurrence_ids
-            .iter()
-            .find(|id| layer.tombstones.binary_search(id).is_ok())
-        {
-            return Err(ResolveRefusal::ListedAndTombstoned {
-                index,
-                occurrence_id: occurrence_id.clone(),
-            });
-        }
-        entries = entries.saturating_add(layer.occurrence_ids.len() + layer.tombstones.len());
+        entries = entries.saturating_add(check_layer(index, layer)?);
         if entries > max_entries.get() {
             return Err(ResolveRefusal::OverBound {
                 max: max_entries.get(),
             });
         }
     }
-    let mut order: Vec<usize> = (0..layers.len()).collect();
-    order.sort_by_key(|index| layers[*index].precedence);
-    let mut bases = order
+    order_layers(layers)
+}
+
+/// One layer's own consistency; returns the rows and tombstones it carries.
+fn check_layer(index: usize, layer: &Layer<'_>) -> Result<usize, ResolveRefusal> {
+    if layer.checkpoint.snapshot_commit_seq > layer.checkpoint.checkpoint_commit_seq {
+        return Err(ResolveRefusal::CheckpointOrder { index });
+    }
+    if layer.occurrence_ids.len() != layer.rows.len() {
+        return Err(ResolveRefusal::IncompleteView {
+            index,
+            ids: layer.occurrence_ids.len(),
+            rows: layer.rows.len(),
+        });
+    }
+    for (list, ids) in [
+        ("occurrence identifiers", layer.occurrence_ids),
+        ("tombstones", layer.tombstones),
+    ] {
+        if let Some(entry) = (1..ids.len()).find(|i| ids[*i - 1].as_bytes() >= ids[*i].as_bytes()) {
+            return Err(ResolveRefusal::Order { index, list, entry });
+        }
+    }
+    if let Some(occurrence_id) = layer
+        .occurrence_ids
         .iter()
-        .copied()
-        .filter(|index| layers[*index].precedence.delta_ordinal == 0);
+        .find(|id| layer.tombstones.binary_search(id).is_ok())
+    {
+        return Err(ResolveRefusal::ListedAndTombstoned {
+            index,
+            occurrence_id: occurrence_id.clone(),
+        });
+    }
+    Ok(layer.occurrence_ids.len() + layer.tombstones.len())
+}
+
+/// The base is found and every epoch is checked against it before anything is ordered, so no layer's position can hide a foreign epoch; only then are the deltas ordered by ordinal.
+fn order_layers(layers: &[Layer<'_>]) -> Result<Vec<usize>, ResolveRefusal> {
+    let mut bases = (0..layers.len()).filter(|index| layers[*index].precedence.delta_ordinal == 0);
     let base = bases.next().ok_or(ResolveRefusal::NoBase)?;
     if let Some(second) = bases.next() {
         return Err(ResolveRefusal::MultipleBases {
@@ -191,20 +227,23 @@ fn check_topology(
         });
     }
     let base_epoch = layers[base].precedence.base_epoch;
+    for (index, layer) in layers.iter().enumerate() {
+        if layer.precedence.base_epoch != base_epoch {
+            return Err(ResolveRefusal::EpochMismatch {
+                index,
+                epoch: layer.precedence.base_epoch,
+                base_epoch,
+            });
+        }
+    }
+    let mut order: Vec<usize> = (0..layers.len()).collect();
+    order.sort_by_key(|index| layers[*index].precedence.delta_ordinal);
     for pair in order.windows(2) {
         let (previous, index) = (pair[0], pair[1]);
-        let precedence = layers[index].precedence;
-        if precedence == layers[previous].precedence {
+        if layers[index].precedence.delta_ordinal == layers[previous].precedence.delta_ordinal {
             return Err(ResolveRefusal::EqualPrecedence {
                 first: previous,
                 second: index,
-            });
-        }
-        if precedence.base_epoch != base_epoch {
-            return Err(ResolveRefusal::EpochMismatch {
-                index,
-                epoch: precedence.base_epoch,
-                base_epoch,
             });
         }
         let before = layers[previous].checkpoint;

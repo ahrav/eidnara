@@ -546,22 +546,14 @@ impl Fixture {
 
     /// The independent expectation: every dense-required row with a vector among `objects`, scored in f64 coordinate order and sorted by score descending then identifier ascending.
     pub fn reference(&self, query: &[f32], objects: &[&str]) -> Vec<(String, f64)> {
-        let mut scored: Vec<(String, f64)> = self
-            .rows
-            .iter()
-            .filter(|row| objects.contains(&row.object.as_str()))
-            .filter(|row| row.class != OccurrenceClass::RawToolSpans)
-            .filter_map(|row| {
-                let vector = row.vector.as_ref()?;
-                let mut score = 0.0f64;
-                for j in 0..vector.len() {
-                    score += f64::from(query[j]) * f64::from(vector[j]);
-                }
-                Some((row.occurrence_id(), score))
-            })
-            .collect();
-        scored.sort_by(|(a_id, a), (b_id, b)| b.total_cmp(a).then_with(|| a_id.cmp(b_id)));
-        scored
+        reference_over(
+            query,
+            self.rows
+                .iter()
+                .filter(|row| objects.contains(&row.object.as_str()))
+                .filter(|row| row.class != OccurrenceClass::RawToolSpans)
+                .filter_map(|row| Some((row.occurrence_id(), row.vector.as_deref()?))),
+        )
     }
 
     pub fn dense_ids(&self) -> BTreeSet<String> {
@@ -571,6 +563,25 @@ impl Fixture {
             .map(Row::occurrence_id)
             .collect()
     }
+}
+
+/// f64 inner product in increasing coordinate order, then score descending and identifier bytes ascending: the reference every ranking is checked against.
+pub fn reference_over<'a>(
+    query: &[f32],
+    rows: impl IntoIterator<Item = (String, &'a [f32])>,
+) -> Vec<(String, f64)> {
+    let mut scored: Vec<(String, f64)> = rows
+        .into_iter()
+        .map(|(id, vector)| {
+            let mut score = 0.0f64;
+            for j in 0..vector.len() {
+                score += f64::from(query[j]) * f64::from(vector[j]);
+            }
+            (id, score)
+        })
+        .collect();
+    scored.sort_by(|(a_id, a), (b_id, b)| b.total_cmp(a).then_with(|| a_id.cmp(b_id)));
+    scored
 }
 
 pub fn keyed(ranking: &ExhaustiveRanking) -> Vec<(String, f64)> {

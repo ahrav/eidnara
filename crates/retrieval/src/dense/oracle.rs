@@ -75,15 +75,8 @@ pub(super) struct Walk<'a> {
 
 /// Supplies the live required rows in identifier order and the vector each carries.
 pub(super) trait RowSource {
-    /// One page of live required rows after `after`, at most `take`, and whether rows remain.
-    fn page(
-        &mut self,
-        conn: &GuardedConn<'_>,
-        generation_id: &str,
-        after: &str,
-        take: usize,
-        budget: &EvalBudget,
-    ) -> Result<(Vec<PageRow>, bool), ScanStop>;
+    /// The page query, in the shape [`read_page`] documents.
+    fn page_sql(&self) -> &str;
 
     /// The validated vector of a visited row, or `None` when the source holds none for it.
     fn vector(
@@ -91,21 +84,17 @@ pub(super) trait RowSource {
         row: &PageRow,
         layout: &RowLayout,
     ) -> Result<Option<Vec<f32>>, OracleRefusal>;
+
+    /// Runs after every page with whether rows remain past it.
+    fn after_page(&mut self, _more: bool) {}
 }
 
 /// The projection's own `occurrence_vectors` of the generation.
 struct StoredVectors;
 
 impl RowSource for StoredVectors {
-    fn page(
-        &mut self,
-        conn: &GuardedConn<'_>,
-        generation_id: &str,
-        after: &str,
-        take: usize,
-        budget: &EvalBudget,
-    ) -> Result<(Vec<PageRow>, bool), ScanStop> {
-        read_page(conn, &PAGE_SQL, generation_id, after, take, budget)
+    fn page_sql(&self) -> &str {
+        &PAGE_SQL
     }
 
     fn vector(
@@ -326,8 +315,9 @@ pub(super) fn walk(
             .page_rows
             .get()
             .min(bounds.max_rows.get() - ranking.coverage.required);
-        let (page, more) = match source.page(
+        let (page, more) = match read_page(
             conn,
+            source.page_sql(),
             &request.generation.generation_id,
             &after,
             take,
@@ -337,6 +327,7 @@ pub(super) fn walk(
             Err(ScanStop::Budget) => return exhausted(ranking),
             Err(ScanStop::Projection(error)) => return Err(error.into()),
         };
+        source.after_page(more);
         if let Some(last) = page.last() {
             after.clone_from(&last.candidate.occurrence_id);
             let present = decode_page(page, &layout, source, &mut ranking, &mut hook)?;
@@ -398,7 +389,7 @@ fn incomplete(ranking: &mut ExhaustiveRanking, reason: IncompleteReason) {
 
 /// Reads one row past `take` to learn whether rows remain without retaining the extra row; `take == 0` is a pure remainder probe.
 /// `sql` selects the seven columns of [`PAGE_SQL`] in that order and binds the generation identifier, the identifier to start after, and the limit as `?1`, `?2`, `?3`.
-pub(super) fn read_page(
+fn read_page(
     conn: &GuardedConn<'_>,
     sql: &str,
     generation_id: &str,
