@@ -1339,37 +1339,71 @@ impl RingClientEndpoint {
         Ok(Self { to_host, from_host })
     }
 
-    /// Publishes one complete consumer frame under the caller's deadline.
+    /// Parks on the capacity doorbell until the frame's inventory has room or `deadline`
+    /// passes, then publishes. The inventory follows the frame exactly as in
+    /// [`Self::try_send_bounded`].
     pub fn send(
         &self,
         header: EnvelopeHeader,
         body: &[u8],
         deadline: StdInstant,
     ) -> Result<(), SendFailure> {
-        self.send_bounded(header, body, deadline, deadline)
-    }
-
-    /// Publishes one frame, waiting for capacity only until `reserve_deadline`
-    /// and refusing to commit once `frame_deadline` has passed.
-    ///
-    /// The body copy runs after the reservation returns, so the frame deadline
-    /// is re-checked before `commit`; an uncommitted reservation is aborted on
-    /// drop and publishes nothing. A caller that waits in slices passes a short
-    /// `reserve_deadline` and the frame's own `frame_deadline`.
-    pub fn send_bounded(
-        &self,
-        header: EnvelopeHeader,
-        body: &[u8],
-        reserve_deadline: StdInstant,
-        frame_deadline: StdInstant,
-    ) -> Result<(), SendFailure> {
-        let mut reservation = self
+        let inventory = self.inventory_for_frame(&header, body.len());
+        let reservation = self
             .to_host
-            .reserve_until(body.len(), header.encode(), reserve_deadline)
+            .reserve_until_in(inventory, body.len(), header.encode(), deadline)
             .map_err(|error| match error {
                 ProducerError::Deadline => SendFailure::Deadline,
                 _ => SendFailure::Unreserved,
             })?;
+        self.publish(reservation, body, deadline)
+    }
+
+    /// Publishes one frame without waiting for capacity. The inventory follows the frame:
+    /// pure-header controls take the control reserve, terminals that fit take the terminal
+    /// reserve, everything else is ordinary. `Ok(TrySend::Exhausted)` means the inventory has
+    /// no block or descriptor headroom right now and nothing was charged; the caller parks on
+    /// the capacity doorbell (`to_host.arm_capacity_wait`) and retries. A frame whose deadline
+    /// has passed is refused before commit and publishes nothing.
+    pub fn try_send_bounded(
+        &self,
+        header: EnvelopeHeader,
+        body: &[u8],
+        frame_deadline: StdInstant,
+    ) -> Result<TrySend, SendFailure> {
+        let inventory = self.inventory_for_frame(&header, body.len());
+        if StdInstant::now() >= frame_deadline {
+            return Err(SendFailure::Deadline);
+        }
+        let reservation = match self
+            .to_host
+            .try_reserve_in(inventory, body.len(), header.encode())
+        {
+            Ok(reservation) => reservation,
+            Err(ProducerError::Exhausted) => return Ok(TrySend::Exhausted),
+            Err(_) => return Err(SendFailure::Unreserved),
+        };
+        self.publish(reservation, body, frame_deadline)
+            .map(|()| TrySend::Published)
+    }
+
+    fn inventory_for_frame(&self, header: &EnvelopeHeader, body_len: usize) -> Inventory {
+        let terminal_capacity = self
+            .to_host
+            .geometry()
+            .class(shm_transport::pool::BlockClass::Terminal)
+            .body_capacity();
+        inventory_for(header, body_len, terminal_capacity)
+    }
+
+    /// The body copy runs after reservation, so `publish` re-checks `frame_deadline` before
+    /// `commit`; dropping an uncommitted reservation publishes nothing.
+    fn publish(
+        &self,
+        mut reservation: ProducerReservation<'_>,
+        body: &[u8],
+        frame_deadline: StdInstant,
+    ) -> Result<(), SendFailure> {
         // A failed `write` aborts the reservation, so nothing was published.
         reservation
             .write(body)
@@ -1388,52 +1422,6 @@ impl RingClientEndpoint {
             .commit(body.len())
             .map_err(|_| SendFailure::Reserved)?;
         Ok(())
-    }
-
-    /// Publishes one frame without waiting for capacity. The inventory follows the frame:
-    /// pure-header controls take the control reserve, terminals that fit take the terminal
-    /// reserve, everything else is ordinary. `Ok(TrySend::Exhausted)` means the inventory has
-    /// no block or descriptor headroom right now and nothing was charged; the caller parks on
-    /// the capacity doorbell (`to_host.arm_capacity_wait`) and retries. A frame whose deadline
-    /// has passed is refused before commit and publishes nothing.
-    pub fn try_send_bounded(
-        &self,
-        header: EnvelopeHeader,
-        body: &[u8],
-        frame_deadline: StdInstant,
-    ) -> Result<TrySend, SendFailure> {
-        let terminal_capacity = self
-            .to_host
-            .geometry()
-            .class(shm_transport::pool::BlockClass::Terminal)
-            .body_capacity();
-        let inventory = inventory_for(&header, body.len(), terminal_capacity);
-        if StdInstant::now() >= frame_deadline {
-            return Err(SendFailure::Deadline);
-        }
-        let mut reservation =
-            match self
-                .to_host
-                .try_reserve_in(inventory, body.len(), header.encode())
-            {
-                Ok(reservation) => reservation,
-                Err(ProducerError::Exhausted) => return Ok(TrySend::Exhausted),
-                Err(_) => return Err(SendFailure::Unreserved),
-            };
-        // A failed `write` aborts the reservation, so nothing was published.
-        reservation
-            .write(body)
-            .map_err(|_| SendFailure::Unreserved)?;
-        if StdInstant::now() >= frame_deadline {
-            return Err(SendFailure::Deadline);
-        }
-        if self.to_host.is_quarantined() {
-            return Err(SendFailure::Unreserved);
-        }
-        reservation
-            .commit(body.len())
-            .map_err(|_| SendFailure::Reserved)?;
-        Ok(TrySend::Published)
     }
 
     pub fn try_recv(&self) -> Result<Option<(EnvelopeHeader, Vec<u8>)>, RingClientError> {
@@ -1486,8 +1474,6 @@ fn decode_hex<const N: usize>(text: &str) -> Result<[u8; N], RingClientError> {
 #[derive(Clone, Copy)]
 pub struct RingClientError;
 
-/// The stage at which [`RingClientEndpoint::send`] failed.
-///
 /// Outcome of a nonblocking publication attempt that did not fail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrySend {
@@ -1497,6 +1483,8 @@ pub enum TrySend {
     Exhausted,
 }
 
+/// The stage at which [`RingClientEndpoint::send`] failed.
+///
 /// A frame that never obtained a reservation wrote zero bytes; after reservation, the host's view is unknown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendFailure {
@@ -2419,7 +2407,7 @@ mod tests {
 
     #[test]
     fn a_client_send_past_its_frame_deadline_publishes_nothing() {
-        // Reservation succeeds (`reserve_deadline` is ahead) but the frame deadline has passed.
+        // Capacity is free, so the reservation succeeds although the frame deadline has passed.
         let rings = DuplexRing::create(&ring_profile()).unwrap();
         let (descriptor, descriptors) = worker_descriptor(&rings).expect("descriptor");
         let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
@@ -2434,18 +2422,64 @@ mod tests {
             corr: 1,
         };
         let now = StdInstant::now();
-        assert_eq!(
-            peer.send_bounded(header, &[1], now + Duration::from_secs(1), now),
-            Err(SendFailure::Deadline)
-        );
+        assert_eq!(peer.send(header, &[1], now), Err(SendFailure::Deadline));
         assert!(
             rings.second.try_receive().unwrap().is_none(),
             "the aborted reservation leaves no frame in the ring"
         );
         let live_deadline = StdInstant::now() + Duration::from_secs(1);
-        peer.send_bounded(header, &[1], live_deadline, live_deadline)
+        peer.send(header, &[1], live_deadline)
             .expect("a live frame deadline publishes");
         assert!(rings.second.try_receive().unwrap().is_some());
+    }
+
+    /// Both client publication paths classify a frame's inventory the same way: with ordinary
+    /// descriptor headroom exhausted, a pure-header `Pong` publishes from the control reserve
+    /// through `send` as it does through `try_send_bounded`, while a data frame stays refused.
+    #[test]
+    fn client_send_and_try_send_share_the_frame_inventory() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let (descriptor, descriptors) = worker_descriptor(&rings).expect("descriptor");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let request = |corr| EnvelopeHeader {
+            len: 1,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 7,
+            epoch: 1,
+            corr,
+        };
+        let deadline = StdInstant::now() + Duration::from_millis(200);
+        let ordinary = u64::from(rings.second.geometry().ordinary_descriptors());
+        for corr in 1..=ordinary {
+            assert_eq!(
+                peer.try_send_bounded(request(corr), &[1], deadline),
+                Ok(TrySend::Published)
+            );
+        }
+        assert_eq!(
+            peer.try_send_bounded(request(ordinary + 1), &[1], deadline),
+            Ok(TrySend::Exhausted),
+            "ordinary descriptor headroom is exhausted"
+        );
+        let pong = EnvelopeHeader {
+            len: 0,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Pong,
+            flags: crate::wire::pure_header_flags(),
+            channel: 0,
+            epoch: 1,
+            corr: 99,
+        };
+        peer.send(pong, &[], deadline)
+            .expect("a control publishes from its reserve past exhausted ordinary headroom");
+        assert_eq!(
+            peer.send(request(ordinary + 1), &[1], deadline),
+            Err(SendFailure::Deadline),
+            "a data frame still waits on ordinary headroom until its deadline"
+        );
     }
 
     #[tokio::test]

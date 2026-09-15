@@ -476,15 +476,14 @@ async fn managed_client_witnesses_current_layout_maximum_bodies_and_controlled_r
         let snapshot = client.host_status().await.expect("host.status decodes");
         let shm = &snapshot.shared_memory;
         assert_eq!(shm["activation"]["completed"], 2);
-        assert_eq!(shm["reclamation"]["completed"], 1);
-        if shm["returns"]["released_backings"] == 2 {
+        if shm["reclamation"]["completed"] == 1 && shm["returns"]["released_backings"] == 2 {
             assert_eq!(shm["returns"]["live_backings"], 2);
             assert_eq!(shm["returns"]["outstanding"], 0);
             break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the closed connection's backing never released: {shm}"
+            "the closed connection's generation never retired or its backing never released: {shm}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
