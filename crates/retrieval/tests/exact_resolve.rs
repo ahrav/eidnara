@@ -19,7 +19,7 @@ use retrieval::exact::{
     Authority, CertificateRefusal, CompletenessCertificate, Completion, Disqualification,
     ExactProof, ExactQuery, HexPrefix, IncompleteReason, ObjectFormat, ProofInvalidation,
     RequestIntent, Resolution, ResolveBounds, ResolveRefusal, ResolveRequest, ShaPrefixQuery,
-    resolve, validate_for_use,
+    resolve, validate_for_use, validate_for_use_with_hook_for_test,
 };
 use retrieval::{
     OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, Tombstone, TombstoneReason,
@@ -520,6 +520,10 @@ fn a_healthy_explicit_singleton_proves_and_validates_while_an_always_refuse_cont
         .expect("a healthy singleton proves");
     assert_eq!(proof.target_id(), "obj-1");
     assert_eq!(proof.occurrences().len(), 2);
+    assert!(
+        std::ptr::eq(proof.occurrences(), &resolution.retained[..]),
+        "the proof shares the retained rows instead of copying them past the retention bound"
+    );
     assert_eq!(fixture.validate(&proof, &budget), Ok(()));
 
     let hybrid = fixture
@@ -1326,6 +1330,46 @@ fn a_certificate_past_the_restored_kernel_tip_defeats_proof() {
         1,
         "the eligible row still reaches hybrid"
     );
+}
+
+/// `validate_for_use` rejects a proof when the budget expires during its kernel batch.
+#[test]
+fn final_use_refuses_a_budget_that_expires_inside_the_kernel_batch() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
+    let certificate = fixture.certificate();
+    let proof = fixture
+        .resolve(
+            object_query("obj-1"),
+            true,
+            &certificate,
+            bounds(),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap()
+        .proof
+        .expect("a healthy singleton proves");
+    let budget = EvalBudget::unbounded();
+    let outcome = fixture
+        .store
+        .with_conn(|conn| {
+            Ok(validate_for_use_with_hook_for_test(
+                conn,
+                &fixture.kernel,
+                &proof,
+                Authority {
+                    project: &fixture.project,
+                    destination: ArtifactDestination::Local,
+                    inventory_epoch: EPOCH,
+                },
+                &budget,
+                || budget.cancel(),
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome, Err(ProofInvalidation::BudgetExhausted));
 }
 
 #[test]

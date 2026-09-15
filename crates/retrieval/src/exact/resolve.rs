@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use kernel::applicability::EvalBudget;
 use kernel::{
@@ -128,7 +129,7 @@ pub struct Consumed {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExactProof {
     target_id: String,
-    occurrences: Vec<AssociationRow>,
+    occurrences: Arc<[AssociationRow]>,
     certificate: CompletenessCertificate,
     project: ProjectScope,
     destination: ArtifactDestination,
@@ -165,7 +166,8 @@ pub struct Resolution {
     pub disqualified: Option<Disqualification>,
     /// Targets among the retained rows, whatever the completion.
     pub observed_targets: BTreeSet<String>,
-    pub retained: Vec<AssociationRow>,
+    /// `retained` shares its allocation with `ExactProof::occurrences`, so proof minting copies no rows.
+    pub retained: Arc<[AssociationRow]>,
     pub observations: Observations,
     pub consumed: Consumed,
     pub distinct_keys: usize,
@@ -237,6 +239,7 @@ struct Attempt<'a> {
     initial: CommitReadTarget,
     snapshot: Option<EgressSnapshot>,
     stopped: Option<IncompleteReason>,
+    retained: Vec<AssociationRow>,
     resolution: Resolution,
 }
 
@@ -282,11 +285,12 @@ pub fn resolve(
         initial,
         snapshot: None,
         stopped: None,
+        retained: Vec::new(),
         resolution: Resolution {
             completion: Completion::Complete,
             disqualified: None,
             observed_targets: BTreeSet::new(),
-            retained: Vec::new(),
+            retained: Arc::from([]),
             observations: Observations::default(),
             consumed: Consumed::default(),
             distinct_keys: 0,
@@ -483,7 +487,7 @@ impl Attempt<'_> {
         self.resolution
             .observed_targets
             .insert(row.target_id.clone());
-        self.resolution.retained.push(row.clone());
+        self.retained.push(row.clone());
     }
 
     fn finish(mut self) -> Resolution {
@@ -496,6 +500,7 @@ impl Attempt<'_> {
             ExactQuery::Sha(_) => self.resolution.distinct_keys == 1,
             ExactQuery::CanonicalObject(_) => true,
         };
+        self.resolution.retained = Arc::from(std::mem::take(&mut self.retained));
         if self.request.intent == RequestIntent::WholeRequest
             && self.resolution.completion == Completion::Complete
             && self.resolution.disqualified.is_none()
@@ -506,7 +511,7 @@ impl Attempt<'_> {
         {
             self.resolution.proof = Some(ExactProof {
                 target_id: target.clone(),
-                occurrences: self.resolution.retained.clone(),
+                occurrences: Arc::clone(&self.resolution.retained),
                 certificate: self.request.certificate.clone(),
                 project: self.request.authority.project.clone(),
                 destination: self.request.authority.destination,
@@ -542,6 +547,31 @@ pub fn validate_for_use(
     proof: &ExactProof,
     authority: Authority<'_>,
     budget: &EvalBudget,
+) -> Result<Result<(), ProofInvalidation>, ResolveRefusal> {
+    validate_for_use_inner(conn, kernel, proof, authority, budget, || ())
+}
+
+/// `after_judgement` runs once the kernel batch returns, before the budget is
+/// rechecked, so a test can expire the budget inside that window.
+#[cfg(feature = "test-support")]
+pub fn validate_for_use_with_hook_for_test(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    proof: &ExactProof,
+    authority: Authority<'_>,
+    budget: &EvalBudget,
+    after_judgement: impl FnOnce(),
+) -> Result<Result<(), ProofInvalidation>, ResolveRefusal> {
+    validate_for_use_inner(conn, kernel, proof, authority, budget, after_judgement)
+}
+
+fn validate_for_use_inner(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    proof: &ExactProof,
+    authority: Authority<'_>,
+    budget: &EvalBudget,
+    after_judgement: impl FnOnce(),
 ) -> Result<Result<(), ProofInvalidation>, ResolveRefusal> {
     if budget.is_exhausted() {
         return Ok(Err(ProofInvalidation::BudgetExhausted));
@@ -589,6 +619,10 @@ pub fn validate_for_use(
         Err(KernelError::Deadline) => return Ok(Err(ProofInvalidation::BudgetExhausted)),
         Err(error) => return Err(error.into()),
     };
+    after_judgement();
+    if budget.is_exhausted() {
+        return Ok(Err(ProofInvalidation::BudgetExhausted));
+    }
     if report.snapshot != proof.snapshot {
         return Ok(Err(ProofInvalidation::SnapshotChanged));
     }
