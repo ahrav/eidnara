@@ -257,17 +257,33 @@ fn derived_reinjection_rests_on_exact_live_parents() {
         let refused = fixture.record(key, request(subject, 1, evidence));
         assert_eq!(refused, Err(expected), "{key}");
     }
-    let too_many: Vec<(String, i64)> = (0..17)
-        .map(|index| (format!("decision-object-{}", index + 10), 1))
+    for index in 10..27 {
+        fixture.admit_decision(index, index);
+    }
+    let too_many: Vec<(String, i64)> = (10..27)
+        .map(|index| (format!("decision-object-{index}"), index))
         .collect();
     let too_many: Vec<(&str, i64)> = too_many
         .iter()
         .map(|(id, revision)| (id.as_str(), *revision))
         .collect();
+    let before = fixture.tip();
     assert_eq!(
         fixture.record("too-many", request(subject, 1, derived(&too_many))),
         Err(ClaimCausalityError::TooManyParents)
     );
+    assert_eq!(fixture.tip(), before);
+    fixture
+        .record(
+            "at-parent-limit",
+            request(subject, 1, derived(&too_many[..16])),
+        )
+        .unwrap();
+    let at_limit = fixture.tip();
+    let maximum_class = CausalClass::DerivedReinjection {
+        parents: parents(&too_many[..16]),
+    };
+    assert_eq!(fixture.class(subject, at_limit), maximum_class);
 
     let recorded = fixture
         .record(
@@ -284,6 +300,7 @@ fn derived_reinjection_rests_on_exact_live_parents() {
         parents: parents(&[("decision-object-2", 1), ("domain-object", 1)]),
     };
     assert_eq!(fixture.class(subject, recorded_at), expected);
+    assert_eq!(fixture.class(subject, at_limit), maximum_class);
     assert_eq!(
         fixture
             .store
@@ -478,7 +495,31 @@ fn replay_is_effect_free_and_conflicting_or_unsupported_records_are_unknown() {
         parents: parents(&[("domain-object", 1)]),
     };
 
-    // A later record for the same subject replaces the first; old snapshots keep the old class.
+    let mut previous = first.object_id.clone();
+    let mut history = vec![(first_at, first.object_id.clone(), direct_class.clone())];
+    for index in 0..16 {
+        let (evidence, expected) = if index % 2 == 0 {
+            (derived(&[("domain-object", 1)]), derived_class.clone())
+        } else {
+            (direct(&evidence_id, &digest), direct_class.clone())
+        };
+        let outcome = fixture
+            .record(
+                &format!("history-{index}"),
+                request("decision-object-1", 1, evidence),
+            )
+            .unwrap();
+        assert_eq!(outcome.replaced_object_id, Some(previous));
+        previous = outcome.object_id;
+        history.push((fixture.tip(), previous.clone(), expected));
+    }
+    for (as_of, object_id, expected) in history {
+        let reading = fixture.reading("decision-object-1", as_of);
+        assert_eq!(reading.class, expected, "snapshot {as_of}");
+        assert_eq!(reading.record.unwrap().object_id, object_id);
+    }
+
+    // A later record replaces only the live predecessor; old snapshots keep their class.
     let second = fixture
         .record(
             "derived",
@@ -487,7 +528,7 @@ fn replay_is_effect_free_and_conflicting_or_unsupported_records_are_unknown() {
         .unwrap();
     assert_eq!(
         second.replaced_object_id.as_deref(),
-        Some(first.object_id.as_str())
+        Some(previous.as_str())
     );
     assert_eq!(
         fixture.class("decision-object-1", fixture.tip()),
@@ -599,7 +640,31 @@ fn oversized_payloads_read_as_unknown_and_records_survive_reopen() {
         )
         .unwrap();
     let tip = fixture.tip();
-    let tight = NonZeroU64::new(8).unwrap();
+    let payload = column_text(
+        fixture.root.path(),
+        &format!(
+            "SELECT CAST(observation_payload AS TEXT) FROM observations WHERE observation_id='{}'",
+            recorded.observation_id
+        ),
+    )
+    .unwrap();
+    let payload_bytes = u64::try_from(payload.len()).unwrap();
+    let exact = fixture
+        .store
+        .causal_class_as_of(
+            "decision-object-1",
+            tip,
+            NonZeroU64::new(payload_bytes).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        exact.class,
+        CausalClass::DirectObservation {
+            acquisition_evidence_id: evidence_id.clone(),
+            artifact_digest: digest.clone(),
+        }
+    );
+    let tight = NonZeroU64::new(payload_bytes - 1).unwrap();
     let reading = fixture
         .store
         .causal_class_as_of("decision-object-1", tip, tight)

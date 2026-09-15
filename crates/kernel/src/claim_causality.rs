@@ -439,13 +439,7 @@ struct StoredRecord {
 
 impl KernelStore {
     /// Reads the causal class of `object_id` at `requested` from one snapshot.
-    ///
-    /// # Errors
-    ///
-    /// `NotFound` when no registry row for `object_id` exists by the snapshot;
-    /// `FutureSnapshot` when `requested` exceeds the tip; `InvalidInput` for a
-    /// negative sequence; `CorruptCanonicalRow` for an undecodable descriptor
-    /// row; `Busy`, `Deadline`, or `Io` from the reader.
+    /// This call has no deadline for reader acquisition or query execution.
     pub fn causal_class_as_of(
         &self,
         object_id: &str,
