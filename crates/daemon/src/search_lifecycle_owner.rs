@@ -234,30 +234,34 @@ impl SearchLifecycleOwner {
     }
 
     /// A new selection manager for `identity` under `bounds`, carrying this owner's test hooks.
+    #[cfg(not(feature = "test-support"))]
     fn new_selection(
         &self,
         identity: ProjectionIdentity,
         bounds: CoverageBounds,
     ) -> SearchSelection {
-        let selection = SearchSelection::new(&self.home, identity, bounds);
-        #[cfg(feature = "test-support")]
-        {
-            // The barrier after a rename moves an armed failure into the sync's own flag, once.
-            let armed = Arc::clone(&self.recovery_sync_failure);
-            let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let flag = Arc::clone(&fail);
-            return selection
-                .with_recovery_write_barrier_for_test(move |event| {
-                    if event == crate::projection_lifecycle::WriteBarrier::AfterRename
-                        && armed.swap(false, std::sync::atomic::Ordering::AcqRel)
-                    {
-                        fail.store(true, std::sync::atomic::Ordering::Release);
-                    }
-                })
-                .with_recovery_directory_sync_failure_for_test(flag);
-        }
-        #[cfg(not(feature = "test-support"))]
-        selection
+        SearchSelection::new(&self.home, identity, bounds)
+    }
+
+    /// A new selection manager for `identity` under `bounds`, carrying this owner's test hooks: the barrier after a record rename moves an armed sync failure into the sync's own flag, once.
+    #[cfg(feature = "test-support")]
+    fn new_selection(
+        &self,
+        identity: ProjectionIdentity,
+        bounds: CoverageBounds,
+    ) -> SearchSelection {
+        let armed = Arc::clone(&self.recovery_sync_failure);
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&fail);
+        SearchSelection::new(&self.home, identity, bounds)
+            .with_recovery_write_barrier_for_test(move |event| {
+                if event == crate::projection_lifecycle::WriteBarrier::AfterRename
+                    && armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    fail.store(true, std::sync::atomic::Ordering::Release);
+                }
+            })
+            .with_recovery_directory_sync_failure_for_test(flag)
     }
 
     #[cfg(feature = "test-support")]
