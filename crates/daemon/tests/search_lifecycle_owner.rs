@@ -3119,6 +3119,98 @@ fn a_lowered_duration_bound_blocks_an_active_record() {
     );
 }
 
+/// A record a reloaded duration bound no longer fits keeps its records installed with no coverage, as an expired record does: ordinary hooks are denied on the missing coverage rather than on a missing manifest, so a cleanup that follows still finds its envelope.
+#[test]
+fn a_duration_refusal_keeps_the_evidence_a_cleanup_needs() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    let recorded_at = now();
+    let mut request = rebuild(home);
+    request.deadline = recorded_at + 60_000;
+    owner
+        .request(&request, recorded_at, &slice_budget())
+        .unwrap();
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("B_recovery_ms", 30_000)]),
+        &campaign_json(&identity),
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.starts_with("B_recovery_ms observed at")),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap_err(),
+        Denial::Missing(Gate::ClassCoverage),
+        "the records stay installed without coverage; a cleanup keeps its envelope"
+    );
+}
+
+/// A request for another kernel over an active record whose duration a reloaded bound no longer fits leaves admission closed, as the slice that refused the record left it.
+#[test]
+fn a_foreign_kernel_request_keeps_a_record_over_the_duration_bound_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    let recorded_at = now();
+    let mut request = rebuild(home);
+    request.deadline = recorded_at + 60_000;
+    owner
+        .request(&request, recorded_at, &slice_budget())
+        .unwrap();
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("B_recovery_ms", 30_000)],
+        ),
+        &campaign_json(&identity),
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.starts_with("B_recovery_ms observed at")),
+        "{outcome:?}"
+    );
+    let denied = || {
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .is_err()
+    };
+    assert!(denied());
+    let mut foreign = rebuild(home);
+    foreign.kernel_incarnation_id = "another-kernel".to_owned();
+    let outcome = owner.request(&foreign, now(), &slice_budget());
+    assert!(
+        matches!(&outcome, Err(BuildError::Invalid(reason)) if reason.contains("another kernel incarnation")),
+        "{outcome:?}"
+    );
+    assert!(matches!(control(home), ControlState::Intent(_)));
+    assert!(
+        denied(),
+        "a refused foreign request must not reopen admission over a record whose duration the bound no longer fits"
+    );
+    assert!(owner.pin(&slice_budget()).is_err());
+}
+
 /// A request whose deadline leaves no time past the start margin is refused rather than recorded for every slice to refuse inside the margin.
 #[test]
 fn a_request_inside_the_start_margin_is_refused() {

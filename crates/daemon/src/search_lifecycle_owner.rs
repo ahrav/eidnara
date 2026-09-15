@@ -26,7 +26,7 @@ use crate::projection_admission::{
     AdmissionInputs, Closed, InputRefusal, ProjectionAdmission, Refresh, SelectedProjection,
 };
 use crate::projection_gates::{
-    Denial, EntryPoint, InvalidationIdentity, ProjectionHook, RuntimeManifest,
+    Denial, EntryPoint, Gate, InvalidationIdentity, ProjectionHook, RuntimeManifest,
 };
 use crate::projection_lifecycle::{
     ControlState, IntentRefusal, LifecycleIntent, LifecycleRequest, MAX_RECORD_BYTES,
@@ -557,32 +557,16 @@ impl SearchLifecycleOwner {
                 return SliceOutcome::Closed(refusal);
             }
         };
-        // An active record's own duration is charged against the transition's bound, as recovery charges it; a record a reloaded bound no longer fits is refused by every slice, so admission closes here rather than opening on the evidence about to be installed.
-        if !completed {
-            let duration_limit = intent.transition.duration_limit();
-            let observed =
-                u64::try_from(intent.episodes.deadline.saturating_sub(intent.recorded_at))
-                    .unwrap_or(u64::MAX);
-            match limit(inputs.manifest(), duration_limit) {
-                Ok(max) if observed <= max => {}
-                Ok(max) => {
-                    let _ = self.admission.refresh(None);
-                    return SliceOutcome::Blocked(
-                        Denial::LimitExceeded {
-                            limit: duration_limit.to_owned(),
-                            observed,
-                            max,
-                        }
-                        .to_string(),
-                    );
-                }
-                Err(_) => {
-                    let _ = self.admission.refresh(None);
-                    return SliceOutcome::Blocked(
-                        "manifest limits cannot bound the record".to_owned(),
-                    );
-                }
-            }
+        // An active record's own duration is charged against the transition's bound, as recovery charges it; a record a reloaded bound no longer fits is refused by every slice, so the records are installed with no coverage, as for an expired record: ordinary hooks are denied while a cleanup keeps its evidence.
+        if !completed && let Err(denial) = duration_within_bound(inputs.manifest(), &intent) {
+            let _ = self.admission.refresh_with(
+                inputs.clone(),
+                SelectedProjection {
+                    identity: &identity,
+                    coverage: None,
+                },
+            );
+            return SliceOutcome::Blocked(denial.to_string());
         }
         // Hooks are judged on this slice's observation before the record decides anything, so an expired or blocked record cannot leave the previous slice's evidence installed.
         if let Refresh::Closed(closed) = self.refresh(&inputs, Some(selection), &identity, &budget)
@@ -952,15 +936,22 @@ impl SearchLifecycleOwner {
         }
         // Whether the manifest still bounds the operation already recorded, as its next slice would check. A replacement that fits the reduced limits may replace what no longer does; a request that does not fit either, or one refused for another reason, leaves the gate closed, as that slice would.
         let recorded = ProjectionLifecycle::read_at(&self.home);
-        let current_fits = match &recorded {
-            ControlState::Intent(current) | ControlState::Current(current) => replacement_spec(
+        let spec_fits = |current: &LifecycleIntent| {
+            replacement_spec(
                 inputs.manifest(),
                 identity.clone(),
                 current.transition,
                 current.episodes.allowance,
                 &current.consumer.generation_id,
             )
-            .is_ok(),
+            .is_ok()
+        };
+        let current_fits = match &recorded {
+            // An active record's duration is charged as its slices charge it; a completed record's construction is history.
+            ControlState::Intent(current) => {
+                spec_fits(current) && duration_within_bound(inputs.manifest(), current).is_ok()
+            }
+            ControlState::Current(current) => spec_fits(current),
             // An unreadable record is what the next slice closes admission on.
             ControlState::Unavailable(_) => false,
             _ => true,
@@ -1178,6 +1169,27 @@ fn with_followup(error: &BuildError, step: &str, followup: Option<BuildError>) -
     match followup {
         Some(followup) => format!("{error}; {step}: {followup}"),
         None => error.to_string(),
+    }
+}
+
+/// Charges an active record's own duration, its deadline less the clock it was recorded at, against its transition's bound in `manifest`, as recovery charges it at every admission.
+fn duration_within_bound(
+    manifest: &RuntimeManifest,
+    intent: &LifecycleIntent,
+) -> Result<(), Denial> {
+    let limit_name = intent.transition.duration_limit();
+    let observed = u64::try_from(intent.episodes.deadline.saturating_sub(intent.recorded_at))
+        .unwrap_or(u64::MAX);
+    let max = limit(manifest, limit_name)
+        .map_err(|_| Denial::Failed(Gate::Resource, format!("limit {limit_name} is absent")))?;
+    if observed <= max {
+        Ok(())
+    } else {
+        Err(Denial::LimitExceeded {
+            limit: limit_name.to_owned(),
+            observed,
+            max,
+        })
     }
 }
 
