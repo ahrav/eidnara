@@ -328,21 +328,18 @@ fn selected_sequence(store: &GenerationStore) -> Result<Option<u64>, Composition
     match store.read_vector_current()? {
         CurrentProfile::Quarantined => Err(CompositionRefusal::Quarantined),
         CurrentProfile::Absent => Ok(None),
-        CurrentProfile::Current(digest) => {
-            Ok(record(store, &digest).map(|(_, record)| record.sequence))
-        }
+        CurrentProfile::Current(digest) => Ok(record(store, &digest)
+            .filter(|_| store.validate(&digest).is_ok())
+            .map(|record| record.sequence)),
     }
 }
 
-/// The validated generation and record of `digest`, or `None` when its manifest does not name a vector composition or its record does not decode. The manifest is read before the files are hashed, so a store full of other owners' generations costs one manifest read each.
-fn record(store: &GenerationStore, digest: &str) -> Option<(ValidatedGeneration, Composition)> {
+/// Reads records only from manifests targeting `VECTOR_SELECTION_TARGET`. Full inventory and member verification still belong inside the candidate bound.
+fn record(store: &GenerationStore, digest: &str) -> Option<Composition> {
     if store.manifest(digest).ok()?.target != VECTOR_SELECTION_TARGET {
         return None;
     }
-    let generation = store.validate(digest).ok()?;
-    let record =
-        serde_json::from_slice(&generation.read_verified_file(COMPOSITION_FILE).ok()?).ok()?;
-    Some((generation, record))
+    serde_json::from_slice(&store.read_manifest_file(digest, COMPOSITION_FILE).ok()?).ok()
 }
 
 /// What the selector durably names after an attempt with an unknown outcome.
@@ -420,6 +417,13 @@ fn verify_validated(
     if composition.canonical_bytes() != bytes {
         return Err(CompositionRefusal::NotComposition("record not canonical"));
     }
+    // Refuse before opening members: the bound limits verification work, not just the returned topology.
+    if composition.deltas.len() > max_deltas.get() {
+        return Err(CompositionRefusal::DeltasOverBound {
+            count: composition.deltas.len(),
+            max: max_deltas.get(),
+        });
+    }
     // The manifest names the members file by hash and the store verified that hash, so equal manifests mean the members file agrees with the record.
     if composition.stage_manifest() != generation.manifest {
         return Err(CompositionRefusal::NotComposition("manifest binding"));
@@ -479,7 +483,7 @@ pub enum Unavailable {
     Store(String),
 }
 
-/// Takes the selected composition when it verifies. Otherwise reads only the manifests of the store's other generations to find compositions, orders them by descending sequence, then fully verifies at most `bound` of them and takes the first that passes. An acknowledged selection is never displaced by a newer composition that was staged but not selected. `_transaction` keeps a concurrent mutator from reclaiming what recovery is examining.
+/// Takes the selected composition when it verifies. After selected-composition verification fails or the selector is absent, retains the newest `bound` candidates and fully verifies them in descending order. Discovery retains no generation descriptors.
 ///
 /// # Errors
 ///
@@ -507,24 +511,22 @@ pub fn recover(
             });
         }
     }
-    let mut candidates: Vec<(u64, String, ValidatedGeneration)> = Vec::new();
+    let mut candidates = BTreeSet::new();
     for digest in store.digests().map_err(store_error)? {
         if selected.as_deref() == Some(digest.as_str()) {
             continue;
         }
-        if let Some((generation, record)) = record(store, &digest) {
-            candidates.push((record.sequence, digest, generation));
+        if let Some(record) = record(store, &digest) {
+            candidates.insert((record.sequence, digest));
+            if candidates.len() > bound.get() {
+                candidates.pop_first();
+            }
         }
     }
-    // Newest first; equal sequences fall back to digest order so the choice is deterministic.
-    candidates.sort_by(|(left_sequence, left, _), (right_sequence, right, _)| {
-        right_sequence
-            .cmp(left_sequence)
-            .then_with(|| right.cmp(left))
-    });
-    for (_, _, generation) in candidates.into_iter().take(bound.get()) {
+    // Newest first; equal sequences fall back to descending digest order.
+    for (_, digest) in candidates.into_iter().rev() {
         examined += 1;
-        if let Ok(composition) = verify_validated(store, generation, expected, max_deltas) {
+        if let Ok(composition) = verify_composition(store, &digest, expected, max_deltas) {
             let selector = match &selected {
                 Some(current) => SelectorState::Stale(current.clone()),
                 None => SelectorState::Absent,

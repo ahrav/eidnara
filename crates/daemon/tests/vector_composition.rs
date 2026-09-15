@@ -686,6 +686,90 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
 }
 
 #[test]
+fn recovery_counts_full_validation_failures_against_its_candidate_bound() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let first = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&first).unwrap();
+    let second = fixture.compose(2, &base, &[]).unwrap();
+    fixture.publish(&second).unwrap();
+    fs::remove_file(fixture.lifecycle_dir().join(VECTOR_PROFILE_NAME)).unwrap();
+    fs::write(
+        fixture.generation_dir(&second.digest()).join("unlisted"),
+        b"bad",
+    )
+    .unwrap();
+
+    assert_eq!(
+        recover(
+            &fixture.store,
+            &fixture.tx,
+            &fixture.expected(),
+            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap_err(),
+        Unavailable::NoCompatibleTarget { examined: 1 },
+        "inventory validation belongs inside the bound, not discovery"
+    );
+    assert_eq!(
+        fixture.recover().unwrap(),
+        (first.digest(), SelectorState::Absent)
+    );
+}
+
+#[test]
+fn recovery_does_not_retain_discovery_descriptors() {
+    const CHILD: &str = "EIDNARA_COMPOSITION_FD_BOUND_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "recovery_does_not_retain_discovery_descriptors",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    // Only this child lowers its FD limit; parallel tests keep the parent's limits.
+    rustix::process::setrlimit(
+        rustix::process::Resource::Nofile,
+        rustix::process::Rlimit {
+            current: Some(64),
+            maximum: Some(64),
+        },
+    )
+    .unwrap();
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let mut newest = String::new();
+    for sequence in 1..=80 {
+        newest = fixture
+            .publish(&fixture.compose(sequence, &base, &[]).unwrap())
+            .unwrap();
+    }
+    fs::remove_file(fixture.lifecycle_dir().join(VECTOR_PROFILE_NAME)).unwrap();
+    let recovered = recover(
+        &fixture.store,
+        &fixture.tx,
+        &fixture.expected(),
+        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(1).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovered.composition.digest, newest);
+    assert_eq!(recovered.selector, SelectorState::Absent);
+}
+
+#[test]
 fn the_vector_selector_refuses_layers_and_other_owners_and_a_composition_record_binds_its_members()
 {
     let fixture = Fixture::new();
@@ -1014,6 +1098,33 @@ fn equal_sequences_without_a_selector_recover_deterministically_and_a_selector_n
         fixture.store.read_vector_current().unwrap(),
         CurrentProfile::Absent
     );
+}
+
+#[test]
+fn verification_refuses_excess_deltas_before_opening_any_member() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let composition = fixture
+        .compose(1, &base, &[fixture.layer(5, 12), fixture.layer(6, 14)])
+        .unwrap();
+    fixture.publish(&composition).unwrap();
+    fixture.corrupt(&base.digest, CODES_FILE);
+
+    assert_eq!(
+        verify_composition(
+            &fixture.store,
+            &composition.digest(),
+            &fixture.expected(),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap_err(),
+        CompositionRefusal::DeltasOverBound { count: 2, max: 1 },
+        "the admission bound must refuse before even the base is verified"
+    );
+    assert!(matches!(
+        fixture.verify_composition(&composition.digest()),
+        Err(CompositionRefusal::Member { digest, .. }) if digest == base.digest
+    ));
 }
 
 #[test]
