@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use daemon::projection_admission::{ADMISSION_DIR, EVIDENCE_RECORD, InputRefusal};
-use daemon::projection_gates::{Denial, EntryPoint, ProjectionHook};
+use daemon::projection_gates::{Denial, EntryPoint, Gate, ProjectionHook};
 use daemon::projection_lifecycle::{
     Cause, ConsumerBinding, ControlState, LifecycleRequest, ProjectionLifecycle, Transition,
 };
@@ -1274,7 +1274,7 @@ fn caller_cancellation_interrupts_a_catch_up_waiting_for_a_kernel_reader() {
     );
 }
 
-/// A manifest that lowers a maintenance limit without changing the identity or coverage bounds hands the running supervisor back so the next one starts under the new bounds.
+/// A manifest that lowers a maintenance limit without changing the identity or coverage bounds hands the running supervisor back so the next one starts under the new bounds. The gate still holds the manifest the supervisor's bounds came from when it is handed back: a grant under the new manifest is never issued while a supervisor runs under the old bounds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_manifest_that_changes_the_maintenance_bounds_rotates_the_supervisor() {
     use support::embedding_fixtures::PROJECT;
@@ -1311,6 +1311,16 @@ async fn a_manifest_that_changes_the_maintenance_bounds_rotates_the_supervisor()
     let SliceOutcome::RotateMaintenance(handle) = outcome else {
         panic!("changed maintenance bounds hand the supervisor back: {outcome:?}");
     };
+    let gate = owner.admission().gate();
+    let expected = daemon::projection_gates::InvalidationIdentity::from(&identity);
+    let grant = gate
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .unwrap();
+    assert!(
+        gate.check_limits(&grant, &expected, &[("pending_count", LIMIT)])
+            .is_ok(),
+        "the gate keeps the manifest the running supervisor's bounds came from until it is stopped"
+    );
     owner.stop_maintenance(&handle).await.unwrap();
     assert!(matches!(
         owner.run_slice(&slice_budget()),
@@ -1319,6 +1329,14 @@ async fn a_manifest_that_changes_the_maintenance_bounds_rotates_the_supervisor()
     assert!(
         owner.maintenance().is_some(),
         "a supervisor restarts under the new bounds"
+    );
+    let grant = gate
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .unwrap();
+    assert!(
+        gate.check_limits(&grant, &expected, &[("pending_count", LIMIT)])
+            .is_err(),
+        "the slice that starts the new supervisor installs the manifest its bounds came from"
     );
     owner.shutdown().await.unwrap();
 }
@@ -3138,7 +3156,11 @@ fn a_duration_refusal_keeps_the_evidence_a_cleanup_needs() {
     let identity = identity(&kernel_incarnation_id(home));
     write_records(
         home,
-        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("B_recovery_ms", 30_000)]),
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("B_recovery_ms", 30_000)],
+        ),
         &campaign_json(&identity),
     );
     let outcome = owner.run_slice(&slice_budget());

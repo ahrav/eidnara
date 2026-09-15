@@ -568,6 +568,14 @@ impl SearchLifecycleOwner {
             );
             return SliceOutcome::Blocked(denial.to_string());
         }
+        // A supervisor whose bounds the manifest no longer yields is handed back before the gate renews on that manifest: renewal would cancel its grant and at once issue the next one, under which its loop would run a slice on the old bounds until the rotation reached it. The next slice, with no supervisor, installs the manifest and starts one under its bounds.
+        if completed
+            && selection.holds_operation(&intent)
+            && let Some(live) = selection.maintenance()
+            && self.tenure_outdated(inputs.manifest(), &spec)
+        {
+            return SliceOutcome::RotateMaintenance(live);
+        }
         // Hooks are judged on this slice's observation before the record decides anything, so an expired or blocked record cannot leave the previous slice's evidence installed.
         if let Refresh::Closed(closed) = self.refresh(&inputs, Some(selection), &identity, &budget)
         {
@@ -727,18 +735,15 @@ impl SearchLifecycleOwner {
         let roster: BTreeMap<String, ProjectScope> = (self.roster)().into_iter().collect();
         let mut tenure = self.tenure.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(live) = selection.maintenance() {
-            let Some((tenant, slices, started, recovery_ms)) = tenure.as_mut() else {
+            let Some((tenant, slices, started, _)) = tenure.as_mut() else {
                 return Ok(Some(live));
             };
             *slices += 1;
-            // A lone project keeps its supervisor; rotating it would only pay a restart. An expired episode grant, or bounds the manifest no longer yields, restarts its supervisor regardless of roster membership. The grant's deadline is an instant derived from `B_recovery_ms` at the start, so that limit is compared on its own.
+            // A lone project keeps its supervisor; rotating it would only pay a restart. An expired episode grant restarts its supervisor regardless of roster membership; bounds the manifest no longer yields hand it back before the gate renews, in `run_slice`.
             let over = *slices >= MAINTENANCE_TENURE_SLICES && roster.len() > 1;
             let expired = crate::now_ms() >= started.dispatch.grant.deadline;
-            let changed = !maintenance_bounds(manifest, spec).is_ok_and(|fresh| {
-                without_grant_deadline(fresh) == without_grant_deadline(*started)
-            }) || limit(manifest, "B_recovery_ms").ok() != Some(*recovery_ms);
             let bound = roster.get(tenant.as_str()) == Some(&*live.scope);
-            return Ok((over || expired || changed || !bound).then_some(live));
+            return Ok((over || expired || !bound).then_some(live));
         }
         let last = tenure.as_ref().map(|(tenant, _, _, _)| tenant.as_str());
         let Some((next, scope)) = last
@@ -776,6 +781,16 @@ impl SearchLifecycleOwner {
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound maintenance"))?;
         *tenure = Some((next.clone(), 0, bounds, recovery_ms));
         Ok(None)
+    }
+
+    /// Whether the manifest no longer yields the bounds the live supervisor started under. The grant's deadline is an instant derived from `B_recovery_ms` at the start, so that limit is compared on its own.
+    fn tenure_outdated(&self, manifest: &RuntimeManifest, spec: &ReplacementSpec) -> bool {
+        let tenure = self.tenure.lock().unwrap_or_else(|p| p.into_inner());
+        tenure.as_ref().is_some_and(|(_, _, started, recovery_ms)| {
+            !maintenance_bounds(manifest, spec).is_ok_and(|fresh| {
+                without_grant_deadline(fresh) == without_grant_deadline(*started)
+            }) || limit(manifest, "B_recovery_ms").ok() != Some(*recovery_ms)
+        })
     }
 
     /// Keeps the records' `physical_drain_ms` for a stop whose records are gone or disagree by then. Records that do not both name `identity`, as during a partial reload, are not an approved grace and leave the last one in place.
@@ -1636,6 +1651,26 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// An authorized recovery's specification is bounded by `B_authorized_recovery_ms`, so its maintenance bounds are what refuse a zero `B_recovery_ms`.
+    #[test]
+    fn a_zero_recovery_bound_refuses_the_maintenance_bounds() {
+        let identity = test_identity();
+        let mut manifest = manifest(&identity);
+        manifest.limits.insert("B_recovery_ms".to_owned(), 0);
+        let spec = replacement_spec(
+            &manifest,
+            identity,
+            Transition::AuthorizedRecovery,
+            3,
+            "generation",
+        )
+        .unwrap();
+        assert_eq!(
+            maintenance_bounds(&manifest, &spec).err(),
+            Some(SpecRefusal::TooSmall("B_recovery_ms"))
+        );
     }
 
     /// A backfill pass obsoletes every terminal candidate it selected in one transaction, one row each, so the pending bound fits the rows a transaction may mutate.

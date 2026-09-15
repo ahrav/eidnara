@@ -2244,6 +2244,59 @@ async fn terminal_search_deadline_preserves_the_candidate_for_retry() {
     assert_eq!(engine.calls(), 0);
 }
 
+/// A grant withdrawn while the terminal obsoletion write awaits the projection connection commits nothing: the transaction judges the budget once the connection is held, so no row is obsoleted under a manifest the grant no longer covers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_terminal_obsoletion_is_not_written_under_a_budget_cancelled_before_its_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("terminal-withdrawn", "obsolete input");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    corpus.retire(&object);
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let limits = bounds();
+    let guard = budget(Duration::from_secs(10));
+    let withdrawn = guard.clone();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
+    let search = search_path(dir.path());
+    let mut holder = None;
+    let mut events = Vec::new();
+
+    let end = dispatcher
+        .run_pass(eligibility(&project), &limits, &guard, NOW, &mut |event| {
+            if matches!(event, DispatchEvent::Bound(_)) {
+                let (held_tx, held) = mpsc::channel();
+                let search = search.clone();
+                let withdrawn = withdrawn.clone();
+                holder = Some(std::thread::spawn(move || {
+                    let conn = Connection::open(search).unwrap();
+                    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    held_tx.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(500));
+                    withdrawn.cancel();
+                    std::thread::sleep(Duration::from_millis(100));
+                    conn.execute_batch("ROLLBACK").unwrap();
+                }));
+                held.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            events.push(event);
+        })
+        .unwrap();
+    holder.take().unwrap().join().unwrap();
+    assert_eq!(end, Some(Blocked::BudgetExhausted));
+    assert_eq!(
+        ledger(dir.path(), occurrence).state,
+        "pending",
+        "no row is obsoleted under a withdrawn grant"
+    );
+    assert!(stopped(&events).is_empty(), "{events:?}");
+    assert!(projection.quarantine().is_none());
+    assert_eq!(engine.calls(), 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_terminal_commit_emits_no_attributed_stop() {
     let dir = tempfile::tempdir().unwrap();

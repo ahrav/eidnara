@@ -533,7 +533,9 @@ impl<'a> EmbeddingDispatcher<'a> {
             cursor: safe_cursor,
             revisit_at,
         });
-        if let Some(blocked) = self.obsolete_candidates(&terminal, deadline, now, observer)? {
+        if let Some(blocked) =
+            self.obsolete_candidates(&terminal, budget, deadline, now, observer)?
+        {
             return Ok(Some(blocked));
         }
         let pass = Pass {
@@ -597,6 +599,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             return self.obsolete_identity(
                 job,
                 "generation_mismatch",
+                pass.budget,
                 pass.deadline,
                 pass.now,
                 observer,
@@ -1210,9 +1213,11 @@ impl<'a> EmbeddingDispatcher<'a> {
         }
     }
 
+    /// Marks `candidates` obsolete in one transaction. `Ok(Some(blocked))` means no row was written: `write_within` did not acquire the connection before `deadline`, or `budget.is_exhausted()` held before the write began.
     fn obsolete_candidates(
         &mut self,
         candidates: &[PendingObsoletion],
+        budget: &EvalBudget,
         deadline: Instant,
         now: i64,
         observer: &mut dyn FnMut(DispatchEvent),
@@ -1222,6 +1227,9 @@ impl<'a> EmbeddingDispatcher<'a> {
         }
         self.check_quarantine()?;
         let outcomes = self.projection.write_within(deadline, |conn| {
+            if budget.is_exhausted() {
+                return Ok(None);
+            }
             candidates
                 .iter()
                 .map(|candidate| {
@@ -1236,6 +1244,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()
+                .map(Some)
         });
         let outcomes = if self.take_fault(DispatchFault::LoseObsoletionReply) && outcomes.is_ok() {
             Err(SearchProjectionError::Store(storage::StoreError::Backend(
@@ -1245,7 +1254,8 @@ impl<'a> EmbeddingDispatcher<'a> {
             outcomes
         };
         match outcomes {
-            Ok(outcomes) => {
+            Ok(None) => Ok(Some(Blocked::BudgetExhausted)),
+            Ok(Some(outcomes)) => {
                 for (candidate, outcome) in candidates.iter().zip(outcomes) {
                     if outcome == Obsoletion::Marked {
                         observer(DispatchEvent::Stopped {
@@ -1274,6 +1284,7 @@ impl<'a> EmbeddingDispatcher<'a> {
         &mut self,
         job: &DispatchJob,
         reason: &'static str,
+        budget: &EvalBudget,
         deadline: Instant,
         now: i64,
         observer: &mut dyn FnMut(DispatchEvent),
@@ -1288,6 +1299,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                 source_artifact_digest: job.source_artifact_digest.clone(),
                 reason,
             }],
+            budget,
             deadline,
             now,
             observer,
