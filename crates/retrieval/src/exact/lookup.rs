@@ -6,7 +6,9 @@ use rusqlite::params;
 use storage::GuardedConn;
 
 use crate::batch::{ProjectionCheckpoint, read_checkpoint};
-use crate::exact::association::{CANONICAL_OBJECT_NAMESPACE, EXTRACTION_VERSION, sha_namespace};
+use crate::exact::association::{
+    CANONICAL_OBJECT_NAMESPACE, EXTRACTION_VERSION, derived_target, sha_namespace,
+};
 use crate::exact::selector::{Family, HexPrefix};
 use crate::{ProjectionError, Tombstone, decode_span, decode_tombstone};
 
@@ -284,7 +286,7 @@ pub fn page(
                 expected: EXTRACTION_VERSION,
             });
         }
-        let decoded = AssociationRow::decode(row)?;
+        let decoded = AssociationRow::decode(row, range.family)?;
         if previous_key.as_ref() != Some(&decoded.key) {
             page.distinct_keys += 1;
         }
@@ -295,7 +297,7 @@ pub fn page(
 }
 
 impl AssociationRow {
-    fn decode(row: &rusqlite::Row<'_>) -> Result<Self, LookupRefusal> {
+    fn decode(row: &rusqlite::Row<'_>, family: Family) -> Result<Self, LookupRefusal> {
         let corrupt = || ProjectionError::CorruptRow;
         let span = decode_span(row.get(9)?, row.get(10)?)?;
         let occurrence_created_commit_seq: i64 = row.get(15)?;
@@ -320,9 +322,14 @@ impl AssociationRow {
         if identity_digest(&tuple) != occurrence_id || lineage.as_deref() != Some(&*lineage_id) {
             return Err(corrupt().into());
         }
+        let key: Vec<u8> = row.get(0)?;
+        let target_id: String = row.get(1)?;
+        if derived_target(family, &key, &lineage_id) != Some(target_id.as_bytes()) {
+            return Err(corrupt().into());
+        }
         Ok(Self {
-            key: row.get(0)?,
-            target_id: row.get(1)?,
+            key,
+            target_id,
             occurrence_id,
             created_commit_seq: row.get(4)?,
             lineage_id,

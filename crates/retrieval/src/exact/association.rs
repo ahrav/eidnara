@@ -68,6 +68,21 @@ pub fn extract(record: &OccurrenceRecord<'_>, lineage_id: &str) -> Vec<Associati
     }
 }
 
+/// The target `extract` derives for a stored key: the key itself for `id`
+/// rows, the occurrence lineage for `sha` rows, and nothing for families
+/// without a mapping.
+pub(crate) fn derived_target<'a>(
+    family: Family,
+    key: &'a [u8],
+    lineage_id: &'a str,
+) -> Option<&'a [u8]> {
+    match family {
+        Family::Id => Some(key),
+        Family::Sha => Some(lineage_id.as_bytes()),
+        Family::Path | Family::Symbol | Family::Command | Family::Config | Family::Error => None,
+    }
+}
+
 fn canonical_object(object_id: Option<&str>) -> Vec<AssociationKey> {
     object_id
         .map(|object_id| AssociationKey {

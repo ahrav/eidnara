@@ -866,6 +866,7 @@ fn a_page_refuses_the_same_damaged_rows_as_the_occurrence_reader() {
     let sources = vec![
         claim("obj-1", 1, "decision_summary"),
         claim("obj-1", 1, "rationale"),
+        commit("repo-a", ObjectFormat::Sha1, oid40("abc", '0'), 1),
     ];
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());
@@ -873,6 +874,52 @@ fn a_page_refuses_the_same_damaged_rows_as_the_occurrence_reader() {
     apply(&store, &sources, mutation(0, 5), vec![], 10).unwrap();
     let damaged = occurrence_id(&sources[0]);
     let query = ExactQuery::CanonicalObject(b"obj-1");
+    let prefix = hex("abc");
+    let sha_query =
+        ExactQuery::Sha(ShaPrefixQuery::bind("repo-a", ObjectFormat::Sha1, &prefix).unwrap());
+    for (name, sql, query) in [
+        (
+            "id target",
+            "UPDATE exact_associations SET target_id='elsewhere' WHERE family='id'",
+            &query,
+        ),
+        (
+            "sha target",
+            "UPDATE exact_associations SET target_id='elsewhere' WHERE family='sha'",
+            &sha_query,
+        ),
+    ] {
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(sql, [])?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    page(conn, &context(8), query, None).unwrap_err(),
+                    LookupRefusal::Projection(ProjectionError::CorruptRow),
+                    "{name}: a target the mapping did not derive is refused"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "UPDATE exact_associations SET target_id='obj-1' WHERE family='id'",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE exact_associations SET target_id=o.lineage_id FROM occurrences o
+                 WHERE o.occurrence_id=exact_associations.occurrence_id AND family='sha'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     for (name, invalidated_commit_seq) in [("at creation", 5), ("before creation", 3)] {
         store
             .with_conn_fenced(|conn| {

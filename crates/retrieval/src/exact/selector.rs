@@ -211,14 +211,14 @@ fn mentions(trimmed: &str, start: usize, bounds: SelectorBounds) -> Vec<Mention>
     found
 }
 
-/// The byte before the keyword must not continue an identifier, so `oid:`
-/// never contains `id:`.
+/// A selector head cannot start inside an identifier.
 fn selector_head(text: &str, at: usize) -> Option<(Family, usize)> {
-    if at > 0 {
-        let before = text.as_bytes()[at - 1];
-        if before.is_ascii_alphanumeric() || before == b'_' {
-            return None;
-        }
+    if text[..at]
+        .chars()
+        .next_back()
+        .is_some_and(|before| before.is_alphanumeric() || before == '_')
+    {
+        return None;
     }
     let rest = &text.as_bytes()[at..];
     Family::ALL.into_iter().find_map(|family| {
@@ -490,6 +490,16 @@ mod tests {
             hybrid("oid:abc"),
             vec![],
             "a keyword inside an identifier is not a head"
+        );
+        assert_eq!(
+            hybrid("caf\u{e9}id:abc"),
+            vec![],
+            "a Unicode letter before the keyword continues the identifier"
+        );
+        assert_eq!(
+            hybrid("\u{2192}id:abc").len(),
+            1,
+            "a Unicode symbol before the keyword does not"
         );
     }
 
