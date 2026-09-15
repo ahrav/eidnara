@@ -43,6 +43,15 @@
 | `claim-cancellation-preserves-durable-work` | cancellation at each boundary | RP2.1 tests |
 | `claim-disable-preserves-consumer-contract` | lagging consumer at disable | no |
 | `claim-recovery-converges-within-approved-bound` | approved bound plus crash cuts | no |
+| `candidate-validation-preserves-surface-policy` | labeled claims validated on two surfaces | yes |
+| `stale-projection-cannot-authorize-current-use` | quarantine and correction between two validations | yes |
+| `eligibility-cache-cannot-change-canonical-verdict` | duplicated ordered candidates, two reads | yes |
+| `u5-rejection-and-unknown-accounting-is-lossless` | rejected Unknown and permitted genuine in one batch | yes |
+| `u5-evaluation-keeps-provenance-and-judgment-separate` | equal policy, different classes | yes |
+| `u5-class-transition-situations-are-witnessed` | frozen RP2.9 manifest | partial |
+| `bound-project-scope-cannot-be-widened-by-candidate` | foreign-project claim | kernel tests |
+| `checkout-applicability-is-revalidated-without-relevance-refresh` | checkout change with a wired engine | no |
+| `optional-edits-require-host-capability-and-survival-proof` | harness with and without capability | no |
 
 ## Coverage checks to add
 
@@ -52,6 +61,12 @@
   process-crash harness once RP2.9 approves a bound.
 - `claim-disable-preserves-consumer-contract`: a claim consumer disable path
   once the pending-consumer transition is decided.
+- `checkout-applicability-is-revalidated-without-relevance-refresh`: a daemon
+  path that loads applicability inputs for claim candidates and calls the
+  kernel engine, with a git fixture carrying overlapping and disjoint edits.
+- `optional-edits-require-host-capability-and-survival-proof` and the six
+  delivery witnesses: OpenCode and Pi harness runs observing real host and
+  provider output.
 
 ## Leverage ranking
 

@@ -12,9 +12,11 @@ the trusted causality write path (`Envelope::record_claim_causality`), and the
 snapshot-bound causal classifier (`claim_causality::causal_class_at`); and the
 projection side: `retrieval::claims`, which classifies live claim occurrences
 into Current, Superseded, Retracted, Hidden, or Stale from those facts at one
-kernel snapshot and stores no state. Eligibility per surface, checkout
-applicability, and harness delivery are separate implementation boundaries;
-their records join this catalog with the ticket that lands them.
+kernel snapshot and stores no state; and the final-use gate:
+`KernelStore::judge_surface_eligibility` and
+`retrieval::claims::validate_for_surface`, which judge candidates per surface
+against current canonical policy at a fresh snapshot. Checkout applicability
+and harness delivery are not yet wired; their records say so.
 
 ## Reachability classes
 
@@ -31,11 +33,11 @@ Every slug the specification and its three implementation tickets assign. The
 
 | Slug | Ticket | Record |
 | --- | --- | --- |
-| `bound-project-scope-cannot-be-widened-by-candidate` | #466 | pending |
-| `candidate-validation-preserves-surface-policy` | #466 | pending |
+| `bound-project-scope-cannot-be-widened-by-candidate` | #466 | yes |
+| `candidate-validation-preserves-surface-policy` | #466 | yes |
 | `canonical-claim-fields-match-fenced-source` | #458 | yes |
 | `canonical-provenance-survives-approved-write-read-path` | #458 | yes |
-| `checkout-applicability-is-revalidated-without-relevance-refresh` | #466 | pending |
+| `checkout-applicability-is-revalidated-without-relevance-refresh` | #466 | yes |
 | `claim-cancellation-preserves-durable-work` | #460 | yes |
 | `claim-capacity-failure-is-atomic` | #458 | yes |
 | `claim-consumer-replay-includes-published-history` | #460 | yes |
@@ -51,20 +53,20 @@ Every slug the specification and its three implementation tickets assign. The
 | `claim-tombstone-masks-all-representations` | #460 | yes |
 | `claim-worker-result-cannot-outlive-identity` | #460 | yes |
 | `echo-classification-requires-canonical-causality` | #458 | yes |
-| `eligibility-cache-cannot-change-canonical-verdict` | #466 | pending |
+| `eligibility-cache-cannot-change-canonical-verdict` | #466 | yes |
 | `eligible-positive-and-unknown-claims-remain-reachable` | #460 | yes |
 | `malformed-required-field-stops-projection-progress` | #458 | yes |
 | `occurrence-identity-is-not-payload-or-source-triple` | #458 | yes |
-| `optional-edits-require-host-capability-and-survival-proof` | #466 | pending |
+| `optional-edits-require-host-capability-and-survival-proof` | #466 | yes |
 | `projection-has-no-second-truth-or-policy-authority` | #458 | yes |
 | `retrieved-content-cannot-upgrade-write-authority` | #458 | yes |
 | `revision-domains-remain-distinct-and-supported` | #458 | yes |
 | `served-sensitivity-and-artifact-policy-govern-egress` | #458 | yes |
-| `stale-projection-cannot-authorize-current-use` | #466 | pending |
+| `stale-projection-cannot-authorize-current-use` | #466 | yes |
 | `supporting-authority-is-preserved-not-recomputed` | #458 | yes |
-| `u5-class-transition-situations-are-witnessed` | #466 | pending |
-| `u5-evaluation-keeps-provenance-and-judgment-separate` | #466 | pending |
-| `u5-rejection-and-unknown-accounting-is-lossless` | #466 | pending |
+| `u5-class-transition-situations-are-witnessed` | #466 | yes |
+| `u5-evaluation-keeps-provenance-and-judgment-separate` | #466 | yes |
+| `u5-rejection-and-unknown-accounting-is-lossless` | #466 | yes |
 | `unknown-echo-state-is-policy-neutral` | #460 | yes |
 
 ## Records
@@ -669,6 +671,197 @@ Impact: recovery that never converges leaves stale candidates authoritative.
 Open questions:
 - Which numeric recovery bound does RP2.9 approve for claim projections? (needs human input)
 
+### candidate-validation-preserves-surface-policy
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `validate_for_surface` judges `Current` candidates through
+`KernelStore::judge_surface_eligibility_within_budget`, which pairs each batch
+verdict with the serving view's visibility on the requested surface from the
+same read; the daemon test shows labeled claims permitted only on explicit
+search and an automatic one visible on all three surfaces from one batch
+verdict, a foreign project denied `WrongScope`, and a remote destination
+denied `ProviderSensitive` through the artifact gate.
+Guarantee: A candidate is presented on a surface only when the kernel's batch
+verdict is `Ok` and the serving view shows the object on that surface; batch
+`Ok` alone never grants automatic injection, and a labeled presentation keeps
+its label.
+Check: `always` - `SurfaceVerdict::permits` requires `Ok` and a non-hidden
+visibility on the surface; `UseVerdict::Permitted(visibility)` carries the
+kernel's own visibility, so a `Labeled` presentation keeps its label.
+Fault/timing angle: none.
+Required faults and enabling state: claims admitted with `ExplicitLabeled` and `Automatic` visibility rows, validated on all three surfaces, under a foreign project, and at a remote destination.
+Confidence: high - [evidence](evidence/candidate-validation-preserves-surface-policy.md).
+Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`; status unaudited.
+Impact: a batch `Ok` read as permission injects a claim the policy only allows on explicit search.
+Open questions: None.
+
+### stale-projection-cannot-authorize-current-use
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - after a quarantine and a correction the projection has not
+caught up with, both the classification snapshot and the fresh revalidation of
+a subset of earlier survivors deny the restricted objects; the unaffected
+claims stay permitted.
+Guarantee: A projection row that was Current at an earlier snapshot grants
+nothing at a later one; every use is judged against the kernel at a fresh
+snapshot, and a restriction completed before that snapshot denies the use.
+Check: `always` - `validate_for_surface` over survivors selected earlier returns
+`Denied(Verdict(_))` for every object the kernel restricted since, and its
+`snapshot.tip` exceeds the earlier snapshot's.
+Fault/timing angle: the window between selection and handoff.
+Required faults and enabling state: approve-then-quarantine and correction landing between two validations.
+Confidence: high - [evidence](evidence/stale-projection-cannot-authorize-current-use.md).
+Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`; status unaudited.
+Impact: a selected claim is delivered after the kernel revoked it.
+Open questions: None.
+
+### eligibility-cache-cannot-change-canonical-verdict
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - two validations of the same ordered, duplicated candidate
+list at one snapshot return equal verdicts, positions, and snapshots; the
+daemon route's `VerdictCache` is unchanged by this change and its own checks
+cover cached versus uncached agreement.
+Guarantee: Ordered duplicate entries keep their positions and verdicts, and
+cached and uncached reads at one snapshot agree.
+Check: `always` - `verdicts[i]` judges `candidates[i]` for every `i`, including
+duplicates; two reads at one tip are equal.
+Fault/timing angle: none.
+Required faults and enabling state: a candidate list with every entry repeated.
+Confidence: medium - [evidence](evidence/eligibility-cache-cannot-change-canonical-verdict.md).
+Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`; `crates/daemon/tests/kernel_routes.rs` - `eligibility_verdicts_cover_every_class_and_cache_per_incarnation_and_tip`; status unaudited.
+Impact: a cache answers a different verdict than the kernel would.
+Open questions: None.
+
+### u5-rejection-and-unknown-accounting-is-lossless
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `UseAccounting` keeps permitted, rejected, and Unknown object
+sets apart; the daemon test shows the rejected and Unknown sets overlapping on
+two objects without either absorbing the other, and attempts counted as rows.
+Guarantee: Rejected and Unknown identities are counted in separate sets that
+may overlap; attempts, relevance judgments, and external application outcomes
+are never folded into them.
+Check: `always` - `rejected_objects` and `unknown_objects` are independent
+sets keyed by object id; `attempted_rows` counts rows.
+Fault/timing angle: none.
+Required faults and enabling state: a rejected claim with Unknown lineage and a permitted claim with known lineage in one batch.
+Confidence: high - [evidence](evidence/u5-rejection-and-unknown-accounting-is-lossless.md).
+Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`; status unaudited.
+Impact: merged counts hide how many rejections were also Unknown.
+Open questions: None.
+
+### u5-evaluation-keeps-provenance-and-judgment-separate
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - the validation verdict is computed without reading the
+causal class, and the class is reported through the batch's facts beside the
+verdict; relevance judgments and application outcomes are not modeled in this
+change.
+Guarantee: The causal class of a candidate is reported beside, and never
+folded into, its use verdict.
+Check: `always` - `validate_for_surface` reads no causal class when computing
+`UseVerdict`; `unknown_objects` is filled from the facts independently.
+Fault/timing angle: none.
+Required faults and enabling state: a genuine and an Unknown claim with equal policy.
+Confidence: medium - [evidence](evidence/u5-evaluation-keeps-provenance-and-judgment-separate.md).
+Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`; `crates/retrieval/tests/claims.rs` - `causal_class_changes_no_state`; status unaudited.
+Impact: provenance leaks into relevance or authorization.
+Open questions:
+- How are relevance judgments and external-application outcomes recorded beside these counts? (unresolved, needs the RP2.9 accounting protocol)
+
+### u5-class-transition-situations-are-witnessed
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - the daemon tests witness `Current` to `Superseded`,
+`Retracted`, `Hidden`, and `Stale` transitions and a `DirectObservation` record
+surviving a correction of its subject's predecessor; the full required
+class-by-transition manifest is RP2.9's to freeze.
+Guarantee: Every required causal-class-by-transition cell has an independent
+situation witness before the class is counted as covered.
+Check: `sometimes` - each cell of the frozen manifest is reached by at least one
+test that constructs its situation, not merely its code path.
+Fault/timing angle: transitions landing between classification and validation.
+Required faults and enabling state: the frozen RP2.9 manifest of cells.
+Confidence: low - [evidence](evidence/u5-class-transition-situations-are-witnessed.md).
+Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`, `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees`; status unaudited.
+Impact: a summary marker counts a cell no test constructed.
+Open questions:
+- Which cells does the RP2.9 manifest require? (needs human input)
+
+### bound-project-scope-cannot-be-widened-by-candidate
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - validation binds the project through `ProjectScope` on
+every kernel call; the kernel's `WrongScope` verdict is covered by the existing
+eligibility tests, and no claim test constructs a foreign-project candidate.
+Guarantee: A candidate cannot widen the project scope a request is bound to;
+the kernel judges every candidate against the bound project's scope terms.
+Check: `always` - a candidate whose scope does not name the bound project is
+`Denied(Verdict(WrongScope))`.
+Fault/timing angle: none.
+Required faults and enabling state: a claim scoped to another project.
+Confidence: medium - [evidence](evidence/bound-project-scope-cannot-be-widened-by-candidate.md).
+Existing check: `crates/kernel/tests/kernel_eligibility.rs`; status unaudited.
+Impact: a request bound to one project delivers another project's claims.
+Open questions: None.
+
+### checkout-applicability-is-revalidated-without-relevance-refresh
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: not yet - no daemon or retrieval path invokes the kernel
+applicability engine for claim candidates; the engine and its checkout
+snapshot exist with their own kernel tests.
+Guarantee: A checkout change recomputes applicability for selected claims
+without a new observation or a relevance refresh, and overlapping dirty edits
+block automatic use while disjoint edits leave a claim Current.
+Check: `always` - after a HEAD, check-input, or dirty-tree change the engine is
+invoked again on the same candidates and its states are honored.
+Fault/timing angle: a checkout change between selection and handoff.
+Required faults and enabling state: the kernel applicability engine wired to claim candidates; a git fixture with dirty edits.
+Confidence: low - [evidence](evidence/checkout-applicability-is-revalidated-without-relevance-refresh.md).
+Existing check: `crates/kernel/tests/kernel_applicability_engine.rs`, `crates/kernel/tests/kernel_read_repair.rs`; status unaudited.
+Impact: a claim about code the checkout no longer has is injected as current.
+Open questions:
+- Which daemon path loads bounded applicability inputs for claim candidates? (needs human input)
+
+### optional-edits-require-host-capability-and-survival-proof
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: not yet - no harness path delivers claims; host capability
+enforcement and surviving-visibility proof belong to the daemon and plugin
+integration this change does not include.
+Guarantee: An optional edit is attempted only under host-enforced capability
+and counted only with a surviving-visibility proof; delivery is never proof of
+a filesystem edit.
+Check: `always-or-unreached` - the edit path is not entered without the
+capability, and an entered path records survival before counting.
+Fault/timing angle: stale preparations and duplicate callbacks.
+Required faults and enabling state: a harness with the capability and one without.
+Confidence: low - [evidence](evidence/optional-edits-require-host-capability-and-survival-proof.md).
+Existing check: none.
+Impact: a simulated capability counts as an applied edit.
+Open questions:
+- Which harness capabilities are actually supported? (needs human input)
+
 ## Relationship map
 
 - `echo-classification-requires-canonical-causality` is the load-bearing record;
@@ -682,6 +875,10 @@ Open questions:
   reader copies rows and reuses the serving query.
 - `claim-export-predecode-bounds` and `claim-capacity-failure-is-atomic` share
   the bound-before-read discipline.
+- `candidate-validation-preserves-surface-policy` and
+  `stale-projection-cannot-authorize-current-use` share the final-use gate:
+  every presentation is judged by the kernel per surface at a fresh snapshot,
+  so neither an earlier verdict nor a lagging projection row is authority.
 - `claim-tombstone-masks-all-representations`,
   `claim-rebuild-incremental-parity`, and
   `unknown-echo-state-is-policy-neutral` share one mechanism: the projection

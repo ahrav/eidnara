@@ -7,14 +7,21 @@
 //! every time it is asked for. `classify` takes no causal class, so `Unknown`
 //! lineage cannot change a candidate's state, and no field here carries a
 //! score, a boost, or a corroboration count.
+//!
+//! `validate_for_surface` is the final-use gate: it re-judges `Current`
+//! candidates against the kernel's current policy for one surface at a fresh
+//! snapshot, so a restriction that landed after classification denies the use
+//! whatever the projection still holds.
 
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 
+use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ClaimFactBounds, ClaimFacts, ClaimFactsError, Disposition, KernelStore, ServedStanding,
-    SurfaceVisibility,
+    ArtifactDestination, ClaimFactBounds, ClaimFacts, ClaimFactsError, CommitReadIncarnation,
+    Disposition, EgressSnapshot, EligibilityCandidate, EligibilityVerdict, KernelError,
+    KernelStore, ProjectScope, ServedStanding, Surface, SurfaceVisibility,
 };
 use rusqlite::params;
 use storage::GuardedConn;
@@ -57,6 +64,9 @@ pub struct ClaimCandidateRow {
     pub representation: String,
     pub object_id: String,
     pub revision: i64,
+    /// The digest of the artifact the row's bytes were selected from; the
+    /// final-use gate judges its egress facts with the object.
+    pub artifact_digest: String,
 }
 
 /// One classified candidate. `claim` indexes `ClaimCandidateBatch::claims`;
@@ -101,6 +111,9 @@ pub enum ClaimCandidateError {
     Projection(#[from] ProjectionError),
     #[error(transparent)]
     Facts(#[from] ClaimFactsError),
+    /// A kernel failure while judging candidates for a surface.
+    #[error("surface eligibility: {0}")]
+    Eligibility(KernelError),
 }
 
 /// The classes the `id` family covers are exactly the claim classes.
@@ -114,7 +127,8 @@ fn claim_classes() -> &'static [OccurrenceClass] {
 /// `?1` and `?2` are the two claim class codes, `?3` the row probe, `?4` the
 /// association family keyword, `?5` the association namespace.
 const LIVE_CLAIM_ROWS_SQL: &str =
-    "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision
+    "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision,
+            o.source_artifact_digest
      FROM occurrences o
      LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
      LEFT JOIN exact_associations a
@@ -123,7 +137,15 @@ const LIVE_CLAIM_ROWS_SQL: &str =
      ORDER BY o.class,o.occurrence_id
      LIMIT ?3";
 
-type LiveRow = (String, String, String, Option<String>, Option<u32>, i64);
+type LiveRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<u32>,
+    i64,
+    String,
+);
 
 /// Live claim rows in `(class, occurrence_id)` order. A set larger than `max`
 /// is refused whole rather than truncated.
@@ -165,6 +187,7 @@ pub fn live_claim_candidates(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )?
@@ -174,7 +197,7 @@ pub fn live_claim_candidates(
     }
     rows.into_iter()
         .map(
-            |(occurrence_id, class, representation, object_id, version, revision)| {
+            |(occurrence_id, class, representation, object_id, version, revision, digest)| {
                 let class =
                     OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?;
                 let object_id = object_id.ok_or(ProjectionError::CorruptRow)?;
@@ -194,6 +217,7 @@ pub fn live_claim_candidates(
                     representation,
                     object_id,
                     revision,
+                    artifact_digest: digest,
                 })
             },
         )
@@ -282,5 +306,157 @@ pub fn classify_live_claims(
         known_as_of,
         claims: snapshot.claims,
         candidates,
+    })
+}
+
+/// Why a surface may not present a candidate at the validated snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseDenial {
+    /// The candidate's state at the classification snapshot was not `Current`.
+    State(CandidateState),
+    /// The kernel's batch verdict at the validation snapshot.
+    Verdict(EligibilityVerdict),
+    /// The batch admitted the object but the serving view hides it on this surface.
+    SurfaceHidden,
+}
+
+/// What one surface may do with one candidate at the validation snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseVerdict {
+    /// The kernel's own visibility on the surface: `Labeled` means the
+    /// presentation must carry the claim's label.
+    Permitted(SurfaceVisibility),
+    Denied(UseDenial),
+}
+
+/// `candidates[i]` of the validated slice paired with its verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedCandidate {
+    pub candidate: ClaimCandidate,
+    pub verdict: UseVerdict,
+}
+
+/// Identity-based counts kept apart: an object may be both rejected and of
+/// unknown lineage, so the two sets may overlap and neither is derived from
+/// the other. Attempts count rows; the sets count objects.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UseAccounting {
+    pub attempted_rows: usize,
+    pub permitted_objects: BTreeSet<String>,
+    pub rejected_objects: BTreeSet<String>,
+    pub unknown_objects: BTreeSet<String>,
+}
+
+/// The result of validating candidates for one surface at one fresh kernel
+/// snapshot. A candidate denied here is denied for that snapshot; a change
+/// after `snapshot.tip` is concurrent with the delivery, not a retroactive
+/// cancellation of it.
+#[derive(Debug)]
+pub struct SurfaceValidation {
+    /// A `None` classification generation is not a reusable grant and must
+    /// not be cached.
+    pub snapshot: EgressSnapshot,
+    pub incarnation: CommitReadIncarnation,
+    pub surface: Surface,
+    /// Positionally aligned with the validated slice.
+    pub candidates: Vec<ValidatedCandidate>,
+    pub accounting: UseAccounting,
+}
+
+impl SurfaceValidation {
+    pub fn is_reusable(&self) -> bool {
+        self.snapshot.classification_generation.is_some()
+    }
+}
+
+/// Validates `candidates` for `surface` against the kernel's current canonical
+/// policy in one fresh snapshot bounded by `budget`. Only `Current` candidates
+/// are submitted to the kernel, judged by the decision object they name, its
+/// revision, and the artifact behind the row; the rest are denied by their
+/// state. A batch `Ok` permits the surface only when the serving view also
+/// shows the object there, so an `AutoInject` presentation needs `Visible` on
+/// `AutoInject`, never batch `Ok` alone. Call it before preselection admission
+/// and again on the exact survivors immediately before handoff; the second
+/// call reads a newer snapshot and denies anything restricted since the first.
+/// `batch` supplies the lineage facts for the accounting; candidates are
+/// matched to it by object id.
+///
+/// # Errors
+///
+/// `Eligibility(InvalidInput)` when more than `MAX_ELIGIBILITY_CANDIDATES`
+/// candidates are `Current` or a row's object id fails the candidate bounds;
+/// `Eligibility(Deadline)` when the budget runs out; other kernel read errors
+/// as `Eligibility(_)`.
+pub fn validate_for_surface(
+    kernel: &KernelStore,
+    batch: &ClaimCandidateBatch,
+    candidates: &[ClaimCandidate],
+    project: &ProjectScope,
+    destination: ArtifactDestination,
+    surface: Surface,
+    budget: &EvalBudget,
+) -> Result<SurfaceValidation, ClaimCandidateError> {
+    let current = |candidate: &&ClaimCandidate| candidate.state == CandidateState::Current;
+    let submitted: Vec<EligibilityCandidate> = candidates
+        .iter()
+        .filter(current)
+        .map(|candidate| EligibilityCandidate {
+            object_id: candidate.row.object_id.clone(),
+            source_revision: candidate.row.revision,
+            artifact_digest: Some(candidate.row.artifact_digest.clone()),
+        })
+        .collect();
+    let judged = kernel
+        .judge_surface_eligibility_within_budget(project, destination, surface, &submitted, budget)
+        .map_err(ClaimCandidateError::Eligibility)?;
+    let lineage: HashMap<&str, &ClaimFacts> = batch
+        .claims
+        .iter()
+        .map(|claim| (claim.object.object_id.as_str(), claim))
+        .collect();
+    let mut accounting = UseAccounting {
+        attempted_rows: candidates.len(),
+        ..UseAccounting::default()
+    };
+    let mut verdicts = judged.verdicts.iter();
+    let mut validated = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let verdict = if current(&candidate) {
+            // `submitted` was filtered by the same predicate over the same
+            // slice, so the kernel returned exactly one verdict per `Current`
+            // candidate in order.
+            match verdicts.next() {
+                Some(judged) if judged.permits() => UseVerdict::Permitted(judged.visibility),
+                Some(judged) if judged.verdict == EligibilityVerdict::Ok => {
+                    UseVerdict::Denied(UseDenial::SurfaceHidden)
+                }
+                Some(judged) => UseVerdict::Denied(UseDenial::Verdict(judged.verdict)),
+                None => return Err(ClaimCandidateError::Eligibility(KernelError::InvalidInput)),
+            }
+        } else {
+            UseVerdict::Denied(UseDenial::State(candidate.state))
+        };
+        let object_id = candidate.row.object_id.clone();
+        match verdict {
+            UseVerdict::Permitted(_) => accounting.permitted_objects.insert(object_id.clone()),
+            UseVerdict::Denied(_) => accounting.rejected_objects.insert(object_id.clone()),
+        };
+        if lineage
+            .get(object_id.as_str())
+            .is_none_or(|claim| claim.causality.is_unknown())
+        {
+            accounting.unknown_objects.insert(object_id);
+        }
+        validated.push(ValidatedCandidate {
+            candidate: candidate.clone(),
+            verdict,
+        });
+    }
+    Ok(SurfaceValidation {
+        snapshot: judged.snapshot,
+        incarnation: judged.incarnation,
+        surface: judged.surface,
+        candidates: validated,
+        accounting,
     })
 }

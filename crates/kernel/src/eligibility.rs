@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use rusqlite::Transaction;
 
-use crate::admission::{EgressCandidate, EgressSnapshot, egress_candidates_tx};
+use crate::admission::{EgressCandidate, EgressSnapshot, Surface, egress_candidates_tx};
 use crate::cas::{ArtifactDestination, ArtifactEligibility, is_artifact_digest};
 use crate::commit_read::CommitReadIncarnation;
 use crate::envelope::Sensitivity;
@@ -95,6 +95,48 @@ pub struct EligibilityBatch {
     pub verdicts: Vec<EligibilityVerdict>,
 }
 
+/// One candidate's standing on one surface: the batch verdict plus the
+/// visibility the serving view gives the object on that surface. A batch `Ok`
+/// judged at the widest surface never permits a narrower surface by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceVerdict {
+    pub verdict: EligibilityVerdict,
+    pub visibility: SurfaceVisibility,
+}
+
+impl SurfaceVerdict {
+    /// Whether the surface may present the candidate at all.
+    pub fn permits(self) -> bool {
+        self.verdict == EligibilityVerdict::Ok && self.visibility != SurfaceVisibility::Hidden
+    }
+
+    /// Whether a permitted presentation must carry its label.
+    pub fn labeled(self) -> bool {
+        self.permits() && self.visibility == SurfaceVisibility::Labeled
+    }
+}
+
+/// [`EligibilityBatch`] for one surface: the same batch verdicts, each paired
+/// with the visibility that surface gives the object in the same snapshot.
+#[derive(Debug)]
+pub struct SurfaceEligibilityBatch {
+    /// As for [`EligibilityBatch::snapshot`]: a `None` classification
+    /// generation is not a reusable grant and must not be cached.
+    pub snapshot: EgressSnapshot,
+    pub incarnation: CommitReadIncarnation,
+    /// The surface the visibilities were judged for, echoed so a consumer
+    /// cannot apply an `ExplicitSearch` batch to `AutoInject`.
+    pub surface: Surface,
+    /// `verdicts[i]` judges `candidates[i]`; duplicates and order are preserved.
+    pub verdicts: Vec<SurfaceVerdict>,
+}
+
+impl SurfaceEligibilityBatch {
+    pub fn is_reusable(&self) -> bool {
+        self.snapshot.classification_generation.is_some()
+    }
+}
+
 struct ScopeVerdicts<'a> {
     project: &'a ProjectScope,
     verdicts: HashMap<String, bool>,
@@ -172,6 +214,22 @@ pub(crate) fn judge_in_tx(
     destination: ArtifactDestination,
     candidates: &[EligibilityCandidate],
 ) -> Result<Vec<EligibilityVerdict>, KernelError> {
+    Ok(
+        judge_facts_in_tx(tx, tip, project, destination, candidates)?
+            .into_iter()
+            .map(|(verdict, _)| verdict)
+            .collect(),
+    )
+}
+
+/// [`judge_in_tx`] keeping each candidate's egress facts beside its verdict.
+fn judge_facts_in_tx(
+    tx: &Transaction<'_>,
+    tip: i64,
+    project: &ProjectScope,
+    destination: ArtifactDestination,
+    candidates: &[EligibilityCandidate],
+) -> Result<Vec<(EligibilityVerdict, EgressCandidate)>, KernelError> {
     let named: Vec<(&str, Option<&str>)> = candidates
         .iter()
         .map(|candidate| {
@@ -188,16 +246,42 @@ pub(crate) fn judge_in_tx(
     };
     candidates
         .iter()
-        .zip(&facts)
+        .zip(facts)
         .map(|(candidate, facts)| {
             let scope_id = facts
                 .state
                 .as_ref()
                 .and_then(|state| state.scope_id.as_deref());
             let in_scope = scopes.matches(tx, scope_id)?;
-            Ok(judge(candidate, facts, destination, in_scope))
+            Ok((judge(candidate, &facts, destination, in_scope), facts))
         })
         .collect()
+}
+
+/// The batch verdicts at the widest surface, each paired with the visibility
+/// `surface` gives the object from the same serving read. An object no row
+/// serves is `Hidden` on every surface whatever its batch verdict says. On
+/// `ExplicitSearch` the visibility adds only the `Labeled` distinction, since
+/// the batch verdict already reports `Hidden` there.
+pub(crate) fn judge_surface_in_tx(
+    tx: &Transaction<'_>,
+    tip: i64,
+    project: &ProjectScope,
+    destination: ArtifactDestination,
+    surface: Surface,
+    candidates: &[EligibilityCandidate],
+) -> Result<Vec<SurfaceVerdict>, KernelError> {
+    Ok(
+        judge_facts_in_tx(tx, tip, project, destination, candidates)?
+            .into_iter()
+            .map(|(verdict, facts)| SurfaceVerdict {
+                verdict,
+                visibility: facts.served.map_or(SurfaceVisibility::Hidden, |served| {
+                    served.visibility_on(surface)
+                }),
+            })
+            .collect(),
+    )
 }
 
 /// Runs before any reader is acquired; `egress_candidates_tx` repeats the digest check because it also serves callers that skip this gate.
@@ -236,6 +320,65 @@ impl KernelStore {
             destination,
             candidates,
         )
+    }
+
+    /// [`Self::judge_eligibility`] plus the visibility `surface` gives each
+    /// candidate, from the same snapshot, so a caller serving one surface can
+    /// tell a candidate it may present from one the batch merely admits.
+    pub fn judge_surface_eligibility(
+        &self,
+        project: &ProjectScope,
+        destination: ArtifactDestination,
+        surface: Surface,
+        candidates: &[EligibilityCandidate],
+    ) -> Result<SurfaceEligibilityBatch, KernelError> {
+        self.judge_surface_eligibility_with(None, project, destination, surface, candidates)
+    }
+
+    /// [`Self::judge_surface_eligibility`] whose reader wait and read stop at
+    /// the budget's deadline or interrupt with `KernelError::Deadline`.
+    pub fn judge_surface_eligibility_within_budget(
+        &self,
+        project: &ProjectScope,
+        destination: ArtifactDestination,
+        surface: Surface,
+        candidates: &[EligibilityCandidate],
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<SurfaceEligibilityBatch, KernelError> {
+        self.judge_surface_eligibility_with(
+            Some(&budget.acquire_limit()),
+            project,
+            destination,
+            surface,
+            candidates,
+        )
+    }
+
+    fn judge_surface_eligibility_with(
+        &self,
+        limit: Option<&crate::open::AcquireLimit>,
+        project: &ProjectScope,
+        destination: ArtifactDestination,
+        surface: Surface,
+        candidates: &[EligibilityCandidate],
+    ) -> Result<SurfaceEligibilityBatch, KernelError> {
+        check_bounds(candidates)?;
+        let read = |tx: &Transaction<'_>, tip: i64| {
+            Ok((
+                self.incarnation(),
+                judge_surface_in_tx(tx, tip, project, destination, surface, candidates)?,
+            ))
+        };
+        let (snapshot, (incarnation, verdicts)) = match limit {
+            Some(limit) => self.egress_read_within(limit, read)?,
+            None => self.egress_read(read)?,
+        };
+        Ok(SurfaceEligibilityBatch {
+            snapshot,
+            incarnation,
+            surface,
+            verdicts,
+        })
     }
 
     fn judge_eligibility_with(

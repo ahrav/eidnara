@@ -89,7 +89,7 @@ pub use current_input::{
 };
 pub use eligibility::{
     EligibilityBatch, EligibilityCandidate, EligibilityVerdict, MAX_ELIGIBILITY_CANDIDATES,
-    MAX_ELIGIBILITY_OBJECT_ID_BYTES, ProjectScope,
+    MAX_ELIGIBILITY_OBJECT_ID_BYTES, ProjectScope, SurfaceEligibilityBatch, SurfaceVerdict,
 };
 pub use envelope::{
     AlignmentProjectionSpec, CommitIntent, CommitReceipt, DependentObservationQuery, DomainSpec,

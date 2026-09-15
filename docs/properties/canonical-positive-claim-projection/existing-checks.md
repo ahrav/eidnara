@@ -29,6 +29,12 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `causal_class_changes_no_state` | same | Unknown neutrality across every state-relevant fact combination | unaudited |
 | `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees` | `crates/daemon/tests/claim_sources.rs` | lagging rows classify Superseded, Retracted, Hidden from canonical facts against an independent oracle; catch-up tombstones; quarantine stays live and Hidden; a causality record changes no state; a fresh rebuild classifies identically | unaudited |
 
+## Final-use validation
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `final_use_is_judged_per_surface_from_current_canonical_policy` | `crates/daemon/tests/claim_sources.rs` | explicit search permitted with label while AutoInject is `SurfaceHidden` on the same batch `Ok`; genuine and Unknown permitted alike; separate overlapping rejected and Unknown sets; ordered duplicates; two reads agree; quarantine and correction deny at classification and at revalidation of earlier survivors | unaudited |
+
 ## Adjacent kernel checks the records rely on
 
 | Check | Location | Covers | Status |
@@ -41,6 +47,9 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 
 - No production caller of `claim_facts_as_of`, `record_claim_causality`, or
   `classify_live_claims`, so no route-level check exists.
+- No daemon route calls `validate_for_surface`; no harness delivers a claim, so
+  the six independent delivery witnesses the delivery ticket requires do not
+  exist; no claim path invokes the checkout applicability engine.
 - No claim-specific process-crash cut, recovery bound, or disable path; the
   RP2.1 shared checks named in the records cover the mechanisms the claim
   rows travel through.

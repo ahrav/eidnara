@@ -53,6 +53,22 @@ reviews found and how each finding was dispositioned.
 | `max_rows` is a result bound, not a work bound: the live-claim query sorts before it limits | bias | kept, documented on the bound; the sibling `live_candidates` shares the plan |
 | Near-duplicate of `eligibility::live_candidates` | bias | kept: the claim read needs the association join and both claim classes; widening the sibling's class filter is a follow-up for its own owner |
 
+## Final-use gate change
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| Candidates were submitted without their artifact digest, so the artifact egress gate never ran and a `LocalOnly` artifact passed at `Remote` | gap | fixed: the live row carries `source_artifact_digest` and submits it; the remote case is asserted |
+| The serving view was read twice per judgement | refinement | fixed: `ServedClass` carries all three surfaces from the one read `egress_candidates_tx` already makes |
+| No budgeted variant of the surface judgement | gap | fixed: `judge_surface_eligibility_within_budget`; `validate_for_surface` takes an `EvalBudget` |
+| `expect` on the verdict zip in library code; lineage looked up by index into a batch the caller might not have passed | gap | fixed: one aligned pass with an error on a short verdict list; lineage keyed by object id |
+| Eligibility errors spelled as `Facts(Kernel(_))` | refinement | fixed: `ClaimCandidateError::Eligibility` |
+| `labeled: bool` paraphrased the kernel's visibility | refinement | fixed: `Permitted(SurfaceVisibility)` |
+| Per-surface visibility, `WrongScope`, `Remote`, `AutoSearch`, and a proper subset revalidation were untested | gap | fixed: an `adr_accepted` seed with an `Automatic` row, a foreign project, a remote destination, all three surfaces, and a subset |
+| `ValidatedCandidate` dropped the candidate's facts index | refinement | fixed: it holds the candidate |
+| Cacheability of the surface batch was undocumented | refinement | fixed: `is_reusable` on both batch types |
+| `SurfaceHidden` is unreachable on `ExplicitSearch` | bias | kept, documented on `judge_surface_in_tx` |
+| `validate_for_surface` duplicates the shape of `eligibility::judge_occurrences`, which judges the descriptor object | bias | kept for this change: the two judge different objects on purpose; converging them belongs with the descriptor path's owner |
+
 ## Biases for a human
 
 - Every record is `test-only` because no production path calls the reader or

@@ -17,6 +17,7 @@ fn occurrence(revision: i64) -> ClaimCandidateRow {
         representation: "decision_summary".to_string(),
         object_id: "decision-object-1".to_string(),
         revision,
+        artifact_digest: "0".repeat(64),
     }
 }
 
