@@ -235,6 +235,35 @@ fn claim_facts_copy_stored_values_and_stay_bound_to_their_snapshot() {
     assert_eq!(before.known_as_of, admitted_at - 1);
 }
 
+/// A target captured from one store binds the facts read to that store's
+/// incarnation, so a restore or a mispaired store between capturing the tip
+/// and reading the facts refuses instead of classifying from another history.
+#[test]
+fn facts_at_a_target_refuse_another_incarnation() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 1);
+    let target = fixture.store.capture_commit_read_target().unwrap();
+    let ids = ["decision-object-1".to_string()];
+    let at_target = fixture
+        .store
+        .claim_facts_at(&ids, target, bounds())
+        .unwrap();
+    let as_of = fixture
+        .store
+        .claim_facts_as_of(&ids, target.through_commit, bounds())
+        .unwrap();
+    assert_eq!(at_target, as_of);
+
+    let other = Fixture::open();
+    other.admit_decision(1, 1);
+    let foreign = other.store.capture_commit_read_target().unwrap();
+    assert_eq!(foreign.through_commit, target.through_commit);
+    assert_eq!(
+        fixture.store.claim_facts_at(&ids, foreign, bounds()),
+        Err(ClaimFactsError::IncarnationMismatch)
+    );
+}
+
 #[test]
 fn a_lineage_admission_binds_every_object_on_the_lineage() {
     let fixture = Fixture::open();

@@ -15,15 +15,18 @@ use std::collections::{HashMap, HashSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::LazyLock;
 
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::admission::{
     Disposition, EventKind, Maturity, Outcome, ServedRow, SourceClass, Surface, SurfaceVisibility,
     TaintClass, VisibilityRow, served_classes, served_lineage_decision_sql,
     served_own_decision_sql, supporting_approval_valid_sql,
 };
+use super::applicability::EvalBudget;
 use super::claim_causality::{CausalClass, CausalRecord, causal_class_at, registry_row_at};
+use super::commit_read::{CommitReadIncarnation, CommitReadTarget, tip};
 use super::envelope::{ObjectRow, Sensitivity};
+use super::open::AcquireLimit;
 use super::source_descriptor::{
     OCCURRENCE_ID_PREFIX, SOURCE_DESCRIPTOR_KIND, descriptor_object_id, reencoded_identity,
     stored_detail,
@@ -50,6 +53,8 @@ pub enum ClaimFactsError {
     NotADecision,
     #[error("claim facts row holds a required field this build cannot interpret")]
     MalformedRequiredField,
+    #[error("claim facts target names another kernel incarnation")]
+    IncarnationMismatch,
     #[error(transparent)]
     Kernel(#[from] KernelError),
 }
@@ -179,6 +184,76 @@ impl KernelStore {
         requested: i64,
         bounds: ClaimFactBounds,
     ) -> Result<ClaimFactsSnapshot, ClaimFactsError> {
+        self.claim_facts_inner(
+            object_ids,
+            requested,
+            bounds,
+            None,
+            &AcquireLimit::default(),
+        )
+    }
+
+    /// [`Self::claim_facts_as_of`] at `target.through_commit`, refused with
+    /// `IncarnationMismatch` under the reader guard when the store is not the
+    /// incarnation `target` was captured from, so a restore between capturing
+    /// the tip and reading the facts cannot pair one history's tip with
+    /// another's rows.
+    ///
+    /// # Errors
+    ///
+    /// `IncarnationMismatch` before any claim row is read (`FutureSnapshot`
+    /// precedes it when the replacement's tip is below the target), then every
+    /// refusal of [`Self::claim_facts_as_of`].
+    pub fn claim_facts_at(
+        &self,
+        object_ids: &[String],
+        target: CommitReadTarget,
+        bounds: ClaimFactBounds,
+    ) -> Result<ClaimFactsSnapshot, ClaimFactsError> {
+        self.claim_facts_inner(
+            object_ids,
+            target.through_commit,
+            bounds,
+            Some(target.incarnation),
+            &AcquireLimit::default(),
+        )
+    }
+
+    /// [`Self::claim_facts_at`] under `budget`: reader acquisition and every
+    /// statement stop at the deadline or on cancellation with
+    /// `KernelError::Deadline`.
+    ///
+    /// # Errors
+    ///
+    /// `Kernel(Deadline)` from an exhausted budget, then every refusal of
+    /// [`Self::claim_facts_at`].
+    pub fn claim_facts_at_within_budget(
+        &self,
+        object_ids: &[String],
+        target: CommitReadTarget,
+        bounds: ClaimFactBounds,
+        budget: &EvalBudget,
+    ) -> Result<ClaimFactsSnapshot, ClaimFactsError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            self.claim_facts_inner(
+                object_ids,
+                target.through_commit,
+                bounds,
+                Some(target.incarnation),
+                &limit,
+            )
+        })
+    }
+
+    fn claim_facts_inner(
+        &self,
+        object_ids: &[String],
+        requested: i64,
+        bounds: ClaimFactBounds,
+        incarnation: Option<CommitReadIncarnation>,
+        limit: &AcquireLimit,
+    ) -> Result<ClaimFactsSnapshot, ClaimFactsError> {
         if object_ids.len() > bounds.max_claims.get() {
             return Err(ClaimFactsError::TooManyClaims);
         }
@@ -192,25 +267,41 @@ impl KernelStore {
         if !object_ids.iter().all(|id| distinct.insert(id.as_str())) {
             return Err(ClaimFactsError::DuplicateClaim);
         }
-        let (tip, loaded) = self.read_snapshot(requested, |tx, _| {
-            let mut claims = Vec::with_capacity(object_ids.len());
-            let mut missing = Vec::new();
-            let mut served = load_served(tx, requested, object_ids)?;
-            for object_id in object_ids {
-                match registry_row_at(tx, requested, object_id)? {
-                    None => missing.push(object_id.clone()),
-                    Some(object) => {
-                        // A `load_claim` error aborts the request before later `object_ids` are read.
-                        match load_claim(tx, requested, object, served.remove(object_id), bounds) {
-                            Ok(claim) => claims.push(claim),
-                            Err(error) => return Ok(Err(error)),
-                        }
-                    }
+        if requested < 0 {
+            return Err(KernelError::InvalidInput.into());
+        }
+        let mut reader = self.reader_with_limit(limit)?;
+        let tx = reader.transaction(TransactionBehavior::Deferred)?;
+        let tip = tip(&tx).map_err(map_sqlite)?;
+        if requested > tip {
+            return Err(KernelError::FutureSnapshot.into());
+        }
+        // The reader guard is held, so a restore cannot land between this
+        // comparison and the rows read below.
+        if incarnation.is_some_and(|expected| expected != self.incarnation()) {
+            return Err(ClaimFactsError::IncarnationMismatch);
+        }
+        let mut claims = Vec::with_capacity(object_ids.len());
+        let mut missing = Vec::new();
+        let mut served = load_served(&tx, requested, object_ids)?;
+        for object_id in object_ids {
+            limit.check()?;
+            match registry_row_at(&tx, requested, object_id)? {
+                None => missing.push(object_id.clone()),
+                Some(object) => {
+                    // A `load_claim` error aborts the request before later `object_ids` are read.
+                    claims.push(load_claim(
+                        &tx,
+                        requested,
+                        object,
+                        served.remove(object_id),
+                        bounds,
+                    )?);
                 }
             }
-            Ok(Ok((claims, missing)))
-        })?;
-        let (claims, missing) = loaded?;
+        }
+        tx.commit()?;
+        limit.check()?;
         Ok(ClaimFactsSnapshot {
             known_as_of: requested,
             tip,
