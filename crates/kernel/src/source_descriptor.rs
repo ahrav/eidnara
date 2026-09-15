@@ -22,7 +22,7 @@ use super::source_identity::{
 };
 use super::{
     CachedSql, KernelError,
-    cas::{is_artifact_digest, is_exact_retention},
+    cas::{ExactEvidence, exact_evidence, is_artifact_digest},
     map_sqlite,
 };
 
@@ -438,24 +438,12 @@ impl Envelope<'_> {
         &self,
         request: &SourceDescriptorRequest<'_>,
     ) -> Result<(), SourceDescriptorError> {
-        let stored: Option<(String, Vec<u8>)> = self
-            .tx
-            .query_row_cached(
-                "SELECT artifact_digest,redaction_metadata FROM evidence_meta
-                 WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL",
-                [request.evidence_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(map_sqlite)?;
-        let (digest, redactions) = stored.ok_or(SourceDescriptorError::EvidenceMissing)?;
-        if digest != request.artifact_digest {
-            return Err(SourceDescriptorError::ArtifactMismatch);
+        match exact_evidence(self.tx, request.evidence_id, request.artifact_digest, None)? {
+            ExactEvidence::Missing => Err(SourceDescriptorError::EvidenceMissing),
+            ExactEvidence::DigestMismatch => Err(SourceDescriptorError::ArtifactMismatch),
+            ExactEvidence::NotExact => Err(SourceDescriptorError::EvidenceNotExact),
+            ExactEvidence::Bound => Ok(()),
         }
-        if !is_exact_retention(&redactions) {
-            return Err(SourceDescriptorError::EvidenceNotExact);
-        }
-        Ok(())
     }
 
     /// The live descriptor of this lineage and its revision, if any. More
