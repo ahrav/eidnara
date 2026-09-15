@@ -105,7 +105,13 @@ impl Scales {
     pub fn decode(bytes: &[u8], dimension: u32) -> Result<Self, ScalarBytesRejection> {
         let values = codec::decode_words(bytes)
             .map_err(|_| ScalarBytesRejection::TruncatedWord { bytes: bytes.len() })?;
-        Self::from_values(values, dimension)
+        if values.len() != dimension as usize {
+            return Err(ScalarBytesRejection::Dimension {
+                expected: dimension,
+                actual: values.len(),
+            });
+        }
+        Self::from_values(values.collect(), dimension)
     }
 
     /// SHA-256 of the encoded scales, for binding a calibration to the generation that carries it.

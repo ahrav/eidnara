@@ -489,6 +489,38 @@ fn scales_and_codes_round_trip_deterministically_and_refuse_malformed_bytes() {
             actual: 7
         })
     );
+    // Shape errors take precedence over invalid coordinates for both word decoders.
+    for actual in [0, 7, 9] {
+        let malformed = codec::encode(&vec![f32::NAN; actual]);
+        assert_eq!(
+            codec::decode_shape(&malformed, DIMENSION),
+            Err(RowRejection::Dimension {
+                expected: DIMENSION,
+                actual
+            })
+        );
+        assert_eq!(
+            Scales::decode(&malformed, DIMENSION),
+            Err(ScalarBytesRejection::Dimension {
+                expected: DIMENSION,
+                actual
+            })
+        );
+        let mut truncated = malformed;
+        truncated.push(0);
+        assert_eq!(
+            codec::decode_shape(&truncated, DIMENSION),
+            Err(RowRejection::TruncatedWord {
+                bytes: truncated.len()
+            })
+        );
+        assert_eq!(
+            Scales::decode(&truncated, DIMENSION),
+            Err(ScalarBytesRejection::TruncatedWord {
+                bytes: truncated.len()
+            })
+        );
+    }
     for bad in [0.0f32, -0.0, -1.0, f32::NAN, f32::INFINITY] {
         let mut values = [1.0f32; 8];
         values[5] = bad;
