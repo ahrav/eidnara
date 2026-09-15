@@ -375,8 +375,9 @@ impl<'a> EmbeddingDispatcher<'a> {
             self.projection
                 .write_within(deadline, |conn| bind_lane(conn, &binding, now))
         };
+        // The bound is the budget's own deadline, so a connection still held then is the budget ending, with nothing rebound.
         if let Err(SearchProjectionError::Store(storage::StoreError::Deadline)) = &bound {
-            return Ok(Some(Blocked::SearchDeadline));
+            return Ok(Some(Blocked::BudgetExhausted));
         }
         match self.before_dispositions(bound)? {
             BindingOutcome::Mismatch => return Ok(Some(Blocked::BindingMismatch)),
