@@ -496,6 +496,7 @@ fn causal_class_changes_no_state() {
 mod live_rows {
     use std::num::NonZeroUsize;
 
+    use kernel::applicability::EvalBudget;
     use kernel::source_identity::{Occurrence, OccurrenceClass, encode};
     use retrieval::claims::{
         ClaimCandidateBounds, ClaimCandidateError, classify_live_claims, live_claim_candidates,
@@ -504,7 +505,13 @@ mod live_rows {
     use rusqlite::params;
     use storage::{Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite};
 
-    const KERNEL: &str = "kernel-incarnation-a";
+    const FOREIGN: &str = "kernel-incarnation-a";
+
+    fn database_id(kernel: &kernel::KernelStore) -> String {
+        kernel
+            .database_incarnation_id_within_budget(&EvalBudget::unbounded())
+            .unwrap()
+    }
 
     fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
         ProjectionIdentity {
@@ -623,6 +630,16 @@ mod live_rows {
 
     fn bound(max: usize) -> NonZeroUsize {
         NonZeroUsize::new(max).unwrap()
+    }
+
+    fn bounds() -> ClaimCandidateBounds {
+        ClaimCandidateBounds {
+            max_rows: bound(8),
+            facts: kernel::ClaimFactBounds {
+                max_claims: bound(2),
+                max_causal_payload_bytes: std::num::NonZeroU64::new(1 << 16).unwrap(),
+            },
+        }
     }
 
     #[test]
@@ -829,6 +846,7 @@ mod live_rows {
         let store = open(dir.path());
         seed(&store, 2);
         let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        let budget = EvalBudget::unbounded();
         let bounds = ClaimCandidateBounds {
             max_rows: bound(1),
             facts: kernel::ClaimFactBounds {
@@ -839,33 +857,36 @@ mod live_rows {
         // No identity: refused before the row bound, which two rows would also trip.
         assert!(matches!(
             store
-                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, bounds)))
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, &budget, bounds)))
                 .unwrap(),
             Err(ClaimCandidateError::NoIdentity)
         ));
+        // The identity names a kernel other than the one the read is given.
         store
-            .with_conn_fenced(|conn| Ok(install_identity(conn, &identity(KERNEL), 1)))
+            .with_conn_fenced(|conn| Ok(install_identity(conn, &identity(FOREIGN), 1)))
             .unwrap()
             .unwrap();
-        let refused = store
-            .with_conn(|conn| {
-                Ok(classify_live_claims(
-                    conn,
-                    &kernel,
-                    "kernel-incarnation-b",
-                    bounds,
-                ))
-            })
-            .unwrap();
-        match refused {
+        match store
+            .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, &budget, bounds)))
+            .unwrap()
+        {
             Err(ClaimCandidateError::ForeignKernel {
                 kernel_incarnation_id,
-            }) => assert_eq!(kernel_incarnation_id, KERNEL),
+            }) => assert_eq!(kernel_incarnation_id, FOREIGN),
             other => panic!("expected ForeignKernel, got {other:?}"),
         }
+        // The kernel's own identity is the one compared, not a caller's claim.
+        let matching = open(&dir.path().join("matching"));
+        seed(&matching, 2);
+        matching
+            .with_conn_fenced(|conn| {
+                Ok(install_identity(conn, &identity(&database_id(&kernel)), 1))
+            })
+            .unwrap()
+            .unwrap();
         assert!(matches!(
-            store
-                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, bounds)))
+            matching
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, &budget, bounds)))
                 .unwrap(),
             Err(ClaimCandidateError::Projection(
                 ProjectionError::TooManyRecords { count: 2 }
@@ -874,29 +895,63 @@ mod live_rows {
     }
 
     #[test]
+    fn an_exhausted_budget_is_refused_before_the_projection_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        seed(&store, 2);
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                Ok(install_identity(conn, &identity(&database_id(&kernel)), 1))
+            })
+            .unwrap()
+            .unwrap();
+        let budget = EvalBudget::unbounded();
+        budget.cancel();
+        let bounds = ClaimCandidateBounds {
+            max_rows: bound(1),
+            facts: kernel::ClaimFactBounds {
+                max_claims: bound(1),
+                max_causal_payload_bytes: std::num::NonZeroU64::new(1 << 16).unwrap(),
+            },
+        };
+        // A cancelled budget wins over the row bound two rows would trip.
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, &budget, bounds)))
+                .unwrap(),
+            Err(ClaimCandidateError::Facts(kernel::ClaimFactsError::Kernel(
+                kernel::KernelError::Deadline
+            )))
+        ));
+    }
+
+    #[test]
     fn distinct_objects_past_the_facts_bound_are_refused_before_the_kernel_is_read() {
         let dir = tempfile::tempdir().unwrap();
         let store = open(dir.path());
         seed(&store, 3);
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
         store
-            .with_conn_fenced(|conn| Ok(install_identity(conn, &identity(KERNEL), 1)))
+            .with_conn_fenced(|conn| {
+                Ok(install_identity(conn, &identity(&database_id(&kernel)), 1))
+            })
             .unwrap()
             .unwrap();
-        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
-        // Renaming commit_log makes tip reads fail; TooManyClaims must win over Io.
+        let budget = EvalBudget::unbounded();
+        // Renaming the registry makes the facts read fail while the tip and
+        // identity reads still work; TooManyClaims must win over that Io.
         let raw = rusqlite::Connection::open(dir.path().join("kernel/kernel.sqlite")).unwrap();
-        raw.execute_batch("ALTER TABLE commit_log RENAME TO unavailable_commit_log")
+        raw.execute_batch("ALTER TABLE object_registry RENAME TO unavailable_object_registry")
             .unwrap();
-        assert_eq!(kernel.tip(), Err(kernel::KernelError::Io));
-        let bounds = ClaimCandidateBounds {
-            max_rows: bound(8),
-            facts: kernel::ClaimFactBounds {
-                max_claims: bound(2),
-                max_causal_payload_bytes: std::num::NonZeroU64::new(1 << 16).unwrap(),
-            },
-        };
+        let target = kernel.capture_commit_read_target().unwrap();
+        assert_eq!(
+            kernel.claim_facts_at(&["x".to_string()], target, bounds().facts),
+            Err(kernel::ClaimFactsError::Kernel(kernel::KernelError::Io))
+        );
+        let bounds = bounds();
         let refused = store
-            .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, bounds)))
+            .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, &budget, bounds)))
             .unwrap();
         assert!(matches!(
             refused,
@@ -913,7 +968,7 @@ mod live_rows {
         };
         assert!(matches!(
             store
-                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, KERNEL, at_bound)))
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, &budget, at_bound)))
                 .unwrap(),
             Err(retrieval::claims::ClaimCandidateError::Facts(
                 kernel::ClaimFactsError::Kernel(kernel::KernelError::Io)

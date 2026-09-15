@@ -45,11 +45,13 @@ Ticket numbers here are tracking metadata, not names of anything in the tree.
 ## Design decisions carried by the projection side
 
 - The projection stores no claim state. `retrieval::claims::classify_live_claims`
-  is the snapshot-bound read: it checks the projection identity against the
-  kernel's incarnation, reads the live rows, captures the tip and kernel
-  incarnation together with `capture_commit_read_target`, reads
-  `claim_facts_at` that target (refused under the reader guard if the store
-  was restored in between), and maps each row through `classify`, so a
+  is the snapshot-bound read under a caller budget: it captures the kernel
+  incarnation, compares the projection identity with the kernel's own database
+  identity, reads the live rows, captures the tip and incarnation again with
+  `capture_commit_read_target` (a changed incarnation is refused), reads
+  `claim_facts_at_within_budget` at that target (refused under the reader
+  guard if the store was restored in between), and maps each row through
+  `classify`, so a
   lagging projection cannot revive a claim the kernel withdrew and a rebuild
   cannot disagree with the projection it replaces. `classify` is the state
   mapping over already-loaded facts: Current, Superseded, Retracted, Hidden, or
