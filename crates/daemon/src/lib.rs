@@ -64,6 +64,7 @@ pub mod projection_admission;
 pub mod projection_gates;
 pub mod projection_lifecycle;
 pub mod release_contract;
+pub mod vector_generation;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;

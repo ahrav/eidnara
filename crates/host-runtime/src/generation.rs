@@ -41,6 +41,12 @@ pub const GENERATIONS_DIR_NAME: &str = "generations";
 
 pub const CURRENT_PROFILE_NAME: &str = "current-profile.json";
 pub const SEARCH_PROFILE_NAME: &str = "search-profile.json";
+pub const VECTOR_PROFILE_NAME: &str = "vector-profile.json";
+/// The manifest target every vector generation is staged under; `select_vector` refuses any other.
+pub const VECTOR_TARGET: &str = "vector-generation";
+
+/// Selectors a daemon component owns. Each names one generation the store must retain, and each is quarantined on its own when its schema is unknown.
+const OWNER_PROFILE_NAMES: [&str; 2] = [SEARCH_PROFILE_NAME, VECTOR_PROFILE_NAME];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileEvent {
@@ -469,6 +475,26 @@ impl GenerationStore {
         self.read_profile(SEARCH_PROFILE_NAME)
     }
 
+    pub fn read_vector_current(&self) -> Result<CurrentProfile, GenerationError> {
+        self.read_profile(VECTOR_PROFILE_NAME)
+    }
+
+    /// The digest every owner selector names, plus whether any owner selector is quarantined.
+    fn owner_selections(&self) -> Result<(BTreeSet<String>, bool), GenerationError> {
+        let mut selected = BTreeSet::new();
+        let mut quarantined = false;
+        for name in OWNER_PROFILE_NAMES {
+            match self.read_profile(name)? {
+                CurrentProfile::Current(digest) => {
+                    selected.insert(digest);
+                }
+                CurrentProfile::Quarantined => quarantined = true,
+                CurrentProfile::Absent => {}
+            }
+        }
+        Ok((selected, quarantined))
+    }
+
     fn read_profile(&self, name: &str) -> Result<CurrentProfile, GenerationError> {
         let fd = match openat(
             &self.root_fd,
@@ -793,12 +819,12 @@ impl GenerationStore {
         if protected.contains(digest) {
             return Err(invalid("corrupt digest target is protected"));
         }
-        match self.read_search_current()? {
-            CurrentProfile::Current(current) if current == digest => {
-                return Err(invalid("corrupt search selection is protected"));
-            }
-            CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
-            _ => {}
+        let (selected, quarantined) = self.owner_selections()?;
+        if quarantined {
+            return Err(GenerationError::UnsupportedStateSchema);
+        }
+        if selected.contains(digest) {
+            return Err(invalid("corrupt owner selection is protected"));
         }
         let _pin = lock_for_reclamation(&self.generations_fd, digest).map_err(|err| match err {
             Reclamation::Pinned => invalid("corrupt generation is pinned"),
@@ -824,12 +850,36 @@ impl GenerationStore {
         _transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
+        self.select_owner(SEARCH_PROFILE_NAME, digest, None, observer)
+    }
+
+    /// Points the vector selector at `digest`. A generation whose manifest target is not [`VECTOR_TARGET`] belongs to another owner and is refused, so the vector selector can never name a search seed or a host payload.
+    /// The store checks inventory, sizes, modes, and hashes; the daemon's semantic verification of the generation precedes this call and is not repeated here.
+    pub fn select_vector(
+        &self,
+        digest: &str,
+        _transaction: &LifecycleTransactionLock,
+        observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
+    ) -> Result<(), GenerationError> {
+        self.select_owner(VECTOR_PROFILE_NAME, digest, Some(VECTOR_TARGET), observer)
+    }
+
+    fn select_owner(
+        &self,
+        name: &str,
+        digest: &str,
+        target: Option<&str>,
+        observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
+    ) -> Result<(), GenerationError> {
         self.verify_named_identity()?;
-        if self.read_search_current()? == CurrentProfile::Quarantined {
+        if self.read_profile(name)? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
         }
-        self.validate(digest)?;
-        self.replace_profile_at(SEARCH_PROFILE_NAME, digest, observer)?;
+        let validated = self.validate(digest)?;
+        if target.is_some_and(|target| validated.manifest.target != target) {
+            return Err(invalid("generation belongs to another owner"));
+        }
+        self.replace_profile_at(name, digest, observer)?;
         self.verify_named_identity()
     }
 
@@ -837,8 +887,20 @@ impl GenerationStore {
         &self,
         _transaction: &LifecycleTransactionLock,
     ) -> Result<CurrentProfile, GenerationError> {
+        self.reconcile_owner(SEARCH_PROFILE_NAME)
+    }
+
+    pub fn reconcile_vector(
+        &self,
+        _transaction: &LifecycleTransactionLock,
+    ) -> Result<CurrentProfile, GenerationError> {
+        self.reconcile_owner(VECTOR_PROFILE_NAME)
+    }
+
+    /// Re-reads one owner selector and syncs the root, closing a cut between the selector's rename and its directory sync.
+    fn reconcile_owner(&self, name: &str) -> Result<CurrentProfile, GenerationError> {
         self.verify_named_identity()?;
-        let current = self.read_search_current()?;
+        let current = self.read_profile(name)?;
         fsync_preserving_storage(&self.root_fd, "lifecycle root fsync failed")?;
         Ok(current)
     }
@@ -950,12 +1012,12 @@ impl GenerationStore {
             CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
             _ => {}
         }
-        match self.read_search_current()? {
-            CurrentProfile::Current(current) if current == digest => {
-                return Err(invalid("search generation is selected"));
-            }
-            CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
-            _ => {}
+        let (selected, quarantined) = self.owner_selections()?;
+        if quarantined {
+            return Err(GenerationError::UnsupportedStateSchema);
+        }
+        if selected.contains(&digest) {
+            return Err(invalid("owner generation is selected"));
         }
         match rustix::fs::statat(
             &self.generations_fd,
@@ -987,24 +1049,20 @@ impl GenerationStore {
     /// The protected digests include the active candidate.
     /// `prune` preserves entries with unknown manifest schemas or foreign names.
     /// `prune` returns `UnsupportedStateSchema` when the current profile is quarantined.
-    /// A quarantined search profile may name any digest, so `prune` then counts it as quarantined
-    /// and removes only temps, which no selector can reference.
+    /// A quarantined owner profile may name any digest, so `prune` then counts it as quarantined
+    /// and removes only temps, which no selector can reference. Every owner selector gates every
+    /// caller: a corrupt or quarantined vector selector stops the host launcher's prune as a
+    /// corrupt or quarantined search selector already does.
     /// One unremovable entry does not stop the sweep: every reclaimable entry is removed first,
     /// then the first removal error is returned.
     pub fn prune(&self, protected: &BTreeSet<String>) -> Result<PruneReport, GenerationError> {
         let mut protected = protected.clone();
         let mut report = PruneReport::default();
-        let search_quarantined = match self.read_search_current()? {
-            CurrentProfile::Current(digest) => {
-                protected.insert(digest);
-                false
-            }
-            CurrentProfile::Quarantined => {
-                report.quarantined += 1;
-                true
-            }
-            CurrentProfile::Absent => false,
-        };
+        let (selected, owner_quarantined) = self.owner_selections()?;
+        protected.extend(selected);
+        if owner_quarantined {
+            report.quarantined += 1;
+        }
         match self.read_current()? {
             CurrentProfile::Absent => {}
             CurrentProfile::Current(digest) => {
@@ -1033,7 +1091,7 @@ impl GenerationStore {
                 report.quarantined += 1;
                 continue;
             }
-            if search_quarantined || protected.contains(&name) {
+            if owner_quarantined || protected.contains(&name) {
                 continue;
             }
             let _pin = match lock_for_reclamation(&self.generations_fd, &name) {
