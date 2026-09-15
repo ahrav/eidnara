@@ -1188,37 +1188,53 @@ pub async fn dispatch_request<H: HostHandler>(
             FrameId::routed(route, corr),
             code,
             message,
-        )
-        .await;
+        );
     }
 }
 
-pub(crate) async fn emit_pending_rejection<H: HostHandler>(
+pub(crate) fn emit_pending_rejection<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     generation: &Arc<GenerationCore>,
-    settlement: &Settlement,
+    settlement: &Arc<Settlement>,
     id: FrameId,
     code: &'static str,
     message: &'static str,
 ) {
     // The request was admitted with a credit, so this rejection is a credited terminal: `settle`
-    // moves the credit onto the frame and it returns with the block.
-    settle(
-        settlement,
-        &shared.terminal_budget,
-        generation,
-        RouteHandle {
-            channel: id.channel,
-            epoch: id.epoch,
-        },
-        id.corr,
-        Terminal::Error {
-            code: code.to_owned(),
-            message: message.to_owned(),
-            retry_after_ms: None,
-        },
-    )
-    .await;
+    // moves the credit onto the frame and it returns with the block. The reader only schedules
+    // it; awaiting writer-queue capacity here would stall every later frame on this connection.
+    match generation.busy_rejects.clone().try_acquire_owned() {
+        Ok(reject_permit) => {
+            let shared_task = Arc::clone(shared);
+            let gen_task = Arc::clone(generation);
+            let settlement = Arc::clone(settlement);
+            shared.spawn_tracked(generation.read_tasks.track_future(async move {
+                let _reject_permit = reject_permit;
+                settle(
+                    &settlement,
+                    &shared_task.terminal_budget,
+                    &gen_task,
+                    RouteHandle {
+                        channel: id.channel,
+                        epoch: id.epoch,
+                    },
+                    id.corr,
+                    Terminal::Error {
+                        code: code.to_owned(),
+                        message: message.to_owned(),
+                        retry_after_ms: None,
+                    },
+                )
+                .await;
+            }));
+        }
+        Err(_) => {
+            // Same bound as `emit_rejection`: too many rejections blocked on contended egress
+            // retire the generation instead of queueing more work behind them.
+            generation.token.cancel();
+            generation.writer.discard();
+        }
+    }
 }
 
 fn remove_pending(generation: &GenerationCore, key: PendingKey) {

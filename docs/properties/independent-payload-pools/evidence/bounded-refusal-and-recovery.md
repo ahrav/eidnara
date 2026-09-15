@@ -12,9 +12,9 @@ Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/backend/ring.rs:1044`
 - `crates/shm-transport/src/profile.rs:416`
-- `crates/host-runtime/src/ring_transport.rs:296`
+- `crates/host-runtime/src/ring_transport.rs:313`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2360` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:3742` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:3560` bounds a stalled peer by the frame deadline.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2360` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:3827` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:3645` bounds a stalled peer by the frame deadline.
 
 ## Failure scenario
 

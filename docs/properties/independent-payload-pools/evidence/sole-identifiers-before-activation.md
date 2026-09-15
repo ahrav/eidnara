@@ -12,7 +12,7 @@ Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/backend/ring.rs:190`
 - `crates/shm-transport/src/backend/ring.rs:726`
-- `crates/host-runtime/src/ring_transport.rs:1493`
+- `crates/host-runtime/src/ring_transport.rs:1510`
 - `packages/shm-native/src/lib.rs:305`
 
 Witness status: yes - `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:3134`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.

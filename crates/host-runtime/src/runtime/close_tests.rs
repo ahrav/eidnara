@@ -278,8 +278,7 @@ async fn post_abort_snapshot_does_not_resettle_rejection() {
             FrameId::routed(route, key.2),
             "server_busy",
             "host is shutting down",
-        )
-        .await;
+        );
         let rejected = queue.recv().await.unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&rejected.bytes[crate::wire::HEADER_LEN..])
@@ -324,8 +323,7 @@ async fn registration_race_rejection_carries_the_terminal_credit() {
         FrameId::routed(route, key.2),
         "unknown_channel",
         "no live route for this channel and epoch",
-    )
-    .await;
+    );
     drop(settlement);
     let rejected = queue.recv().await.unwrap();
     assert_eq!(
@@ -339,6 +337,55 @@ async fn registration_race_rejection_carries_the_terminal_credit() {
     );
     drop(rejected);
     assert_eq!(generation.terminal_credits.available_permits(), before + 1);
+}
+
+/// A registration-race rejection runs off the connection reader: with the writer queue full,
+/// scheduling it returns at once, and the credited rejection still reaches the queue later.
+#[tokio::test]
+async fn registration_race_rejection_does_not_block_the_reader_on_a_full_writer_queue() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        route,
+        key,
+        ..
+    } = fixture();
+    for corr in 100..108 {
+        crate::dispatch::emit_error_terminal(
+            &shared.terminal_budget,
+            &generation,
+            FrameId::control(corr),
+            "filler",
+            "fills the writer queue",
+        )
+        .await;
+    }
+    let credit = generation
+        .terminal_credits
+        .clone()
+        .try_acquire_owned()
+        .unwrap();
+    let settlement = Settlement::with_credit(Some(credit));
+    // Scheduling is synchronous: the reader never awaits writer-queue capacity for a rejection.
+    emit_pending_rejection(
+        &shared,
+        &generation,
+        &settlement,
+        FrameId::routed(route, key.2),
+        "unknown_channel",
+        "no live route for this channel and epoch",
+    );
+    drop(settlement);
+    for _ in 0..8 {
+        drop(queue.recv().await.unwrap());
+    }
+    let rejected = queue.recv().await.unwrap();
+    assert!(
+        rejected.credit.is_some(),
+        "the rejection frame carries the credit to its block"
+    );
+    assert!(!generation.token.is_cancelled());
 }
 
 /// Holds every block of the smallest ordinary class so the producer can arm a capacity wait;
