@@ -105,7 +105,7 @@ frame at all would isolate the `wrote` path).
   longer exist. The bridge reserves with the non-blocking `try_send_bounded`,
   keeps an exhausted write in its lane, arms the capacity doorbell for the
   blocked lane, and waits in one `poll` bounded by the earliest `commit_by`
-  (`client.rs:2711-2765`); a pass that publishes still sets `wrote`
+  (`client.rs:2711-2775`); a pass that publishes still sets `wrote`
   (`:2640`) and continues (`:2697`), so the k-passes bound is unchanged.
   The bridge clears `parked` before it exits (`:2803`).
 - Missing evidence: none beyond what the record's Exercised field states.
