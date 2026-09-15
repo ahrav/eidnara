@@ -349,9 +349,9 @@ fn capture_replacement_and_stage_reversal_require_owned_cleanup() {
 
 fn certificate(hold_id: &str) -> daemon::search_seed::SeedVerification {
     serde_json::from_value(serde_json::json!({
-        "schema": 1, "schema_version": 3, "kernel_incarnation_id": "incarnation-a",
+        "schema": 2, "schema_version": 3, "kernel_incarnation_id": "incarnation-a",
         "projection_policy_version": "source-policy.v1", "identity_contract_version": "search-projection-identity-v2",
-        "limit_manifest_protocol_version": "limits.v1", "embedding_model": "model", "tokenizer_fingerprint": "tokenizer",
+        "limit_manifest_protocol_version": "limits.v1", "embedding_model": "model", "tokenizer_fingerprint": "tokenizer", "analysis_identity": "analysis",
         "vector_dimension": 8, "generation_epoch": 1, "generation_id": "gen-2", "generation_state": "building",
         "snapshot_commit_seq": 40, "checkpoint_commit_seq": 41, "occurrences": 0, "tombstones": 0,
         "hold_id": hold_id, "pending_jobs": 0, "admitted_jobs": 0, "vectors": 0, "bytes": 0, "sha256": "a".repeat(64),

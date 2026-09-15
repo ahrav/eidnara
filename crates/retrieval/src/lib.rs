@@ -39,7 +39,7 @@ use storage::{CachedStatement, GuardedConn};
 pub const BASELINE: &str = include_str!("../baseline.sql");
 
 /// A schema mismatch requires a rebuild from canonical state.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Connection opening does not compare projection identities.
 /// A matching identity does not establish completeness or authorize search.
@@ -52,13 +52,19 @@ pub struct ProjectionIdentity {
     pub limit_manifest_protocol_version: String,
     pub embedding_model: String,
     pub tokenizer_fingerprint: String,
+    /// [`lexical::AnalysisIdentity`] the lexical rows were built under; a different current identity means the rows were analyzed by other rules and the projection is rebuilt.
+    pub analysis_identity: String,
     pub vector_dimension: u32,
     pub generation_epoch: u64,
 }
 
 impl ProjectionIdentity {
+    /// The schema version and analysis identity are pinned to this build, so a stored identity that equals the caller's expectation still fails when either was produced by another build.
     pub fn require_compatible(&self, expected: &Self) -> Result<(), ProjectionError> {
-        if self.schema_version == SCHEMA_VERSION && self == expected {
+        if self.schema_version == SCHEMA_VERSION
+            && self.analysis_identity == lexical::AnalysisIdentity::current().as_str()
+            && self == expected
+        {
             Ok(())
         } else {
             Err(ProjectionError::IdentityMismatch)
@@ -282,8 +288,23 @@ pub enum ProjectionError {
     InvalidVector { reason: &'static str },
     #[error("occurrence {occurrence_id} already has a different vector under the generation")]
     VectorConflict { occurrence_id: String },
+    #[error("lexical analysis refused: {0}")]
+    Lexical(lexical::LexicalRefusal),
+    #[error("occurrence {occurrence_id} derives the lexical rowid held by occurrence {holder}")]
+    LexicalRowidCollision {
+        occurrence_id: String,
+        holder: String,
+    },
+    #[error("the linked engine is unsupported: {reason}")]
+    Unsupported { reason: &'static str },
     #[error("sqlite: {0}")]
     Sqlite(String),
+}
+
+impl From<lexical::LexicalRefusal> for ProjectionError {
+    fn from(refusal: lexical::LexicalRefusal) -> Self {
+        Self::Lexical(refusal)
+    }
 }
 
 impl From<rusqlite::Error> for ProjectionError {
@@ -323,7 +344,9 @@ pub fn install_identity(
     identity: &ProjectionIdentity,
     installed_at: i64,
 ) -> Result<(), ProjectionError> {
-    if identity.schema_version != SCHEMA_VERSION {
+    if identity.schema_version != SCHEMA_VERSION
+        || identity.analysis_identity != lexical::AnalysisIdentity::current().as_str()
+    {
         return Err(ProjectionError::IdentityMismatch);
     }
     if let Some(stored) = read_identity(conn)? {
@@ -333,8 +356,8 @@ pub fn install_identity(
         "INSERT INTO projection_identity(
              singleton,schema_version,kernel_incarnation_id,projection_policy_version,
              identity_contract_version,limit_manifest_protocol_version,embedding_model,
-             tokenizer_fingerprint,vector_dimension,generation_epoch,installed_at
-         ) VALUES (1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+             tokenizer_fingerprint,analysis_identity,vector_dimension,generation_epoch,installed_at
+         ) VALUES (1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             identity.schema_version,
             identity.kernel_incarnation_id,
@@ -343,6 +366,7 @@ pub fn install_identity(
             identity.limit_manifest_protocol_version,
             identity.embedding_model,
             identity.tokenizer_fingerprint,
+            identity.analysis_identity,
             identity.vector_dimension,
             i64::try_from(identity.generation_epoch).map_err(|_| ProjectionError::CorruptRow)?,
             installed_at,
@@ -387,7 +411,7 @@ pub fn read_identity(conn: &impl QueryRow) -> Result<Option<ProjectionIdentity>,
         .query_row(
             "SELECT schema_version,kernel_incarnation_id,projection_policy_version,
                     identity_contract_version,limit_manifest_protocol_version,embedding_model,
-                    tokenizer_fingerprint,vector_dimension,generation_epoch
+                    tokenizer_fingerprint,analysis_identity,vector_dimension,generation_epoch
              FROM projection_identity WHERE singleton=1",
             [],
             |row| {
@@ -400,10 +424,11 @@ pub fn read_identity(conn: &impl QueryRow) -> Result<Option<ProjectionIdentity>,
                         limit_manifest_protocol_version: row.get(4)?,
                         embedding_model: row.get(5)?,
                         tokenizer_fingerprint: row.get(6)?,
-                        vector_dimension: row.get(7)?,
+                        analysis_identity: row.get(7)?,
+                        vector_dimension: row.get(8)?,
                         generation_epoch: 0,
                     },
-                    row.get(8)?,
+                    row.get(9)?,
                 ))
             },
         )

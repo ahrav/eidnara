@@ -30,6 +30,9 @@ pub fn identity(kernel_incarnation_id: &str, vector_dimension: u32) -> Projectio
         limit_manifest_protocol_version: LIMITS.to_string(),
         embedding_model: MODEL.to_string(),
         tokenizer_fingerprint: FINGERPRINT.to_string(),
+        analysis_identity: retrieval::lexical::AnalysisIdentity::current()
+            .as_str()
+            .to_string(),
         vector_dimension,
         generation_epoch: 1,
     }

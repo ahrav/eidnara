@@ -55,6 +55,8 @@ pub enum Cause {
     Corruption,
     SchemaMismatch,
     TokenizerMismatch,
+    /// The lexical rows were analyzed under another analysis identity.
+    AnalysisMismatch,
     EmbeddingModelMismatch,
     ProjectionPolicyMismatch,
     IdentityContractMismatch,

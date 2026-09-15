@@ -23,10 +23,12 @@ with no default; a missing bound is a compile error, not an experimental value.
   The `fts5vocab` oracle also needs full detail to report offsets.
 - Two indexed columns, in order: `original` and `parts`
   (`lexical::ORIGINAL_COLUMN`, `lexical::PARTS_COLUMN`).
+- One unindexed column, `occurrence_id`, so a probe result names its
+  occurrence without a join. Unindexed columns take no part in matching.
 - `lexical::fts5_table_args()` renders all of the above as the argument list
-  of `CREATE VIRTUAL TABLE ... USING fts5(...)`. The index and every scratch
-  oracle table use it, so neither can drift to another tokenizer or detail
-  mode.
+  of `CREATE VIRTUAL TABLE ... USING fts5(...)`. The `lexical` table in
+  `search.sqlite` and every scratch oracle table use it, so neither can drift
+  to another tokenizer or detail mode.
 - No custom tokenizer, dictionary, prefix index, or n-gram index.
 
 The engine folds case and removes Latin diacritics. Two inputs that fold to the
@@ -129,6 +131,50 @@ selector alone, and a bare `ab12` in prose is a lexical atom.
 `Analysis::parts_text()` is the parts joined by single spaces. Atoms and parts
 never contain whitespace, so the join does not change what the engine
 tokenizes. The index stores these two strings in the two columns.
+
+## The index row
+
+`search.sqlite` holds one `lexical` row per live occurrence, written in the
+same transaction as the occurrence and deleted in the transaction that records
+its tombstone. The rowid is `lexical::rowid(occurrence_id)`: the leading
+sixty-four bits of the occurrence identifier with the sign bit cleared. It
+depends on the identifier alone, so a rebuild from fenced input and incremental
+application store equal rows whatever order they see the occurrences in. Two
+live occurrences whose identifiers share a rowid are refused as
+`ProjectionError::LexicalRowidCollision`, which names both occurrences; the
+batch that would have stored the second one persists nothing. Identifiers are
+SHA-256 digests, so a collision among N live occurrences has probability near
+N squared over 2 to the 64th. A collision is deterministic: rebuilding replays
+it, so the projection stays unavailable until an operator retires one of the
+two occurrences. This is a known limitation of deriving the rowid from the
+identifier rather than from insertion order.
+
+The lexical row follows liveness rather than the batch that stores the
+occurrence: a record whose occurrence is live and has no row gains one, and a
+record whose occurrence is tombstoned gains none, whether or not the occurrence
+row itself was new. `batch_status` reads the same predicate, so a live record
+without its row reports the batch as not applied and reapplying the batch
+restores the row.
+
+The index analyzes the occurrence's selected payload bytes under the payload
+byte bound, which also bounds the atom count because every atom is at least one
+byte. NUL is replaced by a space before analysis: the analyzer refuses NUL to
+protect a bound probe, and indexed text is never bound as one. Equal-byte
+occurrences are distinct rows; revising or deleting one leaves its sibling's row
+in place.
+
+The projection identity records `AnalysisIdentity::current()` in
+`analysis_identity`. A projection whose stored identity differs from the current
+one is incompatible and is rebuilt, exactly as a tokenizer or schema mismatch
+is. `lexical::verify_rows` checks that live occurrences and lexical rows
+correspond one to one; `PRAGMA integrity_check` verifies the inverted index
+itself, and both run wherever the projection is reopened or its construction is
+verified. `lexical::probe_engine` proves at open that the linked SQLite has
+FTS5 and that the `lexical` table's tokenizer loads, and reports the engine's
+version and source id as `EngineIdentity`; a missing module or tokenizer is
+`ProjectionError::Unsupported`, and `install_identity` and
+`require_compatible` pin `analysis_identity` to this build's
+`AnalysisIdentity::current()` the way they pin the schema version.
 
 ## What a request analyzes
 

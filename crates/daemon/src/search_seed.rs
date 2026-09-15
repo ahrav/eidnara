@@ -31,7 +31,7 @@ use crate::search_writer::Quarantine;
 pub const SEED_TARGET: &str = "search-projection-seed";
 pub const SEED_FILE: &str = "search.sqlite";
 pub const SEED_REPORT_FILE: &str = "seed-report.json";
-const REPORT_SCHEMA: u32 = 1;
+const REPORT_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeedBounds {
@@ -120,6 +120,7 @@ pub struct SeedVerification {
     pub limit_manifest_protocol_version: String,
     pub embedding_model: String,
     pub tokenizer_fingerprint: String,
+    pub analysis_identity: String,
     pub vector_dimension: u32,
     pub generation_epoch: u64,
     pub generation_id: String,
@@ -147,6 +148,7 @@ impl SeedVerification {
             limit_manifest_protocol_version: self.limit_manifest_protocol_version.clone(),
             embedding_model: self.embedding_model.clone(),
             tokenizer_fingerprint: self.tokenizer_fingerprint.clone(),
+            analysis_identity: self.analysis_identity.clone(),
             vector_dimension: self.vector_dimension,
             generation_epoch: self.generation_epoch,
         }
@@ -605,6 +607,7 @@ fn verify_closed_until(
         limit_manifest_protocol_version: identity.limit_manifest_protocol_version,
         embedding_model: identity.embedding_model,
         tokenizer_fingerprint: identity.tokenizer_fingerprint,
+        analysis_identity: identity.analysis_identity,
         vector_dimension: identity.vector_dimension,
         generation_epoch: identity.generation_epoch,
         generation_id,
@@ -640,6 +643,7 @@ pub fn seed_stage_meta(verification: &SeedVerification) -> StageMeta {
         &identity.limit_manifest_protocol_version,
         &identity.embedding_model,
         &identity.tokenizer_fingerprint,
+        &identity.analysis_identity,
         identity.vector_dimension,
         identity.generation_epoch,
     ))

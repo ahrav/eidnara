@@ -154,6 +154,7 @@ pub fn reclaim(
         reclaimed.vectors += vectors.execute([&candidate.occurrence_id])?;
         tombstone.execute([&candidate.occurrence_id])?;
         associations.execute([&candidate.occurrence_id])?;
+        crate::lexical::index::delete(conn, &candidate.occurrence_id)?;
         reclaimed.occurrences += occurrence.execute([&candidate.occurrence_id])?;
         reclaimed.payloads += payload.execute([&payload_id])?;
     }

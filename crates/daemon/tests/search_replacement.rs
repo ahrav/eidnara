@@ -199,11 +199,53 @@ fn control(root: &Path) -> daemon::projection_lifecycle::LifecycleIntent {
 
 type Rows = BTreeMap<String, (String, Vec<u8>, Option<i64>)>;
 
+/// Rows of a projection whose lexical invariant must hold: a cut between an occurrence and its lexical row would surface here, where crash-cut and construction states are compared.
+fn rows_with_lexical(path: &Path) -> Rows {
+    assert_lexical_rows_match_live_occurrences(&Connection::open(path).unwrap());
+    rows(path)
+}
+
 fn rows(path: &Path) -> Rows {
     let conn = Connection::open(path).unwrap();
     conn.prepare("SELECT o.source_object_id,o.class,p.bytes,t.invalidated_commit_seq FROM occurrences o JOIN payloads p USING(payload_id) LEFT JOIN occurrence_tombstones t USING(occurrence_id) ORDER BY o.source_object_id")
         .unwrap().query_map([], |row| Ok((row.get(0)?, (row.get(1)?,row.get(2)?,row.get(3)?))))
         .unwrap().map(Result::unwrap).collect()
+}
+
+fn assert_lexical_rows_match_live_occurrences(conn: &Connection) {
+    let live: BTreeMap<String, ()> = conn
+        .prepare(
+            "SELECT occurrence_id FROM occurrences o
+             WHERE NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id)",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, ())))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let lexical: Vec<(i64, String)> = conn
+        .prepare("SELECT rowid, occurrence_id FROM lexical")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        lexical.len(),
+        live.len(),
+        "one lexical row per live occurrence"
+    );
+    for (rowid, occurrence_id) in &lexical {
+        assert!(
+            live.contains_key(occurrence_id),
+            "lexical row for {occurrence_id} names a live occurrence"
+        );
+        assert_eq!(
+            retrieval::lexical::rowid(occurrence_id),
+            Some(*rowid),
+            "lexical row sits at its derived rowid"
+        );
+    }
 }
 
 #[test]
@@ -316,7 +358,7 @@ fn construction_exports_five_classes_at_s_and_stages_exactly_t_without_selection
         .collect();
     assert!(baseline_pages >= 3);
     assert!(verification_pages >= 3);
-    assert_eq!(rows(candidate.path()), ledger);
+    assert_eq!(rows_with_lexical(candidate.path()), ledger);
     assert_eq!(
         candidate.staged().verification.checkpoint_commit_seq,
         target.unwrap()
@@ -438,7 +480,7 @@ fn expired_degraded_and_missing_source_holds_abort_owned_construction() {
             .unwrap()
             .build(&budget(Duration::from_secs(30)), &mut |event| match event {
                 BuildEvent::BaselineReleased => {
-                    baseline = Some(rows(&database(root.path())));
+                    baseline = Some(rows_with_lexical(&database(root.path())));
                     baseline_pending = Some(pending(&database(root.path())));
                     corpus.publish("late", "late bytes");
                     if fault == "history" {
@@ -502,7 +544,10 @@ fn expired_degraded_and_missing_source_holds_abort_owned_construction() {
                 }
                 BuildEvent::Aborting if matches!(fault, "history" | "oversized") => {
                     checked_refusal = true;
-                    assert_eq!(rows(&database(root.path())), *baseline.as_ref().unwrap());
+                    assert_eq!(
+                        rows_with_lexical(&database(root.path())),
+                        *baseline.as_ref().unwrap()
+                    );
                     assert_eq!(
                         pending(&database(root.path())),
                         *baseline_pending.as_ref().unwrap()
@@ -1324,7 +1369,7 @@ fn one_complete_commit_can_span_multiple_source_pages() {
         applied,
         [candidate.staged().verification.checkpoint_commit_seq]
     );
-    assert_eq!(rows(candidate.path()), ledger);
+    assert_eq!(rows_with_lexical(candidate.path()), ledger);
     candidate.revalidate().unwrap();
 }
 
@@ -1346,7 +1391,7 @@ fn cancellation_inside_catchup_rolls_back_without_quarantine_or_acknowledgement(
         .unwrap()
         .build(&allowance, &mut |event| match event {
             BuildEvent::BaselineReleased => {
-                baseline = Some(rows(&database(root.path())));
+                baseline = Some(rows_with_lexical(&database(root.path())));
                 corpus.publish("late", "late bytes");
             }
             BuildEvent::CatchUp(EpisodeEvent::LocalStaged { .. }) => {
@@ -1356,7 +1401,10 @@ fn cancellation_inside_catchup_rolls_back_without_quarantine_or_acknowledgement(
             BuildEvent::Aborting => {
                 checked = true;
                 let snapshot = control(root.path()).replacement_capture.unwrap().snapshot;
-                assert_eq!(rows(&database(root.path())), *baseline.as_ref().unwrap());
+                assert_eq!(
+                    rows_with_lexical(&database(root.path())),
+                    *baseline.as_ref().unwrap()
+                );
                 assert_eq!(
                     corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
                     Some(snapshot)

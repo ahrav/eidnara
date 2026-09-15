@@ -52,6 +52,9 @@ fn identity() -> ProjectionIdentity {
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: "model-a".to_string(),
         tokenizer_fingerprint: "fp-a".to_string(),
+        analysis_identity: retrieval::lexical::AnalysisIdentity::current()
+            .as_str()
+            .to_string(),
         vector_dimension: 8,
         generation_epoch: 1,
     }
@@ -199,6 +202,8 @@ struct Durable {
     pending: BTreeSet<String>,
     /// Job state keyed by `(occurrence_id, generation_id)`.
     jobs: BTreeMap<(String, String), String>,
+    /// Lexical rows as `(rowid, occurrence_id)`; one per live occurrence.
+    lexical: BTreeSet<(i64, String)>,
 }
 
 fn durable(conn: &GuardedConn<'_>) -> Durable {
@@ -266,6 +271,13 @@ fn durable(conn: &GuardedConn<'_>) -> Durable {
     )
     .into_iter()
     .collect();
+    let lexical = rows(
+        conn,
+        "SELECT rowid,occurrence_id FROM lexical ORDER BY 1",
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+    )
+    .into_iter()
+    .collect();
     Durable {
         occurrences,
         payloads,
@@ -273,6 +285,7 @@ fn durable(conn: &GuardedConn<'_>) -> Durable {
         checkpoint,
         pending,
         jobs,
+        lexical,
     }
 }
 
@@ -538,6 +551,12 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
             "table:embedding_jobs",
             "table:embedding_recovery_authorizations",
             "table:exact_associations",
+            "table:lexical",
+            "table:lexical_config",
+            "table:lexical_content",
+            "table:lexical_data",
+            "table:lexical_docsize",
+            "table:lexical_idx",
             "table:occurrence_tombstones",
             "table:occurrence_vectors",
             "table:occurrences",
@@ -603,6 +622,8 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
             pending_created: 3,
             pending_obsoleted: 0,
             associations_inserted: 1,
+            lexical_rows_inserted: 4,
+            lexical_rows_deleted: 0,
             checkpoint_commit_seq: 5,
             older_prefix: false,
         }
@@ -625,6 +646,10 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
         jobs: [0, 1, 3]
             .iter()
             .map(|&i| (job(&ids[i]), "pending".to_string()))
+            .collect(),
+        lexical: ids
+            .iter()
+            .map(|id| (retrieval::lexical::rowid(id).unwrap(), id.clone()))
             .collect(),
     };
     store
@@ -693,6 +718,8 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
             pending_created: 1,
             pending_obsoleted: 2,
             associations_inserted: 0,
+            lexical_rows_inserted: 1,
+            lexical_rows_deleted: 2,
             checkpoint_commit_seq: 9,
             older_prefix: false,
         }
@@ -713,6 +740,16 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
     ledger.jobs.insert(job(&ids[0]), "obsolete".to_string());
     ledger.jobs.insert(job(&ids[1]), "obsolete".to_string());
     ledger.jobs.insert(job(&m1r2), "pending".to_string());
+    for id in [&ids[0], &ids[1]] {
+        assert!(
+            ledger
+                .lexical
+                .remove(&(retrieval::lexical::rowid(id).unwrap(), id.clone()))
+        );
+    }
+    ledger
+        .lexical
+        .insert((retrieval::lexical::rowid(&m1r2).unwrap(), m1r2.clone()));
     store
         .with_conn(|conn| {
             assert_eq!(durable(conn), ledger);
@@ -833,6 +870,7 @@ fn a_fault_at_any_phase_leaves_the_whole_prior_state() {
         BatchFault::AfterAdmission,
         BatchFault::AfterRows,
         BatchFault::AfterAssociations,
+        BatchFault::AfterLexical,
         BatchFault::AfterTombstones,
         BatchFault::AfterPending,
         BatchFault::AfterCheckpoint,
@@ -880,6 +918,8 @@ fn a_fault_at_any_phase_leaves_the_whole_prior_state() {
             pending_created: 0,
             pending_obsoleted: 0,
             associations_inserted: 0,
+            lexical_rows_inserted: 0,
+            lexical_rows_deleted: 0,
             checkpoint_commit_seq: 4,
             older_prefix: false,
         }

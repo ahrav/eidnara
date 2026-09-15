@@ -295,6 +295,7 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
         support::projection_gate::LIMITS,
         support::projection_gate::MODEL,
         support::projection_gate::FINGERPRINT,
+        retrieval::lexical::AnalysisIdentity::current().as_str(),
         8,
         1,
     ]))
@@ -364,7 +365,7 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
     assert_eq!(
         report,
         json!({
-            "schema": 1,
+            "schema": 2,
             "schema_version": retrieval::SCHEMA_VERSION,
             "kernel_incarnation_id": kernel_incarnation_id(dir.path()),
             "projection_policy_version": support::projection_gate::POLICY,
@@ -372,6 +373,7 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
             "limit_manifest_protocol_version": support::projection_gate::LIMITS,
             "embedding_model": support::projection_gate::MODEL,
             "tokenizer_fingerprint": support::projection_gate::FINGERPRINT,
+            "analysis_identity": retrieval::lexical::AnalysisIdentity::current().as_str(),
             "vector_dimension": 8,
             "generation_epoch": 1,
             "generation_id": support::embedding_fixtures::GENERATION,
@@ -1208,6 +1210,9 @@ fn compatibility_digest_separates_fields_that_contain_newlines() {
         limit_manifest_protocol_version: "limits".to_owned(),
         embedding_model: "model".to_owned(),
         tokenizer_fingerprint: "tokenizer".to_owned(),
+        analysis_identity: retrieval::lexical::AnalysisIdentity::current()
+            .as_str()
+            .to_string(),
         vector_dimension: 8,
         generation_epoch: 1,
         generation_id: "gen-1".to_owned(),

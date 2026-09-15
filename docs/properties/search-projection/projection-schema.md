@@ -5,7 +5,7 @@ search projection that the retrieval crate's
 [baseline](../../../crates/retrieval/baseline.sql) creates. Identity or schema
 incompatibility requires a rebuild from the canonical store, not a schema
 migration. A change to this inventory requires a new schema version and a
-rebuild. The schema version is 5.
+rebuild. The schema version is 6.
 
 The [lifecycle contract](spec-traceability.md) requires staging and verifying a
 complete, compatible replacement before selecting it. During replacement,
@@ -14,7 +14,9 @@ Lifecycle state and recovery authorization belong outside the disposable
 database. The persistence APIs described here do not implement this rebuild and
 selection protocol.
 
-Every table below is `STRICT`. Columns are listed in declaration order; a
+Every table below is `STRICT` except the virtual table `lexical`, whose
+FTS5 module arguments are frozen instead of a column list. Columns are listed
+in declaration order; a
 column is marked as primary key when it is the rowid alias, the declared
 `PRIMARY KEY`, or a member of a composite `PRIMARY KEY(...)` constraint. A test
 (`crates/retrieval/tests/schema_inventory.rs`) reads this document, opens a
@@ -50,6 +52,7 @@ or deletes the projection, proves completeness, or authorizes serving search.
 | `limit_manifest_protocol_version` | TEXT | yes | no |  |
 | `embedding_model` | TEXT | yes | no |  |
 | `tokenizer_fingerprint` | TEXT | yes | no |  |
+| `analysis_identity` | TEXT | yes | no |  |
 | `vector_dimension` | INTEGER | yes | no | `CHECK(vector_dimension>0)` |
 | `generation_epoch` | INTEGER | yes | no | `CHECK(generation_epoch>=0)` |
 | `installed_at` | INTEGER | yes | no |  |
@@ -143,6 +146,26 @@ Table constraints:
 Indexes:
 
 - `idx_exact_associations_occurrence` on `(occurrence_id)`
+
+## `lexical`
+
+One FTS5 row per live occurrence, holding the analyzer's original atoms in
+`original`, its conservative parts in `parts`, and the occurrence identifier as
+an unindexed column. The tokenizer, detail mode, and column layout are the
+analysis contract in `docs/lexical-analysis-contract.md`;
+`retrieval::lexical::fts5_table_args()` renders the same arguments, and the
+projection identity's `analysis_identity` records the contract the rows were
+built under. The rowid is the leading 63 bits of the occurrence identifier, so
+a rebuild and incremental application store equal rows. The row is written in
+the same transaction as its occurrence, deleted in the transaction that records
+the occurrence's tombstone, and deleted again when message cleanup reclaims the
+occurrence. The shadow tables the FTS5 module creates (`lexical_data`,
+`lexical_idx`, `lexical_content`, `lexical_docsize`, `lexical_config`) are
+engine-owned and outside this inventory. `PRAGMA integrity_check` verifies the
+inverted index; `retrieval::lexical::verify_rows` checks that live occurrences
+and lexical rows correspond one to one.
+
+Virtual table: `fts5(original, parts, occurrence_id UNINDEXED, tokenize = 'unicode61 remove_diacritics 2 tokenchars ''_''', detail = full)`
 
 ## `projection_checkpoint`
 

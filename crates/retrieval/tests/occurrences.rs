@@ -231,6 +231,9 @@ fn identity() -> ProjectionIdentity {
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: "model-a".to_string(),
         tokenizer_fingerprint: "fp-a".to_string(),
+        analysis_identity: retrieval::lexical::AnalysisIdentity::current()
+            .as_str()
+            .to_string(),
         vector_dimension: 8,
         generation_epoch: 1,
     }
@@ -1354,12 +1357,34 @@ fn a_different_identity_cannot_be_installed_over_an_existing_projection() {
                 );
                 assert_eq!(read_identity(conn).unwrap(), None);
             }
+            let mut other_analysis = identity();
+            other_analysis.analysis_identity = "analyzed-by-another-build".to_string();
+            assert_eq!(
+                install_identity(conn, &other_analysis, 1),
+                Err(ProjectionError::IdentityMismatch),
+                "an empty projection must reject an analysis identity this build did not produce"
+            );
+            assert_eq!(read_identity(conn).unwrap(), None);
             install_identity(conn, &identity(), 1).unwrap();
             install_identity(conn, &identity(), 2).unwrap();
             let mut other = identity();
             other.tokenizer_fingerprint = "fp-b".to_string();
             assert_eq!(
                 install_identity(conn, &other, 3),
+                Err(ProjectionError::IdentityMismatch)
+            );
+            // A stored identity whose analysis differs from this build is incompatible even when the caller expects exactly the stored value.
+            conn.execute(
+                "UPDATE projection_identity SET analysis_identity='analyzed-by-another-build'",
+                [],
+            )?;
+            let stored = read_identity(conn).unwrap().unwrap();
+            assert_eq!(
+                stored.require_compatible(&stored),
+                Err(ProjectionError::IdentityMismatch)
+            );
+            assert_eq!(
+                install_identity(conn, &stored, 4),
                 Err(ProjectionError::IdentityMismatch)
             );
             Ok(())
