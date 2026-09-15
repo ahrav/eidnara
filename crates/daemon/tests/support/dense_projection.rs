@@ -28,7 +28,7 @@ const DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000
 
 pub struct Projection {
     pub kernel: Arc<KernelStore>,
-    pub store: SqliteStore,
+    pub store: Arc<SqliteStore>,
     pub incarnation: String,
     pub project: ProjectScope,
     pub objects: Vec<String>,
@@ -162,7 +162,7 @@ impl Projection {
             .unwrap();
         let projection = Self {
             kernel: Arc::new(kernel),
-            store,
+            store: Arc::new(store),
             incarnation,
             project: ProjectScope::new(PROJECT).unwrap(),
             objects: objects.iter().map(|object| (*object).to_string()).collect(),
@@ -248,19 +248,6 @@ impl Projection {
             .commit(intent(&format!("retire-{object}")), |envelope| {
                 envelope.retire_decision(object)?;
                 Ok(String::new())
-            })
-            .unwrap();
-    }
-
-    /// Marks the occurrence dead in the projection, as an invalidation would.
-    pub fn tombstone(&self, object: &str) {
-        self.store
-            .with_conn_fenced(|conn| {
-                conn.execute(
-                    "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at) VALUES (?1,7,'retired',1)",
-                    [occurrence_id(object)],
-                )?;
-                Ok(())
             })
             .unwrap();
     }

@@ -460,9 +460,9 @@ pub struct PruneReport {
     pub removed_temps: usize,
     pub removed_profile_temps: usize,
     pub quarantined: usize,
-    /// Unprotected generations a reader's shared lock kept in place.
+    /// Generations this pass would have removed but for a reader's shared lock; a pinned generation that is also protected is not counted, since protection alone keeps it.
     pub retained_pinned: usize,
-    /// Manifest-declared bytes of those generations, so the accounting owner sees what readers hold.
+    /// Manifest-declared bytes of those generations: what this pass could not reclaim because readers hold it.
     pub retained_bytes: u64,
 }
 
@@ -2995,6 +2995,8 @@ mod tests {
                 removed_temps: 1,
                 removed_profile_temps: 1,
                 removed_generations: 0,
+                retained_pinned: 0,
+                retained_bytes: 0,
             }
         );
         assert!(!staging_temp.exists());

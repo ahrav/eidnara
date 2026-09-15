@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -473,12 +474,17 @@ pub fn stage(built: &BuiltVectors, staging: &Staging<'_>) -> Result<String, Vect
     )
 }
 
-/// A generation whose files, sidecar, and meaning were all checked.
+/// A generation whose files, sidecar, and meaning were all checked. The row and code artifacts stay open on the descriptors verification read them through, and the tables it decoded stay with it, so a reader takes the files as verified without opening or hashing them again.
 pub struct VerifiedVectors {
     pub digest: String,
     pub sidecar: VectorSidecar,
     /// Retains the directory descriptor and, once pinned, the shared lock.
     pub generation: ValidatedGeneration,
+    pub rows: File,
+    pub codes: File,
+    pub scales: Scales,
+    pub occurrence_ids: Vec<String>,
+    pub tombstones: Vec<String>,
 }
 
 impl std::fmt::Debug for VerifiedVectors {
@@ -524,8 +530,8 @@ pub fn verify(
     let layout = sidecar
         .layout()
         .ok_or(VectorRefusal::NotVectors("metric"))?;
-    let rows = codec::decode_rows(&generation.read_verified_file(ROWS_FILE)?, &layout)
-        .map_err(VectorRefusal::Rows)?;
+    let rows_file = File::from(generation.open_verified_file(ROWS_FILE)?);
+    let rows = codec::decode_rows(&read_all(&rows_file)?, &layout).map_err(VectorRefusal::Rows)?;
     let fault = |path, fault| VectorRefusal::File { path, fault };
     if rows.rows.len() as u64 != sidecar.rows {
         return Err(fault(ROWS_FILE, FileFault::RowCount));
@@ -556,18 +562,39 @@ pub fn verify(
     }
     let codes = encode_all(&layout, &calibration.scales, vectors)
         .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
-    if generation.read_verified_file(CODES_FILE)? != codes {
+    let codes_file = File::from(generation.open_verified_file(CODES_FILE)?);
+    if read_all(&codes_file)? != codes {
         return Err(fault(CODES_FILE, FileFault::Codes));
     }
     Ok(VerifiedVectors {
         digest: digest.to_owned(),
         sidecar,
         generation,
+        rows: rows_file,
+        codes: codes_file,
+        scales: calibration.scales,
+        occurrence_ids: ids,
+        tombstones,
     })
 }
 
+/// The whole of a verified file, read from its start whatever the descriptor's position.
+fn read_all(file: &File) -> Result<Vec<u8>, VectorRefusal> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    let mut reader = file
+        .try_clone()
+        .map_err(|error| VectorRefusal::Io(error.kind().to_string()))?;
+    std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(0))
+        .map_err(|error| VectorRefusal::Io(error.kind().to_string()))?;
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|error| VectorRefusal::Io(error.kind().to_string()))?;
+    Ok(bytes)
+}
+
 /// Every field is compared, so a different model space is refused even at an equal dimension.
-fn check_identity(
+pub(crate) fn check_identity(
     sidecar: &VectorSidecar,
     expected: &ExpectedVectors<'_>,
 ) -> Result<(), VectorRefusal> {

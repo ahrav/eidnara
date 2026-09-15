@@ -8,10 +8,10 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::Path;
 
-use host_runtime::generation::ValidatedGeneration;
 use host_runtime::generation::{
     CurrentProfile, GenerationError, GenerationManifest, GenerationStore, MEMBERS_FILE_NAME,
-    ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET, WireMembers,
+    ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET, ValidatedGeneration,
+    WireMembers,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 
@@ -370,10 +370,11 @@ pub fn reconcile(
     }
 }
 
-/// A composition whose generation, record, and every member were verified.
+/// A composition whose generation, record, and every member were verified. `record` retains the composition generation's directory descriptor, so a reader pins the record verification saw.
 pub struct VerifiedComposition {
     pub digest: String,
     pub composition: Composition,
+    pub record: ValidatedGeneration,
     pub base: VerifiedVectors,
     pub deltas: Vec<VerifiedVectors>,
 }
@@ -447,6 +448,7 @@ fn verify_validated(
     Ok(VerifiedComposition {
         digest: generation.digest.clone(),
         composition,
+        record: generation,
         base,
         deltas,
     })

@@ -19,11 +19,7 @@ pub enum RowFault {
 
 /// A layer's rows by index. Resident rows answer from memory; a file-backed layer reads one row's bytes at its offset and decodes them, so only winners are ever read.
 pub trait RowAccess {
-    fn len(&self) -> usize;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
+    fn row_count(&self) -> usize;
 
     /// The row at `index`, validated against the generation's layout by the caller.
     ///
@@ -33,9 +29,10 @@ pub trait RowAccess {
     fn row(&self, index: usize) -> Result<Vec<f32>, RowFault>;
 }
 
-impl RowAccess for [Vec<f32>] {
-    fn len(&self) -> usize {
-        <[Vec<f32>]>::len(self)
+/// Resident rows; a slice cannot stand behind `dyn`, so the owning vector is the implementor.
+impl RowAccess for Vec<Vec<f32>> {
+    fn row_count(&self) -> usize {
+        self.len()
     }
 
     fn row(&self, index: usize) -> Result<Vec<f32>, RowFault> {
@@ -45,16 +42,6 @@ impl RowAccess for [Vec<f32>] {
                 self.len()
             ))
         })
-    }
-}
-
-impl RowAccess for Vec<Vec<f32>> {
-    fn len(&self) -> usize {
-        Vec::len(self)
-    }
-
-    fn row(&self, index: usize) -> Result<Vec<f32>, RowFault> {
-        self.as_slice().row(index)
     }
 }
 
@@ -239,11 +226,11 @@ fn check_layer(index: usize, layer: &Layer<'_>) -> Result<usize, ResolveRefusal>
     if layer.checkpoint.snapshot_commit_seq > layer.checkpoint.checkpoint_commit_seq {
         return Err(ResolveRefusal::CheckpointOrder { index });
     }
-    if layer.occurrence_ids.len() != layer.rows.len() {
+    if layer.occurrence_ids.len() != layer.rows.row_count() {
         return Err(ResolveRefusal::IncompleteView {
             index,
             ids: layer.occurrence_ids.len(),
-            rows: layer.rows.len(),
+            rows: layer.rows.row_count(),
         });
     }
     for (list, ids) in [

@@ -287,19 +287,25 @@ ranking can run against, all or nothing. Under the lifecycle's shared
 transaction lock it recovers and verifies the composition as
 `vector_composition::recover` does, pins the composition record and every
 member with a shared lock on its directory descriptor, charges the bytes the
-view keeps decoded in memory (identifiers, tombstones, scales, sidecar) to
-the caller's residency budget, opens every member's row and code artifacts
-through the retained descriptors with each file rehashed on open, checks each
-artifact's declared length against the identifier count so every offset the
-reader will compute lies inside it, re-reads the selector, and only then
-releases the shared lock. A selector that no longer names what recovery
-observed, a member that disagrees with itself, a budget that cannot hold the
-resident bytes, or any store refusal returns nothing, and the pins,
-descriptors, and charge are dropped with the failure. While the shared lock
-is held no publisher or pruner can take the exclusive transaction lock, and
-once the view exists its pins alone keep the record and members in place:
-`prune` skips a pinned generation and reports it and its manifest-declared
-bytes as retained.
+view keeps decoded in memory (identifiers, tombstones, scales, sidecar, at
+their manifest-declared sizes) to the caller's residency budget, takes each
+member's row and code artifacts on the descriptors verification opened and
+hashed them through, together with the tables it decoded, re-reads the
+selector, and only then releases the shared lock. Verification already proved
+each artifact holds exactly one row per identifier, so every offset the
+reader will compute lies inside it. A selector that no longer names what
+recovery observed, a budget that cannot hold the resident bytes, or any store
+refusal returns nothing, and the pins, descriptors, and charge are dropped
+with the failure. Acquisition hashes every member and blocks on the lifecycle lock, so
+it runs on a blocking thread, and a view is acquired once and shared rather
+than taken per query: while the shared lock is held no publisher or pruner
+can take the exclusive transaction lock, and mutators give up after a bounded
+wait. Once the view exists its pins alone keep the record and members in
+place. `prune` takes no lock of its own; it relies on every mutator holding
+the exclusive transaction lock, and skips a pinned generation, reporting the
+ones it would otherwise have removed and their manifest-declared bytes as
+retained. A pinned generation that is also protected is not counted, since
+protection alone keeps it.
 
 The view's layers map the composition onto the resolver's precedence, the
 base as ordinal zero and each delta by its position, all under the
@@ -310,21 +316,24 @@ them through the original-row codec, and answers code requests by reading
 `index * dimension` in the code artifact and decoding through the scalar
 recipe, so a winner's codes score with its own layer's scales and no other's.
 An index at or past the declared rows, a short read, or bytes the codec
-refuses fail that row; nothing is reinterpreted.
+refuses fail that row; nothing is reinterpreted. These positioned reads are
+not re-hashed: pins protect lifetime, not contents, and a same-user write
+after verification is outside the cooperative-file threat model.
 
-`vector_reader::rank` checks the view's identity against the request's
-generation (model, tokenizer fingerprint, dimension, epoch, generation
-identifier), charges one page of row scratch to the caller's scratch budget
+`vector_reader::rank` checks every layer's sidecar against the request's
+expectation with the same identity check verification uses, charges one page
+of decoded rows plus one raw row of scratch to the caller's scratch budget
 for the walk's duration, and runs `dense::layered::rank_layers` over the
 view's layers inside the caller's projection read transaction; canonical
 eligibility, revalidation, coverage, and completion are the layered
-ranking's. `rank_on_worker` runs the same on a blocking worker that owns the
-view, the kernel handle, and the scratch budget until the physical read
-returns, so a caller that drops its handle, cancels the budget, or lets the
-deadline pass releases nothing before the work does; the ranking it returns
-keeps the view until the output itself is dropped. The reader does not
-authorize anything: physical ownership of the files says which rows exist,
-and the kernel's verdicts say which may be returned.
+ranking's. A caller runs it through the request's existing blocking seam
+(`RequestCtx::run_blocking`, which the host's drain joins) with the
+`Arc<PinnedVectors>` moved into the work, so the view, its pins, and its
+charges live until the physical read returns whatever happens to the caller's
+future, its deadline, or its cancellation, and whoever keeps the ranking's
+view keeps its pins until that view is dropped. The reader does not authorize
+anything: physical ownership of the files says which rows exist, and the
+kernel's verdicts say which may be returned.
 
 ## The immutable vector generation
 

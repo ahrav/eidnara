@@ -1,9 +1,10 @@
-//! Reads a vector composition through pinned files. Acquisition observes the selector under the lifecycle's shared protection, recovers and verifies the composition, pins the record and every member with shared locks, opens every required file through the retained directory descriptors, charges the bytes the view keeps resident, and re-reads the selector before the protection is released; a failure anywhere returns nothing, and the pins, descriptors, and charge go with it.
-//! Ranking reads only the rows the resolver names, each by its offset in the row artifact into scratch charged for one page, and decodes them through the original-row codec; the int8 codes are read the same way under the layer's own scales.
-//! A ranking run on a worker owns the view until the physical work returns, whatever happens to the caller, and the output it returns keeps the view until it is dropped.
+//! Reads a vector composition through pinned files. Acquisition observes the selector under the lifecycle's shared protection, recovers and verifies the composition, pins the record and every member with shared locks, keeps the row and code artifacts open on the descriptors verification hashed them through, charges the bytes the view keeps resident, and re-reads the selector before the protection is released; a failure anywhere returns nothing, and the pins, descriptors, and charge go with it.
+//! Ranking reads only the rows the resolver names, each by its offset in the row artifact into scratch charged for one page, and decodes them through the original-row codec; the int8 codes are read the same way under the layer's own scales. Positioned reads after acquisition are not re-hashed: pins protect lifetime, and same-user writes after verification are outside the cooperative-file threat model.
+//! A caller runs the ranking through the request's blocking seam with the view moved into the work, so the view lives until the physical read returns whatever happens to the caller.
 
+use std::fs::File;
 use std::num::NonZeroUsize;
-use std::os::fd::OwnedFd;
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,9 +13,9 @@ use host_runtime::generation::{
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 use host_runtime::wire::{ByteBudget, ByteCharge};
+use kernel::KernelStore;
 use kernel::applicability::EvalBudget;
-use kernel::{ArtifactDestination, KernelStore, ProjectScope};
-use retrieval::batch::{ProjectionCheckpoint, VectorGeneration};
+use retrieval::batch::ProjectionCheckpoint;
 use retrieval::dense::codec::{self, ARTIFACT_HEADER_BYTES, RowLayout};
 use retrieval::dense::scalar::{self, Scales};
 use retrieval::dense::{
@@ -26,8 +27,8 @@ use storage::GuardedConn;
 
 use crate::vector_composition::{self, SelectorState, Unavailable, VerifiedComposition};
 use crate::vector_generation::{
-    CODES_FILE, ExpectedVectors, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE, SIDECAR_FILE,
-    TOMBSTONES_FILE, VectorIdentity, VectorSidecar, VerifiedVectors,
+    self, ExpectedVectors, ROW_IDS_FILE, SCALES_FILE, SIDECAR_FILE, TOMBSTONES_FILE, VectorRefusal,
+    VectorSidecar, VerifiedVectors,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,9 +41,9 @@ pub struct ReaderBounds {
 /// Where acquisition stands; a test may hold or mutate the store here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcquireEvent {
-    /// Every pin is held and every required file but the last is open.
-    BeforeLastOpen,
-    /// Every file is open; the selector is about to be re-read.
+    /// Every pin and every charge is held; the last layer is about to be taken.
+    BeforeLastLayer,
+    /// Every layer is held; the selector is about to be re-read.
     BeforeSelectorRecheck,
 }
 
@@ -56,11 +57,6 @@ pub enum AcquireRefusal {
     Store(String),
     #[error("the view would keep {bytes} bytes resident; the residency budget refused them")]
     Residency { bytes: usize },
-    #[error("the layer {digest} does not agree with itself about {detail}")]
-    Layer {
-        digest: String,
-        detail: &'static str,
-    },
     #[error("the selector moved during acquisition: it named {observed:?}, now {current:?}")]
     SelectorMoved {
         observed: SelectorState,
@@ -74,18 +70,17 @@ impl From<GenerationError> for AcquireRefusal {
     }
 }
 
-/// One member's open files and resident tables; the layer keeps its shared lock through `_generation`.
+/// One member's open artifacts and resident tables; the layer keeps its shared lock through `_generation`.
 pub struct PinnedLayer {
     pub digest: String,
     pub sidecar: VectorSidecar,
     pub precedence: Precedence,
     pub checkpoint: ProjectionCheckpoint,
-    pub occurrence_ids: Vec<String>,
-    pub tombstones: Vec<String>,
     pub scales: Scales,
-    rows: OwnedFd,
-    codes: OwnedFd,
-    dimension: u32,
+    occurrence_ids: Vec<String>,
+    tombstones: Vec<String>,
+    rows: File,
+    codes: File,
     _generation: ValidatedGeneration,
 }
 
@@ -101,14 +96,48 @@ impl std::fmt::Debug for PinnedLayer {
 }
 
 impl PinnedLayer {
-    fn row_bytes(&self) -> usize {
-        self.dimension as usize * 4
+    /// Verification proved the artifacts hold exactly one row per identifier, so the row set of the composition is what the reader hands the resolver.
+    fn from_member(member: VerifiedVectors, epoch: u64, ordinal: u32) -> Self {
+        let VerifiedVectors {
+            digest,
+            sidecar,
+            generation,
+            rows,
+            codes,
+            scales,
+            occurrence_ids,
+            tombstones,
+        } = member;
+        Self {
+            precedence: Precedence {
+                base_epoch: epoch,
+                delta_ordinal: ordinal,
+            },
+            checkpoint: sidecar.checkpoint(),
+            digest,
+            sidecar,
+            scales,
+            occurrence_ids,
+            tombstones,
+            rows,
+            codes,
+            _generation: generation,
+        }
     }
 
-    /// The bytes of row `index` in `file`, whose rows follow `header` bytes; the offset is checked against the identifier count so no read can leave the rows the sidecar declares.
+    /// In row order; the bound every positioned read is checked against.
+    pub fn occurrence_ids(&self) -> &[String] {
+        &self.occurrence_ids
+    }
+
+    fn dimension(&self) -> usize {
+        self.sidecar.vector_dimension as usize
+    }
+
+    /// The `width` bytes of row `index` in `file`, whose rows follow `header` bytes. The index is checked against the identifier count, and verification proved the artifact holds exactly that many rows, so no read can leave the rows the sidecar declares; a file cut short afterwards fails the read instead.
     fn read_row_bytes(
         &self,
-        file: &OwnedFd,
+        file: &File,
         header: usize,
         width: usize,
         index: usize,
@@ -121,50 +150,42 @@ impl PinnedLayer {
         }
         let offset = header as u64 + index as u64 * width as u64;
         let mut bytes = vec![0u8; width];
-        let mut filled = 0;
-        while filled < width {
-            let read = rustix::io::pread(file, &mut bytes[filled..], offset + filled as u64)
-                .map_err(|error| RowFault::Unavailable(format!("row {index}: {error}")))?;
-            if read == 0 {
-                return Err(RowFault::Unavailable(format!(
-                    "row {index} is truncated after {filled} of {width} bytes"
-                )));
-            }
-            filled += read;
-        }
+        file.read_exact_at(&mut bytes, offset)
+            .map_err(|error| RowFault::Unavailable(format!("row {index}: {error}")))?;
         Ok(bytes)
     }
 
-    /// The int8 codes of row `index`, decoded under the layer's own dimension; they score with this layer's scales and no other's.
+    /// The int8 codes of row `index`; they score with this layer's scales and no other's.
     ///
     /// # Errors
     ///
     /// A row past the layer's declared rows, a short read, or bytes the recipe refuses.
     pub fn codes(&self, index: usize) -> Result<Vec<i8>, RowFault> {
-        let bytes = self.read_row_bytes(&self.codes, 0, self.dimension as usize, index)?;
-        scalar::decode_codes(&bytes, self.dimension)
+        let bytes = self.read_row_bytes(&self.codes, 0, self.dimension(), index)?;
+        scalar::decode_codes(&bytes, self.sidecar.vector_dimension)
             .map_err(|rejection| RowFault::Unavailable(rejection.to_string()))
     }
 }
 
 impl RowAccess for PinnedLayer {
-    fn len(&self) -> usize {
+    fn row_count(&self) -> usize {
         self.occurrence_ids.len()
     }
 
     fn row(&self, index: usize) -> Result<Vec<f32>, RowFault> {
-        let bytes =
-            self.read_row_bytes(&self.rows, ARTIFACT_HEADER_BYTES, self.row_bytes(), index)?;
-        codec::decode_shape(&bytes, self.dimension).map_err(RowFault::Rejected)
+        let bytes = self.read_row_bytes(
+            &self.rows,
+            ARTIFACT_HEADER_BYTES,
+            self.dimension() * 4,
+            index,
+        )?;
+        codec::decode_shape(&bytes, self.sidecar.vector_dimension).map_err(RowFault::Rejected)
     }
 }
 
-/// A complete verified composition held open: the record and every member pinned, every required file open, and the resident bytes charged until the view is dropped.
+/// A complete verified composition held open: the record and every member pinned, every artifact open, and the resident bytes charged until the view is dropped. Acquire a view once and share it; acquisition hashes every member and holds the lifecycle's shared lock while it does.
 pub struct PinnedVectors {
     pub digest: String,
-    pub sequence: u64,
-    pub selector: SelectorState,
-    pub identity: VectorIdentity,
     pub layout: RowLayout,
     /// The base first, then the deltas in application order.
     pub layers: Vec<PinnedLayer>,
@@ -176,8 +197,6 @@ impl std::fmt::Debug for PinnedVectors {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PinnedVectors")
             .field("digest", &self.digest)
-            .field("sequence", &self.sequence)
-            .field("selector", &self.selector)
             .field("layers", &self.layers)
             .finish_non_exhaustive()
     }
@@ -205,9 +224,26 @@ impl PinnedVectors {
     }
 }
 
+/// The files a view keeps decoded in memory for its lifetime, charged at their manifest-declared sizes; rows and codes stay on disk and are read by offset.
+const RESIDENT_FILES: [&str; 4] = [ROW_IDS_FILE, TOMBSTONES_FILE, SCALES_FILE, SIDECAR_FILE];
+
+impl SelectorState {
+    /// Whether `current` still says what this state observed about `digest`.
+    fn still_holds(&self, current: &CurrentProfile, digest: &str) -> bool {
+        match (self, current) {
+            (Self::Current, CurrentProfile::Current(now)) => now == digest,
+            (Self::Stale(was), CurrentProfile::Current(now)) => now == was,
+            (Self::Absent, CurrentProfile::Absent) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Blocks on the lifecycle lock and hashes every member; run it on a blocking thread.
+///
 /// # Errors
 ///
-/// No shared protection, no verifying composition, a store refusal, a residency budget that cannot hold the view's resident bytes, a member that disagrees with itself, or a selector that moved while the view was being opened. Nothing is handed out on any of them.
+/// No shared protection, no verifying composition, a store refusal, a residency budget that cannot hold the view's resident bytes, or a selector that moved while the view was being taken. Nothing is handed out on any of them.
 pub fn acquire(
     root: Option<&Path>,
     expected: &ExpectedVectors<'_>,
@@ -233,10 +269,10 @@ pub fn acquire(
     let VerifiedComposition {
         digest,
         composition,
+        record,
         base,
         deltas,
     } = recovered.composition;
-    let record = store.validate(&digest)?;
     record.pin()?;
     let members: Vec<VerifiedVectors> = std::iter::once(base).chain(deltas).collect();
     for member in &members {
@@ -253,25 +289,17 @@ pub fn acquire(
         .try_charge(resident)
         .ok_or(AcquireRefusal::Residency { bytes: resident })?;
     let epoch = composition.generation_epoch;
-    let mut layers = Vec::with_capacity(members.len());
     let last = members.len() - 1;
+    let mut layers = Vec::with_capacity(members.len());
     for (ordinal, member) in members.into_iter().enumerate() {
-        layers.push(open_layer(
-            member,
-            epoch,
-            ordinal as u32,
-            (ordinal == last).then_some(&mut *observe),
-        )?);
+        if ordinal == last {
+            observe(AcquireEvent::BeforeLastLayer);
+        }
+        layers.push(PinnedLayer::from_member(member, epoch, ordinal as u32));
     }
     observe(AcquireEvent::BeforeSelectorRecheck);
     let current = store.read_vector_current()?;
-    let unchanged = match (&recovered.selector, &current) {
-        (SelectorState::Current, CurrentProfile::Current(now)) => *now == digest,
-        (SelectorState::Stale(was), CurrentProfile::Current(now)) => now == was,
-        (SelectorState::Absent, CurrentProfile::Absent) => true,
-        _ => false,
-    };
-    if !unchanged {
+    if !recovered.selector.still_holds(&current, &digest) {
         return Err(AcquireRefusal::SelectorMoved {
             observed: recovered.selector,
             current,
@@ -280,9 +308,6 @@ pub fn acquire(
     drop(protection);
     Ok(Arc::new(PinnedVectors {
         digest,
-        sequence: composition.sequence,
-        selector: recovered.selector,
-        identity: composition.identity(),
         layout: RowLayout {
             dimension: composition.vector_dimension,
             metric: expected.metric,
@@ -294,78 +319,10 @@ pub fn acquire(
     }))
 }
 
-/// The files a view keeps decoded in memory for its lifetime; rows and codes stay on disk and are read by offset.
-const RESIDENT_FILES: [&str; 4] = [ROW_IDS_FILE, TOMBSTONES_FILE, SCALES_FILE, SIDECAR_FILE];
-
-/// Opens one verified member's files through its retained directory descriptor, each rehashed on open, and checks the row artifact's length against the identifiers so every offset the reader will compute lies inside it. `observe`, given for the final member, runs before its last open.
-fn open_layer(
-    member: VerifiedVectors,
-    epoch: u64,
-    ordinal: u32,
-    observe: Option<&mut dyn FnMut(AcquireEvent)>,
-) -> Result<PinnedLayer, AcquireRefusal> {
-    let VerifiedVectors {
-        digest,
-        sidecar,
-        generation,
-    } = member;
-    let layer_fault = |detail| AcquireRefusal::Layer {
-        digest: digest.clone(),
-        detail,
-    };
-    let occurrence_ids: Vec<String> =
-        serde_json::from_slice(&generation.read_verified_file(ROW_IDS_FILE)?)
-            .map_err(|_| layer_fault("identifiers"))?;
-    let tombstones: Vec<String> =
-        serde_json::from_slice(&generation.read_verified_file(TOMBSTONES_FILE)?)
-            .map_err(|_| layer_fault("tombstones"))?;
-    let scales = Scales::decode(
-        &generation.read_verified_file(SCALES_FILE)?,
-        sidecar.vector_dimension,
-    )
-    .map_err(|_| layer_fault("scales"))?;
-    let rows = generation.open_verified_file(ROWS_FILE)?;
-    let declared = |path: &str| {
-        generation
-            .manifest
-            .files
-            .iter()
-            .find(|file| file.path == path)
-            .map_or(0, |file| file.size)
-    };
-    let row_bytes = u64::from(sidecar.vector_dimension) * 4;
-    let count = occurrence_ids.len() as u64;
-    if declared(ROWS_FILE) != ARTIFACT_HEADER_BYTES as u64 + count * row_bytes {
-        return Err(layer_fault("row artifact length"));
-    }
-    if declared(CODES_FILE) != count * u64::from(sidecar.vector_dimension) {
-        return Err(layer_fault("codes length"));
-    }
-    if let Some(observe) = observe {
-        observe(AcquireEvent::BeforeLastOpen);
-    }
-    let codes = generation.open_verified_file(CODES_FILE)?;
-    Ok(PinnedLayer {
-        precedence: Precedence {
-            base_epoch: epoch,
-            delta_ordinal: ordinal,
-        },
-        checkpoint: sidecar.checkpoint(),
-        dimension: sidecar.vector_dimension,
-        digest,
-        sidecar,
-        occurrence_ids,
-        tombstones,
-        scales,
-        rows,
-        codes,
-        _generation: generation,
-    })
-}
-
 /// Not `Debug`: the query row is embedding content.
 pub struct RankRequest<'a> {
-    pub generation: &'a VectorGeneration,
+    /// What the caller expects the view to be; every identity field of every layer is rechecked at handoff.
+    pub expected: &'a ExpectedVectors<'a>,
     pub query: &'a [f32],
     pub authority: Authority<'a>,
     pub bounds: OracleBounds,
@@ -381,11 +338,10 @@ pub enum RankRefusal {
     Scratch { bytes: usize },
     #[error(transparent)]
     Layered(#[from] LayeredRefusal),
-    #[error("the projection could not be read: {0}")]
-    Projection(String),
 }
 
-/// Ranks `request` over the view's layers inside the caller's read transaction. The view's identity is checked against the request's generation first, and one page of row scratch is charged for the walk's duration.
+/// Ranks `request` over the view's layers inside the caller's read transaction. Every layer's sidecar is checked against the request's expectation first, and one page of row scratch is charged for the walk's duration.
+/// Run it through the request's blocking seam with the `Arc<PinnedVectors>` moved into the work, so the view outlives a caller that drops its future, cancels, or times out.
 ///
 /// # Errors
 ///
@@ -398,34 +354,27 @@ pub fn rank(
     budget: &EvalBudget,
     scratch: &ByteBudget,
 ) -> Result<LayeredRanking, RankRefusal> {
-    let generation = request.generation;
-    let field = if view.identity.embedding_model != generation.embedding_model {
-        Some("embedding_model")
-    } else if view.identity.tokenizer_fingerprint != generation.tokenizer_fingerprint {
-        Some("tokenizer_fingerprint")
-    } else if view.identity.vector_dimension != generation.vector_dimension {
-        Some("vector_dimension")
-    } else if view.identity.generation_epoch != generation.generation_epoch {
-        Some("generation_epoch")
-    } else if view
-        .layers
-        .iter()
-        .any(|layer| layer.sidecar.generation_id != generation.generation_id)
-    {
-        Some("generation_id")
-    } else {
-        None
-    };
-    if let Some(field) = field {
-        return Err(RankRefusal::Identity { field });
+    let expected = request.expected;
+    for layer in &view.layers {
+        vector_generation::check_identity(&layer.sidecar, expected).map_err(|refusal| {
+            RankRefusal::Identity {
+                field: match refusal {
+                    VectorRefusal::Identity { field } => field,
+                    _ => "identity",
+                },
+            }
+        })?;
     }
-    let bytes = request.bounds.page_rows.get() * view.layout.dimension as usize * 4;
+    // The page's decoded rows plus the one raw row being read.
+    let bytes = (request.bounds.page_rows.get() + 1)
+        .checked_mul(view.layout.dimension as usize * 4)
+        .ok_or(RankRefusal::Scratch { bytes: usize::MAX })?;
     let _scratch = scratch
         .try_charge(bytes)
         .ok_or(RankRefusal::Scratch { bytes })?;
     let layers = view.resolver_layers();
     let query = LayeredQuery {
-        generation,
+        generation: expected.generation,
         metric: view.layout.metric,
         unit_norm_tolerance: view.layout.unit_norm_tolerance,
         query: request.query,
@@ -435,56 +384,4 @@ pub fn rank(
         max_entries: request.max_entries,
     };
     Ok(rank_layers(conn, kernel, &query, budget)?)
-}
-
-/// A ranking that keeps its view: the pins, descriptors, and resident charge live until the output is dropped.
-#[derive(Debug)]
-pub struct RankedView {
-    pub ranking: LayeredRanking,
-    pub view: Arc<PinnedVectors>,
-}
-
-/// Everything a worker needs to own outright, since the caller may be gone before the work returns.
-pub struct WorkerRequest {
-    pub generation: VectorGeneration,
-    pub query: Vec<f32>,
-    pub project: ProjectScope,
-    pub destination: ArtifactDestination,
-    pub bounds: OracleBounds,
-    pub max_entries: NonZeroUsize,
-}
-
-/// Runs [`rank`] on a blocking worker that owns `view`, `kernel`, and `scratch` until the physical read returns; the caller dropping the returned handle does not stop the work or release anything it holds. `with_conn` supplies the projection read transaction the walk runs inside.
-pub fn rank_on_worker<R>(
-    view: Arc<PinnedVectors>,
-    kernel: Arc<KernelStore>,
-    with_conn: R,
-    request: WorkerRequest,
-    budget: EvalBudget,
-    scratch: ByteBudget,
-) -> tokio::task::JoinHandle<Result<RankedView, RankRefusal>>
-where
-    R: FnOnce(&mut dyn FnMut(&GuardedConn<'_>)) -> Result<(), String> + Send + 'static,
-{
-    tokio::task::spawn_blocking(move || {
-        let mut outcome = None;
-        with_conn(&mut |conn| {
-            let request = RankRequest {
-                generation: &request.generation,
-                query: &request.query,
-                authority: Authority {
-                    project: &request.project,
-                    destination: request.destination,
-                },
-                bounds: request.bounds,
-                max_entries: request.max_entries,
-            };
-            outcome = Some(rank(&view, conn, &kernel, &request, &budget, &scratch));
-        })
-        .map_err(RankRefusal::Projection)?;
-        let ranking = outcome.ok_or_else(|| {
-            RankRefusal::Projection("the projection read never ran the walk".to_owned())
-        })??;
-        Ok(RankedView { ranking, view })
-    })
 }
