@@ -62,10 +62,10 @@ the peer returns capacity or the write's `commit_by` passes, which is
 Multiple writes enqueued without per-write wakes, at most one edge delivered,
 then per-write bounded completion. Exists:
 `ring_bridge_drains_inbound_and_queued_writes`
-(`crates/host-runtime/src/client.rs:7443-7526`) pushes eight writes directly into
+(`crates/host-runtime/src/client.rs:7444-7527`) pushes eight writes directly into
 `write.tx` — bypassing `RingWriteSender::try_send`, so zero worker_wake edges
-(`:7483`) — publishes one inbound frame and signals one explicit edge
-(`:7508-7512`), then bounds every completion at 250 ms (`:7514-7520`). Not
+(`:7483`) — publishes one inbound frame (`:7495-7512`) and signals one explicit
+edge (`:7513`), then bounds every completion at 250 ms (`:7520-7526`). Not
 yet constructed: the same starvation with the inbound direction idle (the
 existing test's one edge doubles as the wake; a variant with no inbound
 frame at all would isolate the `wrote` path).

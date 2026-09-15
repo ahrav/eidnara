@@ -7659,6 +7659,12 @@ mod tests {
                 .expect("bridge alive")
                 .expect("published");
         }
+        // The hook fires once, immediately before the bridge's first `arm_capacity_wait`: a
+        // bridge that retried the exhausted reservation without arming would never reach it.
+        let (armed_tx, armed_rx) = oneshot::channel::<()>();
+        bridge_hooks::install_before_capacity_arm(&write.wake, move || {
+            let _ = armed_tx.send(());
+        });
         let (blocked, blocked_rx) =
             bridge_write(FrameType::Request, 1, ordinary as u64 + 1, vec![9], far);
         write.try_send(blocked).expect("queue blocked");
@@ -7669,6 +7675,10 @@ mod tests {
                 .is_err(),
             "the frame past ordinary headroom must wait, not fail"
         );
+        tokio::time::timeout(Duration::from_secs(5), armed_rx)
+            .await
+            .expect("the blocked bridge arms the capacity wait instead of retrying")
+            .expect("hook ran");
 
         // A control behind the blocked data uses the control reserve.
         let (pong, pong_rx) = bridge_write(FrameType::Pong, 0, 77, Vec::new(), far);
