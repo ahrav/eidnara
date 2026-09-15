@@ -1656,19 +1656,17 @@ impl Ring {
         if self.ledger.borrow().allowed && !self.is_quarantined() {
             self.reclaim_completions()?;
         }
-        // The ledger is not borrowed across a callback: `settle` may re-enter this ring, and a
-        // return reclaimed by that re-entry appends to `reclaimed` and is visited by this same
-        // drain. `clear` keeps the capacity so steady-state returns allocate nothing.
-        let mut index = 0;
+        // Each entry leaves `reclaimed` before its callback runs and the ledger is not borrowed
+        // across the call: `settle` may re-enter this ring, and a re-entrant reservation
+        // `swap_remove`s the block it reuses while a re-entrant scan appends new returns. Popping
+        // keeps every remaining entry reachable either way, and the buffer keeps its capacity.
         loop {
-            let next = self.ledger.borrow().reclaimed.get(index).copied();
+            let next = self.ledger.borrow_mut().reclaimed.pop();
             let Some(block) = next else {
                 break;
             };
             settle(block);
-            index += 1;
         }
-        self.ledger.borrow_mut().reclaimed.clear();
         Ok(())
     }
 
@@ -2546,6 +2544,40 @@ mod tests {
         assert_eq!(
             settled, expected,
             "both physical returns are reported exactly once across the two drains"
+        );
+    }
+
+    /// A callback that re-enters `try_reserve_in` and takes the block being settled must not
+    /// hide another returned block from the same drain.
+    #[test]
+    fn take_reclaimed_reports_every_return_when_a_callback_reserves_the_settled_block() {
+        let (producer, consumer) = pair(tiny_geometry());
+        let small = publish(&producer, &[1u8; 100]);
+        let large = publish(&producer, &[2u8; 10_000]);
+        assert_ne!(small, large);
+        receive(&consumer).release().unwrap();
+        receive(&consumer).release().unwrap();
+        let mut settled = Vec::new();
+        let mut reserved_once = false;
+        producer
+            .take_reclaimed(|block| {
+                settled.push(block);
+                if !reserved_once {
+                    reserved_once = true;
+                    // Re-enter the ring and take a small block: the freshly returned one.
+                    producer
+                        .try_reserve(100, wire_v3_header(100).unwrap())
+                        .unwrap()
+                        .abort();
+                }
+            })
+            .unwrap();
+        producer
+            .take_reclaimed(|block| settled.push(block))
+            .unwrap();
+        assert!(
+            settled.contains(&large),
+            "the large block's return must be reported although the callback reordered the ledger: {settled:?}"
         );
     }
 
