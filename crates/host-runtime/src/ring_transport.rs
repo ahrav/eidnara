@@ -791,21 +791,17 @@ async fn run_endpoint(
             };
             // A blocked ticket parks on capacity readiness; an unblocked publisher never arms
             // it, so an idle owner does not wake on every peer return.
-            let capacity_armed = if let Some((inventory, bound)) = publisher.blocked_head() {
-                match rings.first.arm_capacity_wait(inventory, bound) {
-                    Ok(armed) => armed,
-                    Err(_) => {
-                        fail(
-                            &mut inbound,
-                            &mut queue,
-                            &root,
-                            ReadClose::Corrupt("shared-memory capacity wait failed"),
-                        );
-                        return;
-                    }
+            let capacity_armed = match publisher.arm_capacity_wait(&rings.first) {
+                Ok(armed) => armed,
+                Err(()) => {
+                    fail(
+                        &mut inbound,
+                        &mut queue,
+                        &root,
+                        ReadClose::Corrupt("shared-memory capacity wait failed"),
+                    );
+                    return;
                 }
-            } else {
-                false
             };
             if publisher.has_pending() && !capacity_armed {
                 // Capacity moved between the attempt and the arm; retry without blocking.
@@ -972,8 +968,8 @@ async fn receive_one(
     let charge = loop {
         // A blocked ticket parks on capacity readiness during the budget wait too; otherwise a
         // peer return while handlers hold the budget would publish nothing until the deadline.
-        let capacity_armed = if let Some((inventory, bound)) = publisher.blocked_head() {
-            match rings.first.arm_capacity_wait(inventory, bound) {
+        let capacity_armed = if publisher.has_pending() {
+            match publisher.arm_capacity_wait(&rings.first) {
                 Ok(true) => true,
                 Ok(false) => {
                     if publisher.pump(&rings.first).is_err() {
@@ -981,7 +977,7 @@ async fn receive_one(
                     }
                     continue;
                 }
-                Err(_) => return Err(ReadClose::Corrupt("shared-memory capacity wait failed")),
+                Err(()) => return Err(ReadClose::Corrupt("shared-memory capacity wait failed")),
             }
         } else {
             false
@@ -1126,6 +1122,30 @@ impl Publisher {
         self.pending
             .front()
             .map(|pending| (pending.inventory, pending.body_len))
+    }
+
+    /// Arms the capacity doorbell for the blocked head. `Ok(true)` means the caller should park
+    /// on capacity readiness; `Ok(false)` means nothing is blocked or capacity moved, so the
+    /// caller pumps again instead. `Err` is a ring failure the caller retires on.
+    ///
+    /// The ring re-checks only the head's reservation when it arms. A reserved frame behind the
+    /// head draws from its own inventory, so a return of that inventory before the arm bumps
+    /// the generation without a token and the head's check cannot see it. One pump after the
+    /// arm publishes such a frame; when it does, the arm is undone and the caller loops.
+    fn arm_capacity_wait(&mut self, ring: &Ring) -> Result<bool, ()> {
+        let Some((inventory, bound)) = self.blocked_head() else {
+            return Ok(false);
+        };
+        if !ring.arm_capacity_wait(inventory, bound).map_err(|_| ())? {
+            return Ok(false);
+        }
+        let before = self.pending.len();
+        self.pump(ring)?;
+        if self.pending.len() == before {
+            return Ok(true);
+        }
+        ring.complete_capacity_wait().map_err(|_| ())?;
+        Ok(false)
     }
 
     /// Whether another admitted frame may move from the queue into the owner's pending set.
@@ -1927,6 +1947,64 @@ mod tests {
 
     fn capacity_fd(rings: &DuplexRing) -> tokio::io::unix::AsyncFd<OwnedFd> {
         tokio::io::unix::AsyncFd::new(rings.first.duplicate_capacity_ready().unwrap()).unwrap()
+    }
+
+    /// Holds every terminal-class block on the consumer side so an eligible terminal frame
+    /// blocks on its own inventory.
+    fn exhaust_terminal_class(
+        producer: &Ring,
+        consumer: &Ring,
+    ) -> Vec<shm_transport::lease::PayloadLease> {
+        let count = producer
+            .geometry()
+            .class(shm_transport::pool::BlockClass::Terminal)
+            .count;
+        (0..count)
+            .map(|_| {
+                let mut reservation = producer
+                    .try_reserve_in(
+                        Inventory::Terminal,
+                        1,
+                        shm_transport::backend::ring::wire_v3_header(1).unwrap(),
+                    )
+                    .expect("fill terminal reservation");
+                reservation.write(&[1]).unwrap();
+                reservation.commit(1).unwrap();
+                consumer.try_receive().unwrap().expect("filled terminal")
+            })
+            .collect()
+    }
+
+    /// `Publisher::arm_capacity_wait` must return `Ok(false)` and publish an eligible terminal
+    /// when a terminal block returns after a blocked pump and before arming, even though the
+    /// ordinary head stays exhausted.
+    #[test]
+    fn arming_publishes_a_bypassable_terminal_whose_block_returned_before_arming() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let ordinary = exhaust_smallest_class(&rings.first, &consumer);
+        let mut terminals = exhaust_terminal_class(&rings.first, &consumer);
+        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
+        publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
+        publisher.push(frame(FrameType::Error, 9, 2, b"{}"));
+        publisher
+            .pump(&rings.first)
+            .expect("both frames stay blocked");
+        assert_eq!(publisher.pending.len(), 2);
+
+        terminals.pop().unwrap().release().unwrap();
+        assert_eq!(
+            publisher.arm_capacity_wait(&rings.first),
+            Ok(false),
+            "the returned terminal block makes the eligible terminal publishable"
+        );
+        assert_eq!(
+            publisher.pending.len(),
+            1,
+            "the terminal published past the still-blocked ordinary head"
+        );
+        drop(ordinary);
+        drop(terminals);
     }
 
     /// `arm_capacity_wait` must return `Ok(false)` when capacity returns after a blocked pump
