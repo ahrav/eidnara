@@ -1154,10 +1154,11 @@ fn certificates_must_name_this_projection_and_kernel_and_lag_defeats_proof() {
 }
 
 /// The kernel judges the occurrence's source object; the proof names the
-/// association target. A target column altered independently of the tuple
-/// must refuse the attempt rather than prove another object.
+/// association target. A row retargeted by rewriting both its key and its
+/// target, while its tuple still names the original object, must refuse the
+/// attempt rather than prove the new target.
 #[test]
-fn an_association_target_altered_independently_of_its_tuple_refuses_the_attempt() {
+fn an_association_retargeted_against_its_tuple_refuses_the_attempt() {
     let fixture = Fixture::new();
     fixture.decide("objects", &[ok("obj-1"), ok("obj-2")]);
     fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
@@ -1167,8 +1168,8 @@ fn an_association_target_altered_independently_of_its_tuple_refuses_the_attempt(
         .with_conn_fenced(|conn| {
             let altered = conn
                 .execute(
-                    "UPDATE exact_associations SET target_id='obj-2' WHERE key=?1",
-                    [b"obj-1".as_slice()],
+                    "UPDATE exact_associations SET key=?2, target_id='obj-2' WHERE key=?1",
+                    [b"obj-1".as_slice(), b"obj-2".as_slice()],
                 )
                 .unwrap();
             assert_eq!(altered, 1);
@@ -1176,7 +1177,7 @@ fn an_association_target_altered_independently_of_its_tuple_refuses_the_attempt(
         })
         .unwrap();
     let outcome = fixture.resolve(
-        object_query("obj-1"),
+        object_query("obj-2"),
         true,
         &certificate,
         bounds(),
