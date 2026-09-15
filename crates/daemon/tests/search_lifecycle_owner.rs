@@ -2665,6 +2665,22 @@ async fn an_expired_disable_does_not_take_a_free_manager() {
     );
 }
 
+/// Disabling an owner with no family after its admission records are gone persists the stop and completes: there is no cleanup that would need the manifest's bounds.
+#[tokio::test]
+async fn a_disable_with_no_family_completes_without_admission_records() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    std::fs::remove_dir_all(home.join(ADMISSION_DIR)).unwrap();
+    let outcome = owner.disable(&slice_budget(), &mut |_| {}).await;
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(matches!(control(home), ControlState::Disabled(_)));
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

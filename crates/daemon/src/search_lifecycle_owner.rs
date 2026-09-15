@@ -911,14 +911,15 @@ impl SearchLifecycleOwner {
         };
         let selection = restore.selection.as_mut().expect("taken above");
         selection.begin_disable(self.admission.gate(), observer)?;
-        let inputs = AdmissionInputs::read(&self.home)
-            .map_err(|_| BuildError::Invalid("admission records refused"))?;
         let ControlState::Disabled(disabled) = ProjectionLifecycle::open(&self.home)?.read() else {
             return Err(BuildError::Invalid("disable did not persist"));
         };
+        // A stop with nothing to reconcile is complete; only cleanup needs the manifest's bounds, so the records are read after this.
         let Some(intent) = disabled.handoff.as_deref() else {
             return Ok(());
         };
+        let inputs = AdmissionInputs::read(&self.home)
+            .map_err(|_| BuildError::Invalid("admission records refused"))?;
         let spec = replacement_spec(
             inputs.manifest(),
             selection.identity().clone(),
