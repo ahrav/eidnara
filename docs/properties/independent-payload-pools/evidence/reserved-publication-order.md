@@ -12,10 +12,10 @@ Resolved against the tree of this catalog's introducing commit:
 
 - docs/payload-pool-protocol.md section 11
 - `docs/host-wire-protocol.md:314`
-- `crates/host-runtime/src/ring_transport.rs:1075`
-- `crates/host-runtime/src/ring_transport.rs:1102`
+- `crates/host-runtime/src/ring_transport.rs:1088`
+- `crates/host-runtime/src/ring_transport.rs:1115`
 
-Witness status: partial - `crates/host-runtime/src/ring_transport.rs:3290` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:3524` pins that a channel-0 Request is never a bypass control. The Rust client keeps `Cancel` and `Goodbye` behind the requests they govern on the data lane and lets only `Pong` bypass (`crates/host-runtime/src/client.rs:2877`); `a_cancel_stays_behind_the_request_it_governs` and `cancels_cannot_exhaust_the_pong_reserve` in crates/host-runtime/src/client.rs cover it, and `RingClientEndpoint::try_send_bounded` (`crates/host-runtime/src/ring_transport.rs:1487`) classifies each client frame's inventory with the same `inventory_for`. The native publisher belongs to #550.
+Witness status: partial - `crates/host-runtime/src/ring_transport.rs:3372` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:3606` pins that a channel-0 Request is never a bypass control. The Rust client keeps `Cancel` and `Goodbye` behind the requests they govern on the data lane and lets only `Pong` bypass (`crates/host-runtime/src/client.rs:2877`); `a_cancel_stays_behind_the_request_it_governs` and `cancels_cannot_exhaust_the_pong_reserve` in crates/host-runtime/src/client.rs cover it, and `RingClientEndpoint::try_send_bounded` (`crates/host-runtime/src/ring_transport.rs:1500`) classifies each client frame's inventory with the same `inventory_for`. The native publisher belongs to #550.
 
 ## Failure scenario
 
