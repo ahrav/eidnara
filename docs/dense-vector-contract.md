@@ -267,18 +267,66 @@ bytes is refused when its meaning changed. A different model space is refused
 at an equal dimension.
 
 The vector selector is `vector-profile.json`, beside the host and search
-selectors. `select_vector` refuses a generation whose manifest target is not
-`vector-generation`; the search selector keeps its existing behavior and
-checks no target. Pruning retains every owner-selected generation, discard
-refuses one, exchange repair refuses to replace one, and a corrupt or
-quarantined owner selector stops the store's mutators for every caller, as
-the search selector already did. The store's selection primitive checks
-inventory, sizes, modes, and hashes only; the daemon's semantic verification
-of a generation precedes selection, and selecting or recovering a complete
-composition is a separate contract.
+selectors. It names a composition, never a layer. A layer's manifest target
+is `vector-generation`; a composition's is `vector-composition`, and
+`select_vector` refuses any other. The search selector keeps its existing
+behavior and checks no target. Pruning retains every owner-selected
+generation and every member it lists in `members.json`, discard refuses one,
+exchange repair refuses to replace one, and a corrupt or quarantined owner
+selector, or a selected generation that fails validation, stops the store's
+mutators for every caller. The store's selection primitive checks inventory,
+sizes, modes, hashes, the target, and that every listed member validates; the
+daemon's semantic verification of the composition and its members precedes
+selection.
+
+A delta layer may carry `tombstones.json`, a JSON array of the occurrence
+identifiers it masks in strictly increasing order; a base never does. The
+sidecar records the count, and the file is present only when the count is
+nonzero.
 
 Staging charges the whole payload inventory against the admission manifest's
 `capture_disk_bytes` limit under the caller's admission; a denial stages
 nothing. The build's work directory is scratch: files are created exclusively
 and not synced there, because the store copies and syncs them when it stages,
 and a retry uses a fresh directory.
+
+## The vector composition
+
+`daemon::vector_composition` names one base layer and up to a caller-bounded
+number of ordered delta layers in one immutable composition generation, staged
+through the shared store under target `vector-composition`:
+
+| File | Bytes |
+| --- | --- |
+| `composition.json` | Canonical record: schema, publication sequence, model, tokenizer fingerprint, dimension, metric, tolerance, recipe, epoch, kernel incarnation, base digest, delta digests in application order. |
+| `members.json` | `{"schema":1,"members":[base, deltas...]}`; the lifecycle store reads it to retain every member while the composition is selected. |
+
+`compose` refuses a base with tombstones, a duplicate member, more deltas than
+the bound, a member whose sidecar does not carry the expectation's identity,
+and a delta whose checkpoint moves backwards from its predecessor's. This is a
+conservative reading of the base/delta checkpoint relation the owners have not
+yet frozen: every delta's snapshot and checkpoint are at or after the
+checkpoint of the layer before it. Equal-precedence conflicts among members
+are not decided here.
+
+`publish` stages the composition under the caller's admission and moves the
+selector in one rename. It records three facts separately: `staged` when the
+store holds the record, `acknowledged` when the selector rename returned, and
+`durable` when the containing-directory sync returned. A failure carries those
+facts; a failure after `acknowledged` is an unknown outcome, and `reconcile`
+settles it by reading the selector back, syncing its directory, and comparing
+digests: `Published` when it names the attempt, `Prior` with whatever it names
+otherwise, `Quarantined` when its schema is unknown. An interrupted
+publication therefore leaves the old complete selection or the new one, never
+a partial or mixed view, and an identical retry converges on the same digest
+without a second record.
+
+`verify_composition` checks the record's target, schema, canonical bytes,
+manifest binding, agreement with `members.json`, and identity, verifies every
+member with `vector_generation::verify`, and recomposes the members to check
+the recorded topology. `recover` takes the selected composition when it
+verifies; otherwise it examines the other compositions newest first, at most
+`bound` of them, and takes the first that verifies, reporting the selector as
+`Stale` or `Absent` rather than repointing it. An acknowledged selection is
+never displaced by a newer composition that was staged but not selected, and
+no verifying composition means explicit unavailability.

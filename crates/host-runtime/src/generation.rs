@@ -42,8 +42,10 @@ pub const GENERATIONS_DIR_NAME: &str = "generations";
 pub const CURRENT_PROFILE_NAME: &str = "current-profile.json";
 pub const SEARCH_PROFILE_NAME: &str = "search-profile.json";
 pub const VECTOR_PROFILE_NAME: &str = "vector-profile.json";
-/// The manifest target every vector generation is staged under; `select_vector` refuses any other.
-pub const VECTOR_TARGET: &str = "vector-generation";
+/// The manifest target of a generation the vector selector may name: a composition that lists its members in [`MEMBERS_FILE_NAME`]; `select_vector` refuses any other.
+pub const VECTOR_SELECTION_TARGET: &str = "vector-composition";
+/// A manifest-listed file naming the digests a generation requires retained while it is selected; an owner selector that names such a generation protects every member.
+pub const MEMBERS_FILE_NAME: &str = "members.json";
 
 /// Selectors a daemon component owns. Each names one generation the store must retain, and each is quarantined on its own when its schema is unknown.
 const OWNER_PROFILE_NAMES: [&str; 2] = [SEARCH_PROFILE_NAME, VECTOR_PROFILE_NAME];
@@ -278,7 +280,48 @@ pub struct ValidatedGeneration {
     dir: OwnedFd,
 }
 
+/// The wire shape of [`MEMBERS_FILE_NAME`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireMembers {
+    pub schema: u32,
+    pub members: Vec<String>,
+}
+
 impl ValidatedGeneration {
+    /// The digests this generation requires retained, read through the retained descriptor; empty when the manifest lists no members file.
+    ///
+    /// # Errors
+    ///
+    /// A members file the manifest names but that fails its hash, has an unknown schema, or names a noncanonical digest.
+    pub fn members(&self) -> Result<Vec<String>, GenerationError> {
+        if !self
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.path == MEMBERS_FILE_NAME)
+        {
+            return Ok(Vec::new());
+        }
+        let fd = self.open_verified_file(MEMBERS_FILE_NAME)?;
+        let bytes =
+            read_all_fd(&fd, MAX_MANIFEST_BYTES).map_err(|_| invalid("members read failed"))?;
+        match decode_with_schema::<WireMembers>(&bytes) {
+            SchemaDecode::Valid(members) => {
+                if members
+                    .members
+                    .iter()
+                    .any(|digest| !is_canonical_payload_digest(digest))
+                {
+                    return Err(invalid("members name a noncanonical digest"));
+                }
+                Ok(members.members)
+            }
+            SchemaDecode::UnknownSchema => Err(GenerationError::UnsupportedStateSchema),
+            SchemaDecode::Malformed => Err(invalid("members file is corrupt")),
+        }
+    }
+
     pub fn pin(&self) -> Result<(), GenerationError> {
         rustix::fs::flock(&self.dir, rustix::fs::FlockOperation::NonBlockingLockShared)
             .map_err(|_| invalid("generation is being reclaimed"))
@@ -479,13 +522,21 @@ impl GenerationStore {
         self.read_profile(VECTOR_PROFILE_NAME)
     }
 
-    /// The digest every owner selector names, plus whether any owner selector is quarantined.
+    /// The digest every owner selector names, plus every member such a generation requires retained, plus whether any owner selector is quarantined.
+    ///
+    /// # Errors
+    ///
+    /// A selected generation that fails validation or whose members cannot be read: its members are unknown, so nothing may be reclaimed.
     fn owner_selections(&self) -> Result<(BTreeSet<String>, bool), GenerationError> {
         let mut selected = BTreeSet::new();
         let mut quarantined = false;
         for name in OWNER_PROFILE_NAMES {
             match self.read_profile(name)? {
                 CurrentProfile::Current(digest) => {
+                    let validated = self
+                        .validate(&digest)
+                        .map_err(|_| invalid("owner selection is not a valid generation"))?;
+                    selected.extend(validated.members()?);
                     selected.insert(digest);
                 }
                 CurrentProfile::Quarantined => quarantined = true,
@@ -853,15 +904,20 @@ impl GenerationStore {
         self.select_owner(SEARCH_PROFILE_NAME, digest, None, observer)
     }
 
-    /// Points the vector selector at `digest`. A generation whose manifest target is not [`VECTOR_TARGET`] belongs to another owner and is refused, so the vector selector can never name a search seed or a host payload.
-    /// The store checks inventory, sizes, modes, and hashes; the daemon's semantic verification of the generation precedes this call and is not repeated here.
+    /// Points the vector selector at a composition. A generation whose manifest target is not [`VECTOR_SELECTION_TARGET`] belongs to another owner and is refused, and a composition whose members are not all present and valid is refused, so the selector never exposes a partial set.
+    /// The store checks inventory, sizes, modes, and hashes; the daemon's semantic verification of the composition and its members precedes this call and is not repeated here.
     pub fn select_vector(
         &self,
         digest: &str,
         _transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
-        self.select_owner(VECTOR_PROFILE_NAME, digest, Some(VECTOR_TARGET), observer)
+        self.select_owner(
+            VECTOR_PROFILE_NAME,
+            digest,
+            Some(VECTOR_SELECTION_TARGET),
+            observer,
+        )
     }
 
     fn select_owner(
@@ -879,8 +935,24 @@ impl GenerationStore {
         if target.is_some_and(|target| validated.manifest.target != target) {
             return Err(invalid("generation belongs to another owner"));
         }
+        for member in validated.members()? {
+            self.validate(&member)
+                .map_err(|_| invalid("composition member is not a valid generation"))?;
+        }
         self.replace_profile_at(name, digest, observer)?;
         self.verify_named_identity()
+    }
+
+    /// Every complete generation the store holds, by digest, in name order; temps and foreign names are omitted.
+    pub fn digests(&self) -> Result<Vec<String>, GenerationError> {
+        let (entries, _) = read_dir_names_partitioned(&self.generations_fd)
+            .map_err(|_| invalid("directory listing failed"))?;
+        let mut digests: Vec<String> = entries
+            .into_iter()
+            .filter(|name| is_canonical_payload_digest(name))
+            .collect();
+        digests.sort();
+        Ok(digests)
     }
 
     pub fn reconcile_search(

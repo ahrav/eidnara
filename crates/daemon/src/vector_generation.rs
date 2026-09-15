@@ -11,7 +11,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use host_runtime::generation::{
-    GenerationError, GenerationManifest, GenerationStore, ManifestFile, StageMeta, VECTOR_TARGET,
+    GenerationError, GenerationManifest, GenerationStore, ManifestFile, StageMeta,
     ValidatedGeneration,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
@@ -26,13 +26,17 @@ use sha2::{Digest, Sha256};
 use crate::projection_gates::{Admission, Denial, HookGate, InvalidationIdentity};
 use crate::search_seed::manifest_sources;
 
+/// The manifest target of one vector layer: a base or a delta of original rows, codes, and scales.
+pub const VECTOR_TARGET: &str = "vector-generation";
 pub const ROWS_FILE: &str = "rows.f32";
 pub const CODES_FILE: &str = "codes.int8";
 pub const SCALES_FILE: &str = "scales.f32";
 pub const ROW_IDS_FILE: &str = "row-ids.json";
+/// Sorted unique identifiers of occurrences a delta layer masks; present only when the layer carries at least one.
+pub const TOMBSTONES_FILE: &str = "tombstones.json";
 pub const SIDECAR_FILE: &str = "vector-sidecar.json";
 pub const SIDECAR_SCHEMA: u32 = 1;
-/// Every file the sidecar inventories, in the order the build writes them.
+/// Every file the sidecar inventories for its rows, in the order the build writes them.
 const PAYLOAD_FILES: [&str; 4] = [ROWS_FILE, CODES_FILE, SCALES_FILE, ROW_IDS_FILE];
 /// The disk limit the admission manifest names for staged bytes; the vector build charges its whole inventory against it.
 const STAGE_DISK_LIMIT: &str = "capture_disk_bytes";
@@ -65,6 +69,7 @@ pub struct VectorSidecar {
     pub checkpoint_commit_seq: i64,
     pub hold_id: String,
     pub rows: u64,
+    pub tombstones: u64,
     pub files: Vec<SidecarFile>,
 }
 
@@ -93,13 +98,23 @@ impl VectorSidecar {
         }
     }
 
-    fn inventories_exactly(&self, paths: &[&str]) -> bool {
+    /// The payload files plus the tombstone file when the layer masks any occurrence.
+    fn inventories_exactly(&self) -> bool {
+        let paths: Vec<&str> = self.expected_files();
         self.files.len() == paths.len()
             && self
                 .files
                 .iter()
                 .zip(paths)
-                .all(|(file, path)| file.path == *path)
+                .all(|(file, path)| file.path == path)
+    }
+
+    fn expected_files(&self) -> Vec<&'static str> {
+        let mut paths = PAYLOAD_FILES.to_vec();
+        if self.tombstones != 0 {
+            paths.push(TOMBSTONES_FILE);
+        }
+        paths
     }
 
     /// The compatibility identity's digest fills the contract slot, the sidecar's hash the inputs slot, and the row artifact's hash the payload slot; no release contract or inputs lock exists for a vector generation.
@@ -170,6 +185,8 @@ pub enum FileFault {
     Calibration,
     /// The identifiers do not number the rows in strictly increasing order.
     Identifiers,
+    /// The tombstones are not the declared count of strictly increasing identifiers.
+    Tombstones,
     /// The codes are not the rows encoded under the scales.
     Codes,
 }
@@ -182,6 +199,8 @@ pub enum VectorRefusal {
     NoRows,
     #[error("row {index} is out of identifier order or repeats a row")]
     RowOrder { index: usize },
+    #[error("tombstone {index} is out of identifier order or repeats one")]
+    TombstoneOrder { index: usize },
     #[error("original rows: {0}")]
     Rows(codec::ArtifactRejection),
     #[error("calibration: {0}")]
@@ -238,6 +257,7 @@ impl BuiltVectors {
 pub fn build(
     expected: &ExpectedVectors<'_>,
     export: &LiveRows,
+    tombstones: &[String],
     work_dir: &Path,
 ) -> Result<BuiltVectors, VectorRefusal> {
     let rows = &export.rows;
@@ -248,6 +268,9 @@ pub fn build(
         (1..rows.len()).find(|i| rows[*i - 1].occurrence_id >= rows[*i].occurrence_id)
     {
         return Err(VectorRefusal::RowOrder { index });
+    }
+    if let Some(index) = (1..tombstones.len()).find(|i| tombstones[*i - 1] >= tombstones[*i]) {
+        return Err(VectorRefusal::TombstoneOrder { index });
     }
     let layout = RowLayout {
         dimension: expected.generation.vector_dimension,
@@ -263,14 +286,23 @@ pub fn build(
             VectorRefusal::Rows(codec::ArtifactRejection::Row { index, rejection })
         })?;
     let ids: Vec<&str> = rows.iter().map(|row| row.occurrence_id.as_str()).collect();
-    let payloads = [
-        rows_bytes,
-        codes,
-        calibration.scales.encode(),
-        serde_json::to_vec(&ids).expect("identifier serialization cannot fail"),
+    let mut payloads = vec![
+        (ROWS_FILE, rows_bytes),
+        (CODES_FILE, codes),
+        (SCALES_FILE, calibration.scales.encode()),
+        (
+            ROW_IDS_FILE,
+            serde_json::to_vec(&ids).expect("identifier serialization cannot fail"),
+        ),
     ];
+    if !tombstones.is_empty() {
+        payloads.push((
+            TOMBSTONES_FILE,
+            serde_json::to_vec(tombstones).expect("identifier serialization cannot fail"),
+        ));
+    }
     let mut inventory = Vec::with_capacity(payloads.len());
-    for (path, bytes) in PAYLOAD_FILES.iter().zip(&payloads) {
+    for (path, bytes) in &payloads {
         write_new(&work_dir.join(path), bytes)?;
         inventory.push(SidecarFile {
             path: (*path).to_owned(),
@@ -295,6 +327,7 @@ pub fn build(
         checkpoint_commit_seq: export.checkpoint.checkpoint_commit_seq,
         hold_id: export.checkpoint.hold_id.clone(),
         rows: rows.len() as u64,
+        tombstones: tombstones.len() as u64,
         files: inventory,
     };
     write_new(&work_dir.join(SIDECAR_FILE), &sidecar.canonical_bytes())?;
@@ -304,35 +337,56 @@ pub fn build(
     })
 }
 
-/// Stages a build into `store` after the admission gate accepts its whole inventory against the staged-bytes limit; a refused admission stages nothing.
-/// `_transaction` is the caller's exclusive hold on the store's transaction lock; hold it until the digest is pinned or protected.
+/// Everything a stager needs from the lifecycle and the admission gate. `transaction` is the caller's exclusive hold on the store's transaction lock; hold it until the digest is pinned or protected.
+pub struct Staging<'a> {
+    pub store: &'a GenerationStore,
+    pub transaction: &'a LifecycleTransactionLock,
+    pub gate: &'a HookGate,
+    pub admission: &'a Admission,
+    pub identity: &'a ProjectionIdentity,
+    pub protected: &'a BTreeSet<String>,
+}
+
+impl Staging<'_> {
+    /// Charges the manifest's whole inventory against the staged-bytes limit, then stages the files `resolve` names for each manifest path; a refused admission stages nothing.
+    ///
+    /// # Errors
+    ///
+    /// An admission denial or the store's refusal.
+    pub(crate) fn stage_manifest(
+        &self,
+        manifest: &GenerationManifest,
+        meta: &StageMeta,
+        resolve: impl Fn(&str) -> PathBuf,
+    ) -> Result<String, VectorRefusal> {
+        let bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
+        self.gate
+            .check_limits(
+                self.admission,
+                &InvalidationIdentity::from(self.identity),
+                &[(STAGE_DISK_LIMIT, bytes)],
+            )
+            .map_err(VectorRefusal::Admission)?;
+        let sources = manifest_sources(manifest, |path| Some(resolve(path)))
+            .expect("every manifest path resolves under the work directory");
+        let digest = self.store.stage(&sources, meta, self.protected)?;
+        // The store checked every source against the manifest's size and hash, so the digest it returns is the manifest's.
+        debug_assert_eq!(digest, manifest.digest());
+        Ok(digest)
+    }
+}
+
+/// Stages a build through `staging`.
 ///
 /// # Errors
 ///
 /// An admission denial or the store's refusal.
-pub fn stage(
-    built: &BuiltVectors,
-    store: &GenerationStore,
-    _transaction: &LifecycleTransactionLock,
-    gate: &HookGate,
-    admission: &Admission,
-    identity: &ProjectionIdentity,
-    protected: &BTreeSet<String>,
-) -> Result<String, VectorRefusal> {
-    let manifest = built.sidecar.stage_manifest();
-    let bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
-    gate.check_limits(
-        admission,
-        &InvalidationIdentity::from(identity),
-        &[(STAGE_DISK_LIMIT, bytes)],
+pub fn stage(built: &BuiltVectors, staging: &Staging<'_>) -> Result<String, VectorRefusal> {
+    staging.stage_manifest(
+        &built.sidecar.stage_manifest(),
+        &built.sidecar.stage_meta(),
+        |path| built.dir.join(path),
     )
-    .map_err(VectorRefusal::Admission)?;
-    let sources = manifest_sources(&manifest, |path| Some(built.dir.join(path)))
-        .expect("every manifest path resolves under the work directory");
-    let digest = store.stage(&sources, &built.sidecar.stage_meta(), protected)?;
-    // The store checked every source against the manifest's size and hash, so the digest it returns is the manifest's.
-    debug_assert_eq!(digest, manifest.digest());
-    Ok(digest)
 }
 
 /// A generation whose files, sidecar, and meaning were all checked.
@@ -341,6 +395,21 @@ pub struct VerifiedVectors {
     pub sidecar: VectorSidecar,
     /// Retains the directory descriptor and, once pinned, the shared lock.
     pub generation: ValidatedGeneration,
+}
+
+impl VerifiedVectors {
+    /// The identifiers this layer masks, re-verified against the manifest on read; empty for a layer without tombstones.
+    pub fn tombstones(&self) -> Result<Vec<String>, VectorRefusal> {
+        if self.sidecar.tombstones == 0 {
+            return Ok(Vec::new());
+        }
+        serde_json::from_slice(&read_verified(&self.generation, TOMBSTONES_FILE)?).map_err(|_| {
+            VectorRefusal::File {
+                path: TOMBSTONES_FILE,
+                fault: FileFault::Tombstones,
+            }
+        })
+    }
 }
 
 impl std::fmt::Debug for VerifiedVectors {
@@ -376,7 +445,7 @@ pub fn verify(
     if sidecar.canonical_bytes() != sidecar_bytes {
         return Err(VectorRefusal::NotVectors("sidecar not canonical"));
     }
-    if !sidecar.inventories_exactly(&PAYLOAD_FILES) {
+    if !sidecar.inventories_exactly() {
         return Err(VectorRefusal::NotVectors("inventory"));
     }
     if sidecar.stage_manifest() != *manifest {
@@ -411,6 +480,16 @@ pub fn verify(
         .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
     if read_verified(&generation, CODES_FILE)? != codes {
         return Err(fault(CODES_FILE, FileFault::Codes));
+    }
+    if sidecar.tombstones != 0 {
+        let tombstones: Vec<String> =
+            serde_json::from_slice(&read_verified(&generation, TOMBSTONES_FILE)?)
+                .map_err(|_| fault(TOMBSTONES_FILE, FileFault::Tombstones))?;
+        if tombstones.len() as u64 != sidecar.tombstones
+            || tombstones.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(fault(TOMBSTONES_FILE, FileFault::Tombstones));
+        }
     }
     Ok(VerifiedVectors {
         digest: digest.to_owned(),
@@ -477,15 +556,19 @@ fn encode_all<'a>(
     Ok(codes)
 }
 
-fn read_verified(
+/// Reads one manifest-listed file through the retained descriptor after rehashing it.
+pub(crate) fn read_verified(
     generation: &ValidatedGeneration,
-    path: &'static str,
-) -> Result<Vec<u8>, VectorRefusal> {
+    path: &str,
+) -> Result<Vec<u8>, GenerationError> {
     let fd = generation.open_verified_file(path)?;
     let mut file = fs::File::from(fd);
     let mut bytes = Vec::new();
-    io::Read::read_to_end(&mut file, &mut bytes)
-        .map_err(|error| VectorRefusal::Io(error.kind().to_string()))?;
+    io::Read::read_to_end(&mut file, &mut bytes).map_err(|_| {
+        GenerationError::NativePayloadInvalid {
+            detail: "verified file read failed",
+        }
+    })?;
     Ok(bytes)
 }
 
