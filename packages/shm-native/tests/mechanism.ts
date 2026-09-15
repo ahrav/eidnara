@@ -863,6 +863,19 @@ describe("raw N-API descriptor boundary", () => {
                 `while (report.wakes === 1 && Date.now() < deadline) await sleep(1);\n` +
                 `report.wakesAfterSecondConsumption = report.wakes;\n` +
                 `publish(DEPTH + 2);\n` +
+                `while (addon.poll(pair.second, (token) => tokens.push(token)));\n` +
+                `let corr = DEPTH + 3;\n` +
+                `report.publishedWithBlocksHeld = 0;\n` +
+                `try { for (;; corr += 1) { publish(corr); report.publishedWithBlocksHeld += 1; } } catch (error) { report.blocksExhausted = error.message; }\n` +
+                `report.wakesBeforeReturn = report.wakes;\n` +
+                `report.armedOnBlocks = addon.armCapacity(pair.first);\n` +
+                `await sleep(50);\n` +
+                `report.wakesWhileBlocksHeld = report.wakes;\n` +
+                `addon.release(pair.second, tokens.shift());\n` +
+                `deadline = Date.now() + 2000;\n` +
+                `while (report.wakes === report.wakesBeforeReturn && Date.now() < deadline) await sleep(1);\n` +
+                `report.wakesAfterReturn = report.wakes;\n` +
+                `publish(corr);\n` +
                 `for (const token of tokens) addon.release(pair.second, token);\n` +
                 `addon.close(pair.first);\n` +
                 `addon.close(pair.second);\n` +
@@ -884,6 +897,12 @@ describe("raw N-API descriptor boundary", () => {
             rearmed: boolean;
             wakesAfterRearm: number;
             wakesAfterSecondConsumption: number;
+            publishedWithBlocksHeld: number;
+            blocksExhausted: string;
+            wakesBeforeReturn: number;
+            armedOnBlocks: boolean;
+            wakesWhileBlocksHeld: number;
+            wakesAfterReturn: number;
         };
         // The producer side must be watched before it can park.
         expect(report.unwatched).toMatch(/not watched/);
@@ -898,6 +917,17 @@ describe("raw N-API descriptor boundary", () => {
         expect(report.rearmed).toBe(true);
         expect(report.wakesAfterRearm).toBe(1);
         expect(report.wakesAfterSecondConsumption).toBe(2);
+        // Every descriptor is acknowledged while the peer holds the blocks, so the 4 KiB class
+        // (64 blocks) runs out with descriptor headroom to spare: 33 held plus 31 published.
+        expect(report.publishedWithBlocksHeld).toBe(
+            GRANT_CLASSES[0]![1] - (GRANT_ORDINARY_DESCRIPTORS + 1),
+        );
+        expect(report.blocksExhausted).toBe(RING_FULL_MESSAGE);
+        expect(report.wakesBeforeReturn).toBe(2);
+        expect(report.armedOnBlocks).toBe(true);
+        expect(report.wakesWhileBlocksHeld).toBe(2);
+        // One lease return, with no descriptor consumed, is the only event, and it is enough.
+        expect(report.wakesAfterReturn).toBe(3);
     });
 
     test("injected detach and deletion failures quarantine the backing and conserve tokens", () => {

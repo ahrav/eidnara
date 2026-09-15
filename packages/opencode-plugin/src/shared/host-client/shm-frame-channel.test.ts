@@ -1175,6 +1175,60 @@ describe("mandatory shared-memory channel", () => {
         expect(ticket.cancel()).toBe(false);
     });
 
+    test("a cancel that lands inside a queued frame's fill reports the publication it cannot stop and refunds once", () => {
+        const budget = new ByteBudget(1 << 20);
+        const state = { full: true, arm: () => true };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        channel.beginFrames();
+        let cancelled: boolean | undefined;
+        const ticket = channel.produce(responseHeader(FrameType.Request, 1n, 4), {
+            byteLength: 4,
+            fill: (cursor: ProducerCursor) => {
+                cursor.write(new Uint8Array(4));
+                cancelled = ticket.cancel();
+            },
+        });
+        expect(channel.stats().queuedDataFrames).toBe(1);
+        state.full = false;
+        mock.readiness()?.();
+        expect(mock.published).toEqual([1n]);
+        expect(cancelled).toBe(false);
+        expect(channel.stats().queuedDataFrames).toBe(0);
+        expect(budget.used).toBe(0);
+    });
+
+    test("cancelling the queue head publishes its successor without a readiness wake", async () => {
+        const budget = new ByteBudget(1 << 20);
+        const state = { full: true, arm: () => true };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        channel.beginFrames();
+        const body = {
+            byteLength: 4,
+            fill: (cursor: ProducerCursor) => cursor.write(new Uint8Array(4)),
+        };
+        const head = channel.produce(responseHeader(FrameType.Request, 1n, 4), body);
+        state.full = false;
+        channel.produce(responseHeader(FrameType.Request, 2n, 4), body);
+        expect(channel.stats().queuedDataFrames).toBe(2);
+        expect(head.cancel()).toBe(true);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(mock.published).toEqual([2n]);
+        expect(channel.stats().queuedDataFrames).toBe(0);
+        expect(budget.used).toBe(0);
+    });
+
     test("queued data cannot refuse a Cancel or Goodbye, and control admission has its own bound", () => {
         const budget = new ByteBudget(1 << 24);
         const closes: FrameChannelCloseReason[] = [];

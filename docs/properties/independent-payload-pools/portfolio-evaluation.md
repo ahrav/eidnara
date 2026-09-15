@@ -8,7 +8,7 @@ of its resolution.
 
 | # | Finding | Disposition |
 | --- | --- | --- |
-| 1 | The remaining `partial` records are `environment-finalizer-confinement` (a late-finalizer witness needs a runtime that reports detachment), `partial-setup-reclaims-only-unexposed-resources` (a failure between descriptor duplication and grant transfer), `send-outcome-no-generic-replay` and `real-process-current-layout-witness` (native daemon-level witnesses on a capable runtime), and the Miri same-process limitation. | Accepted: the catalog keeps target claims separate from implemented facts; each record names its handoff. |
+| 1 | The remaining `partial` records are `environment-finalizer-confinement` (a late-finalizer witness needs a runtime that reports detachment), `partial-setup-reclaims-only-unexposed-resources` (a failure between descriptor duplication and grant transfer), `send-outcome-no-generic-replay` and `real-process-current-layout-witness` (native daemon-level witnesses on a capable runtime), `request-conversion-completion-ownership` (no test pauses the production inbound copy under Cancel, route close, or shutdown), `acceptance-artifact-provenance` (build metadata is not an artifact digest), and the Miri same-process limitation. | Accepted: the catalog keeps target claims separate from implemented facts; each record names its handoff. |
 | 2 | The native and direct-host real-process suites skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and Node (`node_detachment_unavailable`). | Recorded as an explicit unsupported capability in `real-process-current-layout-witness`; a probe copy of `runtime.ts` with the transfer gate removed passed locally, which is diagnostic only, not evidence. |
 | 3 | Miri proves same-shape access and ownership within one process; hostile cross-process writers are unprovable there. | Accepted limitation; the two-process job supplies the process boundary without Miri. |
 | 4 | The Valgrind job cannot run child-process witnesses. | Resolved by the separate `two-process` job with named witnesses. |
@@ -23,7 +23,7 @@ of its resolution.
 
 #550 is the last implementation task of the stack (#546, #548, #552, #550),
 so its closing evidence is the combined run below, executed on the final tree
-of this branch on Linux x86-64 with Bun 1.3.14, Node 22.23.2, and
+of this branch on Linux x86-64 with Bun 1.3.14, Node 24.18.0, and
 `cargo +1.98`. Each row names what it covers of lifetimes, aliases, quotas,
 simultaneous exhaustion, ordering, and stop/restart, and what it could not.
 
@@ -31,10 +31,10 @@ simultaneous exhaustion, ordering, and stop/restart, and what it could not.
 | --- | --- | --- | --- | --- |
 | Rust workspace (transport, host, Rust client, daemon) | `cargo +1.98 nextest run --workspace --locked --profile ci` | 4008 passed, 74 skipped (bench kinds, shm child-role entry) | lifetimes, quotas, ordering, exhaustion, stop/restart (`shm_failure_modes.rs`), 64 MiB both directions, one-over refusal | Valgrind (CI only) |
 | Transport unsafe | `cargo +nightly-2026-07-27 miri test -p shm-transport --lib -- lease:: backend::ring::miri` | 15 passed | ownership, return-once, same-shape access | hostile cross-process writers |
-| Native addon | `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1 bun run --cwd packages/shm-native test` | 24 pass | aliases, injected detach and deletion failures, control bypass, capacity wake, exhaustion | wrapper-level lifecycle on this Bun (`markAsUntransferable` absent) |
+| Native addon | `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1 bun run --cwd packages/shm-native test` | 24 pass | aliases, injected detach and deletion failures, control bypass, capacity wake on descriptor consumption and on a lease return alone, exhaustion | wrapper-level lifecycle on this Bun (`markAsUntransferable` absent) |
 | Native capability, both runtimes | `test:capability:bun`, `test:capability:node`, `test:node` | recorded limitations with artifact identity | artifact identity and runtime versions | activation on a detachment-capable runtime |
-| TypeScript client | `bun test packages/opencode-plugin/src/shared/host-client` | 204 pass | queue ordering and bound, control bypass, retained quotas, live-addon capacity wake | daemon-level TypeScript run on a capable runtime |
-| Plugin | `bun run --cwd packages/opencode-plugin test`, `smoke` | 3525 pass, 2 fail (SSRF parity, needs Node >= 24.15), smoke pass | integration of the client into the plugin | none beyond the Node-version failures |
+| TypeScript client | `bun test packages/opencode-plugin/src/shared/host-client` | 211 pass (mock-addon witnesses; the real-addon cases return early because `probeCapabilities()` reports `runtime_mechanism_unavailable` on this Bun) | queue ordering and bound, flush waiting on the queue, control bypass, retained quotas and post-close refusal, capacity re-arm against a mock addon | the live-addon capacity wake (`a saturated outbound ring cannot block inbound readiness`) and the daemon-level TypeScript run, both on a runtime that reports the detachment capability |
+| Plugin | `bun run --cwd packages/opencode-plugin test`, `smoke` | 3532 pass on Node 24.18.0 (the SSRF parity tests fail below Node 24.15), smoke pass | integration of the client into the plugin | none |
 | Direct host E2E | `bun run --cwd packages/e2e-tests test:fixture-contract` | 3 pass, 2 skip | fixture contract | the two capability skips |
 | Sole surface | `rg` for `SpanPlan`, `SamplePrefix`, `MADV_REMOVE`, `ReleaseSink`, `RingGrant`, `host-test-ring-v1`, `BRIDGE_RESERVE_SLICE`, `reserve_until` outside the transport's own API and tests | no matches in production sources (`PoolGeometry::arena_bytes` is the current layout's field, not the retired arena) | one transport, one layout reader, one receive representation, no shim or flag | none |
 

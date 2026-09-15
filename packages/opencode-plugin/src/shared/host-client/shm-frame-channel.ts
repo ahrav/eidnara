@@ -88,7 +88,8 @@ interface PendingPublication {
     reservedBytes: number;
     /** `true` for a frame admitted from the control reserve rather than the data queue. */
     control: boolean;
-    state: "queued" | "published" | "dropped";
+    /** `publishing` covers the native call, whose `fill` runs caller code that may cancel. */
+    state: "queued" | "publishing" | "published" | "dropped";
 }
 
 /** A pure-header liveness reply; the only frame that publishes past queued data (§6.3). */
@@ -309,9 +310,11 @@ export class ShmFrameChannel implements SetupFrameChannel {
             cancel: () => {
                 if (pending.state === "queued") {
                     this.dropPending(pending);
+                    // Removing the head rings no doorbell, so the successor is retried here.
+                    if (this.pendingPublications.length > 0) this.schedulePump();
                     return true;
                 }
-                return pending.state !== "published";
+                return pending.state === "dropped";
             },
         };
     }
@@ -358,9 +361,11 @@ export class ShmFrameChannel implements SetupFrameChannel {
                 this.dropPending(head);
                 continue;
             }
+            head.state = "publishing";
             try {
                 this.publishFrame(head.header, head.body, head.hooks, head.deadline);
             } catch (error) {
+                head.state = "queued";
                 if (error instanceof HostCallError && error.code === "ring_full") {
                     return true;
                 }

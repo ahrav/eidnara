@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `.github/workflows/ci.yml:785`
 - `packages/shm-native/index.ts:38`
 
-Witness status: yes - the native job builds the addon from source before every test run (`.github/workflows/ci.yml:785`); `nativeWireConstants` (`packages/shm-native/index.ts:12`) compares the loaded addon's identifiers with the wrapper's; `nativeArtifactIdentity` (`packages/shm-native/index.ts:38`) reports the loaded addon's build profile, target, N-API version, schema, and profile, and the capability witness (`packages/shm-native/tests/capability.ts:20`) records them beside the runtime's own version on every run and asserts them under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`, so a recorded limitation names the exact artifact and runtime it applies to.
+Witness status: partial - the native job builds the addon from source before every test run (`.github/workflows/ci.yml:785`); `nativeWireConstants` (`packages/shm-native/index.ts:12`) compares the loaded addon's identifiers with the wrapper's; `nativeArtifactIdentity` (`packages/shm-native/index.ts:38`) reports the loaded addon's build profile, target, N-API version, schema, and profile, and the capability witness (`packages/shm-native/tests/capability.ts:20`) records them beside the runtime's own version on every run and asserts them under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`. Those fields name a build configuration, not an artifact: a stale local `shm_native.node` built from another revision at the same layout passes every assertion, so exact provenance holds only where the CI job's source build is enforced, and a standalone run records the configuration it loaded, not the revision.
 
 ## Failure scenario
 
@@ -40,7 +40,7 @@ Check semantics: `always` - the addon's `descriptorSchemaVersion()` and `qualifi
 
 - Sources examined: the files listed under the evidence trail, the test names
   in `Exercised`, and the CI workflow where the record is a gate property.
-- Findings: yes at the tree of this catalog's introducing commit; see `Exercised` for what each
+- Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: none for this task
-- Conclusion: resolved with answer.
+- Missing evidence: an artifact digest tied to the source revision; build metadata cannot tell a stale local build at the same layout from the tested one.
+- Conclusion: unresolved, needs the named handoff.

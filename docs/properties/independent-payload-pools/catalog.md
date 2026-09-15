@@ -73,7 +73,7 @@ A marker fires on a correct implementation; none asserts a violation.
 | `shared-copy-source-access` | safety | default-production | `always` | partial |
 | `owned-lease-thread-boundary` | safety | default-production | `always` | yes |
 | `private-decode-input-stability` | safety | default-production | `always` | yes |
-| `request-conversion-completion-ownership` | safety | default-production | `always` | yes |
+| `request-conversion-completion-ownership` | safety | default-production | `always` | partial |
 | `native-alias-closure-before-transfer` | safety | default-production | `always` | yes |
 | `partial-close-token-conservation` | safety | default-production | `always` | yes |
 | `environment-finalizer-confinement` | safety | default-production | `always` | partial |
@@ -91,7 +91,7 @@ A marker fires on a correct implementation; none asserts a violation.
 | `single-replacement-surface` | safety | test-only | `always` | yes |
 | `integration-gate-dependency-selection` | safety | test-only | `always` | yes |
 | `unsafe-witness-selection` | safety | test-only | `always` | yes |
-| `acceptance-artifact-provenance` | safety | test-only | `always` | yes |
+| `acceptance-artifact-provenance` | safety | test-only | `always` | partial |
 | `real-process-current-layout-witness` | reachability | test-only | `reachable` | partial |
 | `malformed-fixture-valid-baseline` | safety | test-only | `always` | yes |
 | `fuzz-adapter-current-contract` | safety | test-only | `always` | yes |
@@ -722,17 +722,17 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - the native job builds the addon from source before every test run (`.github/workflows/ci.yml:785`); `nativeWireConstants` (`packages/shm-native/index.ts:12`) compares the loaded addon's identifiers with the wrapper's; `nativeArtifactIdentity` (`packages/shm-native/index.ts:38`) reports the loaded addon's build profile, target, N-API version, schema, and profile, and the capability witness (`packages/shm-native/tests/capability.ts:20`) records them beside the runtime's own version on every run and asserts them under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`, so a recorded limitation names the exact artifact and runtime it applies to.
+Exercised: partial - the native job builds the addon from source before every test run (`.github/workflows/ci.yml:785`); `nativeWireConstants` (`packages/shm-native/index.ts:12`) compares the loaded addon's identifiers with the wrapper's; `nativeArtifactIdentity` (`packages/shm-native/index.ts:38`) reports the loaded addon's build profile, target, N-API version, schema, and profile, and the capability witness (`packages/shm-native/tests/capability.ts:20`) records them beside the runtime's own version on every run and asserts them under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`. Those fields name a build configuration, not an artifact: a stale local `shm_native.node` built from another revision at the same layout passes every assertion, so exact provenance holds only where the CI job's source build is enforced, and a standalone run records the configuration it loaded, not the revision.
 Guarantee: Acceptance runs load a wrapper and addon built from the tested source at the current layout.
 Check: `always` - the addon's `descriptorSchemaVersion()` and `qualifiedTestProfile()` equal the wrapper constants in every run.
 Fault/timing angle: A stale prebuilt `shm_native.node`.
 Required faults and enabling state: A run against a stale artifact. Markers: marker:`gate.stale_artifact_present`.
-Confidence: high - [evidence](evidence/acceptance-artifact-provenance.md). Verified against the tree of this catalog's introducing commit: `packages/shm-native/tests/mechanism.ts:57`; `.github/workflows/ci.yml:785`; `packages/shm-native/index.ts:38`.
-Existing check: the native job builds the addon from source before every test run (`.github/workflows/ci.yml:785`); `nativeWireConstants` (`packages/shm-native/index.ts:12`) compares the loaded addon's identifiers with the wrapper's; `nativeArtifactIdentity` (`packages/shm-native/index.ts:38`) reports the loaded addon's build profile, target, N-API version, schema, and profile, and the capability witness (`packages/shm-native/tests/capability.ts:20`) records them beside the runtime's own version on every run and asserts them under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`, so a recorded limitation names the exact artifact and runtime it applies to.
+Confidence: medium - [evidence](evidence/acceptance-artifact-provenance.md). Verified against the tree of this catalog's introducing commit: `packages/shm-native/tests/mechanism.ts:57`; `.github/workflows/ci.yml:785`; `packages/shm-native/index.ts:38`.
+Existing check: the native job builds the addon from source before every test run (`.github/workflows/ci.yml:785`); `nativeWireConstants` (`packages/shm-native/index.ts:12`) compares the loaded addon's identifiers with the wrapper's; `nativeArtifactIdentity` (`packages/shm-native/index.ts:38`) reports the loaded addon's build profile, target, N-API version, schema, and profile, and the capability witness (`packages/shm-native/tests/capability.ts:20`) records them beside the runtime's own version on every run and asserts them under `EIDNARA_SHM_NATIVE_CLAIMED_TARGET=1`. Those fields name a build configuration, not an artifact: a stale local `shm_native.node` built from another revision at the same layout passes every assertion, so exact provenance holds only where the CI job's source build is enforced, and a standalone run records the configuration it loaded, not the revision.
 Impact: A stale artifact tests the old layout while reporting the new one.
 Open questions:
 
-- Handoff: none for this task.
+- Handoff: a content digest of the addon tied to the source revision, recorded by the addon and checked by the wrapper, before a standalone run can claim exact artifact provenance.
 
 ### real-process-current-layout-witness
 
