@@ -388,6 +388,53 @@ async fn registration_race_rejection_does_not_block_the_reader_on_a_full_writer_
     assert!(!generation.token.is_cancelled());
 }
 
+/// A request that loses the registration race still returns its lease before any rejection; a
+/// failed return doorbell retires the generation instead of queueing a rejection over a
+/// transport that cannot be woken.
+#[tokio::test]
+async fn a_request_losing_the_registration_race_retires_on_a_failed_return() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        ..
+    } = fixture();
+    let route = shared
+        .registry
+        .reserve(&generation, RouteClass::General)
+        .unwrap();
+    shared.registry.install_bound(route);
+    shared.registry.freeze_admission();
+    let mut leases = leases_whose_return_wake_fails();
+    let budget = crate::wire::ByteBudget::new(16);
+    let header = crate::wire::EnvelopeHeader {
+        len: 1,
+        ver: crate::wire::PROTOCOL_VERSION,
+        ty: crate::wire::FrameType::Request,
+        flags: crate::wire::response_flags(false, true),
+        channel: route.channel,
+        epoch: route.epoch,
+        corr: 9,
+    };
+    let frame = crate::frame_channel::InboundFrame::new(
+        header,
+        leases.pop().unwrap(),
+        budget.try_charge(1).unwrap(),
+    );
+    crate::dispatch::dispatch_request(&shared, &generation, frame).await;
+    shared.tracker.close();
+    shared.tracker.wait().await;
+    assert!(
+        generation.token.is_cancelled(),
+        "the failed return is a transport fault, not a rejectable request"
+    );
+    assert!(
+        queue.try_recv().is_err(),
+        "no rejection is queued over a transport that cannot be woken"
+    );
+    drop(leases);
+}
+
 /// Holds every block of the smallest ordinary class so the producer can arm a capacity wait;
 /// dropping the producer afterwards closes its doorbell end, so the first return's wake fails.
 /// Every lease stays held until the caller drops it: a drop before the frame under test would

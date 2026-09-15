@@ -12,7 +12,7 @@ Resolved against the tree of this catalog's introducing commit:
 
 - `crates/host-runtime/src/frame_channel.rs:115`
 - `crates/host-runtime/src/connection.rs:547`
-- `crates/host-runtime/src/dispatch.rs:1020`
+- `crates/host-runtime/src/dispatch.rs:1023`
 
 Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2389` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:115`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:547`) parses channel-0 bodies only from that private copy. An oversized channel-0 request's lease is released before any parse or delivery (`crates/host-runtime/src/ring_transport.rs:985-988`) and only a `Rejected` event is delivered.
 
@@ -32,7 +32,7 @@ Situation markers that must fire independently of the safety check:
 
 - `host.copy_races_peer_write`
 
-Check semantics: `always` - no `InboundFrame` or control decoder holds a `LeaseSpan`; `lease.release()` precedes `deliver`.
+Check semantics: `always` - no control decoder or handler holds a `LeaseSpan`; the lease travels inside the `InboundFrame` through `deliver`, and `lease.release()` in `into_private` precedes every parser and handler.
 
 ## Investigation log
 

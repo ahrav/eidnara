@@ -978,6 +978,9 @@ pub async fn dispatch_request<H: HostHandler>(
     let outer = shared.spawn_tracked(route_tracker.track_future(async move {
         let _pending_permit = pending_permit;
         if start_rx.await.is_err() {
+            // Registration lost to route close or frozen admission; the lease returns before the
+            // rejection, and a failed return doorbell ends the generation instead.
+            release_before_copy(frame, &gen_task);
             remove_pending(&gen_task, key);
             return;
         }
