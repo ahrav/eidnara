@@ -90,6 +90,10 @@ impl OccurrenceClass {
 /// The harnesses whose native identities a projection accepts.
 pub const HARNESSES: [&str; 2] = ["opencode", "pi"];
 
+/// The git object formats a `git_commits` identity may name, each with the
+/// hex length of a complete object id.
+pub const OBJECT_FORMATS: [(&str, usize); 2] = [("sha1", 40), ("sha256", 64)];
+
 /// Why an occurrence was refused, in the order the checks run. The first
 /// failing check names the refusal, so a record with several faults reports
 /// the earliest one.
@@ -361,11 +365,11 @@ pub fn encode_preserving_span(
         return Err(OccurrenceRefusal::UnknownHarness);
     }
     if class == OccurrenceClass::GitCommits {
-        let expected_len = match values[1] {
-            "sha1" => 40,
-            "sha256" => 64,
-            _ => return Err(OccurrenceRefusal::MalformedOid),
-        };
+        let expected_len = OBJECT_FORMATS
+            .iter()
+            .find(|(format, _)| *format == values[1])
+            .map(|(_, len)| *len)
+            .ok_or(OccurrenceRefusal::MalformedOid)?;
         let oid = values[2];
         if oid.len() != expected_len || !crate::scope::is_lower_hex_oid(oid) {
             return Err(OccurrenceRefusal::MalformedOid);

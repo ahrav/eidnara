@@ -861,6 +861,48 @@ fn bounds_stale_cursors_interruption_and_missing_context_report_incompleteness()
         .unwrap();
 }
 
+#[test]
+fn a_page_refuses_the_same_damaged_rows_as_the_occurrence_reader() {
+    let sources = vec![
+        claim("obj-1", 1, "decision_summary"),
+        claim("obj-1", 1, "rationale"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    apply(&store, &sources, mutation(0, 5), vec![], 10).unwrap();
+    let damaged = occurrence_id(&sources[0]);
+    let query = ExactQuery::CanonicalObject(b"obj-1");
+    for (name, invalidated_commit_seq) in [("at creation", 5), ("before creation", 3)] {
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO occurrence_tombstones(
+                         occurrence_id,invalidated_commit_seq,reason,recorded_at
+                     ) VALUES (?1,?2,'retired',1)",
+                    rusqlite::params![damaged, invalidated_commit_seq],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    retrieval::read_occurrence(conn, &damaged).unwrap_err(),
+                    ProjectionError::CorruptRow,
+                    "tombstone {name}: the occurrence reader refuses the row"
+                );
+                assert_eq!(
+                    page(conn, &context(8), &query, None).unwrap_err(),
+                    LookupRefusal::Projection(ProjectionError::CorruptRow),
+                    "tombstone {name}: the page reader applies the same rule"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
 fn association_rows(conn: &GuardedConn<'_>) -> Vec<(String, String, Vec<u8>, String, String)> {
     let mut statement = conn
         .prepare(

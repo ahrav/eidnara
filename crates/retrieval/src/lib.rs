@@ -208,7 +208,7 @@ impl TombstoneReason {
         }
     }
 
-    pub(crate) fn parse(value: &str) -> Option<Self> {
+    fn parse(value: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|reason| reason.as_str() == value)
@@ -822,6 +822,43 @@ pub fn tombstone_occurrence(
     }
 }
 
+/// The schema requires both span bounds or neither; half-present pairs and
+/// negative bounds are corrupt.
+pub(crate) fn decode_span(
+    start: Option<i64>,
+    end: Option<i64>,
+) -> Result<Option<(u64, u64)>, ProjectionError> {
+    match (start, end) {
+        (None, None) => Ok(None),
+        (Some(start), Some(end)) => Ok(Some((
+            u64::try_from(start).map_err(|_| ProjectionError::CorruptRow)?,
+            u64::try_from(end).map_err(|_| ProjectionError::CorruptRow)?,
+        ))),
+        _ => Err(ProjectionError::CorruptRow),
+    }
+}
+
+/// A tombstone is recorded after the occurrence's creation commit; tombstones
+/// at or before it, unknown reasons, and half-present pairs are corrupt.
+pub(crate) fn decode_tombstone(
+    invalidated_commit_seq: Option<i64>,
+    reason: Option<&str>,
+    created_commit_seq: i64,
+) -> Result<Option<Tombstone>, ProjectionError> {
+    match (invalidated_commit_seq, reason) {
+        (None, None) => Ok(None),
+        (Some(invalidated_commit_seq), Some(reason))
+            if invalidated_commit_seq > created_commit_seq =>
+        {
+            Ok(Some(Tombstone {
+                invalidated_commit_seq,
+                reason: TombstoneReason::parse(reason).ok_or(ProjectionError::CorruptRow)?,
+            }))
+        }
+        _ => Err(ProjectionError::CorruptRow),
+    }
+}
+
 /// One stored occurrence with its payload bytes and tombstone, or `None`. A
 /// row whose columns do not decode to the shape the schema promises is
 /// `CorruptRow`, as is a tuple or payload that no longer hashes to its stored
@@ -859,30 +896,14 @@ pub fn read_occurrence(
                 {
                     return Err(corrupt());
                 }
-                let span = match (row.get::<_, Option<i64>>(6)?, row.get::<_, Option<i64>>(7)?) {
-                    (None, None) => None,
-                    (Some(start), Some(end)) => Some((
-                        u64::try_from(start).map_err(|_| corrupt())?,
-                        u64::try_from(end).map_err(|_| corrupt())?,
-                    )),
-                    _ => return Err(corrupt()),
-                };
-                let tombstone = match (
-                    row.get::<_, Option<i64>>(16)?,
-                    row.get::<_, Option<String>>(17)?,
-                ) {
-                    (None, None) => None,
-                    (Some(invalidated_commit_seq), Some(reason)) => {
-                        if invalidated_commit_seq <= row.get::<_, i64>(15)? {
-                            return Err(corrupt());
-                        }
-                        Some(Tombstone {
-                            invalidated_commit_seq,
-                            reason: TombstoneReason::parse(&reason).ok_or_else(corrupt)?,
-                        })
-                    }
-                    _ => return Err(corrupt()),
-                };
+                let span = decode_span(row.get(6)?, row.get(7)?).map_err(|_| corrupt())?;
+                let created_commit_seq: i64 = row.get(15)?;
+                let tombstone = decode_tombstone(
+                    row.get(16)?,
+                    row.get::<_, Option<String>>(17)?.as_deref(),
+                    created_commit_seq,
+                )
+                .map_err(|_| corrupt())?;
                 Ok(StoredOccurrence {
                     occurrence_id: row.get(0)?,
                     tuple: row.get(1)?,
@@ -899,7 +920,7 @@ pub fn read_occurrence(
                     source_object_id: row.get(12)?,
                     source_evidence_id: row.get(13)?,
                     source_artifact_digest: row.get(14)?,
-                    created_commit_seq: row.get(15)?,
+                    created_commit_seq,
                     tombstone,
                 })
             },
