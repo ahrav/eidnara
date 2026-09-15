@@ -340,3 +340,105 @@ async fn registration_race_rejection_carries_the_terminal_credit() {
     drop(rejected);
     assert_eq!(generation.terminal_credits.available_permits(), before + 1);
 }
+
+/// Holds every block of the smallest ordinary class so the producer can arm a capacity wait;
+/// dropping the producer afterwards closes its doorbell end, so the first return's wake fails.
+/// Every lease stays held until the caller drops it: a drop before the frame under test would
+/// consume the parked marker and the later return would send nothing.
+fn leases_whose_return_wake_fails() -> Vec<shm_transport::lease::PayloadLease> {
+    use shm_transport::backend::ring::{DuplexRing, wire_v3_header};
+    use shm_transport::pool::Inventory;
+    let rings = DuplexRing::create(&crate::ring_transport::ring_profile()).unwrap();
+    let consumer = rings.first.attachment().unwrap().attach().unwrap();
+    let class_count = rings
+        .first
+        .geometry()
+        .class(shm_transport::pool::BlockClass::Ordinary(0))
+        .count as usize;
+    let held: Vec<_> = (0..class_count)
+        .map(|_| {
+            let mut reservation = rings
+                .first
+                .try_reserve(1, wire_v3_header(1).unwrap())
+                .unwrap();
+            reservation.write(&[1]).unwrap();
+            reservation.commit(1).unwrap();
+            consumer.try_receive().unwrap().unwrap()
+        })
+        .collect();
+    assert_eq!(
+        rings.first.arm_capacity_wait(Inventory::Ordinary, 1),
+        Ok(true)
+    );
+    drop(rings);
+    held
+}
+
+/// A pure-header frame whose lease cannot ring the return doorbell is a transport fault: the
+/// read loop must exit at that frame instead of applying it and reading on.
+#[tokio::test]
+async fn a_pure_header_frame_with_a_failed_return_wake_ends_the_read_loop() {
+    let CloseFixture {
+        shared,
+        generation,
+        route,
+        key,
+        settlement,
+        ..
+    } = fixture();
+    // The fixture's route is already closing; watch a fresh pending entry instead.
+    let cancelled = CancellationToken::new();
+    generation.pending.lock().unwrap().insert(
+        key,
+        PendingEntry {
+            cancel: cancelled.clone(),
+            settlement,
+        },
+    );
+    let mut leases = leases_whose_return_wake_fails();
+    let budget = crate::wire::ByteBudget::new(16);
+    let pong = crate::wire::EnvelopeHeader {
+        len: 0,
+        ver: crate::wire::PROTOCOL_VERSION,
+        ty: crate::wire::FrameType::Pong,
+        flags: crate::wire::pure_header_flags(),
+        channel: 0,
+        epoch: 0,
+        corr: 9,
+    };
+    let cancel = crate::wire::EnvelopeHeader {
+        len: 0,
+        ver: crate::wire::PROTOCOL_VERSION,
+        ty: crate::wire::FrameType::Cancel,
+        flags: crate::wire::pure_header_flags(),
+        channel: route.channel,
+        epoch: route.epoch,
+        corr: key.2,
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    for header in [pong, cancel] {
+        let frame = crate::frame_channel::InboundFrame::new(
+            header,
+            leases.pop().unwrap(),
+            budget.try_charge(0).unwrap(),
+        );
+        tx.try_send(Ok(crate::frame_channel::InboundEvent::Frame(frame)))
+            .unwrap();
+    }
+    drop(tx);
+    let exit = crate::connection::read_loop(
+        &shared,
+        &generation,
+        crate::ring_transport::ShmReceiver::from_channel(rx),
+    )
+    .await;
+    assert!(
+        matches!(exit, crate::connection::ReadExit::Peer),
+        "a failed return doorbell on the Pong ends the generation: {exit:?}"
+    );
+    assert!(
+        !cancelled.is_cancelled(),
+        "the Cancel behind the faulted Pong must not be applied"
+    );
+    drop(leases);
+}

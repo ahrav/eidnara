@@ -4361,12 +4361,12 @@ any further **worker-queue** wake — k queued writes drain in k loop passes.
 Scoped to the private `worker_wake` descriptor, and conditional on the
 host-to-peer ring having descriptor and arena capacity for each write. Without
 that capacity `RingClientEndpoint::try_send_bounded`
-(`ring_transport.rs:1520`) returns `Exhausted` without blocking, the write
+(`ring_transport.rs:1526`) returns `Exhausted` without blocking, the write
 stays in its lane slot (`client.rs:2515`), and the bridge arms the peer's
 capacity doorbell for that lane through `Ring::arm_capacity_wait`
 (`ring.rs:903`, `client.rs:2711-2718`), then parks in one `poll` on the
 doorbell beside the worker wake, data readiness, and the setup socket, bounded
-by the earliest pending `commit_by` (`client.rs:2753-2765`); inbound frames
+by the earliest pending `commit_by` (`client.rs:2753-2775`); inbound frames
 drain before every retry. The wait is still a *peer* wake, and it is required
 before `wrote` is ever set at `client.rs:2640`, so neither the k-passes bound
 nor "no further wake" holds across a capacity stall. A pass that publishes

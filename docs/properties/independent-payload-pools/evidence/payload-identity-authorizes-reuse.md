@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/retained.rs:602`
 - `crates/shm-transport/src/descriptor.rs:222`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2637` and `crates/shm-transport/src/backend/ring.rs:2542`; `crates/shm-transport/tests/contract.rs:118` covers the pure validator.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2710` and `crates/shm-transport/src/backend/ring.rs:2615`; `crates/shm-transport/tests/contract.rs:118` covers the pure validator.
 
 ## Failure scenario
 

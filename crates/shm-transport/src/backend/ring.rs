@@ -1651,20 +1651,24 @@ impl Ring {
     /// in block-id order, not in the order the peer returned them. A caller that ties a credit or
     /// record to a published block releases it here, at the physical return, not when a callback
     /// finishes. `try_reserve_in` removes a returned block it reuses, so `settle` never sees a
-    /// block the peer holds again.
+    /// block the peer holds again; that holds for a reservation made from inside `settle` too,
+    /// so a caller that reserves from the callback settles the reused block's own record at
+    /// the reservation, as the host's publisher does when it republishes into the block.
     pub fn take_reclaimed(&self, mut settle: impl FnMut(u32)) -> Result<(), RingError> {
         if self.ledger.borrow().allowed && !self.is_quarantined() {
             self.reclaim_completions()?;
         }
-        let reclaimed: Vec<u32> = std::mem::take(&mut self.ledger.borrow_mut().reclaimed);
-        for block in &reclaimed {
-            settle(*block);
+        // Each entry leaves `reclaimed` before its callback runs and the ledger is not borrowed
+        // across the call: `settle` may re-enter this ring, and a re-entrant reservation
+        // `swap_remove`s the block it reuses while a re-entrant scan appends new returns. Popping
+        // keeps every remaining entry reachable either way, and the buffer keeps its capacity.
+        loop {
+            let next = self.ledger.borrow_mut().reclaimed.pop();
+            let Some(block) = next else {
+                break;
+            };
+            settle(block);
         }
-        // The buffer keeps its capacity so steady-state returns allocate nothing.
-        let mut ledger = self.ledger.borrow_mut();
-        let mut buffer = reclaimed;
-        buffer.clear();
-        ledger.reclaimed = buffer;
         Ok(())
     }
 
@@ -2508,6 +2512,75 @@ mod tests {
             producer.try_reserve_in(Inventory::Control, 4096, wire_v3_header(4096).unwrap()),
             Err(ProducerError::BoundExceedsClass)
         ));
+    }
+
+    /// A return reclaimed while a `take_reclaimed` callback re-enters the ring is reported,
+    /// on this drain or the next, never dropped.
+    #[test]
+    fn take_reclaimed_keeps_returns_reclaimed_during_a_callback() {
+        let (producer, consumer) = pair(tiny_geometry());
+        let first = publish(&producer, b"first");
+        let second = publish(&producer, b"second");
+        let held_first = receive(&consumer);
+        let held_second = receive(&consumer);
+        held_first.release().unwrap();
+        let mut settled = Vec::new();
+        let mut late = Some(held_second);
+        producer
+            .take_reclaimed(|block| {
+                settled.push(block);
+                // The callback returns the second block and re-enters the ring; the sample
+                // reclaims it into the ledger while this drain is in progress.
+                if let Some(lease) = late.take() {
+                    lease.release().unwrap();
+                    let _ = producer.inventory();
+                }
+            })
+            .unwrap();
+        producer
+            .take_reclaimed(|block| settled.push(block))
+            .unwrap();
+        settled.sort_unstable();
+        let mut expected = vec![first, second];
+        expected.sort_unstable();
+        assert_eq!(
+            settled, expected,
+            "both physical returns are reported exactly once across the two drains"
+        );
+    }
+
+    /// A callback that re-enters `try_reserve_in` and takes the block being settled must not
+    /// hide another returned block from the same drain.
+    #[test]
+    fn take_reclaimed_reports_every_return_when_a_callback_reserves_the_settled_block() {
+        let (producer, consumer) = pair(tiny_geometry());
+        let small = publish(&producer, &[1u8; 100]);
+        let large = publish(&producer, &[2u8; 10_000]);
+        assert_ne!(small, large);
+        receive(&consumer).release().unwrap();
+        receive(&consumer).release().unwrap();
+        let mut settled = Vec::new();
+        let mut reserved_once = false;
+        producer
+            .take_reclaimed(|block| {
+                settled.push(block);
+                if !reserved_once {
+                    reserved_once = true;
+                    // Re-enter the ring and take a small block: the freshly returned one.
+                    producer
+                        .try_reserve(100, wire_v3_header(100).unwrap())
+                        .unwrap()
+                        .abort();
+                }
+            })
+            .unwrap();
+        producer
+            .take_reclaimed(|block| settled.push(block))
+            .unwrap();
+        assert!(
+            settled.contains(&large),
+            "the large block's return must be reported although the callback reordered the ledger: {settled:?}"
+        );
     }
 
     /// A reused block is not reportable until its new holder releases it.
