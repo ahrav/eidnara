@@ -849,6 +849,8 @@ impl SearchLifecycleOwner {
                 &current.consumer.generation_id,
             )
             .is_ok(),
+            // An unreadable record is what the next slice closes admission on.
+            ControlState::Unavailable(_) => false,
             _ => true,
         };
         // The replacement bounds depend on this request's allowance and generation, so their refusal is the request's alone.
@@ -868,9 +870,16 @@ impl SearchLifecycleOwner {
                 "manifest limits cannot bound the request",
             ));
         }
+        // A request with no time left would be recorded only for the next slice to find it expired.
         let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
         let bound = limit(inputs.manifest(), request.transition.duration_limit())
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+        if duration == 0 {
+            if !current_fits {
+                let _ = self.admission.refresh(None);
+            }
+            return Err(BuildError::Invalid("the request's deadline has passed"));
+        }
         if duration > bound {
             if !current_fits {
                 let _ = self.admission.refresh(None);
