@@ -29,11 +29,12 @@ not the charge accounting.
   [`send_before`][send-before], which reserves a channel permit under the
   admission lock and pushes the `OutboundFrame`.
 - The endpoint thread takes frames from `queue.recv()` in the
-  [`select!`][idle-select] and runs [`Publisher::try_publish`][publish-one];
-  it reserves, then the direct arm serializes and commits in
-  [`publish_direct`][publish-direct].
+  [`select!`][idle-select], pushes them onto `Publisher`, and runs
+  `Publisher::pump`, which drains the pending frames through
+  [`Publisher::try_publish`][publish-one]; each publication reserves, then the
+  direct arm serializes and commits in [`publish_direct`][publish-direct].
   Commit is the point at which the closure's captures stop being needed and
-  the egress charge is dropped ([`:1221-1277`][publish-one]).
+  the egress charge is dropped ([`:1333-1389`][publish-one]).
 - A stream item is different: [`StreamSink::send`][stream-send] runs
   `emit_reserved_frame` while the handler future is still executing, so a
   direct stream item's closure can be serialized before the handler returns.
@@ -111,7 +112,7 @@ tracing the window.
 [direct-frame]: ../../../../../crates/host-runtime/src/frame_channel.rs#L166-L200
 [send-before]: ../../../../../crates/host-runtime/src/frame_channel.rs#L248-L275
 [idle-select]: ../../../../../crates/host-runtime/src/ring_transport.rs#L582-L617
-[publish-one]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1221-L1277
-[publish-direct]: ../../../../../crates/host-runtime/src/ring_transport.rs#L788-L800
+[publish-one]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1333-L1389
+[publish-direct]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1392-L1404
 [t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1849-L1879
 [fixture-arm]: ../../../../../crates/host-runtime/tests/support/mod.rs#L441-L455

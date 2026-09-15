@@ -2951,9 +2951,9 @@ the host's publication path, which every activated connection runs:
 `Publisher::try_publish`'s helpers `publish_direct` (`:1280`) and
 `publish_owned` (`:1294`), reached from `Publisher::pump` (`:1159`), which
 `run_endpoint` calls at `:696` and `:884` and `receive_one` calls at `:972`,
-`:1003`, and `:1017`; and `:1584` is inside `RingClientEndpoint::publish`
-(`:1563`), shared by `send` (`:1503`, the blocking test-peer variant) and
-`try_send_bounded` (`:1526`), which production reaches from
+`:1003`, and `:1017`; and `:1601` is inside `RingClientEndpoint::publish`
+(`:1580`), shared by `send` (`:1520`, the blocking test-peer variant) and
+`try_send_bounded` (`:1543`), which production reaches from
 `attempt_pending_writes` (`client.rs:2511`) on every bridge loop pass. No `cfg` gate and no config gate
 stands on either of the two. The `Ring::release` end of the property is likewise
 production: `ring_release_callback` (`ring.rs:1670-1677`) runs on every lease
@@ -3293,11 +3293,7 @@ Confidence: high - [evidence](evidence/ring-a-endpoint-thread-panic-is-reported-
 at `:592-598`; `panic_boundary::redact_sync` wraps only the direct serializer
 (`:610-613`) and not the hooks.
 Existing check: none for the ring thread. `panic_boundary.rs` is Part 2a scope.
-Impact: the host loses its only transport thread and reports success. Frames
-admitted after the panic sit in the queue until each hits its admission
-deadline, so the connection degrades over `frame_deadline` per frame rather than
-retiring, and diagnostics records nothing at all: no `peer_death`, no
-`exhaustion`, and `state: "healthy"`.
+Impact: superseded at HEAD. The host lost its only transport thread and reported success; frames admitted after the panic sat in the queue until each hit its admission deadline, and diagnostics recorded nothing. At HEAD the outer `catch_unwind` retires the generation with `ReadClose::Corrupt`, cancels `queue.retired` and `root` so nothing further is admitted, and `endpoint_panic.observed` in `host.status` counts the panic; the residual impact is the lost thread for that connection alone.
 Open questions:
 
 - Should `:591`'s `COMPLETE` store move after the hooks, or should the hooks
@@ -4013,9 +4009,10 @@ Open questions:
 Grouped by shared mechanism rather than by the headings above, because the
 sharpest relationships cross groups. **Every dominance statement below is a
 hypothesis** about which oracle subsumes which, offered to order the work, not a
-verified claim. None has been tested, because no check in this sub-part executes
-in CI beyond the two `compile_fail` doctests, and neither doctest touches any of
-these records.
+verified claim. None has been tested: at HEAD the workspace `--all-targets`
+jobs run every inline test in this sub-part and `cargo test --doc` runs the
+three replacement doctests in `crates/shm-transport/src/backend/ring.rs`, but
+none of those checks targets these records.
 
 - **One charge, four ways to lose track of it.**
   [ring-a-admission-charge-releases-on-every-endpoint-thread-exit](#ring-a-admission-charge-releases-on-every-endpoint-thread-exit),

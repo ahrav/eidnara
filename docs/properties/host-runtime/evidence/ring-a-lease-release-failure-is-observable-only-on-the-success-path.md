@@ -88,10 +88,12 @@ eight, pinned by the profile post-#131 and asserted at
 `ring_transport.rs:903-904`.
 `try_receive` refuses to hand out a ninth lease and returns `Ok(None)`
 (`ring.rs:1063-1068`), which `receive_one` returns as `Ok(false)`, which
-`run_endpoint` treats as an idle direction. So eight silent release failures
-convert the peer-to-host direction into a permanently idle-looking channel, and
-the host has no signal distinguishing that from a quiet peer. That is the
-mechanism behind the impact claim.
+`run_endpoint` treats as an idle direction. The accumulation this paragraph
+first described, eight silent release failures turning the peer-to-host
+direction into a permanently idle-looking channel, cannot occur: the
+investigation below found that every untracked drop path returns
+`Err(ReadClose::..)` and ends the read loop, so at most one diagnostic is lost
+per retiring connection. The paragraph is kept as the reasoning that led there.
 
 ## Failure scenario
 

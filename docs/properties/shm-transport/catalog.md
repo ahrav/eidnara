@@ -1052,14 +1052,15 @@ Status: active
 Exercised: not yet — needs a failpoint on lease or span construction.
 Guarantee: The error paths that follow the receive commit point are unreachable,
 so no receive can leave a slot claimed but un-leased and un-quarantined.
-Check: `unreachable` — assert the three post-commit-point failure branches in
-`try_receive` are never entered. Semantics revised from `always-or-unreached`
-after direct analysis: all three branches are provably unreachable given that
-`validate` already succeeded on a 64-bit target, so the honest check is that the
-forbidden points are never entered, not a conditional invariant over a state the
-code cannot construct. If any branch ever becomes reachable, the wedge scenario
-below is what happens, and the property should be re-derived as `always` at that
-point.
+Check: `always(!X)` where `X` is "a fallible step follows the `consumed`
+compare-exchange in `try_receive_inner`" (`ring.rs:1349-1352`). Semantics
+revised twice: the source tree's `unreachable` over three post-commit branches
+became moot when those branches were deleted, and the surviving property is
+that nothing fallible sits after the commit point. If a fallible step is ever
+added there, the wedge scenario below is what the wrapper's quarantine
+prevents, and the property should be re-derived as `always` over that step.
+`shm_receive_cas_won_then_validation_ran` stays a normal-path reachability
+marker, not a failpoint for deleted branches.
 Fault/timing angle: at HEAD `try_receive_inner` validates the descriptor
 snapshot and the wire header before its commit point, the `consumed`
 compare-exchange (`ring.rs:1349-1352`); the `body_len` conversion
@@ -1086,17 +1087,15 @@ that an accepted descriptor guarantees the span count and bounds that both
 constructors check, so all three branches are dead given `validate` on a 64-bit
 target; that argument still holds.
 Existing check: none.
-Impact: none in production. Three `Result` paths exist for conditions that cannot
-arise and nothing marks them as such; a future change to `validate` would make
-them reachable, and at HEAD the outcome would be a quarantined ring rather than
-the source tree's silent wedge, with no test covering the transition.
+Impact: none in production. The three `Result` paths the source tree carried
+after the commit point are gone; a fallible step added there in a future change
+would quarantine the ring through the wrapper rather than wedge it silently,
+with no test covering that transition.
 Open questions:
 
-- Mechanism note: the Check line names three post-commit-point branches that
-  do not exist at HEAD (see Fault/timing angle). Either the record's check
-  becomes `always(!X)` over "a fallible step follows the `consumed` exchange at
-  `ring.rs:1349-1352`", or the record is retired as superseded. (needs human
-  input)
+- Mechanism note: resolved by restating the Check as `always(!X)` (see above);
+  the three post-commit-point branches the source tree named do not exist at
+  HEAD (see Fault/timing angle).
 
 ### release-failure-is-observable
 
@@ -1125,17 +1124,18 @@ which touches no `Ring`: a completion cell it cannot address yields
 `Retained::wake_failed` (`:629`, `:647`, `:656`) without quarantining the
 ring. The latch is readable through `Retained::wake_failed()` (`:435-437`),
 but no caller outside `retained.rs` reads it, so a failed return on the drop
-path leaves only that flag behind. The host has a second discard site:
-`InboundFrame::into_private` releases the lease with `let _ =
-lease.release()` (`crates/host-runtime/src/frame_channel.rs:119`) after
-copying the body, so a failed return there is also unreported. The source
-tree's host half, `let _ = custody.release()` falling through to a suspect
-record, is gone.
+path leaves only that flag behind. The host copy path does not discard:
+`InboundFrame::into_private` propagates `lease.release()` as
+`PrivateCopyError::Transport` (`crates/host-runtime/src/frame_channel.rs:115-122`),
+which `dispatch.rs` turns into `ReadClose::Corrupt("shared-memory completion
+failed")`. The source tree's host half, `let _ = custody.release()` falling
+through to a suspect record, is gone; the drop path is the only remaining
+discard.
 Required faults and enabling state: a release that fails while the surrounding
 operation is otherwise clean.
 Confidence: medium - [evidence](evidence/release-failure-is-observable.md).
-Verified at HEAD - the drop-path discard is `lease.rs:367`, the host copy-path
-discard is `frame_channel.rs:119`, and `Retained::complete`
+Verified at HEAD - the drop-path discard is `lease.rs:367`, the host copy path
+(`frame_channel.rs:115-122`) propagates the release error, and `Retained::complete`
 (`retained.rs:588-619`) quarantines nothing: a failed return sets only
 `wake_failed`, which no caller reads, so the failure is not observable through
 `is_quarantined()` or any counter. The former
@@ -4361,7 +4361,7 @@ any further **worker-queue** wake — k queued writes drain in k loop passes.
 Scoped to the private `worker_wake` descriptor, and conditional on the
 host-to-peer ring having descriptor and arena capacity for each write. Without
 that capacity `RingClientEndpoint::try_send_bounded`
-(`ring_transport.rs:1526`) returns `Exhausted` without blocking, the write
+(`ring_transport.rs:1543`) returns `Exhausted` without blocking, the write
 stays in its lane slot (`client.rs:2515`), and the bridge arms the peer's
 capacity doorbell for that lane through `Ring::arm_capacity_wait`
 (`ring.rs:903`, `client.rs:2711-2718`), then parks in one `poll` on the
@@ -5704,7 +5704,8 @@ because `ParkGuard::arm` stores the incremented generation, `:645-650`); the
 next successful `commit` signals the data doorbell, and a
 `wait_for_data(deadline)` armed before the release returns `Ok(true)` strictly
 before `deadline` rather than expiring on it. A failing release is out of scope:
-it quarantines and clears `parked` on purpose.
+it latches `Retained::wake_failed` and leaves `parked` untouched, so no wake
+is owed.
 Fault/timing angle: `signal_wake` sends a doorbell byte only when it swaps a
 non-zero `parked` (`:2033`), so any path that clears the consumer's marker
 between arm and publish makes the publisher skip the signal and leaves the

@@ -2869,7 +2869,7 @@ evaluation of this area and its disposition are recorded in
 [idle-select]: ../../../../crates/host-runtime/src/ring_transport.rs#L582-L617
 [publish-fail]: ../../../../crates/host-runtime/src/ring_transport.rs#L696-L704
 [receive-to-vec]: ../../../../crates/host-runtime/src/ring_transport.rs#L664
-[publish-one]: ../../../../crates/host-runtime/src/ring_transport.rs#L1221-L1277
+[publish-one]: ../../../../crates/host-runtime/src/ring_transport.rs#L1333-L1389
 [publish-direct]: ../../../../crates/host-runtime/src/ring_transport.rs#L788
 [commit-before]: ../../../../crates/host-runtime/src/ring_transport.rs#L815
 [res-writer]: ../../../../crates/host-runtime/src/ring_transport.rs#L830

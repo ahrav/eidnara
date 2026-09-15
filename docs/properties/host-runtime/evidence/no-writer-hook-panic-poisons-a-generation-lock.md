@@ -47,7 +47,11 @@ insert - is exact. Contrast `connection.rs:737`, where `health_snapshot` is read
 with `unwrap_or_else(std::sync::PoisonError::into_inner)`: the crate does have a
 poison-tolerant idiom, and the `pings` lock does not use it.
 
-The skipped retirement signal is confirmed. `queue.retired.cancel()` sits at
+The skipped retirement signal is confirmed for the TCP writer of that
+revision, which no longer exists at HEAD; the ring endpoint's outer
+`catch_unwind` cancels `queue.retired` and `root` on a panic
+(`ring_transport.rs`, the `Err` branch after `run_endpoint`), so what follows
+is historical. `queue.retired.cancel()` sat at
 `tcp_frame_channel.rs:402`, *after* the loop. An unwind out of `:394` leaves the
 loop by unwinding, so `:402` never executes. `SenderQueue`
 (`frame_channel.rs:838-854`) has no `Drop` impl - at HEAD `frame_channel.rs`

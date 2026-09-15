@@ -278,8 +278,7 @@ async fn post_abort_snapshot_does_not_resettle_rejection() {
             FrameId::routed(route, key.2),
             "server_busy",
             "host is shutting down",
-        )
-        .await;
+        );
         let rejected = queue.recv().await.unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&rejected.bytes[crate::wire::HEADER_LEN..])
@@ -324,8 +323,7 @@ async fn registration_race_rejection_carries_the_terminal_credit() {
         FrameId::routed(route, key.2),
         "unknown_channel",
         "no live route for this channel and epoch",
-    )
-    .await;
+    );
     drop(settlement);
     let rejected = queue.recv().await.unwrap();
     assert_eq!(
@@ -339,6 +337,55 @@ async fn registration_race_rejection_carries_the_terminal_credit() {
     );
     drop(rejected);
     assert_eq!(generation.terminal_credits.available_permits(), before + 1);
+}
+
+/// A registration-race rejection runs off the connection reader: with the writer queue full,
+/// scheduling it returns at once, and the credited rejection still reaches the queue later.
+#[tokio::test]
+async fn registration_race_rejection_does_not_block_the_reader_on_a_full_writer_queue() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        route,
+        key,
+        ..
+    } = fixture();
+    for corr in 100..108 {
+        crate::dispatch::emit_error_terminal(
+            &shared.terminal_budget,
+            &generation,
+            FrameId::control(corr),
+            "filler",
+            "fills the writer queue",
+        )
+        .await;
+    }
+    let credit = generation
+        .terminal_credits
+        .clone()
+        .try_acquire_owned()
+        .unwrap();
+    let settlement = Settlement::with_credit(Some(credit));
+    // Scheduling is synchronous: the reader never awaits writer-queue capacity for a rejection.
+    emit_pending_rejection(
+        &shared,
+        &generation,
+        &settlement,
+        FrameId::routed(route, key.2),
+        "unknown_channel",
+        "no live route for this channel and epoch",
+    );
+    drop(settlement);
+    for _ in 0..8 {
+        drop(queue.recv().await.unwrap());
+    }
+    let rejected = queue.recv().await.unwrap();
+    assert!(
+        rejected.credit.is_some(),
+        "the rejection frame carries the credit to its block"
+    );
+    assert!(!generation.token.is_cancelled());
 }
 
 /// Holds every block of the smallest ordinary class so the producer can arm a capacity wait;
@@ -439,6 +486,94 @@ async fn a_pure_header_frame_with_a_failed_return_wake_ends_the_read_loop() {
     assert!(
         !cancelled.is_cancelled(),
         "the Cancel behind the faulted Pong must not be applied"
+    );
+    drop(leases);
+}
+
+/// A request refused before its copy still returns its lease; a failed return doorbell must
+/// retire the generation instead of queueing a rejection over a broken transport.
+#[tokio::test]
+async fn a_rejected_request_whose_return_wake_fails_retires_the_generation() {
+    let CloseFixture {
+        shared,
+        generation,
+        route,
+        mut queue,
+        ..
+    } = fixture();
+    shared.shutdown.cancel();
+    let mut leases = leases_whose_return_wake_fails();
+    let budget = crate::wire::ByteBudget::new(16);
+    let header = crate::wire::EnvelopeHeader {
+        len: 1,
+        ver: crate::wire::PROTOCOL_VERSION,
+        ty: crate::wire::FrameType::Request,
+        flags: crate::wire::response_flags(false, true),
+        channel: route.channel,
+        epoch: route.epoch,
+        corr: 1,
+    };
+    let frame = crate::frame_channel::InboundFrame::new(
+        header,
+        leases.pop().unwrap(),
+        budget.try_charge(1).unwrap(),
+    );
+    crate::dispatch::dispatch_request(&shared, &generation, frame).await;
+    assert!(
+        generation.token.is_cancelled(),
+        "the failed return is a transport fault, not a rejectable request"
+    );
+    assert!(
+        queue.try_recv().is_err(),
+        "no rejection is queued over a transport that cannot be woken"
+    );
+    drop(leases);
+}
+
+/// A request whose route closes after registration is cancelled before its private copy runs;
+/// the lease returns explicitly, and a failed return doorbell retires the generation instead of
+/// queueing a cancellation terminal over a transport that cannot be woken.
+#[tokio::test]
+async fn a_request_cancelled_by_route_close_before_its_copy_retires_on_a_failed_return() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        ..
+    } = fixture();
+    let route = shared
+        .registry
+        .reserve(&generation, RouteClass::General)
+        .unwrap();
+    shared.registry.install_bound(route);
+    let mut leases = leases_whose_return_wake_fails();
+    let budget = crate::wire::ByteBudget::new(16);
+    let header = crate::wire::EnvelopeHeader {
+        len: 1,
+        ver: crate::wire::PROTOCOL_VERSION,
+        ty: crate::wire::FrameType::Request,
+        flags: crate::wire::response_flags(false, true),
+        channel: route.channel,
+        epoch: route.epoch,
+        corr: 7,
+    };
+    let frame = crate::frame_channel::InboundFrame::new(
+        header,
+        leases.pop().unwrap(),
+        budget.try_charge(1).unwrap(),
+    );
+    // Registration completes here; the copy runs on the spawned task, which has not been polled.
+    crate::dispatch::dispatch_request(&shared, &generation, frame).await;
+    let _decision = shared.registry.begin_close(route);
+    shared.tracker.close();
+    shared.tracker.wait().await;
+    assert!(
+        generation.token.is_cancelled(),
+        "the failed return is a transport fault, not a cancellable request"
+    );
+    assert!(
+        queue.try_recv().is_err(),
+        "no terminal is queued over a transport that cannot be woken"
     );
     drop(leases);
 }

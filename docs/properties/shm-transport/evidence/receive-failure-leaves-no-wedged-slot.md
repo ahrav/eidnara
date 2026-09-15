@@ -209,6 +209,8 @@ emit: `shm_receive_cas_won_then_validation_ran`.
   quarantine rather than wedge. There is no slot state, no `active_leases`, and
   no `lease_span`; the three failure paths this trail analyses are superseded.
 - Missing evidence: none; the analysis is a direct read.
-- Conclusion: needs human input - the record's `unreachable` check names
-  branches that do not exist, so it is either retired as superseded or restated
-  as `always(!X)` over "a fallible step follows the `consumed` exchange".
+- Conclusion: resolved - the record's check is restated as `always(!X)` over
+  "a fallible step follows the `consumed` exchange"; the three branches the
+  source tree named do not exist at HEAD, and
+  `shm_receive_cas_won_then_validation_ran` remains a normal-path reachability
+  marker rather than a failpoint for them.

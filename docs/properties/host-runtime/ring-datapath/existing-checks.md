@@ -69,9 +69,11 @@ and body bytes leave the transport only through `InboundFrame::into_private`
 runs. `wire.rs:4-14` is a ```text``` fence
 and is not compiled, so it is not a check.
 
-So the correct statement is: **no inline unit test in this sub-part runs in CI,
-and the three replacement doctests in `crates/shm-transport/src/backend/ring.rs`
-do.**
+So the correct statement for the source repository's workflow was: **no inline
+unit test in this sub-part ran in CI, and the three replacement doctests in
+`crates/shm-transport/src/backend/ring.rs` did.** At HEAD the workspace
+`--all-targets` jobs build and run the `host-runtime` library test target, so
+every inline test this inventory lists runs in CI alongside those doctests.
 
 ### The in-crate contract suite, split by reach
 

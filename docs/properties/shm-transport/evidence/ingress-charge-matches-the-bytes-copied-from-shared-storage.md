@@ -46,8 +46,10 @@ does re-derive it: after `PayloadLease::to_vec` (`:116`) it returns
 (`crates/host-runtime/src/connection.rs:419-422`,
 `crates/host-runtime/src/dispatch.rs:1006-1011`). The charge is reserved from
 `header.len` before the copy (`ring_transport.rs:1004`) and travels with the frame
-(`frame_channel.rs:68`, `:125`), so it matches the copied body whenever the copy
-succeeds; the charge is what the budget later releases, so a divergence that
+(`frame_channel.rs:68`, `:125`), so it matches the copied body whenever
+`InboundFrame::into_private` succeeds; `PayloadLease::to_vec` can copy and still
+return `PrivateCopyError::LengthMismatch`, and that frame never reaches a
+decoder; the charge is what the budget later releases, so a divergence that
 escaped both checks would be a durable accounting error rather than a transient
 one.
 
@@ -61,7 +63,7 @@ reachable only by a peer writing the shared descriptor page directly, which the
 mapping permits: both `Mapping::create` and `Mapping::attach` map
 `PROT_READ|PROT_WRITE` (`backend/ring.rs:462`, `:481`) and the required seals are
 `F_SEAL_GROW|SHRINK|SEAL` with no `F_SEAL_WRITE` (`:2850`).
-At HEAD: `send` (`:1503`, blocking, used by test peers) and `try_send_bounded` (`:1526`, the production bridge path) both reserve and then commit through `publish` (`:1563-1587`), and the endpoint is no longer test-only: `start_ring_bridge` in `crates/host-runtime/src/client.rs:2547` attaches one in production.
+At HEAD: `send` (`:1520`, blocking, used by test peers) and `try_send_bounded` (`:1543`, the production bridge path) both reserve and then commit through `publish` (`:1580-1604`), and the endpoint is no longer test-only: `start_ring_bridge` in `crates/host-runtime/src/client.rs:2547` attaches one in production.
 
 The peer-side consumer showed what not delegating looks like. In the former
 `packages/plugin/src/shared/host-client/transport-provider.ts:406-426` the

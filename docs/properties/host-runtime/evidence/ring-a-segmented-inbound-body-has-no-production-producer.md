@@ -157,12 +157,13 @@ Dependencies:
 The `reachable` check as stated cannot pass, so the useful constructions are the
 two things the dead path was standing in for.
 
-1. **Wrap-around body, end to end.** Fill the arena so the next body straddles
-   the wrap point, publish it peer-to-host, and assert the host delivers the
-   exact bytes. This exercises `to_vec`'s two-span loop
-   (`lease.rs`; not re-swept post-#131) through the production path, which is
-   the real
-   obligation. The arena is `shm_transport::MIN_ARENA_BYTES` (asserted at
+1. **Wrap-around body, end to end.** Historical, arena-backend only: fill the
+   arena so the next body straddles the wrap point, publish it peer-to-host, and
+   assert the host delivers the exact bytes. At HEAD the pool backend writes
+   each frame into one fixed block and `PayloadLease::body` yields one
+   contiguous `LeaseSpan`, so no production frame can take this shape and the
+   current-path obligation is the single-span `to_vec` copy that
+   `control_frame_body_is_copied_out_of_the_ring` already exercises. The arena is `shm_transport::MIN_ARENA_BYTES` (asserted at
    `ring_transport.rs:905`) and the descriptor depth is 8 (`:903`), so filling it
    is a matter of publishing and releasing enough frames to advance the write
    cursor near the end.

@@ -843,6 +843,20 @@ pub(crate) async fn emit_authoritative_rejection<H: HostHandler>(
 
 ///
 /// Route lookup proves `unknown_channel` without consuming capacity; capacity rejections prove no dispatch; only then is the single handler task spawned.
+/// Returns a frame's lease before any copy. `false` means the return doorbell failed: the
+/// generation is retired and the caller must not queue anything on it.
+fn release_before_copy(
+    frame: crate::frame_channel::InboundFrame,
+    generation: &GenerationCore,
+) -> bool {
+    if frame.release().is_err() {
+        generation.token.cancel();
+        generation.writer.discard();
+        return false;
+    }
+    true
+}
+
 pub async fn dispatch_request<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     generation: &Arc<GenerationCore>,
@@ -856,7 +870,9 @@ pub async fn dispatch_request<H: HostHandler>(
     let corr = header.corr;
 
     if shared.draining.load(Ordering::SeqCst) || shared.shutdown.is_cancelled() {
-        drop(frame);
+        if !release_before_copy(frame, generation) {
+            return;
+        }
         emit_rejection(
             shared,
             generation,
@@ -872,7 +888,9 @@ pub async fn dispatch_request<H: HostHandler>(
     // The tracker wraps the dispatch future so route close can wait for it to stop even if the waiting future is dropped.
     let Some((route_tracker, class, cancel)) = shared.registry.route_tracker(route, generation.id)
     else {
-        drop(frame);
+        if !release_before_copy(frame, generation) {
+            return;
+        }
         emit_rejection(
             shared,
             generation,
@@ -895,7 +913,9 @@ pub async fn dispatch_request<H: HostHandler>(
     // credit reserves the terminal's delivery storage and returns only when that block does, so
     // a connection cannot admit more requests than its reserved terminal inventory can settle.
     let Ok(terminal_credit) = generation.terminal_credits.clone().try_acquire_owned() else {
-        drop(frame);
+        if !release_before_copy(frame, generation) {
+            return;
+        }
         emit_rejection(
             shared,
             generation,
@@ -909,7 +929,9 @@ pub async fn dispatch_request<H: HostHandler>(
 
     // Admission acquires permits synchronously with the read loop to prevent clients from queueing unbounded dispatch tasks ahead of the capacity gate.
     let Ok(pending_permit) = pending_pool.clone().try_acquire_owned() else {
-        drop(frame);
+        if !release_before_copy(frame, generation) {
+            return;
+        }
         emit_rejection(
             shared,
             generation,
@@ -921,7 +943,9 @@ pub async fn dispatch_request<H: HostHandler>(
         return;
     };
     let Ok(task_permit) = task_pool.clone().try_acquire_owned() else {
-        drop(frame);
+        if !release_before_copy(frame, generation) {
+            return;
+        }
         emit_rejection(
             shared,
             generation,
@@ -960,9 +984,7 @@ pub async fn dispatch_request<H: HostHandler>(
 
         if cancel.is_cancelled() {
             // The lease returns before any copy; a failed return doorbell ends the generation.
-            if frame.release().is_err() {
-                gen_task.token.cancel();
-                gen_task.writer.discard();
+            if !release_before_copy(frame, &gen_task) {
                 remove_pending(&gen_task, key);
                 return;
             }
@@ -998,9 +1020,7 @@ pub async fn dispatch_request<H: HostHandler>(
         let copied = if frame.is_empty() {
             // Nothing to read, so no worker hop; the closed-route outcome matches `run_blocking`.
             if ledgers.route.is_closed() {
-                if frame.release().is_err() {
-                    gen_task.token.cancel();
-                    gen_task.writer.discard();
+                if !release_before_copy(frame, &gen_task) {
                     remove_pending(&gen_task, key);
                     return;
                 }
@@ -1168,37 +1188,53 @@ pub async fn dispatch_request<H: HostHandler>(
             FrameId::routed(route, corr),
             code,
             message,
-        )
-        .await;
+        );
     }
 }
 
-pub(crate) async fn emit_pending_rejection<H: HostHandler>(
+pub(crate) fn emit_pending_rejection<H: HostHandler>(
     shared: &Arc<HostShared<H>>,
     generation: &Arc<GenerationCore>,
-    settlement: &Settlement,
+    settlement: &Arc<Settlement>,
     id: FrameId,
     code: &'static str,
     message: &'static str,
 ) {
     // The request was admitted with a credit, so this rejection is a credited terminal: `settle`
-    // moves the credit onto the frame and it returns with the block.
-    settle(
-        settlement,
-        &shared.terminal_budget,
-        generation,
-        RouteHandle {
-            channel: id.channel,
-            epoch: id.epoch,
-        },
-        id.corr,
-        Terminal::Error {
-            code: code.to_owned(),
-            message: message.to_owned(),
-            retry_after_ms: None,
-        },
-    )
-    .await;
+    // moves the credit onto the frame and it returns with the block. The reader only schedules
+    // it; awaiting writer-queue capacity here would stall every later frame on this connection.
+    match generation.busy_rejects.clone().try_acquire_owned() {
+        Ok(reject_permit) => {
+            let shared_task = Arc::clone(shared);
+            let gen_task = Arc::clone(generation);
+            let settlement = Arc::clone(settlement);
+            shared.spawn_tracked(generation.read_tasks.track_future(async move {
+                let _reject_permit = reject_permit;
+                settle(
+                    &settlement,
+                    &shared_task.terminal_budget,
+                    &gen_task,
+                    RouteHandle {
+                        channel: id.channel,
+                        epoch: id.epoch,
+                    },
+                    id.corr,
+                    Terminal::Error {
+                        code: code.to_owned(),
+                        message: message.to_owned(),
+                        retry_after_ms: None,
+                    },
+                )
+                .await;
+            }));
+        }
+        Err(_) => {
+            // Same bound as `emit_rejection`: too many rejections blocked on contended egress
+            // retire the generation instead of queueing more work behind them.
+            generation.token.cancel();
+            generation.writer.discard();
+        }
+    }
 }
 
 fn remove_pending(generation: &GenerationCore, key: PendingKey) {
