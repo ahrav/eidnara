@@ -63,9 +63,11 @@ Every other block return in the tree goes through `PayloadLease::return_once`
 or `Drop` (`:364-370`), which calls `Retained::complete` with the lease's own
 `block` and `generation` (`crates/shm-transport/src/backend/retained.rs:588`),
 the consumer-derived values captured at construction (`lease.rs:259-274`). The
-host's release calls, `ring_transport.rs:948-950` on the oversize control
-rejection and `frame_channel.rs:119` inside `InboundFrame::into_private`, plus
-the peer's two at `ring_transport.rs:1451` and `:1455`, are all this form.
+host's release calls, `ring_transport.rs:1029-1031` on the oversize control
+rejection, `frame_channel.rs:126` inside `InboundFrame::into_private`, and
+`InboundFrame::release` (`frame_channel.rs:105`) on the read loop's pure-header
+path and `dispatch_request`'s pre-copy refusals, plus the peer's two at
+`ring_transport.rs:1581` and `:1585`, are all this form.
 `packages/shm-native/src/lib.rs:374-377` is the native side's
 equivalent, releasing `active.lease`.
 

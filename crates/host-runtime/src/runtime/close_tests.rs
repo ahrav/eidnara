@@ -1,6 +1,6 @@
 use super::*;
 use crate::connection::{PendingEntry, PendingKey};
-use crate::dispatch::{Settlement, emit_pending_rejection, settle_route_work};
+use crate::dispatch::{Settlement, Terminal, settle, settle_route_work};
 use crate::frame_channel::{SenderQueue, frame_sender};
 use crate::handler::{
     BindOutcome, RequestCtx, RequestOutcome, RouteClass, RouteHandle, RouteIdentity, RouteTarget,
@@ -271,14 +271,19 @@ async fn post_abort_snapshot_does_not_resettle_rejection() {
         );
         never_started.abort();
         let _ = never_started.await;
-        emit_pending_rejection(
-            &shared,
-            &generation,
+        settle(
             &settlement,
-            FrameId::routed(route, key.2),
-            "server_busy",
-            "host is shutting down",
-        );
+            &shared.terminal_budget,
+            &generation,
+            route,
+            key.2,
+            Terminal::Error {
+                code: "server_busy".to_owned(),
+                message: "host is shutting down".to_owned(),
+                retry_after_ms: None,
+            },
+        )
+        .await;
         let rejected = queue.recv().await.unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&rejected.bytes[crate::wire::HEADER_LEN..])
@@ -316,14 +321,19 @@ async fn registration_race_rejection_carries_the_terminal_credit() {
         .unwrap();
     let before = generation.terminal_credits.available_permits();
     let settlement = Settlement::with_credit(Some(credit));
-    emit_pending_rejection(
-        &shared,
-        &generation,
+    settle(
         &settlement,
-        FrameId::routed(route, key.2),
-        "unknown_channel",
-        "no live route for this channel and epoch",
-    );
+        &shared.terminal_budget,
+        &generation,
+        route,
+        key.2,
+        Terminal::Error {
+            code: "unknown_channel".to_owned(),
+            message: "no live route for this channel and epoch".to_owned(),
+            retry_after_ms: None,
+        },
+    )
+    .await;
     drop(settlement);
     let rejected = queue.recv().await.unwrap();
     assert_eq!(
@@ -340,17 +350,21 @@ async fn registration_race_rejection_carries_the_terminal_credit() {
 }
 
 /// A registration-race rejection runs off the connection reader: with the writer queue full,
-/// scheduling it returns at once, and the credited rejection still reaches the queue later.
+/// `dispatch_request` returns at once, and the credited rejection still reaches the queue later.
 #[tokio::test]
 async fn registration_race_rejection_does_not_block_the_reader_on_a_full_writer_queue() {
     let CloseFixture {
         shared,
         generation,
         mut queue,
-        route,
-        key,
         ..
     } = fixture();
+    let route = shared
+        .registry
+        .reserve(&generation, RouteClass::General)
+        .unwrap();
+    shared.registry.install_bound(route);
+    shared.registry.freeze_admission();
     for corr in 100..108 {
         crate::dispatch::emit_error_terminal(
             &shared.terminal_budget,
@@ -361,22 +375,26 @@ async fn registration_race_rejection_does_not_block_the_reader_on_a_full_writer_
         )
         .await;
     }
-    let credit = generation
-        .terminal_credits
-        .clone()
-        .try_acquire_owned()
-        .unwrap();
-    let settlement = Settlement::with_credit(Some(credit));
-    // Scheduling is synchronous: the reader never awaits writer-queue capacity for a rejection.
-    emit_pending_rejection(
-        &shared,
-        &generation,
-        &settlement,
-        FrameId::routed(route, key.2),
-        "unknown_channel",
-        "no live route for this channel and epoch",
-    );
-    drop(settlement);
+    let before = generation.terminal_credits.available_permits();
+    let (rings, lease) = lease_whose_return_succeeds();
+    let budget = crate::wire::ByteBudget::new(16);
+    let header = crate::wire::EnvelopeHeader {
+        len: 1,
+        ver: crate::wire::PROTOCOL_VERSION,
+        ty: crate::wire::FrameType::Request,
+        flags: crate::wire::response_flags(false, true),
+        channel: route.channel,
+        epoch: route.epoch,
+        corr: 11,
+    };
+    let frame =
+        crate::frame_channel::InboundFrame::new(header, lease, budget.try_charge(1).unwrap());
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        crate::dispatch::dispatch_request(&shared, &generation, frame),
+    )
+    .await
+    .expect("the reader must not wait on writer-queue capacity for a rejection");
     for _ in 0..8 {
         drop(queue.recv().await.unwrap());
     }
@@ -385,7 +403,77 @@ async fn registration_race_rejection_does_not_block_the_reader_on_a_full_writer_
         rejected.credit.is_some(),
         "the rejection frame carries the credit to its block"
     );
+    assert_eq!(generation.terminal_credits.available_permits(), before - 1);
+    drop(rejected);
+    assert_eq!(generation.terminal_credits.available_permits(), before);
     assert!(!generation.token.is_cancelled());
+    drop(rings);
+}
+
+/// A request that loses the registration race still returns its lease before any rejection; a
+/// failed return doorbell retires the generation instead of queueing a rejection over a
+/// transport that cannot be woken.
+#[tokio::test]
+async fn a_request_losing_the_registration_race_retires_on_a_failed_return() {
+    let CloseFixture {
+        shared,
+        generation,
+        mut queue,
+        ..
+    } = fixture();
+    let route = shared
+        .registry
+        .reserve(&generation, RouteClass::General)
+        .unwrap();
+    shared.registry.install_bound(route);
+    shared.registry.freeze_admission();
+    let mut leases = leases_whose_return_wake_fails();
+    let budget = crate::wire::ByteBudget::new(16);
+    let header = crate::wire::EnvelopeHeader {
+        len: 1,
+        ver: crate::wire::PROTOCOL_VERSION,
+        ty: crate::wire::FrameType::Request,
+        flags: crate::wire::response_flags(false, true),
+        channel: route.channel,
+        epoch: route.epoch,
+        corr: 9,
+    };
+    let frame = crate::frame_channel::InboundFrame::new(
+        header,
+        leases.pop().unwrap(),
+        budget.try_charge(1).unwrap(),
+    );
+    crate::dispatch::dispatch_request(&shared, &generation, frame).await;
+    shared.tracker.close();
+    shared.tracker.wait().await;
+    assert!(
+        generation.token.is_cancelled(),
+        "the failed return is a transport fault, not a rejectable request"
+    );
+    assert!(
+        queue.try_recv().is_err(),
+        "no rejection is queued over a transport that cannot be woken"
+    );
+    drop(leases);
+}
+
+/// One committed one-byte frame received through a live ring pair; the pair is returned so the
+/// producer's doorbell stays open and the lease's return wake succeeds.
+fn lease_whose_return_succeeds() -> (
+    shm_transport::backend::ring::DuplexRing,
+    shm_transport::lease::PayloadLease,
+) {
+    use shm_transport::backend::ring::{DuplexRing, wire_v3_header};
+    let rings = DuplexRing::create(&crate::ring_transport::ring_profile()).unwrap();
+    let consumer = rings.first.attachment().unwrap().attach().unwrap();
+    let mut reservation = rings
+        .first
+        .try_reserve(1, wire_v3_header(1).unwrap())
+        .unwrap();
+    reservation.write(&[1]).unwrap();
+    reservation.commit(1).unwrap();
+    let lease = consumer.try_receive().unwrap().unwrap();
+    (rings, lease)
 }
 
 /// Holds every block of the smallest ordinary class so the producer can arm a capacity wait;
@@ -562,7 +650,8 @@ async fn a_request_cancelled_by_route_close_before_its_copy_retires_on_a_failed_
         leases.pop().unwrap(),
         budget.try_charge(1).unwrap(),
     );
-    // Registration completes here; the copy runs on the spawned task, which has not been polled.
+    // Registration completes here; the copy runs on the spawned task, which the current-thread
+    // test runtime cannot poll before this test yields, so the route closes first.
     crate::dispatch::dispatch_request(&shared, &generation, frame).await;
     let _decision = shared.registry.begin_close(route);
     shared.tracker.close();
