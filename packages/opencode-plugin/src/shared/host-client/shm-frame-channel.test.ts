@@ -1350,6 +1350,37 @@ describe("mandatory shared-memory channel", () => {
         expect(budget.used).toBe(0);
     });
 
+    test("queued Goodbyes do not consume the Cancel allowance", () => {
+        const budget = new ByteBudget(1 << 20);
+        const state = { full: true, arm: () => true };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        channel.beginFrames();
+        for (let index = 0; index < 16; index += 1) {
+            channel.sendControl(responseHeader(FrameType.Goodbye, 0n, 0));
+        }
+        expect(channel.stats().queuedControlFrames).toBe(16);
+        for (let index = 0; index < 16; index += 1) {
+            channel.sendControl(responseHeader(FrameType.Cancel, BigInt(index + 1), 0));
+        }
+        expect(channel.stats().queuedControlFrames).toBe(32);
+        expect(() => channel.sendControl(responseHeader(FrameType.Cancel, 17n, 0))).toThrow(
+            HostCallError,
+        );
+        expect(channel.isClosed()).toBe(false);
+        state.full = false;
+        mock.readiness()?.();
+        expect(mock.published.length).toBe(32);
+        expect(channel.stats().queuedControlFrames).toBe(0);
+        expect(budget.used).toBe(0);
+        channel.close();
+    });
+
     test("a control frame that cannot publish retires the channel", () => {
         let produceCalls = 0;
         let nativeCloseCalls = 0;

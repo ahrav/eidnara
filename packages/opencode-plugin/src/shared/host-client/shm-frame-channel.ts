@@ -146,6 +146,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
      */
     private readonly pendingPublications: PendingPublication[] = [];
     private queuedControlFrames = 0;
+    private queuedCancelFrames = 0;
     private readonly flushWaiters = new Set<() => void>();
     private pumpScheduled = false;
     private quarantinedBytes = 0;
@@ -281,15 +282,13 @@ export class ShmFrameChannel implements SetupFrameChannel {
         reservedBytes: number,
     ): FrameSendTicket {
         const control = isReservedControl(header, body.byteLength);
-        const bound = !control
-            ? PENDING_PUBLICATION_FRAMES
-            : header.ty === FrameType.Cancel
-              ? PENDING_CANCEL_FRAMES
-              : PENDING_CONTROL_FRAMES;
-        const queued = control
-            ? this.queuedControlFrames
-            : this.pendingPublications.length - this.queuedControlFrames;
-        if (queued >= bound) {
+        const cancel = control && header.ty === FrameType.Cancel;
+        const refused = control
+            ? this.queuedControlFrames >= PENDING_CONTROL_FRAMES ||
+              (cancel && this.queuedCancelFrames >= PENDING_CANCEL_FRAMES)
+            : this.pendingPublications.length - this.queuedControlFrames >=
+              PENDING_PUBLICATION_FRAMES;
+        if (refused) {
             this.releasePublication(reservedBytes);
             throw ringFullError(undefined);
         }
@@ -304,6 +303,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
         };
         this.pendingPublications.push(pending);
         if (control) this.queuedControlFrames += 1;
+        if (cancel) this.queuedCancelFrames += 1;
         // Only the queue head arms for capacity; re-arming behind it can consume its host wake.
         if (this.pendingPublications.length === 1) this.pumpPending();
         return {
@@ -331,6 +331,7 @@ export class ShmFrameChannel implements SetupFrameChannel {
         if (index < 0) return;
         this.pendingPublications.splice(index, 1);
         if (pending.control) this.queuedControlFrames -= 1;
+        if (pending.control && pending.header.ty === FrameType.Cancel) this.queuedCancelFrames -= 1;
         if (this.pendingPublications.length === 0) {
             for (const settle of [...this.flushWaiters]) settle();
         }

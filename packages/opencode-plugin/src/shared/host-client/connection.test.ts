@@ -75,6 +75,9 @@ class FakeChannel implements SetupFrameChannel {
     sendControlError: unknown = null;
     closeError: unknown = null;
     produceErrorAfterPublish: unknown = null;
+    /** While set, `produce` queues the body like a full ring and `publishDeferred` runs its fill later. */
+    deferFill = false;
+    readonly deferred: DirectFrameBody[] = [];
     startHook: ((deadline: Deadline) => Promise<void>) | null = null;
     private readonly copies = new CopyCounter();
     private readonly leases = new Set<ReceiveLease>();
@@ -104,12 +107,22 @@ class FakeChannel implements SetupFrameChannel {
                 "memory_cap",
             );
         }
+        if (this.deferFill) {
+            this.deferred.push(body);
+            return { cancel: () => false };
+        }
         body.fill(new ArrayCursor(new Uint8Array(body.byteLength)));
         this.produced.push(header);
         hooks?.onPublish?.();
         if (this.produceErrorAfterPublish !== null) throw this.produceErrorAfterPublish;
         hooks?.onComplete?.();
         return { cancel: () => false };
+    }
+
+    publishDeferred(): void {
+        for (const body of this.deferred.splice(0)) {
+            body.fill(new ArrayCursor(new Uint8Array(body.byteLength)));
+        }
     }
 
     reserve(): BoundedFrameProducer {
@@ -621,6 +634,39 @@ describe("connection generation admission", () => {
                 channel.lease(new TextEncoder().encode("{}")),
             );
             expect((await outer.result).kind).toBe("response");
+            expect(routedRequest(generation).correlation).toBe(outer.correlation + 1n);
+        } finally {
+            generation.retire("owner_close");
+        }
+    });
+
+    test("request() re-entered from a fill that runs after the frame was queued is refused", async () => {
+        const { generation, channel } = await harness();
+        try {
+            let nested: unknown;
+            channel.deferFill = true;
+            const outer = generation.request({
+                channel: CHANNEL,
+                epoch: EPOCH,
+                body: {
+                    byteLength: 2,
+                    fill: (cursor) => {
+                        try {
+                            routedRequest(generation);
+                        } catch (error) {
+                            nested = error;
+                        }
+                        cursor.write(Buffer.from("{}"));
+                    },
+                },
+                deadline: Deadline.start(2_000),
+            });
+            channel.deferFill = false;
+            expect(channel.deferred).toHaveLength(1);
+            channel.publishDeferred();
+            expect(nested).toMatchObject({ kind: "not_sent", code: "reentrant_request" });
+            expect(channel.produced).toHaveLength(0);
+            expect(generation.stats().pendingRequests).toBe(1);
             expect(routedRequest(generation).correlation).toBe(outer.correlation + 1n);
         } finally {
             generation.retire("owner_close");

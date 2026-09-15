@@ -363,7 +363,10 @@ export class ConnectionGeneration {
     // `nextCorr` allocates only consumer correlations; host Ping correlations are never stored.
     private nextCorr: bigint;
     private corrExhausted = false;
-    /** `producing` blocks nested requests because `DirectFrameBody.fill` runs before its correlation is committed. */
+    /**
+     * `producing` blocks nested requests while a `DirectFrameBody.fill` runs, whether the
+     * channel publishes it now or later from its queue.
+     */
     private producing = false;
     private hostPingWatermark = 0n;
 
@@ -624,7 +627,17 @@ export class ConnectionGeneration {
         // `request` registers the entry before admission so retirement settles it if channel publication fails synchronously.
         this.pending.set(key, entry);
         let ticket: FrameSendTicket;
-        this.producing = true;
+        const guardedBody: DirectFrameBody = {
+            byteLength: body.byteLength,
+            fill: (cursor) => {
+                this.producing = true;
+                try {
+                    body.fill(cursor);
+                } finally {
+                    this.producing = false;
+                }
+            },
+        };
         try {
             // `request` commits `corr` only after successful channel admission.
             ticket = this.channel.produce(
@@ -636,7 +649,7 @@ export class ConnectionGeneration {
                     epoch: header.epoch,
                     corr: header.corr,
                 },
-                body,
+                guardedBody,
                 {
                     onPublish: () => {
                         entry.writeInvoked = true;
@@ -657,8 +670,6 @@ export class ConnectionGeneration {
                 "write_failed",
                 error,
             );
-        } finally {
-            this.producing = false;
         }
         entry.sendTicket = ticket;
         if (corr === MAX_CORRELATION) {
