@@ -25,11 +25,12 @@ use super::admission::{
 use super::claim_causality::{CausalClass, CausalRecord, causal_class_at, registry_row_at};
 use super::envelope::{ObjectRow, Sensitivity};
 use super::source_descriptor::{
-    SOURCE_DESCRIPTOR_KIND, descriptor_object_id, reencoded_identity, stored_detail,
+    OCCURRENCE_ID_PREFIX, SOURCE_DESCRIPTOR_KIND, descriptor_object_id, reencoded_identity,
+    stored_detail,
 };
 use super::source_hold::Descriptors;
 use super::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
-use super::{CachedSql, KernelError, KernelStore, map_sqlite};
+use super::{KernelError, KernelStore, map_sqlite};
 
 pub const MAX_CLAIM_OBJECT_ID_BYTES: usize = 512;
 
@@ -281,67 +282,58 @@ fn sensitivity_field(value: &str) -> Result<Sensitivity, ClaimFactsError> {
         .ok_or(ClaimFactsError::MalformedRequiredField)
 }
 
+/// SQL boolean: every lifecycle column the typed row `typed` copies from its
+/// registry row `registry` still agrees with it.
+fn lifecycle_agrees_sql(typed: &str, registry: &str) -> String {
+    format!(
+        "{typed}.created_commit_seq={registry}.created_commit_seq
+         AND {typed}.invalidated_commit_seq IS {registry}.invalidated_commit_seq
+         AND {typed}.superseded_by IS {registry}.superseded_by
+         AND {typed}.sensitivity_class={registry}.sensitivity_class"
+    )
+}
+
 /// The decision row is written from the same spec as its registry row, so a
-/// disagreement on creation commit, invalidation, successor, or class is
-/// corruption, not a fact.
-/// `ObjectRow` decodes an unrecognized class as `Secret`; compare raw stored
-/// values.
+/// lifecycle disagreement is corruption, not a fact. `ObjectRow` decodes an
+/// unrecognized class as `Secret`; the stored text is decoded here instead.
 fn load_decision(
     tx: &Transaction<'_>,
     object: &ObjectRow,
 ) -> Result<ClaimDecisionFacts, ClaimFactsError> {
-    struct Raw {
-        decision: ClaimDecisionFacts,
-        created: i64,
-        invalidated: Option<i64>,
-        registry_invalidated: Option<i64>,
-        superseded_by: Option<String>,
-        registry_superseded_by: Option<String>,
-        sensitivity: String,
-        registry_sensitivity: String,
-    }
-    let row = tx
-        .query_row_cached(
+    static SQL: LazyLock<String> = LazyLock::new(|| {
+        format!(
             "SELECT d.decision_id,d.decision_kind,d.proposition_id,d.scope_id,d.anchor_id,
-                    d.evidence_id,d.created_commit_seq,d.invalidated_commit_seq,
-                    o.invalidated_commit_seq,d.superseded_by,o.superseded_by,
-                    d.sensitivity_class,o.sensitivity_class
+                    d.evidence_id,{agrees},o.sensitivity_class
              FROM decisions d
              JOIN object_registry o ON o.object_id=d.object_id
              WHERE d.object_id=?1",
-            [&object.object_id],
-            |row| {
-                Ok(Raw {
-                    decision: ClaimDecisionFacts {
-                        decision_id: row.get(0)?,
-                        decision_kind: row.get(1)?,
-                        proposition_id: row.get(2)?,
-                        scope_id: row.get(3)?,
-                        anchor_id: row.get(4)?,
-                        evidence_id: row.get(5)?,
-                    },
-                    created: row.get(6)?,
-                    invalidated: row.get(7)?,
-                    registry_invalidated: row.get(8)?,
-                    superseded_by: row.get(9)?,
-                    registry_superseded_by: row.get(10)?,
-                    sensitivity: row.get(11)?,
-                    registry_sensitivity: row.get(12)?,
-                })
-            },
+            agrees = lifecycle_agrees_sql("d", "o"),
         )
+    });
+    let mut statement = tx.prepare_cached(&SQL).map_err(map_sqlite)?;
+    let row: Option<(ClaimDecisionFacts, bool, String)> = statement
+        .query_row([&object.object_id], |row| {
+            Ok((
+                ClaimDecisionFacts {
+                    decision_id: row.get(0)?,
+                    decision_kind: row.get(1)?,
+                    proposition_id: row.get(2)?,
+                    scope_id: row.get(3)?,
+                    anchor_id: row.get(4)?,
+                    evidence_id: row.get(5)?,
+                },
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        })
         .optional()
         .map_err(map_sqlite)?;
-    let raw = row.ok_or(KernelError::CorruptCanonicalRow)?;
-    if raw.created != object.created_commit_seq
-        || raw.invalidated != raw.registry_invalidated
-        || raw.superseded_by != raw.registry_superseded_by
-        || raw.sensitivity != raw.registry_sensitivity
-    {
+    let (decision, agrees, registry_sensitivity) = row.ok_or(KernelError::CorruptCanonicalRow)?;
+    if !agrees {
         return Err(KernelError::CorruptCanonicalRow.into());
     }
-    sensitivity_field(&raw.registry_sensitivity)?;
-    Ok(raw.decision)
+    sensitivity_field(&registry_sensitivity)?;
+    Ok(decision)
 }
 
 #[derive(Clone, Copy)]
@@ -513,12 +505,12 @@ fn load_occurrences(
                     let detail = stored_detail(&raw.payload)?;
                     let reencoded =
                         reencoded_identity(&detail).ok_or(KernelError::CorruptCanonicalRow)?;
-                    if reencoded.occurrence_id != encoded.occurrence_id
+                    if reencoded.tuple != encoded.tuple
+                        || !raw.lifecycle_agrees
+                        || raw.observation_id
+                            != format!("{OCCURRENCE_ID_PREFIX}{}", encoded.occurrence_id)
                         || raw.source_kind != class.code()
                         || raw.source_revision != object.source_revision
-                        || raw.sensitivity != raw.registry_sensitivity
-                        || raw.created_commit_seq != raw.observation_created
-                        || raw.invalidated_commit_seq != raw.observation_invalidated
                         || detail.lineage_id != raw.source_id
                         || detail.evidence_id != raw.evidence_id
                         || detail.artifact_digest != raw.artifact_digest
@@ -546,14 +538,11 @@ fn load_occurrences(
 
 struct RawDescriptor {
     payload: Vec<u8>,
+    observation_id: String,
     source_kind: String,
     source_revision: i64,
-    sensitivity: String,
-    registry_sensitivity: String,
+    lifecycle_agrees: bool,
     created_commit_seq: i64,
-    invalidated_commit_seq: Option<i64>,
-    observation_created: i64,
-    observation_invalidated: Option<i64>,
     source_id: String,
     evidence_id: String,
     artifact_digest: String,
@@ -567,14 +556,13 @@ fn load_descriptor(
 ) -> Result<Option<RawDescriptor>, KernelError> {
     static SQL: LazyLock<String> = LazyLock::new(|| {
         format!(
-            "SELECT b.observation_payload,o.source_kind,o.source_revision,b.sensitivity_class,
-                    o.sensitivity_class,o.created_commit_seq,o.invalidated_commit_seq,
-                    b.created_commit_seq,b.invalidated_commit_seq,o.source_id,
-                    b.evidence_id,e.artifact_digest
+            "SELECT b.observation_payload,b.observation_id,o.source_kind,o.source_revision,
+                    {agrees},o.created_commit_seq,o.source_id,b.evidence_id,e.artifact_digest
              FROM object_registry o
              JOIN observations b ON b.object_id=o.object_id
              JOIN evidence_meta e ON e.evidence_id=b.evidence_id
              WHERE o.object_id=?1 AND b.observation_kind=?2 AND {live}",
+            agrees = lifecycle_agrees_sql("b", "o"),
             live = Descriptors::LiveAtEnd.predicate("?3", "0"),
         )
     });
@@ -585,17 +573,14 @@ fn load_descriptor(
             |row| {
                 Ok(RawDescriptor {
                     payload: row.get(0)?,
-                    source_kind: row.get(1)?,
-                    source_revision: row.get(2)?,
-                    sensitivity: row.get(3)?,
-                    registry_sensitivity: row.get(4)?,
+                    observation_id: row.get(1)?,
+                    source_kind: row.get(2)?,
+                    source_revision: row.get(3)?,
+                    lifecycle_agrees: row.get(4)?,
                     created_commit_seq: row.get(5)?,
-                    invalidated_commit_seq: row.get(6)?,
-                    observation_created: row.get(7)?,
-                    observation_invalidated: row.get(8)?,
-                    source_id: row.get(9)?,
-                    evidence_id: row.get(10)?,
-                    artifact_digest: row.get(11)?,
+                    source_id: row.get(6)?,
+                    evidence_id: row.get(7)?,
+                    artifact_digest: row.get(8)?,
                 })
             },
         )

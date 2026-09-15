@@ -819,6 +819,16 @@ fn occurrence_facts_refuse_a_detail_that_disagrees_with_its_guarded_rows() {
             "UPDATE object_registry SET source_kind='promoted_memory'",
             "UPDATE object_registry SET source_kind='canonical_claims'",
         ),
+        (
+            "observation successor",
+            "UPDATE observations SET superseded_by='domain-object'",
+            "UPDATE observations SET superseded_by=NULL",
+        ),
+        (
+            "observation id",
+            "UPDATE observations SET observation_id='srcocc:other'",
+            "UPDATE observations SET observation_id='srcocc:' || json_extract(json_extract(observation_payload,'$.detail'),'$.occurrence_id')",
+        ),
     ] {
         fixture.sql(&format!("{tamper}{scope};"));
         assert_eq!(

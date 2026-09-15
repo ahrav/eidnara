@@ -34,7 +34,7 @@ pub const SOURCE_DESCRIPTOR_DETAIL_VERSION: u32 = 1;
 /// writes stay bounded under the single writer.
 pub const MAX_DESCRIPTORS_PER_COMMIT: usize = 1024;
 
-const OCCURRENCE_ID_PREFIX: &str = "srcocc:";
+pub(crate) const OCCURRENCE_ID_PREFIX: &str = "srcocc:";
 const DESCRIPTOR_OBJECT_ID_PREFIX: &str = "srcdesc:";
 
 /// Git policy versions identify the permitted refs and traversal boundary without changing occurrence identity.
