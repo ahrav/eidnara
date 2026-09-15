@@ -12,9 +12,9 @@ Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/backend/ring.rs:1042`
 - `crates/shm-transport/src/pool.rs:31`
-- `crates/host-runtime/src/ring_transport.rs:1272`
+- `crates/host-runtime/src/ring_transport.rs:1294`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2462` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:3040` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return. Client publication selection belongs to #552 and #550.
+Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2462` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:3181` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return. Client publication selection belongs to #552 and #550.
 
 ## Failure scenario
 
