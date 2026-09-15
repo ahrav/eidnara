@@ -703,7 +703,8 @@ impl SearchLifecycleOwner {
                 return Refresh::Closed(Closed::NoProjection);
             }
         };
-        let coverage = if selection.has_selected() {
+        // A selection kept under another identity, as after a reload the slice loop has not yet rotated on, is foreign evidence: the new identity has no registered family, so it is judged as unregistered rather than denied on the old family's report.
+        let coverage = if selection.has_selected() && *selection.identity() == *identity {
             selection
                 .observe_selected(budget)
                 .ok()

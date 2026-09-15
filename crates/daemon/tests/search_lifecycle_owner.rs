@@ -2219,6 +2219,46 @@ async fn a_cancelled_loop_leaves_the_drain_to_shutdown() {
     );
 }
 
+/// A request made after a reload changed the projection identity, before any slice rotated the selection, is judged under the new identity rather than denied on the old family's evidence.
+#[test]
+fn a_request_after_an_identity_change_is_judged_under_the_new_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let ControlState::Current(current) = control(home) else {
+        panic!("the first rebuild reached Current");
+    };
+
+    // The reload ships a new protocol version, which is part of the identity; the open family is foreign under it.
+    let mut renewed = identity(&kernel_incarnation_id(home));
+    renewed.limit_manifest_protocol_version = "limits.v2".to_owned();
+    write_records(
+        home,
+        &manifest_json(&renewed, &ProjectionHook::ALL),
+        &campaign_json(&renewed),
+    );
+    let mut request = rebuild(home);
+    request.selected_generation = current.staged_seed_digest.clone().unwrap();
+    request.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    request.attempt_id = "rebuild-under-limits-v2".to_owned();
+    let outcome = owner.request(&request, now(), &slice_budget());
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

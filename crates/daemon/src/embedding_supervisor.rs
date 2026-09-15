@@ -1,6 +1,6 @@
 //! Runs embedding maintenance as bounded slices under the daemon's shutdown token: a backfill pass over durable pending work, then an identity sweep, then a yield, so one maintenance kind never starves the other and no slice outlives its budget. The loop waits `idle` only when both kinds last found nothing to do, so a blocked lane cannot spin it and a dry sweep cannot throttle a backfill with a backlog.
 //!
-//! Every slice gets one `EvalBudget`: an absolute deadline derived once when the slice starts, and a sticky cancellation that shutdown raises. The dispatcher and the sweeper thread that same budget through admission, the result poll, the guard, and the reclamation write, so no stage renews it. A projection transaction's wait for the file is the store's own busy timeout, not the budget's, so a slice bound is the deadline plus that timeout. A slice runs on a tracked blocking thread; shutdown stops new slices, cancels the running one, and joins every tracked task. A native call that has not returned keeps its permit, its charges, and its result lease, and the join stays unresolved until it exits: grace expiry reports that state, it does not end it. A slice that panics is reported, not swallowed, and stops the supervisor. Quarantine from either maintenance kind stops the supervisor and retains every obligation for an operator. A read that fails before anything is decided is not terminal: the slice reports it and the loop runs the same kind again after the idle wait.
+//! Every slice gets one `EvalBudget`: an absolute deadline derived once when the slice starts, the nearer of the slice bound and a still-ahead episode grant deadline, and a sticky cancellation that shutdown raises. The dispatcher and the sweeper thread that same budget through admission, the result poll, the guard, and the reclamation write, so no stage renews it. A projection transaction's wait for the file is the store's own busy timeout, not the budget's, so a slice bound is the deadline plus that timeout. A slice runs on a tracked blocking thread; shutdown stops new slices, cancels the running one, and joins every tracked task. A native call that has not returned keeps its permit, its charges, and its result lease, and the join stays unresolved until it exits: grace expiry reports that state, it does not end it. A slice that panics is reported, not swallowed, and stops the supervisor. Quarantine from either maintenance kind stops the supervisor and retains every obligation for an operator. A read that fails before anything is decided is not terminal: the slice reports it and the loop runs the same kind again after the idle wait.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -239,8 +239,21 @@ impl EmbeddingSupervisor {
                 self.stop_with(Stop::Shutdown);
                 return;
             }
+            // A slice that would straddle the episode grant's deadline ends there instead, so no pass awaits and publishes a result past the episode; a slice begun after the deadline keeps the slice bound, since its passes only refuse and stop expired rows.
+            let until_grant = self
+                .bounds
+                .dispatch
+                .grant
+                .deadline
+                .saturating_sub((self.now)());
+            let slice = match u64::try_from(until_grant) {
+                Ok(remaining) if remaining > 0 => {
+                    self.bounds.slice.min(Duration::from_millis(remaining))
+                }
+                _ => self.bounds.slice,
+            };
             let budget = EvalBudget::new(
-                Some(Instant::now() + self.bounds.slice),
+                Some(Instant::now() + slice),
                 Arc::new(AtomicBool::new(false)),
             );
             let _ = self.events.send(SupervisorEvent::SliceStarted {

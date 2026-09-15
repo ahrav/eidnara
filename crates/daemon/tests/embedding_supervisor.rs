@@ -261,6 +261,64 @@ async fn ended(events: &mut UnboundedReceiver<SupervisorEvent>, kind: SliceKind)
     .await
 }
 
+/// A slice's budget ends at the episode grant's deadline when that comes before the slice bound, so a result that lands after the deadline is not awaited under a slice that would still publish it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_slice_ends_at_the_grant_deadline_when_it_is_nearer_than_the_slice_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("held", "held text");
+    let (projection, _rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    // The grant ends 300 ms of the supervisor's clock after now; the slice bound is far longer.
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
+        SliceBounds {
+            dispatch: DispatchBounds {
+                grant: grant(3, NOW + 300),
+                ..bounds()
+            },
+            ..slice_bounds(Duration::from_secs(5))
+        },
+        Arc::new(|| NOW),
+        sender,
+    );
+    let started = Instant::now();
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    let SupervisorEvent::SliceStarted {
+        kind: SliceKind::Backfill,
+        deadline,
+    } = next_event(&mut events).await
+    else {
+        panic!()
+    };
+    assert!(
+        deadline <= started + Duration::from_millis(300) + Duration::from_millis(50),
+        "the slice deadline is the grant's, not the slice bound's: {:?} past start",
+        deadline.saturating_duration_since(started)
+    );
+    // The held call keeps the backfill waiting, so the slice ends when its budget does.
+    assert!(matches!(
+        ended(&mut events, SliceKind::Backfill).await,
+        SliceOutcome::Backfill {
+            end: Some(Blocked::BudgetExhausted),
+            ..
+        }
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    TestEngine::release(&gate);
+    let _ = supervisor.shutdown(Duration::from_secs(5)).await;
+    running.await.unwrap();
+}
+
 /// AC2, AC3, AC4: slices alternate under their own budgets while native work is held; shutdown joins its slices but stays unresolved while the host still runs an admitted call, repeated requests neither duplicate work nor release anything, and once the call exits shutdown resolves with the row still admitted for the next incarnation, which finishes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn shutdown_joins_slices_and_stays_unresolved_while_native_work_is_held() {
