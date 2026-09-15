@@ -6,7 +6,8 @@
 //! The write path checks each named fact against the store inside the commit.
 //! Request text, roles, and producer strings grant nothing.
 //! Generic observation writers reject `CLAIM_CAUSALITY_KIND` as kind or source kind.
-//! Generic observation writers reject the `claimcause:` and `claimcauseobj:` ids.
+//! Generic observation writers reject the `claimcause:` and `claimcauseobj:` ids;
+//! commit validation refuses a `claimcauseobj:` registry row from any other writer.
 //! Retirement stays open through `retire_observation`: withdrawing lineage
 //! yields `Unknown`, which grants nothing.
 //! A reader returns `Unknown` when a named fact is missing or malformed.
@@ -159,7 +160,8 @@ impl CausalClass {
 }
 
 /// `producer` is the commit log's producer for the record's commit.
-/// `operation` is `None` when the detail did not decode.
+/// `operation` is `None` unless the detail decoded, names this subject, and
+/// agrees with the subject's succession.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CausalRecord {
     pub observation_id: String,
@@ -191,6 +193,12 @@ fn record_object_id(subject: &str, commit_seq: i64) -> String {
 }
 
 impl Envelope<'_> {
+    /// Registry inserts use several writers; commit validation admits
+    /// `claimcauseobj:` ids only when this envelope's causality writer owns them.
+    pub(super) fn check_causality_ownership(&self) -> Result<(), KernelError> {
+        self.check_reserved_ownership(OBJECT_ID_PREFIX, &self.causality_objects)
+    }
+
     /// The subject must be a live decision at `subject_revision`.
     /// `DirectObservation` cites live exact-retained evidence at `artifact_digest`.
     /// `DerivedReinjection` names 1..=[`MAX_DERIVATION_PARENTS`] distinct live parents.
@@ -214,19 +222,7 @@ impl Envelope<'_> {
         if subject.object.source_revision != request.subject_revision {
             return Err(ClaimCausalityError::SubjectRevisionMismatch);
         }
-        let replaced_predecessor: bool = self
-            .tx
-            .query_row_cached(
-                "SELECT EXISTS(SELECT 1 FROM object_registry WHERE superseded_by=?1)",
-                [&subject_id],
-                |row| row.get(0),
-            )
-            .map_err(map_sqlite)?;
-        let operation = if replaced_predecessor {
-            CausalOperation::Correct
-        } else {
-            CausalOperation::Insert
-        };
+        let operation = derived_operation(self.tx, &subject_id)?;
         let (evidence_id, dependencies) = match &request.evidence {
             CausalEvidence::DirectObservation {
                 acquisition_evidence_id,
@@ -289,6 +285,8 @@ impl Envelope<'_> {
                 self.correct_observation_inner(replaced, spec)?;
             }
         }
+        self.causality_objects
+            .insert(detail.subject_object_id, object_id.clone());
         Ok(ClaimCausalityOutcome {
             observation_id,
             object_id,
@@ -408,6 +406,27 @@ impl Envelope<'_> {
 struct SubjectRow {
     object: ObjectRow,
     scope_id: Option<String>,
+}
+
+/// A subject that replaced a predecessor was corrected; one without was
+/// inserted. Succession is written in the subject's own commit, so the answer
+/// is the same at every snapshot that holds the subject.
+fn derived_operation(
+    tx: &Transaction<'_>,
+    subject_id: &str,
+) -> Result<CausalOperation, KernelError> {
+    let replaced_predecessor: bool = tx
+        .query_row_cached(
+            "SELECT EXISTS(SELECT 1 FROM object_registry WHERE superseded_by=?1)",
+            [subject_id],
+            |row| row.get(0),
+        )
+        .map_err(map_sqlite)?;
+    Ok(if replaced_predecessor {
+        CausalOperation::Correct
+    } else {
+        CausalOperation::Insert
+    })
 }
 
 /// Writer and reader select records through this one statement so they agree
@@ -555,7 +574,6 @@ pub(crate) fn causal_class_at(
         Ok(detail) => detail,
         Err(reason) => return Ok((CausalClass::Unknown(reason), Some(summary))),
     };
-    summary.operation = Some(detail.operation);
     if detail.subject_object_id != subject.object_id
         || detail.subject_revision != subject.source_revision
     {
@@ -564,6 +582,13 @@ pub(crate) fn causal_class_at(
             Some(summary),
         ));
     }
+    if detail.operation != derived_operation(tx, &subject.object_id)? {
+        return Ok((
+            CausalClass::Unknown(UnknownReason::Malformed),
+            Some(summary),
+        ));
+    }
+    summary.operation = Some(detail.operation);
     // The detail is the one column without an immutability guard, so each
     // class is accepted only where the guarded columns agree with it: the
     // cited `evidence_id` for an acquisition, the `derived_from` rows for a
@@ -654,7 +679,7 @@ fn dependencies_match(
         .iter()
         .map(|parent| (parent.object_id.clone(), Some(parent.revision.to_string())))
         .collect();
-    Ok(stored == named)
+    Ok(named.len() == parents.len() && stored == named)
 }
 
 // A parent invalidated after the derivation was observed does not erase the

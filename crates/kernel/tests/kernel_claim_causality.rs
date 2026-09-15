@@ -705,3 +705,76 @@ fn oversized_payloads_read_as_unknown_and_records_survive_reopen() {
         }
     );
 }
+
+#[test]
+fn detail_operation_and_parent_list_must_agree_with_the_registry() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 1);
+    let recorded = fixture
+        .record(
+            "derived",
+            request("decision-object-1", 1, derived(&[("domain-object", 1)])),
+        )
+        .unwrap();
+    assert_eq!(recorded.operation, CausalOperation::Insert);
+    let payload_sql = format!(
+        "SELECT CAST(observation_payload AS TEXT) FROM observations WHERE observation_id='{}'",
+        recorded.observation_id
+    );
+    let original = column_text(fixture.root.path(), &payload_sql).unwrap();
+    let rewrite = |from: &str, to: &str| {
+        assert!(original.contains(from), "{from}");
+        fixture.sql(&format!(
+            "UPDATE observations SET observation_payload=CAST('{}' AS BLOB)
+             WHERE observation_id='{}';",
+            original.replace(from, to).replace('\'', "''"),
+            recorded.observation_id
+        ));
+    };
+
+    // The stored operation is checked against the subject's succession.
+    rewrite("operation\\\":\\\"insert", "operation\\\":\\\"correct");
+    let reading = fixture.reading("decision-object-1", fixture.tip());
+    assert_eq!(
+        reading.class,
+        CausalClass::Unknown(UnknownReason::Malformed)
+    );
+    assert_eq!(reading.record.unwrap().operation, None);
+
+    // A parent named twice never collapses onto the single stored dependency.
+    let parent = "{\\\"object_id\\\":\\\"domain-object\\\",\\\"revision\\\":1}";
+    rewrite(&format!("{parent}]"), &format!("{parent},{parent}]"));
+    assert_eq!(
+        fixture.class("decision-object-1", fixture.tip()),
+        CausalClass::Unknown(UnknownReason::Malformed)
+    );
+}
+
+#[test]
+fn causality_object_ids_are_reserved_across_every_registry_writer() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 1);
+    let squat = format!("claimcauseobj:decision-object-1:{}", fixture.tip() + 1);
+
+    for (key, object_id) in [
+        ("squat-decision", squat.as_str()),
+        ("squat-other", "claimcauseobj:x"),
+    ] {
+        let mut spec = decision(2, 1);
+        spec.object_id = object_id.to_string();
+        let refused = fixture.store.commit(intent(key), |envelope| {
+            envelope.insert_decision(spec.clone())?;
+            Ok(String::new())
+        });
+        assert_eq!(refused, Err(KernelError::InvalidInput), "{key}");
+    }
+
+    // Refused commits take no sequence; the owning writer lands the same id.
+    let recorded = fixture
+        .record(
+            "derived",
+            request("decision-object-1", 1, derived(&[("domain-object", 1)])),
+        )
+        .unwrap();
+    assert_eq!(recorded.object_id, squat);
+}
