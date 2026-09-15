@@ -33,17 +33,21 @@ lease.release()
 
 Delivery path, `:546-548`: the identical form.
 
-**The three returns that hold a lease and drop it.**
+**The returns that hold a lease and drop it.**
 
 - `:525` - the charge-wait `select!`'s `read_cancel.cancelled()` arm returns
-  `Err(ReadClose::Cancelled)`. (Post-#131 the ingress wait is one `select!`
-  over an async charge, `:522-542`, not a poll loop with an inner select.)
+  `Ok(false)` at HEAD, so the endpoint finishes its bounded post-cancel drain
+  before closing the inbound channel with `ReadClose::Cancelled`. (Post-#131 the
+  ingress wait is one `select!` over an async charge, `:522-542`, not a poll
+  loop with an inner select.)
+- the same `select!`'s `discard.cancelled()` arm returns `Ok(false)`, and
+  `run_endpoint` leaves at the top of its loop.
 - `:527-532` - the absolute frame deadline expires, returning
   `Err(ReadClose::Overloaded)` at `:531`.
 - `:539` - the sender queue closes while the charge is pending, returning
   `Err(ReadClose::Cancelled)`.
 
-All three return while `lease` is a live local, so `PayloadLease`'s `Drop` runs.
+All of them return while `lease` is a live local, so `PayloadLease`'s `Drop` runs.
 `crates/shm-transport/src/lease.rs:364-370`:
 
 ```
