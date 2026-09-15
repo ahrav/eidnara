@@ -2776,6 +2776,61 @@ fn a_request_refused_on_the_manifest_closes_admission() {
     );
 }
 
+/// A request refused for its own sizing, with no change to the records, leaves the healthy family's admission as it is.
+#[test]
+fn a_request_refused_for_its_own_sizing_leaves_admission_open() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let identity = identity(&kernel_incarnation_id(home));
+    // Three retry attempts afford one attempt per episode for an allowance of three, and none for four.
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("retry_attempts", 3)]),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let grant = owner
+        .admission()
+        .gate()
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .unwrap();
+    let ControlState::Current(current) = control(home) else {
+        panic!("the rebuild reached Current");
+    };
+
+    let mut oversized = rebuild(home);
+    oversized.allowance = 4;
+    oversized.selected_generation = current.staged_seed_digest.clone().unwrap();
+    oversized.consumer.consumer_id = "search-lifecycle-again".to_owned();
+    oversized.attempt_id = "rebuild-again".to_owned();
+    let outcome = owner.request(&oversized, now(), &slice_budget());
+    assert!(
+        matches!(outcome, Err(BuildError::Invalid(_))),
+        "{outcome:?}"
+    );
+    assert!(
+        !grant.invalidated.is_cancelled(),
+        "a request's own sizing refusal cancels no grant"
+    );
+    assert!(owner.pin(&slice_budget()).is_ok());
+    assert!(
+        matches!(control(home), ControlState::Current(done) if done.attempt_id == current.attempt_id)
+    );
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {
