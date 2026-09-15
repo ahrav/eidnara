@@ -1929,6 +1929,32 @@ mod tests {
         tokio::io::unix::AsyncFd::new(rings.first.duplicate_capacity_ready().unwrap()).unwrap()
     }
 
+    /// `arm_capacity_wait` must return `Ok(false)` when capacity returns after a blocked pump
+    /// and before arming.
+    #[test]
+    fn arming_against_the_blocked_head_refuses_to_park_over_a_return_before_arming() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let mut held = exhaust_smallest_class(&rings.first, &consumer);
+        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_secs(5), None);
+        publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
+        publisher.pump(&rings.first).expect("blocked pump");
+        let (inventory, bound) = publisher.blocked_head().expect("the head is blocked");
+        assert_eq!(inventory, Inventory::Ordinary);
+
+        held.pop().unwrap().release().unwrap();
+        assert_eq!(
+            rings.first.arm_capacity_wait(inventory, bound),
+            Ok(false),
+            "capacity is already back; parking would wait for an unrelated return"
+        );
+        publisher
+            .pump(&rings.first)
+            .expect("pump publishes the head");
+        assert!(!publisher.has_pending());
+        drop(held);
+    }
+
     /// A peer return during the ingress-budget wait publishes the blocked ticket instead of
     /// waiting for the budget or the frame deadline.
     #[tokio::test]
