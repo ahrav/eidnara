@@ -2353,3 +2353,34 @@ fn use_accounting_reads_causality_at_the_validation_snapshot() {
         "the verdicts are from the fresh snapshot; the accounting must be too"
     );
 }
+
+/// `MarkStale` leaves the revision alone, so the kernel batch still says `Ok`;
+/// the fresh classification denies the row.
+#[test]
+fn an_admission_marked_stale_after_classification_is_denied_at_the_fresh_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (corpus, _projection, batch, before) = one_decision_validated(dir.path());
+    corpus
+        .kernel
+        .commit(intent("stale:rule"), |envelope| {
+            let mut request = admission("rule");
+            request.event.kind = EventKind::MarkStale;
+            envelope.record_admission(request)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let after = revalidate(&corpus, &batch.candidates);
+    assert!(after.snapshot.tip > before.snapshot.tip);
+    for validated in &after.candidates {
+        assert_eq!(
+            validated.verdict,
+            UseVerdict::Denied(UseDenial::State(CandidateState::Stale)),
+            "{}",
+            validated.candidate.row.representation
+        );
+    }
+    assert_eq!(
+        after.accounting.rejected_objects,
+        BTreeSet::from(["rule".to_string()])
+    );
+}

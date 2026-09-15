@@ -799,8 +799,9 @@ Reachability: test-only
 Status: active
 Exercised: partial - the daemon tests witness `Current` to `Superseded`,
 `Retracted`, `Hidden`, and `Stale` transitions and a `DirectObservation` record
-surviving a correction of its subject's predecessor; the full required
-class-by-transition manifest is RP2.9's to freeze.
+created on the successor after its predecessor's correction; no test records
+causality before a correction, so no record is witnessed surviving one. The
+full required class-by-transition manifest is RP2.9's to freeze.
 Guarantee: Every required causal-class-by-transition cell has an independent
 situation witness before the class is counted as covered.
 Check: `sometimes` - each cell of the frozen manifest is reached by at least one
@@ -808,7 +809,7 @@ test that constructs its situation, not merely its code path.
 Fault/timing angle: transitions landing between classification and validation.
 Required faults and enabling state: the frozen RP2.9 manifest of cells.
 Confidence: low - [evidence](evidence/u5-class-transition-situations-are-witnessed.md).
-Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`, `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees`; status unaudited.
+Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`, `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees`, `an_admission_marked_stale_after_classification_is_denied_at_the_fresh_snapshot`; status unaudited.
 Impact: a summary marker counts a cell no test constructed.
 Open questions:
 - Which cells does the RP2.9 manifest require? (needs human input)
