@@ -1151,21 +1151,20 @@ fn a_held_kernel_reader_does_not_outlive_the_budget() {
     let request = probes("parse");
     let held = std::sync::Barrier::new(2);
     let hold = Duration::from_secs(3);
+    let deadline = Duration::from_millis(300);
+    let bound = hold / 2;
     let (result, elapsed) = std::thread::scope(|scope| {
         scope.spawn(|| fixture.kernel.hold_readers_for_test(&held, hold));
         held.wait();
         let started = Instant::now();
-        let budget = EvalBudget::new(
-            Some(started + Duration::from_millis(300)),
-            Arc::new(AtomicBool::new(false)),
-        );
+        let budget = EvalBudget::new(Some(started + deadline), Arc::new(AtomicBool::new(false)));
         (
             fixture.retrieve(&request, bounds(), &budget),
             started.elapsed(),
         )
     });
     assert!(
-        elapsed < hold,
+        elapsed < bound,
         "the request waited for the held kernel reader: {elapsed:?}"
     );
     let retrieval = result.unwrap();
