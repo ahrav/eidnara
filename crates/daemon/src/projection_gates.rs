@@ -438,7 +438,7 @@ pub struct Admission {
     pub invalidated: CancellationToken,
 }
 
-/// Outcome of [`HookGate::renew`] for existing grants.
+/// Outcome of a [`ProjectionAdmission::refresh`](crate::projection_admission::ProjectionAdmission::refresh) for existing grants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
 pub enum Renewal {
@@ -669,7 +669,7 @@ impl HookGate {
     }
 
     /// Installs `evaluator` without cancelling grants when the manifest and identity match and every hook the old evaluator admitted stays admitted. Any other change cancels as [`HookGate::close`] does. A disabled gate stores the evaluator and stays latched.
-    pub fn renew(&self, evaluator: EvidenceEvaluator) -> Renewal {
+    pub(crate) fn renew(&self, evaluator: EvidenceEvaluator) -> Renewal {
         let mut state = self
             .state
             .lock()

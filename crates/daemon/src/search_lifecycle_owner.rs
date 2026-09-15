@@ -1,4 +1,4 @@
-//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated once and judged on its coverage after that; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. Nothing here records intent on its own: a rebuild or recovery starts from an explicit request, and a restart resumes the record it finds without renewing its allowance. Nothing here catches a Current family up either: the construction hold is released at completion, so a family that trails the kernel past the freshness limit is denied until it is rebuilt.
+//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated once and judged on its coverage after that; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. Nothing here records intent on its own: a rebuild or recovery starts from an explicit request, and a restart resumes the record it finds without renewing its allowance. A Current family catches up in the same slices: the construction hold outlives completion, so each slice applies the commits since the family's checkpoint under that hold and acknowledges them. Holds die with the kernel's lease, so after a restart the family serves what it has until it trails the kernel past the freshness limit, at which point every hook is denied until a rebuild is requested.
 
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
@@ -9,7 +9,8 @@ use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsSt
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    CommitPageBounds, KernelStore, SourceHoldAdmission, SourceHoldBounds, SourcePageBounds,
+    CommitPageBounds, KernelStore, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+    SourcePageBounds,
 };
 use retrieval::batch::{BatchBounds, VectorGeneration};
 use retrieval::coverage::CoverageBounds;
@@ -21,12 +22,14 @@ use crate::embedding_dispatch::LaneIdentity;
 use crate::projection_admission::{
     AdmissionInputs, Closed, InputRefusal, ProjectionAdmission, Refresh, SelectedProjection,
 };
-use crate::projection_gates::RuntimeManifest;
+use crate::projection_gates::{EntryPoint, InvalidationIdentity, ProjectionHook, RuntimeManifest};
 use crate::projection_lifecycle::{
     ControlState, LifecycleIntent, LifecycleRequest, MAX_RECORD_BYTES, ProjectionLifecycle,
     Recorded, Transition,
 };
-use crate::search_catchup::EpisodeBounds;
+use crate::search_catchup::{
+    CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeReport, SearchCatchUp,
+};
 use crate::search_replacement::selection::disable::DisableEvent;
 use crate::search_replacement::selection::recovery::{RecoveryFailure, RecoveryProgress};
 use crate::search_replacement::selection::retirement::DISPOSITION_ROW_BYTES;
@@ -71,8 +74,10 @@ pub enum SliceOutcome {
     Unregistered,
     /// The recorded operation advanced: a replacement was selected, or the record reached Current.
     Advanced(RecoveryProgress),
-    /// The selected family is Current: reopened and revalidated on the slice that first held it, judged on its coverage and kernel on every later one.
+    /// The selected family is Current, revalidated, and at the kernel tip.
     Current,
+    /// The selected family is Current and this slice applied commits toward the tip; `ReachedTarget` means it got there.
+    CaughtUp(EpisodeReport),
     /// The record is disabled, a disable is reconciling, or the owner is shut down; only explicit recovery reopens a disabled record.
     Disabled,
     /// The record could not be trusted.
@@ -262,7 +267,7 @@ impl SearchLifecycleOwner {
         if completed && selection.holds_operation(&intent) {
             // The family was reopened and revalidated when this owner first held it; a later slice judges it on its coverage and kernel without reopening it.
             return match selection.check_selected(&self.kernel, self.admission.gate(), &budget) {
-                Ok(()) => SliceOutcome::Current,
+                Ok(()) => self.settle_current(selection, &spec, &identity, &budget),
                 Err(error) => SliceOutcome::Blocked(error.to_string()),
             };
         }
@@ -289,11 +294,10 @@ impl SearchLifecycleOwner {
             Ok(progress) => {
                 // The family the slice opened or selected is what later hooks are judged against.
                 let _ = self.refresh(selection, &identity, &budget);
-                if completed && progress == RecoveryProgress::Current {
-                    SliceOutcome::Current
-                } else {
-                    SliceOutcome::Advanced(progress)
+                if !(completed && progress == RecoveryProgress::Current) {
+                    return SliceOutcome::Advanced(progress);
                 }
+                self.settle_current(selection, &spec, &identity, &budget)
             }
             Err(RecoveryFailure::Build(mut failure)) => {
                 // Cleanup runs under the same budget; a deferred cleanup keeps its owner's locks until the next slice retries.
@@ -307,6 +311,66 @@ impl SearchLifecycleOwner {
             )),
             Err(RecoveryFailure::Blocked(error)) => SliceOutcome::Blocked(error.to_string()),
         }
+    }
+
+    /// Reports a Current family: `Current` at the kernel tip, `CaughtUp` after one catch-up episode toward it, with admission refreshed on the family the episode moved.
+    fn settle_current(
+        &self,
+        selection: &SearchSelection,
+        spec: &ReplacementSpec,
+        identity: &ProjectionIdentity,
+        budget: &EvalBudget,
+    ) -> SliceOutcome {
+        match self.catch_up(selection, spec, identity, budget) {
+            Ok(None) => SliceOutcome::Current,
+            Ok(Some(report)) => {
+                let _ = self.refresh(selection, identity, budget);
+                SliceOutcome::CaughtUp(report)
+            }
+            Err(error) => SliceOutcome::Blocked(error.to_string()),
+        }
+    }
+
+    /// Applies the commits since the selected family's checkpoint under the hold that checkpoint names, one episode toward the tip, and acknowledges them. Returns `None` when the family is already at the tip, decided from the family's own coverage before it is pinned so an idle slice hashes nothing. The hold binding is the running lease, so a family built in an earlier incarnation reports its dead hold as a blocked episode.
+    fn catch_up(
+        &self,
+        selection: &SearchSelection,
+        spec: &ReplacementSpec,
+        identity: &ProjectionIdentity,
+        budget: &EvalBudget,
+    ) -> Result<Option<EpisodeReport>, BuildError> {
+        let checkpoint = selection.observe_selected(budget)?.checkpoint;
+        if checkpoint.checkpoint_commit_seq >= self.kernel.tip_within_budget(budget)? {
+            return Ok(None);
+        }
+        let reader = selection.pin(&self.kernel, self.admission.gate(), budget)?;
+        let grants = self.admission.gate().admit_all(
+            &[
+                ProjectionHook::EmbeddingBootstrap,
+                ProjectionHook::GitDurableRows,
+            ],
+            EntryPoint::Dispatch,
+        )?;
+        let expected = InvalidationIdentity::from(identity);
+        for grant in &grants {
+            self.admission
+                .gate()
+                .check_limits(grant, &expected, &spec.catchup_page_charges())?;
+        }
+        let consumer = CatchUpConsumer {
+            binding: SourceHoldBinding {
+                consumer_id: reader.consumer().consumer_id.clone(),
+                lease_epoch: self.kernel.lease_epoch(),
+                source_policy_version: identity.projection_policy_version.clone(),
+            },
+            hold_id: checkpoint.hold_id,
+            kernel_incarnation_id: identity.kernel_incarnation_id.clone(),
+            generation_id: Some(reader.consumer().generation_id.clone()),
+        };
+        let report = SearchCatchUp::new(&self.kernel, reader.projection())
+            .with_budget(budget.clone())
+            .run_episode(&consumer, &spec.episode, crate::now_ms(), &mut |_| {})?;
+        Ok(Some(report))
     }
 
     /// Refreshes admission from the selected family's coverage, with no coverage when that family cannot be read, or from the unregistered observation at `tip` when no family is selected. Coverage is read outside gate admission so a denial does not block the next observation.
@@ -639,7 +703,7 @@ fn replacement_spec(
     })
 }
 
-/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record runs the next one without waiting; every other outcome idles first. A panicking slice closes admission and ends the loop, since its state is no longer known.
+/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first. A panicking slice closes admission and ends the loop, since its state is no longer known.
 pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
     let mut reporter = SliceReporter::default();
     loop {
@@ -669,7 +733,12 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
         if cancel.is_cancelled() {
             return;
         }
-        if matches!(outcome, SliceOutcome::Advanced(_)) {
+        let advanced = match &outcome {
+            SliceOutcome::Advanced(_) => true,
+            SliceOutcome::CaughtUp(report) => report.batches_applied > 0,
+            _ => false,
+        };
+        if advanced {
             continue;
         }
         tokio::select! {
@@ -685,6 +754,7 @@ enum ReportKind {
     Blocked,
     Unavailable,
     Closed,
+    CatchUpBlocked,
 }
 
 /// Decides which slice outcomes reach the log: the first report after an outcome that is not one, a change of kind, and a repeat of the same kind with different detail once per `REPORT_REPEAT_INTERVAL`. A reason that embeds a moving value, such as the kernel tip, would otherwise print on every slice.
@@ -706,9 +776,17 @@ impl SliceReporter {
             SliceOutcome::Closed(refusal) => {
                 (ReportKind::Closed, format!("admission closed: {refusal}"))
             }
+            SliceOutcome::CaughtUp(EpisodeReport {
+                end: EpisodeEnd::Blocked(blocked),
+                ..
+            }) => (
+                ReportKind::CatchUpBlocked,
+                format!("catch-up blocked: {blocked:?}"),
+            ),
             SliceOutcome::Unregistered
             | SliceOutcome::Advanced(_)
             | SliceOutcome::Current
+            | SliceOutcome::CaughtUp(_)
             | SliceOutcome::Disabled => {
                 self.last = None;
                 return None;
