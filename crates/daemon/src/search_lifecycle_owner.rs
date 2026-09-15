@@ -827,6 +827,9 @@ impl SearchLifecycleOwner {
             &request.consumer.generation_id,
         )
         .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+        // A slice prepares under the coverage bounds too, so a manifest that cannot yield them would leave the recorded request to slices that all refuse it.
+        coverage_bounds(inputs.manifest())
+            .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
         let duration = u64::try_from(request.deadline.saturating_sub(now)).unwrap_or(0);
         let bound = limit(inputs.manifest(), request.transition.duration_limit())
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;

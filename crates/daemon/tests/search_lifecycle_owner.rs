@@ -2681,15 +2681,33 @@ async fn a_disable_with_no_family_completes_without_admission_records() {
     assert!(matches!(control(home), ControlState::Disabled(_)));
 }
 
-/// A rebuild requested before any scheduled slice has run is judged on the records just read, not on the gate's initial closed state.
+/// A rebuild requested before any scheduled slice has run is judged on the records just read, not on the gate's initial closed state; a manifest no slice could prepare under is refused and records nothing.
 #[test]
 fn a_request_before_the_first_slice_is_judged_on_the_records() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path();
     let corpus = Corpus::open(home);
     corpus.seed();
-    records(home);
+    let identity = identity(&kernel_incarnation_id(home));
+    // Nine rows bound a replacement but not the coverage report a slice would read, so no slice could prepare under this manifest.
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("local_transaction_rows", 9)],
+        ),
+        &campaign_json(&identity),
+    );
     let owner = owner(home, &corpus.kernel);
+    let outcome = owner.request(&rebuild(home), now(), &slice_budget());
+    assert!(
+        matches!(outcome, Err(BuildError::Invalid(_))),
+        "{outcome:?}"
+    );
+    assert!(matches!(control(home), ControlState::Absent));
+
+    records(home);
     let outcome = owner.request(&rebuild(home), now(), &slice_budget());
     assert!(outcome.is_ok(), "{outcome:?}");
 }
