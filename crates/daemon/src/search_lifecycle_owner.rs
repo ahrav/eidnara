@@ -849,7 +849,8 @@ impl SearchLifecycleOwner {
         let mut restore = Restore {
             owner: self,
             selection: {
-                let mut managed = self.lock();
+                // A slice or reader holding the manager is waited for only within the disable's budget.
+                let mut managed = self.lock_within(budget)?;
                 match std::mem::take(&mut *managed) {
                     Managed::Selection(selection) => {
                         *managed = Managed::Disabling;

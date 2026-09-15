@@ -2426,6 +2426,50 @@ fn a_slice_waiting_for_the_manager_ends_with_its_budget() {
     );
 }
 
+/// A disable that finds the manager held waits only as long as its own budget allows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disable_waiting_for_the_manager_ends_with_its_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = Arc::new(owner(home, &corpus.kernel));
+    // A slice pauses at its preparation tap while holding the manager, until the test releases it.
+    let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared) {
+            let _ = reached_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+        }
+    });
+    let holder = {
+        let owner = Arc::clone(&owner);
+        std::thread::spawn(move || owner.run_slice(&slice_budget()))
+    };
+    tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the slice reaches its pause");
+    let started = Instant::now();
+    let outcome = owner
+        .disable(&budget(Duration::from_millis(200)), &mut |_| {})
+        .await;
+    let waited = started.elapsed();
+    release.send(()).unwrap();
+    let _ = holder.join().unwrap();
+    assert!(matches!(outcome, Err(BuildError::Expired)), "{outcome:?}");
+    assert!(
+        waited < Duration::from_secs(2),
+        "the disable waited {waited:?} on a 200 ms budget"
+    );
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {
