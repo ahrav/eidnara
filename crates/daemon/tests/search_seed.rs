@@ -1202,7 +1202,7 @@ fn process_cuts_at_every_quiesce_barrier_reopen_to_the_ledger() {
 #[test]
 fn compatibility_digest_separates_fields_that_contain_newlines() {
     let verification = |policy: &str, contract: &str| SeedVerification {
-        schema: 1,
+        schema: 2,
         schema_version: 1,
         kernel_incarnation_id: "kernel".to_owned(),
         projection_policy_version: policy.to_owned(),
@@ -1210,9 +1210,11 @@ fn compatibility_digest_separates_fields_that_contain_newlines() {
         limit_manifest_protocol_version: "limits".to_owned(),
         embedding_model: "model".to_owned(),
         tokenizer_fingerprint: "tokenizer".to_owned(),
-        analysis_identity: retrieval::lexical::AnalysisIdentity::current()
-            .as_str()
-            .to_string(),
+        analysis_identity: Some(
+            retrieval::lexical::AnalysisIdentity::current()
+                .as_str()
+                .to_string(),
+        ),
         vector_dimension: 8,
         generation_epoch: 1,
         generation_id: "gen-1".to_owned(),
@@ -1234,4 +1236,88 @@ fn compatibility_digest_separates_fields_that_contain_newlines() {
         shifted_left.release_contract_sha256,
         shifted_right.release_contract_sha256
     );
+}
+
+/// A schema 1 report omits `analysis_identity`.
+fn schema_one_report() -> Value {
+    json!({
+        "schema": 1, "schema_version": 5, "kernel_incarnation_id": "incarnation-legacy",
+        "projection_policy_version": "source-policy.v1", "identity_contract_version": "search-projection-identity-v3",
+        "limit_manifest_protocol_version": "limits.v1", "embedding_model": "model-a", "tokenizer_fingerprint": "fp-a",
+        "vector_dimension": 8, "generation_epoch": 1, "generation_id": "gen-legacy", "generation_state": "selected",
+        "snapshot_commit_seq": 40, "checkpoint_commit_seq": 41, "hold_id": "hold-legacy", "occurrences": 3, "tombstones": 1,
+        "pending_jobs": 0, "admitted_jobs": 0, "vectors": 2, "bytes": 4096, "sha256": "a".repeat(64)
+    })
+}
+
+/// Expected canonical bytes and digests for [`schema_one_report`].
+const SCHEMA_ONE_CANONICAL: &str = r#"{"schema":1,"schema_version":5,"kernel_incarnation_id":"incarnation-legacy","projection_policy_version":"source-policy.v1","identity_contract_version":"search-projection-identity-v3","limit_manifest_protocol_version":"limits.v1","embedding_model":"model-a","tokenizer_fingerprint":"fp-a","vector_dimension":8,"generation_epoch":1,"generation_id":"gen-legacy","generation_state":"selected","snapshot_commit_seq":40,"checkpoint_commit_seq":41,"hold_id":"hold-legacy","occurrences":3,"tombstones":1,"pending_jobs":0,"admitted_jobs":0,"vectors":2,"bytes":4096,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+const SCHEMA_ONE_STAGE_DIGEST: &str =
+    "f3fc922ca2ac071c8a16716d200499f4b39821d3ebe188d77cf0c9e87ddeb044";
+const SCHEMA_ONE_REPORT_SHA256: &str =
+    "66931f07c63f79fc2b915974d30bbd1f55675ae8ff34826aaa15bef1dd77bae9";
+const SCHEMA_ONE_RELEASE_CONTRACT_SHA256: &str =
+    "6c4cfb817cfa76bd270fd549e7c508f22c7dd3958421a8b1d6ffe8bd4e4c5536";
+
+#[test]
+fn a_schema_one_report_reads_reproduces_its_digests_and_is_incompatible() {
+    let report: SeedVerification = serde_json::from_value(schema_one_report()).unwrap();
+    assert_eq!(report.schema, 1);
+    assert_eq!(report.analysis_identity, None);
+    assert!(report.shape_matches_schema());
+    assert_eq!(
+        String::from_utf8(report.canonical_bytes()).unwrap(),
+        SCHEMA_ONE_CANONICAL,
+        "re-serializing a schema 1 report adds no field"
+    );
+    assert_eq!(report.report_sha256(), SCHEMA_ONE_REPORT_SHA256);
+    let meta = seed_stage_meta(&report);
+    assert_eq!(
+        meta.release_contract_sha256,
+        SCHEMA_ONE_RELEASE_CONTRACT_SHA256
+    );
+    assert_eq!(report.stage_manifest().digest(), SCHEMA_ONE_STAGE_DIGEST);
+    let stored = report.identity();
+    assert_eq!(stored.analysis_identity, "");
+    let mut expected = stored.clone();
+    expected.schema_version = retrieval::SCHEMA_VERSION;
+    expected.analysis_identity = retrieval::lexical::AnalysisIdentity::current()
+        .as_str()
+        .to_string();
+    assert_eq!(
+        stored.require_compatible(&expected),
+        Err(retrieval::ProjectionError::IdentityMismatch)
+    );
+}
+
+#[test]
+fn a_report_whose_fields_disagree_with_its_schema_is_malformed() {
+    let mut two_without = schema_one_report();
+    two_without["schema"] = json!(2);
+    let report: SeedVerification = serde_json::from_value(two_without).unwrap();
+    assert!(!report.shape_matches_schema());
+    let mut one_with = schema_one_report();
+    one_with["analysis_identity"] = json!("analysis");
+    let report: SeedVerification = serde_json::from_value(one_with).unwrap();
+    assert!(!report.shape_matches_schema());
+    let mut unknown = schema_one_report();
+    unknown["schema"] = json!(3);
+    let report: SeedVerification = serde_json::from_value(unknown).unwrap();
+    assert!(!report.shape_matches_schema());
+}
+
+#[test]
+fn a_replacement_capture_holding_a_schema_one_certificate_reads() {
+    let capture: daemon::projection_lifecycle::ReplacementCapture = serde_json::from_value(json!({
+        "hold_id": "hold-legacy", "snapshot": 40, "lease_epoch": 1,
+        "source_policy_version": "source-policy.v1", "expires_at": 1_000,
+        "stage": schema_one_report(),
+    }))
+    .unwrap();
+    let stage = capture.stage.as_deref().unwrap();
+    assert_eq!(stage.stage_manifest().digest(), SCHEMA_ONE_STAGE_DIGEST);
+    let bytes = serde_json::to_vec(&capture).unwrap();
+    let round_trip: daemon::projection_lifecycle::ReplacementCapture =
+        serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(round_trip, capture);
 }

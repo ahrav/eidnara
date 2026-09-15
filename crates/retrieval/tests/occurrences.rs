@@ -804,8 +804,16 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
     };
     store
         .with_conn_fenced(|conn| {
-            assert!(tombstone_occurrence(conn, &victim, stone, 3).unwrap());
-            assert!(!tombstone_occurrence(conn, &victim, stone, 4).unwrap());
+            assert!(
+                tombstone_occurrence(conn, &victim, stone, 3)
+                    .unwrap()
+                    .recorded
+            );
+            assert!(
+                !tombstone_occurrence(conn, &victim, stone, 4)
+                    .unwrap()
+                    .recorded
+            );
             assert_eq!(
                 tombstone_occurrence(
                     conn,
@@ -935,11 +943,17 @@ fn tombstones_require_a_commit_after_occurrence_creation() {
         .with_conn_fenced(|conn| {
             assert_eq!(
                 tombstone_occurrence(conn, occurrence_id, stone, 3),
-                Ok(true)
+                Ok(retrieval::Tombstoned {
+                    recorded: true,
+                    lexical_rows_deleted: 0,
+                })
             );
             assert_eq!(
                 tombstone_occurrence(conn, occurrence_id, stone, 4),
-                Ok(false)
+                Ok(retrieval::Tombstoned {
+                    recorded: false,
+                    lexical_rows_deleted: 0,
+                })
             );
             Ok(())
         })

@@ -155,15 +155,18 @@ an unindexed column. The tokenizer, detail mode, and column layout are the
 analysis contract in `docs/lexical-analysis-contract.md`;
 `retrieval::lexical::fts5_table_args()` renders the same arguments, and the
 projection identity's `analysis_identity` records the contract the rows were
-built under. The rowid is the leading 63 bits of the occurrence identifier, so
-a rebuild and incremental application store equal rows. The row is written in
-the same transaction as its occurrence, deleted in the transaction that records
-the occurrence's tombstone, and deleted again when message cleanup reclaims the
-occurrence. The shadow tables the FTS5 module creates (`lexical_data`,
-`lexical_idx`, `lexical_content`, `lexical_docsize`, `lexical_config`) are
-engine-owned and outside this inventory. `PRAGMA integrity_check` verifies the
-inverted index; `retrieval::lexical::verify_rows` checks that live occurrences
-and lexical rows correspond one to one.
+built under. The rowid is one of the four 64-bit words of the occurrence
+identifier with the sign bit cleared (`retrieval::lexical::rowids`): the first
+word no other occurrence holds. A rebuild and incremental application store
+equal rows unless two live occurrences share a word. The row is written in the
+same transaction as its occurrence, deleted by `retrieval::tombstone_occurrence`
+in the transaction that records the occurrence's tombstone, and deleted again
+when message cleanup reclaims the occurrence. The shadow tables the FTS5 module
+creates (`lexical_data`, `lexical_idx`, `lexical_content`, `lexical_docsize`,
+`lexical_config`) are engine-owned and outside this inventory. `PRAGMA
+integrity_check` verifies the inverted index; `retrieval::lexical::verify_rows`
+checks that live occurrences and lexical rows correspond one to one and that
+every row sits at one of its occurrence's words.
 
 Virtual table: `fts5(original, parts, occurrence_id UNINDEXED, tokenize = 'unicode61 remove_diacritics 2 tokenchars ''_''', detail = full)`
 

@@ -619,37 +619,35 @@ fn apply_batch_inner(
     }
     phase!(fault, AfterAssociations);
 
-    // The lexical row follows liveness, not this batch's insert: a tombstoned occurrence gains no row on replay, and a live occurrence that lacks one gains it, which is the same predicate `batch_status` reads.
+    // The lexical row follows liveness, not this batch's insert: a tombstoned occurrence gains no row on replay, and a live occurrence that lacks one gains it, which is the same predicate `batch_status` reads. An occurrence this batch also invalidates is skipped: its tombstone below would delete the row at once.
     for (row, selected) in persisted.iter().zip(&admission.selected) {
-        let tombstoned: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM occurrence_tombstones WHERE occurrence_id=?1)",
-            [&row.occurrence_id],
-            |row| row.get(0),
-        )?;
-        if !tombstoned
-            && crate::lexical::index::insert(
-                conn,
-                &row.occurrence_id,
-                selected,
-                bounds.persist.max_payload_bytes,
-            )?
+        if admission.tombstoned.contains(row.occurrence_id.as_str())
+            || has_tombstone(conn, &row.occurrence_id)?
         {
+            continue;
+        }
+        if crate::lexical::index::insert(
+            conn,
+            &row.occurrence_id,
+            selected,
+            bounds.persist.max_payload_bytes,
+        )? {
             outcome.lexical_rows_inserted += 1;
         }
     }
     phase!(fault, AfterLexical);
 
     for invalidation in &batch.invalidations {
-        if tombstone_occurrence(
+        let tombstoned = tombstone_occurrence(
             conn,
             &invalidation.occurrence_id,
             invalidation.tombstone,
             now,
-        )? {
+        )?;
+        if tombstoned.recorded {
             outcome.tombstones_recorded += 1;
         }
-        outcome.lexical_rows_deleted +=
-            crate::lexical::index::delete(conn, &invalidation.occurrence_id)?;
+        outcome.lexical_rows_deleted += tombstoned.lexical_rows_deleted;
     }
     phase!(fault, AfterTombstones);
 
@@ -704,11 +702,11 @@ fn apply_batch_inner(
 }
 
 fn has_tombstone(conn: &GuardedConn<'_>, occurrence_id: &str) -> Result<bool, ProjectionError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM occurrence_tombstones WHERE occurrence_id=?1)",
-        [occurrence_id],
-        |row| row.get(0),
-    )?)
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM occurrence_tombstones WHERE occurrence_id=?1)",
+        )?
+        .query_row([occurrence_id], |row| row.get(0))?)
 }
 
 fn has_job(

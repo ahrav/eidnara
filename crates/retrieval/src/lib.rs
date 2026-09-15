@@ -290,10 +290,13 @@ pub enum ProjectionError {
     VectorConflict { occurrence_id: String },
     #[error("lexical analysis refused: {0}")]
     Lexical(lexical::LexicalRefusal),
-    #[error("occurrence {occurrence_id} derives the lexical rowid held by occurrence {holder}")]
+    #[error(
+        "occurrence {occurrence_id} derives only lexical rowids held by other occurrences: {holders:?}"
+    )]
     LexicalRowidCollision {
         occurrence_id: String,
-        holder: String,
+        /// The holder of each of the occurrence's rowids, in rowid order.
+        holders: Vec<String>,
     },
     #[error("the linked engine is unsupported: {reason}")]
     Unsupported { reason: &'static str },
@@ -786,16 +789,23 @@ fn persist_with_digests<'c>(
         .collect())
 }
 
-/// Records that an occurrence stopped being live. Recording the same
-/// tombstone again is a no-op; a different one for the same occurrence is a
-/// collision, because an invalidation fact never changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tombstoned {
+    /// Whether the tombstone row was written; `false` when the same tombstone was already recorded.
+    pub recorded: bool,
+    pub lexical_rows_deleted: usize,
+}
+
+/// Records an occurrence tombstone and removes its lexical row. Recording the
+/// same tombstone again is a no-op; a different one for the same occurrence is
+/// a collision, because an invalidation fact never changes.
 /// The invalidation commit must be strictly after the stored creation commit.
 pub fn tombstone_occurrence(
     conn: &GuardedConn<'_>,
     occurrence_id: &str,
     tombstone: Tombstone,
     recorded_at: i64,
-) -> Result<bool, ProjectionError> {
+) -> Result<Tombstoned, ProjectionError> {
     if tombstone.invalidated_commit_seq <= 0 {
         return Err(ProjectionError::NonPositiveTombstoneSequence {
             occurrence_id: occurrence_id.to_string(),
@@ -825,15 +835,17 @@ pub fn tombstone_occurrence(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    match stored {
+    let recorded = match stored {
         Some((at, reason))
             if at == tombstone.invalidated_commit_seq && reason == tombstone.reason.as_str() =>
         {
-            Ok(false)
+            false
         }
-        Some(_) => Err(ProjectionError::TombstoneCollision {
-            occurrence_id: occurrence_id.to_string(),
-        }),
+        Some(_) => {
+            return Err(ProjectionError::TombstoneCollision {
+                occurrence_id: occurrence_id.to_string(),
+            });
+        }
         None => {
             conn.execute(
                 "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
@@ -845,9 +857,13 @@ pub fn tombstone_occurrence(
                     recorded_at,
                 ],
             )?;
-            Ok(true)
+            true
         }
-    }
+    };
+    Ok(Tombstoned {
+        recorded,
+        lexical_rows_deleted: lexical::index::delete(conn, occurrence_id)?,
+    })
 }
 
 /// The schema requires both span bounds or neither; half-present pairs and

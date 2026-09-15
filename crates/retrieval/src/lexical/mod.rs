@@ -15,7 +15,9 @@ pub mod index;
 pub use analysis::{Analysis, LexicalBounds, LexicalRefusal, analyze, analyze_segments};
 pub use compile::{Probe, compile};
 pub use identity::AnalysisIdentity;
-pub use index::{EngineIdentity, OCCURRENCE_ID_COLUMN, probe_engine, rowid, verify_rows};
+pub use index::{
+    EngineIdentity, OCCURRENCE_ID_COLUMN, ROWID_WORDS, probe_engine, rowid, rowids, verify_rows,
+};
 
 /// `_` is a token character so `snake_case` stays one engine token, and `remove_diacritics 2` folds precomposed Latin diacritics.
 pub const TOKENIZER: &str = "unicode61 remove_diacritics 2 tokenchars '_'";

@@ -240,10 +240,9 @@ fn assert_lexical_rows_match_live_occurrences(conn: &Connection) {
             live.contains_key(occurrence_id),
             "lexical row for {occurrence_id} names a live occurrence"
         );
-        assert_eq!(
-            retrieval::lexical::rowid(occurrence_id),
-            Some(*rowid),
-            "lexical row sits at its derived rowid"
+        assert!(
+            retrieval::lexical::rowids(occurrence_id).is_some_and(|words| words.contains(rowid)),
+            "lexical row sits at one of its derived rowids"
         );
     }
 }

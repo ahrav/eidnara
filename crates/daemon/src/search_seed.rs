@@ -109,6 +109,8 @@ pub enum SeedRefusal {
 }
 
 /// What verification found in the closed file, bound to the bytes by `sha256`.
+///
+/// `schema` selects the field set: schema 1 omits `analysis_identity`; `REPORT_SCHEMA` requires it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SeedVerification {
@@ -120,7 +122,9 @@ pub struct SeedVerification {
     pub limit_manifest_protocol_version: String,
     pub embedding_model: String,
     pub tokenizer_fingerprint: String,
-    pub analysis_identity: String,
+    /// `None` is valid only in a schema 1 report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_identity: Option<String>,
     pub vector_dimension: u32,
     pub generation_epoch: u64,
     pub generation_id: String,
@@ -139,6 +143,15 @@ pub struct SeedVerification {
 }
 
 impl SeedVerification {
+    #[must_use]
+    pub fn shape_matches_schema(&self) -> bool {
+        match self.schema {
+            1 => self.analysis_identity.is_none(),
+            REPORT_SCHEMA => self.analysis_identity.is_some(),
+            _ => false,
+        }
+    }
+
     pub fn identity(&self) -> ProjectionIdentity {
         ProjectionIdentity {
             schema_version: self.schema_version,
@@ -148,7 +161,7 @@ impl SeedVerification {
             limit_manifest_protocol_version: self.limit_manifest_protocol_version.clone(),
             embedding_model: self.embedding_model.clone(),
             tokenizer_fingerprint: self.tokenizer_fingerprint.clone(),
-            analysis_identity: self.analysis_identity.clone(),
+            analysis_identity: self.analysis_identity.clone().unwrap_or_default(),
             vector_dimension: self.vector_dimension,
             generation_epoch: self.generation_epoch,
         }
@@ -607,7 +620,7 @@ fn verify_closed_until(
         limit_manifest_protocol_version: identity.limit_manifest_protocol_version,
         embedding_model: identity.embedding_model,
         tokenizer_fingerprint: identity.tokenizer_fingerprint,
-        analysis_identity: identity.analysis_identity,
+        analysis_identity: Some(identity.analysis_identity),
         vector_dimension: identity.vector_dimension,
         generation_epoch: identity.generation_epoch,
         generation_id,
@@ -634,20 +647,21 @@ pub struct StagedSeed {
 
 /// The manifest identity a seed stages under: the target names the seed kind, the contract slot carries the compatibility identity's digest, the inputs slot the verification report's digest, and the payload slot the seed bytes' digest. No release contract or inputs lock exists for a seed; the slots bind what a seed has.
 pub fn seed_stage_meta(verification: &SeedVerification) -> StageMeta {
-    let identity = verification.identity();
     // A JSON array delimits each field, so identities whose strings contain the delimiter still hash apart.
-    let compatibility = serde_json::to_vec(&(
-        identity.schema_version,
-        &identity.projection_policy_version,
-        &identity.identity_contract_version,
-        &identity.limit_manifest_protocol_version,
-        &identity.embedding_model,
-        &identity.tokenizer_fingerprint,
-        &identity.analysis_identity,
-        identity.vector_dimension,
-        identity.generation_epoch,
-    ))
-    .expect("identity serialization cannot fail");
+    let mut fields = vec![
+        serde_json::Value::from(verification.schema_version),
+        serde_json::Value::from(verification.projection_policy_version.as_str()),
+        serde_json::Value::from(verification.identity_contract_version.as_str()),
+        serde_json::Value::from(verification.limit_manifest_protocol_version.as_str()),
+        serde_json::Value::from(verification.embedding_model.as_str()),
+        serde_json::Value::from(verification.tokenizer_fingerprint.as_str()),
+    ];
+    if let Some(analysis_identity) = &verification.analysis_identity {
+        fields.push(serde_json::Value::from(analysis_identity.as_str()));
+    }
+    fields.push(serde_json::Value::from(verification.vector_dimension));
+    fields.push(serde_json::Value::from(verification.generation_epoch));
+    let compatibility = serde_json::to_vec(&fields).expect("identity serialization cannot fail");
     StageMeta {
         target: SEED_TARGET.to_owned(),
         release_contract_sha256: hex(&Sha256::digest(&compatibility)),
