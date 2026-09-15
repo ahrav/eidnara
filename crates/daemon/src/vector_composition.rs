@@ -116,8 +116,6 @@ impl Composition {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum CompositionRefusal {
-    #[error("the base layer carries tombstones")]
-    BaseWithTombstones,
     #[error("delta {index} repeats a member digest")]
     DuplicateMember { index: usize },
     #[error("{count} deltas exceed the {max} delta bound")]
@@ -175,7 +173,7 @@ pub struct CompositionSpec<'a> {
     pub max_deltas: NonZeroUsize,
 }
 
-/// Names a composition after checking its topology: a base without tombstones, at most `max_deltas` distinct deltas, every member carrying the expectation's identity, and checkpoints that never move backwards from the base through each delta.
+/// Names a composition after checking its topology: at most `max_deltas` distinct deltas, every member carrying the expectation's identity, and checkpoints that never move backwards from the base through each delta.
 ///
 /// # Errors
 ///
@@ -211,9 +209,6 @@ fn check_topology(
     deltas: &[VerifiedVectors],
     max_deltas: NonZeroUsize,
 ) -> Result<(), CompositionRefusal> {
-    if base.sidecar.tombstones != 0 {
-        return Err(CompositionRefusal::BaseWithTombstones);
-    }
     if deltas.len() > max_deltas.get() {
         return Err(CompositionRefusal::DeltasOverBound {
             count: deltas.len(),

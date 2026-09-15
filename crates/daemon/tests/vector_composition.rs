@@ -142,12 +142,11 @@ impl Fixture {
         }
     }
 
-    /// Builds, stages, and verifies one layer; `tombstones` makes it a delta.
-    fn layer(&self, seed: u8, checkpoint: i64, tombstones: &[String]) -> VerifiedVectors {
+    /// Builds, stages, and verifies one layer.
+    fn layer(&self, seed: u8, checkpoint: i64) -> VerifiedVectors {
         let built = build(
             &self.expected(),
             &export(seed, checkpoint),
-            tombstones,
             &self.work_dir(),
         )
         .unwrap();
@@ -274,7 +273,7 @@ fn a_base_publishes_as_one_complete_selection_whose_members_stay_protected_witho
         .unwrap();
     let search_before = fixture.selector_bytes(SEARCH_PROFILE_NAME).unwrap();
 
-    let base = fixture.layer(1, 10, &[]);
+    let base = fixture.layer(1, 10);
     let base_digest = base.digest.clone();
     let composition = fixture.compose(1, &base, &[]).unwrap();
     assert_eq!(composition.members(), vec![base_digest.clone()]);
@@ -332,14 +331,11 @@ fn a_base_publishes_as_one_complete_selection_whose_members_stay_protected_witho
 #[test]
 fn a_delta_update_publishes_a_new_complete_target_and_releases_the_old_composition_only() {
     let fixture = Fixture::new();
-    let base = fixture.layer(1, 10, &[]);
+    let base = fixture.layer(1, 10);
     let first = fixture.compose(1, &base, &[]).unwrap();
     fixture.publish(&first).unwrap();
 
-    let masked = vec![rows(1)[0].occurrence_id.clone()];
-    let delta = fixture.layer(5, 12, &masked);
-    assert_eq!(delta.sidecar.tombstones, 1);
-    assert_eq!(delta.tombstones().unwrap(), masked);
+    let delta = fixture.layer(5, 12);
     let second = fixture
         .compose(2, &base, std::slice::from_ref(&delta))
         .unwrap();
@@ -381,15 +377,11 @@ fn a_delta_update_publishes_a_new_complete_target_and_releases_the_old_compositi
 #[test]
 fn topology_and_identity_checks_refuse_a_composition_before_anything_is_staged() {
     let fixture = Fixture::new();
-    let base = fixture.layer(1, 10, &[]);
-    let delta = fixture.layer(5, 12, &[rows(1)[0].occurrence_id.clone()]);
+    let base = fixture.layer(1, 10);
+    let delta = fixture.layer(5, 12);
     let before = fixture.generations();
 
-    assert_eq!(
-        fixture.compose(1, &delta, &[]).unwrap_err(),
-        CompositionRefusal::BaseWithTombstones
-    );
-    let earlier = fixture.layer(6, 9, &["ff".repeat(32)]);
+    let earlier = fixture.layer(6, 9);
     assert_eq!(
         fixture.compose(1, &base, &[earlier]).unwrap_err(),
         CompositionRefusal::CheckpointOrder { index: 0 }
@@ -400,7 +392,7 @@ fn topology_and_identity_checks_refuse_a_composition_before_anything_is_staged()
         CompositionRefusal::DuplicateMember { index: 1 }
     );
     let many: Vec<VerifiedVectors> = (0..5u8)
-        .map(|i| fixture.layer(20 + i, 20 + i64::from(i), &["ee".repeat(32)]))
+        .map(|i| fixture.layer(20 + i, 20 + i64::from(i)))
         .collect();
     assert_eq!(
         fixture.compose(1, &base, &many).unwrap_err(),
@@ -441,7 +433,7 @@ fn topology_and_identity_checks_refuse_a_composition_before_anything_is_staged()
 #[test]
 fn a_composition_with_a_missing_or_unverified_member_is_never_selected() {
     let fixture = Fixture::new();
-    let base = fixture.layer(1, 10, &[]);
+    let base = fixture.layer(1, 10);
     let composition = fixture.compose(1, &base, &[]).unwrap();
     // The member is reclaimed between composing and publishing.
     let member_manifest = base.sidecar.stage_manifest();
@@ -470,7 +462,7 @@ fn a_composition_with_a_missing_or_unverified_member_is_never_selected() {
 
     // A composition whose member is present but rehashed to another meaning verifies as a store object and fails composition verification.
     let fixture = Fixture::new();
-    let base = fixture.layer(1, 10, &[]);
+    let base = fixture.layer(1, 10);
     let composition = fixture.compose(1, &base, &[]).unwrap();
     fixture.publish(&composition).unwrap();
     fixture.corrupt(&base.digest, CODES_FILE);
@@ -499,12 +491,12 @@ fn every_selector_cut_leaves_the_old_or_the_new_complete_selection_and_reconcile
         ProfileEvent::AfterDirectorySync,
     ] {
         let fixture = Fixture::new();
-        let base = fixture.layer(1, 10, &[]);
+        let base = fixture.layer(1, 10);
         let old = fixture.compose(1, &base, &[]).unwrap();
         fixture.publish(&old).unwrap();
         let old_bytes = fixture.selector_bytes(VECTOR_PROFILE_NAME).unwrap();
 
-        let delta = fixture.layer(5, 12, &[]);
+        let delta = fixture.layer(5, 12);
         let new = fixture.compose(2, &base, &[delta]).unwrap();
         let mut seen = Vec::new();
         let failure = publish(
@@ -588,10 +580,10 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
         Unavailable::NoCompatibleTarget { examined: 0 }
     );
 
-    let base = fixture.layer(1, 10, &[]);
+    let base = fixture.layer(1, 10);
     let first = fixture.compose(1, &base, &[]).unwrap();
     fixture.publish(&first).unwrap();
-    let delta = fixture.layer(5, 12, &[]);
+    let delta = fixture.layer(5, 12);
     let second = fixture.compose(2, &base, &[delta]).unwrap();
     fixture.publish(&second).unwrap();
 
@@ -699,7 +691,7 @@ fn the_vector_selector_refuses_layers_and_other_owners_and_a_composition_record_
             .select_vector(&seed, &fixture.tx, &mut |_| Ok(()))
             .is_err()
     );
-    let base = fixture.layer(1, 10, &[]);
+    let base = fixture.layer(1, 10);
     assert!(
         fixture
             .store
@@ -770,14 +762,14 @@ fn the_vector_selector_refuses_layers_and_other_owners_and_a_composition_record_
 #[test]
 fn a_reader_pinning_a_superseded_composition_keeps_its_members_through_prune() {
     let fixture = Fixture::new();
-    let base = fixture.layer(1, 10, &[]);
+    let base = fixture.layer(1, 10);
     let first = fixture.compose(1, &base, &[]).unwrap();
     fixture.publish(&first).unwrap();
     // The reader pins the composition it opened, as the daemon's handoff will, before the selector moves on.
     let pinned = fixture.store.validate(&first.digest()).unwrap();
     pinned.pin().unwrap();
 
-    let other_base = fixture.layer(7, 11, &[]);
+    let other_base = fixture.layer(7, 11);
     let second = fixture.compose(2, &other_base, &[]).unwrap();
     fixture.publish(&second).unwrap();
 
@@ -811,10 +803,10 @@ fn a_reader_pinning_a_superseded_composition_keeps_its_members_through_prune() {
 #[test]
 fn an_unreadable_selected_composition_quarantines_pruning_while_a_corrupt_member_does_not() {
     let fixture = Fixture::new();
-    let base = fixture.layer(1, 10, &[]);
+    let base = fixture.layer(1, 10);
     let composition = fixture.compose(1, &base, &[]).unwrap();
     fixture.publish(&composition).unwrap();
-    let orphan = fixture.layer(9, 30, &[]);
+    let orphan = fixture.layer(9, 30);
 
     // A corrupt member: the record still names it, so prune knows what to keep and reclaims only the orphan.
     fixture.corrupt(&base.digest, CODES_FILE);
@@ -849,7 +841,7 @@ fn an_unreadable_selected_composition_quarantines_pruning_while_a_corrupt_member
         .join(GENERATIONS_DIR_NAME)
         .join("tmp-0123456789abcdef");
     fs::create_dir(&temp).unwrap();
-    let another = fixture.layer(11, 31, &[]);
+    let another = fixture.layer(11, 31);
     let report = fixture.store.prune(&BTreeSet::new()).unwrap();
     assert_eq!(report.removed_temps, 1);
     assert_eq!(report.removed_generations, 0);

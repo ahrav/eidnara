@@ -32,11 +32,9 @@ pub const ROWS_FILE: &str = "rows.f32";
 pub const CODES_FILE: &str = "codes.int8";
 pub const SCALES_FILE: &str = "scales.f32";
 pub const ROW_IDS_FILE: &str = "row-ids.json";
-/// Sorted unique identifiers of occurrences a delta layer masks; present only when the layer carries at least one.
-pub const TOMBSTONES_FILE: &str = "tombstones.json";
 pub const SIDECAR_FILE: &str = "vector-sidecar.json";
 pub const SIDECAR_SCHEMA: u32 = 1;
-/// Every file the sidecar inventories for its rows, in the order the build writes them.
+/// Every file the sidecar inventories, in the order the build writes them.
 const PAYLOAD_FILES: [&str; 4] = [ROWS_FILE, CODES_FILE, SCALES_FILE, ROW_IDS_FILE];
 /// The disk limit the admission manifest names for staged bytes; the vector build charges its whole inventory against it.
 const STAGE_DISK_LIMIT: &str = "capture_disk_bytes";
@@ -69,7 +67,6 @@ pub struct VectorSidecar {
     pub checkpoint_commit_seq: i64,
     pub hold_id: String,
     pub rows: u64,
-    pub tombstones: u64,
     pub files: Vec<SidecarFile>,
 }
 
@@ -98,23 +95,13 @@ impl VectorSidecar {
         }
     }
 
-    /// The payload files plus the tombstone file when the layer masks any occurrence.
     fn inventories_exactly(&self) -> bool {
-        let paths: Vec<&str> = self.expected_files();
-        self.files.len() == paths.len()
+        self.files.len() == PAYLOAD_FILES.len()
             && self
                 .files
                 .iter()
-                .zip(paths)
+                .zip(PAYLOAD_FILES)
                 .all(|(file, path)| file.path == path)
-    }
-
-    fn expected_files(&self) -> Vec<&'static str> {
-        let mut paths = PAYLOAD_FILES.to_vec();
-        if self.tombstones != 0 {
-            paths.push(TOMBSTONES_FILE);
-        }
-        paths
     }
 
     /// The compatibility identity's digest fills the contract slot, the sidecar's hash the inputs slot, and the row artifact's hash the payload slot; no release contract or inputs lock exists for a vector generation.
@@ -273,8 +260,6 @@ pub enum FileFault {
     Calibration,
     /// The identifiers do not number the rows in strictly increasing order.
     Identifiers,
-    /// The tombstones are not the declared count of strictly increasing identifiers.
-    Tombstones,
     /// The codes are not the rows encoded under the scales.
     Codes,
 }
@@ -287,8 +272,6 @@ pub enum VectorRefusal {
     NoRows,
     #[error("row {index} is out of identifier order or repeats a row")]
     RowOrder { index: usize },
-    #[error("tombstone {index} is out of identifier order or repeats one")]
-    TombstoneOrder { index: usize },
     #[error("original rows: {0}")]
     Rows(codec::ArtifactRejection),
     #[error("calibration: {0}")]
@@ -345,7 +328,6 @@ impl BuiltVectors {
 pub fn build(
     expected: &ExpectedVectors<'_>,
     export: &LiveRows,
-    tombstones: &[String],
     work_dir: &Path,
 ) -> Result<BuiltVectors, VectorRefusal> {
     let rows = &export.rows;
@@ -357,9 +339,7 @@ pub fn build(
     {
         return Err(VectorRefusal::RowOrder { index });
     }
-    if let Some(index) = (1..tombstones.len()).find(|i| tombstones[*i - 1] >= tombstones[*i]) {
-        return Err(VectorRefusal::TombstoneOrder { index });
-    }
+
     let layout = RowLayout {
         dimension: expected.generation.vector_dimension,
         metric: expected.metric,
@@ -374,23 +354,14 @@ pub fn build(
             VectorRefusal::Rows(codec::ArtifactRejection::Row { index, rejection })
         })?;
     let ids: Vec<&str> = rows.iter().map(|row| row.occurrence_id.as_str()).collect();
-    let mut payloads = vec![
-        (ROWS_FILE, rows_bytes),
-        (CODES_FILE, codes),
-        (SCALES_FILE, calibration.scales.encode()),
-        (
-            ROW_IDS_FILE,
-            serde_json::to_vec(&ids).expect("identifier serialization cannot fail"),
-        ),
+    let payloads = [
+        rows_bytes,
+        codes,
+        calibration.scales.encode(),
+        serde_json::to_vec(&ids).expect("identifier serialization cannot fail"),
     ];
-    if !tombstones.is_empty() {
-        payloads.push((
-            TOMBSTONES_FILE,
-            serde_json::to_vec(tombstones).expect("identifier serialization cannot fail"),
-        ));
-    }
     let mut inventory = Vec::with_capacity(payloads.len());
-    for (path, bytes) in &payloads {
+    for (path, bytes) in PAYLOAD_FILES.iter().zip(&payloads) {
         write_new(&work_dir.join(path), bytes)?;
         inventory.push(SidecarFile {
             path: (*path).to_owned(),
@@ -415,7 +386,6 @@ pub fn build(
         checkpoint_commit_seq: export.checkpoint.checkpoint_commit_seq,
         hold_id: export.checkpoint.hold_id.clone(),
         rows: rows.len() as u64,
-        tombstones: tombstones.len() as u64,
         files: inventory,
     };
     write_new(&work_dir.join(SIDECAR_FILE), &sidecar.canonical_bytes())?;
@@ -486,21 +456,6 @@ pub struct VerifiedVectors {
     pub generation: ValidatedGeneration,
 }
 
-impl VerifiedVectors {
-    /// The identifiers this layer masks, re-verified against the manifest on read; empty for a layer without tombstones.
-    pub fn tombstones(&self) -> Result<Vec<String>, VectorRefusal> {
-        if self.sidecar.tombstones == 0 {
-            return Ok(Vec::new());
-        }
-        serde_json::from_slice(&read_verified(&self.generation, TOMBSTONES_FILE)?).map_err(|_| {
-            VectorRefusal::File {
-                path: TOMBSTONES_FILE,
-                fault: FileFault::Tombstones,
-            }
-        })
-    }
-}
-
 impl std::fmt::Debug for VerifiedVectors {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VerifiedVectors")
@@ -569,16 +524,6 @@ pub fn verify(
         .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
     if read_verified(&generation, CODES_FILE)? != codes {
         return Err(fault(CODES_FILE, FileFault::Codes));
-    }
-    if sidecar.tombstones != 0 {
-        let tombstones: Vec<String> =
-            serde_json::from_slice(&read_verified(&generation, TOMBSTONES_FILE)?)
-                .map_err(|_| fault(TOMBSTONES_FILE, FileFault::Tombstones))?;
-        if tombstones.len() as u64 != sidecar.tombstones
-            || tombstones.windows(2).any(|pair| pair[0] >= pair[1])
-        {
-            return Err(fault(TOMBSTONES_FILE, FileFault::Tombstones));
-        }
     }
     Ok(VerifiedVectors {
         digest: digest.to_owned(),

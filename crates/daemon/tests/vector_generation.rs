@@ -138,7 +138,7 @@ impl Fixture {
     }
 
     fn build(&self) -> BuiltVectors {
-        build(&self.expected(), &export(), &[], &self.work_dir()).unwrap()
+        build(&self.expected(), &export(), &self.work_dir()).unwrap()
     }
 
     fn stage(&self, built: &BuiltVectors) -> Result<String, VectorRefusal> {
@@ -321,12 +321,12 @@ fn paired_fresh_builds_produce_identical_names_bytes_sidecar_manifest_and_digest
     // A changed input changes the payload hash, the sidecar, and the directory name.
     let mut perturbed = export();
     perturbed.rows[2].vector[0] = perturbed.rows[2].vector[0].next_up();
-    let other = build(&fixture.expected(), &perturbed, &[], &fixture.work_dir()).unwrap();
+    let other = build(&fixture.expected(), &perturbed, &fixture.work_dir()).unwrap();
     assert_ne!(other.digest(), first.digest());
     assert_ne!(other.sidecar.files[0].sha256, first.sidecar.files[0].sha256);
     let mut other_hold = export();
     other_hold.checkpoint.hold_id = "hold-8".to_owned();
-    let other = build(&fixture.expected(), &other_hold, &[], &fixture.work_dir()).unwrap();
+    let other = build(&fixture.expected(), &other_hold, &fixture.work_dir()).unwrap();
     assert_ne!(other.digest(), first.digest());
     assert_eq!(
         other.sidecar.files, first.sidecar.files,
@@ -370,25 +370,25 @@ fn build_refuses_no_rows_out_of_order_rows_and_rows_outside_the_layout() {
     let mut empty = export();
     empty.rows.clear();
     assert_eq!(
-        build(&fixture.expected(), &empty, &[], &dir),
+        build(&fixture.expected(), &empty, &dir),
         Err(VectorRefusal::NoRows)
     );
     let mut reversed = export();
     reversed.rows.reverse();
     assert_eq!(
-        build(&fixture.expected(), &reversed, &[], &dir),
+        build(&fixture.expected(), &reversed, &dir),
         Err(VectorRefusal::RowOrder { index: 1 })
     );
     let mut duplicated = export();
     duplicated.rows[1].occurrence_id = duplicated.rows[0].occurrence_id.clone();
     assert_eq!(
-        build(&fixture.expected(), &duplicated, &[], &dir),
+        build(&fixture.expected(), &duplicated, &dir),
         Err(VectorRefusal::RowOrder { index: 1 })
     );
     let mut unnormalized = export();
     unnormalized.rows[2].vector = vec![1.0; 8];
     assert!(matches!(
-        build(&fixture.expected(), &unnormalized, &[], &dir),
+        build(&fixture.expected(), &unnormalized, &dir),
         Err(VectorRefusal::Rows(_))
     ));
     assert!(

@@ -283,11 +283,6 @@ exercises. The store's selection primitive checks inventory, sizes, modes,
 hashes, the target, and that every listed member validates; the daemon's
 semantic verification of the composition and its members precedes selection.
 
-A delta layer may carry `tombstones.json`, a JSON array of the occurrence
-identifiers it masks in strictly increasing order; a base never does. The
-sidecar records the count, and the file is present only when the count is
-nonzero.
-
 Staging charges the whole payload inventory against the admission manifest's
 `capture_disk_bytes` limit under the caller's admission; a denial stages
 nothing. The build's work directory is scratch: files are created exclusively
