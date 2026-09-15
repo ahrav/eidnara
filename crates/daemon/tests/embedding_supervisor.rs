@@ -296,10 +296,11 @@ async fn a_slice_ends_at_the_grant_deadline_when_it_is_nearer_than_the_slice_bou
     else {
         panic!()
     };
+    // The slice started no later than this receive, so its deadline is at most the grant's remainder from now.
     assert!(
-        deadline <= started + Duration::from_millis(300) + Duration::from_millis(50),
-        "the slice deadline is the grant's, not the slice bound's: {:?} past start",
-        deadline.saturating_duration_since(started)
+        deadline.saturating_duration_since(Instant::now()) <= Duration::from_millis(300),
+        "the slice deadline is the grant's, not the slice bound's: {:?} ahead",
+        deadline.saturating_duration_since(Instant::now())
     );
     // The held call keeps the backfill waiting, so the slice ends when its budget does.
     assert!(matches!(
