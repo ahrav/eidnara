@@ -89,7 +89,8 @@ Check: `always` - for each returned claim, own and lineage admission fields,
 decision fields, and registry fields equal the rows selected at S by an
 independent query; re-reading S after further commits yields an equal value
 for the revisioned fields; re-reading S after the cited evidence is tightened
-changes only `served`.
+may change `served` and `supporting_approval.valid_at_snapshot`, but no
+revisioned field.
 Fault/timing angle: a write between two reads of the same S; a snapshot before
 the object existed; evidence reclassified after S.
 Required faults and enabling state: at least one later commit after S touching
