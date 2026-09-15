@@ -432,7 +432,7 @@ Existing check: `crates/host-runtime/src/ring_transport.rs:3420` holds a real `i
 Impact: An early return would reuse a block a worker is still copying.
 Open questions:
 
-- Handoff: none for this task.
+- Handoff: a test that pauses the production inbound copy under Cancel, route close, or shutdown; the barrier witness closes trackers directly and the dispatch witnesses hold work only after the copy.
 
 ### native-alias-closure-before-transfer
 
