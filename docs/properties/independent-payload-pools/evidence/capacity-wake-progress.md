@@ -13,7 +13,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/ring.rs:1111`
 - `crates/shm-transport/src/backend/retained.rs:629`
 - `crates/shm-transport/src/backend/ring.rs:95`
-- `crates/host-runtime/src/client.rs:2716`
+- `crates/host-runtime/src/client.rs:2718`
 - `packages/shm-native/src/lib.rs:1533`
 - `packages/opencode-plugin/src/shared/host-client/shm-frame-channel.ts:427`
 

@@ -3966,7 +3966,7 @@ outlives `frame_deadline` fails the generation from `Publisher::pump`
 (`:1168-1171`) or the deadline arm (`:867-877`) instead of parking the thread.
 The parked `Ring::reserve_until` wait this record was written against has no
 host caller, and the Rust client bridge arms the capacity wake directly
-(`client.rs:2716`); `reserve_until` remains for the native addon
+(`client.rs:2718`); `reserve_until` remains for the native addon
 (`packages/shm-native/src/lib.rs:1046`). Inbound blocks outbound: the inbound send is
 awaited with no timeout and no enclosing select
 (`ring_transport.rs:737-745`), so it parks until the application drains.
@@ -4361,7 +4361,7 @@ any further **worker-queue** wake — k queued writes drain in k loop passes.
 Scoped to the private `worker_wake` descriptor, and conditional on the
 host-to-peer ring having descriptor and arena capacity for each write. Without
 that capacity `RingClientEndpoint::try_send_bounded`
-(`ring_transport.rs:1433`) returns `Exhausted` without blocking, the write
+(`ring_transport.rs:1487`) returns `Exhausted` without blocking, the write
 stays in its lane slot (`client.rs:2515`), and the bridge arms the peer's
 capacity doorbell for that lane through `Ring::arm_capacity_wait`
 (`ring.rs:903`, `client.rs:2711-2718`), then parks in one `poll` on the
