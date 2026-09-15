@@ -260,7 +260,11 @@ the kernel snapshot or incarnation changes between batches; a batch whose
 classification merge overlapped the read. The accepted set is
 re-judged once in one batch, and only candidates the kernel still admits are
 returned. A change of snapshot or incarnation at that step marks the result
-incomplete but does not discard the re-judged contributions.
+incomplete but does not discard the re-judged contributions. Each kernel
+judgment runs through `KernelStore::judge_eligibility_within_budget` under the
+request's budget, so a wait for a pooled kernel reader or a kernel read that
+reaches the deadline ends the request as `Incomplete(BudgetExhausted)` instead
+of blocking while the projection connection is held.
 
 `RetrievalBounds` has four `NonZeroUsize` fields with no default: `max_probes`,
 `scan_rows`, `max_accepted`, and `batch_rows`. A probe list longer than

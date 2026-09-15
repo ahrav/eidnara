@@ -18,7 +18,9 @@ use storage::GuardedConn;
 
 use super::Probe;
 use crate::ProjectionError;
-use crate::eligibility::{Disposition, EligibilityReport, OccurrenceCandidate, judge_occurrences};
+use crate::eligibility::{
+    Disposition, EligibilityReport, OccurrenceCandidate, judge_occurrences_within_budget,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetrievalBounds {
@@ -332,21 +334,31 @@ fn scan(
     Ok((seen, false))
 }
 
-/// Returns `SnapshotChanged` or `KernelIncarnationChanged` if kernel state differs from the first batch.
+/// Returns `SnapshotChanged` or `KernelIncarnationChanged` if kernel state differs from the first batch,
+/// and `None` when the budget ended during the judgment, which is then already recorded on `retrieval`.
 fn judge_batch(
     kernel: &KernelStore,
     authority: Authority<'_>,
     batch: &[(String, Hit)],
+    budget: &EvalBudget,
     retrieval: &mut Retrieval,
-) -> Result<(EligibilityReport, Option<IncompleteReason>), RetrievalRefusal> {
+) -> Result<Option<(EligibilityReport, Option<IncompleteReason>)>, RetrievalRefusal> {
     let candidates: Vec<OccurrenceCandidate> =
         batch.iter().map(|(_, hit)| hit.candidate.clone()).collect();
-    let report = judge_occurrences(
+    let report = match judge_occurrences_within_budget(
         kernel,
         authority.project,
         authority.destination,
         &candidates,
-    )?;
+        budget,
+    ) {
+        Ok(report) => report,
+        Err(KernelError::Deadline) => {
+            incomplete(retrieval, IncompleteReason::BudgetExhausted);
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
     retrieval.consumed.batches += 1;
     retrieval.consumed.judged += batch.len();
     let moved = if retrieval
@@ -361,7 +373,7 @@ fn judge_batch(
     };
     retrieval.incarnation.get_or_insert(report.incarnation);
     retrieval.snapshot.get_or_insert(report.snapshot);
-    Ok((report, moved))
+    Ok(Some((report, moved)))
 }
 
 /// Judges candidates in comparator order, `batch_rows` at a time, and accepts eligible ones until `max_accepted` fills.
@@ -390,7 +402,10 @@ fn admit(
             incomplete(retrieval, IncompleteReason::BudgetExhausted);
             break;
         }
-        let (report, moved) = judge_batch(kernel, authority, &batch, retrieval)?;
+        let Some((report, moved)) = judge_batch(kernel, authority, &batch, budget, retrieval)?
+        else {
+            break;
+        };
         if let Some(reason) = moved {
             incomplete(retrieval, reason);
             // The moved batch's verdicts describe other facts, so none is accepted; its exclusions are still judged work.
@@ -430,7 +445,10 @@ fn revalidate(
         incomplete(retrieval, IncompleteReason::BudgetExhausted);
         return Ok(());
     }
-    let (report, moved) = judge_batch(kernel, authority, &accepted, retrieval)?;
+    let Some((report, moved)) = judge_batch(kernel, authority, &accepted, budget, retrieval)?
+    else {
+        return Ok(());
+    };
     if let Some(reason) = moved {
         incomplete(retrieval, reason);
     }

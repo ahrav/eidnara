@@ -2955,6 +2955,28 @@ impl KernelStore {
             value,
         ))
     }
+
+    /// [`Self::egress_read`] whose reader wait and statements stop at `limit` with `KernelError::Deadline`.
+    pub(crate) fn egress_read_within<T>(
+        &self,
+        limit: &super::open::AcquireLimit,
+        read: impl FnOnce(&Transaction<'_>, i64) -> Result<T, KernelError>,
+    ) -> Result<(EgressSnapshot, T), KernelError> {
+        let mut reader = self.reader_with_limit(limit)?;
+        let generation_before = self.classification_generation.load(Ordering::SeqCst);
+        let tx = reader.transaction(rusqlite::TransactionBehavior::Deferred)?;
+        let tip = super::commit_read::tip(&tx).map_err(map_sqlite)?;
+        let value = read(&tx, tip)?;
+        tx.commit()?;
+        let generation_after = self.classification_generation.load(Ordering::SeqCst);
+        Ok((
+            EgressSnapshot {
+                tip,
+                classification_generation: stable_generation(generation_before, generation_after),
+            },
+            value,
+        ))
+    }
 }
 
 pub(crate) fn egress_candidates_tx(

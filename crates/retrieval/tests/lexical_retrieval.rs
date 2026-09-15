@@ -406,6 +406,14 @@ impl Fixture {
     }
 
     fn reference(&self, probes: &[Probe]) -> Vec<String> {
+        self.keyed_reference(probes)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// The test oracle: each occurrence's lowest SQL rank across `probes`, sorted by rank then id.
+    fn keyed_reference(&self, probes: &[Probe]) -> Vec<(String, f64)> {
         self.store
             .with_conn(|conn| {
                 let mut best: Vec<(String, f64)> = Vec::new();
@@ -418,7 +426,7 @@ impl Fixture {
                     }
                 }
                 best.sort_by(|(a_id, a), (b_id, b)| a.total_cmp(b).then_with(|| a_id.cmp(b_id)));
-                Ok(best.into_iter().map(|(id, _)| id).collect())
+                Ok(best)
             })
             .unwrap()
     }
@@ -532,7 +540,7 @@ fn contributions_follow_the_reference_order_and_survive_probe_duplication_and_pe
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
         .unwrap();
     assert_eq!(retrieval.completion, Completion::Complete);
-    assert_eq!(ids_of(&retrieval), fixture.reference(&request));
+    assert_eq!(keyed(&retrieval), fixture.keyed_reference(&request));
     assert_eq!(retrieval.contributions.len(), 6);
     assert!(
         retrieval
@@ -906,16 +914,21 @@ fn retrieval_reads_no_payload_bytes() {
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
         .unwrap();
 
-    let changed = fixture
-        .raw()
-        .execute("UPDATE payloads SET bytes=zeroblob(byte_length)", [])
+    // Renaming the table makes a payload read fail instead of returning zeroed bytes.
+    let raw = fixture.raw();
+    raw.execute("ALTER TABLE payloads RENAME TO payloads_hidden", [])
         .unwrap();
-    assert_eq!(changed, fixture.rows.len());
+    assert!(
+        raw.query_row("SELECT count(*) FROM payloads", [], |row| row
+            .get::<_, i64>(0))
+            .is_err()
+    );
 
     let after = fixture
         .retrieve(&request, bounds(), &EvalBudget::unbounded())
         .unwrap();
     assert_eq!(after, before);
+    assert_eq!(after.contributions.len(), 6);
 }
 
 #[test]
@@ -1130,4 +1143,37 @@ fn an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion
         Completion::Incomplete(IncompleteReason::BudgetExhausted)
     );
     assert!(interrupted.contributions.is_empty());
+}
+
+#[test]
+fn a_held_kernel_reader_does_not_outlive_the_budget() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse");
+    let held = std::sync::Barrier::new(2);
+    let hold = Duration::from_secs(3);
+    let (result, elapsed) = std::thread::scope(|scope| {
+        scope.spawn(|| fixture.kernel.hold_readers_for_test(&held, hold));
+        held.wait();
+        let started = Instant::now();
+        let budget = EvalBudget::new(
+            Some(started + Duration::from_millis(300)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        (
+            fixture.retrieve(&request, bounds(), &budget),
+            started.elapsed(),
+        )
+    });
+    assert!(
+        elapsed < hold,
+        "the request waited for the held kernel reader: {elapsed:?}"
+    );
+    let retrieval = result.unwrap();
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert!(retrieval.contributions.is_empty());
+    assert_eq!(retrieval.consumed.batches, 0);
+    assert_eq!(retrieval.consumed.probes, 1);
 }
