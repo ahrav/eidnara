@@ -949,7 +949,7 @@ impl SearchLifecycleOwner {
                 _ => "admission is closed",
             }));
         }
-        // Whether the manifest still bounds the operation already recorded, as its next slice would check. A replacement that fits the reduced limits may replace what no longer does; a request that does not fit either, or one refused for another reason, leaves the gate closed, as that slice would.
+        // Whether the manifest still bounds the operation already recorded, as its next slice would check. A replacement that fits the reduced limits may replace what no longer does; a request that does not fit either, or one refused for another reason, leaves the gate as that slice would: closed over an operation the manifest cannot bound, and on the records with no coverage over an active record past its duration bound, so a cleanup keeps its envelope.
         let recorded = ProjectionLifecycle::read_at(&self.home);
         let spec_fits = |current: &LifecycleIntent| {
             replacement_spec(
@@ -961,23 +961,39 @@ impl SearchLifecycleOwner {
             )
             .is_ok()
         };
-        let current_fits = match &recorded {
+        let current_fit = match &recorded {
+            ControlState::Intent(current) if !spec_fits(current) => RecordFit::Unbounded,
             // An active record's duration is charged as its slices charge it; a completed record's construction is history.
-            ControlState::Intent(current) => {
-                spec_fits(current) && duration_within_bound(inputs.manifest(), current).is_ok()
+            ControlState::Intent(current)
+                if duration_within_bound(inputs.manifest(), current).is_err() =>
+            {
+                RecordFit::OverDuration
             }
-            ControlState::Current(current) => spec_fits(current),
+            ControlState::Current(current) if !spec_fits(current) => RecordFit::Unbounded,
             // An unreadable record is what the next slice closes admission on.
-            ControlState::Unavailable(_) => false,
-            _ => true,
+            ControlState::Unavailable(_) => RecordFit::Unbounded,
+            _ => RecordFit::Fits,
+        };
+        let leave_gate_as_a_slice_would = || match current_fit {
+            RecordFit::Fits => {}
+            RecordFit::OverDuration => {
+                let _ = self.admission.refresh_with(
+                    inputs.clone(),
+                    SelectedProjection {
+                        identity: &identity,
+                        coverage: None,
+                    },
+                );
+            }
+            RecordFit::Unbounded => {
+                let _ = self.admission.refresh(None);
+            }
         };
         // Judged after the records are installed, so a request for another kernel still leaves the gate on the current records rather than on the evidence a reload replaced; over a recorded operation those records cannot bound, the gate the last slice closed stays closed.
         if self.kernel.database_incarnation_id_within_budget(budget)?
             != request.kernel_incarnation_id
         {
-            if !current_fits {
-                let _ = self.admission.refresh(None);
-            }
+            leave_gate_as_a_slice_would();
             return Err(BuildError::Invalid(
                 "the request names another kernel incarnation",
             ));
@@ -995,9 +1011,7 @@ impl SearchLifecycleOwner {
         )
         .is_err()
         {
-            if !current_fits {
-                let _ = self.admission.refresh(None);
-            }
+            leave_gate_as_a_slice_would();
             return Err(BuildError::Invalid(
                 "manifest limits cannot bound the request",
             ));
@@ -1010,17 +1024,13 @@ impl SearchLifecycleOwner {
         let bound = limit(inputs.manifest(), request.transition.duration_limit())
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
         if duration <= DEADLINE_MARGIN_MS && !replay {
-            if !current_fits {
-                let _ = self.admission.refresh(None);
-            }
+            leave_gate_as_a_slice_would();
             return Err(BuildError::Invalid(
                 "the request's deadline leaves no time past the start margin",
             ));
         }
         if duration > bound {
-            if !current_fits {
-                let _ = self.admission.refresh(None);
-            }
+            leave_gate_as_a_slice_would();
             return Err(BuildError::Invalid(
                 "the request's deadline lies past its transition's bound",
             ));
@@ -1188,6 +1198,16 @@ fn with_followup(error: &BuildError, step: &str, followup: Option<BuildError>) -
 }
 
 /// Charges an active record's own duration, its deadline less the clock it was recorded at, against its transition's bound in `manifest`, as recovery charges it at every admission.
+/// How the manifest bounds the operation already recorded, as judged at a request.
+#[derive(Clone, Copy)]
+enum RecordFit {
+    Fits,
+    /// An active record's duration exceeds its transition's bound; the records still bound a cleanup.
+    OverDuration,
+    /// The manifest cannot bound the recorded operation, or the record is unreadable.
+    Unbounded,
+}
+
 fn duration_within_bound(
     manifest: &RuntimeManifest,
     intent: &LifecycleIntent,

@@ -3210,14 +3210,14 @@ fn a_foreign_kernel_request_keeps_a_record_over_the_duration_bound_closed() {
         matches!(&outcome, SliceOutcome::Blocked(reason) if reason.starts_with("B_recovery_ms observed at")),
         "{outcome:?}"
     );
-    let denied = || {
+    let denial = || {
         owner
             .admission()
             .gate()
             .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
-            .is_err()
+            .unwrap_err()
     };
-    assert!(denied());
+    assert_eq!(denial(), Denial::Missing(Gate::ClassCoverage));
     let mut foreign = rebuild(home);
     foreign.kernel_incarnation_id = "another-kernel".to_owned();
     let outcome = owner.request(&foreign, now(), &slice_budget());
@@ -3226,9 +3226,10 @@ fn a_foreign_kernel_request_keeps_a_record_over_the_duration_bound_closed() {
         "{outcome:?}"
     );
     assert!(matches!(control(home), ControlState::Intent(_)));
-    assert!(
-        denied(),
-        "a refused foreign request must not reopen admission over a record whose duration the bound no longer fits"
+    assert_eq!(
+        denial(),
+        Denial::Missing(Gate::ClassCoverage),
+        "a refused foreign request leaves the gate as the slice did: the records installed without coverage, so a cleanup keeps its envelope"
     );
     assert!(owner.pin(&slice_budget()).is_err());
 }
