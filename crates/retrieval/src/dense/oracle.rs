@@ -1,0 +1,524 @@
+//! Walks every live occurrence whose class requires a vector in occurrence identifier order through bounded keyset pages, inside the caller's read transaction.
+//! Each page is decoded and validated, judged for canonical eligibility in one kernel batch, scored, and offered to a bounded top-K; the top-K is re-judged once before return.
+//! A live required row without a vector is a coverage shortfall, so the result is incomplete even when every scored row was eligible; a kernel snapshot or incarnation that moves between batches ends the walk the same way.
+
+use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
+use std::sync::LazyLock;
+
+use kernel::applicability::EvalBudget;
+use kernel::source_identity::OccurrenceClass;
+use kernel::{
+    CommitReadIncarnation, EgressSnapshot, EligibilityVerdict, KernelError, KernelStore,
+    MAX_ELIGIBILITY_CANDIDATES,
+};
+use rusqlite::params;
+use storage::GuardedConn;
+
+use super::codec::{self, Metric, RowLayout, RowRejection};
+use super::score::{Ranked, TopK, score};
+use crate::ProjectionError;
+use crate::batch::{VectorGeneration, dense_eligible};
+use crate::coverage::CURRENT_PENDING;
+use crate::eligibility::{
+    Authority, AuthorityMoved, Disposition, EligibilityReport, OccurrenceCandidate, judge_tracked,
+    tally_exclusion,
+};
+use crate::scan::ScanStop;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OracleBounds {
+    /// Rows returned; at most [`MAX_ELIGIBILITY_CANDIDATES`] so the final re-judgment fits one batch.
+    pub k: NonZeroUsize,
+    /// Rows read, decoded, and judged per page; at most [`MAX_ELIGIBILITY_CANDIDATES`].
+    pub page_rows: NonZeroUsize,
+    /// Live required rows one request may visit before it stops as incomplete.
+    pub max_rows: NonZeroUsize,
+}
+
+/// Not `Debug`: the query row is embedding content.
+pub struct ExhaustiveQuery<'a> {
+    pub generation: &'a VectorGeneration,
+    pub metric: Metric,
+    /// The generation's `unit_norm_tolerance`; the daemon supplies the inference owner's value.
+    pub unit_norm_tolerance: f64,
+    pub query: &'a [f32],
+    pub authority: Authority<'a>,
+    pub bounds: OracleBounds,
+}
+
+impl ExhaustiveQuery<'_> {
+    fn layout(&self) -> RowLayout {
+        RowLayout {
+            dimension: self.generation.vector_dimension,
+            metric: self.metric,
+            unit_norm_tolerance: self.unit_norm_tolerance,
+        }
+    }
+}
+
+/// Counts over the visited prefix of `R`, the live rows whose class requires a vector.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DenseCoverage {
+    pub required: usize,
+    /// Members of `R` whose stored vector decoded and satisfied the layout.
+    pub with_vector: usize,
+    /// Members of `R` without a vector of the generation while durable work for it is still open.
+    pub missing_pending: usize,
+    /// Members of `R` without a vector and without open work.
+    pub missing_without_pending: usize,
+}
+
+impl DenseCoverage {
+    pub fn missing(&self) -> usize {
+        self.missing_pending + self.missing_without_pending
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncompleteReason {
+    /// A live required row has no vector of the generation; the ranking omits it and cannot stand for the population.
+    DenseCoverageShortfall,
+    /// `max_rows` were visited while rows remained.
+    RowBound,
+    BudgetExhausted,
+    KernelIncarnationChanged,
+    /// The kernel snapshot moved between eligibility batches, so later verdicts describe other facts.
+    SnapshotChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completion {
+    /// Every live required row was visited, carried a valid vector, and was judged under one snapshot.
+    Complete,
+    Incomplete(IncompleteReason),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Consumed {
+    pub pages: usize,
+    pub judged: usize,
+    pub batches: usize,
+    /// Rows the kernel judged ineligible before or at final revalidation, by verdict in judgment order.
+    pub excluded: Vec<(EligibilityVerdict, usize)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExhaustiveRanking {
+    /// Re-judged rows, best first, at most `k`.
+    pub ranked: Vec<Ranked>,
+    pub completion: Completion,
+    pub coverage: DenseCoverage,
+    /// The snapshot every ranked row was judged under; `None` if no batch ran.
+    pub snapshot: Option<EgressSnapshot>,
+    pub incarnation: Option<CommitReadIncarnation>,
+    pub consumed: Consumed,
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum OracleRefusal {
+    #[error(
+        "the {bound} bound of {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
+    )]
+    BatchOverBound { bound: &'static str, value: usize },
+    #[error("the query row is not a member of the generation: {0}")]
+    Query(RowRejection),
+    #[error(
+        "the stored vector of occurrence {occurrence_id} is not a member of the generation: {rejection}"
+    )]
+    StoredRow {
+        occurrence_id: String,
+        rejection: RowRejection,
+    },
+    #[error("the request's budget ended before any page was read")]
+    BudgetExhausted,
+    #[error(transparent)]
+    Projection(#[from] ProjectionError),
+    #[error(transparent)]
+    Kernel(#[from] KernelError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Window<'a> {
+    /// A live required row is about to be decoded.
+    Visited(&'a str),
+    AfterPage(usize),
+    BeforeRevalidation,
+}
+
+struct PageRow {
+    candidate: OccurrenceCandidate,
+    vector: Option<Vec<u8>>,
+    pending: bool,
+}
+
+/// One keyset over the primary key covers every dense class, so no page sorts a class and visit order equals identifier order.
+/// The unary `+` on `o.class` keeps the planner off the class index, which would sort the whole class on every page.
+static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
+    let classes: Vec<String> = OccurrenceClass::ALL
+        .into_iter()
+        .filter(|class| dense_eligible(*class))
+        .map(|class| format!("'{}'", class.code()))
+        .collect();
+    format!(
+        "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest,v.vector,
+                CASE WHEN v.vector IS NULL THEN {CURRENT_PENDING} ELSE 0 END
+         FROM occurrences o
+         LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
+         LEFT JOIN occurrence_vectors v ON v.occurrence_id=o.occurrence_id AND v.generation_id=?1
+         WHERE t.occurrence_id IS NULL AND +o.class IN ({}) AND o.occurrence_id>?2
+         ORDER BY o.occurrence_id
+         LIMIT ?3",
+        classes.join(",")
+    )
+});
+
+/// # Errors
+///
+/// A budget that ends before any page is read is [`OracleRefusal::BudgetExhausted`]; one that ends later leaves the result [`Completion::Incomplete`] with no ranked rows.
+/// A stored vector that fails the layout refuses the whole request as [`OracleRefusal::StoredRow`]; no row of its page is scored.
+pub fn exhaustive(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    request: &ExhaustiveQuery<'_>,
+    budget: &EvalBudget,
+) -> Result<ExhaustiveRanking, OracleRefusal> {
+    exhaustive_inner(conn, kernel, request, budget, |_| {})
+}
+
+/// `hook` runs before each visited row is decoded, after every page, and once before the final re-judgment, so a test can change the kernel or the budget in those windows.
+#[cfg(feature = "test-support")]
+pub fn exhaustive_with_hook_for_test(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    request: &ExhaustiveQuery<'_>,
+    budget: &EvalBudget,
+    hook: impl FnMut(Window<'_>),
+) -> Result<ExhaustiveRanking, OracleRefusal> {
+    exhaustive_inner(conn, kernel, request, budget, hook)
+}
+
+fn exhaustive_inner(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    request: &ExhaustiveQuery<'_>,
+    budget: &EvalBudget,
+    mut hook: impl FnMut(Window<'_>),
+) -> Result<ExhaustiveRanking, OracleRefusal> {
+    budget.check().map_err(|_| OracleRefusal::BudgetExhausted)?;
+    let bounds = request.bounds;
+    for (bound, value) in [("k", bounds.k.get()), ("page_rows", bounds.page_rows.get())] {
+        if value > MAX_ELIGIBILITY_CANDIDATES {
+            return Err(OracleRefusal::BatchOverBound { bound, value });
+        }
+    }
+    let layout = request.layout();
+    layout.check().map_err(OracleRefusal::Query)?;
+    codec::validate(request.query, &layout).map_err(OracleRefusal::Query)?;
+    crate::vectors::check_generation(conn, request.generation)?;
+
+    let mut ranking = ExhaustiveRanking {
+        ranked: Vec::new(),
+        completion: Completion::Complete,
+        coverage: DenseCoverage::default(),
+        snapshot: None,
+        incarnation: None,
+        consumed: Consumed::default(),
+    };
+    let mut top: TopK<OccurrenceCandidate> = TopK::new(bounds.k);
+    let mut after = String::new();
+    loop {
+        if budget.is_exhausted() {
+            return exhausted(ranking);
+        }
+        let take = bounds
+            .page_rows
+            .get()
+            .min(bounds.max_rows.get() - ranking.coverage.required);
+        let (page, more) = match read_page(
+            conn,
+            &request.generation.generation_id,
+            &after,
+            take,
+            budget,
+        ) {
+            Ok(read) => read,
+            Err(ScanStop::Budget) => return exhausted(ranking),
+            Err(ScanStop::Projection(error)) => return Err(error.into()),
+        };
+        if let Some(last) = page.last() {
+            after.clone_from(&last.candidate.occurrence_id);
+            let present = decode_page(page, &layout, &mut ranking, &mut hook)?;
+            let flow = judge_and_score(
+                kernel,
+                request,
+                &layout,
+                present,
+                budget,
+                &mut ranking,
+                &mut top,
+            )?;
+            hook(Window::AfterPage(ranking.consumed.pages));
+            match flow {
+                ControlFlow::Break(Some(moved)) => {
+                    incomplete(&mut ranking, moved_reason(moved));
+                    break;
+                }
+                ControlFlow::Break(None) => return exhausted(ranking),
+                ControlFlow::Continue(()) => {}
+            }
+        }
+        if !more {
+            break;
+        }
+        if ranking.coverage.required == bounds.max_rows.get() {
+            incomplete(&mut ranking, IncompleteReason::RowBound);
+            break;
+        }
+    }
+    hook(Window::BeforeRevalidation);
+    revalidate(kernel, request.authority, budget, top, &mut ranking)?;
+    if budget.is_exhausted() {
+        return exhausted(ranking);
+    }
+    // A walk that stopped early already names the stronger reason; a shortfall is only the reason when the walk otherwise completed.
+    if ranking.coverage.missing() != 0 {
+        incomplete(&mut ranking, IncompleteReason::DenseCoverageShortfall);
+    }
+    Ok(ranking)
+}
+
+/// Rows admitted before the budget ended were never re-judged under it, so none is returned.
+fn exhausted(mut ranking: ExhaustiveRanking) -> Result<ExhaustiveRanking, OracleRefusal> {
+    if ranking.consumed.pages == 0 {
+        return Err(OracleRefusal::BudgetExhausted);
+    }
+    ranking.ranked.clear();
+    incomplete(&mut ranking, IncompleteReason::BudgetExhausted);
+    Ok(ranking)
+}
+
+/// The first reason stands, except that an ended budget always wins: whatever was known before, the result was not finished.
+fn incomplete(ranking: &mut ExhaustiveRanking, reason: IncompleteReason) {
+    if reason == IncompleteReason::BudgetExhausted || ranking.completion == Completion::Complete {
+        ranking.completion = Completion::Incomplete(reason);
+    }
+}
+
+/// Reads one row past `take` to learn whether rows remain without retaining the extra row; `take == 0` is a pure remainder probe.
+fn read_page(
+    conn: &GuardedConn<'_>,
+    generation_id: &str,
+    after: &str,
+    take: usize,
+    budget: &EvalBudget,
+) -> Result<(Vec<PageRow>, bool), ScanStop> {
+    let limit = i64::try_from(take.saturating_add(1)).unwrap_or(i64::MAX);
+    let mut statement = conn.prepare_cached(&PAGE_SQL)?;
+    let mut rows = statement.query(params![generation_id, after, limit])?;
+    let mut page = Vec::with_capacity(take);
+    while let Some(row) = rows.next()? {
+        budget.check().map_err(|_| ScanStop::Budget)?;
+        if page.len() == take {
+            return Ok((page, true));
+        }
+        let class = OccurrenceClass::from_code(&row.get::<_, String>(1)?)
+            .ok_or(ProjectionError::CorruptRow)?;
+        page.push(PageRow {
+            candidate: OccurrenceCandidate::new(
+                row.get(0)?,
+                class,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ),
+            vector: row.get(5)?,
+            pending: row.get(6)?,
+        });
+    }
+    Ok((page, false))
+}
+
+/// Every present vector of the page is decoded and validated before any row of it is judged; a missing vector is counted and its row is neither judged nor scored.
+fn decode_page(
+    page: Vec<PageRow>,
+    layout: &RowLayout,
+    ranking: &mut ExhaustiveRanking,
+    hook: &mut impl FnMut(Window<'_>),
+) -> Result<(Vec<OccurrenceCandidate>, Vec<Vec<f32>>), OracleRefusal> {
+    ranking.consumed.pages += 1;
+    let mut candidates = Vec::with_capacity(page.len());
+    let mut vectors = Vec::with_capacity(page.len());
+    for row in page {
+        hook(Window::Visited(&row.candidate.occurrence_id));
+        ranking.coverage.required += 1;
+        match row.vector {
+            Some(bytes) => {
+                let vector = codec::decode(&bytes, layout).map_err(|rejection| {
+                    OracleRefusal::StoredRow {
+                        occurrence_id: row.candidate.occurrence_id.clone(),
+                        rejection,
+                    }
+                })?;
+                ranking.coverage.with_vector += 1;
+                candidates.push(row.candidate);
+                vectors.push(vector);
+            }
+            None if row.pending => ranking.coverage.missing_pending += 1,
+            None => ranking.coverage.missing_without_pending += 1,
+        }
+    }
+    Ok((candidates, vectors))
+}
+
+/// Judges the page's present rows in one batch and offers the eligible ones to the top-K.
+/// A moved authority discards the page's verdicts and stops the walk with its reason; a budget that ends inside the judgment stops it with none, the reason already recorded.
+fn judge_and_score(
+    kernel: &KernelStore,
+    request: &ExhaustiveQuery<'_>,
+    layout: &RowLayout,
+    (candidates, vectors): (Vec<OccurrenceCandidate>, Vec<Vec<f32>>),
+    budget: &EvalBudget,
+    ranking: &mut ExhaustiveRanking,
+    top: &mut TopK<OccurrenceCandidate>,
+) -> Result<ControlFlow<Option<AuthorityMoved>>, OracleRefusal> {
+    if candidates.is_empty() {
+        return Ok(ControlFlow::Continue(()));
+    }
+    let Some((report, moved)) =
+        judge_page(kernel, request.authority, &candidates, budget, ranking)?
+    else {
+        return Ok(ControlFlow::Break(None));
+    };
+    if let Some(moved) = moved {
+        // The moved batch's verdicts describe other facts, so none is admitted; its exclusions are still judged work.
+        for judged in report.occurrences {
+            if let Disposition::PolicyExcluded(verdict) = judged.disposition {
+                tally_exclusion(&mut ranking.consumed.excluded, verdict);
+            }
+        }
+        return Ok(ControlFlow::Break(Some(moved)));
+    }
+    for ((candidate, vector), judged) in candidates.into_iter().zip(vectors).zip(report.occurrences)
+    {
+        match judged.disposition {
+            Disposition::Eligible => {
+                let ranked = Ranked {
+                    occurrence_id: candidate.occurrence_id.clone(),
+                    class: candidate.class,
+                    score: score(layout.metric, request.query, &vector),
+                };
+                top.offer(ranked, candidate);
+            }
+            Disposition::PolicyExcluded(verdict) => {
+                tally_exclusion(&mut ranking.consumed.excluded, verdict);
+            }
+        }
+    }
+    Ok(ControlFlow::Continue(()))
+}
+
+/// `None` means the budget ended during the judgment and `ranking` already says so.
+fn judge_page(
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    candidates: &[OccurrenceCandidate],
+    budget: &EvalBudget,
+    ranking: &mut ExhaustiveRanking,
+) -> Result<Option<(EligibilityReport, Option<AuthorityMoved>)>, OracleRefusal> {
+    let judged = match judge_tracked(
+        kernel,
+        authority,
+        candidates,
+        budget,
+        &mut ranking.snapshot,
+        &mut ranking.incarnation,
+    ) {
+        Ok(judged) => judged,
+        Err(KernelError::Deadline) => {
+            incomplete(ranking, IncompleteReason::BudgetExhausted);
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    ranking.consumed.batches += 1;
+    ranking.consumed.judged += candidates.len();
+    Ok(Some(judged))
+}
+
+fn moved_reason(moved: AuthorityMoved) -> IncompleteReason {
+    match moved {
+        AuthorityMoved::Incarnation => IncompleteReason::KernelIncarnationChanged,
+        AuthorityMoved::Snapshot => IncompleteReason::SnapshotChanged,
+    }
+}
+
+/// Re-judges the top-K in one batch and keeps only rows the kernel still admits, so a canonical change after admission cannot reach the caller.
+fn revalidate(
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    budget: &EvalBudget,
+    top: TopK<OccurrenceCandidate>,
+    ranking: &mut ExhaustiveRanking,
+) -> Result<(), OracleRefusal> {
+    if top.is_empty() {
+        return Ok(());
+    }
+    if budget.is_exhausted() {
+        incomplete(ranking, IncompleteReason::BudgetExhausted);
+        return Ok(());
+    }
+    let (ranked, candidates): (Vec<Ranked>, Vec<OccurrenceCandidate>) =
+        top.into_ranked().into_iter().unzip();
+    let Some((report, moved)) = judge_page(kernel, authority, &candidates, budget, ranking)? else {
+        return Ok(());
+    };
+    if let Some(moved) = moved {
+        incomplete(ranking, moved_reason(moved));
+    }
+    ranking.snapshot = Some(report.snapshot);
+    ranking.incarnation = Some(report.incarnation);
+    for (row, judged) in ranked.into_iter().zip(report.occurrences) {
+        match judged.disposition {
+            Disposition::Eligible => ranking.ranked.push(row),
+            Disposition::PolicyExcluded(verdict) => {
+                tally_exclusion(&mut ranking.consumed.excluded, verdict);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PAGE_SQL;
+    use rusqlite::Connection;
+
+    /// The walk must step the primary-key index in identifier order; a class-index search would sort the whole class on every page.
+    #[test]
+    fn the_page_query_steps_the_occurrence_identifier_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::BASELINE).unwrap();
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", *PAGE_SQL))
+            .unwrap()
+            .query_map(rusqlite::params!["gen", "", 3], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|detail| {
+                detail.contains(
+                    "SEARCH o USING INDEX sqlite_autoindex_occurrences_1 (occurrence_id>?)",
+                )
+            }),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
+}

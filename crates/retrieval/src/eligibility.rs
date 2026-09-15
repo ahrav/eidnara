@@ -115,6 +115,13 @@ pub enum Disposition {
     PolicyExcluded(EligibilityVerdict),
 }
 
+/// The scope and destination every candidate of one request is judged against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Authority<'a> {
+    pub project: &'a ProjectScope,
+    pub destination: ArtifactDestination,
+}
+
 impl From<EligibilityVerdict> for Disposition {
     fn from(verdict: EligibilityVerdict) -> Self {
         match verdict {
@@ -237,6 +244,67 @@ fn report(candidates: &[OccurrenceCandidate], batch: EligibilityBatch) -> Eligib
                 disposition: verdict.into(),
             })
             .collect(),
+    }
+}
+
+/// How a later batch's kernel state differs from the first batch's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityMoved {
+    /// The kernel database was replaced, so no verdict of the first batch describes the same facts.
+    Incarnation,
+    /// The kernel committed between batches, so later verdicts describe other facts.
+    Snapshot,
+}
+
+/// Compares `report` with the state a request first judged under. An incarnation change is reported before a snapshot change because a new incarnation makes snapshot equality meaningless.
+/// An unknown classification generation counts as a moved snapshot; see [`EgressSnapshot::classification_generation`].
+pub fn authority_moved(
+    initial_snapshot: Option<&EgressSnapshot>,
+    initial_incarnation: Option<&CommitReadIncarnation>,
+    report: &EligibilityReport,
+) -> Option<AuthorityMoved> {
+    if initial_incarnation.is_some_and(|initial| *initial != report.incarnation) {
+        Some(AuthorityMoved::Incarnation)
+    } else if !report.is_reusable()
+        || initial_snapshot.is_some_and(|initial| *initial != report.snapshot)
+    {
+        Some(AuthorityMoved::Snapshot)
+    } else {
+        None
+    }
+}
+
+/// Judges one batch within `budget`, records the first batch's snapshot and incarnation in `snapshot` and `incarnation`, and reports whether this batch's state differs from that first state.
+///
+/// # Errors
+///
+/// As [`judge_occurrences_within_budget`]; a [`KernelError::Deadline`] leaves `snapshot` and `incarnation` unchanged.
+pub fn judge_tracked(
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    candidates: &[OccurrenceCandidate],
+    budget: &EvalBudget,
+    snapshot: &mut Option<EgressSnapshot>,
+    incarnation: &mut Option<CommitReadIncarnation>,
+) -> Result<(EligibilityReport, Option<AuthorityMoved>), KernelError> {
+    let report = judge_occurrences_within_budget(
+        kernel,
+        authority.project,
+        authority.destination,
+        candidates,
+        budget,
+    )?;
+    let moved = authority_moved(snapshot.as_ref(), incarnation.as_ref(), &report);
+    snapshot.get_or_insert(report.snapshot);
+    incarnation.get_or_insert(report.incarnation);
+    Ok((report, moved))
+}
+
+/// Counts `verdict` in a tally kept in first-seen verdict order.
+pub fn tally_exclusion(tally: &mut Vec<(EligibilityVerdict, usize)>, verdict: EligibilityVerdict) {
+    match tally.iter_mut().find(|(seen, _)| *seen == verdict) {
+        Some((_, count)) => *count += 1,
+        None => tally.push((verdict, 1)),
     }
 }
 

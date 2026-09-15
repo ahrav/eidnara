@@ -11,16 +11,19 @@ use std::num::NonZeroUsize;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, CommitReadIncarnation, EgressSnapshot, EligibilityVerdict, KernelError,
-    KernelStore, MAX_ELIGIBILITY_CANDIDATES, ProjectScope,
+    CommitReadIncarnation, EgressSnapshot, EligibilityVerdict, KernelError, KernelStore,
+    MAX_ELIGIBILITY_CANDIDATES,
 };
 use storage::GuardedConn;
 
 use super::Probe;
 use crate::ProjectionError;
+pub use crate::eligibility::Authority;
 use crate::eligibility::{
-    Disposition, EligibilityReport, OccurrenceCandidate, judge_occurrences_within_budget,
+    AuthorityMoved, Disposition, EligibilityReport, OccurrenceCandidate, judge_tracked,
+    tally_exclusion,
 };
+use crate::scan::ScanStop;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetrievalBounds {
@@ -32,12 +35,6 @@ pub struct RetrievalBounds {
     pub max_accepted: NonZeroUsize,
     /// Candidates judged per kernel batch, at most [`MAX_ELIGIBILITY_CANDIDATES`].
     pub batch_rows: NonZeroUsize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Authority<'a> {
-    pub project: &'a ProjectScope,
-    pub destination: ArtifactDestination,
 }
 
 /// One occurrence's lexical contribution: its raw FTS rank under the probe that ranked it best.
@@ -84,10 +81,7 @@ pub struct Consumed {
 
 impl Consumed {
     fn exclude(&mut self, verdict: EligibilityVerdict) {
-        match self.excluded.iter_mut().find(|(seen, _)| *seen == verdict) {
-            Some((_, count)) => *count += 1,
-            None => self.excluded.push((verdict, 1)),
-        }
+        tally_exclusion(&mut self.excluded, verdict);
     }
 }
 
@@ -143,28 +137,6 @@ fn comparator((left_id, left): &(String, Hit), (right_id, right): &(String, Hit)
     left.rank
         .total_cmp(&right.rank)
         .then_with(|| left_id.cmp(right_id))
-}
-
-enum ScanStop {
-    /// The request budget or the connection's interrupt ended the statement.
-    Budget,
-    Projection(ProjectionError),
-}
-
-impl From<rusqlite::Error> for ScanStop {
-    fn from(error: rusqlite::Error) -> Self {
-        if storage::is_interrupted(&error) {
-            Self::Budget
-        } else {
-            Self::Projection(error.into())
-        }
-    }
-}
-
-impl From<ProjectionError> for ScanStop {
-    fn from(error: ProjectionError) -> Self {
-        Self::Projection(error)
-    }
 }
 
 const PROBE_SQL: &str = "SELECT l.occurrence_id, l.rank, o.class, o.source_object_id, o.revision, o.source_artifact_digest
@@ -345,14 +317,15 @@ fn judge_batch(
 ) -> Result<Option<(EligibilityReport, Option<IncompleteReason>)>, RetrievalRefusal> {
     let candidates: Vec<OccurrenceCandidate> =
         batch.iter().map(|(_, hit)| hit.candidate.clone()).collect();
-    let report = match judge_occurrences_within_budget(
+    let (report, moved) = match judge_tracked(
         kernel,
-        authority.project,
-        authority.destination,
+        authority,
         &candidates,
         budget,
+        &mut retrieval.snapshot,
+        &mut retrieval.incarnation,
     ) {
-        Ok(report) => report,
+        Ok(judged) => judged,
         Err(KernelError::Deadline) => {
             incomplete(retrieval, IncompleteReason::BudgetExhausted);
             return Ok(None);
@@ -361,18 +334,10 @@ fn judge_batch(
     };
     retrieval.consumed.batches += 1;
     retrieval.consumed.judged += batch.len();
-    let moved = if retrieval
-        .incarnation
-        .is_some_and(|initial| initial != report.incarnation)
-    {
-        Some(IncompleteReason::KernelIncarnationChanged)
-    } else if snapshot_moved(retrieval.snapshot, report.snapshot) {
-        Some(IncompleteReason::SnapshotChanged)
-    } else {
-        None
-    };
-    retrieval.incarnation.get_or_insert(report.incarnation);
-    retrieval.snapshot.get_or_insert(report.snapshot);
+    let moved = moved.map(|moved| match moved {
+        AuthorityMoved::Incarnation => IncompleteReason::KernelIncarnationChanged,
+        AuthorityMoved::Snapshot => IncompleteReason::SnapshotChanged,
+    });
     Ok(Some((report, moved)))
 }
 
@@ -466,30 +431,4 @@ fn revalidate(
         }
     }
     Ok(())
-}
-
-/// An unknown classification generation counts as a moved snapshot; see [`EgressSnapshot::classification_generation`].
-fn snapshot_moved(initial: Option<EgressSnapshot>, current: EgressSnapshot) -> bool {
-    current.classification_generation.is_none() || initial.is_some_and(|initial| initial != current)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_unknown_classification_generation_counts_as_a_moved_snapshot() {
-        let stable = EgressSnapshot {
-            tip: 7,
-            classification_generation: Some(4),
-        };
-        let unknown = EgressSnapshot {
-            tip: 7,
-            classification_generation: None,
-        };
-        assert!(!snapshot_moved(None, stable));
-        assert!(!snapshot_moved(Some(stable), stable));
-        assert!(snapshot_moved(None, unknown));
-        assert!(snapshot_moved(Some(unknown), unknown));
-    }
 }

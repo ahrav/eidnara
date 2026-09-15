@@ -11,8 +11,11 @@
 //! and conflicts are refused without a suffix, a rename, or a replacement.
 //! Payloads are never logged; refusals name identities and sizes, not content.
 
+#![forbid(unsafe_code)]
+
 pub mod batch;
 pub mod coverage;
+pub mod dense;
 pub mod dispatch;
 pub mod eligibility;
 pub mod exact;
@@ -20,6 +23,7 @@ pub mod identity_sweep;
 pub mod lexical;
 pub mod message_cleanup;
 pub mod retirement;
+mod scan;
 pub mod vectors;
 
 use std::collections::HashMap;
