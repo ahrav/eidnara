@@ -371,8 +371,13 @@ impl<'a> EmbeddingDispatcher<'a> {
                 "database is locked".to_owned(),
             )))
         } else {
-            self.projection.write(|conn| bind_lane(conn, &binding, now))
+            // The binding resets rows another incarnation held; it waits for the connection only until the budget's deadline, so a withdrawn grant or an ended slice never rebinds late.
+            self.projection
+                .write_within(deadline, |conn| bind_lane(conn, &binding, now))
         };
+        if let Err(SearchProjectionError::Store(storage::StoreError::Deadline)) = &bound {
+            return Ok(Some(Blocked::SearchDeadline));
+        }
         match self.before_dispositions(bound)? {
             BindingOutcome::Mismatch => return Ok(Some(Blocked::BindingMismatch)),
             BindingOutcome::Unbuilt => return Ok(Some(Blocked::ProjectionIdentity)),
