@@ -557,6 +557,33 @@ impl SearchLifecycleOwner {
                 return SliceOutcome::Closed(refusal);
             }
         };
+        // An active record's own duration is charged against the transition's bound, as recovery charges it; a record a reloaded bound no longer fits is refused by every slice, so admission closes here rather than opening on the evidence about to be installed.
+        if !completed {
+            let duration_limit = intent.transition.duration_limit();
+            let observed =
+                u64::try_from(intent.episodes.deadline.saturating_sub(intent.recorded_at))
+                    .unwrap_or(u64::MAX);
+            match limit(inputs.manifest(), duration_limit) {
+                Ok(max) if observed <= max => {}
+                Ok(max) => {
+                    let _ = self.admission.refresh(None);
+                    return SliceOutcome::Blocked(
+                        Denial::LimitExceeded {
+                            limit: duration_limit.to_owned(),
+                            observed,
+                            max,
+                        }
+                        .to_string(),
+                    );
+                }
+                Err(_) => {
+                    let _ = self.admission.refresh(None);
+                    return SliceOutcome::Blocked(
+                        "manifest limits cannot bound the record".to_owned(),
+                    );
+                }
+            }
+        }
         // Hooks are judged on this slice's observation before the record decides anything, so an expired or blocked record cannot leave the previous slice's evidence installed.
         if let Refresh::Closed(closed) = self.refresh(&inputs, Some(selection), &identity, &budget)
         {

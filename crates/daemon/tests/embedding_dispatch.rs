@@ -2095,6 +2095,95 @@ async fn a_refusal_learned_after_the_row_deadline_is_not_recorded_under_the_pass
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disposition_is_not_written_under_a_budget_cancelled_before_its_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let over = corpus.publish("m0", "fifteen bytes!!");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &over);
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut limits = bounds();
+    limits.input = daemon::embedding_dispatch::InputEnvelope {
+        bytes: 8,
+        tokens: u64::MAX,
+    };
+    // The grant is withdrawn at the admit stage, after the pass's own budget check and before the refused input's stop is written.
+    let guard = budget(Duration::from_secs(10));
+    let withdrawn = guard.clone();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
+    let mut events = Vec::new();
+    let end = dispatcher
+        .run_pass(eligibility(&project), &limits, &guard, NOW, &mut |event| {
+            if matches!(
+                event,
+                DispatchEvent::Stage {
+                    stage: Stage::Admit,
+                    ..
+                }
+            ) {
+                withdrawn.cancel();
+            }
+            events.push(event);
+        })
+        .unwrap();
+    assert_eq!(end, Some(Blocked::BudgetExhausted));
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (row.state.as_str(), row.attempts),
+        ("pending", 0),
+        "no disposition is recorded under a withdrawn grant"
+    );
+    assert!(stopped(&events).is_empty());
+    assert_eq!(engine.calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retained_result_is_not_published_above_the_reloaded_input_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("m0", "held message");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let short = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
+        result_wait: Duration::from_millis(50),
+        ..bounds()
+    };
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &short, NOW);
+    assert_eq!(end, None);
+    assert_eq!(admitted(&events).len(), 1);
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(held.state, "admitted");
+
+    // The result is ready under a manifest that no longer admits the input's bytes: the completion is refused like an admission would be, and no vector is published.
+    TestEngine::release(&gate.0);
+    let lowered = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope {
+            bytes: 8,
+            tokens: u64::MAX,
+        },
+        ..bounds()
+    };
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &lowered, NOW + 1);
+    assert_eq!(end, None);
+    assert!(published(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        stopped(&events),
+        vec![(held.job_id.clone(), "input_over_limit".to_string())]
+    );
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!(row.state, "failed");
+    assert_eq!(row.vector, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_search_deadline_preserves_the_candidate_for_retry() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());

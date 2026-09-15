@@ -11,9 +11,9 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use host_runtime::local_embeddings::{
-    DenseUnavailable, EmbedTokens, InferenceFailureKind, LaneInfo, LaneUnavailableState,
-    LocalEmbeddingsComponent, LocalEmbeddingsStatus, PollOutcome, SubmitOutcome,
-    failure_is_permanent,
+    AdmittedInput, DenseUnavailable, EmbedTokens, InferenceFailureKind, LaneInfo,
+    LaneUnavailableState, LocalEmbeddingsComponent, LocalEmbeddingsStatus, PollOutcome,
+    SubmitOutcome, failure_is_permanent,
 };
 use kernel::applicability::EvalBudget;
 use kernel::{
@@ -666,11 +666,8 @@ impl<'a> EmbeddingDispatcher<'a> {
                     else {
                         return self.stop(job, "malformed_request", pass, observer);
                     };
-                    // The stored input is judged again before its result is trusted: the exact count is what the completion is charged, and a lane that no longer admits the input cannot complete it.
-                    let admitted = match self
-                        .local_embeddings
-                        .preflight_embedding_for_lane(pass.lane, &job.text)
-                    {
+                    // The stored input is judged again before its result is trusted: the exact count is what the completion is charged, and a lane or a manifest envelope that no longer admits the input cannot complete it.
+                    let admitted = match self.admit_input(job, pass) {
                         Ok(admitted) => admitted,
                         Err(refusal) => {
                             return self.completion_preflight_refusal(job, refusal, pass, observer);
@@ -734,6 +731,31 @@ impl<'a> EmbeddingDispatcher<'a> {
         }
     }
 
+    /// Judges the row's input under the manifest's envelope beside the lane's own limits: bytes before the tokenizer runs, tokens once it has counted them. An admission and a completion judge the same way, so a result retained from a larger envelope is not published above the one now approved.
+    fn admit_input<'t>(
+        &self,
+        job: &'t DispatchJob,
+        pass: &Pass<'_>,
+    ) -> Result<AdmittedInput<'t>, DenseUnavailable> {
+        let envelope = pass.bounds.input;
+        if job.text.len() as u64 > envelope.bytes {
+            return Err(DenseUnavailable::ByteOverflow {
+                bytes: job.text.len(),
+                max_bytes: usize::try_from(envelope.bytes).unwrap_or(usize::MAX),
+            });
+        }
+        let admitted = self
+            .local_embeddings
+            .preflight_embedding_for_lane(pass.lane, &job.text)?;
+        if u64::from(admitted.tokens().get()) > envelope.tokens {
+            return Err(DenseUnavailable::TokenOverflow {
+                tokens: admitted.tokens(),
+                max_tokens: EmbedTokens::new(u32::try_from(envelope.tokens).unwrap_or(u32::MAX)),
+            });
+        }
+        Ok(admitted)
+    }
+
     fn submit(
         &self,
         job: &DispatchJob,
@@ -743,28 +765,9 @@ impl<'a> EmbeddingDispatcher<'a> {
         if let Some(quarantine) = self.projection.quarantine() {
             return Err(SubmitFailure::Quarantined(quarantine));
         }
-        // The manifest's envelope is judged beside the lane's own limits: bytes before the tokenizer runs, tokens once it has counted them.
-        let envelope = pass.bounds.input;
-        if job.text.len() as u64 > envelope.bytes {
-            return Err(SubmitFailure::Unavailable(DenseUnavailable::ByteOverflow {
-                bytes: job.text.len(),
-                max_bytes: usize::try_from(envelope.bytes).unwrap_or(usize::MAX),
-            }));
-        }
         let admitted = self
-            .local_embeddings
-            .preflight_embedding_for_lane(pass.lane, &job.text)
+            .admit_input(job, pass)
             .map_err(SubmitFailure::Unavailable)?;
-        if u64::from(admitted.tokens().get()) > envelope.tokens {
-            return Err(SubmitFailure::Unavailable(
-                DenseUnavailable::TokenOverflow {
-                    tokens: admitted.tokens(),
-                    max_tokens: EmbedTokens::new(
-                        u32::try_from(envelope.tokens).unwrap_or(u32::MAX),
-                    ),
-                },
-            ));
-        }
         if let Some(quarantine) = self.projection.quarantine() {
             return Err(SubmitFailure::Quarantined(quarantine));
         }
@@ -1151,13 +1154,13 @@ impl<'a> EmbeddingDispatcher<'a> {
         match self.write_disposition(pass, |conn| {
             record_retry(conn, &job.job_id, kind, retry_at, pass.now)
         })? {
-            Some(Disposition::Retry) => observer(DispatchEvent::Retried { job_id, kind }),
-            Some(Disposition::Exhausted) => observer(DispatchEvent::Stopped {
+            Ok(Disposition::Retry) => observer(DispatchEvent::Retried { job_id, kind }),
+            Ok(Disposition::Exhausted) => observer(DispatchEvent::Stopped {
                 job_id,
                 reason: EXHAUSTED.to_owned(),
             }),
-            Some(Disposition::NotOpen) => {}
-            None => return Ok(Some(Blocked::SearchDeadline)),
+            Ok(Disposition::NotOpen) => {}
+            Err(blocked) => return Ok(Some(blocked)),
         }
         Ok(None)
     }
@@ -1171,26 +1174,38 @@ impl<'a> EmbeddingDispatcher<'a> {
     ) -> Result<Option<Blocked>, DispatchError> {
         let now = pass.now;
         match self.write_disposition(pass, |conn| stop_job(conn, &job.job_id, reason, now))? {
-            Some(true) => observer(DispatchEvent::Stopped {
+            Ok(true) => observer(DispatchEvent::Stopped {
                 job_id: job.job_id.clone(),
                 reason: reason.to_owned(),
             }),
-            Some(false) => {}
-            None => return Ok(Some(Blocked::SearchDeadline)),
+            Ok(false) => {}
+            Err(blocked) => return Ok(Some(blocked)),
         }
         Ok(None)
     }
 
-    /// A retry or stop written within the job's disposition deadline. `None` means the connection was still held at the deadline: the row is left as it was for a later pass to judge under its own clock, and the caller ends the pass, since the next disposition would wait on the same held connection.
+    /// A retry or stop written within the job's disposition deadline. `Err(blocked)` means nothing was written and the caller ends the pass: the connection was still held at the deadline, or the budget was cancelled while it was awaited, so the transaction is not begun under a withdrawn grant. The row is left as it was for a later pass to judge under its own clock.
     fn write_disposition<T>(
         &mut self,
         pass: &Pass<'_>,
         f: impl FnOnce(&storage::GuardedConn<'_>) -> Result<T, ProjectionError>,
-    ) -> Result<Option<T>, DispatchError> {
+    ) -> Result<Result<T, Blocked>, DispatchError> {
         self.check_quarantine()?;
-        match self.projection.write_within(pass.disposition_deadline(), f) {
-            Ok(value) => Ok(Some(value)),
-            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => Ok(None),
+        let judged = |conn: &storage::GuardedConn<'_>| {
+            if pass.budget.is_exhausted() {
+                return Ok(None);
+            }
+            f(conn).map(Some)
+        };
+        match self
+            .projection
+            .write_within(pass.disposition_deadline(), judged)
+        {
+            Ok(Some(value)) => Ok(Ok(value)),
+            Ok(None) => Ok(Err(Blocked::BudgetExhausted)),
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                Ok(Err(Blocked::SearchDeadline))
+            }
             Err(error) => Err(self.store_failure(error)),
         }
     }
@@ -1251,7 +1266,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
                 Ok(Some(Blocked::SearchDeadline))
             }
-            Err(_) => self.reconcile_obsoletions(candidates),
+            Err(_) => self.reconcile_obsoletions(candidates, deadline),
         }
     }
 
@@ -1279,11 +1294,13 @@ impl<'a> EmbeddingDispatcher<'a> {
         )
     }
 
+    /// Reads the rows after an obsoletion write whose reply was lost, within `deadline` like the write: a connection still held then leaves the outcome unresolved for the next pass, which reads the rows again.
     fn reconcile_obsoletions(
         &mut self,
         candidates: &[PendingObsoletion],
+        deadline: Instant,
     ) -> Result<Option<Blocked>, DispatchError> {
-        let statuses = self.projection.read(|conn| {
+        let statuses = self.projection.read_within(deadline, |conn| {
             candidates
                 .iter()
                 .map(|candidate| {
@@ -1292,6 +1309,9 @@ impl<'a> EmbeddingDispatcher<'a> {
                 .collect::<Result<Vec<_>, _>>()
         });
         match statuses {
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                Ok(Some(Blocked::LocalCommitUnresolved))
+            }
             Ok(statuses) => {
                 if statuses.iter().all(|status| {
                     !matches!(status.job_state.as_deref(), Some("pending" | "admitted"))

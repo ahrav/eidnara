@@ -3109,6 +3109,14 @@ fn a_lowered_duration_bound_blocks_an_active_record() {
     );
     assert!(matches!(control(home), ControlState::Intent(_)));
     assert!(owner.pin(&slice_budget()).is_err(), "no family was opened");
+    assert!(
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .is_err(),
+        "a record the reloaded bound no longer fits keeps admission closed, as every slice refuses it"
+    );
 }
 
 /// A request whose deadline leaves no time past the start margin is refused rather than recorded for every slice to refuse inside the margin.
