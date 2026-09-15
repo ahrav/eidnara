@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/host-runtime/tests/client.rs:426`
 - `packages/e2e-tests/src/rust-runner/hermetic-host.ts:275`
 
-Witness status: partial - `crates/shm-transport/tests/ring.rs:317` records a completed real cross-process exchange at layout 4, and `crates/host-runtime/tests/client.rs:365` records, through the managed Rust client against a live host, the sole profile and layout identity from `host.status`, a completed daemon request in each direction at the 64 MiB maximum, the one-over local refusal, and the activation, reclamation, and released-backing counters across a controlled close and reconnect; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
+Witness status: partial - `crates/shm-transport/tests/ring.rs:317` records a completed real cross-process exchange at layout 4, and `crates/host-runtime/tests/client.rs:365` records, through the managed Rust client against a host run in the same test process by `TestHost::start_with` (`crates/host-runtime/tests/support/mod.rs:795`), the sole profile and layout identity from `host.status`, a completed daemon request in each direction at the 64 MiB maximum, the one-over local refusal, and the activation, reclamation, and released-backing counters across a controlled close and reconnect, which is in-process integration evidence and not a cross-process witness; the direct-host E2E and native suites still skip on Bun 1.3.14 (`markAsUntransferable` unimplemented) and on Node (`node_detachment_unavailable`), which are recorded limitations, not passes.
 
 ## Failure scenario
 
@@ -42,5 +42,5 @@ Check semantics: `reachable` - the code point that reports a completed real exch
   in `Exercised`, and the CI workflow where the record is a gate property.
 - Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #550 adds the native and TypeScript real-process witnesses.
+- Missing evidence: #548, #552, #550 add daemon-level real-process witnesses; the Rust client's cross-process run is still owed.
 - Conclusion: unresolved, needs the named handoff.

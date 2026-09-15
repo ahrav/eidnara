@@ -357,7 +357,7 @@ async fn close_rejects_new_sends() {
     host.shutdown_gracefully().await;
 }
 
-/// Rust-client real-process witness for the payload-pool layout: a managed client attaches
+/// Rust-client in-process witness for the payload-pool layout: a managed client attaches
 /// the sole profile, completes a daemon request in each direction at the maximum body,
 /// refuses one byte over it locally, and records the host's artifact identity and lifecycle
 /// counters through `host.status` before and after a controlled close and reconnect.

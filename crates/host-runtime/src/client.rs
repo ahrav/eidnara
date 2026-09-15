@@ -7836,6 +7836,8 @@ mod tests {
             .try_receive()
             .expect("receive")
             .expect("a published frame");
+        // A direct channel receive skips the poll, so drain `write.wake` before the post-arm recheck.
+        drain_eventfd(&write.wake);
         consumed_tx.send(()).expect("bridge waits in the hook");
 
         assert_eq!(
