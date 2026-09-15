@@ -285,6 +285,7 @@ impl KernelStore {
         let mut missing = Vec::new();
         let mut served = load_served(&tx, requested, object_ids)?;
         for object_id in object_ids {
+            limit.check()?;
             match registry_row_at(&tx, requested, object_id)? {
                 None => missing.push(object_id.clone()),
                 Some(object) => {

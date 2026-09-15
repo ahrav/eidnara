@@ -47,8 +47,9 @@ Ticket numbers here are tracking metadata, not names of anything in the tree.
 - The projection stores no claim state. `retrieval::claims::classify_live_claims`
   is the snapshot-bound read under a caller budget: it captures the kernel
   incarnation, compares the projection identity with the kernel's own database
-  identity, reads the live rows, captures the tip and incarnation again with
-  `capture_commit_read_target` (a changed incarnation is refused), reads
+  identity, reads the projection checkpoint and the live rows, captures the
+  tip and incarnation again with `capture_commit_read_target` (a changed
+  incarnation or a tip behind the checkpoint is refused), reads
   `claim_facts_at_within_budget` at that target (refused under the reader
   guard if the store was restored in between), and maps each row through
   `classify`, so a

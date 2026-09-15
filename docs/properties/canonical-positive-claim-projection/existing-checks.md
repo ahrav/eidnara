@@ -40,6 +40,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `a_candidate_from_another_batch_reads_no_facts` | same | `ClaimCandidateBatch::claim` returns `None` for a candidate whose index is out of range or names another object | unaudited |
 | `live_rows::an_association_whose_target_disagrees_with_its_key_or_row_is_refused` | same | `CorruptRow` when the association target, its key, or the occurrence tuple name different objects | unaudited |
 | `live_rows::a_projection_from_another_kernel_incarnation_is_refused_before_any_read` | same | `NoIdentity`, then `ForeignKernel` against the kernel's own database identity, before the row bound is checked | unaudited |
+| `live_rows::a_kernel_tip_behind_the_projection_checkpoint_is_refused` | same | `NoCheckpoint` without a checkpoint, `KernelBehindProjection` when the captured tip is behind it, and a full read once they agree | unaudited |
 | `live_rows::an_exhausted_budget_is_refused_before_the_projection_is_read` | same | a cancelled `EvalBudget` refuses `Kernel(Deadline)` before the row bound | unaudited |
 | `live_rows::rows_are_bounded_ordered_and_keyed_to_the_decision_object` | same | `(class, occurrence_id)` order, the decision object key per row, and `TooManyRecords` past the row bound | unaudited |
 | `live_rows::a_claim_row_without_its_association_or_with_another_extractor_is_refused` | same | `ExtractionVersionMismatch` for another extractor and `CorruptRow` for a claim row with no `canonical_object` association | unaudited |
