@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1702`
-- `crates/host-runtime/src/ring_transport.rs:892`
+- `crates/shm-transport/src/backend/ring.rs:1740`
+- `crates/host-runtime/src/ring_transport.rs:1449`
 
-Witness status: partial - `crates/host-runtime/src/ring_transport.rs:853` serializes through `ReservationWriter` after reservation and commits under the frame deadline; `crates/shm-transport/src/backend/ring.rs:2351` covers abort and short commit.
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:3484` counts serializer invocations: zero while the class is exhausted through retirement, exactly one once a block is reserved; `crates/host-runtime/src/ring_transport.rs:1409` serializes through `ReservationWriter` only after reservation, and `crates/shm-transport/src/backend/ring.rs:2389` covers abort and short commit.
 
 ## Failure scenario
 
@@ -39,7 +39,7 @@ Check semantics: `always` - `ProducerReservation::capacity()` equals the caller'
 
 - Sources examined: the files listed under the evidence trail, the test names
   in `Exercised`, and the CI workflow where the record is a gate property.
-- Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
+- Findings: yes at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #548 for the unreserved-serializer-runs-zero-times witness.
-- Conclusion: unresolved, needs the named handoff.
+- Missing evidence: none for this task
+- Conclusion: resolved with answer.

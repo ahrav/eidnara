@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/host-runtime/src/ring_transport.rs:1001`
-- `crates/shm-transport/src/backend/ring.rs:1015`
+- `crates/host-runtime/src/ring_transport.rs:1558`
+- `crates/shm-transport/src/backend/ring.rs:1019`
 
-Witness status: partial - `crates/host-runtime/src/ring_transport.rs:1064` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs. Stop/restart witnesses belong to #548, #552, #550.
+Witness status: partial - `crates/host-runtime/src/ring_transport.rs:1621` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:3645` retires a host ticket that missed its deadline as `not_sent` with nothing published. Stop/restart witnesses for the clients belong to #552 and #550.
 
 ## Failure scenario
 
@@ -41,5 +41,5 @@ Check semantics: `always` - every `SendFailure` maps to exactly one of the two o
   in `Exercised`, and the CI workflow where the record is a gate property.
 - Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #548, #552, #550.
+- Missing evidence: #552, #550.
 - Conclusion: unresolved, needs the named handoff.

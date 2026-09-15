@@ -10,7 +10,7 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1351`
+- `crates/shm-transport/src/backend/ring.rs:1365`
 - `crates/shm-transport/src/backend/retained.rs:628`
 - `crates/shm-transport/src/backend/retained.rs:644`
 

@@ -25,11 +25,12 @@ sender exercises today.
   `len: body.len` and a [`DirectFrame`][direct-frame] whose header is that
   header encoded, and queues an `OutboundFrame` with the charge through
   `send_before`.
-- On the endpoint thread, [`publish_one`][publish-one] wraps the publish in
-  `catch_unwind`, returns `Err(())` unless the result is `Ok(Ok(()))`, and
-  drops `charge` at [`:749-786`][publish-one] only after success.
-- [`publish_direct`][publish-direct] calls
-  `reserve_until(body_len, header, deadline)`, runs the serializer into a
+- On the endpoint thread, [`Publisher::try_publish`][publish-one] reserves
+  through `try_reserve_in`, wraps the publish in `catch_unwind`, returns
+  `Err(())` unless the result is `Ok(Ok(()))`, and drops `charge` at
+  [`:1333-1389`][publish-one] only after success.
+- [`publish_direct`][publish-direct] takes the reservation `try_publish`
+  made, runs the serializer into a
   [`ReservationWriter`][res-writer]
   under `redact_sync`, then [`commit_before`][commit-before], which refuses at
   the deadline and otherwise calls `commit(body_len)`.
@@ -47,7 +48,7 @@ sender exercises today.
   panic unwinds through it to `catch_unwind`. In both cases the
   `ProducerReservation` drops, and [`Drop`][res-drop] runs
   [`abort_reservation`][abort], which punches the dirtied range.
-- The endpoint loop at [`:622-646`][publish-fail] turns any `publish_one`
+- The endpoint loop at [`:696-704`][publish-fail] turns any `Publisher::pump`
   error into `ReadClose::Corrupt("shared-memory publish failed")` and returns,
   which closes the connection. The owned path classifies a `measure` or
   `write_to` failure as a request-scoped `encode_failed` terminal in
@@ -80,13 +81,13 @@ bytes for the whole queue wait.
 ## Timing windows and dependencies
 
 The serializer runs on the endpoint thread with a ring reservation held and
-inbound receives blocked, between `reserve_until` returning and
+inbound receives blocked, between `try_reserve_in` returning and
 `commit_before`. A slow serializer meets the deadline check at commit. Between
-`emit_reserved_frame` queueing the frame and `publish_one` completing, the
+`emit_reserved_frame` queueing the frame and `Publisher::try_publish` completing, the
 closure and its captures live in the queue; a retired or cancelled generation
 drops the `OutboundFrame` there, which must release both the egress charge
 and the captured source bytes. The egress charge's release is at
-[`:749-786`][publish-one] on success and at the `OutboundFrame` drop otherwise.
+[`:1333-1389`][publish-one] on success and at the `OutboundFrame` drop otherwise.
 
 ## What a test must construct
 
@@ -104,8 +105,8 @@ deadline arm and the owned `into_parts` cases only.
 
 ### Q: Is a connection close the intended outcome for a settled response?
 
-- Sources examined: [`publish_one`][publish-one], the loop at
-  [`:622-646`][publish-fail], [`settle_prepared_with`][settle-with], the host
+- Sources examined: [`Publisher::try_publish`][publish-one], the loop at
+  [`:696-704`][publish-fail], [`settle_prepared_with`][settle-with], the host
   catalog's [terminal record][hr-terminal], and [§6.3][wire63].
 - Findings: The owned path fails one request; the direct path fails the
   connection. §6.3 fixes abort-without-publication and says nothing about
@@ -147,9 +148,9 @@ deadline arm and the owned `into_parts` cases only.
 [from-writer]: ../../../../../crates/host-runtime/src/handler.rs#L465-L472
 [t-parts]: ../../../../../crates/host-runtime/src/handler.rs#L596-L673
 [direct-frame]: ../../../../../crates/host-runtime/src/frame_channel.rs#L166-L200
-[publish-fail]: ../../../../../crates/host-runtime/src/ring_transport.rs#L622-L646
-[publish-one]: ../../../../../crates/host-runtime/src/ring_transport.rs#L749-L786
-[publish-direct]: ../../../../../crates/host-runtime/src/ring_transport.rs#L788-L800
+[publish-fail]: ../../../../../crates/host-runtime/src/ring_transport.rs#L696-L704
+[publish-one]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1333-L1389
+[publish-direct]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1392-L1404
 [commit-before]: ../../../../../crates/host-runtime/src/ring_transport.rs#L814-L825
 [res-writer]: ../../../../../crates/host-runtime/src/ring_transport.rs#L827-L843
 [t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1849-L1879

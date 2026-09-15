@@ -76,11 +76,12 @@ The scenario below was derived against the source tree this record was written f
 The sequential cases are covered. In the source tree this record was written
 against, the uncovered one was the read-then-CAS window, which needs a second party
 holding a copied identity and progressing between `:1565` and `:1575`. At HEAD
-`Ring::release` is `pub(crate)` (`ring.rs:1528`) and reached only through
-`ReceiveLease`, whose `release_once` sets `released` before calling the sink
-(`lease.rs:350-357`), so no caller outside the crate can present a copied or
+the arbiter is `Retained::complete`, which is `pub(crate)`
+(`crates/shm-transport/src/backend/retained.rs:588`) and reached only through
+`PayloadLease::return_once`, which sets `returned` before calling it
+(`lease.rs:346-355`), so no caller outside the crate can present a copied or
 retained identity; the interleaving below is constructible only by in-crate code
-and reads as the regression a widened `release` visibility would reopen:
+and reads as the regression a widened `complete` visibility would reopen:
 
 1. Party A holds a stale identity for sequence `N` — for example a copy kept after
    its lease was already completed, or a lap-old identity.
@@ -167,7 +168,7 @@ the thing to make explicit, so it is the question investigated.
   property on state still holds, and the residual hazard is misattribution rather
   than a double success. It remains unexercised, needs F3, and is the reason this
   record stays open despite good sequential coverage.
-  At HEAD: Ring::release is pub(crate) and reachable only through ReceiveLease, so a party holding a copied ReleaseIdentity cannot call it directly.
+  At HEAD: the arbiter is `Retained::complete`, `pub(crate)` and reachable only through `PayloadLease::return_once`, so a party holding a copied `PayloadIdentity` cannot call it directly.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 
@@ -181,6 +182,37 @@ the thing to make explicit, so it is the question investigated.
   - line 58, `crates/shm-transport/tests/ring.rs:152-175` now `crates/shm-transport/src/backend/ring.rs:3874-3891`: Each identity mismatch now also quarantines the ring, and the surviving lease's own release then returns Quarantined.
   - line 64, `:219-223` now `:3925-3929`: The stale release also quarantines the ring now, and the test asserts the recycled slot stays SLOT_RECEIVER_LEASED for the fresh frame.
   - line 100, `:1117` now `:1454`: Both the increment and the decrement of active_leases go through Ring::advance_cursor, an AcqRel compare-exchange from the handle's recorded value, so neither is a Relaxed fetch any more.
-  - line 128, `ring.rs:1175-1247` now `ring.rs:1528-1600`: Ring::release is pub(crate) and reachable only through ReceiveLease, so a party holding a copied ReleaseIdentity cannot call it directly.
+  - line 128, `ring.rs:1175-1247` now `crates/shm-transport/src/backend/retained.rs:588-619`: the arbiter is `Retained::complete`, `pub(crate)` and reachable only through `PayloadLease::return_once` (`lease.rs:346-355`), so a party holding a copied `PayloadIdentity` cannot call it directly.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+### Q: Where is the exactly-once arbiter with completion in `Retained::complete`?
+
+- Sources examined: `crates/shm-transport/src/lease.rs:239-370` (`PayloadLease`,
+  `release`, `return_once`, `Drop`), `:563-622` (return-once and stale-completion
+  tests); `crates/shm-transport/src/backend/retained.rs:571-619` (`mark_live`,
+  `complete`); `crates/shm-transport/src/backend/ring.rs:1088-1125`
+  (`reclaim_completions`), `:2475-2500`
+  (`stale_returns_free_nothing_and_future_completions_quarantine`).
+- Findings: two mutation points, both in `complete`. The receiver's live record
+  for the block is compare-exchanged from `generation` to zero (`retained.rs:595-600`);
+  only the winner decrements `outstanding_returns`. The completion cell takes
+  `fetch_max(generation)` (`:606`), so a stale return cannot lower a newer one
+  and a duplicate publication of the same generation is idempotent. Per lease,
+  `return_once` sets `returned` first (`lease.rs:350-351`), so `release` then
+  `Drop` publishes once; `owned_lease_exposes_exact_bytes_and_returns_exactly_once`
+  (`:563-589`) asserts the record, the count, and the cell after one release,
+  and `stale_completion_cannot_lower_a_newer_one` (`:607-622`) asserts the
+  `fetch_max`. On the producer side `reclaim_completions` frees a block once per
+  generation match (`ring.rs:1107-1120`) and quarantines on a cell ahead of any
+  issued generation (`:1101-1106`), which
+  `stale_returns_free_nothing_and_future_completions_quarantine` (`:2475-2500`)
+  drives. There is no slot-state compare-exchange, no `active_leases`, and no
+  identity comparison on the return path; the identity the return carries is
+  `(block, generation)` against the backing that issued it.
+- Missing evidence: the concurrent case, two returns of one `(block, generation)`
+  from two threads, has no test; `owned_lease_drop_returns_once_after_moving_to_another_thread`
+  (`lease.rs:592-604`) moves one lease, not two.
+- Conclusion: resolved with answer - the at-most-once half rests on the live-record
+  compare-exchange and the monotonic cell; the catalog record's slot-state
+  citations are superseded and carry a mechanism note.

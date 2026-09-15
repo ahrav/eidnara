@@ -10,10 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1038`
+- `crates/shm-transport/src/backend/ring.rs:1042`
 - `crates/shm-transport/src/pool.rs:31`
+- `crates/host-runtime/src/ring_transport.rs:1350`
 
-Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2428` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; host and client publication selection belong to #548, #552, and #550.
+Witness status: partial - `crates/shm-transport/src/backend/ring.rs:2466` proves control and terminal reservations succeed while ordinary descriptor headroom is exhausted; `crates/host-runtime/src/ring_transport.rs:3424` shows the host publisher publishing an eligible Ping and an unrelated terminal past a blocked ordinary ticket with the smallest ordinary class empty, then resuming admission order as blocks return. Client publication selection belongs to #552 and #550.
 
 ## Failure scenario
 
@@ -42,5 +43,5 @@ Check semantics: `always` - `try_reserve_in(Inventory::Control | Terminal, ..)` 
   in `Exercised`, and the CI workflow where the record is a gate property.
 - Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #548, #552, #550 for publication selection.
+- Missing evidence: #552, #550 for client publication selection.
 - Conclusion: unresolved, needs the named handoff.

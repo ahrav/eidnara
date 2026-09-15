@@ -10,10 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/host-runtime/src/ring_transport.rs:796`
-- `crates/host-runtime/src/frame_channel.rs:111`
+- `crates/host-runtime/src/frame_channel.rs:115`
+- `crates/host-runtime/src/connection.rs:547`
+- `crates/host-runtime/src/dispatch.rs:1047`
 
-Witness status: partial - the host still copies every body with `to_vec` before `InboundFrame::owned` (`crates/host-runtime/src/ring_transport.rs:796`); the owned raw-lease `InboundFrame` and channel-0 private copy belong to #548.
+Witness status: yes - `crates/host-runtime/src/ring_transport.rs:2389` shows the ring slot released once the body is private; `InboundFrame::into_private` (`crates/host-runtime/src/frame_channel.rs:115`) copies, releases the lease, then checks the copied length against the header, and `decode_control_frame` (`crates/host-runtime/src/connection.rs:547`) parses channel-0 bodies only from that private copy. An oversized channel-0 request's lease is released before any parse or delivery (`crates/host-runtime/src/ring_transport.rs:985-988`) and only a `Rejected` event is delivered.
 
 ## Failure scenario
 
@@ -31,7 +32,7 @@ Situation markers that must fire independently of the safety check:
 
 - `host.copy_races_peer_write`
 
-Check semantics: `always` - no `InboundFrame` or control decoder holds a `LeaseSpan`; `lease.release()` precedes `deliver`.
+Check semantics: `always` - no control decoder or handler holds a `LeaseSpan`; the lease travels inside the `InboundFrame` through `deliver`, and `lease.release()` in `into_private` precedes every parser and handler.
 
 ## Investigation log
 
@@ -39,7 +40,7 @@ Check semantics: `always` - no `InboundFrame` or control decoder holds a `LeaseS
 
 - Sources examined: the files listed under the evidence trail, the test names
   in `Exercised`, and the CI workflow where the record is a gate property.
-- Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
+- Findings: yes at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #548 owns the raw-lease `InboundFrame` conversion and the header/body consistency check.
-- Conclusion: unresolved, needs the named handoff.
+- Missing evidence: none for this task
+- Conclusion: resolved with answer.

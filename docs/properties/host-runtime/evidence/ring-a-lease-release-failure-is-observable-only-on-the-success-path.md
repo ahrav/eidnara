@@ -33,24 +33,28 @@ lease.release()
 
 Delivery path, `:546-548`: the identical form.
 
-**The three returns that hold a lease and drop it.**
+**The returns that hold a lease and drop it.**
 
 - `:525` - the charge-wait `select!`'s `read_cancel.cancelled()` arm returns
-  `Err(ReadClose::Cancelled)`. (Post-#131 the ingress wait is one `select!`
-  over an async charge, `:522-542`, not a poll loop with an inner select.)
+  `Ok(false)` at HEAD, so the endpoint finishes its bounded post-cancel drain
+  before closing the inbound channel with `ReadClose::Cancelled`. (Post-#131 the
+  ingress wait is one `select!` over an async charge, `:522-542`, not a poll
+  loop with an inner select.)
+- the same `select!`'s `discard.cancelled()` arm returns `Ok(false)`, and
+  `run_endpoint` leaves at the top of its loop.
 - `:527-532` - the absolute frame deadline expires, returning
   `Err(ReadClose::Overloaded)` at `:531`.
 - `:539` - the sender queue closes while the charge is pending, returning
   `Err(ReadClose::Cancelled)`.
 
-All three return while `lease` is a live local, so `ReceiveLease`'s `Drop` runs.
-`crates/shm-transport/src/lease.rs:201-206`:
+All of them return while `lease` is a live local, so `PayloadLease`'s `Drop` runs.
+`crates/shm-transport/src/lease.rs:364-370`:
 
 ```
-impl Drop for ReceiveLease<'_> {
+impl Drop for PayloadLease {
     fn drop(&mut self) {
-        if !self.released {
-            let _ = self.release_once();
+        if !self.returned {
+            let _ = self.return_once();
         }
     }
 }
@@ -88,10 +92,17 @@ eight, pinned by the profile post-#131 and asserted at
 `ring_transport.rs:903-904`.
 `try_receive` refuses to hand out a ninth lease and returns `Ok(None)`
 (`ring.rs:1063-1068`), which `receive_one` returns as `Ok(false)`, which
-`run_endpoint` treats as an idle direction. So eight silent release failures
-convert the peer-to-host direction into a permanently idle-looking channel, and
-the host has no signal distinguishing that from a quiet peer. That is the
-mechanism behind the impact claim.
+`run_endpoint` treats as an idle direction. The accumulation this paragraph
+first described, eight silent release failures turning the peer-to-host
+direction into a permanently idle-looking channel, cannot occur: the
+investigation below found that every untracked drop path belongs to a
+connection that is already ending. The deadline and budget exits return
+`Err(ReadClose::..)` and end the read loop; the `read_cancel` and `discard`
+exits return `Ok(false)` with the lease dropped, and `run_endpoint` then leaves
+at the loop boundary on `discard` or finishes the bounded post-cancel drain on
+`read_cancel` before closing the inbound channel with `ReadClose::Cancelled`. So
+the loss is bounded per retiring connection, not cumulative across its life.
+The paragraph is kept as the reasoning that led there.
 
 ## Failure scenario
 
@@ -172,7 +183,7 @@ Preconditions, all three needed:
 3. An oracle that can see the discarded `Result`. Since `Drop` discards it, the
    test cannot observe it directly. Two options: assert the *consequence* -
    `active_leases` on the consumer page did not decrease - or add a
-   `#[cfg(debug_assertions)]` counter inside `ReceiveLease::drop` for failed
+   `#[cfg(debug_assertions)]` counter inside `PayloadLease::drop` for failed
    drop-path releases. The second is the honest oracle; the first is a proxy that
    also fires for unrelated reasons.
 
@@ -216,9 +227,15 @@ the host's handling of it on the drop paths.
   what each returns; `run_endpoint:406-411` (every `Err(close)` from
   `receive_one` ends the loop); `ring.rs:1063-1068` (lease saturation as
   `Ok(None)`).
-- Findings: no. All three untracked paths return `Err(ReadClose::..)`, and
-  `run_endpoint` responds by sending the close, cancelling `retired` and `root`,
-  and returning at `:406-411`. So a silent release failure always coincides with the
+- Findings: no. The deadline and over-budget paths return `Err(ReadClose::..)`,
+  and `run_endpoint` responds by sending the close, cancelling `retired` and
+  `root`, and returning at `:406-411`. At HEAD the `read_cancel` and `discard`
+  exits inside the charge wait return `Ok(false)` instead (`ring_transport.rs`,
+  the `select!` in `receive_one`): `discard` makes `run_endpoint` return at the
+  top of its loop, and `read_cancel` lets it finish one descriptor depth of
+  post-cancel receives before it closes the inbound channel with
+  `ReadClose::Cancelled`. Every path is therefore taken by a connection that is
+  already ending, so a silent release failure always coincides with the
   connection ending. The eight-slot exhaustion scenario I first considered would
   need a release failure on a path that continues the loop, and there is none.
 - Missing evidence: none.
@@ -227,3 +244,49 @@ the host's handling of it on the drop paths.
   in the lens file overstates this and should be read together with this entry;
   the corrected reading is recorded here rather than silently reworded, per the
   method's rule about not restating an unconfirmed claim as fact.
+
+### Q: Does the success path still report a release failure at HEAD?
+
+- Sources examined: `ring_transport.rs:1007-1125` (`receive_one`),
+  `:1119-1123` (the lease travels inside `InboundFrame::new`),
+  `frame_channel.rs:105-131` (`InboundFrame::release` and
+  `InboundFrame::into_private`),
+  `crates/shm-transport/src/lease.rs:342-355` (`release` and `return_once`) and
+  `:364-370` (`Drop`), `connection.rs:405-419` (the pure-header release in
+  `read_loop`) and `:547-553` (`decode_control_frame`),
+  `dispatch.rs:848-858` (`release_before_copy`) and `:1047-1080` (the routed
+  copy under `WorkLedgers::run_blocking`).
+- Findings: yes, on the success path, and on the host exits that release
+  explicitly. `receive_one` does not copy or release on the delivery path; it hands
+  the `PayloadLease` to the connection engine inside the frame. The release
+  happens in `InboundFrame::into_private` as
+  `lease.release().map_err(|_| PrivateCopyError::Transport)?`
+  (`frame_channel.rs:126`), so a failed return doorbell is reported to both
+  callers as `PrivateCopyError::Transport` and each ends the generation
+  (`connection.rs:553`, `dispatch.rs:1063-1068`);
+  `into_private_reports_a_failed_return_wake_as_a_transport_error`
+  (`ring_transport.rs:3391`) drives that failing return. The host's pre-copy
+  exits release explicitly as well: `read_loop` calls `InboundFrame::release`
+  on pure-header frames (`connection.rs:414`) and `dispatch_request` calls
+  `release_before_copy` on admission refusal, lost registration, pre-copy
+  cancellation, and the closed-route exit, retiring the generation when the
+  return fails. The oversize channel-0 rejection still routes its release
+  error at `ring_transport.rs:1029-1031`. The paths that drop the lease without
+  a report are `receive_one`'s exits inside the charge wait, the `Ok(false)`
+  returns on `read_cancel` and `discard` (`:1075`, `:1077`), the `Overloaded`
+  returns (`:1072`, `:1082`), and the `Cancelled` return when the sender queue
+  closes (`:1091`); the `deliver` exits after the charge succeeded, where a
+  closed inbound channel or a `discard`, `root`, or pending-deadline win
+  (`:995-1002`) drops the event with the lease inside it; and the read loop's
+  request-watermark rejection (`connection.rs:426-428`), which returns
+  `ReadExit::Peer` with the frame still held. Every one of them retires the
+  generation, so they are lost diagnostics, not a new leak.
+- Missing evidence: whether the routed copy running on a blocking worker
+  changes what a release failure could mean there; the block returns from a
+  thread that holds no `Ring`.
+- Conclusion: the success path reports again, and so do the host's explicit
+  pre-copy releases. `into_private` propagates the release failure and a test
+  exercises it, so the `Guarantee:` and `Check:` fields describe a path HEAD
+  has; the asymmetry the record names has narrowed to the drop exits listed
+  above, `receive_one`'s charge-wait and `deliver` exits and the read loop's
+  watermark rejection, which drop the lease and discard the `Result`.

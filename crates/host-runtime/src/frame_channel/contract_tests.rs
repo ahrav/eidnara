@@ -98,6 +98,7 @@ fn outbound(corr: u64, body: &[u8]) -> OutboundFrame {
         direct: None,
         charge: crate::wire::ByteCharge::none(),
         written: None,
+        credit: None,
     }
 }
 
@@ -133,7 +134,7 @@ pub(crate) async fn concurrent_send_receive_preserves_fifo_admission<F: ChannelF
             panic!("expected a complete inbound frame");
         };
         assert_eq!(frame.header.corr, corr);
-        frame.with_lease(|lease| assert_eq!(lease.bytes(), b"in"));
+        assert_eq!(frame.into_private().expect("private copy").body, b"in");
     }
 }
 
@@ -168,12 +169,15 @@ pub(crate) async fn saturation_holds_at_frame_bound_and_spares_control_capacity<
         direct: None,
         charge: crate::wire::ByteCharge::none(),
         written: None,
+        credit: None,
     };
-    // Every ordinary descriptor slot is taken before the peer reads anything; frames stay
-    // charge-free, so only descriptor headroom bounds this fill.
+    // Pure-header controls draw from the reserved control inventory, whose block count is
+    // below the descriptor depth, so that class is what the fill exhausts before the peer
+    // reads anything; the frames stay charge-free, so no byte budget bounds it.
     let depth = crate::ring_transport::ring_profile()
         .geometry()
-        .ordinary_descriptors() as usize;
+        .class(shm_transport::pool::BlockClass::Control)
+        .count as usize;
     for _ in 0..depth {
         h.sender
             .send(control())
@@ -397,13 +401,15 @@ pub(crate) async fn inbound_payload_ownership_travels_with_the_frame<F: ChannelF
     let InboundEvent::Frame(frame) = event else {
         panic!("expected a complete inbound frame");
     };
-    assert_eq!(frame.with_lease(|lease| lease.len()), 2048);
+    assert_eq!(frame.len(), 2048);
+    let private = frame.into_private().expect("private copy");
+    assert_eq!(private.body.len(), 2048);
     assert_eq!(
         h.budget.available(),
         baseline - 2048,
         "a delivered body holds its charge"
     );
-    drop(frame);
+    drop(private);
     assert_eq!(
         h.budget.available(),
         baseline,

@@ -6,6 +6,7 @@
 //! so it settles when the last lease returns, while the worker charge settles
 //! when the thread exits.
 
+use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,7 @@ use crate::setup_socket::RING_DESCRIPTOR_COUNT;
 use crate::wire::{EnvelopeHeader, FrameType, decode_header};
 use shm_transport::backend::ring::{DuplexRing, ProducerError, ProducerReservation, Ring};
 use shm_transport::backend::ring::{HOST_TO_PEER_LANE, PEER_TO_HOST_LANE, PoolGrant};
+use shm_transport::pool::Inventory;
 use shm_transport::profile::{
     AdmissionController, HostLimits as ShmHostLimits, ResourceCharges, TargetProfile,
 };
@@ -147,8 +149,14 @@ pub struct RingTransport {
     limits: ShmHostLimits,
     activations: AtomicU64,
     peer_deaths: AtomicU64,
+    /// Connection generations that ended. This is not released backing: an ended generation
+    /// may leave owned leases live, which `returns` below reports separately.
     reclamations: AtomicU64,
     exhaustions: AtomicU64,
+    /// Admission refusals by the first exhausted resource, so an operator can tell which
+    /// ceiling refused rather than reading one aggregate count.
+    refusals: Mutex<std::collections::BTreeMap<&'static str, u64>>,
+    backings: Arc<BackingRegistry>,
     /// Shared with each endpoint thread so a caught panic is counted after
     /// the thread has already left `run_endpoint`.
     endpoint_panics: Arc<AtomicU64>,
@@ -163,6 +171,89 @@ pub(crate) struct PreparedRing {
     pub(crate) io: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     pub(crate) root: CancellationToken,
     pub(crate) read_cancel: CancellationToken,
+}
+
+/// Return obligations and released backing at one instant; see `RingTransport::return_snapshot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReturnSnapshot {
+    /// Payload leases this host holds across every mapped backing: the host's own return
+    /// obligations to the peer. Leases the peer holds live in the peer's process and are not
+    /// counted here.
+    pub outstanding: u64,
+    /// Backings still mapped by an endpoint handle or a lease.
+    pub live_backings: u64,
+    /// Backings whose last holder dropped.
+    pub released_backings: u64,
+    /// `released_backings * mapping_bytes_per_direction`.
+    pub released_backing_bytes: u64,
+}
+
+/// Every retained backing this transport created, weakly. A backing that no longer upgrades
+/// has unmapped: its leases returned and its handles dropped. Registration and endpoint exit
+/// prune dead entries, so the registry is bounded by live backings plus those whose leases are
+/// still in flight, not by the number of connections ever prepared.
+#[derive(Default)]
+struct BackingRegistry {
+    entries: Mutex<Vec<BackingEntry>>,
+    /// Backings observed unmapped and pruned from `entries`.
+    released: AtomicU64,
+}
+
+struct BackingEntry {
+    backing: std::sync::Weak<shm_transport::backend::retained::Retained>,
+    /// The connection's charge moved to quarantine, so this backing's unmapping proves nothing
+    /// about the storage and never counts as released; it stays observable while it lives.
+    quarantined: bool,
+}
+
+impl BackingRegistry {
+    /// Drops entries that no longer upgrade, counting each non-quarantined one as a released
+    /// backing, and folds `live` over the rest.
+    fn prune(&self, mut live: impl FnMut(&shm_transport::backend::retained::Retained)) {
+        let mut entries = self.entries.lock().expect("backing registry lock");
+        entries.retain(|entry| match entry.backing.upgrade() {
+            Some(retained) => {
+                live(&retained);
+                true
+            }
+            None => {
+                if !entry.quarantined {
+                    self.released.fetch_add(1, Ordering::Relaxed);
+                }
+                false
+            }
+        });
+    }
+
+    fn register(&self, rings: &DuplexRing) {
+        self.prune(|_| {});
+        self.entries.lock().expect("backing registry lock").extend(
+            [rings.first.retained(), rings.second.retained()].map(|retained| BackingEntry {
+                backing: Arc::downgrade(retained),
+                quarantined: false,
+            }),
+        );
+    }
+
+    /// Marks both of `rings`' backings quarantined. A quarantined connection's peer still maps
+    /// the pools, so the host-side handles unmapping later proves nothing about the storage;
+    /// a lease the host still holds stays visible as an outstanding return until it goes.
+    fn forget(&self, rings: &DuplexRing) {
+        let quarantined = [
+            Arc::downgrade(rings.first.retained()),
+            Arc::downgrade(rings.second.retained()),
+        ];
+        for entry in self
+            .entries
+            .lock()
+            .expect("backing registry lock")
+            .iter_mut()
+        {
+            if quarantined.iter().any(|gone| entry.backing.ptr_eq(gone)) {
+                entry.quarantined = true;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -189,9 +280,57 @@ impl RingTransport {
             peer_deaths: AtomicU64::new(0),
             reclamations: AtomicU64::new(0),
             exhaustions: AtomicU64::new(0),
+            refusals: Mutex::new(std::collections::BTreeMap::new()),
+            backings: Arc::new(BackingRegistry::default()),
             endpoint_panics: Arc::new(AtomicU64::new(0)),
             publish_hook: Mutex::new(None),
         }
+    }
+
+    /// Return obligations and released backing, read in one pass over the backing registry:
+    /// `outstanding` counts the leases this host holds across every backing still mapped, not
+    /// the leases the peer holds, which live in the peer's process;
+    /// `released_backings` counts backings whose last holder has dropped, each of which
+    /// returned `mapping_bytes_per_direction` bytes. Leases return on other threads while the
+    /// pass runs, so the two counts are independent samples, not one atomic snapshot.
+    pub fn return_snapshot(&self) -> ReturnSnapshot {
+        let mut outstanding = 0u64;
+        let mut live = 0u64;
+        self.backings.prune(|retained| {
+            live += 1;
+            outstanding = outstanding.saturating_add(retained.outstanding_returns());
+        });
+        let released = self.backings.released.load(Ordering::Relaxed);
+        ReturnSnapshot {
+            outstanding,
+            live_backings: live,
+            released_backings: released,
+            released_backing_bytes: released
+                .saturating_mul(self.profile.mapping_bytes_per_direction()),
+        }
+    }
+
+    fn record_refusal(&self, error: shm_transport::profile::AdmissionError) {
+        use shm_transport::profile::AdmissionError as E;
+        let resource = match error {
+            E::DescriptorLimit => "descriptors",
+            E::MappingByteLimit => "mapping_bytes",
+            E::LedgerByteLimit => "ledger_bytes",
+            E::LeaseLimit => "leases",
+            E::MappingLimit => "mappings",
+            E::FileDescriptorLimit => "file_descriptors",
+            E::WakeHandleLimit => "wake_handles",
+            E::WorkerLimit => "workers",
+            E::ClientInstanceLimit => "client_instances",
+            E::PhysicalCoreBudgetExceeded | E::PhysicalCoresUnverified => "pinned_workers",
+            E::ChargeOverflow | E::ChargeUnderflow | E::AccountingUnavailable => "accounting",
+        };
+        *self
+            .refusals
+            .lock()
+            .expect("refusal counter lock")
+            .entry(resource)
+            .or_insert(0) += 1;
     }
 
     /// Returns redacted aggregate admission accounting.
@@ -230,6 +369,14 @@ impl RingTransport {
             "client_instances": self.limits.client_instances,
             "pinned_workers": self.limits.pinned_workers,
         });
+        let returns = self.return_snapshot();
+        let refusals: serde_json::Map<String, serde_json::Value> = self
+            .refusals
+            .lock()
+            .expect("refusal counter lock")
+            .iter()
+            .map(|(resource, count)| ((*resource).to_owned(), serde_json::json!(count)))
+            .collect();
         let (state, error_class, accounting) = match self.accounting() {
             Ok(accounting) => (
                 "healthy",
@@ -258,8 +405,22 @@ impl RingTransport {
             "accounting": accounting,
             "activation": {"completed": self.activations.load(Ordering::Acquire)},
             "peer_death": {"observed": self.peer_deaths.load(Ordering::Acquire)},
-            "reclamation": {"completed": self.reclamations.load(Ordering::Acquire)},
-            "exhaustion": {"observed": self.exhaustions.load(Ordering::Acquire)},
+            // `completed` counts connection generations that ended; released backing is the
+            // separate `returns` quantity below. The key is a wire name and stays.
+            "reclamation": {
+                "completed": self.reclamations.load(Ordering::Acquire),
+                "meaning": "connection generations ended",
+            },
+            "returns": {
+                "outstanding": returns.outstanding,
+                "live_backings": returns.live_backings,
+                "released_backings": returns.released_backings,
+                "released_backing_bytes": returns.released_backing_bytes,
+            },
+            "exhaustion": {
+                "observed": self.exhaustions.load(Ordering::Acquire),
+                "by_resource": refusals,
+            },
             "endpoint_panic": {"observed": self.endpoint_panics.load(Ordering::Acquire)},
         })
     }
@@ -290,8 +451,9 @@ impl RingTransport {
         queue_frames: usize,
         frame_deadline: Duration,
     ) -> Result<PreparedRing, RingUnavailable> {
-        let admission = self.admission.admit(&self.profile, None).map_err(|_| {
+        let admission = self.admission.admit(&self.profile, None).map_err(|error| {
             self.exhaustions.fetch_add(1, Ordering::Relaxed);
+            self.record_refusal(error);
             RingUnavailable
         })?;
         // The worker charge ends with the endpoint thread; the backing charge ends with the
@@ -321,6 +483,7 @@ impl RingTransport {
         let worker_read_cancel = read_cancel.clone();
         let publish_hook = self.publish_hook.lock().expect("publish hook lock").clone();
         let endpoint_panics = Arc::clone(&self.endpoint_panics);
+        let backing_registry = Arc::clone(&self.backings);
         let panic_root = root.clone();
         let panic_retired = queue.retired.clone();
         // Held outside `run_endpoint` so a panic there can still deliver an
@@ -348,6 +511,7 @@ impl RingTransport {
                     }
                 };
                 rings.retain_charge(Arc::clone(&backing_admission));
+                backing_registry.register(&rings);
                 let transfer = worker_descriptor(&rings);
                 let Ok((descriptor, descriptors)) = transfer else {
                     let _ = initialized_tx.send(Err(RingUnavailable));
@@ -360,6 +524,7 @@ impl RingTransport {
                     runtime.block_on(run_endpoint(
                         &rings,
                         queue,
+                        queue_frames,
                         inbound,
                         ingress,
                         frame_deadline,
@@ -384,7 +549,13 @@ impl RingTransport {
                 // after Goodbye, so the wait is short; a peer that keeps a mapping past the grace
                 // moves the charge to the quarantined bucket rather than refunding storage it holds.
                 let quarantined = !peer_released_ring(&rings, PEER_RELEASE_GRACE);
+                if quarantined {
+                    backing_registry.forget(&rings);
+                }
                 drop(rings);
+                // A released backing with no lease in flight unmaps here; one still leased is
+                // pruned by a later registration or snapshot.
+                backing_registry.prune(|_| {});
                 if quarantined && backing_admission.quarantine().is_err() {
                     // Quarantine accounting failed: the charge stays counted rather than falling
                     // through to a refund of storage nobody proved released.
@@ -525,6 +696,12 @@ impl Inbound {
 }
 
 impl ShmReceiver {
+    /// A receiver over a test-owned channel, so `read_loop` can be driven with hand-built events.
+    #[cfg(test)]
+    pub(crate) fn from_channel(inbound: mpsc::Receiver<Result<InboundEvent, ReadClose>>) -> Self {
+        Self { inbound }
+    }
+
     pub(crate) async fn recv(&mut self) -> Result<InboundEvent, ReadClose> {
         self.inbound
             .recv()
@@ -537,6 +714,7 @@ impl ShmReceiver {
 async fn run_endpoint(
     rings: &DuplexRing,
     mut queue: SenderQueue,
+    queue_capacity: usize,
     inbound: Inbound,
     ingress: ByteBudget,
     frame_deadline: Duration,
@@ -547,10 +725,11 @@ async fn run_endpoint(
     let discard = queue.discard.clone();
     let finish = queue.finish.clone();
     let mut inbound = Some(inbound);
-    let readiness = match rings.second.duplicate_data_ready().and_then(|fd| {
+    let async_fd = |fd: OwnedFd| {
         tokio::io::unix::AsyncFd::new(fd)
             .map_err(|_| shm_transport::backend::ring::RingError::ObjectSetupFailed)
-    }) {
+    };
+    let readiness = match rings.second.duplicate_data_ready().and_then(async_fd) {
         Ok(readiness) => readiness,
         Err(_) => {
             fail(
@@ -562,6 +741,22 @@ async fn run_endpoint(
             return;
         }
     };
+    // Capacity readiness of the outbound direction: descriptor acknowledgements and payload
+    // returns from the peer ring it, so a blocked ticket waits here instead of parking the
+    // owner inside an uninterruptible reserve.
+    let capacity = match rings.first.duplicate_capacity_ready().and_then(async_fd) {
+        Ok(capacity) => capacity,
+        Err(_) => {
+            fail(
+                &mut inbound,
+                &mut queue,
+                &root,
+                ReadClose::Corrupt("shared-memory readiness setup failed"),
+            );
+            return;
+        }
+    };
+    let mut publisher = Publisher::new(&rings.first, queue_capacity, frame_deadline, publish_hook);
     // One descriptor depth of receives after `read_cancel` covers every frame committed before it.
     let post_cancel_depth =
         usize::try_from(rings.second.grant().geometry().descriptor_depth()).unwrap_or(usize::MAX);
@@ -575,6 +770,16 @@ async fn run_endpoint(
         if finish.is_cancelled() {
             finishing = true;
         }
+        // Returns and consumptions since the last pass settle credits and may unblock a ticket.
+        if publisher.pump(&rings.first).is_err() {
+            fail(
+                &mut inbound,
+                &mut queue,
+                &root,
+                ReadClose::Corrupt("shared-memory publish failed"),
+            );
+            return;
+        }
         let mut received = false;
         if let Some(inbound_sender) = inbound.as_ref().map(|inbound| &inbound.sender) {
             let cancelled = read_cancel.is_cancelled();
@@ -586,12 +791,13 @@ async fn run_endpoint(
                 receive_one(
                     rings,
                     &mut queue,
+                    &mut publisher,
+                    &capacity,
                     inbound_sender,
                     &ingress,
                     frame_deadline,
                     &root,
                     &read_cancel,
-                    publish_hook.as_ref(),
                 )
                 .await
             };
@@ -614,18 +820,28 @@ async fn run_endpoint(
             }
         }
 
-        let queued = if received {
+        let drained = if received {
             // Directions alternate under sustained inbound traffic: each
             // received frame is followed by at most one queued outbound
             // frame, taken without waiting, so a peer that refills the
             // inbound ring as slots release cannot starve responses, Pings,
             // and close frames while host-to-peer capacity is free.
-            queue.try_recv().ok()
-        } else if finishing {
+            if publisher.can_accept() {
+                queue.try_recv().ok()
+            } else {
+                None
+            }
+        } else if finishing && publisher.can_accept() {
             match queue.drain_finished() {
                 Some(frame) => Some(frame),
+                None if publisher.has_pending() => None,
                 None => return,
             }
+        } else {
+            None
+        };
+        let queued = if received || drained.is_some() {
+            drained
         } else {
             let data_armed = if inbound.is_some() {
                 match rings.second.arm_data_wait() {
@@ -644,16 +860,38 @@ async fn run_endpoint(
             } else {
                 false
             };
+            // A blocked ticket parks on capacity readiness; an unblocked publisher never arms
+            // it, so an idle owner does not wake on every peer return.
+            let capacity_armed = match publisher.arm_capacity_wait(&rings.first) {
+                Ok(armed) => armed,
+                Err(()) => {
+                    fail(
+                        &mut inbound,
+                        &mut queue,
+                        &root,
+                        ReadClose::Corrupt("shared-memory capacity wait failed"),
+                    );
+                    return;
+                }
+            };
+            if publisher.has_pending() && !capacity_armed {
+                // Capacity moved between the attempt and the arm; retry without blocking.
+                if data_armed {
+                    let _ = rings.second.complete_data_wait();
+                }
+                continue;
+            }
             tokio::select! {
                 biased;
                 () = discard.cancelled() => return,
-                () = finish.cancelled() => {
+                () = finish.cancelled(), if !finishing => {
                     finishing = true;
                     None
                 }
                 () = read_cancel.cancelled(), if inbound.is_some() => None,
-                frame = queue.recv() => match frame {
+                frame = queue.recv(), if !finishing && publisher.can_accept() => match frame {
                     Some(frame) => Some(frame),
+                    None if publisher.has_pending() => None,
                     None => return,
                 },
                 ready = readiness.readable(), if data_armed => {
@@ -678,13 +916,46 @@ async fn run_endpoint(
                     }
                     None
                 },
+                ready = capacity.readable(), if capacity_armed => {
+                    let Ok(mut guard) = ready else {
+                        fail(
+                            &mut inbound,
+                            &mut queue,
+                            &root,
+                            ReadClose::Corrupt("shared-memory readiness failed"),
+                        );
+                        return;
+                    };
+                    guard.clear_ready();
+                    if rings.first.complete_capacity_wait().is_err() {
+                        fail(
+                            &mut inbound,
+                            &mut queue,
+                            &root,
+                            ReadClose::Corrupt("shared-memory capacity wait failed"),
+                        );
+                        return;
+                    }
+                    None
+                },
+                () = tokio::time::sleep_until(publisher.earliest_deadline()), if publisher.has_pending() => {
+                    // A ticket outlived the frame deadline while parked: the peer is not
+                    // draining, and the generation retires instead of waiting forever.
+                    fail(
+                        &mut inbound,
+                        &mut queue,
+                        &root,
+                        ReadClose::Corrupt("shared-memory publish failed"),
+                    );
+                    return;
+                }
                 () = root.cancelled() => return,
             }
         };
-        let Some(queued) = queued else {
-            continue;
-        };
-        if publish_one(&rings.first, queued, frame_deadline, publish_hook.as_ref()).is_err() {
+        if let Some(queued) = queued {
+            publisher.push(queued);
+        }
+        if publisher.pump(&rings.first).is_err() {
             fail(
                 &mut inbound,
                 &mut queue,
@@ -711,10 +982,14 @@ fn fail(
 }
 
 // Teardown must not depend on the receiver draining: a full channel under `discard` or `root` cancellation yields instead of blocking the endpoint.
+/// Hands `event` to the receiver. `pending_deadline` is the earliest deadline of a ticket the
+/// publisher still holds, if any: the delivery wait can outlast it while the receiver is not
+/// draining, and a ticket past its deadline retires the generation from here as well.
 async fn deliver(
     inbound: &InboundSender,
     queue: &SenderQueue,
     root: &CancellationToken,
+    pending_deadline: Option<Instant>,
     event: Result<InboundEvent, ReadClose>,
 ) -> Result<(), ReadClose> {
     tokio::select! {
@@ -722,6 +997,9 @@ async fn deliver(
         sent = inbound.send(event) => sent.map_err(|_| ReadClose::Cancelled),
         () = queue.discard.cancelled() => Err(ReadClose::Cancelled),
         () = root.cancelled() => Err(ReadClose::Cancelled),
+        () = tokio::time::sleep_until(pending_deadline.unwrap_or_else(Instant::now)), if pending_deadline.is_some() => {
+            Err(ReadClose::Corrupt("shared-memory publish failed"))
+        }
     }
 }
 
@@ -729,12 +1007,13 @@ async fn deliver(
 async fn receive_one(
     rings: &DuplexRing,
     queue: &mut SenderQueue,
+    publisher: &mut Publisher,
+    capacity: &tokio::io::unix::AsyncFd<OwnedFd>,
     inbound: &InboundSender,
     ingress: &ByteBudget,
     frame_deadline: Duration,
     root: &CancellationToken,
     read_cancel: &CancellationToken,
-    publish_hook: Option<&PublishHook>,
 ) -> Result<bool, ReadClose> {
     let Some(lease) = rings
         .second
@@ -754,6 +1033,9 @@ async fn receive_one(
             inbound,
             queue,
             root,
+            publisher
+                .has_pending()
+                .then(|| publisher.earliest_deadline()),
             Ok(InboundEvent::Rejected(RejectedFrame { corr: header.corr })),
         )
         .await?;
@@ -765,6 +1047,22 @@ async fn receive_one(
     let charge = ingress.charge(header.len);
     tokio::pin!(charge);
     let charge = loop {
+        // A blocked ticket parks on capacity readiness during the budget wait too; otherwise a
+        // peer return while handlers hold the budget would publish nothing until the deadline.
+        let capacity_armed = if publisher.has_pending() {
+            match publisher.arm_capacity_wait(&rings.first) {
+                Ok(true) => true,
+                Ok(false) => {
+                    if publisher.pump(&rings.first).is_err() {
+                        return Err(ReadClose::Corrupt("shared-memory publish failed"));
+                    }
+                    continue;
+                }
+                Err(()) => return Err(ReadClose::Corrupt("shared-memory capacity wait failed")),
+            }
+        } else {
+            false
+        };
         tokio::select! {
             biased;
             // An available budget charges before the lifecycle arms are polled, so a frame committed before read cancellation still drains; only a frame that must wait for budget yields to cancellation.
@@ -783,79 +1081,337 @@ async fn receive_one(
                 // it corrupt, so the admission charge releases cleanly.
                 return Err(ReadClose::Overloaded);
             }
-            queued = queue.recv() => match queued {
+            queued = queue.recv(), if publisher.can_accept() => match queued {
                 Some(queued) => {
-                    if publish_one(&rings.first, queued, frame_deadline, publish_hook).is_err() {
+                    publisher.push(queued);
+                    if publisher.pump(&rings.first).is_err() {
                         return Err(ReadClose::Corrupt("shared-memory publish failed"));
                     }
                 }
                 None => return Err(ReadClose::Cancelled),
+            },
+            ready = capacity.readable(), if capacity_armed => {
+                let Ok(mut guard) = ready else {
+                    return Err(ReadClose::Corrupt("shared-memory readiness failed"));
+                };
+                guard.clear_ready();
+                if rings.first.complete_capacity_wait().is_err() {
+                    return Err(ReadClose::Corrupt("shared-memory capacity wait failed"));
+                }
+                if publisher.pump(&rings.first).is_err() {
+                    return Err(ReadClose::Corrupt("shared-memory publish failed"));
+                }
+            },
+            () = tokio::time::sleep_until(publisher.earliest_deadline()), if publisher.has_pending() => {
+                return Err(ReadClose::Corrupt("shared-memory publish failed"));
             }
         }
     };
-    let body = lease
-        .to_vec()
-        .map_err(|_| ReadClose::Corrupt("shared-memory lease failed"))?;
-    lease
-        .release()
-        .map_err(|_| ReadClose::Corrupt("shared-memory completion failed"))?;
+    // The lease travels with the frame; the private copy happens where the request's work
+    // ledgers can join it, and the block returns from there.
     deliver(
         inbound,
         queue,
         root,
-        Ok(InboundEvent::Frame(InboundFrame::owned(
-            header, body, charge,
+        publisher
+            .has_pending()
+            .then(|| publisher.earliest_deadline()),
+        Ok(InboundEvent::Frame(InboundFrame::new(
+            header, lease, charge,
         ))),
     )
     .await?;
     Ok(true)
 }
 
-fn publish_one(
-    ring: &Ring,
-    queued: OutboundFrame,
-    frame_deadline: Duration,
-    publish_hook: Option<&PublishHook>,
-) -> Result<(), ()> {
-    let OutboundFrame {
-        bytes,
-        tail,
-        direct,
-        charge,
-        written,
-    } = queued;
-    let wire_header: Option<[u8; crate::wire::HEADER_LEN]> = match &direct {
-        Some(direct) => Some(direct.header()),
-        None => bytes
-            .get(..crate::wire::HEADER_LEN)
-            .and_then(|header| header.try_into().ok()),
-    };
-    let deadline = StdInstant::now() + frame_deadline;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match direct {
-        Some(direct) => publish_direct(ring, direct, deadline),
-        None => publish_owned(ring, &bytes, &tail, deadline),
-    }));
-    if !matches!(result, Ok(Ok(()))) {
-        return Err(());
+/// Which pool inventory a queued frame draws from. Pure-header controls use the reserved
+/// control class; `Error` and `StreamEnd` terminals that fit use the reserved terminal class;
+/// everything else is ordinary data. A channel-0 `Request` is never a control here: the host
+/// does not send one, and the classifier treats any `Request` as ordinary.
+fn inventory_for(header: &EnvelopeHeader, body_len: usize, terminal_capacity: u64) -> Inventory {
+    match header.ty {
+        ty if ty.is_pure_header() && body_len == 0 => Inventory::Control,
+        FrameType::Error | FrameType::StreamEnd if body_len as u64 <= terminal_capacity => {
+            Inventory::Terminal
+        }
+        _ => Inventory::Ordinary,
     }
-    if let Some(hook) = publish_hook
-        && let Some(header) = wire_header.and_then(|header| decode_header(&header).ok())
-    {
-        hook(header.ty, header.channel);
-    }
-    if let Some(written) = written {
-        written(Instant::now());
-    }
-    drop(charge);
-    Ok(())
 }
 
-fn publish_direct(ring: &Ring, direct: DirectFrame, deadline: StdInstant) -> Result<(), ()> {
-    let header = direct.header();
-    let body_len = direct.body_len();
-    let mut reservation = ring
-        .reserve_until(body_len, header, deadline)
+/// One admitted frame the endpoint has not yet published.
+struct PendingFrame {
+    frame: OutboundFrame,
+    header: Option<EnvelopeHeader>,
+    inventory: Inventory,
+    /// Body length the reservation is sized for; with `inventory`, the bound a capacity wait
+    /// re-checks before parking.
+    body_len: usize,
+    /// Publication must complete before this instant or the generation retires.
+    deadline: StdInstant,
+}
+
+impl PendingFrame {
+    /// The request stream this frame belongs to, for the data-before-terminal rule. Pure-header
+    /// controls carry host correlations from their own namespace and are never a stream
+    /// prefix, so a `Ping` sharing a number with a consumer request does not hold its
+    /// terminal back.
+    fn stream_key(&self) -> Option<(u16, u64)> {
+        self.header
+            .filter(|header| !header.ty.is_pure_header())
+            .map(|header| (header.channel, header.corr))
+    }
+}
+
+/// The endpoint's single publication owner. Frames enter in admission order; ordinary frames
+/// publish in that order, and while the head is blocked on ordinary capacity, eligible reserved
+/// frames behind it publish from their own inventories: pure-header controls always, and a
+/// terminal only when no earlier pending frame shares its `(channel, corr)`, so a terminal never
+/// skips its own stream prefix. `Goodbye` is not eligible: it follows every admitted frame.
+/// Every attempt is nonblocking; the owner parks on capacity readiness between attempts.
+struct Publisher {
+    pending: VecDeque<PendingFrame>,
+    /// Frames the owner may hold unpublished at once. Together with the admission queue this
+    /// bounds every unpublished ticket to twice the configured queue depth.
+    capacity: usize,
+    frame_deadline: Duration,
+    terminal_capacity: u64,
+    hook: Option<PublishHook>,
+    /// Terminal credit held per block until the block physically returns.
+    credits: Vec<Option<tokio::sync::OwnedSemaphorePermit>>,
+}
+
+impl Publisher {
+    fn new(
+        ring: &Ring,
+        capacity: usize,
+        frame_deadline: Duration,
+        hook: Option<PublishHook>,
+    ) -> Self {
+        let geometry = ring.geometry();
+        let mut credits = Vec::with_capacity(geometry.block_count() as usize);
+        credits.resize_with(geometry.block_count() as usize, || None);
+        Self {
+            pending: VecDeque::new(),
+            capacity: capacity.max(1),
+            frame_deadline,
+            terminal_capacity: geometry
+                .class(shm_transport::pool::BlockClass::Terminal)
+                .body_capacity(),
+            hook,
+            credits,
+        }
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Inventory and bound of the head frame, which `pump` left pending only because its
+    /// reservation was exhausted; a capacity wait arms against this reservation.
+    fn blocked_head(&self) -> Option<(Inventory, usize)> {
+        self.pending
+            .front()
+            .map(|pending| (pending.inventory, pending.body_len))
+    }
+
+    /// Arms the capacity doorbell for the blocked head. `Ok(true)` means the caller should park
+    /// on capacity readiness; `Ok(false)` means nothing is blocked or capacity moved, so the
+    /// caller pumps again instead. `Err` is a ring failure the caller retires on.
+    ///
+    /// The ring re-checks only the head's reservation when it arms. A reserved frame behind the
+    /// head draws from its own inventory, so a return of that inventory before the arm bumps
+    /// the generation without a token and the head's check cannot see it. One pump after the
+    /// arm publishes such a frame; when it does, the arm is undone and the caller loops.
+    fn arm_capacity_wait(&mut self, ring: &Ring) -> Result<bool, ()> {
+        let Some((inventory, bound)) = self.blocked_head() else {
+            return Ok(false);
+        };
+        if !ring.arm_capacity_wait(inventory, bound).map_err(|_| ())? {
+            return Ok(false);
+        }
+        let before = self.pending.len();
+        self.pump(ring)?;
+        if self.pending.len() == before {
+            return Ok(true);
+        }
+        ring.complete_capacity_wait().map_err(|_| ())?;
+        Ok(false)
+    }
+
+    /// Whether another admitted frame may move from the queue into the owner's pending set.
+    fn can_accept(&self) -> bool {
+        self.pending.len() < self.capacity
+    }
+
+    fn earliest_deadline(&self) -> Instant {
+        let earliest = self
+            .pending
+            .iter()
+            .map(|pending| pending.deadline)
+            .min()
+            .unwrap_or_else(StdInstant::now);
+        Instant::from_std(earliest)
+    }
+
+    fn push(&mut self, frame: OutboundFrame) {
+        let header = match &frame.direct {
+            Some(direct) => decode_header(&direct.header()).ok(),
+            None => frame
+                .bytes
+                .get(..crate::wire::HEADER_LEN)
+                .and_then(|header| header.try_into().ok())
+                .and_then(|header: [u8; crate::wire::HEADER_LEN]| decode_header(&header).ok()),
+        };
+        let body_len = match &frame.direct {
+            Some(direct) => direct.body_len(),
+            None => frame
+                .bytes
+                .len()
+                .saturating_sub(crate::wire::HEADER_LEN)
+                .saturating_add(frame.tail.len()),
+        };
+        let inventory = header.as_ref().map_or(Inventory::Ordinary, |header| {
+            inventory_for(header, body_len, self.terminal_capacity)
+        });
+        self.pending.push_back(PendingFrame {
+            frame,
+            header,
+            inventory,
+            body_len,
+            deadline: StdInstant::now() + self.frame_deadline,
+        });
+    }
+
+    /// Settles returned blocks, then publishes everything eligible. `Err` means a frame failed
+    /// for a reason a retry cannot clear or outlived its deadline; the caller retires the
+    /// generation. Publication failure after commit is reported the same way.
+    fn pump(&mut self, ring: &Ring) -> Result<(), ()> {
+        let credits = &mut self.credits;
+        ring.take_reclaimed(|block| {
+            if let Some(slot) = credits.get_mut(block as usize) {
+                // The credit follows the block: it is released here, at the physical return.
+                *slot = None;
+            }
+        })
         .map_err(|_| ())?;
+        let now = StdInstant::now();
+        if self.pending.iter().any(|pending| pending.deadline <= now) {
+            return Err(());
+        }
+        let mut index = 0;
+        let mut head_blocked = false;
+        while index < self.pending.len() {
+            let pending = &self.pending[index];
+            let eligible = if index == 0 {
+                true
+            } else if head_blocked {
+                match pending.inventory {
+                    Inventory::Control => pending
+                        .header
+                        .is_some_and(|header| header.ty != FrameType::Goodbye),
+                    Inventory::Terminal => {
+                        let key = pending.stream_key();
+                        !self
+                            .pending
+                            .iter()
+                            .take(index)
+                            .any(|earlier| earlier.stream_key() == key)
+                    }
+                    Inventory::Ordinary => false,
+                }
+            } else {
+                // The head published; the next frame is the new head.
+                true
+            };
+            if !eligible {
+                index += 1;
+                continue;
+            }
+            match self.try_publish(ring, index)? {
+                true => {
+                    // Removed at `index`; the same index now names the next frame.
+                    if index == 0 {
+                        head_blocked = false;
+                    }
+                }
+                false => {
+                    if index == 0 {
+                        head_blocked = true;
+                    }
+                    index += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Publishes the pending frame at `index` if its inventory has capacity. `Ok(false)` leaves
+    /// the frame pending.
+    fn try_publish(&mut self, ring: &Ring, index: usize) -> Result<bool, ()> {
+        let (inventory, deadline) = {
+            let pending = &self.pending[index];
+            (pending.inventory, pending.deadline)
+        };
+        let frame = &self.pending[index].frame;
+        let (header, body_len): ([u8; crate::wire::HEADER_LEN], usize) = match &frame.direct {
+            Some(direct) => (direct.header(), direct.body_len()),
+            None => {
+                let (header, first_body) = frame
+                    .bytes
+                    .split_at_checked(crate::wire::HEADER_LEN)
+                    .ok_or(())?;
+                (
+                    header.try_into().map_err(|_| ())?,
+                    first_body.len().checked_add(frame.tail.len()).ok_or(())?,
+                )
+            }
+        };
+        let reservation = match ring.try_reserve_in(inventory, body_len, header) {
+            Ok(reservation) => reservation,
+            Err(ProducerError::Exhausted) => return Ok(false),
+            Err(_) => return Err(()),
+        };
+        let block = reservation.block();
+        let PendingFrame {
+            frame,
+            header: decoded,
+            ..
+        } = self.pending.remove(index).ok_or(())?;
+        let OutboundFrame {
+            bytes,
+            tail,
+            direct,
+            charge,
+            written,
+            credit,
+        } = frame;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match direct {
+            Some(direct) => publish_direct(reservation, direct, body_len, deadline),
+            None => publish_owned(reservation, &bytes, &tail, body_len, deadline),
+        }));
+        if !matches!(result, Ok(Ok(()))) {
+            return Err(());
+        }
+        if let Some(slot) = self.credits.get_mut(block as usize) {
+            *slot = credit;
+        }
+        if let (Some(hook), Some(header)) = (self.hook.as_ref(), decoded) {
+            hook(header.ty, header.channel);
+        }
+        if let Some(written) = written {
+            written(Instant::now());
+        }
+        drop(charge);
+        Ok(true)
+    }
+}
+
+fn publish_direct(
+    mut reservation: ProducerReservation<'_>,
+    direct: DirectFrame,
+    body_len: usize,
+    deadline: StdInstant,
+) -> Result<(), ()> {
     let result = crate::panic_boundary::redact_sync(|| {
         let mut writer = ReservationWriter(&mut reservation);
         direct.serialize(&mut writer)
@@ -864,19 +1420,20 @@ fn publish_direct(ring: &Ring, direct: DirectFrame, deadline: StdInstant) -> Res
     commit_before(reservation, body_len, deadline)
 }
 
-fn publish_owned(ring: &Ring, bytes: &[u8], tail: &[u8], deadline: StdInstant) -> Result<(), ()> {
-    let (header, first_body) = bytes.split_at_checked(crate::wire::HEADER_LEN).ok_or(())?;
-    let header: [u8; crate::wire::HEADER_LEN] = header.try_into().map_err(|_| ())?;
-    let body_len = first_body.len().checked_add(tail.len()).ok_or(())?;
-    let mut reservation = ring
-        .reserve_until(body_len, header, deadline)
-        .map_err(|_| ())?;
+fn publish_owned(
+    mut reservation: ProducerReservation<'_>,
+    bytes: &[u8],
+    tail: &[u8],
+    body_len: usize,
+    deadline: StdInstant,
+) -> Result<(), ()> {
+    let (_, first_body) = bytes.split_at_checked(crate::wire::HEADER_LEN).ok_or(())?;
     reservation.write(first_body).map_err(|_| ())?;
     reservation.write(tail).map_err(|_| ())?;
     commit_before(reservation, body_len, deadline)
 }
 
-// Serialization runs after `reserve_until` returns, so the deadline is re-checked at commit; dropping an uncommitted reservation aborts it.
+// Serialization runs after the reservation is taken, so the deadline is re-checked at commit; dropping an uncommitted reservation aborts it.
 fn commit_before(
     reservation: ProducerReservation<'_>,
     body_len: usize,
@@ -1113,6 +1670,16 @@ mod tests {
     use crate::wire::{Flags, PROTOCOL_VERSION, Priority};
 
     /// The backing charge settles after `io` completes, once the peer-release wait ends.
+    /// Blocks until the endpoint thread has settled its backing after `io` completed: the
+    /// thread waits for doorbell end-of-file before refunding or quarantining, so accounting
+    /// and the backing registry lag `io` by up to `PEER_RELEASE_GRACE`.
+    fn wait_until(settled: impl Fn() -> bool) {
+        let deadline = StdInstant::now() + Duration::from_secs(5);
+        while !settled() && StdInstant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     async fn settled_accounting(
         transport: &RingTransport,
         settled: impl Fn(&shm_transport::profile::AccountingSnapshot) -> bool,
@@ -1142,7 +1709,7 @@ mod tests {
     fn production_profile_affords_five_connections_under_the_byte_ceiling() {
         let one = per_connection_limits();
         assert_eq!(one.mapping_bytes, 2 * 95_825_920);
-        assert_eq!(one.ledger_bytes, 2 * 187 * 40);
+        assert_eq!(one.ledger_bytes, 2 * 187 * 44);
         assert_eq!(MAX_RING_RESIDENT_BYTES, 1 << 30);
         assert_eq!(affordable_connections(), 5);
         assert_eq!(crate::config::HostLimits::default().max_connections, 5);
@@ -1226,6 +1793,125 @@ mod tests {
             .await
             .expect("finished endpoint wakes despite unread peer data")
             .expect("endpoint task joins");
+    }
+
+    /// Kernel thread ids of live endpoint threads. `comm` truncates names to 15 bytes.
+    fn endpoint_thread_ids() -> std::collections::BTreeSet<u32> {
+        std::fs::read_dir("/proc/self/task")
+            .expect("task directory")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let tid: u32 = entry.file_name().to_str()?.parse().ok()?;
+                let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+                comm.trim()
+                    .starts_with(&"host-shm-endpoint"[..15])
+                    .then_some(tid)
+            })
+            .collect()
+    }
+
+    /// User plus system clock ticks consumed by `threads`, from `/proc/self/task/<tid>/stat`
+    /// fields 14 and 15.
+    fn cpu_ticks(threads: &std::collections::BTreeSet<u32>) -> u64 {
+        threads
+            .iter()
+            .map(|tid| {
+                let stat = std::fs::read_to_string(format!("/proc/self/task/{tid}/stat"))
+                    .unwrap_or_default();
+                let after_comm = stat.rsplit_once(')').map_or("", |(_, rest)| rest);
+                let fields: Vec<&str> = after_comm.split_whitespace().collect();
+                let tick = |index: usize| -> u64 {
+                    fields.get(index).and_then(|v| v.parse().ok()).unwrap_or(0)
+                };
+                tick(11) + tick(12)
+            })
+            .sum()
+    }
+
+    /// A finishing endpoint whose head is blocked on peer capacity parks on capacity
+    /// readiness instead of re-running the publisher until the peer drains or the frame
+    /// deadline passes.
+    #[tokio::test]
+    async fn a_finishing_endpoint_with_a_blocked_head_parks_instead_of_spinning() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let before = endpoint_thread_ids();
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            receiver: _receiver,
+            io,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 4, Duration::from_secs(5))
+            .expect("ring prepares");
+        let endpoint_threads: std::collections::BTreeSet<u32> =
+            endpoint_thread_ids().difference(&before).copied().collect();
+        assert!(
+            !endpoint_threads.is_empty(),
+            "the endpoint thread is visible"
+        );
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+
+        // The peer holds every block of the smallest ordinary class. Receiving as frames land
+        // keeps the sender queue and the ordinary descriptors from filling first.
+        let count = ring_profile()
+            .geometry()
+            .class(shm_transport::pool::BlockClass::Ordinary(0))
+            .count as usize;
+        let mut held = Vec::with_capacity(count);
+        for corr in 0..count as u64 {
+            sender
+                .send(frame(FrameType::StreamData, 7, corr, b"fill"))
+                .await
+                .expect("fill frame admits");
+            while let Some(lease) = peer.from_host.try_receive().expect("peer receives") {
+                held.push(lease);
+            }
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while held.len() < count {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "fill frames publish"
+            );
+            match peer.from_host.try_receive().expect("peer receives") {
+                Some(lease) => held.push(lease),
+                None => tokio::time::sleep(Duration::from_millis(1)).await,
+            }
+        }
+        // One more ordinary frame blocks at the head; Goodbye waits behind it.
+        sender
+            .send(frame(FrameType::StreamData, 7, 99, b"blocked"))
+            .await
+            .expect("blocked frame admits");
+        sender
+            .send(frame(FrameType::Goodbye, 0, 0, &[]))
+            .await
+            .expect("goodbye admits");
+        sender.finish();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let ticks_before = cpu_ticks(&endpoint_threads);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let ticks = cpu_ticks(&endpoint_threads) - ticks_before;
+        assert!(
+            ticks < 10,
+            "a finishing endpoint blocked on peer capacity used {ticks} clock ticks in 500ms"
+        );
+
+        // Returning the held blocks lets the head and then Goodbye publish; the endpoint exits.
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), io)
+            .await
+            .expect("endpoint exits once the peer returns capacity")
+            .expect("endpoint task joins");
+        let (head, _) = peer.try_recv().unwrap().expect("blocked head published");
+        assert_eq!((head.ty, head.corr), (FrameType::StreamData, 99));
+        let (goodbye, _) = peer.try_recv().unwrap().expect("goodbye published");
+        assert_eq!(goodbye.ty, FrameType::Goodbye);
     }
 
     #[test]
@@ -1374,6 +2060,281 @@ mod tests {
         assert_eq!(used.load(Ordering::SeqCst), 0);
     }
 
+    fn capacity_fd(rings: &DuplexRing) -> tokio::io::unix::AsyncFd<OwnedFd> {
+        tokio::io::unix::AsyncFd::new(rings.first.duplicate_capacity_ready().unwrap()).unwrap()
+    }
+
+    /// Holds every terminal-class block on the consumer side so an eligible terminal frame
+    /// blocks on its own inventory.
+    fn exhaust_terminal_class(
+        producer: &Ring,
+        consumer: &Ring,
+    ) -> Vec<shm_transport::lease::PayloadLease> {
+        let count = producer
+            .geometry()
+            .class(shm_transport::pool::BlockClass::Terminal)
+            .count;
+        (0..count)
+            .map(|_| {
+                let mut reservation = producer
+                    .try_reserve_in(
+                        Inventory::Terminal,
+                        1,
+                        shm_transport::backend::ring::wire_v3_header(1).unwrap(),
+                    )
+                    .expect("fill terminal reservation");
+                reservation.write(&[1]).unwrap();
+                reservation.commit(1).unwrap();
+                consumer.try_receive().unwrap().expect("filled terminal")
+            })
+            .collect()
+    }
+
+    /// Holds every control-class block on the consumer side so a pure-header control blocks
+    /// on its own inventory.
+    fn exhaust_control_class(
+        producer: &Ring,
+        consumer: &Ring,
+    ) -> Vec<shm_transport::lease::PayloadLease> {
+        let count = producer
+            .geometry()
+            .class(shm_transport::pool::BlockClass::Control)
+            .count;
+        (0..count)
+            .map(|_| {
+                let reservation = producer
+                    .try_reserve_in(
+                        Inventory::Control,
+                        0,
+                        shm_transport::backend::ring::wire_v3_header(0).unwrap(),
+                    )
+                    .expect("fill control reservation");
+                reservation.commit(0).unwrap();
+                consumer.try_receive().unwrap().expect("filled control")
+            })
+            .collect()
+    }
+
+    /// A blocked host `Ping` whose correlation equals a channel-0 `Error`'s consumer
+    /// correlation is not that error's stream prefix; the error still bypasses.
+    #[test]
+    fn a_blocked_ping_sharing_a_correlation_does_not_hold_back_a_channel_zero_error() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let ordinary = exhaust_smallest_class(&rings.first, &consumer);
+        let controls = exhaust_control_class(&rings.first, &consumer);
+        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
+        publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
+        publisher.push(frame(FrameType::Ping, 0, 5, b""));
+        publisher.push(frame(FrameType::Error, 0, 5, b"{}"));
+        publisher.pump(&rings.first).expect("pump");
+        assert_eq!(
+            publisher.pending.len(),
+            2,
+            "the ordinary head and the Ping stay blocked; the error publishes"
+        );
+        assert!(
+            publisher
+                .pending
+                .iter()
+                .all(|pending| pending.inventory != Inventory::Terminal),
+            "no terminal remains pending"
+        );
+        drop(ordinary);
+        drop(controls);
+    }
+
+    /// `Publisher::arm_capacity_wait` must return `Ok(false)` and publish an eligible terminal
+    /// when a terminal block returns after a blocked pump and before arming, even though the
+    /// ordinary head stays exhausted.
+    #[test]
+    fn arming_publishes_a_bypassable_terminal_whose_block_returned_before_arming() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let ordinary = exhaust_smallest_class(&rings.first, &consumer);
+        let mut terminals = exhaust_terminal_class(&rings.first, &consumer);
+        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
+        publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
+        publisher.push(frame(FrameType::Error, 9, 2, b"{}"));
+        publisher
+            .pump(&rings.first)
+            .expect("both frames stay blocked");
+        assert_eq!(publisher.pending.len(), 2);
+
+        terminals.pop().unwrap().release().unwrap();
+        assert_eq!(
+            publisher.arm_capacity_wait(&rings.first),
+            Ok(false),
+            "the returned terminal block makes the eligible terminal publishable"
+        );
+        assert_eq!(
+            publisher.pending.len(),
+            1,
+            "the terminal published past the still-blocked ordinary head"
+        );
+        drop(ordinary);
+        drop(terminals);
+    }
+
+    /// `arm_capacity_wait` must return `Ok(false)` when capacity returns after a blocked pump
+    /// and before arming.
+    #[test]
+    fn arming_against_the_blocked_head_refuses_to_park_over_a_return_before_arming() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let mut held = exhaust_smallest_class(&rings.first, &consumer);
+        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_secs(5), None);
+        publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
+        publisher.pump(&rings.first).expect("blocked pump");
+        let (inventory, bound) = publisher.blocked_head().expect("the head is blocked");
+        assert_eq!(inventory, Inventory::Ordinary);
+
+        held.pop().unwrap().release().unwrap();
+        assert_eq!(
+            rings.first.arm_capacity_wait(inventory, bound),
+            Ok(false),
+            "capacity is already back; parking would wait for an unrelated return"
+        );
+        publisher
+            .pump(&rings.first)
+            .expect("pump publishes the head");
+        assert!(!publisher.has_pending());
+        drop(held);
+    }
+
+    /// A blocked ticket's frame deadline must still retire the generation while `receive_one`
+    /// waits for inbound delivery space.
+    #[tokio::test]
+    async fn a_blocked_ticket_deadline_retires_the_generation_while_delivery_is_blocked() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let held = exhaust_smallest_class(&rings.first, &consumer);
+        // One blocked ordinary ticket with a short deadline.
+        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_millis(300), None);
+        publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
+        publisher.pump(&rings.first).expect("blocked pump");
+        assert!(publisher.has_pending());
+
+        // The peer commits a request the budget grants at once; delivery is what blocks,
+        // because the inbound channel already holds an undrained event.
+        let header = EnvelopeHeader {
+            len: 1,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 7,
+            epoch: 1,
+            corr: 1,
+        };
+        let mut reservation = rings.second.try_reserve(1, header.encode()).unwrap();
+        reservation.write(&[7]).unwrap();
+        reservation.commit(1).unwrap();
+        let (_sender, mut queue) =
+            frame_sender(1, CancellationToken::new(), Duration::from_secs(1));
+        let (inbound, _received) = mpsc::channel(1);
+        inbound
+            .try_send(Err(ReadClose::CleanEof))
+            .expect("fill the inbound channel");
+        let budget = ByteBudget::new(1024);
+        let capacity = capacity_fd(&rings);
+        let root = CancellationToken::new();
+        let read_cancel = CancellationToken::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            receive_one(
+                &rings,
+                &mut queue,
+                &mut publisher,
+                &capacity,
+                &inbound,
+                &budget,
+                Duration::from_secs(5),
+                &root,
+                &read_cancel,
+            ),
+        )
+        .await
+        .expect("the blocked ticket's deadline ends the delivery wait");
+        assert!(
+            matches!(
+                result,
+                Err(ReadClose::Corrupt("shared-memory publish failed"))
+            ),
+            "a ticket past its deadline retires the generation: {result:?}"
+        );
+        drop(held);
+    }
+
+    /// A peer return during the ingress-budget wait publishes the blocked ticket instead of
+    /// waiting for the budget or the frame deadline.
+    #[tokio::test]
+    async fn a_budget_wait_publishes_a_blocked_ticket_when_the_peer_returns_capacity() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let mut held = exhaust_smallest_class(&rings.first, &consumer);
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&published);
+        let hook: PublishHook = Arc::new(move |ty, channel| {
+            observed.lock().unwrap().push((ty, channel));
+        });
+        // The publisher is full with one blocked ordinary ticket, so no queued frame can
+        // move it.
+        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_secs(5), Some(hook));
+        publisher.push(frame(FrameType::StreamData, 7, 1, b"blocked"));
+        publisher.pump(&rings.first).expect("blocked pump");
+        assert!(publisher.has_pending() && !publisher.can_accept());
+
+        // The peer commits a request whose one byte the ingress budget cannot grant.
+        let header = EnvelopeHeader {
+            len: 1,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 7,
+            epoch: 1,
+            corr: 1,
+        };
+        let mut reservation = rings.second.try_reserve(1, header.encode()).unwrap();
+        reservation.write(&[7]).unwrap();
+        reservation.commit(1).unwrap();
+        let (_sender, mut queue) =
+            frame_sender(1, CancellationToken::new(), Duration::from_secs(1));
+        let (inbound, _received) = mpsc::channel(1);
+        let budget = ByteBudget::new(1);
+        let _held_byte = budget.try_charge(1).expect("hold the only byte");
+        let capacity = capacity_fd(&rings);
+        let root = CancellationToken::new();
+        let read_cancel = CancellationToken::new();
+        let receive = receive_one(
+            &rings,
+            &mut queue,
+            &mut publisher,
+            &capacity,
+            &inbound,
+            &budget,
+            Duration::from_millis(400),
+            &root,
+            &read_cancel,
+        );
+        let returned = held.pop().unwrap();
+        let return_after_poll = async move {
+            tokio::task::yield_now().await;
+            std::thread::spawn(move || drop(returned)).join().unwrap();
+        };
+        let (result, ()) = tokio::join!(receive, return_after_poll);
+        assert!(
+            matches!(result, Err(ReadClose::Overloaded)),
+            "the budget never frees, so the wait still ends at the frame deadline"
+        );
+        assert_eq!(
+            *published.lock().unwrap(),
+            vec![(FrameType::StreamData, 7)],
+            "the peer's return published the blocked ticket during the budget wait"
+        );
+        assert!(!publisher.has_pending());
+        drop(held);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn control_frame_body_is_copied_out_of_the_ring() {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
@@ -1410,12 +2371,13 @@ mod tests {
             receive_one(
                 &rings,
                 &mut queue,
+                &mut Publisher::new(&rings.first, 1, Duration::from_secs(1), None),
+                &capacity_fd(&rings),
                 &inbound,
                 &ByteBudget::new(1024),
                 Duration::from_secs(1),
                 &CancellationToken::new(),
                 &CancellationToken::new(),
-                None,
             )
             .await
             .unwrap()
@@ -1423,7 +2385,7 @@ mod tests {
         let InboundEvent::Frame(frame) = received.recv().await.unwrap().unwrap() else {
             panic!("expected copied frame");
         };
-        assert_eq!(frame.with_lease(|lease| lease.to_owned()), body);
+        assert_eq!(frame.into_private().unwrap().body, body);
         assert!(
             rings.second.try_receive().unwrap().is_none(),
             "the ring slot is released once the body is copied out"
@@ -1455,15 +2417,18 @@ mod tests {
         // A held charge leaves the budget genuinely waiting; a zero-capacity budget would refuse the frame outright.
         let budget = ByteBudget::new(1);
         let _held = budget.try_charge(1).expect("hold the only byte");
+        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_secs(1), None);
+        let capacity = capacity_fd(&rings);
         let receive = receive_one(
             &rings,
             &mut queue,
+            &mut publisher,
+            &capacity,
             &inbound,
             &budget,
             Duration::from_secs(1),
             &root,
             &cancellation,
-            None,
         );
         let cancel_after_poll = async move {
             tokio::task::yield_now().await;
@@ -1507,15 +2472,18 @@ mod tests {
         let _held = budget.try_charge(1).expect("hold the only byte");
         let root = CancellationToken::new();
         let read_cancel = CancellationToken::new();
+        let mut publisher = Publisher::new(&rings.first, 1, Duration::from_secs(1), None);
+        let capacity = capacity_fd(&rings);
         let receive = receive_one(
             &rings,
             &mut queue,
+            &mut publisher,
+            &capacity,
             &inbound,
             &budget,
             Duration::from_secs(1),
             &root,
             &read_cancel,
-            None,
         );
         let discard_after_poll = async move {
             tokio::task::yield_now().await;
@@ -1876,6 +2844,7 @@ mod tests {
             direct: None,
             charge: crate::wire::ByteCharge::none(),
             written: None,
+            credit: None,
         };
         sender.send(goodbye).await.expect("frame admits");
         tokio::time::timeout(Duration::from_secs(1), io)
@@ -1935,6 +2904,114 @@ mod tests {
         drop(peer);
     }
 
+    /// A backing whose charge moved to quarantine was not proved released, so the released
+    /// counters must not count it when the host-side handles unmap.
+    #[tokio::test]
+    async fn a_quarantined_backing_is_not_counted_as_released() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            io,
+            root,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        root.cancel();
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits")
+            .expect("endpoint task joins");
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.quarantined != ResourceCharges::ZERO
+        })
+        .await;
+        assert_ne!(accounting.quarantined, ResourceCharges::ZERO);
+        let snapshot = transport.return_snapshot();
+        assert_eq!(
+            snapshot.released_backings, 0,
+            "a quarantined backing is still mapped by the peer and was never proved released"
+        );
+        assert_eq!(
+            snapshot.live_backings, 0,
+            "no host-side handle or lease keeps the quarantined backing mapped"
+        );
+        assert_eq!(transport.diagnostics()["returns"]["released_backings"], 0);
+        drop(peer);
+    }
+
+    /// A frame the host still holds when its connection quarantines is an outstanding return on
+    /// a live backing; quarantine must keep that obligation visible without ever counting the
+    /// backing released.
+    #[tokio::test]
+    async fn a_host_held_lease_stays_observable_after_its_backing_quarantines() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            mut receiver,
+            io,
+            root,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        peer.send(
+            EnvelopeHeader {
+                len: 1,
+                ver: PROTOCOL_VERSION,
+                ty: FrameType::Request,
+                flags: Flags::new(false, Priority::Interactive, false),
+                channel: 7,
+                epoch: 1,
+                corr: 1,
+            },
+            &[1],
+            StdInstant::now() + Duration::from_secs(1),
+        )
+        .expect("peer publishes");
+        let Ok(InboundEvent::Frame(held)) = receiver.recv().await else {
+            panic!("the host receives the frame");
+        };
+        root.cancel();
+        drop(sender);
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits")
+            .expect("endpoint task joins");
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.quarantined != ResourceCharges::ZERO
+        })
+        .await;
+        assert_ne!(accounting.quarantined, ResourceCharges::ZERO);
+        let snapshot = transport.return_snapshot();
+        assert_eq!(
+            snapshot.outstanding, 1,
+            "the host still owes the peer this frame's return"
+        );
+        assert_eq!(
+            snapshot.live_backings, 1,
+            "the backing the held frame maps is still live"
+        );
+        assert_eq!(snapshot.released_backings, 0);
+        held.release().expect("release");
+        let snapshot = transport.return_snapshot();
+        assert_eq!(snapshot.outstanding, 0);
+        assert_eq!(
+            snapshot.released_backings, 0,
+            "a quarantined backing is never proved released, even after the host's last return"
+        );
+        drop(peer);
+    }
+
     #[test]
     fn a_doorbell_with_a_queued_token_ahead_of_end_of_file_still_reads_as_released() {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
@@ -1984,6 +3061,7 @@ mod tests {
             direct: None,
             charge: crate::wire::ByteCharge::none(),
             written: None,
+            credit: None,
         };
         sender.send(frame).await.expect("frame admits");
         let deadline = StdInstant::now() + Duration::from_secs(1);
@@ -2150,8 +3228,12 @@ mod tests {
                 writer.write_all(&[1])
             }),
         );
+        let reservation = rings
+            .first
+            .try_reserve(1, direct.header())
+            .expect("reservation");
         assert!(
-            publish_direct(&rings.first, direct, deadline).is_err(),
+            publish_direct(reservation, direct, 1, deadline).is_err(),
             "a serializer that finishes after the deadline must not publish"
         );
         let attached = rings.first.attachment().unwrap().attach().unwrap();
@@ -2241,6 +3323,635 @@ mod tests {
                 .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
                 .is_err(),
             "quarantined charges still count against the admission limit"
+        );
+    }
+
+    fn frame(ty: FrameType, channel: u16, corr: u64, body: &[u8]) -> OutboundFrame {
+        let flags = if body.is_empty() && ty.is_pure_header() {
+            crate::wire::pure_header_flags()
+        } else {
+            Flags::new(false, Priority::Interactive, ty != FrameType::StreamData)
+        };
+        let id = if channel == 0 {
+            crate::wire::FrameId::control(corr)
+        } else {
+            crate::wire::FrameId::routed(crate::handler::RouteHandle { channel, epoch: 1 }, corr)
+        };
+        let (bytes, tail) =
+            crate::wire::encode_split_frame(ty, flags, id, body.to_vec()).expect("frame encodes");
+        OutboundFrame {
+            bytes,
+            tail,
+            direct: None,
+            charge: crate::wire::ByteCharge::none(),
+            written: None,
+            credit: None,
+        }
+    }
+
+    /// Holds every block of the smallest ordinary class on the consumer side so an ordinary
+    /// frame of that class blocks while descriptors and reserves stay free.
+    fn exhaust_smallest_class(
+        producer: &Ring,
+        consumer: &Ring,
+    ) -> Vec<shm_transport::lease::PayloadLease> {
+        let count = producer
+            .geometry()
+            .class(shm_transport::pool::BlockClass::Ordinary(0))
+            .count;
+        (0..count)
+            .map(|_| {
+                let mut reservation = producer
+                    .try_reserve(1, shm_transport::backend::ring::wire_v3_header(1).unwrap())
+                    .expect("fill reservation");
+                reservation.write(&[1]).unwrap();
+                reservation.commit(1).unwrap();
+                consumer.try_receive().unwrap().expect("filled frame")
+            })
+            .collect()
+    }
+
+    /// A valid `writer_queue_frames` may be as large as `Semaphore::MAX_PERMITS`; the pending
+    /// set must not allocate that depth up front.
+    #[test]
+    fn a_publisher_does_not_preallocate_its_configured_depth() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let publisher = Publisher::new(
+            &rings.first,
+            tokio::sync::Semaphore::MAX_PERMITS,
+            Duration::from_secs(1),
+            None,
+        );
+        assert!(publisher.can_accept());
+        assert_eq!(publisher.pending.capacity(), 0);
+    }
+
+    /// A failed return doorbell makes `into_private` return `PrivateCopyError::Transport`.
+    #[test]
+    fn into_private_reports_a_failed_return_wake_as_a_transport_error() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let mut held = exhaust_smallest_class(&rings.first, &consumer);
+        let lease = held.pop().unwrap();
+        assert_eq!(
+            rings.first.arm_capacity_wait(Inventory::Ordinary, 1),
+            Ok(true),
+            "the producer parks, so the return must ring the doorbell"
+        );
+        // Dropping the producer closes its doorbell ends; the return's wake now fails.
+        drop(rings);
+        let header = EnvelopeHeader {
+            len: lease.len() as u32,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 0,
+            epoch: 0,
+            corr: 1,
+        };
+        let budget = ByteBudget::new(16);
+        let charge = budget.try_charge(lease.len()).unwrap();
+        let frame = InboundFrame::new(header, lease, charge);
+        assert_eq!(
+            frame.into_private().err(),
+            Some(crate::frame_channel::PrivateCopyError::Transport),
+            "a failed return wake is a transport failure, not a private frame"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn eligible_controls_and_unrelated_terminals_publish_past_a_blocked_ordinary_ticket() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let held = exhaust_smallest_class(&rings.first, &consumer);
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&published);
+        let hook: PublishHook = Arc::new(move |ty, channel| {
+            observed.lock().unwrap().push((ty, channel));
+        });
+        let mut publisher = Publisher::new(&rings.first, 16, Duration::from_secs(5), Some(hook));
+        // Ordinary data of the exhausted class blocks at the head.
+        publisher.push(frame(FrameType::StreamData, 7, 1, b"data"));
+        // Behind it: a Ping, an unrelated error terminal, this stream's own terminal, a second
+        // unrelated stream's prefix and terminal, and Goodbye.
+        publisher.push(frame(FrameType::Ping, 0, 9, &[]));
+        publisher.push(frame(
+            FrameType::Error,
+            7,
+            2,
+            br#"{"code":"x","message":"y"}"#,
+        ));
+        publisher.push(frame(FrameType::StreamEnd, 7, 1, &[]));
+        publisher.push(frame(FrameType::StreamData, 7, 3, b"more"));
+        publisher.push(frame(FrameType::StreamEnd, 7, 3, &[]));
+        publisher.push(frame(FrameType::Goodbye, 0, 0, &[]));
+        publisher.pump(&rings.first).expect("pump");
+        assert_eq!(
+            *published.lock().unwrap(),
+            vec![(FrameType::Ping, 0), (FrameType::Error, 7)],
+            "only the Ping and the unrelated terminal bypass; a terminal never skips its own \
+             prefix and Goodbye follows every admitted frame"
+        );
+        assert!(publisher.has_pending());
+        // Returning one block from another thread frees the head; everything drains in order.
+        let mut held = held;
+        let returned = held.pop().unwrap();
+        std::thread::spawn(move || drop(returned)).join().unwrap();
+        publisher.pump(&rings.first).expect("pump after return");
+        assert_eq!(
+            published.lock().unwrap()[2..],
+            [(FrameType::StreamData, 7), (FrameType::StreamEnd, 7)],
+            "one returned block admits exactly the blocked head; its terminal then follows              from the terminal reserve, while the next stream's data blocks again"
+        );
+        assert!(publisher.has_pending());
+        drop(held.pop());
+        publisher.pump(&rings.first).expect("pump");
+        assert_eq!(
+            published.lock().unwrap()[4..],
+            [
+                (FrameType::StreamData, 7),
+                (FrameType::StreamEnd, 7),
+                (FrameType::Goodbye, 0)
+            ],
+            "the remaining frames keep admission order once capacity returns"
+        );
+        assert!(!publisher.has_pending());
+        drop(held);
+    }
+
+    #[test]
+    fn an_unreserved_direct_serializer_never_runs_and_a_reserved_one_runs_once() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let held = exhaust_smallest_class(&rings.first, &consumer);
+        let runs = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&runs);
+        let header = EnvelopeHeader {
+            len: 3,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Response,
+            flags: Flags::new(false, Priority::Interactive, true),
+            channel: 7,
+            epoch: 1,
+            corr: 4,
+        };
+        let direct = DirectFrame::new(
+            header,
+            3,
+            Box::new(move |writer| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                writer.write_all(b"abc")
+            }),
+        );
+        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
+        publisher.push(OutboundFrame {
+            bytes: Vec::new(),
+            tail: Vec::new(),
+            direct: Some(direct),
+            charge: crate::wire::ByteCharge::none(),
+            written: None,
+            credit: None,
+        });
+        for _ in 0..3 {
+            publisher.pump(&rings.first).expect("blocked pump");
+        }
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "no reservation, no serialization"
+        );
+        drop(held);
+        publisher.pump(&rings.first).expect("pump after returns");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "one reservation, one serialization"
+        );
+        let lease = consumer.try_receive().unwrap().expect("published");
+        assert_eq!(lease.to_vec().unwrap(), b"abc");
+    }
+
+    #[test]
+    fn a_terminal_credit_returns_with_its_block_not_with_settlement() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let credits = Arc::new(tokio::sync::Semaphore::new(1));
+        let credit = credits.clone().try_acquire_owned().unwrap();
+        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), None);
+        let mut terminal = frame(FrameType::Error, 7, 1, br#"{"code":"x","message":"y"}"#);
+        terminal.credit = Some(credit);
+        publisher.push(terminal);
+        publisher.pump(&rings.first).expect("publish");
+        assert_eq!(
+            credits.available_permits(),
+            0,
+            "published, still held by the peer"
+        );
+        let lease = consumer.try_receive().unwrap().expect("terminal");
+        publisher.pump(&rings.first).expect("pump while held");
+        assert_eq!(
+            credits.available_permits(),
+            0,
+            "consumed, still not returned"
+        );
+        lease.release().unwrap();
+        publisher.pump(&rings.first).expect("pump after return");
+        assert_eq!(
+            credits.available_permits(),
+            1,
+            "the block returned, so the credit did"
+        );
+    }
+
+    /// A second terminal reuses the block the first one returned; the credit on the second
+    /// frame stays held until the peer releases that publication.
+    #[test]
+    fn a_credit_on_a_reused_block_waits_for_the_new_publication_to_return() {
+        enum Peer {
+            ReceiveAndRelease,
+            ReceiveAndHold,
+            ReleaseHeld,
+        }
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let attachment = rings.first.attachment().unwrap();
+        let (command_tx, command_rx) = std::sync::mpsc::channel::<Peer>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let peer = std::thread::spawn(move || {
+            let consumer = attachment.attach().unwrap();
+            let mut held = None;
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    Peer::ReceiveAndRelease => {
+                        consumer.try_receive().unwrap().unwrap().release().unwrap();
+                    }
+                    Peer::ReceiveAndHold => {
+                        held = Some(consumer.try_receive().unwrap().unwrap());
+                    }
+                    Peer::ReleaseHeld => {
+                        held.take().unwrap().release().unwrap();
+                    }
+                }
+                done_tx.send(()).unwrap();
+            }
+        });
+        let publications = Arc::new(AtomicU64::new(0));
+        let hook_publications = Arc::clone(&publications);
+        let hook_commands = command_tx.clone();
+        let hook_done = Arc::new(Mutex::new(done_rx));
+        let hook_wait = Arc::clone(&hook_done);
+        let hook: PublishHook = Arc::new(move |_, _| {
+            let command = if hook_publications.fetch_add(1, Ordering::SeqCst) == 0 {
+                Peer::ReceiveAndRelease
+            } else {
+                Peer::ReceiveAndHold
+            };
+            hook_commands.send(command).unwrap();
+            hook_wait.lock().unwrap().recv().unwrap();
+        });
+        let credits = Arc::new(tokio::sync::Semaphore::new(2));
+        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_secs(5), Some(hook));
+        for corr in 1..=2 {
+            let mut terminal = frame(FrameType::Error, 7, corr, br#"{"code":"x","message":"y"}"#);
+            terminal.credit = Some(credits.clone().try_acquire_owned().unwrap());
+            publisher.push(terminal);
+        }
+        publisher.pump(&rings.first).expect("publish both");
+        assert_eq!(publications.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            credits.available_permits(),
+            1,
+            "the first block returned; the second is held by the peer"
+        );
+        publisher
+            .pump(&rings.first)
+            .expect("pump while the reused block is held");
+        assert_eq!(
+            credits.available_permits(),
+            1,
+            "the reused block's earlier return must not release the credit on its new frame"
+        );
+        command_tx.send(Peer::ReleaseHeld).unwrap();
+        hook_done.lock().unwrap().recv().unwrap();
+        publisher.pump(&rings.first).expect("pump after the return");
+        assert_eq!(credits.available_permits(), 2);
+        // The hook holds the last command sender; dropping the publisher ends the peer loop.
+        drop(publisher);
+        drop(command_tx);
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn a_pending_ticket_past_its_deadline_retires_instead_of_waiting() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let consumer = rings.first.attachment().unwrap().attach().unwrap();
+        let held = exhaust_smallest_class(&rings.first, &consumer);
+        let mut publisher = Publisher::new(&rings.first, 4, Duration::from_millis(10), None);
+        publisher.push(frame(FrameType::StreamData, 7, 1, b"late"));
+        publisher.pump(&rings.first).expect("blocked pump");
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(publisher.pump(&rings.first).is_err());
+        drop(held);
+    }
+
+    #[test]
+    fn inventory_classification_reserves_controls_and_small_terminals_only() {
+        let capacity = 32 * 1024 - 21;
+        let header = |ty, len| EnvelopeHeader {
+            len,
+            ver: PROTOCOL_VERSION,
+            ty,
+            flags: Flags::new(false, Priority::Interactive, true),
+            channel: 0,
+            epoch: 0,
+            corr: 1,
+        };
+        assert_eq!(
+            inventory_for(&header(FrameType::Ping, 0), 0, capacity),
+            Inventory::Control
+        );
+        assert_eq!(
+            inventory_for(&header(FrameType::Goodbye, 0), 0, capacity),
+            Inventory::Control
+        );
+        assert_eq!(
+            inventory_for(&header(FrameType::Error, 100), 100, capacity),
+            Inventory::Terminal
+        );
+        assert_eq!(
+            inventory_for(&header(FrameType::StreamEnd, 0), 0, capacity),
+            Inventory::Terminal
+        );
+        assert_eq!(
+            inventory_for(&header(FrameType::Error, 40_000), 40_000, capacity),
+            Inventory::Ordinary,
+            "a terminal past the reserve falls back to ordinary capacity"
+        );
+        assert_eq!(
+            inventory_for(&header(FrameType::Request, 0), 0, capacity),
+            Inventory::Ordinary,
+            "a channel-0 Request is never a bypass control"
+        );
+        assert_eq!(
+            inventory_for(&header(FrameType::Response, 5), 5, capacity),
+            Inventory::Ordinary
+        );
+    }
+
+    /// A private copy running on the blocking barrier keeps the transport block and its ingress
+    /// charge held through Cancel, route close, and host shutdown; both return exactly once, after
+    /// the copy physically completes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn barrier_held_copy_returns_block_and_charge_once_after_physical_completion() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let body = vec![0xA5u8; 3_000];
+        let header = EnvelopeHeader {
+            len: body.len() as u32,
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Request,
+            flags: Flags::new(false, Priority::Interactive, false),
+            channel: 7,
+            epoch: 1,
+            corr: 1,
+        };
+        let mut reservation = rings
+            .second
+            .try_reserve(body.len(), header.encode())
+            .unwrap();
+        reservation.write(&body).unwrap();
+        reservation.commit(body.len()).unwrap();
+
+        let budget = ByteBudget::new(8 * 1024);
+        let (_sender, mut queue) =
+            frame_sender(1, CancellationToken::new(), Duration::from_secs(1));
+        let (inbound, mut received) = mpsc::channel(1);
+        assert!(
+            receive_one(
+                &rings,
+                &mut queue,
+                &mut Publisher::new(&rings.first, 1, Duration::from_secs(1), None),
+                &capacity_fd(&rings),
+                &inbound,
+                &budget,
+                Duration::from_secs(1),
+                &CancellationToken::new(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+        );
+        let InboundEvent::Frame(frame) = received.recv().await.unwrap().unwrap() else {
+            panic!("expected a leased frame");
+        };
+        let retained = Arc::clone(rings.second.retained());
+        assert_eq!(retained.outstanding_returns(), 1);
+        let charged = budget.capacity() - budget.available();
+        assert_eq!(
+            charged,
+            body.len(),
+            "the ingress charge covers the private copy"
+        );
+
+        let ledgers = crate::handler::WorkLedgers {
+            request: tokio_util::task::TaskTracker::new(),
+            route: tokio_util::task::TaskTracker::new(),
+            host: tokio_util::task::TaskTracker::new(),
+        };
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let copy = ledgers.run_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = gate_rx.recv();
+            frame.into_private()
+        });
+        started_rx.await.unwrap();
+
+        // Cancel, route close, and shutdown all arrive while the copy is still reading.
+        ledgers.request.close();
+        ledgers.route.close();
+        ledgers.host.close();
+        for tracker in [&ledgers.request, &ledgers.route, &ledgers.host] {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), tracker.wait())
+                    .await
+                    .is_err(),
+                "every ledger waits for the held copy"
+            );
+        }
+        assert_eq!(
+            retained.outstanding_returns(),
+            1,
+            "the block stays held while the copy is in flight"
+        );
+        assert_eq!(
+            budget.capacity() - budget.available(),
+            charged,
+            "the charge is not refunded early"
+        );
+
+        gate_tx.send(()).unwrap();
+        let private = copy.await.expect("copy joined").expect("copy succeeded");
+        assert_eq!(private.body, body);
+        for tracker in [&ledgers.request, &ledgers.route, &ledgers.host] {
+            tokio::time::timeout(Duration::from_secs(5), tracker.wait())
+                .await
+                .expect("ledgers drain once the copy completes");
+        }
+        assert_eq!(
+            retained.outstanding_returns(),
+            0,
+            "the block returns with the completed copy"
+        );
+        assert!(
+            rings.second.try_receive().unwrap().is_none(),
+            "no second frame appears from the returned block"
+        );
+        assert_eq!(
+            budget.capacity() - budget.available(),
+            charged,
+            "the charge follows the private bytes, not the transport block"
+        );
+        drop(private);
+        assert_eq!(
+            budget.available(),
+            budget.capacity(),
+            "the charge returns exactly once, with the private bytes"
+        );
+    }
+
+    /// Refusals name the resource that ran out. Limits for one connection admit the first
+    /// `prepare` and refuse the second on the first field checked, and the refusal charges
+    /// nothing: the live connection's accounting is unchanged and a third attempt after release
+    /// succeeds.
+    #[test]
+    fn refusals_are_counted_by_exhausted_resource_and_charge_nothing() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let first = transport
+            .prepare(ByteBudget::new(1 << 20), 4, Duration::from_secs(1))
+            .expect("first connection admits");
+        let active_before = transport.diagnostics()["accounting"]["active"].clone();
+        assert!(
+            transport
+                .prepare(ByteBudget::new(1 << 20), 4, Duration::from_secs(1))
+                .is_err(),
+            "a second connection exceeds one connection's limits"
+        );
+        let diagnostics = transport.diagnostics();
+        assert_eq!(diagnostics["exhaustion"]["observed"], 1);
+        assert_eq!(
+            diagnostics["exhaustion"]["by_resource"],
+            serde_json::json!({"descriptors": 1}),
+            "descriptors are the first limit checked, so the refusal is attributed there"
+        );
+        assert_eq!(
+            diagnostics["accounting"]["active"], active_before,
+            "a refusal charges nothing"
+        );
+
+        let PreparedRing {
+            sender,
+            io,
+            root,
+            descriptors,
+            ..
+        } = first;
+        // No peer ever attached; closing its doorbell ends is what proves the release.
+        drop(descriptors);
+        root.cancel();
+        drop(sender);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(io);
+        // Backing charges end with the last owned lease; the endpoint held none, so the
+        // returned charge admits the next connection once the thread proves the peer released.
+        wait_until(|| transport.accounting().unwrap().active == ResourceCharges::ZERO);
+        let recovered = transport.prepare(ByteBudget::new(1 << 20), 4, Duration::from_secs(1));
+        assert!(
+            recovered.is_ok(),
+            "recovery follows the exhausted resource's own release"
+        );
+        assert_eq!(transport.diagnostics()["exhaustion"]["observed"], 1);
+    }
+
+    #[test]
+    fn ended_connections_leave_no_dead_backing_entries_without_a_status_request() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for _ in 0..3 {
+            let PreparedRing {
+                sender, io, root, ..
+            } = transport
+                .prepare(ByteBudget::new(1 << 20), 4, Duration::from_secs(1))
+                .expect("connection admits");
+            root.cancel();
+            drop(sender);
+            runtime.block_on(io);
+            wait_until(|| transport.accounting().unwrap().active == ResourceCharges::ZERO);
+        }
+        assert_eq!(
+            transport.backings.entries.lock().unwrap().len(),
+            0,
+            "ended connections must not accumulate dead backing entries"
+        );
+        let snapshot = transport.return_snapshot();
+        assert_eq!(snapshot.live_backings, 0);
+        assert_eq!(snapshot.released_backings, 6);
+    }
+
+    #[test]
+    fn return_snapshot_separates_outstanding_leases_from_released_backing() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        // The outbound sender keeps the endpoint thread, and with it both backings, alive.
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            receiver,
+            io,
+            root,
+            read_cancel: _,
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 4, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer =
+            RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors).expect("peer");
+        let before = transport.return_snapshot();
+        assert_eq!(before.live_backings, 2);
+        assert_eq!(before.released_backings, 0);
+        assert_eq!(before.outstanding, 0);
+        // The host's rings and this peer's rings share backing; one held lease on the peer side
+        // is not counted here because the registry tracks host backings only.
+        transport.record_reclamation();
+        assert_eq!(
+            transport.diagnostics()["reclamation"]["completed"],
+            1,
+            "generation ends are counted separately"
+        );
+        assert_eq!(transport.diagnostics()["returns"]["outstanding"], 0);
+        root.cancel();
+        drop(sender);
+        drop(peer);
+        drop(receiver);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(io);
+        wait_until(|| transport.return_snapshot().live_backings == 0);
+        let after = transport.return_snapshot();
+        assert_eq!(
+            after.live_backings, 0,
+            "both backings unmapped with the endpoint"
+        );
+        assert_eq!(after.released_backings, 2);
+        assert_eq!(
+            after.released_backing_bytes,
+            2 * ring_profile().mapping_bytes_per_direction()
         );
     }
 }

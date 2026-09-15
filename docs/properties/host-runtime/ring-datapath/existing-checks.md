@@ -48,22 +48,32 @@ functions and false of doctests. `cargo test -p host-runtime --doc` runs at
 `ci.yml:190` under the step name "Rust lease non-escape" (`:189`), and it builds
 and runs the lib target's doctests.
 
-**Doctests: 2, and they are the only source-resident checks in this sub-part
-that CI executes at all.** Both are `compile_fail`, both were printed and
-confirmed at `HEAD`:
+**Doctests: 3 at HEAD, and they are the only source-resident checks in this
+sub-part that CI executes at all.** The two `frame_channel.rs` doctests below
+are superseded; their replacements are the two `compile_fail` blocks at
+`crates/shm-transport/src/backend/ring.rs:25-33` and the positive
+`PayloadLease: Send` block at `:35-38`, all three run by the workspace
+`cargo test --doc`:
 
 | Location | What it asserts |
 | --- | --- |
-| `frame_channel.rs:296-301` | `ReceiveLease::contiguous(&bytes)` cannot be passed to `fn require_send<T: Send>`, so `ReceiveLease` is not `Send` |
-| `frame_channel.rs:303-308` | the same value cannot be passed to `fn require_static<T: 'static>`, so `ReceiveLease` is not `'static` |
+| `frame_channel.rs:296-301` | Superseded. This doctest asserted that the lease type of that revision could not be passed to `fn require_send<T: Send>`. HEAD has no doctest in `frame_channel.rs`; `PayloadLease` is `Send` by design, and the positive doctest at `crates/shm-transport/src/backend/ring.rs:35-38` asserts it |
+| `frame_channel.rs:303-308` | Superseded. This doctest asserted the same value could not be passed to `fn require_static<T: 'static>`. The confinement doctests at HEAD are the two `compile_fail` blocks at `crates/shm-transport/src/backend/ring.rs:25-33`, which assert `Ring` and `ProducerReservation` are not `Send`; the body view `LeaseSpan` carries `PhantomData<Rc<()>>` (`crates/shm-transport/src/lease.rs:21`) and is `!Send` without a doctest |
 
-The step name names them precisely. Together they hold the one claim in this
-sub-part that has mechanical enforcement in CI: receive bytes are visible only
-through a lexical, thread-confined lease. `wire.rs:4-14` is a ```text``` fence
+The step name names them precisely. Together they held the one claim in this
+sub-part that had mechanical enforcement in CI: receive bytes are visible only
+through a lexical, thread-confined lease. At HEAD that claim is stated
+differently and enforced elsewhere: the owned `PayloadLease` crosses threads,
+and body bytes leave the transport only through `InboundFrame::into_private`
+(`frame_channel.rs:107-128`), which copies then releases before any decoder
+runs. `wire.rs:4-14` is a ```text``` fence
 and is not compiled, so it is not a check.
 
-So the correct statement is: **no inline unit test in this sub-part runs in CI,
-and two doctests do.**
+So the correct statement for the source repository's workflow was: **no inline
+unit test in this sub-part ran in CI, and the three replacement doctests in
+`crates/shm-transport/src/backend/ring.rs` did.** At HEAD the workspace
+`--all-targets` jobs build and run the `host-runtime` library test target, so
+every inline test this inventory lists runs in CI alongside those doctests.
 
 ### The in-crate contract suite, split by reach
 

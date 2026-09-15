@@ -35,7 +35,7 @@ Both signatures confirmed by direct read at this commit:
 // crates/shm-transport/src/backend/ring.rs:1528
 pub fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError>
 ```
-At HEAD: `release` is `pub(crate) fn release`, reachable only through `ReceiveLease` via the crate-private `ReleaseSink` trait, so holding a `&Ring` is no longer a public capability to complete a frame.
+At HEAD: `Ring::release` does not exist; completion is `Retained::complete`, `pub(crate)` (`crates/shm-transport/src/backend/retained.rs:588`), reachable only through `PayloadLease::return_once` (`crates/shm-transport/src/lease.rs:346-355`), so holding a `&Ring` is not a public capability to complete a frame.
 
 ```rust
 // crates/shm-transport/src/backend/ring.rs:2536
@@ -55,7 +55,7 @@ pub fn commit(mut self, body_len: usize) -> Result<ReleaseIdentity, ProducerErro
   returns it (`:2385`), so the identity the producer receives is byte-identical to
   the one `try_receive` derives for the receiver at `:1441`.
 - `ring.rs:1591-1597` — a successful release stores `completion_sequence` and
-  decrements `active_leases` while the receiver's `ReceiveLease` is still alive and
+  decrements `active_leases` while the receiver's lease is still alive and
   still holds `LeaseSpan` pointers into the arena.
 - `ring.rs:2070-2151` `reclaim_completed` — the producer's next `try_reserve` calls
   it first (`:1281`), and it advances `arena_reclaimed` (`:2143`) and sets the
@@ -152,7 +152,7 @@ Three independent facts establish this:
    addon's `to_host`/`from_host` (`lib.rs:77-78`) and the host's
    `rings.first`/`rings.second` (former `shm_provider.rs:597`, former `:555-557`) both follow this
    split, and no non-test path reserves and receives on the same `Ring`.
-   At HEAD: The addon holds a `ReceiveLease<'static>` inside `ActiveLease` and never calls `Ring::release`, which is `pub(crate)` at HEAD, so the only `Ring::release` caller in the tree is the `ReleaseSink` impl the lease uses.
+   At HEAD: The addon holds a `PayloadLease` inside `ActiveLease` (`packages/shm-native/src/lib.rs:57-61`) and completes only through `active.lease.release()` in `detach_active` (`:374-377`); `Ring::release` does not exist, and the completion path is `PayloadLease::return_once` into the `pub(crate)` `Retained::complete`.
 
 Severity therefore: a latent API-shape hazard, not a live defect in the shipped
 topology. In the source tree this record was written against, what kept it worth a
@@ -160,9 +160,10 @@ record was that the composition was available rather than prevented: `Ring` and
 `Ring::release` were public, `commit` handed the identity out, and the type system
 did not distinguish a produce-direction `Ring` from a receive-direction one, so the
 boundary was held by call-site convention in two separate codebases. At HEAD
-`Ring::release` is `pub(crate)` (`ring.rs:1528`) and its only caller is the
-`ReleaseSink` impl that `ReceiveLease::release` and `Drop` go through
-(`lease.rs:324`), so no caller outside the crate can present a producer-held
+the completion arbiter is `Retained::complete`, `pub(crate)`
+(`retained.rs:588`), and its only caller is `PayloadLease::return_once`, which
+`PayloadLease::release` and `Drop` go through (`lease.rs:342-355`, `:364-370`),
+so no caller outside the crate can present a producer-held
 identity; the remaining reachable composition is in-crate code and the crate's
 own unit tests, and the property guards against that visibility being widened.
 
@@ -183,21 +184,21 @@ should not be public, the test becomes a compile-fail assertion instead.
 
 ## Investigation log
 
-### Q: Is `Ring::release` intended to be public at all, or should completion be reachable only through `ReceiveLease`?
+### Q: Is `Ring::release` intended to be public at all, or should completion be reachable only through the receive lease?
 
 - Sources examined: `ring.rs:1528-1600` (`release`), `:2436-2440`
   (`ring_release_callback`), `:2536-2570` (`commit`), `:2604-2612`
   (`DuplexRing::create`), `:1040-1091` (`create`/`create_in` and the random
   incarnation); `crates/shm-transport/src/lease.rs:324-372`
-  (`ReceiveLease::release`, `release_once`, `Drop`);
+  (the receive lease's `release`, `release_once`, `Drop`);
   `packages/shm-native/src/lib.rs:77-78`, `:332-357`, `:1394-1500`;
   `crates/host-runtime/src/ring_transport.rs:664-747`, `:846-933`; a
   repository-wide search of `crates/` and `packages/` for `.release(` call sites.
 - Findings: the reachability half is resolved — see the section above. The
   *reason* the method is public is also established: the addon needs a
   lease-independent completion path because `poll` `mem::forget`s the
-  `ReceiveLease` at `lib.rs:1256` (source tree; not at HEAD) and re-derives completion from its own `active`
-  table at `:332-357`, so making completion reachable only through `ReceiveLease`
+  receive lease at `lib.rs:1256` (source tree; not at HEAD) and re-derives completion from its own `active`
+  table at `:332-357`, so making completion reachable only through the lease
   would require the addon to keep the Rust lease alive across the N-API boundary.
   That is a real design constraint, not an accident.
 - Missing evidence: whether the public method is *intended* as a general
@@ -214,25 +215,49 @@ should not be public, the test becomes a compile-fail assertion instead.
   sub-question needs human input, because the answer determines whether the test
   above asserts a runtime rejection or whether the correct outcome is that the
   composition stops being expressible at all.
-  At HEAD: The doc comment now names the caller set: it says only `ReceiveLease` reaches this, because an identity is `Copy` and a public entry point would let a caller release a frame while still holding the lease that reads it (`:1514-1517`).
+  At HEAD: `Ring::release` and its doc comment do not exist. `Retained::complete`'s doc comment (`crates/shm-transport/src/backend/retained.rs:584-587`) states that the final return runs on whichever thread drops the last owner and never reaches a `Ring`, and `PayloadLease`'s doc comment (`crates/shm-transport/src/lease.rs:239-241`) states that the lease returns the block exactly once, on `release` or on drop; only `PayloadLease::return_once` calls `complete`.
 
 ### Q: What did the post-merge re-anchor find at HEAD?
 
 - Sources examined: every file this trail cites, at the merged HEAD.
 - Findings:
   Mechanisms whose citation moved and whose surrounding claim needed restating:
-  - line 35, crates/shm-transport/src/backend/ring.rs:1175 now crates/shm-transport/src/backend/ring.rs:1528: At HEAD `release` is `pub(crate) fn release`, reachable only through `ReceiveLease` via the crate-private `ReleaseSink` trait, so holding a `&Ring` is no longer a public capability to complete a frame.
+  - line 35, crates/shm-transport/src/backend/ring.rs:1175 now crates/shm-transport/src/backend/retained.rs:588: At HEAD completion is `Retained::complete`, `pub(crate)`, reachable only through `PayloadLease::return_once`, so holding a `&Ring` is not a public capability to complete a frame.
   - line 44, `ring.rs:1175-1247` now `ring.rs:1528-1600`: The checks now live in `release_inner`, they include an `active_leases == 0` rejection at `:1559`, every failure quarantines through `inspect_err(|_| self.enter_quarantine())` at `:1533`, and `release` is `pub(crate)`.
   - line 68, `crates/shm-transport/tests/ring.rs:152-175` now `crates/shm-transport/src/backend/ring.rs:3871-3907`: The ladder moved into the `ring.rs` unit tests as the table-driven `mismatched_release_identity_names_the_field_and_quarantines`, which adds a fourth `DuplicateRelease` case and asserts every mismatch quarantines; `crates/shm-transport/tests/ring.rs` cannot call `Ring::release` at all now that it is `pub(crate)`.
-  - line 134, `packages/shm-native/src/lib.rs:327-331`: The addon holds a `ReceiveLease<'static>` inside `ActiveLease` and never calls `Ring::release`, which is `pub(crate)` at HEAD, so the only `Ring::release` caller in the tree is the `ReleaseSink` impl the lease uses.
+  - line 134, `packages/shm-native/src/lib.rs:327-331`: The addon holds a `PayloadLease` inside `ActiveLease` (`packages/shm-native/src/lib.rs:57-61`) and completes only through `active.lease.release()` in `detach_active` (`:374-377`); `Ring::release` does not exist at HEAD.
   - line 188, `lib.rs:1256`: The addon does keep the Rust lease alive across the N-API boundary at HEAD and completes through it, and `Ring::release` is `pub(crate)`, so the design constraint that justified a public entry point no longer exists.
-  - line 197, `ring.rs:1174` now `ring.rs:1514`: The doc comment now names the caller set: it says only `ReceiveLease` reaches this, because an identity is `Copy` and a public entry point would let a caller release a frame while still holding the lease that reads it (`:1514-1517`).
+  - line 197, `ring.rs:1174`: `Ring::release` and its doc comment do not exist at HEAD; `Retained::complete` (`crates/shm-transport/src/backend/retained.rs:584-588`) documents the final return as never reaching a `Ring`, and only `PayloadLease::return_once` calls it.
   Constructs with no counterpart at HEAD; their citations above are marked "source tree; not at HEAD":
   - line 68, `:177-180` (following ProducerError::Exhausted assert): The ladder is a standalone test with nothing after it; the `ProducerError::Exhausted` assertion now lives in `retained_oldest_lease_enforces_fifo_reclamation` at `crates/shm-transport/tests/ring.rs:148-151`.
   - line 70, `:140` (first_id from first.commit(first_len)): The ladder no longer keeps the identity `commit` returned; it forges copies of the live lease's own `identity()` at `crates/shm-transport/src/backend/ring.rs:3903`.
   - line 134, `packages/shm-native/src/lib.rs:327-331` (channel.from_host.release(active.identity)): `detach_active` now completes through the stored lease with `active.lease.release()` at `packages/shm-native/src/lib.rs:350-355`.
-  - line 137, `:1236` (identity captured from lease.identity() in poll): No identity is captured; `poll` moves the whole `ReceiveLease` into `channel.active` at `packages/shm-native/src/lib.rs:1445-1451`.
+  - line 137, `:1236` (identity captured from lease.identity() in poll): No identity is captured; `poll` moves the whole `PayloadLease` into `channel.active` at `packages/shm-native/src/lib.rs:1532-1538`.
   - line 138, `:1256` (std::mem::forget(lease) in poll): `poll` no longer forgets the lease; it stores it in `ActiveLease` at `packages/shm-native/src/lib.rs:1445-1451`.
-  - line 188, `lib.rs:1256` (poll mem::forgets the ReceiveLease): `poll` stores the `ReceiveLease<'static>` in `ActiveLease` (`packages/shm-native/src/lib.rs:50-54` and `:1445-1451`) instead of forgetting it.
+  - line 188, `lib.rs:1256` (poll mem::forgets the receive lease): `poll` stores the `PayloadLease` in `ActiveLease` (`packages/shm-native/src/lib.rs:57-61` and `:1532-1538`) instead of forgetting it.
 - Missing evidence: none beyond what the record's Exercised field states.
 - Conclusion: the claims above are read against the source tree where marked and against HEAD elsewhere; the catalog record carries the HEAD disposition.
+
+### Q: What holds release authority with completion in `Retained::complete`?
+
+- Sources examined: `crates/shm-transport/src/lease.rs:239-370`;
+  `crates/shm-transport/src/backend/retained.rs:584-619`;
+  `crates/shm-transport/src/backend/ring.rs:1706` (`commit`), `:1629`
+  (`ProducerReservation::identity`); `crates/shm-transport/src/descriptor.rs:149-160`
+  (`PayloadIdentity`); `crates/shm-transport/src/lib.rs:45`;
+  `packages/shm-native/src/lib.rs:57-61`, `:355-380`, `:1532-1538`, `:1590-1601`;
+  a repository search for `.complete(` and `Ring::release`.
+- Findings: the arbiter is `Retained::complete(block, generation)`, `pub(crate)`,
+  and its only caller is `PayloadLease::return_once`. `commit` still hands the
+  producer a `Copy` identity, `PayloadIdentity` (`ring.rs:1706`), but no public
+  entry point accepts an identity for completion, so a producer-held identity
+  authorises nothing outside the crate. `PayloadLease` owns an `Arc<Retained>`
+  rather than borrowing a `Ring`, so the lease outlives the endpoint handle and
+  its return needs no ring at all (`retained.rs:584-587`). The addon keeps the
+  `PayloadLease` in `ActiveLease` and completes through it in `detach_active`.
+- Missing evidence: nothing pins `complete`'s visibility; the compile-fail form
+  of the record still applies, with `Retained::complete` as the name a dependent
+  crate must not be able to reach.
+- Conclusion: resolved with answer - authority is bound to lease ownership by
+  visibility, with `Retained::complete` as the guarded name; the
+  record's `Ring::release` citations are superseded and carry a mechanism note.

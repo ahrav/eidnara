@@ -568,6 +568,22 @@ activation, starting components refresh on a bounded 50 ms cadence; after
 activation settles, polling returns to the configured health interval.
 Handler detail strings are tainted and omitted.
 
+The response also carries a `shared_memory` diagnostics object for the
+payload-pool transport. Its quantities are distinct and sampled independently,
+not as one atomic snapshot:
+`reclamation.completed` counts connection generations that ended (its
+`reclamation.meaning` field states this; the key is a wire name and does not
+mean released storage); `returns` reports the payload leases the host itself
+still holds (`outstanding`, its own return obligations to the peer, not leases
+the peer holds), live backings, and backings proved released with their
+bytes; `exhaustion.observed`
+and `exhaustion.by_resource` count admission refusals in total and by the
+resource that ran out; `accounting` reports active and quarantined
+commitment; and `aggregate` reports the transport, host-resident, and terminal
+encoding ceilings with their checked total. The aggregate is a commitment
+figure, not a resident-set claim. No field carries a socket path, descriptor,
+address, token, or key.
+
 The `context` component additionally carries a sanitized
 `metrics.epochs` object holding exactly these five compatibility epochs, in
 this order:

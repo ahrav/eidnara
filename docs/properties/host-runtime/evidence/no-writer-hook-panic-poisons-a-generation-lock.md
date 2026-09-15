@@ -20,13 +20,14 @@ A direct call. No `catch_unwind`, no `redact_sync`, no `AssertUnwindSafe`. The
 task brief placed the call at `~393`; at HEAD the `if let` is `:393` and the call
 itself is `:394`.
 
-The guarded boundary in the same loop body is `tcp_frame_channel.rs:348-349`:
-
-    let encoded =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| direct.into_owned()));
-
-with the unwind arm at `:355-359` retiring the generation. So one callback into
-foreign code in `write_frames` is guarded and the other is not.
+The guarded boundary in the same loop body was `tcp_frame_channel.rs:348-349`,
+which wrapped the direct serializer's conversion to owned bytes in
+`std::panic::catch_unwind`, with the unwind arm at `:355-359` retiring the
+generation. So one callback into foreign code in `write_frames` was guarded
+and the other was not. That file is absent from HEAD; the ring publisher keeps
+the same shape, wrapping `publish_direct` and `publish_owned` in
+`catch_unwind` (`ring_transport.rs:1259-1262`) while calling the `written`
+hook outside it (`:1272-1274`).
 
 The hook that takes a generation lock is the liveness probe's, built at
 `connection.rs:1426-1449`. Its first statement is
@@ -46,11 +47,18 @@ insert - is exact. Contrast `connection.rs:737`, where `health_snapshot` is read
 with `unwrap_or_else(std::sync::PoisonError::into_inner)`: the crate does have a
 poison-tolerant idiom, and the `pings` lock does not use it.
 
-The skipped retirement signal is confirmed. `queue.retired.cancel()` sits at
+The skipped retirement signal is confirmed for the TCP writer of that
+revision, which no longer exists at HEAD; the ring endpoint's outer
+`catch_unwind` cancels `queue.retired` and `root` on a panic
+(`ring_transport.rs`, the `Err` branch after `run_endpoint`), so what follows
+is historical. `queue.retired.cancel()` sat at
 `tcp_frame_channel.rs:402`, *after* the loop. An unwind out of `:394` leaves the
 loop by unwinding, so `:402` never executes. `SenderQueue`
-(`frame_channel.rs:838-854`) has no `Drop` impl - the only `Drop` in that file is
-`ReceiveLease` at `:381` - so nothing cancels `retired` during the unwind.
+(`frame_channel.rs:838-854`) has no `Drop` impl - at HEAD `frame_channel.rs`
+has no `Drop` impl at all, and the lease it carries is
+`shm_transport::lease::PayloadLease`, whose `Drop`
+(`crates/shm-transport/src/lease.rs:364-370`) returns a block and touches no
+token - so nothing cancels `retired` during the unwind.
 Consequences for senders: `is_retired()` (`frame_channel.rs:828-830`) keeps
 returning false, and `send_ticket_before`'s biased first arm on
 `self.retired.cancelled()` (`:814`) never fires, so admission falls through to

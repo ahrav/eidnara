@@ -12,9 +12,9 @@ Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/lease.rs:378`
 - `crates/shm-transport/src/backend/retained.rs:586`
-- `crates/shm-transport/src/backend/ring.rs:1048`
+- `crates/shm-transport/src/backend/ring.rs:1052`
 
-Witness status: yes - `crates/shm-transport/src/lease.rs:621` and `crates/shm-transport/src/backend/ring.rs:3181` assert the three observers stay unreached through saturated drops on worker threads.
+Witness status: yes - `crates/shm-transport/src/lease.rs:621` and `crates/shm-transport/src/backend/ring.rs:3316` assert the three observers stay unreached through saturated drops on worker threads.
 
 ## Failure scenario
 

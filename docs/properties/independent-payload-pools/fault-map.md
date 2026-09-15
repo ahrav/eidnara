@@ -24,8 +24,8 @@ whether the harness can produce it at the tree of this catalog's introducing com
 | F6 wrong setup identifier or doorbell type | Present layout 3, schema 3, an eventfd, a datagram, an unconnected or non-fresh pool | Yes: `attach_rejects_eventfd_and_datagram_doorbells_and_a_second_producer`, `tests/contract.rs`, `setup_socket.rs` tests |
 | F7 native detach or registration failure | Fail external-view creation, detach, or reference deletion | Partial: external-view creation failpoint exists (`napi_buffers.rs`); detach and deletion failpoints are #550 |
 | F8 quarantine-accounting failure | Poison or overflow the accounting at quarantine time | Partial: `BackingAdmission::quarantine` rejects a second quarantine and `retain_uncertain` is tested; a poisoned lock is not injected |
-| F9 barrier-held copy under cancel | Hold request copy work while `Cancel`, route close, or shutdown arrives | No: #548 |
-| F10 publication selection under exhaustion | Ordinary exhaustion with eligible controls and terminals queued | No at the host and clients: #548, #552, #550 |
+| F9 barrier-held copy under cancel | Hold request copy work while `Cancel`, route close, or shutdown arrives | Yes: `barrier_held_copy_returns_block_and_charge_once_after_physical_completion` (`crates/host-runtime/src/ring_transport.rs`) gates a real `into_private` on the blocking barrier while every ledger closes |
+| F10 publication selection under exhaustion | Ordinary exhaustion with eligible controls and terminals queued | Yes at the host: `eligible_controls_and_unrelated_terminals_publish_past_a_blocked_ordinary_ticket` empties the smallest ordinary class with held leases. Not yet at the clients: #552, #550 |
 
 ## Per-property required faults
 
@@ -81,5 +81,6 @@ whether the harness can produce it at the tree of this catalog's introducing com
 2. F3 across a process boundary (two-process tests) is the only in-tree proof
    that a return from a foreign thread wakes a parked producer in another
    process; keep it out of the memcheck runner.
-3. F7, F9, and F10 need the owning tasks' seams and are the blocking evidence
-   gaps for #548, #552, and #550.
+3. F7 and the client half of F10 need the owning tasks' seams and are the
+   blocking evidence gaps for #552 and #550; F9 and the host half of F10 are
+   in-process host tests that need no external process.

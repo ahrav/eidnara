@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1256`
-- `crates/shm-transport/src/backend/ring.rs:1483`
+- `crates/shm-transport/src/backend/ring.rs:1270`
+- `crates/shm-transport/src/backend/ring.rs:1497`
 - `crates/shm-transport/src/backend/retained.rs:623`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2288` publishes past a one-slot ordinary depth after the consumer acknowledges while still holding the payload; `crates/shm-transport/tests/ring.rs:486` does the same across processes.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2326` publishes past a one-slot ordinary depth after the consumer acknowledges while still holding the payload; `crates/shm-transport/tests/ring.rs:486` does the same across processes.
 
 ## Failure scenario
 

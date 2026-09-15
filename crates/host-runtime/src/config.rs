@@ -18,6 +18,27 @@ pub const MIN_RESIDENT_BYTES: u64 =
 
 pub(crate) const EGRESS_RESERVED_BYTES: u64 = MAX_BODY_LEN as u64 + HEADER_LEN as u64;
 
+/// Terminal obligations one connection may hold for admitted requests. Each admitted request
+/// takes one credit before dispatch and the credit follows the terminal's transport block until
+/// the block physically returns, so a connection can never owe more terminals than its reserved
+/// terminal inventory can carry while one block stays free for a pre-admission rejection. The
+/// value is the terminal class count of `ring_transport::ring_profile()` less one;
+/// `aggregate_overflow_is_rejected_before_activation` pins it against the geometry.
+pub const TERMINAL_CREDITS_PER_CONNECTION: usize = 63;
+
+/// Largest terminal frame the error serializer can produce: a 128-byte code and a 4,096-byte
+/// message, every byte a control character that escapes to six (`\u00XX`), plus the longest
+/// `retry_after_ms`, the JSON envelope, and the header. `dispatch::terminal_frame_bytes_match_the_serializer` pins this against the
+/// serializer, and the 32 KiB terminal block class holds it with room to spare.
+pub(crate) const TERMINAL_FRAME_BYTES: u64 = 25_427;
+
+/// Private encoding bytes reserved per connection for terminal and rejection bodies: one slice
+/// per credit plus one for the pre-admission rejection path. These bytes are charged from their
+/// own budget, never from the ordinary egress floor, so a saturated egress pool cannot starve an
+/// error terminal.
+pub(crate) const TERMINAL_RESERVED_BYTES_PER_CONNECTION: u64 =
+    (TERMINAL_CREDITS_PER_CONNECTION as u64 + 1) * TERMINAL_FRAME_BYTES;
+
 /// Working memory startup reserves beyond one inbound body and one egress frame. Sized for
 /// LocalEmbeddings's worst parse reservation, its full queued-batch budget, one admitted maximum
 /// query, per-item and envelope headroom, the waiter headroom, and the retained job
@@ -77,10 +98,11 @@ pub struct HostLimits {
 
 impl Default for HostLimits {
     fn default() -> Self {
+        let connections =
+            usize::try_from(crate::ring_transport::affordable_connections()).unwrap_or(usize::MAX);
         Self {
             max_handshakes: 32,
-            max_connections: usize::try_from(crate::ring_transport::affordable_connections())
-                .unwrap_or(usize::MAX),
+            max_connections: connections,
             max_routes: 1024,
             max_pending_requests: 1024,
             max_handler_tasks: 256,
@@ -141,6 +163,9 @@ impl HostLimits {
                 minimum: MIN_RESIDENT_BYTES,
             });
         }
+        // The transport, resident, and terminal ceilings stay distinct; their sum must still be
+        // representable so admission never reasons about a wrapped aggregate.
+        self.checked_aggregate()?;
         // Tokio semaphores cap permits below `u32::MAX` on 32-bit targets; byte-granular charges must fit in that cap so `ByteBudget::new` cannot panic.
         // counts.
         let max_budget_bytes = (tokio::sync::Semaphore::MAX_PERMITS as u64).min(u32::MAX as u64);
@@ -151,6 +176,56 @@ impl HostLimits {
             });
         }
         Ok(())
+    }
+}
+
+/// The complete byte commitment a configuration admits: three distinct ceilings and their
+/// checked sum. `total` is a virtual commitment, not a residency claim: pool mappings are
+/// sparse and private copies are bounded by the resident pools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidentAggregate {
+    /// Mapped bytes plus private ledgers for `max_connections` pools, from the transport's
+    /// checked layout charges.
+    pub transport_bytes: u64,
+    /// `max_resident_bytes`: ingress admission, egress, and scratch slices.
+    pub host_bytes: u64,
+    /// Dedicated terminal encoding bytes for `max_connections`, outside `host_bytes`.
+    pub terminal_bytes: u64,
+    /// `transport_bytes + host_bytes + terminal_bytes`.
+    pub total: u64,
+}
+
+impl HostLimits {
+    /// Terminal encoding bytes reserved for `max_connections` connections.
+    pub fn terminal_reserved_bytes(&self) -> Result<u64, ConfigError> {
+        u64::try_from(self.max_connections)
+            .ok()
+            .and_then(|connections| connections.checked_mul(TERMINAL_RESERVED_BYTES_PER_CONNECTION))
+            .ok_or(ConfigError::AggregateOverflow)
+    }
+
+    /// The checked aggregate of the transport, resident, and terminal ceilings. Fails on
+    /// arithmetic overflow rather than admitting a configuration whose total cannot be stated.
+    pub fn checked_aggregate(&self) -> Result<ResidentAggregate, ConfigError> {
+        let per_connection = crate::ring_transport::ring_profile()
+            .charges()
+            .committed_bytes()
+            .ok_or(ConfigError::AggregateOverflow)?;
+        let transport_bytes = u64::try_from(self.max_connections)
+            .ok()
+            .and_then(|connections| connections.checked_mul(per_connection))
+            .ok_or(ConfigError::AggregateOverflow)?;
+        let terminal_bytes = self.terminal_reserved_bytes()?;
+        let total = transport_bytes
+            .checked_add(self.max_resident_bytes)
+            .and_then(|sum| sum.checked_add(terminal_bytes))
+            .ok_or(ConfigError::AggregateOverflow)?;
+        Ok(ResidentAggregate {
+            transport_bytes,
+            host_bytes: self.max_resident_bytes,
+            terminal_bytes,
+            total,
+        })
     }
 }
 
@@ -370,6 +445,8 @@ pub enum ConfigError {
         configured: u64,
         maximum: u64,
     },
+    /// The transport commitment plus resident bytes for `max_connections` overflows `u64`.
+    AggregateOverflow,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -420,6 +497,10 @@ impl std::fmt::Display for ConfigError {
             } => write!(
                 f,
                 "max_resident_bytes {configured} exceeds supported maximum {maximum}"
+            ),
+            Self::AggregateOverflow => write!(
+                f,
+                "the transport and resident byte aggregate for max_connections overflows; lower max_connections or max_resident_bytes"
             ),
         }
     }
@@ -515,6 +596,50 @@ mod tests {
         ));
         limits.max_resident_bytes = MIN_RESIDENT_BYTES;
         limits.validate().expect("exact minimum accepted");
+        // The terminal encoding slice is its own ceiling beside the resident pools; the
+        // aggregate sums all three with checked arithmetic.
+        let aggregate = limits.checked_aggregate().expect("aggregate");
+        assert_eq!(aggregate.host_bytes, MIN_RESIDENT_BYTES);
+        assert_eq!(
+            aggregate.terminal_bytes,
+            limits.max_connections as u64 * TERMINAL_RESERVED_BYTES_PER_CONNECTION
+        );
+        assert_eq!(
+            aggregate.total,
+            aggregate.transport_bytes + MIN_RESIDENT_BYTES + aggregate.terminal_bytes
+        );
+        assert!(aggregate.transport_bytes > 0);
+    }
+
+    #[test]
+    fn aggregate_overflow_is_rejected_before_activation() {
+        // `max_connections` is already capped by the affordable count, so overflow can only
+        // arrive through the resident budget: a total that cannot be stated is refused rather
+        // than admitted with a wrapped ceiling.
+        let limits = HostLimits {
+            max_resident_bytes: u64::MAX,
+            ..Default::default()
+        };
+        assert!(matches!(
+            limits.checked_aggregate(),
+            Err(ConfigError::AggregateOverflow)
+        ));
+        let exact = HostLimits::default();
+        let aggregate = exact.checked_aggregate().expect("default aggregate");
+        assert_eq!(
+            aggregate.terminal_bytes,
+            exact.max_connections as u64 * 64 * TERMINAL_FRAME_BYTES,
+            "63 credits plus one pre-admission rejection slice per connection"
+        );
+        assert_eq!(
+            TERMINAL_CREDITS_PER_CONNECTION as u32 + 1,
+            crate::ring_transport::ring_profile()
+                .geometry()
+                .class(shm_transport::pool::BlockClass::Terminal)
+                .count,
+            "one credit per reserved terminal block, less the block kept for a pre-admission \
+             rejection"
+        );
     }
 
     #[test]

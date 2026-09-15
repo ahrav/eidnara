@@ -12,8 +12,10 @@ Resolved against the tree of this catalog's introducing commit:
 
 - docs/payload-pool-protocol.md section 11
 - `docs/host-wire-protocol.md:314`
+- `crates/host-runtime/src/ring_transport.rs:1131`
+- `crates/host-runtime/src/ring_transport.rs:1158`
 
-Witness status: not yet - eligibility selection (Request correlation order, stream prefix before terminal, drain before Goodbye, no channel-0 Request bypass) is #548's host publisher and #552/#550's client publishers; this layer promises FIFO descriptor consumption only.
+Witness status: partial - `crates/host-runtime/src/ring_transport.rs:3424` checks the host publisher: a blocked ordinary head lets an eligible Ping and an unrelated terminal through, a terminal whose stream prefix is blocked waits, and Goodbye waits for every earlier frame; `crates/host-runtime/src/ring_transport.rs:3658` pins that a channel-0 Request is never a bypass control. Client publishers belong to #552 and #550.
 
 ## Failure scenario
 
@@ -39,7 +41,7 @@ Check semantics: `always` - the sequence of published headers per direction sati
 
 - Sources examined: the files listed under the evidence trail, the test names
   in `Exercised`, and the CI workflow where the record is a gate property.
-- Findings: not yet at the tree of this catalog's introducing commit; see `Exercised` for what each
+- Findings: partial at the tree of this catalog's introducing commit; see `Exercised` for what each
   witness constructs and what it leaves unconstructed.
-- Missing evidence: #548, #552, #550.
+- Missing evidence: #552, #550 for client publishers.
 - Conclusion: unresolved, needs the named handoff.

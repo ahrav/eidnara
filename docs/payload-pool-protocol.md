@@ -262,8 +262,8 @@ backing charge to the quarantined bucket. If quarantine accounting itself fails,
 the charge stays counted as active for the process lifetime; nothing refunds
 storage whose release is unproved.
 
-One connection commits 191,666,800 bytes: two mappings of 95,825,920 bytes and
-two ledgers of 7,480 bytes (187 blocks at 40 bytes). The host admits
+One connection commits 191,668,296 bytes: two mappings of 95,825,920 bytes and
+two ledgers of 8,228 bytes (187 blocks at 44 bytes). The host admits
 connections under a fixed ceiling of 1 GiB (`MAX_RING_RESIDENT_BYTES` in
 `crates/host-runtime/src/ring_transport.rs`), so the default and maximum
 `max_connections` is 5. The FIFO ring this layout replaced charged 64 MiB per
@@ -313,3 +313,17 @@ or for ordinary descriptor headroom. Application ordering rules (Request
 correlation order, per-stream data before terminal, drain before `Goodbye`)
 are the Host Wire Protocol's and are enforced by the publisher's selection
 policy, not by this layer.
+
+The host publisher (`Publisher` in `crates/host-runtime/src/ring_transport.rs`)
+implements that policy as follows. Pending frames keep admission order.
+Pure-header `Ping`, `Pong`, `Cancel`, and `Goodbye` take the control reserve;
+`Error` and `StreamEnd` bodies that fit the terminal class take the terminal
+reserve; everything else, including a channel-0 `Request`, is ordinary and
+never bypasses. A control other than `Goodbye` publishes past a blocked
+ordinary head at once. A terminal publishes past it only when no earlier
+pending frame shares its `(channel, corr)`, so a stream's data always precedes
+its end. `Goodbye` waits for every earlier frame. A frame past its deadline
+retires as `not_sent` with nothing published. Each connection holds 63 terminal
+credits; a request takes one before dispatch and the credit returns when the
+terminal's block physically returns, so admitted requests never exceed the
+terminal inventory while one block stays free for a pre-admission rejection.
