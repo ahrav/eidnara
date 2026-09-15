@@ -31,6 +31,9 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | --- | --- | --- | --- |
 | `state_follows_the_documented_precedence` | `crates/retrieval/tests/claims.rs` | the full state table with precedence, written by hand, including a successor recorded without invalidation and every Hidden-over-Stale conflict pair | unaudited |
 | `causal_class_changes_no_state` | same | Unknown neutrality across every state-relevant fact combination | unaudited |
+| `a_lineage_disposition_binds_like_the_own_row` | same | every lineage disposition over an active own row, and a lineage row more restrictive than the own row | unaudited |
+| `a_row_outside_the_live_descriptor_inventory_is_retracted` | same | `Retracted` when no live descriptor matches the row's id, class, and representation; a successor still wins | unaudited |
+| `live_rows::a_second_canonical_object_association_on_one_row_is_refused` | same | `CorruptRow` for a second `canonical_object` association on one occurrence | unaudited |
 | `a_candidate_from_another_batch_reads_no_facts` | same | `ClaimCandidateBatch::claim` returns `None` for a candidate whose index is out of range or names another object | unaudited |
 | `live_rows::an_association_whose_target_disagrees_with_its_key_or_row_is_refused` | same | `CorruptRow` when the association target, its key, or the occurrence tuple name different objects | unaudited |
 | `live_rows::a_projection_from_another_kernel_incarnation_is_refused_before_any_read` | same | `NoIdentity` and `ForeignKernel` before the row bound is checked | unaudited |

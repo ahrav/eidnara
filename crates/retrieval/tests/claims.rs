@@ -4,9 +4,9 @@
 
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    AdmissionFacts, CausalClass, ClaimDecisionFacts, ClaimFacts, Disposition, EventKind, Maturity,
-    ObjectRow, Outcome, Sensitivity, ServedFacts, ServedStanding, SourceClass, SurfaceVisibility,
-    TaintClass, UnknownReason, VisibilityRow,
+    AdmissionFacts, CausalClass, ClaimDecisionFacts, ClaimFacts, ClaimOccurrence, Disposition,
+    EventKind, Maturity, ObjectRow, Outcome, Sensitivity, ServedFacts, ServedStanding, SourceClass,
+    SurfaceVisibility, TaintClass, UnknownReason, VisibilityRow,
 };
 use retrieval::claims::{
     CandidateState, ClaimCandidate, ClaimCandidateBatch, ClaimCandidateRow, classify,
@@ -57,7 +57,10 @@ struct Facts {
     superseded_by: Option<&'static str>,
     revision: i64,
     disposition: Option<Disposition>,
+    lineage: Option<Disposition>,
     served: ServedStanding,
+    /// Whether the kernel's live descriptor inventory lists the row `occurrence` builds.
+    listed: bool,
     causality: CausalClass,
 }
 
@@ -68,7 +71,9 @@ impl Facts {
             superseded_by: None,
             revision: 1,
             disposition: Some(Disposition::Active),
+            lineage: None,
             served: served(SurfaceVisibility::Labeled),
+            listed: true,
             causality: CausalClass::Unknown(UnknownReason::NoRecord),
         }
     }
@@ -96,9 +101,23 @@ impl Facts {
                 evidence_id: None,
             },
             own_admission: self.disposition.map(admission),
-            lineage_admission: None,
+            lineage_admission: self.lineage.map(admission),
             served: self.served,
-            occurrences: Vec::new(),
+            occurrences: if self.listed {
+                vec![ClaimOccurrence {
+                    class: OccurrenceClass::CanonicalClaims,
+                    representation: "decision_summary",
+                    descriptor_object_id: "descriptor".to_string(),
+                    occurrence_id: "occ".to_string(),
+                    lineage_id: "lineage".to_string(),
+                    payload_id: "payload".to_string(),
+                    artifact_digest: "0".repeat(64),
+                    evidence_id: "evidence".to_string(),
+                    descriptor_commit_seq: 3,
+                }]
+            } else {
+                Vec::new()
+            },
             excluded_representations: Vec::new(),
             causality: self.causality,
             causal_record: None,
@@ -309,6 +328,92 @@ fn state_follows_the_documented_precedence() {
 
 /// Unknown neutrality: for every state, the class is the only field that
 /// differs between an otherwise identical genuine and unknown claim.
+/// The serving view folds a lineage decision into every surface, so the
+/// classifier reads the lineage row's disposition with the same precedence as
+/// the own row's.
+#[test]
+fn a_lineage_disposition_binds_like_the_own_row() {
+    let cases = [
+        (Disposition::Stale, CandidateState::Stale),
+        (Disposition::Superseded, CandidateState::Superseded),
+        (Disposition::Rejected, CandidateState::Hidden),
+        (Disposition::Contradicted, CandidateState::Hidden),
+        (Disposition::Quarantined, CandidateState::Hidden),
+        (Disposition::Disputed, CandidateState::Current),
+        (Disposition::Active, CandidateState::Current),
+    ];
+    for (lineage, expected) in cases {
+        let facts = Facts {
+            lineage: Some(lineage),
+            ..Facts::current()
+        }
+        .build();
+        assert_eq!(
+            classify(&occurrence(1), Some(&facts)),
+            expected,
+            "lineage {lineage:?} over an active own row"
+        );
+    }
+    // The own row's disposition does not shadow a more restrictive lineage row.
+    let facts = Facts {
+        disposition: Some(Disposition::Rejected),
+        lineage: Some(Disposition::Superseded),
+        ..Facts::current()
+    }
+    .build();
+    assert_eq!(
+        classify(&occurrence(1), Some(&facts)),
+        CandidateState::Superseded
+    );
+    let facts = Facts {
+        disposition: Some(Disposition::Stale),
+        lineage: Some(Disposition::Quarantined),
+        served: served(SurfaceVisibility::Hidden),
+        ..Facts::current()
+    }
+    .build();
+    assert_eq!(
+        classify(&occurrence(1), Some(&facts)),
+        CandidateState::Hidden
+    );
+}
+
+/// A row whose descriptor the kernel no longer lists as live, for example after
+/// the artifact behind its evidence was deleted while the decision stayed
+/// active, is Retracted: catch-up will tombstone it, and a lagging projection
+/// must not serve it first.
+#[test]
+fn a_row_outside_the_live_descriptor_inventory_is_retracted() {
+    let facts = Facts {
+        listed: false,
+        ..Facts::current()
+    }
+    .build();
+    assert_eq!(
+        classify(&occurrence(1), Some(&facts)),
+        CandidateState::Retracted
+    );
+    // A successor still wins, as it does over an invalidated registry row.
+    let facts = Facts {
+        listed: false,
+        superseded_by: Some("decision-object-2"),
+        ..Facts::current()
+    }
+    .build();
+    assert_eq!(
+        classify(&occurrence(1), Some(&facts)),
+        CandidateState::Superseded
+    );
+    // The inventory entry must match the row's class and representation, not only its id.
+    let mut facts = Facts::current().build();
+    facts.occurrences[0].class = OccurrenceClass::PromotedMemory;
+    facts.occurrences[0].representation = "summary";
+    assert_eq!(
+        classify(&occurrence(1), Some(&facts)),
+        CandidateState::Retracted
+    );
+}
+
 #[test]
 fn a_candidate_from_another_batch_reads_no_facts() {
     let mut other = Facts::current().build();
@@ -584,6 +689,30 @@ mod live_rows {
                 conn.execute(
                     "UPDATE exact_associations SET key=CAST('obj-00000002' AS BLOB)
                      WHERE occurrence_id='occ-00000001'",
+                    [],
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(live_claim_candidates(conn, bound(8))))
+                .unwrap(),
+            Err(ProjectionError::CorruptRow)
+        ));
+    }
+
+    #[test]
+    fn a_second_canonical_object_association_on_one_row_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        seed(&store, 2);
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "INSERT INTO exact_associations(family,namespace,key,occurrence_id,target_id,
+                         extraction_version,created_commit_seq)
+                     VALUES ('id','canonical_object',CAST('obj-00000002' AS BLOB),'occ-00000001',
+                         'obj-00000002',1,1)",
                     [],
                 )
             })

@@ -28,20 +28,22 @@ use crate::{ProjectionError, read_identity};
 /// claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CandidateState {
-    /// The claim object has no registry row at the snapshot or was invalidated
-    /// without a successor.
+    /// The claim object has no registry row at the snapshot, was invalidated
+    /// without a successor, or no longer lists this row's descriptor as live
+    /// (the export's rule: descriptor and evidence both live), so catch-up will
+    /// tombstone the row.
     Retracted,
-    /// The claim object was replaced by a successor, or its own admission
-    /// disposition is `Superseded`.
+    /// The claim object was replaced by a successor, or its own or lineage
+    /// admission disposition is `Superseded`.
     Superseded,
-    /// The own admission disposition is `Rejected`, `Contradicted`, or
-    /// `Quarantined`, or the serving view lists no row for the object or lists
-    /// it hidden on the widest surface.
+    /// The own or lineage admission disposition is `Rejected`, `Contradicted`,
+    /// or `Quarantined`, or the serving view lists no row for the object or
+    /// lists it hidden on the widest surface.
     Hidden,
-    /// The own admission disposition is `Stale`, or the occurrence carries a
-    /// revision other than the object's canonical one. The registry never
-    /// changes an object's revision, so the second input can only come from a
-    /// corrupt projection row and is kept as a guard.
+    /// The own or lineage admission disposition is `Stale`, or the occurrence
+    /// carries a revision other than the object's canonical one. The registry
+    /// never changes an object's revision, so the second input can only come
+    /// from a corrupt projection row and is kept as a guard.
     Stale,
     /// Served on the widest surface with an `Active` or `Disputed` disposition;
     /// a disputed claim serves labeled, and the label travels with the served
@@ -242,19 +244,28 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
     if facts.object.superseded_by.is_some() {
         return CandidateState::Superseded;
     }
-    if facts.object.invalidated_commit_seq.is_some() {
+    let listed = facts.occurrences.iter().any(|occurrence| {
+        occurrence.occurrence_id == row.occurrence_id
+            && occurrence.class == row.class
+            && occurrence.representation == row.representation
+    });
+    if facts.object.invalidated_commit_seq.is_some() || !listed {
         return CandidateState::Retracted;
     }
-    let disposition = facts
-        .own_admission
-        .as_ref()
-        .map(|admission| admission.disposition);
-    match disposition {
-        Some(Disposition::Superseded) => return CandidateState::Superseded,
-        Some(Disposition::Rejected | Disposition::Contradicted | Disposition::Quarantined) => {
-            return CandidateState::Hidden;
-        }
-        Some(Disposition::Stale | Disposition::Active | Disposition::Disputed) | None => {}
+    // The serving view folds the lineage row into every surface, so its
+    // disposition binds the row like the own row's does.
+    let dispositions = [&facts.own_admission, &facts.lineage_admission]
+        .map(|admission| admission.as_ref().map(|admission| admission.disposition));
+    if dispositions.contains(&Some(Disposition::Superseded)) {
+        return CandidateState::Superseded;
+    }
+    if dispositions.iter().flatten().any(|disposition| {
+        matches!(
+            disposition,
+            Disposition::Rejected | Disposition::Contradicted | Disposition::Quarantined
+        )
+    }) {
+        return CandidateState::Hidden;
     }
     match &facts.served {
         ServedStanding::Served(served) if served.explicit_search != SurfaceVisibility::Hidden => {}
@@ -262,7 +273,9 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
         | ServedStanding::NotLiveAtSnapshot
         | ServedStanding::NeverAdmitted => return CandidateState::Hidden,
     }
-    if disposition == Some(Disposition::Stale) || row.revision != facts.object.source_revision {
+    if dispositions.contains(&Some(Disposition::Stale))
+        || row.revision != facts.object.source_revision
+    {
         return CandidateState::Stale;
     }
     CandidateState::Current
