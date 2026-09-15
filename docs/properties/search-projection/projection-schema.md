@@ -5,7 +5,7 @@ search projection that the retrieval crate's
 [baseline](../../../crates/retrieval/baseline.sql) creates. Identity or schema
 incompatibility requires a rebuild from the canonical store, not a schema
 migration. A change to this inventory requires a new schema version and a
-rebuild. The schema version is 4.
+rebuild. The schema version is 5.
 
 The [lifecycle contract](spec-traceability.md) requires staging and verifying a
 complete, compatible replacement before selecting it. During replacement,
@@ -109,6 +109,40 @@ An occurrence that stopped being live. The occurrence row stays so the invalidat
 | `invalidated_commit_seq` | INTEGER | yes | no | `CHECK(invalidated_commit_seq>0)` |
 | `reason` | TEXT | yes | no | `CHECK(reason IN ('superseded','retired','evidence_invalidated','purged'))` |
 | `recorded_at` | INTEGER | yes | no |  |
+
+## `exact_associations`
+
+One row per exact selector key the versioned source mapping derives for an
+occurrence. `family` is the selector keyword, `namespace` scopes the key
+(`canonical_object` for `id`, `<object_format>:<repository_id>` for `sha`),
+`key` is the normalized key bytes, and `target_id` names the logical target
+the occurrence is evidence for, so alias rows of one target share it. The
+composite primary key serves equality and SHA-prefix range scans in stable
+binary order without a sort; the occurrence index serves physical cleanup.
+`extraction_version` records the mapping the row was derived under. The exact
+extraction version is 1; a new mapping requires a new schema version and a
+rebuild, and both the writer and the page reader refuse rows from another
+version rather than reinterpret them. Rows are written in the same transaction
+as their occurrence and before the projection checkpoint advances, and are
+deleted when message cleanup reclaims the occurrence.
+
+| Column | Type | Not null | Primary key | Column constraints |
+| --- | --- | --- | --- | --- |
+| `family` | TEXT | yes | yes | `CHECK(family IN ('id','sha','path','symbol','command','config','error'))` |
+| `namespace` | TEXT | yes | yes |  |
+| `key` | BLOB | yes | yes |  |
+| `occurrence_id` | TEXT | yes | yes | `REFERENCES occurrences(occurrence_id) ON DELETE RESTRICT` |
+| `target_id` | TEXT | yes | no |  |
+| `extraction_version` | INTEGER | yes | no | `CHECK(extraction_version>0)` |
+| `created_commit_seq` | INTEGER | yes | no | `CHECK(created_commit_seq>0)` |
+
+Table constraints:
+
+- `PRIMARY KEY(family,namespace,key,occurrence_id)`
+
+Indexes:
+
+- `idx_exact_associations_occurrence` on `(occurrence_id)`
 
 ## `projection_checkpoint`
 
