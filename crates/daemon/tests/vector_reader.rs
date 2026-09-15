@@ -275,11 +275,11 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
     assert_eq!(census.held[&ResourceClass::LayerTables], resident);
     let mut pinned = composition.members();
     pinned.push(digest.clone());
+    assert_eq!(census.pinned, manifest_bytes(&fixture, &pinned));
     assert_eq!(
-        census.held[&ResourceClass::PinnedGenerations],
-        manifest_bytes(&fixture, &pinned)
+        census.disk, 0,
+        "pinned generations are recorded, not reserved"
     );
-    assert_eq!(census.disk, 0, "pinned generations are census only");
 
     // Rows come back bit for bit from their offsets; codes are the rows under this layer's own scales.
     let layout = view.layout;
@@ -382,7 +382,7 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
                 assert!(!try_exclusive(&fixture.generation_dir(pinned)));
             }
             assert!(held(&fixture.ledger, ResourceClass::LayerTables) > 0);
-            assert!(held(&fixture.ledger, ResourceClass::PinnedGenerations) > 0);
+            assert!(fixture.ledger.census().pinned > 0);
             if event == AcquireEvent::BeforeLastLayer {
                 // An attempted prune reclaims nothing the view needs; the files are witnessed on disk afterwards.
                 let report = GenerationStore::open(Some(fixture.root.path()))

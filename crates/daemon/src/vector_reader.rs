@@ -25,7 +25,7 @@ use retrieval::eligibility::Authority;
 use storage::GuardedConn;
 
 use crate::projection_gates::Admission;
-use crate::vector_admission::{self, Ledger, Reservation, ResourceClass};
+use crate::vector_admission::{self, Ledger, Pinned, Reservation, ResourceClass};
 use crate::vector_composition::{self, SelectorState, Unavailable, VerifiedComposition};
 use crate::vector_generation::{
     self, ExpectedVectors, ROW_IDS_FILE, SCALES_FILE, SIDECAR_FILE, TOMBSTONES_FILE, VectorRefusal,
@@ -192,7 +192,7 @@ pub struct PinnedVectors {
     pub layers: Vec<PinnedLayer>,
     _record: ValidatedGeneration,
     _resident: Reservation,
-    _pinned: Reservation,
+    _pinned: Pinned,
 }
 
 impl std::fmt::Debug for PinnedVectors {
@@ -294,9 +294,8 @@ pub fn acquire(
         .flat_map(|manifest| manifest.files.iter())
         .map(|file| file.size)
         .sum();
-    let resident = ledger.reserve(grant, ResourceClass::LayerTables, resident, 0)?;
-    // Census only: the store's total already holds these bytes, and the reservation says what this view keeps past a prune.
-    let pinned = ledger.reserve(grant, ResourceClass::PinnedGenerations, pinned, 0)?;
+    let resident = ledger.reserve(grant, ResourceClass::LayerTables, resident)?;
+    let pinned = ledger.pin(pinned);
     let epoch = composition.generation_epoch;
     let last = members.len() - 1;
     let mut layers = Vec::with_capacity(members.len());
@@ -389,7 +388,7 @@ pub fn rank(
             },
         })?;
     let _scratch = ledger
-        .reserve(grant, ResourceClass::Scratch, bytes, 0)
+        .reserve(grant, ResourceClass::Scratch, bytes)
         .map_err(|refusal| RankRefusal::Scratch { bytes, refusal })?;
     let layers = view.resolver_layers();
     let query = LayeredQuery {

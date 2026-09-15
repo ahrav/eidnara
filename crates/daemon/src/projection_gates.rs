@@ -320,6 +320,7 @@ impl RuntimeManifest {
                 .and_then(|entry| entry.get("enabled"))
                 .and_then(Value::as_bool)
                 .ok_or_else(|| ManifestRefusal::MalformedFlag(id.clone()))?;
+            // The flag lives beside the hooks because the manifest's fields are frozen; it is read here and never becomes a hook.
             if id == COMPRESSED_ACTIVATION_ID {
                 compressed_activation = flag;
                 continue;
@@ -590,6 +591,24 @@ impl EvidenceEvaluator {
         if !self.manifest.enabled.get(&hook).copied().unwrap_or(false) {
             return Err(Denial::Disabled(hook));
         }
+        self.gates(hook)
+    }
+
+    /// Judges compressed activation: the manifest's flag, then every gate a dense hook passes, then the compression campaign, which must be bound to this identity and this daemon's binding, unrevoked, run under the manifest's vector limits, passed on every criterion, and traced end to end by a real run of each harness.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Denial`]; a report about a campaign never authorizes production on its own.
+    pub fn judge_compressed_activation(&self) -> Result<(), Denial> {
+        if !self.manifest.compressed_activation {
+            return Err(Denial::CompressionDisabled);
+        }
+        self.gates(ProjectionHook::EmbeddingBootstrap)?;
+        self.compression()
+    }
+
+    /// Both identities, then class coverage for `hook`, freshness, resource, capability, and both-harness evidence.
+    fn gates(&self, hook: ProjectionHook) -> Result<(), Denial> {
         if self.manifest.identity != self.current {
             return Err(Denial::ManifestIdentity);
         }
@@ -606,34 +625,6 @@ impl EvidenceEvaluator {
         self.resource()?;
         self.capability()?;
         self.both_harness()
-    }
-
-    /// Judges compressed activation: the manifest's flag, both identities, every gate a dense hook passes, and then the compression campaign, which must be bound to this identity and this daemon's binding, unrevoked, run under the manifest's vector limits, passed on every criterion, and traced end to end by a real run of each harness.
-    ///
-    /// # Errors
-    ///
-    /// Returns the [`Denial`]; a report about a campaign never authorizes production on its own.
-    pub fn judge_compressed_activation(&self) -> Result<(), Denial> {
-        if !self.manifest.compressed_activation {
-            return Err(Denial::CompressionDisabled);
-        }
-        if self.manifest.identity != self.current {
-            return Err(Denial::ManifestIdentity);
-        }
-        if self.evidence.identity != self.current {
-            return Err(Denial::EvidenceIdentity);
-        }
-        let coverage = self
-            .evidence
-            .coverage
-            .as_ref()
-            .ok_or(Denial::Missing(Gate::ClassCoverage))?;
-        self.class_coverage(ProjectionHook::EmbeddingBootstrap, coverage)?;
-        self.freshness(coverage)?;
-        self.resource()?;
-        self.capability()?;
-        self.both_harness()?;
-        self.compression()
     }
 
     fn compression(&self) -> Result<(), Denial> {
@@ -903,6 +894,8 @@ impl HookGate {
                 && ProjectionHook::ALL
                     .iter()
                     .all(|hook| old.judge(*hook).is_err() || evaluator.judge(*hook).is_ok())
+                && (old.judge_compressed_activation().is_err()
+                    || evaluator.judge_compressed_activation().is_ok())
         }) {
             Renewal::Kept
         } else {
@@ -911,6 +904,12 @@ impl HookGate {
         };
         state.evaluator = Some(evaluator);
         renewal
+    }
+
+    /// [`Self::renew`] for tests of the refresh path, which keeps grants whose verdicts did not change and withdraws the rest.
+    #[cfg(feature = "test-support")]
+    pub fn renew_for_test(&self, evaluator: EvidenceEvaluator) -> Renewal {
+        self.renew(evaluator)
     }
 
     /// Removes the evaluator: nothing is admitted until another is installed.

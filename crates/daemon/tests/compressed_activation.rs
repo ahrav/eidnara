@@ -4,7 +4,7 @@ mod support;
 
 use daemon::projection_gates::{
     COMPRESSED_ACTIVATION_ID, COMPRESSION_CRITERIA, Denial, EvidenceEvaluator, Gate, HookGate,
-    Outcome, ProjectionHook, RuntimeManifest, TRACE_STAGES, TraceKind, VECTOR_LIMITS,
+    Outcome, ProjectionHook, Renewal, RuntimeManifest, TRACE_STAGES, TraceKind, VECTOR_LIMITS,
 };
 use serde_json::json;
 use support::projection_gate::{identity, passing_evaluator};
@@ -29,7 +29,7 @@ fn compression(
 fn a_correctly_bound_campaign_admits_and_every_broken_dimension_denies_on_its_own() {
     assert_eq!(judge(|_| {}), Ok(()));
 
-    // Landed disabled: the flag alone refuses, whatever the evidence says.
+    // The flag alone refuses, whatever the evidence says.
     assert_eq!(
         judge(|e| e.manifest.compressed_activation = false),
         Err(Denial::CompressionDisabled)
@@ -197,6 +197,31 @@ fn the_gate_admits_compressed_activation_only_under_an_installed_evaluator_and_w
         gate.admit_compressed_activation().unwrap_err(),
         Denial::NoManifest
     );
+
+    // On the refresh path, evidence alone can withdraw a grant: a revoked campaign under an unchanged manifest cancels it, and unchanged evidence keeps it.
+    let gate = HookGate::closed();
+    gate.install(passing());
+    let grant = gate.admit_compressed_activation().unwrap();
+    assert_eq!(gate.renew_for_test(passing()), Renewal::Kept);
+    assert!(!grant.invalidated.is_cancelled());
+    let mut revoked = passing();
+    compression(&mut revoked).revoked = true;
+    assert_eq!(gate.renew_for_test(revoked), Renewal::Invalidated);
+    assert!(grant.invalidated.is_cancelled());
+    assert_eq!(
+        gate.admit_compressed_activation().unwrap_err(),
+        Denial::Revoked
+    );
+    // Restored evidence admits again; a refusal turning into an admission withdraws nothing, so hook grants stand.
+    let hook_grant = gate
+        .admit(
+            ProjectionHook::EmbeddingBootstrap,
+            daemon::projection_gates::EntryPoint::Explicit,
+        )
+        .unwrap();
+    assert_eq!(gate.renew_for_test(passing()), Renewal::Kept);
+    assert!(!hook_grant.invalidated.is_cancelled());
+    assert!(gate.admit_compressed_activation().is_ok());
 }
 
 #[test]

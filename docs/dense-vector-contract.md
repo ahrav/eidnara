@@ -287,53 +287,65 @@ vector work holds. It has two pools judged against the runtime manifest's
 optional vector limits through the evidence gate: `vector_resident_bytes` for
 model memory, tokenizer cache, SQLite cache, embedding text, row scratch,
 decoded row buffers, and a view's resident tables; `vector_disk_bytes` for
-files being staged, a compactor's working files, and the store's own
-generations. A reservation is atomic against everything already held: the
-ledger locks its tally, adds the increment and, for the disk pool, the bytes
-on disk under the store's generations directory that the caller states, asks
-the gate whether the total is within the limit under the caller's grant, and
-records the reservation only on a yes. Two reservations racing for the last
+files being staged and a compactor's working files, on top of what the store
+holds. A reservation is atomic against everything already held: the ledger
+locks its tally, adds the increment, asks the gate whether the pool's total is
+within the limit under the caller's grant, and records the reservation only
+on a yes. A disk reservation measures the store itself first, every byte on
+disk under the generations directory, complete generations, staging residue,
+and corrupt entries alike, and counts it with the ledger's own disk
+reservations; every disk reserver runs under the lifecycle's exclusive
+transaction lock, which is what keeps one reserver's copy in flight from
+being counted twice by another's walk. Two reservations racing for the last
 bytes cannot both win; a total that leaves the byte domain is refused before
 the gate sees it; a class whose limit the manifest does not carry is refused
 by the gate as an absent limit; a grant the gate has withdrawn admits nothing
-new. Model memory, tokenizer cache, and SQLite cache are static residents
-charged once each, and a second charge of one is refused as a double charge.
-Dropping a reservation releases it and nothing else does: cancelling the work
-that holds one releases nothing until that work lets go, and output that
-keeps its view keeps its reservations.
+new; a class asked of the wrong pool is refused. Model memory, tokenizer
+cache, and SQLite cache are static residents charged once each, and a second
+charge of one is refused as a double charge. Dropping a reservation releases
+it and nothing else does: cancelling the work that holds one releases nothing
+until that work lets go, and output that keeps its view keeps its
+reservations.
 
-Staging reserves the payload inventory in the disk pool on top of the store's
-bytes before it copies anything and releases the reservation when the copy
-is done, since the bytes are then the store's, counted by the next disk
-reservation. Publication admits a composition's delta count against
-`vector_delta_count` before anything is staged. A reader's view reserves its
-resident tables and records the bytes it pins; the pinned class is census
-only, since the store's total already carries those bytes, and it is what a
-prune's readback is reconciled against: `Ledger::reconcile` sets the prune's
-retained bytes beside the ledger's pinned bytes, and a readback above them
-means readers pin what the ledger was never told about. Ranking reserves one
-page of row scratch for the walk's duration. The compactor's entry point
-reserves its working files in the same pool.
+Staging reserves the payload inventory in the disk pool before it copies
+anything and releases the reservation when the copy is done, since the bytes
+are then the store's, measured by the next disk reservation. A manifest the
+store already holds is charged nothing, so a retry after an unknown outcome
+allocates and reserves nothing. Publication admits a composition's delta
+count against `vector_delta_count` before anything is staged; the count is
+the composition's own, so nothing is held for it, and a delta layer's own
+staging is bounded by bytes alone. A reader's view reserves its resident
+tables and records the bytes it pins: pins are not reservations, since the
+store's total already carries those bytes, and they are what a prune's
+readback is reconciled against. `Ledger::reconcile` sets the prune's retained
+bytes beside the ledger's pinned bytes, and a readback above them means
+readers pin what the ledger was never told about. Ranking reserves one page
+of row scratch for the walk's duration. The compactor's entry point reserves
+its working files in the disk pool the same way.
 
 Compressed activation, production use or full-corpus publication of
 compressed vector layers, is judged by the same gate through
 `HookGate::admit_compressed_activation`. The manifest's `hooks` object may
 carry `search_projection.vector.compressed_activation`; absent is disabled,
 and the flag is not a projection hook, so no class coverage or slice runs
-under it. Enabled, the evaluator applies every gate a dense hook passes and
-then the compression campaign in the evidence record: it must be gathered
-under the current projection identity and under the binding the daemon
-itself runs with (build, corpus digest, quantizer recipe, hardware, and the
-version of each harness), not be revoked, record the same vector limits the
-manifest carries (a changed cap invalidates it), pass every criterion
-(fidelity, request latency, startup and cold cache, concurrency, freshness,
-disk, compaction, cancellation, task cost), and carry a real full-path trace
-from each harness showing a real embedding, the exact, lexical, and dense
-lanes, canonical validation, fusion, span grouping, bounded packing, and
-validated application. A missing, stale, wrongly bound, failed, revoked,
-simulated, report-only, or incomplete record refuses. The daemon supplies no
+under it and the frozen hook map is unchanged. Enabled, the evaluator applies
+every gate a dense hook passes and then the compression campaign in the
+evidence record: it must be gathered under the current projection identity
+and under the binding the daemon itself runs with (build, corpus digest,
+quantizer recipe, hardware, and the version of each harness), not be revoked,
+record the same vector limits the manifest carries (a changed cap
+invalidates it), pass every criterion (fidelity, request latency, startup and
+cold cache, concurrency, freshness, disk, compaction, cancellation, task
+cost), and carry a real full-path trace from each harness showing a real
+embedding, the exact, lexical, and dense lanes, canonical validation, fusion,
+span grouping, bounded packing, and validated application. A missing, stale,
+wrongly bound, failed, revoked, simulated, report-only, or incomplete record
+refuses. A refresh whose evidence turns an admitted activation into a refusal
+withdraws the grant like a changed manifest would. The daemon supplies no
 binding of its own here, so activation refuses as missing whatever the record
-says; a report fixture proves the evaluator and authorizes nothing.
+says; a report fixture proves the evaluator and authorizes nothing. The
+vector limits and the activation flag are daemon vocabulary outside the
+construction contract's frozen limit and hook sets.
 
 ## The pinned reader
 
@@ -343,8 +355,8 @@ transaction lock it recovers and verifies the composition as
 `vector_composition::recover` does, pins the composition record and every
 member with a shared lock on its directory descriptor, reserves the bytes the
 view keeps decoded in memory (identifiers, tombstones, scales, sidecar, at
-their manifest-declared sizes) in the ledger's resident pool and records the
-bytes it pins, takes each
+their manifest-declared sizes) in the ledger's resident pool and records with
+the ledger the bytes it pins, takes each
 member's row and code artifacts on the descriptors verification opened and
 hashed them through, together with the tables it decoded, re-reads the
 selector, and only then releases the shared lock. Verification already proved

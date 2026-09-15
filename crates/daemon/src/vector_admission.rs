@@ -1,5 +1,6 @@
 //! One ledger for every byte vector work holds, resident or on disk, judged against the manifest's vector limits through the evidence gate. A reservation is taken atomically against what is already held: the ledger locks its tally, adds the increment, asks the gate whether the total is within the limit, and records it only on a yes, so two reservations racing for the last bytes cannot both win. Dropping a reservation releases it; nothing else does, so cancellation of the work that took it releases nothing until that work lets go.
-//! The disk pool counts the store's own generations as well: a reservation states what the store holds so staging, promotion, and compaction are refused before they would push the store past its bound, not after. Generations a reader pins are already in that store total while they exist, so the pinned class is recorded for the census and for reconciling a prune's readback, not added to the limit a second time.
+//! The disk pool counts the store's own generations as well: a disk reservation walks the store's generations directory itself, so staging and compaction are refused before they would push the store past its bound, not after. Every disk reserver runs under the lifecycle's exclusive transaction lock, which is what keeps one reserver's copy in flight from being counted twice by another's walk.
+//! Generations a reader pins are already in that store total while they exist; the ledger records pins beside the pools, for the census and for reconciling a prune's readback, and never adds them to a limit.
 //! Static residents (model memory, tokenizer, SQLite cache) are charged once each; a second charge for the same class is refused rather than doubled.
 
 use std::collections::BTreeMap;
@@ -13,7 +14,7 @@ use crate::projection_gates::{Admission, Denial, HookGate, InvalidationIdentity}
 /// The limits the ledger's two pools are judged against.
 pub const RESIDENT_LIMIT: &str = "vector_resident_bytes";
 pub const DISK_LIMIT: &str = "vector_disk_bytes";
-/// Deltas a composition may name; checked at delta admission through the same gate.
+/// Deltas a composition may name; checked at publication through the same gate.
 pub const DELTA_LIMIT: &str = "vector_delta_count";
 
 /// What a reservation holds. Every class belongs to one pool and one limit.
@@ -37,8 +38,6 @@ pub enum ResourceClass {
     Staging,
     /// A compactor's working files.
     CompactionScratch,
-    /// Generations a view pins; the store's total already holds their bytes, so this class is census only.
-    PinnedGenerations,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,19 +47,6 @@ pub enum Pool {
 }
 
 impl ResourceClass {
-    pub const ALL: [ResourceClass; 10] = [
-        Self::ModelMemory,
-        Self::TokenizerCache,
-        Self::SqliteCache,
-        Self::Text,
-        Self::Scratch,
-        Self::RowBuffers,
-        Self::LayerTables,
-        Self::Staging,
-        Self::CompactionScratch,
-        Self::PinnedGenerations,
-    ];
-
     pub fn pool(self) -> Pool {
         match self {
             Self::ModelMemory
@@ -70,13 +56,8 @@ impl ResourceClass {
             | Self::Scratch
             | Self::RowBuffers
             | Self::LayerTables => Pool::Resident,
-            Self::Staging | Self::CompactionScratch | Self::PinnedGenerations => Pool::Disk,
+            Self::Staging | Self::CompactionScratch => Pool::Disk,
         }
-    }
-
-    /// Whether the class adds to its pool's limit; pinned generations are already in the store total a disk reservation states.
-    pub fn counted(self) -> bool {
-        self != Self::PinnedGenerations
     }
 
     /// Charged once for the process; a second reservation is a double charge.
@@ -103,24 +84,27 @@ pub enum Refusal {
     Denied(#[from] Denial),
     #[error("{class:?} is already charged; a static resident is charged once")]
     AlreadyCharged { class: ResourceClass },
+    #[error("a {pool:?} class was asked for the other pool")]
+    WrongPool { pool: Pool },
     #[error("the {pool:?} total would leave the byte domain")]
     Overflow { pool: Pool },
-    #[error("the lifecycle store refused: {0}")]
+    #[error("the lifecycle store could not be measured: {0}")]
     Store(String),
 }
 
-/// What the ledger holds at one instant, by class and by pool. The pool totals are what the limits see: `disk` leaves out the census-only pinned class, which the store's own total already carries.
+/// What the ledger holds at one instant: each pool's reserved bytes, the bytes readers pin, and the reservations by class. `disk` is the ledger's own disk reservations; the store's bytes join them only at reservation time.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Census {
     pub held: BTreeMap<ResourceClass, u64>,
     pub resident: u64,
     pub disk: u64,
+    pub pinned: u64,
 }
 
-/// A prune's readback set against the ledger's pinned generations.
+/// A prune's readback set against the ledger's pinned bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reconciliation {
-    /// Bytes the ledger holds for pinned generations.
+    /// Bytes readers told the ledger they pin.
     pub ledger_pinned: u64,
     /// Bytes the prune could not reclaim because readers pin them.
     pub prune_retained: u64,
@@ -133,10 +117,27 @@ impl Reconciliation {
     }
 }
 
+#[derive(Default)]
+struct Tally {
+    held: BTreeMap<ResourceClass, u64>,
+    pinned: u64,
+}
+
+impl Tally {
+    fn pool_total(&self, pool: Pool) -> Option<u64> {
+        self.held
+            .iter()
+            .filter(|(class, _)| class.pool() == pool)
+            .map(|(_, held)| *held)
+            .try_fold(0u64, |sum, held| sum.checked_add(held))
+    }
+}
+
 pub struct Ledger {
     gate: Arc<HookGate>,
     identity: InvalidationIdentity,
-    held: Mutex<BTreeMap<ResourceClass, u64>>,
+    /// Locked before the gate's own lock and never the other way, so a reservation cannot deadlock against a gate operation.
+    tally: Mutex<Tally>,
 }
 
 impl std::fmt::Debug for Ledger {
@@ -152,88 +153,117 @@ impl Ledger {
         Arc::new(Self {
             gate,
             identity,
-            held: Mutex::new(BTreeMap::new()),
+            tally: Mutex::new(Tally::default()),
         })
     }
 
-    pub fn census(&self) -> Census {
-        let held = self
-            .held
+    fn lock(&self) -> std::sync::MutexGuard<'_, Tally> {
+        self.tally
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut census = Census {
-            held: held.clone(),
-            resident: 0,
-            disk: 0,
-        };
-        for (class, bytes) in held.iter().filter(|(class, _)| class.counted()) {
-            match class.pool() {
-                Pool::Resident => census.resident += bytes,
-                Pool::Disk => census.disk += bytes,
-            }
-        }
-        census
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The bytes on disk under the store's generations directory, complete generations, staging residue, and corrupt entries alike: what the disk pool must count before any reservation. On-disk sizes, not manifests, so an entry whose manifest is unreadable still counts what it occupies.
+    pub fn census(&self) -> Census {
+        let tally = self.lock();
+        Census {
+            held: tally.held.clone(),
+            resident: tally.pool_total(Pool::Resident).unwrap_or(u64::MAX),
+            disk: tally.pool_total(Pool::Disk).unwrap_or(u64::MAX),
+            pinned: tally.pinned,
+        }
+    }
+
+    /// The bytes on disk under the store's generations directory, complete generations, staging residue, and corrupt entries alike, measured by size rather than manifest so an entry whose manifest is unreadable still counts what it occupies. The layout is one directory of entries each holding files, so the walk goes one level down and no further.
     ///
     /// # Errors
     ///
-    /// A generations directory that cannot be walked.
+    /// A generations directory that cannot be read.
     pub fn store_bytes(store: &GenerationStore) -> Result<u64, Refusal> {
-        fn walk(dir: &Path, total: &mut u64) -> std::io::Result<()> {
+        fn files_in(dir: &Path, total: &mut u64) -> std::io::Result<()> {
             for entry in std::fs::read_dir(dir)? {
-                let entry = entry?;
-                let metadata = entry.metadata()?;
-                if metadata.is_dir() {
-                    walk(&entry.path(), total)?;
-                } else if metadata.is_file() {
+                let metadata = entry?.metadata()?;
+                if metadata.is_file() {
                     *total = total.saturating_add(metadata.len());
                 }
             }
             Ok(())
         }
-        let mut total = 0u64;
-        walk(&store.root().join(GENERATIONS_DIR_NAME), &mut total)
-            .map_err(|error| Refusal::Store(error.kind().to_string()))?;
-        Ok(total)
+        fn walk(generations: &Path) -> std::io::Result<u64> {
+            let mut total = 0u64;
+            for entry in std::fs::read_dir(generations)? {
+                let entry = entry?;
+                let metadata = entry.metadata()?;
+                if metadata.is_dir() {
+                    files_in(&entry.path(), &mut total)?;
+                } else if metadata.is_file() {
+                    total = total.saturating_add(metadata.len());
+                }
+            }
+            Ok(total)
+        }
+        walk(&store.root().join(GENERATIONS_DIR_NAME))
+            .map_err(|error| Refusal::Store(error.kind().to_string()))
     }
 
-    /// Reserves `bytes` of `class` against the pool's limit under `grant`; the `store_bytes` a disk reservation states are counted with what the ledger holds. Atomic with respect to every other reservation.
+    /// Reserves `bytes` of a resident class against `vector_resident_bytes` under `grant`, atomically with respect to every other reservation.
     ///
     /// # Errors
     ///
-    /// The gate's denial when the total would exceed the limit or the limit is absent, an overflow, or a second charge of a static class.
+    /// The gate's denial when the total would exceed the limit or the limit is absent, an overflow, a second charge of a static class, or a disk class.
     pub fn reserve(
         self: &Arc<Self>,
         grant: &Admission,
         class: ResourceClass,
         bytes: u64,
-        store_bytes: u64,
     ) -> Result<Reservation, Refusal> {
-        let mut held = self
-            .held
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if class.is_static() && held.contains_key(&class) {
+        if class.pool() != Pool::Resident {
+            return Err(Refusal::WrongPool { pool: Pool::Disk });
+        }
+        self.reserve_in(grant, class, bytes, 0)
+    }
+
+    /// Reserves `bytes` of a disk class against `vector_disk_bytes` on top of what `store` holds on disk, under `grant`. The caller holds the lifecycle's exclusive transaction lock, so no other disk reserver's copy is in flight during the walk.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::reserve`], a store that cannot be measured, or a resident class.
+    pub fn reserve_disk(
+        self: &Arc<Self>,
+        grant: &Admission,
+        class: ResourceClass,
+        bytes: u64,
+        store: &GenerationStore,
+    ) -> Result<Reservation, Refusal> {
+        if class.pool() != Pool::Disk {
+            return Err(Refusal::WrongPool {
+                pool: Pool::Resident,
+            });
+        }
+        let base = Self::store_bytes(store)?;
+        self.reserve_in(grant, class, bytes, base)
+    }
+
+    fn reserve_in(
+        self: &Arc<Self>,
+        grant: &Admission,
+        class: ResourceClass,
+        bytes: u64,
+        base: u64,
+    ) -> Result<Reservation, Refusal> {
+        let pool = class.pool();
+        let mut tally = self.lock();
+        if class.is_static() && tally.held.contains_key(&class) {
             return Err(Refusal::AlreadyCharged { class });
         }
-        let pool = class.pool();
-        let pool_held = held
-            .iter()
-            .filter(|(other, _)| other.pool() == pool && other.counted())
-            .map(|(_, held)| *held)
-            .try_fold(0u64, |sum, held| sum.checked_add(held))
-            .ok_or(Refusal::Overflow { pool })?;
-        let base = if pool == Pool::Disk { store_bytes } else { 0 };
-        let increment = if class.counted() { bytes } else { 0 };
-        let total = pool_held
-            .checked_add(increment)
+        let total = tally
+            .pool_total(pool)
+            .and_then(|held| held.checked_add(bytes))
             .and_then(|total| total.checked_add(base))
             .ok_or(Refusal::Overflow { pool })?;
         self.gate
             .check_limits(grant, &self.identity, &[(pool.limit(), total)])?;
-        *held.entry(class).or_insert(0) += bytes;
+        let entry = tally.held.entry(class).or_insert(0);
+        *entry = entry.checked_add(bytes).ok_or(Refusal::Overflow { pool })?;
         Ok(Reservation {
             ledger: Arc::clone(self),
             class,
@@ -241,7 +271,17 @@ impl Ledger {
         })
     }
 
-    /// Whether a composition of `deltas` deltas is within the manifest's delta bound.
+    /// Records `bytes` a reader pins on disk. The store's total already holds them, so no limit is consulted; the record is what a prune's readback is reconciled against.
+    pub fn pin(self: &Arc<Self>, bytes: u64) -> Pinned {
+        let mut tally = self.lock();
+        tally.pinned = tally.pinned.saturating_add(bytes);
+        Pinned {
+            ledger: Arc::clone(self),
+            bytes,
+        }
+    }
+
+    /// Whether a composition of `deltas` deltas is within the manifest's delta bound. The count is the composition's own, so nothing is held; publication asks before it stages the record.
     ///
     /// # Errors
     ///
@@ -253,27 +293,24 @@ impl Ledger {
 
     pub fn reconcile(&self, report: &PruneReport) -> Reconciliation {
         Reconciliation {
-            ledger_pinned: self
-                .census()
-                .held
-                .get(&ResourceClass::PinnedGenerations)
-                .copied()
-                .unwrap_or(0),
+            ledger_pinned: self.lock().pinned,
             prune_retained: report.retained_bytes,
         }
     }
 
     fn release(&self, class: ResourceClass, bytes: u64) {
-        let mut held = self
-            .held
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(entry) = held.get_mut(&class) {
+        let mut tally = self.lock();
+        if let Some(entry) = tally.held.get_mut(&class) {
             *entry = entry.saturating_sub(bytes);
             if *entry == 0 {
-                held.remove(&class);
+                tally.held.remove(&class);
             }
         }
+    }
+
+    fn unpin(&self, bytes: u64) {
+        let mut tally = self.lock();
+        tally.pinned = tally.pinned.saturating_sub(bytes);
     }
 }
 
@@ -298,5 +335,18 @@ impl Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         self.ledger.release(self.class, self.bytes);
+    }
+}
+
+/// Bytes a reader pins on disk, recorded until dropped.
+#[derive(Debug)]
+pub struct Pinned {
+    ledger: Arc<Ledger>,
+    bytes: u64,
+}
+
+impl Drop for Pinned {
+    fn drop(&mut self) {
+        self.ledger.unpin(self.bytes);
     }
 }

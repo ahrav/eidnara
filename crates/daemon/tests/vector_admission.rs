@@ -51,14 +51,12 @@ fn exceeded(limit: &str, observed: u64, max: u64) -> Refusal {
 fn the_exact_bound_admits_one_more_byte_refuses_and_overflow_never_reaches_the_gate() {
     let (gate, ledger) = ledger_with(RESIDENT_LIMIT, 100);
     let grant = admit(&gate);
-    let text = ledger.reserve(&grant, ResourceClass::Text, 60, 0).unwrap();
-    let scratch = ledger
-        .reserve(&grant, ResourceClass::Scratch, 40, 0)
-        .unwrap();
+    let text = ledger.reserve(&grant, ResourceClass::Text, 60).unwrap();
+    let scratch = ledger.reserve(&grant, ResourceClass::Scratch, 40).unwrap();
     assert_eq!(ledger.census().resident, 100);
     assert_eq!(
         ledger
-            .reserve(&grant, ResourceClass::RowBuffers, 1, 0)
+            .reserve(&grant, ResourceClass::RowBuffers, 1)
             .unwrap_err(),
         exceeded(RESIDENT_LIMIT, 101, 100),
         "the pool is judged as a whole, whatever class asks"
@@ -70,7 +68,7 @@ fn the_exact_bound_admits_one_more_byte_refuses_and_overflow_never_reaches_the_g
     );
     assert_eq!(
         ledger
-            .reserve(&grant, ResourceClass::RowBuffers, u64::MAX, 0)
+            .reserve(&grant, ResourceClass::RowBuffers, u64::MAX)
             .unwrap_err(),
         Refusal::Overflow {
             pool: Pool::Resident
@@ -79,7 +77,7 @@ fn the_exact_bound_admits_one_more_byte_refuses_and_overflow_never_reaches_the_g
     drop(scratch);
     assert_eq!(ledger.census().resident, 60);
     let again = ledger
-        .reserve(&grant, ResourceClass::RowBuffers, 40, 0)
+        .reserve(&grant, ResourceClass::RowBuffers, 40)
         .unwrap();
     assert_eq!(
         (again.class(), again.bytes()),
@@ -88,24 +86,23 @@ fn the_exact_bound_admits_one_more_byte_refuses_and_overflow_never_reaches_the_g
     drop((text, again));
     assert_eq!(ledger.census(), Census::default());
 
-    // A resident reservation never touches the disk pool and a disk reservation never touches the resident pool.
-    let (gate, ledger) = ledger_with(DISK_LIMIT, 10);
-    let grant = admit(&gate);
-    let resident = ledger
-        .reserve(&grant, ResourceClass::Text, 1 << 20, 0)
-        .unwrap();
+    // A class is bound to its pool: a disk class asked of the resident entry point is refused, and so is the reverse.
     assert_eq!(
         ledger
-            .reserve(&grant, ResourceClass::Staging, 11, 0)
+            .reserve(&grant, ResourceClass::Staging, 1)
             .unwrap_err(),
-        exceeded(DISK_LIMIT, 11, 10)
+        Refusal::WrongPool { pool: Pool::Disk }
     );
-    assert!(
-        ledger
-            .reserve(&grant, ResourceClass::Staging, 10, 0)
-            .is_ok()
+    let fixture = Fixture::new();
+    assert_eq!(
+        fixture
+            .ledger
+            .reserve_disk(&fixture.admission, ResourceClass::Text, 1, &fixture.store)
+            .unwrap_err(),
+        Refusal::WrongPool {
+            pool: Pool::Resident
+        }
     );
-    drop(resident);
 }
 
 #[test]
@@ -120,7 +117,7 @@ fn competing_reservations_admit_exactly_what_fits_and_a_cancelled_grant_releases
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 barrier.wait();
-                ledger.reserve(&grant, ResourceClass::Text, 10, 0)
+                ledger.reserve(&grant, ResourceClass::Text, 10)
             })
         })
         .collect();
@@ -151,9 +148,7 @@ fn competing_reservations_admit_exactly_what_fits_and_a_cancelled_grant_releases
     drop(outcomes);
     assert_eq!(ledger.census(), Census::default());
     assert_eq!(
-        ledger
-            .reserve(&grant, ResourceClass::Text, 1, 0)
-            .unwrap_err(),
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
         Refusal::Denied(Denial::Invalidated)
     );
 }
@@ -163,11 +158,11 @@ fn static_residents_are_charged_once_and_an_absent_limit_fails_closed() {
     let (gate, ledger) = ledger_with(RESIDENT_LIMIT, u64::MAX);
     let grant = admit(&gate);
     let model = ledger
-        .reserve(&grant, ResourceClass::ModelMemory, 1 << 30, 0)
+        .reserve(&grant, ResourceClass::ModelMemory, 1 << 30)
         .unwrap();
     assert_eq!(
         ledger
-            .reserve(&grant, ResourceClass::ModelMemory, 1, 0)
+            .reserve(&grant, ResourceClass::ModelMemory, 1)
             .unwrap_err(),
         Refusal::AlreadyCharged {
             class: ResourceClass::ModelMemory
@@ -175,12 +170,12 @@ fn static_residents_are_charged_once_and_an_absent_limit_fails_closed() {
         "the model is never counted twice"
     );
     let _tokenizer = ledger
-        .reserve(&grant, ResourceClass::TokenizerCache, 1 << 10, 0)
+        .reserve(&grant, ResourceClass::TokenizerCache, 1 << 10)
         .unwrap();
     drop(model);
     assert!(
         ledger
-            .reserve(&grant, ResourceClass::ModelMemory, 1 << 30, 0)
+            .reserve(&grant, ResourceClass::ModelMemory, 1 << 30)
             .is_ok(),
         "released, the class may be charged again"
     );
@@ -193,9 +188,7 @@ fn static_residents_are_charged_once_and_an_absent_limit_fails_closed() {
     let ledger = Ledger::new(Arc::clone(&gate), InvalidationIdentity::from(&identity));
     let grant = admit(&gate);
     assert_eq!(
-        ledger
-            .reserve(&grant, ResourceClass::Text, 1, 0)
-            .unwrap_err(),
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
         Refusal::Denied(Denial::Failed(
             Gate::Resource,
             format!("limit {RESIDENT_LIMIT} is absent")
@@ -253,17 +246,24 @@ fn the_disk_pool_counts_the_store_and_staging_is_refused_before_it_would_exceed_
         Ledger::store_bytes(&fixture.store).unwrap() >= store_bytes + staged_bytes,
         "the store's own total grew by at least the staged files"
     );
-    // A compactor's scratch reservation is judged against the same pool and the same store total.
-    let compaction = fixture.ledger.reserve(
+    // A compactor's scratch reservation is judged against the same pool and the same store total; a resident reservation meanwhile leaves the disk pool alone.
+    let _resident = fixture
+        .ledger
+        .reserve(&fixture.admission, ResourceClass::Text, 1 << 20)
+        .unwrap();
+    let compaction = fixture.ledger.reserve_disk(
         &fixture.admission,
         ResourceClass::CompactionScratch,
         1,
-        Ledger::store_bytes(&fixture.store).unwrap(),
+        &fixture.store,
     );
     assert!(matches!(
         compaction,
         Err(Refusal::Denied(Denial::LimitExceeded { .. }))
     ));
+    // Staging the same manifest again allocates nothing and is not charged again.
+    fixture.set_limit(DISK_LIMIT, Ledger::store_bytes(&fixture.store).unwrap());
+    assert_eq!(stage(&built, &fixture.staging()).unwrap(), digest);
 }
 
 #[test]
