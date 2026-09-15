@@ -12,6 +12,7 @@ pub mod applicability;
 mod backup;
 mod cas;
 mod claim_causality;
+mod claim_facts;
 mod commit_read;
 mod consumer_obligations;
 mod current_input;
@@ -71,6 +72,11 @@ pub use claim_causality::{
     CausalOperation, CausalReading, CausalRecord, ClaimCausalityError, ClaimCausalityOutcome,
     ClaimCausalityRequest, DERIVED_FROM_DEPENDENCY_KIND, MAX_DERIVATION_PARENTS, ParentReference,
     UnknownReason,
+};
+pub use claim_facts::{
+    AdmissionFacts, ClaimDecisionFacts, ClaimFactBounds, ClaimFacts, ClaimFactsError,
+    ClaimFactsSnapshot, ClaimOccurrence, ExcludedRepresentation, RepresentationExclusion,
+    ServedFacts, ServedStanding, SupportingApproval,
 };
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,

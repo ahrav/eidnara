@@ -2629,6 +2629,24 @@ fn approval_chain_valid_at_snapshot_sql(approval_column: &str) -> String {
 }
 // policy-digest:chain-end
 
+/// The snapshot-bound authority check as SQL for readers outside this module.
+/// Binds `:governing_as_of`; the policy digest covers the definition it wraps.
+pub(crate) fn supporting_approval_valid_sql(approval_column: &str) -> String {
+    approval_chain_valid_at_snapshot_sql(approval_column)
+}
+
+/// The serving view's own-row selection at `:governing_as_of`, for readers
+/// outside this module. The enclosing query must bind `o` to `object_registry`.
+pub(crate) fn served_own_decision_sql(alias: &str) -> String {
+    latest_own_decision_sql(alias, &format!("AND {alias}.commit_seq<=:governing_as_of"))
+}
+
+/// The serving view's lineage-row selection at `:governing_as_of`, for readers
+/// outside this module. The enclosing query must bind `o` to `object_registry`.
+pub(crate) fn served_lineage_decision_sql(alias: &str) -> String {
+    latest_lineage_decision_sql(alias, &format!("AND {alias}.commit_seq<=:governing_as_of"))
+}
+
 /// A validated trigger reports the sensitivity it carries, which composes into the
 /// admission so an observation cannot admit content less classified than itself.
 ///
@@ -3250,7 +3268,7 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
 // policy-digest:serving-end
 
 /// Returns served rows before a surface is applied.
-fn served_classes(
+pub(crate) fn served_classes(
     tx: &Transaction<'_>,
     requested: i64,
     ids: Option<&str>,

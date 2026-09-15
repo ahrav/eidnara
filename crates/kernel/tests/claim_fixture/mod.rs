@@ -1,16 +1,18 @@
-//! A real-store fixture for the claim causality tests: a domain, admitted
-//! decisions, exact-retained artifacts, and causality records written through
-//! the public API.
+//! A real-store fixture shared by the claim causality and claim facts tests:
+//! a domain, admitted decisions, exact-retained artifacts, published summary
+//! descriptors, and causality records written through the public API.
 
 #![allow(dead_code)]
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 
+use kernel::source_identity::Occurrence;
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CausalClass, CausalEvidence,
     CausalReading, ClaimCausalityError, ClaimCausalityRequest, CommitIntent, DecisionPayload,
     DecisionSpec, DomainSpec, EventKind, KernelStore, ParentReference, ProviderEgress,
-    RepositoryProvenance, Sensitivity, SourceClass, TaintClass,
+    RepositoryProvenance, Sensitivity, SourceClass, SourceDescriptorPolicy,
+    SourceDescriptorRequest, TaintClass,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -29,6 +31,13 @@ pub fn intent(key: &str) -> CommitIntent {
 }
 
 pub const MAX_DETAIL_BYTES: NonZeroU64 = NonZeroU64::new(1 << 16).unwrap();
+
+pub fn bounds() -> kernel::ClaimFactBounds {
+    kernel::ClaimFactBounds {
+        max_claims: NonZeroUsize::new(64).unwrap(),
+        max_causal_payload_bytes: MAX_DETAIL_BYTES,
+    }
+}
 
 pub fn decision(index: i64, revision: i64) -> DecisionSpec {
     DecisionSpec {
@@ -65,6 +74,19 @@ pub fn admission(object_id: &str) -> AdmissionRequest {
             reason: "fixture".to_string(),
         },
     }
+}
+
+/// What one descriptor publication wrote, from the writer's outcome and the
+/// artifact the test retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Published {
+    pub occurrence_id: String,
+    pub lineage_id: String,
+    pub payload_id: String,
+    pub descriptor_object_id: String,
+    pub evidence_id: String,
+    pub digest: String,
+    pub commit_seq: i64,
 }
 
 pub struct Fixture {
@@ -144,6 +166,90 @@ impl Fixture {
         (reported.unwrap(), receipt.commit_seq)
     }
 
+    /// Publishes one descriptor for `decision(index, revision)` under `class`
+    /// and `representation` over fresh exact evidence of `text`.
+    pub fn publish(
+        &self,
+        class: &str,
+        representation: &str,
+        index: i64,
+        revision: i64,
+        text: &str,
+    ) -> Published {
+        let object_id = format!("decision-object-{index}");
+        let (evidence_id, digest) = self.retain(
+            &format!("{class}-{representation}-{index}-{revision}"),
+            text,
+        );
+        let field = if class == "promoted_memory" {
+            "decision_object_id"
+        } else {
+            "object_id"
+        };
+        let identity = [(field, object_id.as_str())];
+        let revision_text = revision.to_string();
+        let mut published = None;
+        self.store
+            .commit(
+                intent(&format!(
+                    "publish-{class}-{representation}-{index}-{revision}"
+                )),
+                |envelope| {
+                    let outcome = envelope
+                        .publish_source_descriptor(&SourceDescriptorRequest {
+                            occurrence: Occurrence {
+                                class,
+                                identity: &identity,
+                                revision: &revision_text,
+                                representation,
+                                span: None,
+                            },
+                            source_policy: SourceDescriptorPolicy::Native,
+                            domain_id: DOMAIN,
+                            scope_id: None,
+                            evidence_id: &evidence_id,
+                            artifact_digest: &digest,
+                            buffer: text,
+                            sensitivity: Sensitivity::Normal,
+                            observed_at: 1,
+                        })
+                        .unwrap();
+                    published = Some(outcome);
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        let outcome = published.unwrap();
+        Published {
+            occurrence_id: outcome.occurrence_id,
+            lineage_id: outcome.lineage_id,
+            payload_id: outcome.payload_id,
+            descriptor_object_id: outcome.object_id,
+            evidence_id,
+            digest,
+            commit_seq: self.tip(),
+        }
+    }
+
+    pub fn publish_summary(&self, index: i64, revision: i64) -> Published {
+        self.publish(
+            "canonical_claims",
+            "decision_summary",
+            index,
+            revision,
+            &format!("decision {index}"),
+        )
+    }
+
+    pub fn facts(&self, object_id: &str, as_of: i64) -> kernel::ClaimFacts {
+        let snapshot = self
+            .store
+            .claim_facts_as_of(&[object_id.to_string()], as_of, bounds())
+            .unwrap();
+        assert!(snapshot.missing.is_empty());
+        snapshot.claims.into_iter().next().unwrap()
+    }
+
     pub fn record(
         &self,
         key: &str,
@@ -202,6 +308,48 @@ impl Fixture {
             })
             .unwrap();
         (handle.evidence_id, handle.digest)
+    }
+
+    /// Seeds `approval`, an accepted decision whose own admission approves it,
+    /// in its own domain, so a later admission can cite it as authority.
+    pub fn seed_approval(&self) {
+        self.store
+            .commit(intent("approval-domain"), |envelope| {
+                envelope.insert_domain(DomainSpec {
+                    domain_id: "approval-domain".to_string(),
+                    object_id: "approval-domain-object".to_string(),
+                    name: "approval domain".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: "approval-domain".to_string(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+        self.sql(
+            "PRAGMA foreign_keys=ON;
+             INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,sensitivity_class
+             ) VALUES (
+                 'approval','decision','approval-domain','fixture','approval',1,1,'normal'
+             );
+             INSERT INTO decisions(
+                 decision_id,object_id,decision_kind,decision_payload,created_commit_seq,
+                 sensitivity_class
+             ) VALUES ('approval-decision','approval','adr_accepted',X'7b7d',1,'normal');
+             INSERT INTO admission_decisions(
+                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                 visibility,outcome,sensitivity_class,policy_revision,reason,elevated_support,
+                 commit_seq,decided_at
+             ) VALUES (
+                 'approval-admission','approval','fixture','approval',1,'explicit_user',
+                 'user_explicit','accepted_adr','approved','approved','active','automatic',
+                 'admit','normal',1,'fixture',1,1,1
+             );",
+        );
     }
 
     pub fn tip(&self) -> i64 {
