@@ -46,8 +46,10 @@ Ticket numbers here are tracking metadata, not names of anything in the tree.
 
 - The projection stores no claim state. `retrieval::claims::classify_live_claims`
   is the snapshot-bound read: it checks the projection identity against the
-  kernel's incarnation, reads the live rows, captures `kernel.tip()`, reads
-  `claim_facts_as_of` at that tip, and maps each row through `classify`, so a
+  kernel's incarnation, reads the live rows, captures the tip and kernel
+  incarnation together with `capture_commit_read_target`, reads
+  `claim_facts_at` that target (refused under the reader guard if the store
+  was restored in between), and maps each row through `classify`, so a
   lagging projection cannot revive a claim the kernel withdrew and a rebuild
   cannot disagree with the projection it replaces. `classify` is the state
   mapping over already-loaded facts: Current, Superseded, Retracted, Hidden, or

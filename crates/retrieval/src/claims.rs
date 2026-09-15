@@ -11,7 +11,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 
-use kernel::source_identity::{OccurrenceClass, occurrence_identity_matches};
+use kernel::source_identity::{
+    OccurrenceClass, Span, derived_lineage_id, identity_digest, occurrence_identity_matches,
+};
 use kernel::{
     ClaimFactBounds, ClaimFacts, ClaimFactsError, Disposition, KernelStore, ServedStanding,
     SurfaceVisibility,
@@ -21,7 +23,7 @@ use storage::GuardedConn;
 
 use crate::exact::selector::Family;
 use crate::exact::{CANONICAL_OBJECT_NAMESPACE, Coverage, EXTRACTION_VERSION, coverage};
-use crate::{ProjectionError, read_identity};
+use crate::{ProjectionError, decode_span, read_identity};
 
 /// Variant order is precedence order: restrictive states sort first, so a
 /// classified claim is never more visible than the kernel's serving view of the
@@ -126,7 +128,7 @@ fn claim_classes() -> &'static [OccurrenceClass] {
 /// association family keyword, `?5` the association namespace.
 const LIVE_CLAIM_ROWS_SQL: &str =
     "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision,
-            a.key,o.tuple
+            a.key,o.tuple,o.lineage_id,o.span_start,o.span_end
      FROM occurrences o
      LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
      LEFT JOIN exact_associations a
@@ -135,16 +137,19 @@ const LIVE_CLAIM_ROWS_SQL: &str =
      ORDER BY o.class,o.occurrence_id
      LIMIT ?3";
 
-type LiveRow = (
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<u32>,
-    i64,
-    Option<Vec<u8>>,
-    Vec<u8>,
-);
+struct LiveRow {
+    occurrence_id: String,
+    class: String,
+    representation: String,
+    target_id: Option<String>,
+    version: Option<u32>,
+    revision: i64,
+    key: Option<Vec<u8>>,
+    tuple: Vec<u8>,
+    lineage_id: String,
+    span_start: Option<i64>,
+    span_end: Option<i64>,
+}
 
 /// Live claim rows in `(class, occurrence_id)` order. A set larger than `max`
 /// is refused whole rather than truncated.
@@ -152,9 +157,11 @@ type LiveRow = (
 /// # Errors
 ///
 /// `TooManyRecords` past `max`; `CorruptRow` for a stored class outside the
-/// contract, a claim row with no `canonical_object` association, or an
-/// association whose key, target, and occurrence tuple do not name one object;
-/// `ExtractionVersionMismatch` for an association from another extractor.
+/// contract, a claim row with no `canonical_object` association, an
+/// association whose key, target, and occurrence tuple do not name one object,
+/// or a row whose id, revision, representation, span, or lineage disagree with
+/// its tuple; `ExtractionVersionMismatch` for an association from another
+/// extractor.
 pub fn live_claim_candidates(
     conn: &GuardedConn<'_>,
     max: NonZeroUsize,
@@ -180,59 +187,77 @@ pub fn live_claim_candidates(
                 CANONICAL_OBJECT_NAMESPACE
             ],
             |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                ))
+                Ok(LiveRow {
+                    occurrence_id: row.get(0)?,
+                    class: row.get(1)?,
+                    representation: row.get(2)?,
+                    target_id: row.get(3)?,
+                    version: row.get(4)?,
+                    revision: row.get(5)?,
+                    key: row.get(6)?,
+                    tuple: row.get(7)?,
+                    lineage_id: row.get(8)?,
+                    span_start: row.get(9)?,
+                    span_end: row.get(10)?,
+                })
             },
         )?
         .collect::<rusqlite::Result<_>>()?;
     if rows.len() > max.get() {
         return Err(ProjectionError::TooManyRecords { count: rows.len() });
     }
-    rows.into_iter()
-        .map(
-            |(occurrence_id, class, representation, object_id, version, revision, key, tuple)| {
-                let class =
-                    OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?;
-                let object_id = object_id.ok_or(ProjectionError::CorruptRow)?;
-                // The `id` family derives the target from the key, and the
-                // extractor takes both from the occurrence's identity field, so
-                // the three must name one object.
-                let [field] = class.identity_fields() else {
-                    return Err(ProjectionError::CorruptRow);
-                };
-                if key.as_deref() != Some(object_id.as_bytes())
-                    || !occurrence_identity_matches(&tuple, class, &[(field, &object_id)])
-                {
-                    return Err(ProjectionError::CorruptRow);
-                }
-                match version {
-                    Some(stored) if stored != EXTRACTION_VERSION => {
-                        return Err(ProjectionError::ExtractionVersionMismatch {
-                            stored,
-                            expected: EXTRACTION_VERSION,
-                        });
-                    }
-                    Some(_) => {}
-                    None => return Err(ProjectionError::CorruptRow),
-                }
-                Ok(ClaimCandidateRow {
-                    occurrence_id,
-                    class,
-                    representation,
-                    object_id,
-                    revision,
-                })
-            },
+    rows.into_iter().map(candidate_row).collect()
+}
+
+/// The same row checks `exact::lookup::AssociationRow::decode` makes: the
+/// association names the object the tuple's identity names, and the id,
+/// revision, representation, span, and lineage columns are the tuple's own.
+fn candidate_row(row: LiveRow) -> Result<ClaimCandidateRow, ProjectionError> {
+    let corrupt = || ProjectionError::CorruptRow;
+    let class = OccurrenceClass::from_code(&row.class).ok_or_else(corrupt)?;
+    let object_id = row.target_id.ok_or_else(corrupt)?;
+    // The `id` family derives the target from the key, and the extractor
+    // takes both from the occurrence's identity field, so the three must name
+    // one object.
+    let [field] = class.identity_fields() else {
+        return Err(corrupt());
+    };
+    if row.key.as_deref() != Some(object_id.as_bytes())
+        || !occurrence_identity_matches(&row.tuple, class, &[(field, &object_id)])
+    {
+        return Err(corrupt());
+    }
+    let span = decode_span(row.span_start, row.span_end)?.map(|(start, end)| Span { start, end });
+    if identity_digest(&row.tuple) != row.occurrence_id
+        || derived_lineage_id(
+            &row.tuple,
+            class.code(),
+            row.revision,
+            &row.representation,
+            span,
         )
-        .collect()
+        .as_deref()
+            != Some(row.lineage_id.as_str())
+    {
+        return Err(corrupt());
+    }
+    match row.version {
+        Some(stored) if stored != EXTRACTION_VERSION => {
+            return Err(ProjectionError::ExtractionVersionMismatch {
+                stored,
+                expected: EXTRACTION_VERSION,
+            });
+        }
+        Some(_) => {}
+        None => return Err(corrupt()),
+    }
+    Ok(ClaimCandidateRow {
+        occurrence_id: row.occurrence_id,
+        class,
+        representation: row.representation,
+        object_id,
+        revision: row.revision,
+    })
 }
 
 /// The state of one row given the canonical facts of its object at the
