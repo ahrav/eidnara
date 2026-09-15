@@ -38,6 +38,21 @@ reviews found and how each finding was dispositioned.
 | `NotAClaim` overstated the check | refinement | fixed: `NotADecision` |
 | The catalog said no summary is returned for an oversized payload while the code returns an identity-only summary | gap | fixed in the record; the code was kept |
 
+## Projection change
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| `classify` matched two of seven dispositions and let `Disputed`, `Rejected`, and `Contradicted` fall through to the served rule | gap | fixed: exhaustive match; `Rejected`, `Contradicted`, `Quarantined` are `Hidden`; `Disputed` follows the served row |
+| Revision skew was documented as the primary `Stale` input though the registry never changes a revision | refinement | fixed: documented as a corruption guard; `Disposition::Stale` is the real input |
+| Candidates dropped the served surfaces and cloned admission and causality per row | refinement | fixed: candidates index the batch's `ClaimFacts` |
+| `family='id'` literal and no `extraction_version` check on the association join | gap | fixed: `Family::Id.keyword()` bound; mismatch refused |
+| The daemon oracle restated the classifier's predicates | gap | fixed: literal expected states per phase from the ticket text |
+| No `Stale`, `Disposition::Superseded`, bound, or corrupt-row coverage | gap | fixed: `MarkStale` claim in the daemon test; refusal tests over the baseline schema |
+| `TooManyObjects` duplicated `TooManyClaims`; `Kernel` and `Facts(Kernel)` spelled one failure two ways | refinement | fixed: both removed |
+| `created_commit_seq` selected and never read | refinement | fixed: removed |
+| `max_rows` is a result bound, not a work bound: the live-claim query sorts before it limits | bias | kept, documented on the bound; the sibling `live_candidates` shares the plan |
+| Near-duplicate of `eligibility::live_candidates` | bias | kept: the claim read needs the association join and both claim classes; widening the sibling's class filter is a follow-up for its own owner |
+
 ## Biases for a human
 
 - Every record is `test-only` because no production path calls the reader or

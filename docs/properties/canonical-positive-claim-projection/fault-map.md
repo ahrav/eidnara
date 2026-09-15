@@ -9,6 +9,8 @@
 | Evidence retirement | yes | `Envelope::retire_evidence` |
 | Object retirement and correction | yes | `retire_observation`, `retire_decision`, `correct_decision` |
 | Duplicate commit | yes | repeated `CommitIntent` |
+| Projection lag behind the kernel | yes | write to the kernel without running the materializer or catch-up |
+| Fresh rebuild | yes | `Corpus::bootstrap` on a second data home |
 | Power loss | no | out of scope for this crate; see `crates/kernel/tests/cas_fault_injection.rs` for the SIGKILL harness |
 
 ## Required faults per property
@@ -30,11 +32,26 @@
 | `revision-domains-remain-distinct-and-supported` | higher detail version | yes |
 | `served-sensitivity-and-artifact-policy-govern-egress` | none for the served half | yes |
 | `supporting-authority-is-preserved-not-recomputed` | revoked supporting approval | yes |
+| `claim-tombstone-masks-all-representations` | correction and retirement with a lagging projection | yes |
+| `claim-rebuild-incremental-parity` | catch-up then fresh bootstrap | yes |
+| `unknown-echo-state-is-policy-neutral` | equal facts, different classes | yes |
+| `eligible-positive-and-unknown-claims-remain-reachable` | served claim without a record | yes |
+| `claim-local-commit-before-ack` | crash between local commit and acknowledgement | RP2.1 harness |
+| `claim-consumer-replay-includes-published-history` | lost or skipped acknowledgement | yes |
+| `claim-export-retention-fence` | released or expired hold | RP2.1 tests |
+| `claim-worker-result-cannot-outlive-identity` | tombstone between dispatch and publication | RP2.1 tests |
+| `claim-cancellation-preserves-durable-work` | cancellation at each boundary | RP2.1 tests |
+| `claim-disable-preserves-consumer-contract` | lagging consumer at disable | no |
+| `claim-recovery-converges-within-approved-bound` | approved bound plus crash cuts | no |
 
 ## Coverage checks to add
 
 - `claim-enablement-requires-approved-evidence`: a caller inventory once a
   daemon path calls the reader or writer.
+- `claim-recovery-converges-within-approved-bound`: a claim campaign on the
+  process-crash harness once RP2.9 approves a bound.
+- `claim-disable-preserves-consumer-contract`: a claim consumer disable path
+  once the pending-consumer transition is decided.
 
 ## Leverage ranking
 

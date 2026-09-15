@@ -21,6 +21,14 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `a_lineage_admission_binds_every_object_on_the_lineage` | same | lineage row copied; own row unchanged; served `Hidden` on every surface after quarantine | unaudited |
 | `facts_survive_reopen` | same | reopen equality | unaudited |
 
+## Projection classification
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `state_follows_the_documented_precedence` | `crates/retrieval/tests/claims.rs` | the full state table with precedence, written by hand | unaudited |
+| `causal_class_changes_no_state` | same | Unknown neutrality across every state-relevant fact combination | unaudited |
+| `lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees` | `crates/daemon/tests/claim_sources.rs` | lagging rows classify Superseded, Retracted, Hidden from canonical facts against an independent oracle; catch-up tombstones; quarantine stays live and Hidden; a causality record changes no state; a fresh rebuild classifies identically | unaudited |
+
 ## Adjacent kernel checks the records rely on
 
 | Check | Location | Covers | Status |
@@ -31,8 +39,11 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 
 ## None found
 
-- No production caller of `claim_facts_as_of` or `record_claim_causality`, so
-  no route-level or daemon-level check exists.
+- No production caller of `claim_facts_as_of`, `record_claim_causality`, or
+  `classify_live_claims`, so no route-level check exists.
+- No claim-specific process-crash cut, recovery bound, or disable path; the
+  RP2.1 shared checks named in the records cover the mechanisms the claim
+  rows travel through.
 - No production path calls `record_claim_causality`, so no fixture exercises a
   real producer's acquisition or derivation flow end to end.
 
