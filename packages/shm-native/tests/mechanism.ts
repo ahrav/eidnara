@@ -966,6 +966,17 @@ describe("raw N-API descriptor boundary", () => {
             ...validRawDescriptor(),
             peerToHostGrant: testGrantHex(0, 0xab),
         });
+        // Lanes are fixed per direction: 0 host-to-peer, 1 peer-to-host.
+        expectRejectedWithoutEffects(addon, {
+            ...validRawDescriptor(),
+            hostToPeerGrant: testGrantHex(1, 0xab),
+            peerToHostGrant: testGrantHex(0, 0xcd),
+        });
+        expectRejectedWithoutEffects(addon, {
+            ...validRawDescriptor(),
+            hostToPeerGrant: testGrantHex(2, 0xab),
+            peerToHostGrant: testGrantHex(3, 0xcd),
+        });
     });
 
     test("accessor objects and proxies get one bounded redacted error", () => {

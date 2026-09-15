@@ -10,7 +10,7 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `packages/shm-native/tests/mechanism.ts:57`
+- `packages/shm-native/tests/mechanism.ts:56`
 - `.github/workflows/ci.yml:785`
 
 Witness status: partial - the native job builds the addon from source before every test run (`.github/workflows/ci.yml:785`); `nativeWireConstants` (`packages/shm-native/index.ts:12`) compares the loaded addon's identifiers with the wrapper's. Recorded artifact identity is #550's.

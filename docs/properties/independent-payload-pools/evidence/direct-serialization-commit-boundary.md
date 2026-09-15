@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1559`
+- `crates/shm-transport/src/backend/ring.rs:1694`
 - `crates/host-runtime/src/ring_transport.rs:858`
 
-Witness status: partial - `crates/host-runtime/src/ring_transport.rs:819` serializes through `ReservationWriter` after reservation and commits under the frame deadline; `crates/shm-transport/src/backend/ring.rs:2208` covers abort and short commit.
+Witness status: partial - `crates/host-runtime/src/ring_transport.rs:819` serializes through `ReservationWriter` after reservation and commits under the frame deadline; `crates/shm-transport/src/backend/ring.rs:2343` covers abort and short commit.
 
 ## Failure scenario
 

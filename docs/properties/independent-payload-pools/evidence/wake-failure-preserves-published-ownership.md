@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-A doorbell failure after publication quarantines the producer, or surfaces as `WakeFailed` to a lease's explicit `release` caller, but never rolls back the published descriptor or completion; `WouldBlock` is success (KTD3). The specification (#524) names this record under its
+A doorbell failure after publication or consumption quarantines the handle that rang it, or surfaces as `WakeFailed` to a lease's explicit `release` caller, but never rolls back the published descriptor, the consumption, or the completion; `WouldBlock` is success (KTD3). The specification (#524) names this record under its
 acceptance section and ties it to the requirements and decisions the
 `catalog.md` relationship map lists.
 
@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1210`
-- `crates/shm-transport/src/backend/retained.rs:624`
-- `crates/shm-transport/src/backend/retained.rs:648`
+- `crates/shm-transport/src/backend/ring.rs:1343`
+- `crates/shm-transport/src/backend/retained.rs:628`
+- `crates/shm-transport/src/backend/retained.rs:644`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2579`; the return-side latch is exercised by `crates/shm-transport/src/backend/ring.rs:2473` whose peer end is closed.
+Witness status: yes - publish side: `wake_failure_after_publication_quarantines_but_leaves_the_frame_published`; consumption side: `a_failed_consumption_wake_quarantines_the_consumer_and_returns_the_block`; return side: `a_failed_return_wake_reports_wake_failed_and_keeps_the_completion`, which arms `parked`, closes the producer's doorbell end, asserts `WakeFailed` from `release`, and reads the completion cell and return flag back. All three are in `crates/shm-transport/src/backend/ring.rs`.
 
 ## Failure scenario
 

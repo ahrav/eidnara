@@ -11,10 +11,10 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/pool.rs:273`
-- `crates/shm-transport/src/backend/ring.rs:1133`
-- `crates/shm-transport/src/backend/ring.rs:533`
+- `crates/shm-transport/src/backend/ring.rs:1266`
+- `crates/shm-transport/src/backend/ring.rs:551`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2179`, `crates/shm-transport/src/backend/ring.rs:2208`, and `crates/shm-transport/src/backend/ring.rs:2243`.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2314`, `crates/shm-transport/src/backend/ring.rs:2343`, and `crates/shm-transport/src/backend/ring.rs:2378`.
 
 ## Failure scenario
 

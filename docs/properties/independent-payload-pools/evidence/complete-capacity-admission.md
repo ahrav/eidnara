@@ -12,7 +12,7 @@ Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/profile.rs:166`
 - `crates/host-runtime/src/ring_transport.rs:70`
-- `crates/shm-transport/src/pool.rs:495`
+- `crates/shm-transport/src/pool.rs:520`
 
 Witness status: yes - `crates/shm-transport/tests/profile.rs:261` checks the charge equals the created object size; `crates/shm-transport/tests/profile.rs:131` and `process_limits_reject_counts_above_the_resident_byte_ceiling` in crates/host-runtime/src/ring_transport.rs.
 

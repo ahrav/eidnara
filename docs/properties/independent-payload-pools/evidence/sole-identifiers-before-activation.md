@@ -10,12 +10,12 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:170`
-- `crates/shm-transport/src/backend/ring.rs:704`
-- `crates/host-runtime/src/ring_transport.rs:918`
-- `packages/shm-native/src/lib.rs:307`
+- `crates/shm-transport/src/backend/ring.rs:190`
+- `crates/shm-transport/src/backend/ring.rs:722`
+- `crates/host-runtime/src/ring_transport.rs:919`
+- `packages/shm-native/src/lib.rs:305`
 
-Witness status: yes - `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:2612`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.
+Witness status: yes - `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:2980`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.
 
 ## Failure scenario
 

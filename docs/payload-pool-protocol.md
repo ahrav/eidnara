@@ -90,8 +90,9 @@ descriptor, one per direction:
 Decoding validates the geometry, recomputes the mapping layout at the host page
 size, and refuses a grant whose total disagrees with the computed layout, whose
 reserved tail is nonzero, or whose version is not 4. The setup layer also
-requires both grants to name the sole profile's geometry, to differ from each
-other, and to name pools with no traffic in flight (`Ring::is_fresh`).
+requires both grants to name the sole profile's geometry, to carry lane `0` in
+the host-to-peer field and lane `1` in the peer-to-host field, and to name pools
+with no traffic in flight (`Ring::is_fresh`).
 
 ## 4. Mapping layout
 
@@ -283,8 +284,13 @@ bytes in this crate is:
 
 No `&[u8]` or `&mut [u8]` over the arena is ever formed. A copy stabilizes the
 destination bytes, not the source: a peer that writes a published block after
-publication violates the protocol, and the copy observes stale or torn bytes,
-never undefined behavior. Consumers therefore decode only from private copies,
+publication violates the protocol, and a write that uses the block's exact span
+is observed as stale or torn bytes, never undefined behavior. The no-UB claim is
+conditional on access shape: concurrent accesses to shared bytes must be
+disjoint or share identical boundaries (`LeaseSpan::new`). An overlapping range
+with shifted boundaries assigns another width to the same bytes, which is a
+mixed-size race the shape does not cover and this contract does not protect
+against. Consumers therefore decode only from private copies,
 and validate the copied header against the copied body length before parsing.
 
 The producer's raw-pointer escape is `ProducerReservation::segment`, whose span

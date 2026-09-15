@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1024`
-- `crates/shm-transport/src/backend/retained.rs:620`
-- `crates/shm-transport/src/backend/ring.rs:75`
+- `crates/shm-transport/src/backend/ring.rs:1092`
+- `crates/shm-transport/src/backend/retained.rs:623`
+- `crates/shm-transport/src/backend/ring.rs:95`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2497`, `crates/shm-transport/src/backend/ring.rs:2537`, and both two-process tests in crates/shm-transport/tests/ring.rs.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2694`, `crates/shm-transport/src/backend/ring.rs:2734`, and both two-process tests in crates/shm-transport/tests/ring.rs.
 
 ## Failure scenario
 
@@ -33,7 +33,7 @@ Situation markers that must fire independently of the safety check:
 - `pool.producer_parked_on_capacity`
 - `pool.transition_during_arm_window`
 
-Check semantics: `always` - a `reserve_until` parked on exhaustion returns `Ok` before its deadline once either transition happens, with `parks >= 1` in `syscall_counters`; bounded by the test deadline, never an open-ended eventually. The pre-arm window is checked separately: a transition that lands between `try_reserve` and `ParkGuard::arm` makes `arm_capacity_wait` return `Ok(false)` and the retried `try_reserve` succeed without a park, so `parks >= 1` does not apply there (`arm_capacity_wait_refuses_to_park_over_a_return_that_landed_before_arming`).
+Check semantics: `always` - a `reserve_until` parked on exhaustion returns `Ok` before its deadline once either transition happens, with `parks >= 1` in `syscall_counters`; bounded by the test deadline, never an open-ended eventually. The pre-arm window is checked separately: a transition that lands between `try_reserve` and `ParkGuard::arm` makes `arm_capacity_wait` return `Ok(false)` and the retried `try_reserve` succeed without a park, so `parks >= 1` does not apply there (`arm_capacity_wait_refuses_to_park_over_a_return_that_landed_before_arming`). The two-process descriptor witness (`two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return`) arms with `arm_capacity_wait` and asserts the doorbell token arrives on `duplicate_capacity_ready` while the payload is still outstanding; it handshakes the child over stdin so consumption cannot precede the arm, and `parks` is not counted on that explicit path.
 
 ## Investigation log
 

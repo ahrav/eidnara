@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/ring.rs:1080`
-- `crates/shm-transport/src/backend/retained.rs:601`
+- `crates/shm-transport/src/backend/ring.rs:1152`
+- `crates/shm-transport/src/backend/retained.rs:597`
 - `crates/shm-transport/src/descriptor.rs:222`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2413` and `crates/shm-transport/src/backend/ring.rs:2335`; `crates/shm-transport/tests/contract.rs:118` covers the pure validator.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2565` and `crates/shm-transport/src/backend/ring.rs:2470`; `crates/shm-transport/tests/contract.rs:118` covers the pure validator.
 
 ## Failure scenario
 

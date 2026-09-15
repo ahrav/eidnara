@@ -85,6 +85,10 @@ pub(crate) mod reclaim_counters {
 /// Encoded grant length: layout version, incarnation, lane, two descriptor depths, seven
 /// class specs, total bytes, and a zero reserved tail.
 pub const GRANT_BYTES: usize = 2 + 16 + 4 + 4 + 4 + CLASS_COUNT * (8 + 4) + 8 + 4;
+/// The grant stores 0 for the host-produced direction at wire offset 18.
+pub const HOST_TO_PEER_LANE: u32 = 0;
+/// The grant stores 1 for the peer-produced direction at wire offset 18.
+pub const PEER_TO_HOST_LANE: u32 = 1;
 
 /// Marks a wake epoch parked for one generation and clears the marker on drop, so every exit
 /// from a park loop, including `?` and `continue`, unparks.
@@ -1468,10 +1472,10 @@ impl Ring {
         self.consumed_local.set(sequence);
         self.consumer.set(true);
         self.retained.mark_live(block, generation);
-        // Consumption alone frees a descriptor slot, so the producer is woken even though the
-        // payload stays held. A failed wake latches on the backing; the consumption stands and
-        // the frame is still delivered.
-        let _ = self.retained.signal_capacity();
+        // A failed wake is a doorbell failure and quarantines the handle.
+        if self.retained.signal_capacity().is_err() {
+            self.enter_quarantine();
+        }
         Ok(Some(PayloadLease::new(
             Arc::clone(&self.retained),
             block,
@@ -1509,9 +1513,11 @@ impl Ring {
     /// as published so nothing looks reusable.
     pub fn inventory(&self) -> PoolInventory {
         let geometry = *self.geometry();
-        if self.ledger.borrow().allowed && !self.is_quarantined() {
+        if self.producer.get() && !self.is_quarantined() {
             // Returns since the last reservation are folded in so the counts reflect what the
             // next reservation would see; a failure here quarantines, which the counts show.
+            // Only the producing handle owns the completion stream; a consumer sample must
+            // leave the summary flags for it.
             let _ = self.reclaim_completions();
         }
         let ledger = self.ledger.borrow();
@@ -1861,8 +1867,8 @@ impl DuplexRing {
     /// Creates both rings from the same profile.
     pub fn create(profile: &TargetProfile) -> Result<Self, RingError> {
         Ok(Self {
-            first: Ring::create(profile, 0)?,
-            second: Ring::create(profile, 1)?,
+            first: Ring::create(profile, HOST_TO_PEER_LANE)?,
+            second: Ring::create(profile, PEER_TO_HOST_LANE)?,
         })
     }
 
@@ -2179,7 +2185,7 @@ mod tests {
     use crate::descriptor::{
         DescriptorError, HardwareProfileId, SETUP_MAPPING_COUNT, TransportDescriptor,
     };
-    use crate::lease::PayloadLease;
+    use crate::lease::{LeaseError, PayloadLease};
     use crate::pool::{BlockClass, ClassSpec, Inventory, PoolGeometry};
     use crate::profile::{ProfileConfig, TargetProfile, WorkerTopology};
 
@@ -2815,6 +2821,85 @@ mod tests {
             .unwrap()
             .abort();
         assert!(producer.inventory().conserves(&geometry));
+    }
+
+    #[test]
+    fn consumer_inventory_does_not_reclaim_the_producer_completion_stream() {
+        let geometry = tiny_geometry();
+        let (producer, consumer) = pair(geometry);
+        publish(&producer, b"sampled");
+        receive(&consumer).release().unwrap();
+        let sampled = consumer.inventory();
+        assert!(
+            !consumer.is_quarantined(),
+            "a fresh attached handle that only consumes has no producer ledger to check against"
+        );
+        assert!(sampled.conserves(&geometry));
+        assert_eq!(
+            publish(&producer, b"reused"),
+            0,
+            "the producer reclaims the return the consumer sample left in place"
+        );
+        assert!(!producer.is_quarantined());
+    }
+
+    #[test]
+    fn a_failed_return_wake_reports_wake_failed_and_keeps_the_completion() {
+        let geometry = tiny_geometry();
+        let (producer, consumer) = pair(geometry);
+        publish(&producer, b"returned");
+        let lease = receive(&consumer);
+        let identity = lease.identity();
+        publish(&producer, b"second");
+        publish(&producer, b"third");
+        assert_eq!(
+            producer.arm_capacity_wait(Inventory::Ordinary, 100),
+            Ok(true),
+            "both ordinary descriptors are taken, so the producer parks"
+        );
+        drop(producer);
+        assert_eq!(lease.release(), Err(LeaseError::WakeFailed));
+        let cell = consumer.retained.completion(identity.block()).unwrap();
+        assert_eq!(
+            cell.generation.load(Ordering::SeqCst),
+            identity.generation(),
+            "the completion stands although the doorbell send failed"
+        );
+        let word = consumer
+            .retained
+            .return_word(0)
+            .unwrap()
+            .load(Ordering::SeqCst);
+        assert_ne!(
+            word & (1 << identity.block()),
+            0,
+            "the return flag stands too"
+        );
+        assert_eq!(consumer.retained.live_generation(identity.block()), Some(0));
+    }
+
+    #[test]
+    fn a_failed_consumption_wake_quarantines_the_consumer_and_returns_the_block() {
+        let geometry = tiny_geometry();
+        let (producer, consumer) = pair(geometry);
+        publish(&producer, b"undelivered");
+        publish(&producer, b"second");
+        assert_eq!(
+            producer.arm_capacity_wait(Inventory::Ordinary, 100),
+            Ok(true),
+            "both ordinary descriptors are taken, so the producer parks"
+        );
+        drop(producer);
+        assert!(
+            matches!(consumer.try_receive(), Err(RingError::Quarantined)),
+            "a failed capacity wake is a doorbell failure and quarantines the handle"
+        );
+        assert!(consumer.is_quarantined());
+        assert_eq!(
+            consumer.retained.live_generation(0),
+            Some(0),
+            "the undelivered lease returned its block exactly once"
+        );
     }
 
     #[test]

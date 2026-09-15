@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/backend/retained.rs:344`
+- `crates/shm-transport/src/backend/retained.rs:342`
 - `crates/host-runtime/src/ring_transport.rs:275`
 
-Witness status: partial - the transport exposes `outstanding_returns` (`crates/shm-transport/src/backend/retained.rs:440`) and `PoolInventory` (`crates/shm-transport/src/backend/ring.rs:515`); the host's `reclamation.completed` counter still counts generation ends (`crates/host-runtime/src/ring_transport.rs:261`).
+Witness status: partial - the transport exposes `outstanding_returns` (`crates/shm-transport/src/backend/retained.rs:426`) and `PoolInventory` (`crates/shm-transport/src/backend/ring.rs:533`); the host's `reclamation.completed` counter still counts generation ends (`crates/host-runtime/src/ring_transport.rs:261`).
 
 ## Failure scenario
 

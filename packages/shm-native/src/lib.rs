@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use napi::bindgen_prelude::{AsyncTask, Buffer, FnArgs, Function, Object};
 use napi::{Env, Error, JsValue, Result, Status, Task, Unknown, ValueType, sys};
 use napi_derive::napi;
-use shm_transport::backend::ring::PoolGrant;
+use shm_transport::backend::ring::{HOST_TO_PEER_LANE, PEER_TO_HOST_LANE, PoolGrant};
 use shm_transport::backend::ring::{ProducerError, ProducerReservation, Ring};
 use shm_transport::descriptor::{WIRE_V3_HEADER_BYTES, check_wire_header};
 use shm_transport::lease::PayloadLease;
@@ -727,7 +727,8 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
             .chain(peer_to_host_fds)
             .collect::<BTreeSet<_>>();
         if distinct.len() != 6
-            || host_to_peer_grant == peer_to_host_grant
+            || host_to_peer_grant.lane() != HOST_TO_PEER_LANE
+            || peer_to_host_grant.lane() != PEER_TO_HOST_LANE
             || !grant_matches_profile(host_to_peer_grant)
             || !grant_matches_profile(peer_to_host_grant)
         {
@@ -1346,7 +1347,7 @@ mod tests {
                 buffers: Vec::new(),
             },
         );
-        let channel = Channel {
+        let mut channel = Channel {
             producers: HashMap::new(),
             active,
             stranded: Vec::new(),
@@ -1359,9 +1360,14 @@ mod tests {
             setup: None,
             _reservation: None,
         };
-        let Channel { mut active, .. } = channel;
-        // The channel and its consumer ring are gone; the lease still reads and returns once.
+        let mut active = std::mem::take(&mut channel.active);
+        drop(channel);
         let held = active.remove(&1).expect("lease").lease;
+        assert_eq!(
+            std::sync::Arc::strong_count(held.retained()),
+            1,
+            "the consumer ring is gone; only the lease holds the backing"
+        );
         assert_eq!(held.to_vec().expect("copy"), b"owned");
         held.release().expect("release");
         drop(producer);

@@ -11,10 +11,10 @@ acceptance section and ties it to the requirements and decisions the
 Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/pool.rs:285`
-- `crates/shm-transport/src/backend/ring.rs:985`
+- `crates/shm-transport/src/backend/ring.rs:1041`
 - `crates/shm-transport/src/lease.rs:308`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2110` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:317` repeats it across a process boundary with returns from a worker thread.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2245` holds A for `2*depth+1` reuses of B; `crates/shm-transport/tests/ring.rs:334` repeats it across a process boundary with returns from a worker thread.
 
 ## Failure scenario
 

@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `packages/shm-native/src/lib.rs:495`
-- `crates/shm-transport/src/lease.rs:432`
+- `packages/shm-native/src/lib.rs:493`
+- `crates/shm-transport/src/lease.rs:378`
 
-Witness status: partial - `packages/shm-native/src/lib.rs:471` closes channels on the environment cleanup hook and `mem::forget`s alias-holding channels; the owned lease's drop is the only finalizer-adjacent return and reaches no N-API (`crates/shm-transport/src/backend/retained.rs:588`).
+Witness status: partial - `packages/shm-native/src/lib.rs:469` closes channels on the environment cleanup hook and `mem::forget`s alias-holding channels; the owned lease's drop is the only finalizer-adjacent return and reaches no N-API (`crates/shm-transport/src/backend/retained.rs:584`).
 
 ## Failure scenario
 

@@ -10,11 +10,11 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/shm-transport/src/lease.rs:377`
-- `crates/shm-transport/src/backend/retained.rs:590`
-- `crates/shm-transport/src/backend/ring.rs:984`
+- `crates/shm-transport/src/lease.rs:378`
+- `crates/shm-transport/src/backend/retained.rs:586`
+- `crates/shm-transport/src/backend/ring.rs:1040`
 
-Witness status: yes - `crates/shm-transport/src/lease.rs:640` and `crates/shm-transport/src/backend/ring.rs:2794` assert the three observers stay unreached through saturated drops on worker threads.
+Witness status: yes - `crates/shm-transport/src/lease.rs:621` and `crates/shm-transport/src/backend/ring.rs:3162` assert the three observers stay unreached through saturated drops on worker threads.
 
 ## Failure scenario
 

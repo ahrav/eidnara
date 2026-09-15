@@ -14,8 +14,8 @@ use std::{fmt, io};
 
 use crate::setup_socket::RING_DESCRIPTOR_COUNT;
 use crate::wire::{EnvelopeHeader, FrameType, decode_header};
-use shm_transport::backend::ring::PoolGrant;
 use shm_transport::backend::ring::{DuplexRing, ProducerError, ProducerReservation, Ring};
+use shm_transport::backend::ring::{HOST_TO_PEER_LANE, PEER_TO_HOST_LANE, PoolGrant};
 use shm_transport::profile::{
     AdmissionController, HostLimits as ShmHostLimits, ResourceCharges, TargetProfile,
 };
@@ -905,7 +905,8 @@ impl RingClientEndpoint {
         let expected = ring_profile();
         if from_host_grant.geometry() != to_host_grant.geometry()
             || from_host_grant.geometry() != expected.geometry()
-            || from_host_grant == to_host_grant
+            || from_host_grant.lane() != HOST_TO_PEER_LANE
+            || to_host_grant.lane() != PEER_TO_HOST_LANE
         {
             return Err(RingClientError);
         }
@@ -1242,6 +1243,43 @@ mod tests {
         assert!(decode_hex::<1>("+0").is_err());
         let non_ascii = std::panic::catch_unwind(|| decode_hex::<2>("0é0"));
         assert!(matches!(non_ascii, Ok(Err(_))));
+    }
+
+    #[test]
+    fn setup_rejects_grants_whose_lanes_do_not_match_their_direction() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            mut descriptor,
+            descriptors,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let fields = descriptor.as_object_mut().unwrap();
+        let host_to_peer = fields.remove("host_to_peer_grant").unwrap();
+        let peer_to_host = fields.remove("peer_to_host_grant").unwrap();
+        fields.insert("host_to_peer_grant".to_owned(), peer_to_host);
+        fields.insert("peer_to_host_grant".to_owned(), host_to_peer);
+        let [
+            from_mapping,
+            from_data,
+            from_capacity,
+            to_mapping,
+            to_data,
+            to_capacity,
+        ] = descriptors;
+        let swapped = [
+            to_mapping,
+            to_data,
+            to_capacity,
+            from_mapping,
+            from_data,
+            from_capacity,
+        ];
+        assert!(
+            RingClientEndpoint::attach_with_descriptors(&descriptor, swapped).is_err(),
+            "each grant attaches to its own mapping, but lane 1 is not host-to-peer"
+        );
     }
 
     #[test]
