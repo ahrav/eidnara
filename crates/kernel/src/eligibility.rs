@@ -244,11 +244,19 @@ impl KernelStore {
     ) -> Result<EligibilityBatch, KernelError> {
         check_bounds(candidates)?;
         let limit = budget.acquire_limit();
-        let (snapshot, verdicts) = limit.run(|| {
+        let (snapshot, (incarnation, verdicts)) = limit.run(|| {
             self.egress_read_within(&limit, |tx, tip| {
-                judge_in_tx(tx, tip, project, destination, candidates)
+                let incarnation = self.incarnation();
+                Ok((
+                    incarnation,
+                    judge_in_tx(tx, tip, project, destination, candidates)?,
+                ))
             })
         })?;
-        Ok(EligibilityBatch { snapshot, verdicts })
+        Ok(EligibilityBatch {
+            snapshot,
+            incarnation,
+            verdicts,
+        })
     }
 }
