@@ -1,4 +1,4 @@
-//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. Nothing here records intent on its own: a rebuild or recovery starts from an explicit request, and a restart resumes the record it finds without renewing its allowance. Nothing here catches a Current family up either: the construction hold is released at completion, so a family that trails the kernel past the freshness limit is denied until it is rebuilt.
+//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated once and judged on its coverage after that; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. Nothing here records intent on its own: a rebuild or recovery starts from an explicit request, and a restart resumes the record it finds without renewing its allowance. Nothing here catches a Current family up either: the construction hold is released at completion, so a family that trails the kernel past the freshness limit is denied until it is rebuilt.
 
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsStatus};
 use kernel::applicability::EvalBudget;
+use kernel::source_identity::OccurrenceClass;
 use kernel::{
     CommitPageBounds, KernelStore, SourceHoldAdmission, SourceHoldBounds, SourcePageBounds,
 };
@@ -16,6 +17,7 @@ use retrieval::{PersistBounds, ProjectionIdentity};
 use tokio_util::sync::CancellationToken;
 
 use crate::coverage::ProjectionCoverage;
+use crate::embedding_dispatch::LaneIdentity;
 use crate::projection_admission::{
     AdmissionInputs, Closed, InputRefusal, ProjectionAdmission, Refresh, SelectedProjection,
 };
@@ -42,6 +44,8 @@ const DEADLINE_MARGIN_MS: u64 = 1_000;
 const MAX_TUPLE_BYTES: u64 = 4096;
 /// How long the scheduler waits after a slice that did not advance the record, so a blocked record is retried without spinning.
 pub const SLICE_IDLE: Duration = Duration::from_secs(5);
+/// How long a repeated report of one kind waits before its changed detail is printed again.
+const REPORT_REPEAT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Why a slice could not derive a projection identity or a bounded specification from the daemon's inputs.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -67,7 +71,7 @@ pub enum SliceOutcome {
     Unregistered,
     /// The recorded operation advanced: a replacement was selected, or the record reached Current.
     Advanced(RecoveryProgress),
-    /// The selected family is Current and revalidated for this slice.
+    /// The selected family is Current: reopened and revalidated on the slice that first held it, judged on its coverage and kernel on every later one.
     Current,
     /// The record is disabled, a disable is reconciling, or the owner is shut down; only explicit recovery reopens a disabled record.
     Disabled,
@@ -143,7 +147,7 @@ impl SearchLifecycleOwner {
         budget: &EvalBudget,
     ) -> Result<ProjectionIdentity, SpecRefusal> {
         let lane = match self.local_embeddings.status() {
-            LocalEmbeddingsStatus::Ready(lane) => lane,
+            LocalEmbeddingsStatus::Ready(lane) => LaneIdentity::from(&lane),
             LocalEmbeddingsStatus::Starting => return Err(SpecRefusal::LaneNotReady("starting")),
             LocalEmbeddingsStatus::Disabled { .. } => {
                 return Err(SpecRefusal::LaneNotReady("disabled"));
@@ -162,11 +166,12 @@ impl SearchLifecycleOwner {
             projection_policy_version: PROJECTION_POLICY_VERSION.to_owned(),
             identity_contract_version: IDENTITY_CONTRACT_VERSION.to_owned(),
             limit_manifest_protocol_version: manifest.protocol_version.clone(),
-            embedding_model: lane.model,
-            tokenizer_fingerprint: lane.fingerprint,
-            vector_dimension: u32::try_from(lane.dims)
-                .map_err(|_| SpecRefusal::LimitRange("vector_dimension"))?,
-            generation_epoch: lane.table_epoch,
+            embedding_model: lane.embedding_model,
+            tokenizer_fingerprint: lane.tokenizer_fingerprint,
+            vector_dimension: lane
+                .vector_dimension
+                .ok_or(SpecRefusal::LimitRange("vector_dimension"))?,
+            generation_epoch: lane.generation_epoch,
         })
     }
 
@@ -220,10 +225,8 @@ impl SearchLifecycleOwner {
         let Managed::Selection(selection) = &mut *managed else {
             return SliceOutcome::Disabled;
         };
-        let control = match ProjectionLifecycle::open(&self.home) {
-            Ok(lifecycle) => lifecycle.read(),
-            Err(error) => return SliceOutcome::Unavailable(error.kind().to_string()),
-        };
+        // `ProjectionLifecycle::open` syncs and locks the lifecycle directory; a probe that decides only whether to write must not.
+        let control = ProjectionLifecycle::read_at(&self.home);
         let blocked = |closed: Closed| SliceOutcome::Blocked(closed.to_string());
         let (intent, completed) = match control {
             ControlState::Absent => {
@@ -252,6 +255,17 @@ impl SearchLifecycleOwner {
                 return SliceOutcome::Closed(refusal);
             }
         };
+        // Hooks are judged on this slice's observation before the record decides anything, so an expired or blocked record cannot leave the previous slice's evidence installed.
+        if let Refresh::Closed(closed) = self.refresh(selection, &identity, &budget) {
+            return blocked(closed);
+        }
+        if completed && selection.holds_operation(&intent) {
+            // The family was reopened and revalidated when this owner first held it; a later slice judges it on its coverage and kernel without reopening it.
+            return match selection.check_selected(&self.kernel, self.admission.gate(), &budget) {
+                Ok(()) => SliceOutcome::Current,
+                Err(error) => SliceOutcome::Blocked(error.to_string()),
+            };
+        }
         // Work on an active record ends within the record's own deadline, which no slice renews; a completed record is revalidated under the slice's bound alone.
         let budget = if completed {
             budget
@@ -264,9 +278,6 @@ impl SearchLifecycleOwner {
             }
             budget.bounded_by(Instant::now() + Duration::from_millis(remaining))
         };
-        if let Refresh::Closed(closed) = self.refresh(selection, &identity, &budget) {
-            return blocked(closed);
-        }
         let progress = selection.recover_slice(
             &self.kernel,
             self.admission.gate(),
@@ -298,7 +309,7 @@ impl SearchLifecycleOwner {
         }
     }
 
-    /// Refreshes admission with the selected family's own coverage when one is open; with no coverage when a selected family refuses to be read, so its hooks are denied rather than judged on a report about nothing; and with the unregistered observation at `tip` when nothing is selected.
+    /// Refreshes admission from the selected family's coverage, with no coverage when that family cannot be read, or from the unregistered observation at `tip` when no family is selected. Coverage is read outside gate admission so a denial does not block the next observation.
     fn refresh(
         &self,
         selection: &SearchSelection,
@@ -315,9 +326,8 @@ impl SearchLifecycleOwner {
         };
         let coverage = if selection.has_selected() {
             selection
-                .pin(&self.kernel, self.admission.gate(), budget)
+                .observe_selected(budget)
                 .ok()
-                .and_then(|reader| reader.coverage(budget).ok())
                 .map(|report| ProjectionCoverage::unjudged(report, tip))
         } else {
             Some(ProjectionCoverage::unregistered(identity, tip))
@@ -457,11 +467,12 @@ fn nonzero_u64(name: &'static str, value: u64) -> Result<NonZeroU64, SpecRefusal
     NonZeroU64::new(value).ok_or(SpecRefusal::TooSmall(name))
 }
 
-/// Coverage observation bounds that stay within the limits `SearchSelection` charges for one observation: five classes of live rows plus five of tombstones within `local_transaction_rows`, and a class within `export_page_rows`.
+/// Each `OccurrenceClass` receives one live and one tombstone share of `local_transaction_rows`, so `CoverageBounds::max_rows` fits the limit; a live share also stays within `export_page_rows`.
 fn coverage_bounds(manifest: &RuntimeManifest) -> Result<CoverageBounds, SpecRefusal> {
+    let shares = 2 * OccurrenceClass::ALL.len() as u64;
     let per_class = nonzero_usize(
         "local_transaction_rows",
-        limit(manifest, "local_transaction_rows")? / 10,
+        limit(manifest, "local_transaction_rows")? / shares,
     )?;
     Ok(CoverageBounds {
         max_live_per_class: nonzero_usize(
@@ -630,7 +641,7 @@ fn replacement_spec(
 
 /// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record runs the next one without waiting; every other outcome idles first. A panicking slice closes admission and ends the loop, since its state is no longer known.
 pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
-    let mut last_reported = None;
+    let mut reporter = SliceReporter::default();
     loop {
         let budget = EvalBudget::new(None, Arc::new(std::sync::atomic::AtomicBool::new(false)));
         let slice_owner = Arc::clone(&owner);
@@ -652,21 +663,8 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
                 return;
             }
         };
-        let report = match &outcome {
-            SliceOutcome::Blocked(reason) | SliceOutcome::Unavailable(reason) => {
-                Some(format!("did not advance: {reason}"))
-            }
-            SliceOutcome::Closed(refusal) => Some(format!("admission closed: {refusal}")),
-            SliceOutcome::Unregistered
-            | SliceOutcome::Advanced(_)
-            | SliceOutcome::Current
-            | SliceOutcome::Disabled => None,
-        };
-        if report != last_reported {
-            if let Some(report) = &report {
-                eprintln!("daemon: search lifecycle {report}");
-            }
-            last_reported = report;
+        if let Some(report) = reporter.report(&outcome, Instant::now()) {
+            eprintln!("daemon: search lifecycle {report}");
         }
         if cancel.is_cancelled() {
             return;
@@ -678,5 +676,111 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
             () = cancel.cancelled() => return,
             () = tokio::time::sleep(SLICE_IDLE) => {}
         }
+    }
+}
+
+/// The kind of a reported slice outcome; a report's detail may embed a moving value, so repeats are judged by kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportKind {
+    Blocked,
+    Unavailable,
+    Closed,
+}
+
+/// Decides which slice outcomes reach the log: the first report after an outcome that is not one, a change of kind, and a repeat of the same kind with different detail once per `REPORT_REPEAT_INTERVAL`. A reason that embeds a moving value, such as the kernel tip, would otherwise print on every slice.
+#[derive(Default)]
+struct SliceReporter {
+    last: Option<(ReportKind, String, Instant)>,
+}
+
+impl SliceReporter {
+    fn report(&mut self, outcome: &SliceOutcome, now: Instant) -> Option<String> {
+        let (kind, detail) = match outcome {
+            SliceOutcome::Blocked(reason) => {
+                (ReportKind::Blocked, format!("did not advance: {reason}"))
+            }
+            SliceOutcome::Unavailable(reason) => (
+                ReportKind::Unavailable,
+                format!("did not advance: {reason}"),
+            ),
+            SliceOutcome::Closed(refusal) => {
+                (ReportKind::Closed, format!("admission closed: {refusal}"))
+            }
+            SliceOutcome::Unregistered
+            | SliceOutcome::Advanced(_)
+            | SliceOutcome::Current
+            | SliceOutcome::Disabled => {
+                self.last = None;
+                return None;
+            }
+        };
+        let print = match &self.last {
+            Some((last_kind, last_detail, printed_at)) if *last_kind == kind => {
+                *last_detail != detail && now.duration_since(*printed_at) >= REPORT_REPEAT_INTERVAL
+            }
+            _ => true,
+        };
+        if !print {
+            return None;
+        }
+        self.last = Some((kind, detail.clone(), now));
+        Some(detail)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blocked(reason: &str) -> SliceOutcome {
+        SliceOutcome::Blocked(reason.to_owned())
+    }
+
+    #[test]
+    fn a_report_of_one_kind_with_moving_detail_repeats_once_per_interval() {
+        let mut reporter = SliceReporter::default();
+        let start = Instant::now();
+        assert!(
+            reporter
+                .report(&blocked("snapshot 10 exceeds 9"), start)
+                .is_some()
+        );
+        assert!(
+            reporter
+                .report(&blocked("snapshot 10 exceeds 9"), start)
+                .is_none()
+        );
+        assert!(
+            reporter
+                .report(&blocked("snapshot 11 exceeds 9"), start + SLICE_IDLE)
+                .is_none(),
+            "a moving value in the reason does not print every slice"
+        );
+        assert!(
+            reporter
+                .report(
+                    &blocked("snapshot 12 exceeds 9"),
+                    start + REPORT_REPEAT_INTERVAL
+                )
+                .is_some(),
+            "the same kind prints again once the interval has passed"
+        );
+    }
+
+    #[test]
+    fn a_change_of_kind_or_an_intervening_advance_prints_at_once() {
+        let mut reporter = SliceReporter::default();
+        let start = Instant::now();
+        assert!(reporter.report(&blocked("stuck"), start).is_some());
+        assert!(
+            reporter
+                .report(&SliceOutcome::Unavailable("corrupt".to_owned()), start)
+                .is_some()
+        );
+        assert!(reporter.report(&SliceOutcome::Current, start).is_none());
+        assert!(
+            reporter.report(&blocked("stuck"), start).is_some(),
+            "a report after an outcome that is not one prints"
+        );
     }
 }

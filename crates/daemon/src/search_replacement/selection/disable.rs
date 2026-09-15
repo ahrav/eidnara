@@ -453,9 +453,7 @@ impl SearchSelection {
                 "local_transaction_rows",
                 (spec.episode.batch.persist.max_records.get() as u64)
                     .saturating_add(1)
-                    .max(self.bounds.max_live().saturating_add(
-                        self.bounds.max_tombstoned_per_class.get().saturating_mul(5),
-                    ) as u64)
+                    .max(self.bounds.max_rows() as u64)
                     .max(spec.episode.commits.max_rows.get() as u64)
                     .max(retirement_rows),
             ),

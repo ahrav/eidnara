@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -18,6 +19,7 @@ use daemon::search_lifecycle_owner::{
 use daemon::search_replacement::BuildError;
 use daemon::search_replacement::selection::disable::DisableEvent;
 use daemon::search_replacement::selection::recovery::RecoveryProgress;
+use host_runtime::lifecycle::LifecycleTransactionLock;
 use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsLimits};
 use kernel::KernelStore;
 use kernel::applicability::EvalBudget;
@@ -523,6 +525,162 @@ fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {
             max: LAG_LIMIT
         }
     );
+    // The next slice observes the family's coverage again; the gate's denial does not hide it.
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains(&format!("trails the kernel by {lag}"))),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap_err(),
+        Denial::Stale {
+            lag,
+            max: LAG_LIMIT
+        }
+    );
+}
+
+/// Disabling `EmbeddingBootstrap` blocks that hook without stopping the coverage observation the enabled hooks are judged on; restoring the manifest re-admits it in the same process.
+#[test]
+fn admission_recovers_in_process_after_the_gate_denies_the_selected_family() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+
+    let identity = identity(&kernel_incarnation_id(home));
+    let without_bootstrap: Vec<ProjectionHook> = ProjectionHook::ALL
+        .iter()
+        .copied()
+        .filter(|hook| *hook != ProjectionHook::EmbeddingBootstrap)
+        .collect();
+    write_records(
+        home,
+        &manifest_json(&identity, &without_bootstrap),
+        &campaign_json(&identity),
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Blocked(_)), "{outcome:?}");
+    let gate = owner.admission().gate();
+    assert_eq!(
+        gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Dispatch)
+            .unwrap_err(),
+        Denial::Disabled(ProjectionHook::EmbeddingBootstrap)
+    );
+    gate.admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .expect("a hook that stays enabled is judged on the family's own coverage");
+
+    records(home);
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Current), "{outcome:?}");
+    gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Dispatch)
+        .expect("the restored manifest admits the family again");
+    owner.pin(&slice_budget()).unwrap();
+}
+
+/// An active record past its deadline starts nothing. The slice still judges admission on the current observation, so it denies a selected family that trails the kernel instead of serving it on pre-deadline evidence.
+#[test]
+fn an_expired_active_record_is_still_judged_on_the_current_observation() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+
+    let mut short = rebuild(home);
+    short.deadline = now() + 5_000;
+    owner.request(&short, now(), &slice_budget()).unwrap();
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Advanced(RecoveryProgress::Selected)),
+        "{outcome:?}"
+    );
+    let gate = owner.admission().gate();
+    gate.admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .expect("the selected family is fresh");
+
+    // Inside the deadline margin no slice starts work; the kernel keeps moving.
+    let until_margin = short.deadline - 1_000 - now();
+    std::thread::sleep(Duration::from_millis(
+        u64::try_from(until_margin).unwrap_or(0) + 50,
+    ));
+    for index in 0..=LAG_LIMIT {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains("deadline")),
+        "{outcome:?}"
+    );
+    assert!(matches!(control(home), ControlState::Intent(_)));
+    let denial = gate
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .expect_err("the expired slice observed the family against the moved kernel");
+    assert!(matches!(denial, Denial::Stale { .. }), "{denial:?}");
+    assert!(owner.pin(&slice_budget()).is_err());
+}
+
+/// A completed record whose family this owner already holds is reopened and revalidated once; an idle slice judges it on its coverage and kernel without taking the lifecycle transaction or writing under the lifecycle directory.
+#[test]
+fn an_idle_slice_on_a_held_current_family_reopens_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+
+    let lifecycle_dir = home.join("search-lifecycle");
+    let changed_at = |path: &Path| {
+        let metadata = std::fs::metadata(path).unwrap();
+        (metadata.ctime(), metadata.ctime_nsec())
+    };
+    let before = changed_at(&lifecycle_dir);
+    // Another lifecycle transaction holds the exclusive lock a reopen takes; an idle slice needs none of it.
+    let transaction = LifecycleTransactionLock::acquire_exclusive(Some(home)).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Current), "{outcome:?}");
+    assert_eq!(
+        changed_at(&lifecycle_dir),
+        before,
+        "an idle slice writes nothing under the lifecycle directory"
+    );
+    drop(transaction);
+    owner.pin(&slice_budget()).unwrap();
 }
 
 /// AC2: a corrupt control record is unavailable, closes admission, and pins nothing; an owner that has run no slice refuses a disable and an authorized recovery; and while a disable reconciles, a concurrent slice and pin see the family as disabled rather than rebuilding a second manager over it.

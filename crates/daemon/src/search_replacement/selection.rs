@@ -173,6 +173,64 @@ impl SearchSelection {
         self.selected.load().is_some()
     }
 
+    pub fn holds_operation(&self, intent: &LifecycleIntent) -> bool {
+        self.selected
+            .load()
+            .as_ref()
+            .is_some_and(|family| family.names_operation(intent))
+    }
+
+    /// Reads the selected family's coverage without gate admission: `HookGate` judges this observation, so a denial of the previous observation cannot prevent the next one.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BuildError::Invalid` when no family is selected or the family is unavailable or quarantined; propagates errors from `deadline` and `read_within`.
+    pub fn observe_selected(&self, budget: &EvalBudget) -> Result<CoverageReport, BuildError> {
+        let family = self
+            .selected
+            .load_full()
+            .ok_or(BuildError::Invalid("search unavailable; rebuild required"))?;
+        if family
+            .unavailable
+            .load(std::sync::atomic::Ordering::Acquire)
+            || family.projection.quarantine().is_some()
+        {
+            return Err(BuildError::Invalid("selected family unavailable"));
+        }
+        Ok(family.projection.read_within(deadline(budget)?, |conn| {
+            observe(
+                conn,
+                &family.certificate.seed.kernel_incarnation_id,
+                &family.generation(),
+                family.bounds,
+            )?
+            .map_err(|_| ProjectionError::CorruptRow)
+        })?)
+    }
+
+    /// Judges the selected family under the gate and the kernel without rehashing its seed or rereading its certificate.
+    ///
+    /// # Errors
+    ///
+    /// Returns the gate's denial, the kernel mismatch, or `BuildError::Invalid` when no family is selected or it is quarantined.
+    pub fn check_selected(
+        &self,
+        kernel: &KernelStore,
+        gate: &HookGate,
+        budget: &EvalBudget,
+    ) -> Result<(), BuildError> {
+        self.admit(gate, budget)?;
+        let family = self
+            .selected
+            .load_full()
+            .ok_or(BuildError::Invalid("search unavailable; rebuild required"))?;
+        family.check_kernel(kernel, budget)?;
+        if family.projection.quarantine().is_some() {
+            return Err(BuildError::Invalid("search quarantined; rebuild required"));
+        }
+        admit_transition_hook(gate, &family.certificate)
+    }
+
     pub fn pin(
         &self,
         kernel: &KernelStore,
@@ -207,12 +265,7 @@ impl SearchSelection {
             &grant,
             &InvalidationIdentity::from(&self.identity),
             &[
-                (
-                    "local_transaction_rows",
-                    self.bounds.max_live().saturating_add(
-                        self.bounds.max_tombstoned_per_class.get().saturating_mul(5),
-                    ) as u64,
-                ),
+                ("local_transaction_rows", self.bounds.max_rows() as u64),
                 (
                     "export_page_rows",
                     self.bounds.max_live_per_class.get() as u64,

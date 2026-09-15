@@ -1270,13 +1270,32 @@ fn exact_verdicts(
     Ok(verdicts)
 }
 
-/// The binding a lane implies: the lane fingerprint is the verified bundle fingerprint the projection identity records as its tokenizer fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneIdentity {
+    pub embedding_model: String,
+    pub tokenizer_fingerprint: String,
+    pub vector_dimension: Option<u32>,
+    pub generation_epoch: u64,
+}
+
+impl From<&LaneInfo> for LaneIdentity {
+    fn from(lane: &LaneInfo) -> Self {
+        Self {
+            embedding_model: lane.model.clone(),
+            tokenizer_fingerprint: lane.fingerprint.clone(),
+            vector_dimension: u32::try_from(lane.dims).ok(),
+            generation_epoch: lane.table_epoch,
+        }
+    }
+}
+
 pub fn lane_binding(lane: &LaneInfo, host_incarnation: &str) -> LaneBinding {
+    let identity = LaneIdentity::from(lane);
     LaneBinding {
-        embedding_model: lane.model.clone(),
-        bundle_fingerprint: lane.fingerprint.clone(),
-        vector_dimension: u32::try_from(lane.dims).unwrap_or(u32::MAX),
-        table_epoch: lane.table_epoch,
+        embedding_model: identity.embedding_model,
+        bundle_fingerprint: identity.tokenizer_fingerprint,
+        vector_dimension: identity.vector_dimension.unwrap_or(u32::MAX),
+        table_epoch: identity.generation_epoch,
         host_incarnation: host_incarnation.to_owned(),
     }
 }
