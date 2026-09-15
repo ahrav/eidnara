@@ -102,7 +102,7 @@ pub(crate) fn persist(
     created_commit_seq: i64,
 ) -> Result<usize, ProjectionError> {
     let mut lookup = conn.prepare_cached(
-        "SELECT target_id,extraction_version FROM exact_associations
+        "SELECT target_id,extraction_version,created_commit_seq FROM exact_associations
          WHERE family=?1 AND namespace=?2 AND key=?3 AND occurrence_id=?4",
     )?;
     let mut insert = conn.prepare_cached(
@@ -128,9 +128,9 @@ pub(crate) fn persist(
             inserted += 1;
             continue;
         }
-        let (target, version): (String, u32) = lookup.query_row(
+        let (target, version, created): (String, u32, i64) = lookup.query_row(
             params![key.family.keyword(), key.namespace, key.key, occurrence_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         if version != EXTRACTION_VERSION {
             return Err(ProjectionError::ExtractionVersionMismatch {
@@ -138,7 +138,7 @@ pub(crate) fn persist(
                 expected: EXTRACTION_VERSION,
             });
         }
-        if target != key.target_id {
+        if target != key.target_id || created != created_commit_seq {
             return Err(ProjectionError::AssociationCollision {
                 occurrence_id: occurrence_id.to_string(),
             });
@@ -151,11 +151,12 @@ pub(crate) fn stored(
     conn: &GuardedConn<'_>,
     occurrence_id: &str,
     keys: &[AssociationKey],
+    created_commit_seq: i64,
 ) -> Result<bool, ProjectionError> {
     let mut lookup = conn.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM exact_associations
          WHERE family=?1 AND namespace=?2 AND key=?3 AND occurrence_id=?4 AND target_id=?5
-           AND extraction_version=?6)",
+           AND extraction_version=?6 AND created_commit_seq=?7)",
     )?;
     for key in keys {
         let present: bool = lookup.query_row(
@@ -165,7 +166,8 @@ pub(crate) fn stored(
                 key.key,
                 occurrence_id,
                 key.target_id,
-                EXTRACTION_VERSION
+                EXTRACTION_VERSION,
+                created_commit_seq
             ],
             |row| row.get(0),
         )?;

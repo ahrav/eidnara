@@ -317,6 +317,57 @@ pub fn derived_lineage_id(
     Some(identity_digest(&lineage))
 }
 
+/// Checks only the identity prefix.
+/// Readers must separately verify the digest and revision/representation/span
+/// suffix with [`identity_digest`] and [`derived_lineage_id`].
+pub fn occurrence_identity_matches(
+    mut tuple: &[u8],
+    class: OccurrenceClass,
+    identity: &[(&str, &str)],
+) -> bool {
+    let fields = class.identity_fields();
+    if identity.len() != fields.len() {
+        return false;
+    }
+    let mut take = |expected: &[u8]| {
+        if let Some(rest) = tuple.strip_prefix(expected) {
+            tuple = rest;
+            true
+        } else {
+            false
+        }
+    };
+    if !take(&[OCCURRENCE_ENCODING_VERSION, ROLE_OCCURRENCE])
+        || !take(
+            &u32::try_from(class.code().len())
+                .expect("small class code")
+                .to_be_bytes(),
+        )
+        || !take(class.code().as_bytes())
+        || !take(
+            &u32::try_from(fields.len())
+                .expect("small field count")
+                .to_be_bytes(),
+        )
+    {
+        return false;
+    }
+    for (expected, (field, value)) in fields.iter().zip(identity) {
+        if expected != field {
+            return false;
+        }
+        for text in [field, value] {
+            let Ok(len) = u32::try_from(text.len()) else {
+                return false;
+            };
+            if !take(&len.to_be_bytes()) || !take(text.as_bytes()) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Callers validate span bounds and, when bytes are available, UTF-8 alignment.
 pub(crate) fn encode_metadata(
     occurrence: &Occurrence<'_>,
@@ -407,4 +458,73 @@ pub fn encode_preserving_span(
         revision,
         span,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_matching_requires_the_complete_exact_prefix() {
+        let oid = "a".repeat(40);
+        for (class, identity, representation) in [
+            (
+                OccurrenceClass::CanonicalClaims,
+                vec![("object_id", "obj:é")],
+                "decision_summary",
+            ),
+            (
+                OccurrenceClass::PromotedMemory,
+                vec![("decision_object_id", "obj:é")],
+                "summary",
+            ),
+            (
+                OccurrenceClass::GitCommits,
+                vec![
+                    ("repository_id", "repo:a"),
+                    ("object_format", "sha1"),
+                    ("oid", &oid),
+                ],
+                "commit_message",
+            ),
+        ] {
+            let tuple = encode_preserving_span(&Occurrence {
+                class: class.code(),
+                identity: &identity,
+                revision: "1",
+                representation,
+                span: None,
+            })
+            .unwrap()
+            .tuple;
+            let prefix_len = 2
+                + 4
+                + class.code().len()
+                + 4
+                + identity
+                    .iter()
+                    .map(|(field, value)| 8 + field.len() + value.len())
+                    .sum::<usize>();
+            for end in 0..=tuple.len() {
+                assert_eq!(
+                    occurrence_identity_matches(&tuple[..end], class, &identity),
+                    end >= prefix_len
+                );
+            }
+            for index in 0..prefix_len {
+                let mut damaged = tuple.clone();
+                damaged[index] ^= 1;
+                assert!(
+                    !occurrence_identity_matches(&damaged, class, &identity),
+                    "byte {index}"
+                );
+            }
+            assert!(!occurrence_identity_matches(&tuple, class, &[]));
+            let mut wrong = identity.clone();
+            wrong[0].1 = "elsewhere";
+            assert!(!occurrence_identity_matches(&tuple, class, &wrong));
+            wrong[0] = ("wrong_field", identity[0].1);
+            assert!(!occurrence_identity_matches(&tuple, class, &wrong));
+        }
+    }
 }

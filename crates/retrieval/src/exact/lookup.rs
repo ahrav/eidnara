@@ -1,7 +1,9 @@
 use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::{OccurrenceClass, Span, derived_lineage_id, identity_digest};
+use kernel::source_identity::{
+    OccurrenceClass, Span, derived_lineage_id, identity_digest, occurrence_identity_matches,
+};
 use rusqlite::params;
 use storage::GuardedConn;
 
@@ -217,6 +219,9 @@ fn page_sql(has_cursor: bool) -> String {
     format!("SELECT {PAGE_COLUMNS} {PAGE_FROM} AND {lower} ORDER BY a.key,a.occurrence_id LIMIT ?5")
 }
 
+/// Checks cancellation between SQLite steps and before returning a page.
+/// An in-progress SQLite step is not interrupted.
+///
 /// # Errors
 ///
 /// Refuses an exhausted budget, a projection without a checkpoint or under
@@ -228,10 +233,13 @@ pub fn page(
     query: &ExactQuery<'_>,
     cursor: Option<&Cursor>,
 ) -> Result<Page, LookupRefusal> {
-    context
-        .budget
-        .check()
-        .map_err(|_| LookupRefusal::BudgetExhausted)?;
+    let check_budget = || {
+        context
+            .budget
+            .check()
+            .map_err(|_| LookupRefusal::BudgetExhausted)
+    };
+    check_budget()?;
     let checkpoint =
         read_checkpoint(conn, context.kernel_incarnation_id)?.ok_or(LookupRefusal::NoCheckpoint)?;
     let range = query.range();
@@ -267,7 +275,11 @@ pub fn page(
         distinct_keys: 0,
     };
     let mut previous_key = cursor.map(|cursor| cursor.last_key.clone());
-    while let Some(row) = rows.next()? {
+    loop {
+        check_budget()?;
+        let row = rows.next()?;
+        check_budget()?;
+        let Some(row) = row else { break };
         if page.rows.len() == context.page_rows.get() {
             let last = page.rows.last().expect("page_rows is nonzero");
             page.next = Some(Cursor {
@@ -286,54 +298,77 @@ pub fn page(
                 expected: EXTRACTION_VERSION,
             });
         }
-        let decoded = AssociationRow::decode(row, range.family)?;
+        let decoded = AssociationRow::decode(row, &range)?;
         if previous_key.as_ref() != Some(&decoded.key) {
             page.distinct_keys += 1;
         }
         previous_key = Some(decoded.key.clone());
         page.rows.push(decoded);
     }
+    check_budget()?;
     Ok(page)
 }
 
 impl AssociationRow {
-    fn decode(row: &rusqlite::Row<'_>, family: Family) -> Result<Self, LookupRefusal> {
+    fn decode(row: &rusqlite::Row<'_>, range: &KeyRange) -> Result<Self, LookupRefusal> {
         let corrupt = || ProjectionError::CorruptRow;
         let span = decode_span(row.get(9)?, row.get(10)?)?;
         let occurrence_created_commit_seq: i64 = row.get(15)?;
+        let created_commit_seq: i64 = row.get(4)?;
+        if created_commit_seq != occurrence_created_commit_seq {
+            return Err(corrupt().into());
+        }
         let tombstone = decode_tombstone(
             row.get(16)?,
             row.get::<_, Option<String>>(17)?.as_deref(),
             occurrence_created_commit_seq,
         )?;
         let class: String = row.get(6)?;
+        let class = OccurrenceClass::from_code(&class).ok_or_else(corrupt)?;
         let occurrence_id: String = row.get(2)?;
         let lineage_id: String = row.get(5)?;
         let revision: i64 = row.get(7)?;
         let representation: String = row.get(8)?;
         let tuple: Vec<u8> = row.get(18)?;
+        let key: Vec<u8> = row.get(0)?;
+        let key_text = std::str::from_utf8(&key).map_err(|_| corrupt())?;
+        let identity: &[(&str, &str)] = match (range.family, class) {
+            (Family::Id, OccurrenceClass::CanonicalClaims) => &[("object_id", key_text)],
+            (Family::Id, OccurrenceClass::PromotedMemory) => &[("decision_object_id", key_text)],
+            (Family::Sha, OccurrenceClass::GitCommits) => {
+                let (format, repository) = range.namespace.split_once(':').ok_or_else(corrupt)?;
+                &[
+                    ("repository_id", repository),
+                    ("object_format", format),
+                    ("oid", key_text),
+                ]
+            }
+            _ => return Err(corrupt().into()),
+        };
         let lineage = derived_lineage_id(
             &tuple,
-            &class,
+            class.code(),
             revision,
             &representation,
             span.map(|(start, end)| Span { start, end }),
         );
-        if identity_digest(&tuple) != occurrence_id || lineage.as_deref() != Some(&*lineage_id) {
+        if !occurrence_identity_matches(&tuple, class, identity)
+            || identity_digest(&tuple) != occurrence_id
+            || lineage.as_deref() != Some(&*lineage_id)
+        {
             return Err(corrupt().into());
         }
-        let key: Vec<u8> = row.get(0)?;
         let target_id: String = row.get(1)?;
-        if derived_target(family, &key, &lineage_id) != Some(target_id.as_bytes()) {
+        if derived_target(range.family, &key, &lineage_id) != Some(target_id.as_bytes()) {
             return Err(corrupt().into());
         }
         Ok(Self {
             key,
             target_id,
             occurrence_id,
-            created_commit_seq: row.get(4)?,
+            created_commit_seq,
             lineage_id,
-            class: OccurrenceClass::from_code(&class).ok_or_else(corrupt)?,
+            class,
             revision,
             representation,
             span,
