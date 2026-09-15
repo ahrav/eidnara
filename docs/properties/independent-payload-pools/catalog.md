@@ -306,7 +306,7 @@ Guarantee: Only descriptor schema 4, layout version 4, and profile `host-payload
 Check: `always` - every mismatch path returns an error before `Mapping::attach` or before `activate` commits, and no code path decodes another layout.
 Fault/timing angle: None; this is fail-closed identity checking.
 Required faults and enabling state: A grant with layout version 3; a setup message with schema 3; an eventfd in a doorbell position; a non-fresh pool at attach. Markers: marker:`setup.stale_identifier_presented`, marker:`setup.wrong_doorbell_type_presented`, marker:`setup.non_fresh_pool_presented`.
-Confidence: high - [evidence](evidence/sole-identifiers-before-activation.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:190`; `crates/shm-transport/src/backend/ring.rs:722`; `crates/host-runtime/src/ring_transport.rs:919`; `packages/shm-native/src/lib.rs:305`.
+Confidence: high - [evidence](evidence/sole-identifiers-before-activation.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:190`; `crates/shm-transport/src/backend/ring.rs:722`; `crates/host-runtime/src/ring_transport.rs:937`; `packages/shm-native/src/lib.rs:305`.
 Existing check: `crates/shm-transport/tests/contract.rs:167`, `crates/shm-transport/src/backend/ring.rs:2999`, `crates/shm-transport/tests/profile.rs:261`, and `stale_wire_or_descriptor_schema_is_invalid_identity` in `crates/host-runtime/src/setup_socket.rs`.
 Impact: An accepted stale identifier would decode another layout's bytes as this one's.
 Open questions:
@@ -357,7 +357,7 @@ Guarantee: A structurally illegal descriptor, header, or body length closes the 
 Check: `always` - `try_receive` returns `Err` and quarantines for every validation failure, and `receive_one` maps a header failure to `ReadClose::Corrupt` before delivering an `InboundEvent`.
 Fault/timing angle: Header/body mismatch written into the block; oversized declared length.
 Required faults and enabling state: A block header whose declared length differs from the descriptor's body length. Markers: marker:`pool.header_body_mismatch_in_block`, marker:`pool.oversized_body_declared`.
-Confidence: high - [evidence](evidence/structural-rejection-before-dispatch.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1473`; `crates/host-runtime/src/ring_transport.rs:714`.
+Confidence: high - [evidence](evidence/structural-rejection-before-dispatch.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1473`; `crates/host-runtime/src/ring_transport.rs:732`.
 Existing check: `crates/shm-transport/src/backend/ring.rs:2478` covers descriptor and header structure; host header validation stays in `validate_inbound_header` tests in `crates/host-runtime/src/frame_channel.rs`.
 Impact: Dispatching a structurally illegal frame would let a peer steer application decoding with unchecked lengths.
 Open questions:
@@ -405,13 +405,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - the host still copies every body with `to_vec` before `InboundFrame::owned` (`crates/host-runtime/src/ring_transport.rs:762`); the owned raw-lease `InboundFrame` and channel-0 private copy belong to #548.
+Exercised: partial - the host still copies every body with `to_vec` before `InboundFrame::owned` (`crates/host-runtime/src/ring_transport.rs:780`); the owned raw-lease `InboundFrame` and channel-0 private copy belong to #548.
 Guarantee: Rust decoding reads only stable private bytes: routed and channel-0 bodies are copied out of the lease before any parser sees them, and the lease is released after the last copy (KTD4).
 Check: `always` - no `InboundFrame` or control decoder holds a `LeaseSpan`; `lease.release()` precedes `deliver`.
 Fault/timing angle: A peer rewriting a published block during the copy.
 Required faults and enabling state: A copy racing a peer write of the same block. Markers: marker:`host.copy_races_peer_write`.
-Confidence: medium - [evidence](evidence/private-decode-input-stability.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/ring_transport.rs:762`; `crates/host-runtime/src/frame_channel.rs:111`.
-Existing check: the host still copies every body with `to_vec` before `InboundFrame::owned` (`crates/host-runtime/src/ring_transport.rs:762`); the owned raw-lease `InboundFrame` and channel-0 private copy belong to #548.
+Confidence: medium - [evidence](evidence/private-decode-input-stability.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/ring_transport.rs:780`; `crates/host-runtime/src/frame_channel.rs:111`.
+Existing check: the host still copies every body with `to_vec` before `InboundFrame::owned` (`crates/host-runtime/src/ring_transport.rs:780`); the owned raw-lease `InboundFrame` and channel-0 private copy belong to #548.
 Impact: Decoding shared bytes would let a peer change a message under the parser.
 Open questions:
 
@@ -611,13 +611,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/host-runtime/src/ring_transport.rs:819` serializes through `ReservationWriter` after reservation and commits under the frame deadline; `crates/shm-transport/src/backend/ring.rs:2351` covers abort and short commit.
+Exercised: partial - `crates/host-runtime/src/ring_transport.rs:837` serializes through `ReservationWriter` after reservation and commits under the frame deadline; `crates/shm-transport/src/backend/ring.rs:2351` covers abort and short commit.
 Guarantee: A direct serializer runs only into a reserved block whose span is the logical body bound, is never consumed without a reservation, and a short result keeps its block (KTD1).
 Check: `always` - `ProducerReservation::capacity()` equals the caller's bound, `segment(0)` has that length, and an unreserved `DirectFrame` is never invoked.
 Fault/timing angle: Reservation failure before serialization.
 Required faults and enabling state: `reserve_until` returning `Deadline` with a `DirectFrame` queued. Markers: marker:`host.direct_frame_unreserved_on_deadline`.
-Confidence: medium - [evidence](evidence/direct-serialization-commit-boundary.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1702`; `crates/host-runtime/src/ring_transport.rs:858`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:819` serializes through `ReservationWriter` after reservation and commits under the frame deadline; `crates/shm-transport/src/backend/ring.rs:2351` covers abort and short commit.
+Confidence: medium - [evidence](evidence/direct-serialization-commit-boundary.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/backend/ring.rs:1702`; `crates/host-runtime/src/ring_transport.rs:876`.
+Existing check: `crates/host-runtime/src/ring_transport.rs:837` serializes through `ReservationWriter` after reservation and commits under the frame deadline; `crates/shm-transport/src/backend/ring.rs:2351` covers abort and short commit.
 Impact: Serializing into class slack or without a reservation would write bytes no descriptor accounts for.
 Open questions:
 
@@ -645,13 +645,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/host-runtime/src/ring_transport.rs:1030` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs. Stop/restart witnesses belong to #548, #552, #550.
+Exercised: partial - `crates/host-runtime/src/ring_transport.rs:1048` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs. Stop/restart witnesses belong to #548, #552, #550.
 Guarantee: Failure before publication is `not_sent`; failure after publication is `outcome_unknown`; no layer replays an uncertain request (R7).
 Check: `always` - every `SendFailure` maps to exactly one of the two outcomes and no code path resubmits a frame after `commit` returned `Err`.
 Fault/timing angle: Quarantine between the pre-commit check and `commit`.
 Required faults and enabling state: A quarantine landing after `write` and before `commit`. Markers: marker:`host.quarantine_between_write_and_commit`.
-Confidence: medium - [evidence](evidence/send-outcome-no-generic-replay.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/ring_transport.rs:967`; `crates/shm-transport/src/backend/ring.rs:1015`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:1030` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs. Stop/restart witnesses belong to #548, #552, #550.
+Confidence: medium - [evidence](evidence/send-outcome-no-generic-replay.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/ring_transport.rs:985`; `crates/shm-transport/src/backend/ring.rs:1015`.
+Existing check: `crates/host-runtime/src/ring_transport.rs:1048` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs. Stop/restart witnesses belong to #548, #552, #550.
 Impact: A replayed uncertain request executes twice.
 Open questions:
 

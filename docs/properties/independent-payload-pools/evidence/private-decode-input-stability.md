@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/host-runtime/src/ring_transport.rs:762`
+- `crates/host-runtime/src/ring_transport.rs:780`
 - `crates/host-runtime/src/frame_channel.rs:111`
 
-Witness status: partial - the host still copies every body with `to_vec` before `InboundFrame::owned` (`crates/host-runtime/src/ring_transport.rs:762`); the owned raw-lease `InboundFrame` and channel-0 private copy belong to #548.
+Witness status: partial - the host still copies every body with `to_vec` before `InboundFrame::owned` (`crates/host-runtime/src/ring_transport.rs:780`); the owned raw-lease `InboundFrame` and channel-0 private copy belong to #548.
 
 ## Failure scenario
 
