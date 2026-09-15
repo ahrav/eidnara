@@ -267,18 +267,88 @@ bytes is refused when its meaning changed. A different model space is refused
 at an equal dimension.
 
 The vector selector is `vector-profile.json`, beside the host and search
-selectors. `select_vector` refuses a generation whose manifest target is not
-`vector-generation`; the search selector keeps its existing behavior and
-checks no target. Pruning retains every owner-selected generation, discard
-refuses one, exchange repair refuses to replace one, and a corrupt or
-quarantined owner selector stops the store's mutators for every caller, as
-the search selector already did. The store's selection primitive checks
-inventory, sizes, modes, and hashes only; the daemon's semantic verification
-of a generation precedes selection, and selecting or recovering a complete
-composition is a separate contract.
+selectors. It names a composition, never a layer. A layer's manifest target
+is `vector-generation`; a composition's is `vector-composition`, and
+`select_vector` refuses any other. Any generation may list `members.json`, digests the store must retain with
+it: pruning retains every member named by any complete generation in the
+store, so a member outlives every record that names it by one prune pass;
+discard refuses a member of any record; exchange repair refuses to replace a
+selected record. The store reads only a generation's manifest and members
+file for this, never its payload, so a corrupt payload of a selected
+generation does not stop pruning; a selected generation whose manifest or
+members file cannot be read, or any generation of unknown schema, makes the
+members unknown, and the store then behaves as with a quarantined selector:
+temps only are reclaimed and discard refuses. The members rule is owner
+agnostic: a search seed that lists members retains them the same way, though
+no search seed does. The store's selection primitive checks inventory, sizes, modes,
+hashes, the target, and that every listed member validates; the daemon's
+semantic verification of the composition and its members precedes selection.
 
 Staging charges the whole payload inventory against the admission manifest's
 `capture_disk_bytes` limit under the caller's admission; a denial stages
 nothing. The build's work directory is scratch: files are created exclusively
 and not synced there, because the store copies and syncs them when it stages,
 and a retry uses a fresh directory.
+
+## The vector composition
+
+`daemon::vector_composition` names one base layer and up to a caller-bounded
+number of ordered delta layers in one immutable composition generation, staged
+through the shared store under target `vector-composition`:
+
+| File | Bytes |
+| --- | --- |
+| `composition.json` | Canonical record: schema, publication sequence, model, tokenizer fingerprint, dimension, metric, tolerance, recipe, epoch, kernel incarnation, base digest, delta digests in application order. |
+| `members.json` | `{"schema":1,"members":[base, deltas...]}`; the lifecycle store reads it to retain every member while the composition is selected. |
+
+`compose` refuses a duplicate member, more deltas than
+the bound, a member whose sidecar does not carry the expectation's identity,
+and a delta whose checkpoint moves backwards from its predecessor's. This is a
+conservative reading of the base/delta checkpoint relation the owners have not
+yet frozen: every delta's snapshot and checkpoint are at or after the
+checkpoint of the layer before it. Equal-precedence conflicts among members
+are not decided here. These layers export live rows only; base/delta tombstone
+semantics belong to the layer-resolution work.
+
+`publish` refuses a sequence at or below the selected composition's, stages
+the composition under the caller's admission, and moves the selector in one
+rename. It reports how far the attempt got, recorded when each step returns:
+`NotStaged`, `Staged` when the store holds the record, `Acknowledged` when
+the selector rename returned, `Durable` when the containing-directory sync
+returned. A failure carries the last stage reached; a failure at or after
+`Acknowledged` is an unknown outcome, and `reconcile` settles it by reading
+the selector back, syncing its directory, and comparing digests: `Published`
+when it names the attempt, `Other` with whatever it names otherwise,
+`Quarantined` when its schema is unknown. An interrupted publication
+therefore leaves the old complete selection or the new one, never a partial
+or mixed view, and a retry of an acknowledged publication is refused by
+sequence without a second record.
+
+`verify_composition` checks the record's target, schema, canonical bytes,
+manifest binding, agreement with `members.json`, and identity, verifies every
+member with `vector_generation::verify`, and re-checks the topology. It refuses
+an excessive delta count before opening any member, so the caller's delta bound
+limits member-verification work as well as the accepted topology.
+`recover` takes the selected composition when it verifies; otherwise it reads
+the manifests of the other generations and, for composition targets, only the
+manifest-listed `composition.json` (hash-checked and capped at 1 MiB). Discovery
+retains the newest `bound` `(sequence, digest)` pairs, not generation descriptors;
+equal sequences use descending digest order. It then fully verifies at most
+those `bound` generations, including inventory and member checks, and takes the
+first that passes. A candidate whose record is readable but whose other files
+are invalid consumes one attempt. Unreadable records are skipped during
+discovery. The directory listing and manifest scan still scale with the store's
+generation count; `bound` is not a bound on that scan or on total bytes in the
+members. Recovery reports the selector as `Stale` or `Absent` rather than
+repointing it. A verifying selection is never displaced by a newer composition
+that was staged but not selected, and no verifying composition within the bound
+means explicit unavailability.
+
+Readers hold a composition the way the store expects: pin the composition
+generation, then open every member, then re-read the selector. While the
+composition record exists, whether pinned or merely not yet reclaimed, its
+members stay retained, so a reader that pinned a superseded composition keeps
+its members after a later publication moves the selector. `recover` does not
+pin the returned composition: its caller must validate and pin the returned
+digest while still holding the lifecycle transaction lock before handing it
+to a reader. Releasing the lock first leaves an unselected fallback reclaimable.

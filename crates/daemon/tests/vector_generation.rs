@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use daemon::projection_gates::{Admission, EntryPoint, HookGate, ProjectionHook};
 use daemon::vector_generation::{
     BuiltVectors, CODES_FILE, ExpectedVectors, FileFault, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE,
-    SIDECAR_FILE, VectorRefusal, VectorSidecar, build, stage, verify,
+    SIDECAR_FILE, Staging, VECTOR_TARGET, VectorRefusal, VectorSidecar, build, stage, verify,
 };
 use host_runtime::generation::{
     CurrentProfile, GENERATIONS_DIR_NAME, GenerationError, GenerationManifest, GenerationStore,
-    ProfileEvent, SEARCH_PROFILE_NAME, SourceSpec, StageMeta, VECTOR_PROFILE_NAME, VECTOR_TARGET,
+    SourceSpec, StageMeta,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 use retrieval::ProjectionIdentity;
@@ -91,6 +91,7 @@ struct Fixture {
     admission: Admission,
     identity: ProjectionIdentity,
     generation: VectorGeneration,
+    protected: BTreeSet<String>,
     work_dirs: std::cell::Cell<usize>,
 }
 
@@ -114,6 +115,7 @@ impl Fixture {
             admission,
             identity,
             generation,
+            protected: BTreeSet::new(),
             work_dirs: std::cell::Cell::new(0),
         }
     }
@@ -152,12 +154,14 @@ impl Fixture {
     ) -> Result<String, VectorRefusal> {
         stage(
             built,
-            &self.store,
-            &self.tx,
-            &self.gate,
-            admission,
-            &self.identity,
-            &BTreeSet::new(),
+            &Staging {
+                store: &self.store,
+                transaction: &self.tx,
+                gate: &self.gate,
+                admission,
+                identity: &self.identity,
+                protected: &self.protected,
+            },
         )
     }
 
@@ -184,17 +188,6 @@ impl Fixture {
 
     fn select_vector(&self, digest: &str) -> Result<(), GenerationError> {
         self.store.select_vector(digest, &self.tx, &mut |_| Ok(()))
-    }
-
-    fn selector_bytes(&self, name: &str) -> Option<Vec<u8>> {
-        fs::read(self.lifecycle_dir().join(name)).ok()
-    }
-
-    fn write_selector(&self, name: &str, bytes: &[u8]) {
-        let path = self.lifecycle_dir().join(name);
-        let _ = fs::remove_file(&path);
-        fs::write(&path, bytes).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     fn stage_search_seed(&self) -> String {
@@ -756,203 +749,6 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
             field: "checkpoint"
         }
     );
-}
-
-#[test]
-fn the_vector_selector_refuses_other_owners_and_leaves_the_search_and_host_selectors_untouched() {
-    let fixture = Fixture::new();
-    let seed = fixture.stage_search_seed();
-    fixture
-        .store
-        .select_search(&seed, &fixture.tx, &mut |_| Ok(()))
-        .unwrap();
-    let search_before = fixture.selector_bytes(SEARCH_PROFILE_NAME).unwrap();
-
-    assert!(
-        fixture.select_vector(&seed).is_err(),
-        "a search seed belongs to another owner"
-    );
-    assert_eq!(
-        fixture.store.read_vector_current().unwrap(),
-        CurrentProfile::Absent
-    );
-
-    let digest = fixture.stage(&fixture.build()).unwrap();
-    fixture.select_vector(&digest).unwrap();
-    assert_eq!(
-        fixture.store.read_vector_current().unwrap(),
-        CurrentProfile::Current(digest.clone())
-    );
-    assert_eq!(
-        fixture.store.read_search_current().unwrap(),
-        CurrentProfile::Current(seed.clone())
-    );
-    assert_eq!(
-        fixture.store.read_current().unwrap(),
-        CurrentProfile::Absent
-    );
-    assert_eq!(
-        fixture.selector_bytes(SEARCH_PROFILE_NAME).unwrap(),
-        search_before,
-        "the search selector is byte-for-byte unchanged"
-    );
-    assert_eq!(
-        fixture.store.reconcile_vector(&fixture.tx).unwrap(),
-        CurrentProfile::Current(digest.clone())
-    );
-
-    // Both owners' selections survive a prune that removes an unselected third generation.
-    let mut other = export();
-    other.checkpoint.hold_id = "hold-9".to_owned();
-    let third = fixture
-        .stage(&build(&fixture.expected(), &other, &fixture.work_dir()).unwrap())
-        .unwrap();
-    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
-    assert_eq!(report.removed_generations, 1);
-    let mut retained = vec![seed, digest];
-    retained.sort();
-    assert_eq!(fixture.generations(), retained);
-    assert!(!fixture.generations().contains(&third));
-}
-
-#[test]
-fn a_selector_cut_before_the_rename_leaves_no_selection_and_one_after_it_is_reconciled() {
-    let fixture = Fixture::new();
-    let digest = fixture.stage(&fixture.build()).unwrap();
-    for cut in [
-        ProfileEvent::BeforeRename,
-        ProfileEvent::AfterRename,
-        ProfileEvent::BeforeDirectorySync,
-        ProfileEvent::AfterDirectorySync,
-    ] {
-        let fixture = Fixture::new();
-        let digest = fixture.stage(&fixture.build()).unwrap();
-        let mut seen = Vec::new();
-        let outcome = fixture
-            .store
-            .select_vector(&digest, &fixture.tx, &mut |event| {
-                seen.push(event);
-                if event == cut {
-                    Err(GenerationError::NativePayloadInvalid { detail: "cut" })
-                } else {
-                    Ok(())
-                }
-            });
-        assert!(outcome.is_err(), "{cut:?}");
-        assert_eq!(
-            *seen.last().unwrap(),
-            cut,
-            "the cut fired where it was placed"
-        );
-        let expected = if cut == ProfileEvent::BeforeRename {
-            CurrentProfile::Absent
-        } else {
-            CurrentProfile::Current(digest.clone())
-        };
-        assert_eq!(
-            fixture.store.read_vector_current().unwrap(),
-            expected,
-            "{cut:?}"
-        );
-        assert_eq!(
-            fixture.store.reconcile_vector(&fixture.tx).unwrap(),
-            expected,
-            "{cut:?}"
-        );
-        let temps: Vec<String> = fs::read_dir(fixture.lifecycle_dir())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(&format!(".{VECTOR_PROFILE_NAME}")))
-            .collect();
-        assert!(
-            temps.is_empty() || cut != ProfileEvent::BeforeRename,
-            "{cut:?}: {temps:?}"
-        );
-    }
-    let _ = digest;
-}
-
-#[test]
-fn prune_discard_and_exchange_repair_respect_the_vector_selector() {
-    let fixture = Fixture::new();
-    let built = fixture.build();
-    let digest = fixture.stage(&built).unwrap();
-    fixture.select_vector(&digest).unwrap();
-
-    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
-    assert_eq!(report.removed_generations, 0);
-    assert_eq!(fixture.generations(), vec![digest.clone()]);
-
-    assert!(
-        fixture
-            .store
-            .discard_unselected(
-                &built.sidecar.stage_manifest(),
-                &fixture.tx,
-                &BTreeSet::new()
-            )
-            .is_err(),
-        "a selected vector generation cannot be discarded"
-    );
-    assert_eq!(fixture.generations(), vec![digest.clone()]);
-
-    // Corrupt the selected generation in place, then stage the same bytes again: exchange repair refuses to replace a selected target.
-    let dir = fixture.generation_dir(&digest);
-    let pristine_codes = fs::read(dir.join(CODES_FILE)).unwrap();
-    let mut codes = pristine_codes.clone();
-    codes[0] ^= 0xff;
-    fs::write(dir.join(CODES_FILE), &codes).unwrap();
-    assert!(fixture.store.validate(&digest).is_err());
-    let again = fixture.build();
-    assert!(
-        matches!(fixture.stage(&again), Err(VectorRefusal::Store(_))),
-        "the corrupt selected target is protected from exchange"
-    );
-    assert_eq!(
-        fixture.generations(),
-        vec![digest.clone()],
-        "no staging temp survives the refusal"
-    );
-
-    // Unselected, the same corrupt target is repaired by exchange.
-    fs::remove_file(fixture.lifecycle_dir().join(VECTOR_PROFILE_NAME)).unwrap();
-    assert_eq!(
-        fixture.store.read_vector_current().unwrap(),
-        CurrentProfile::Absent
-    );
-    let repaired = fixture.stage(&again).unwrap();
-    assert_eq!(repaired, digest);
-    assert!(fixture.verify(&digest).is_ok());
-    assert_eq!(fs::read(dir.join(CODES_FILE)).unwrap(), pristine_codes);
-
-    // A vector selector of unknown schema quarantines: prune keeps every generation and removes only temps; discard, exchange repair, and selection refuse.
-    fixture.write_selector(VECTOR_PROFILE_NAME, br#"{"schema":9,"current":"zz"}"#);
-    assert_eq!(
-        fixture.store.read_vector_current().unwrap(),
-        CurrentProfile::Quarantined
-    );
-    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
-    assert_eq!(report.removed_generations, 0);
-    assert!(report.quarantined >= 1);
-    assert_eq!(fixture.generations(), vec![digest.clone()]);
-    assert!(matches!(
-        fixture.select_vector(&digest),
-        Err(GenerationError::UnsupportedStateSchema)
-    ));
-    assert!(matches!(
-        fixture.store.discard_unselected(
-            &built.sidecar.stage_manifest(),
-            &fixture.tx,
-            &BTreeSet::new()
-        ),
-        Err(GenerationError::UnsupportedStateSchema)
-    ));
-    fs::write(dir.join(CODES_FILE), &codes).unwrap();
-    assert!(
-        matches!(fixture.stage(&again), Err(VectorRefusal::Quarantined)),
-        "exchange repair refuses under a quarantined owner selector"
-    );
-    fs::write(dir.join(CODES_FILE), &pristine_codes).unwrap();
 }
 
 #[test]

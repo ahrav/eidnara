@@ -42,8 +42,10 @@ pub const GENERATIONS_DIR_NAME: &str = "generations";
 pub const CURRENT_PROFILE_NAME: &str = "current-profile.json";
 pub const SEARCH_PROFILE_NAME: &str = "search-profile.json";
 pub const VECTOR_PROFILE_NAME: &str = "vector-profile.json";
-/// The manifest target every vector generation is staged under; `select_vector` refuses any other.
-pub const VECTOR_TARGET: &str = "vector-generation";
+/// The manifest target of a generation the vector selector may name: a composition that lists its members in [`MEMBERS_FILE_NAME`]; `select_vector` refuses any other.
+pub const VECTOR_SELECTION_TARGET: &str = "vector-composition";
+/// A manifest-listed file naming the digests a generation requires retained while it is selected; an owner selector that names such a generation protects every member.
+pub const MEMBERS_FILE_NAME: &str = "members.json";
 
 /// Selectors a daemon component owns. Each names one generation the store must retain, and each is quarantined on its own when its schema is unknown.
 const OWNER_PROFILE_NAMES: [&str; 2] = [SEARCH_PROFILE_NAME, VECTOR_PROFILE_NAME];
@@ -278,7 +280,56 @@ pub struct ValidatedGeneration {
     dir: OwnedFd,
 }
 
+/// The wire shape of [`MEMBERS_FILE_NAME`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireMembers {
+    pub schema: u32,
+    pub members: Vec<String>,
+}
+
+/// The members a manifest-listed members file names, after the file is rehashed against its entry; empty when the manifest lists none.
+fn read_members(
+    dir: &OwnedFd,
+    manifest: &GenerationManifest,
+) -> Result<Vec<String>, GenerationError> {
+    let Some(entry) = manifest
+        .files
+        .iter()
+        .find(|file| file.path == MEMBERS_FILE_NAME)
+    else {
+        return Ok(Vec::new());
+    };
+    let fd =
+        open_rel_file(dir, MEMBERS_FILE_NAME).ok_or_else(|| invalid("members file missing"))?;
+    verify_file_against_entry(&fd, entry)?;
+    let bytes = read_all_fd(&fd, MAX_MANIFEST_BYTES).map_err(|_| invalid("members read failed"))?;
+    match decode_with_schema::<WireMembers>(&bytes) {
+        SchemaDecode::Valid(members) => {
+            if members
+                .members
+                .iter()
+                .any(|digest| !is_canonical_payload_digest(digest))
+            {
+                return Err(invalid("members name a noncanonical digest"));
+            }
+            Ok(members.members)
+        }
+        SchemaDecode::UnknownSchema => Err(GenerationError::UnsupportedStateSchema),
+        SchemaDecode::Malformed => Err(invalid("members file is corrupt")),
+    }
+}
+
 impl ValidatedGeneration {
+    /// The digests this generation requires retained, read through the retained descriptor; empty when the manifest lists no members file.
+    ///
+    /// # Errors
+    ///
+    /// A members file the manifest names but that fails its hash, has an unknown schema, or names a noncanonical digest.
+    pub fn members(&self) -> Result<Vec<String>, GenerationError> {
+        read_members(&self.dir, &self.manifest)
+    }
+
     pub fn pin(&self) -> Result<(), GenerationError> {
         rustix::fs::flock(&self.dir, rustix::fs::FlockOperation::NonBlockingLockShared)
             .map_err(|_| invalid("generation is being reclaimed"))
@@ -295,6 +346,19 @@ impl ValidatedGeneration {
     /// `descriptor_root_path` supports directory traversal only on Linux.
     pub fn descriptor_root_path(&self) -> PathBuf {
         crate::harness_closure::descriptor_path(self.dir.as_raw_fd())
+    }
+
+    /// The bytes of one manifest-listed file, read through [`Self::open_verified_file`]; the manifest cap bounds the read because every listed file's size was checked against it.
+    pub fn read_verified_file(&self, rel_path: &str) -> Result<Vec<u8>, GenerationError> {
+        let fd = self.open_verified_file(rel_path)?;
+        let size = self
+            .manifest
+            .files
+            .iter()
+            .find(|file| file.path == rel_path)
+            .map_or(0, |file| file.size);
+        let cap = usize::try_from(size).map_err(|_| invalid("file too large to read"))?;
+        read_all_fd(&fd, cap).map_err(|_| invalid("verified file read failed"))
     }
 
     /// `open_verified_file` opens a manifest-listed file through the retained directory descriptor and rechecks its shape and hash.
@@ -479,13 +543,18 @@ impl GenerationStore {
         self.read_profile(VECTOR_PROFILE_NAME)
     }
 
-    /// The digest every owner selector names, plus whether any owner selector is quarantined.
+    /// The digest every owner selector names, plus every member such a generation requires retained, plus whether any owner selector is quarantined.
+    /// A selected generation whose manifest or members file cannot be read has unknown members, so it counts as quarantined: its own digest stays protected and no generation is reclaimed.
     fn owner_selections(&self) -> Result<(BTreeSet<String>, bool), GenerationError> {
         let mut selected = BTreeSet::new();
         let mut quarantined = false;
         for name in OWNER_PROFILE_NAMES {
             match self.read_profile(name)? {
                 CurrentProfile::Current(digest) => {
+                    match self.members_of(&digest) {
+                        Ok(members) => selected.extend(members),
+                        Err(_) => quarantined = true,
+                    }
                     selected.insert(digest);
                 }
                 CurrentProfile::Quarantined => quarantined = true,
@@ -493,6 +562,26 @@ impl GenerationStore {
             }
         }
         Ok((selected, quarantined))
+    }
+
+    /// The members `digest` requires retained, from its manifest and members file alone; the other listed files are not opened.
+    fn members_of(&self, digest: &str) -> Result<Vec<String>, GenerationError> {
+        let (dir, manifest) = self.open_manifest(digest)?;
+        read_members(&dir, &manifest)
+    }
+
+    /// Members named by any complete generation in `digests`, so a member is never reclaimed before every record that names it is; a record of unknown schema may name members this build cannot read, so it counts as quarantined.
+    fn named_members(&self, digests: &[String]) -> (BTreeSet<String>, bool) {
+        let mut members = BTreeSet::new();
+        let mut quarantined = false;
+        for digest in digests {
+            match self.members_of(digest) {
+                Ok(found) => members.extend(found),
+                Err(GenerationError::UnsupportedStateSchema) => quarantined = true,
+                Err(_) => {}
+            }
+        }
+        (members, quarantined)
     }
 
     fn read_profile(&self, name: &str) -> Result<CurrentProfile, GenerationError> {
@@ -545,8 +634,51 @@ impl GenerationStore {
         })
     }
 
-    fn validate_in_dir(
+    /// The manifest alone: its bytes hash to `digest` and are canonical, but the files it lists are not opened. Cheap enough to run on every prune.
+    pub fn manifest(&self, digest: &str) -> Result<GenerationManifest, GenerationError> {
+        self.open_manifest(digest).map(|(_, manifest)| manifest)
+    }
+
+    /// This is a discovery read, not proof that the complete generation is valid. Call [`Self::validate`] before using it as a generation.
+    ///
+    /// # Errors
+    ///
+    /// Invalid manifest or path, an unlisted file, a file above the metadata limit, or a shape, size, hash, or read failure.
+    pub fn read_manifest_file(
         &self,
+        digest: &str,
+        rel_path: &str,
+    ) -> Result<Vec<u8>, GenerationError> {
+        validate_rel_path(rel_path)?;
+        let (dir, manifest) = self.open_manifest(digest)?;
+        let entry = manifest
+            .files
+            .iter()
+            .find(|file| file.path == rel_path)
+            .ok_or_else(|| invalid("file is not named by the manifest"))?;
+        if entry.size > MAX_MANIFEST_BYTES as u64 {
+            return Err(invalid("metadata file exceeds size limit"));
+        }
+        let fd = open_rel_file(&dir, rel_path).ok_or_else(|| invalid("file missing"))?;
+        verify_file_against_entry(&fd, entry)?;
+        read_all_fd(&fd, entry.size as usize).map_err(|_| invalid("metadata file read failed"))
+    }
+
+    fn open_manifest(
+        &self,
+        digest: &str,
+    ) -> Result<(OwnedFd, GenerationManifest), GenerationError> {
+        if !is_canonical_payload_digest(digest) {
+            return Err(invalid("generation digest is noncanonical"));
+        }
+        let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
+            return Err(invalid("generation directory is missing or insecure"));
+        };
+        let manifest = Self::read_manifest_in_dir(&dir, digest)?;
+        Ok((dir, manifest))
+    }
+
+    fn read_manifest_in_dir(
         dir: &OwnedFd,
         digest: &str,
     ) -> Result<GenerationManifest, GenerationError> {
@@ -575,12 +707,21 @@ impl GenerationStore {
         if manifest.canonical_bytes() != bytes {
             return Err(invalid("manifest is not canonically encoded"));
         }
-        let mut expected: BTreeSet<String> = BTreeSet::new();
         let mut sorted = manifest.files.clone();
         sorted.sort_by(|a, b| a.path.cmp(&b.path));
         if sorted != manifest.files {
             return Err(invalid("manifest files are not sorted by path"));
         }
+        Ok(manifest)
+    }
+
+    fn validate_in_dir(
+        &self,
+        dir: &OwnedFd,
+        digest: &str,
+    ) -> Result<GenerationManifest, GenerationError> {
+        let manifest = Self::read_manifest_in_dir(dir, digest)?;
+        let mut expected: BTreeSet<String> = BTreeSet::new();
         for entry in &manifest.files {
             // The same path rules the stager enforces bound length and depth before the walk.
             validate_rel_path(&entry.path)?;
@@ -853,15 +994,20 @@ impl GenerationStore {
         self.select_owner(SEARCH_PROFILE_NAME, digest, None, observer)
     }
 
-    /// Points the vector selector at `digest`. A generation whose manifest target is not [`VECTOR_TARGET`] belongs to another owner and is refused, so the vector selector can never name a search seed or a host payload.
-    /// The store checks inventory, sizes, modes, and hashes; the daemon's semantic verification of the generation precedes this call and is not repeated here.
+    /// Points the vector selector at a composition. A generation whose manifest target is not [`VECTOR_SELECTION_TARGET`] belongs to another owner and is refused, and a composition whose members are not all present and valid is refused, so the selector never exposes a partial set.
+    /// The store checks inventory, sizes, modes, and hashes; the daemon's semantic verification of the composition and its members precedes this call and is not repeated here.
     pub fn select_vector(
         &self,
         digest: &str,
         _transaction: &LifecycleTransactionLock,
         observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
     ) -> Result<(), GenerationError> {
-        self.select_owner(VECTOR_PROFILE_NAME, digest, Some(VECTOR_TARGET), observer)
+        self.select_owner(
+            VECTOR_PROFILE_NAME,
+            digest,
+            Some(VECTOR_SELECTION_TARGET),
+            observer,
+        )
     }
 
     fn select_owner(
@@ -879,8 +1025,19 @@ impl GenerationStore {
         if target.is_some_and(|target| validated.manifest.target != target) {
             return Err(invalid("generation belongs to another owner"));
         }
+        for member in validated.members()? {
+            self.validate(&member)
+                .map_err(|_| invalid("composition member is not a valid generation"))?;
+        }
         self.replace_profile_at(name, digest, observer)?;
         self.verify_named_identity()
+    }
+
+    /// Every complete generation the store holds, by digest, in name order; temps and foreign names are omitted.
+    pub fn digests(&self) -> Result<Vec<String>, GenerationError> {
+        let (entries, _) = read_dir_names_partitioned(&self.generations_fd)
+            .map_err(|_| invalid("directory listing failed"))?;
+        Ok(canonical_digests(&entries))
     }
 
     pub fn reconcile_search(
@@ -1019,6 +1176,13 @@ impl GenerationStore {
         if selected.contains(&digest) {
             return Err(invalid("owner generation is selected"));
         }
+        let (named, named_quarantined) = self.named_members(&self.digests()?);
+        if named_quarantined {
+            return Err(GenerationError::UnsupportedStateSchema);
+        }
+        if named.contains(&digest) {
+            return Err(invalid("generation is a member of a retained composition"));
+        }
         match rustix::fs::statat(
             &self.generations_fd,
             digest.as_str(),
@@ -1050,9 +1214,10 @@ impl GenerationStore {
     /// `prune` preserves entries with unknown manifest schemas or foreign names.
     /// `prune` returns `UnsupportedStateSchema` when the current profile is quarantined.
     /// A quarantined owner profile may name any digest, so `prune` then counts it as quarantined
-    /// and removes only temps, which no selector can reference. Every owner selector gates every
-    /// caller: a corrupt or quarantined vector selector stops the host launcher's prune as a
-    /// corrupt or quarantined search selector already does.
+    /// and removes only temps, which no selector can reference; a selected generation whose members
+    /// cannot be read, or any generation of unknown schema, is treated the same way. A member named
+    /// by any complete record survives the pass its record is reclaimed in. Every owner selector
+    /// gates every caller, as the search selector already did.
     /// One unremovable entry does not stop the sweep: every reclaimable entry is removed first,
     /// then the first removal error is returned.
     pub fn prune(&self, protected: &BTreeSet<String>) -> Result<PruneReport, GenerationError> {
@@ -1077,6 +1242,12 @@ impl GenerationStore {
         let (entries, unnamed) = read_dir_names_partitioned(&self.generations_fd)
             .map_err(|_| invalid("directory listing failed"))?;
         report.quarantined += unnamed;
+        let (named, named_quarantined) = self.named_members(&canonical_digests(&entries));
+        protected.extend(named);
+        let owner_quarantined = owner_quarantined || named_quarantined;
+        if named_quarantined {
+            report.quarantined += 1;
+        }
         for name in entries {
             if is_staging_temp_name(&name) {
                 match remove_tree(&self.generations_fd, &name) {
@@ -1125,6 +1296,16 @@ impl GenerationStore {
             None => Ok(report),
         }
     }
+}
+
+fn canonical_digests(entries: &[String]) -> Vec<String> {
+    let mut digests: Vec<String> = entries
+        .iter()
+        .filter(|name| is_canonical_payload_digest(name))
+        .cloned()
+        .collect();
+    digests.sort();
+    digests
 }
 
 fn validate_rel_path(rel: &str) -> Result<(), GenerationError> {
@@ -2368,6 +2549,53 @@ mod tests {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).expect("read verified file");
         assert_eq!(bytes, b"#binary-bytes");
+    }
+
+    #[test]
+    fn manifest_file_discovery_checks_only_the_named_bounded_file() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        std::fs::write(dir.join("bin/eidnara-host"), b"corrupt").unwrap();
+        assert!(store.validate(&digest).is_err());
+        assert_eq!(
+            store.read_manifest_file(&digest, "notices.txt").unwrap(),
+            b"notice text"
+        );
+        for path in ["missing", "../notices.txt", "/notices.txt"] {
+            assert!(store.read_manifest_file(&digest, path).is_err(), "{path}");
+        }
+        std::fs::write(dir.join("notices.txt"), b"NOTICE TEXT").unwrap();
+        assert!(matches!(
+            store.read_manifest_file(&digest, "notices.txt"),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "file hash diverges from the manifest"
+            })
+        ));
+
+        for size in [MAX_MANIFEST_BYTES, MAX_MANIFEST_BYTES + 1] {
+            let sources = [SourceSpec {
+                rel_path: "metadata".to_owned(),
+                source: write_source(src.path(), "metadata", &vec![b'x'; size]),
+                executable: false,
+                expected_size: None,
+                expected_sha256: None,
+            }];
+            let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+            let result = store.read_manifest_file(&digest, "metadata");
+            if size == MAX_MANIFEST_BYTES {
+                assert_eq!(result.unwrap(), vec![b'x'; size]);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(GenerationError::NativePayloadInvalid {
+                        detail: "metadata file exceeds size limit"
+                    })
+                ));
+            }
+        }
     }
 
     /// Persisted manifest bytes must equal the canonical serialization of the decoded manifest.
