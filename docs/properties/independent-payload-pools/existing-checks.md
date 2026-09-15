@@ -213,7 +213,7 @@ An existing check does not remove a property from the catalog; each entry is
 | `host_status_decodes_the_hosts_own_response_shape` (`:305`) | unaudited |
 | `close_rejects_new_sends` (`:343`) | unaudited |
 | `managed_client_witnesses_current_layout_maximum_bodies_and_controlled_recovery` (`:365`) | unaudited |
-| `a_retained_response_stays_private_while_transport_storage_is_reused_and_after_close` (`:499`) | unaudited |
+| `a_retained_response_stays_private_while_transport_storage_is_reused_and_after_close` (`:498`) | unaudited |
 
 ## Native and TypeScript
 

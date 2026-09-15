@@ -2746,13 +2746,6 @@ async fn start_ring_bridge(
                     .chain(pending_data.iter())
                     .map(|write| write.commit_by)
                     .min();
-                let timeout = park_until.map(|until| {
-                    let remaining = until.saturating_duration_since(StdInstant::now());
-                    rustix::event::Timespec {
-                        tv_sec: remaining.as_secs().try_into().unwrap_or(i64::MAX),
-                        tv_nsec: remaining.subsec_nanos().into(),
-                    }
-                });
                 let mut fds = [
                     rustix::event::PollFd::new(&*worker_wake, rustix::event::PollFlags::IN),
                     rustix::event::PollFd::new(&data_ready, rustix::event::PollFlags::IN),
@@ -2761,6 +2754,15 @@ async fn start_ring_bridge(
                 ];
                 let watched = if capacity_armed { 4 } else { 3 };
                 let poll_ready = loop {
+                    // Recomputed per attempt: `poll` takes a relative timeout, so a retry after
+                    // `EINTR` with the original value would restart the wait.
+                    let timeout = park_until.map(|until| {
+                        let remaining = until.saturating_duration_since(StdInstant::now());
+                        rustix::event::Timespec {
+                            tv_sec: remaining.as_secs().try_into().unwrap_or(i64::MAX),
+                            tv_nsec: remaining.subsec_nanos().into(),
+                        }
+                    });
                     match rustix::event::poll(&mut fds[..watched], timeout.as_ref()) {
                         Ok(_) => break true,
                         Err(rustix::io::Errno::INTR) if !cancel.is_cancelled() => continue,

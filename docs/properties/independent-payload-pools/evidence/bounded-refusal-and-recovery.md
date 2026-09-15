@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/profile.rs:416`
 - `crates/host-runtime/src/ring_transport.rs:278`
 
-Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2213` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:3226` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:3044` bounds a stalled peer by the frame deadline; `crates/host-runtime/src/client.rs:7714` shows the client's parked write expiring alone at its operation deadline and retiring the bridge at the frame deadline with nothing published, and `crates/host-runtime/src/client.rs:7073` covers the client budget's exact-fit, one-over, and overflow cases.
+Witness status: yes - `crates/shm-transport/src/backend/ring.rs:2213` and `crates/shm-transport/tests/profile.rs:107`; `crates/host-runtime/src/ring_transport.rs:3226` shows the host names the exhausted resource in `exhaustion.by_resource`, charges nothing, and admits again after release; `crates/host-runtime/src/ring_transport.rs:3044` bounds a stalled peer by the frame deadline; `crates/host-runtime/src/client.rs:7716` shows the client's parked write expiring alone at its operation deadline and retiring the bridge at the frame deadline with nothing published, and `crates/host-runtime/src/client.rs:7075` covers the client budget's exact-fit, one-over, and overflow cases.
 
 ## Failure scenario
 
