@@ -257,17 +257,33 @@ fn derived_reinjection_rests_on_exact_live_parents() {
         let refused = fixture.record(key, request(subject, 1, evidence));
         assert_eq!(refused, Err(expected), "{key}");
     }
-    let too_many: Vec<(String, i64)> = (0..17)
-        .map(|index| (format!("decision-object-{}", index + 10), 1))
+    for index in 10..27 {
+        fixture.admit_decision(index, index);
+    }
+    let too_many: Vec<(String, i64)> = (10..27)
+        .map(|index| (format!("decision-object-{index}"), index))
         .collect();
     let too_many: Vec<(&str, i64)> = too_many
         .iter()
         .map(|(id, revision)| (id.as_str(), *revision))
         .collect();
+    let before = fixture.tip();
     assert_eq!(
         fixture.record("too-many", request(subject, 1, derived(&too_many))),
         Err(ClaimCausalityError::TooManyParents)
     );
+    assert_eq!(fixture.tip(), before);
+    fixture
+        .record(
+            "at-parent-limit",
+            request(subject, 1, derived(&too_many[..16])),
+        )
+        .unwrap();
+    let at_limit = fixture.tip();
+    let maximum_class = CausalClass::DerivedReinjection {
+        parents: parents(&too_many[..16]),
+    };
+    assert_eq!(fixture.class(subject, at_limit), maximum_class);
 
     let recorded = fixture
         .record(
@@ -284,6 +300,7 @@ fn derived_reinjection_rests_on_exact_live_parents() {
         parents: parents(&[("decision-object-2", 1), ("domain-object", 1)]),
     };
     assert_eq!(fixture.class(subject, recorded_at), expected);
+    assert_eq!(fixture.class(subject, at_limit), maximum_class);
     assert_eq!(
         fixture
             .store
@@ -478,7 +495,31 @@ fn replay_is_effect_free_and_conflicting_or_unsupported_records_are_unknown() {
         parents: parents(&[("domain-object", 1)]),
     };
 
-    // A later record for the same subject replaces the first; old snapshots keep the old class.
+    let mut previous = first.object_id.clone();
+    let mut history = vec![(first_at, first.object_id.clone(), direct_class.clone())];
+    for index in 0..16 {
+        let (evidence, expected) = if index % 2 == 0 {
+            (derived(&[("domain-object", 1)]), derived_class.clone())
+        } else {
+            (direct(&evidence_id, &digest), direct_class.clone())
+        };
+        let outcome = fixture
+            .record(
+                &format!("history-{index}"),
+                request("decision-object-1", 1, evidence),
+            )
+            .unwrap();
+        assert_eq!(outcome.replaced_object_id, Some(previous));
+        previous = outcome.object_id;
+        history.push((fixture.tip(), previous.clone(), expected));
+    }
+    for (as_of, object_id, expected) in history {
+        let reading = fixture.reading("decision-object-1", as_of);
+        assert_eq!(reading.class, expected, "snapshot {as_of}");
+        assert_eq!(reading.record.unwrap().object_id, object_id);
+    }
+
+    // A later record replaces only the live predecessor; old snapshots keep their class.
     let second = fixture
         .record(
             "derived",
@@ -487,7 +528,7 @@ fn replay_is_effect_free_and_conflicting_or_unsupported_records_are_unknown() {
         .unwrap();
     assert_eq!(
         second.replaced_object_id.as_deref(),
-        Some(first.object_id.as_str())
+        Some(previous.as_str())
     );
     assert_eq!(
         fixture.class("decision-object-1", fixture.tip()),
@@ -599,7 +640,31 @@ fn oversized_payloads_read_as_unknown_and_records_survive_reopen() {
         )
         .unwrap();
     let tip = fixture.tip();
-    let tight = NonZeroU64::new(8).unwrap();
+    let payload = column_text(
+        fixture.root.path(),
+        &format!(
+            "SELECT CAST(observation_payload AS TEXT) FROM observations WHERE observation_id='{}'",
+            recorded.observation_id
+        ),
+    )
+    .unwrap();
+    let payload_bytes = u64::try_from(payload.len()).unwrap();
+    let exact = fixture
+        .store
+        .causal_class_as_of(
+            "decision-object-1",
+            tip,
+            NonZeroU64::new(payload_bytes).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        exact.class,
+        CausalClass::DirectObservation {
+            acquisition_evidence_id: evidence_id.clone(),
+            artifact_digest: digest.clone(),
+        }
+    );
+    let tight = NonZeroU64::new(payload_bytes - 1).unwrap();
     let reading = fixture
         .store
         .causal_class_as_of("decision-object-1", tip, tight)
@@ -639,4 +704,194 @@ fn oversized_payloads_read_as_unknown_and_records_survive_reopen() {
             artifact_digest: digest,
         }
     );
+}
+
+#[test]
+fn detail_operation_and_parent_list_must_agree_with_the_registry() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 1);
+    let recorded = fixture
+        .record(
+            "derived",
+            request("decision-object-1", 1, derived(&[("domain-object", 1)])),
+        )
+        .unwrap();
+    assert_eq!(recorded.operation, CausalOperation::Insert);
+    let payload_sql = format!(
+        "SELECT CAST(observation_payload AS TEXT) FROM observations WHERE observation_id='{}'",
+        recorded.observation_id
+    );
+    let original = column_text(fixture.root.path(), &payload_sql).unwrap();
+    let rewrite = |from: &str, to: &str| {
+        assert!(original.contains(from), "{from}");
+        fixture.sql(&format!(
+            "UPDATE observations SET observation_payload=CAST('{}' AS BLOB)
+             WHERE observation_id='{}';",
+            original.replace(from, to).replace('\'', "''"),
+            recorded.observation_id
+        ));
+    };
+
+    // The stored operation is checked against the subject's succession.
+    rewrite("operation\\\":\\\"insert", "operation\\\":\\\"correct");
+    let reading = fixture.reading("decision-object-1", fixture.tip());
+    assert_eq!(
+        reading.class,
+        CausalClass::Unknown(UnknownReason::Malformed)
+    );
+    assert_eq!(reading.record.unwrap().operation, None);
+
+    // A parent named twice never collapses onto the single stored dependency.
+    let parent = "{\\\"object_id\\\":\\\"domain-object\\\",\\\"revision\\\":1}";
+    rewrite(&format!("{parent}]"), &format!("{parent},{parent}]"));
+    assert_eq!(
+        fixture.class("decision-object-1", fixture.tip()),
+        CausalClass::Unknown(UnknownReason::Malformed)
+    );
+}
+
+#[test]
+fn causality_object_ids_are_reserved_across_every_registry_writer() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 1);
+    let squat = format!("claimcauseobj:decision-object-1:{}", fixture.tip() + 1);
+
+    for (key, object_id) in [
+        ("squat-decision", squat.as_str()),
+        ("squat-other", "claimcauseobj:x"),
+    ] {
+        let mut spec = decision(2, 1);
+        spec.object_id = object_id.to_string();
+        let refused = fixture.store.commit(intent(key), |envelope| {
+            envelope.insert_decision(spec.clone())?;
+            Ok(String::new())
+        });
+        assert_eq!(refused, Err(KernelError::InvalidInput), "{key}");
+    }
+
+    // Refused commits take no sequence; the owning writer lands the same id.
+    let recorded = fixture
+        .record(
+            "derived",
+            request("decision-object-1", 1, derived(&[("domain-object", 1)])),
+        )
+        .unwrap();
+    assert_eq!(recorded.object_id, squat);
+}
+
+#[test]
+fn a_predecessor_folded_in_later_keeps_the_subjects_insert_operation() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 2);
+    fixture.admit_decision(2, 1);
+    let recorded = fixture
+        .record(
+            "derived",
+            request("decision-object-1", 2, derived(&[("domain-object", 1)])),
+        )
+        .unwrap();
+    assert_eq!(recorded.operation, CausalOperation::Insert);
+    let before = fixture.tip();
+
+    // Folding decision 2 into the already-live decision 1 gives the subject a
+    // predecessor after its creation; the operation is about how the subject
+    // came to be, so it does not change.
+    fixture
+        .store
+        .commit(intent("fold"), |envelope| {
+            envelope.correct_decision("decision-object-2", decision(1, 2))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let expected = CausalClass::DerivedReinjection {
+        parents: parents(&[("domain-object", 1)]),
+    };
+    for as_of in [before, fixture.tip()] {
+        let reading = fixture.reading("decision-object-1", as_of);
+        assert_eq!(reading.class, expected, "snapshot {as_of}");
+        assert_eq!(
+            reading.record.unwrap().operation,
+            Some(CausalOperation::Insert)
+        );
+    }
+    let again = fixture
+        .record(
+            "derived-again",
+            request("decision-object-1", 2, derived(&[("domain-object", 1)])),
+        )
+        .unwrap();
+    assert_eq!(again.operation, CausalOperation::Insert);
+}
+
+#[test]
+fn a_fold_in_the_subjects_own_commit_leaves_its_insert_operation_intact() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(2, 1);
+    let mut recorded = None;
+    fixture
+        .store
+        .commit(intent("insert-record-fold"), |envelope| {
+            envelope.insert_decision(decision(1, 2))?;
+            envelope.record_admission(admission("decision-object-1"))?;
+            recorded = Some(
+                envelope
+                    .record_claim_causality(&request(
+                        "decision-object-1",
+                        2,
+                        derived(&[("domain-object", 1)]),
+                    ))
+                    .unwrap(),
+            );
+            envelope.correct_decision("decision-object-2", decision(1, 2))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(recorded.unwrap().operation, CausalOperation::Insert);
+    let reading = fixture.reading("decision-object-1", fixture.tip());
+    assert_eq!(
+        reading.class,
+        CausalClass::DerivedReinjection {
+            parents: parents(&[("domain-object", 1)]),
+        }
+    );
+    assert_eq!(
+        reading.record.unwrap().operation,
+        Some(CausalOperation::Insert)
+    );
+}
+
+#[test]
+fn a_detail_that_redaction_would_rewrite_is_refused_and_keeps_the_prior_record() {
+    let fixture = Fixture::open();
+    fixture.admit_decision(1, 1);
+    // The raw id passes the identity scan; its JSON escape does not.
+    let parent = "password=1\n";
+    fixture
+        .store
+        .commit(intent("parent"), |envelope| {
+            let mut spec = decision(2, 1);
+            spec.object_id = parent.to_string();
+            envelope.insert_decision(spec)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let first = fixture
+        .record(
+            "derived",
+            request("decision-object-1", 1, derived(&[("domain-object", 1)])),
+        )
+        .unwrap();
+    let expected = CausalClass::DerivedReinjection {
+        parents: parents(&[("domain-object", 1)]),
+    };
+    assert_eq!(fixture.class("decision-object-1", fixture.tip()), expected);
+
+    let refused = fixture.record(
+        "rewritten",
+        request("decision-object-1", 1, derived(&[(parent, 1)])),
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    let reading = fixture.reading("decision-object-1", fixture.tip());
+    assert_eq!(reading.class, expected);
+    assert_eq!(reading.record.unwrap().object_id, first.object_id);
 }

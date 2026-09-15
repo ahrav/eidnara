@@ -25,10 +25,14 @@ use super::admission::{
 use super::claim_causality::{CausalClass, CausalRecord, causal_class_at, registry_row_at};
 use super::envelope::{ObjectRow, Sensitivity};
 use super::source_descriptor::{
-    SOURCE_DESCRIPTOR_KIND, descriptor_object_id, reencoded_identity, stored_detail,
+    OCCURRENCE_ID_PREFIX, SOURCE_DESCRIPTOR_KIND, descriptor_object_id, reencoded_identity,
+    stored_detail,
 };
+use super::source_hold::Descriptors;
 use super::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
-use super::{CachedSql, KernelError, KernelStore, map_sqlite};
+use super::{KernelError, KernelStore, map_sqlite};
+
+pub const MAX_CLAIM_OBJECT_ID_BYTES: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClaimFactBounds {
@@ -178,30 +182,35 @@ impl KernelStore {
         if object_ids.len() > bounds.max_claims.get() {
             return Err(ClaimFactsError::TooManyClaims);
         }
+        if object_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > MAX_CLAIM_OBJECT_ID_BYTES)
+        {
+            return Err(KernelError::InvalidInput.into());
+        }
         let mut distinct = HashSet::with_capacity(object_ids.len());
         if !object_ids.iter().all(|id| distinct.insert(id.as_str())) {
             return Err(ClaimFactsError::DuplicateClaim);
         }
-        let (tip, (claims, missing)) = self.read_snapshot(requested, |tx, _| {
-            let mut claims: Vec<Result<ClaimFacts, ClaimFactsError>> =
-                Vec::with_capacity(object_ids.len());
+        let (tip, loaded) = self.read_snapshot(requested, |tx, _| {
+            let mut claims = Vec::with_capacity(object_ids.len());
             let mut missing = Vec::new();
             let mut served = load_served(tx, requested, object_ids)?;
             for object_id in object_ids {
                 match registry_row_at(tx, requested, object_id)? {
                     None => missing.push(object_id.clone()),
-                    Some(object) => claims.push(load_claim(
-                        tx,
-                        requested,
-                        object,
-                        served.remove(object_id),
-                        bounds,
-                    )),
+                    Some(object) => {
+                        // A `load_claim` error aborts the request before later `object_ids` are read.
+                        match load_claim(tx, requested, object, served.remove(object_id), bounds) {
+                            Ok(claim) => claims.push(claim),
+                            Err(error) => return Ok(Err(error)),
+                        }
+                    }
                 }
             }
-            Ok((claims, missing))
+            Ok(Ok((claims, missing)))
         })?;
-        let claims = claims.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let (claims, missing) = loaded?;
         Ok(ClaimFactsSnapshot {
             known_as_of: requested,
             tip,
@@ -273,42 +282,57 @@ fn sensitivity_field(value: &str) -> Result<Sensitivity, ClaimFactsError> {
         .ok_or(ClaimFactsError::MalformedRequiredField)
 }
 
+/// SQL boolean: every lifecycle column the typed row `typed` copies from its
+/// registry row `registry` still agrees with it.
+fn lifecycle_agrees_sql(typed: &str, registry: &str) -> String {
+    format!(
+        "{typed}.created_commit_seq={registry}.created_commit_seq
+         AND {typed}.invalidated_commit_seq IS {registry}.invalidated_commit_seq
+         AND {typed}.superseded_by IS {registry}.superseded_by
+         AND {typed}.sensitivity_class={registry}.sensitivity_class"
+    )
+}
+
 /// The decision row is written from the same spec as its registry row, so a
-/// disagreement on creation commit or class is corruption, not a fact.
+/// lifecycle disagreement is corruption, not a fact. `ObjectRow` decodes an
+/// unrecognized class as `Secret`; the stored text is decoded here instead.
 fn load_decision(
     tx: &Transaction<'_>,
     object: &ObjectRow,
 ) -> Result<ClaimDecisionFacts, ClaimFactsError> {
-    let row: Option<(ClaimDecisionFacts, i64, String)> = tx
-        .query_row_cached(
-            "SELECT decision_id,decision_kind,proposition_id,scope_id,anchor_id,evidence_id,
-                    created_commit_seq,sensitivity_class
-             FROM decisions WHERE object_id=?1",
-            [&object.object_id],
-            |row| {
-                Ok((
-                    ClaimDecisionFacts {
-                        decision_id: row.get(0)?,
-                        decision_kind: row.get(1)?,
-                        proposition_id: row.get(2)?,
-                        scope_id: row.get(3)?,
-                        anchor_id: row.get(4)?,
-                        evidence_id: row.get(5)?,
-                    },
-                    row.get(6)?,
-                    row.get(7)?,
-                ))
-            },
+    static SQL: LazyLock<String> = LazyLock::new(|| {
+        format!(
+            "SELECT d.decision_id,d.decision_kind,d.proposition_id,d.scope_id,d.anchor_id,
+                    d.evidence_id,{agrees},o.sensitivity_class
+             FROM decisions d
+             JOIN object_registry o ON o.object_id=d.object_id
+             WHERE d.object_id=?1",
+            agrees = lifecycle_agrees_sql("d", "o"),
         )
+    });
+    let mut statement = tx.prepare_cached(&SQL).map_err(map_sqlite)?;
+    let row: Option<(ClaimDecisionFacts, bool, String)> = statement
+        .query_row([&object.object_id], |row| {
+            Ok((
+                ClaimDecisionFacts {
+                    decision_id: row.get(0)?,
+                    decision_kind: row.get(1)?,
+                    proposition_id: row.get(2)?,
+                    scope_id: row.get(3)?,
+                    anchor_id: row.get(4)?,
+                    evidence_id: row.get(5)?,
+                },
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        })
         .optional()
         .map_err(map_sqlite)?;
-    let (decision, created_commit_seq, sensitivity) =
-        row.ok_or(KernelError::CorruptCanonicalRow)?;
-    if created_commit_seq != object.created_commit_seq
-        || sensitivity_field(&sensitivity)? != object.sensitivity
-    {
+    let (decision, agrees, registry_sensitivity) = row.ok_or(KernelError::CorruptCanonicalRow)?;
+    if !agrees {
         return Err(KernelError::CorruptCanonicalRow.into());
     }
+    sensitivity_field(&registry_sensitivity)?;
     Ok(decision)
 }
 
@@ -470,35 +494,28 @@ fn load_occurrences(
                 continue;
             };
             let descriptor_object_id = descriptor_object_id(&encoded.lineage_id, &revision);
-            // Registry timestamps and evidence liveness decide, as they do
-            // for the export, so this inventory never lists a row the
-            // projection at this snapshot cannot see.
-            let descriptor: Option<(Vec<u8>, i64)> = tx
-                .query_row_cached(
-                    "SELECT b.observation_payload,o.created_commit_seq
-                     FROM object_registry o
-                     JOIN observations b ON b.object_id=o.object_id
-                     JOIN evidence_meta e ON e.evidence_id=b.evidence_id
-                     WHERE o.object_id=?1 AND b.observation_kind=?2
-                       AND o.created_commit_seq<=?3
-                       AND (o.invalidated_commit_seq IS NULL OR o.invalidated_commit_seq>?3)
-                       AND (e.invalidated_commit_seq IS NULL OR e.invalidated_commit_seq>?3)",
-                    params![descriptor_object_id, SOURCE_DESCRIPTOR_KIND, requested],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .map_err(map_sqlite)?;
+            let descriptor = load_descriptor(tx, requested, &descriptor_object_id)?;
             match descriptor {
                 None => excluded.push(ExcludedRepresentation {
                     class,
                     representation,
                     reason: RepresentationExclusion::NoDescriptor,
                 }),
-                Some((payload, descriptor_commit_seq)) => {
-                    let detail = stored_detail(&payload)?;
+                Some(raw) => {
+                    let detail = stored_detail(&raw.payload)?;
                     let reencoded =
                         reencoded_identity(&detail).ok_or(KernelError::CorruptCanonicalRow)?;
-                    if reencoded.occurrence_id != encoded.occurrence_id {
+                    if reencoded.tuple != encoded.tuple
+                        || !raw.lifecycle_agrees
+                        || raw.observation_id
+                            != format!("{OCCURRENCE_ID_PREFIX}{}", encoded.occurrence_id)
+                        || raw.source_kind != class.code()
+                        || raw.source_revision != object.source_revision
+                        || detail.lineage_id != raw.source_id
+                        || detail.evidence_id != raw.evidence_id
+                        || detail.artifact_digest != raw.artifact_digest
+                        || detail.payload_id != raw.artifact_digest
+                    {
                         return Err(KernelError::CorruptCanonicalRow);
                     }
                     occurrences.push(ClaimOccurrence {
@@ -510,11 +527,63 @@ fn load_occurrences(
                         payload_id: detail.payload_id,
                         artifact_digest: detail.artifact_digest,
                         evidence_id: detail.evidence_id,
-                        descriptor_commit_seq,
+                        descriptor_commit_seq: raw.created_commit_seq,
                     });
                 }
             }
         }
     }
     Ok((occurrences, excluded))
+}
+
+struct RawDescriptor {
+    payload: Vec<u8>,
+    observation_id: String,
+    source_kind: String,
+    source_revision: i64,
+    lifecycle_agrees: bool,
+    created_commit_seq: i64,
+    source_id: String,
+    evidence_id: String,
+    artifact_digest: String,
+}
+
+/// Returns the descriptor row visible at `requested` under `Descriptors::LiveAtEnd`.
+fn load_descriptor(
+    tx: &Transaction<'_>,
+    requested: i64,
+    descriptor_object_id: &str,
+) -> Result<Option<RawDescriptor>, KernelError> {
+    static SQL: LazyLock<String> = LazyLock::new(|| {
+        format!(
+            "SELECT b.observation_payload,b.observation_id,o.source_kind,o.source_revision,
+                    {agrees},o.created_commit_seq,o.source_id,b.evidence_id,e.artifact_digest
+             FROM object_registry o
+             JOIN observations b ON b.object_id=o.object_id
+             JOIN evidence_meta e ON e.evidence_id=b.evidence_id
+             WHERE o.object_id=?1 AND b.observation_kind=?2 AND {live}",
+            agrees = lifecycle_agrees_sql("b", "o"),
+            live = Descriptors::LiveAtEnd.predicate("?3", "0"),
+        )
+    });
+    let mut statement = tx.prepare_cached(&SQL).map_err(map_sqlite)?;
+    statement
+        .query_row(
+            params![descriptor_object_id, SOURCE_DESCRIPTOR_KIND, requested],
+            |row| {
+                Ok(RawDescriptor {
+                    payload: row.get(0)?,
+                    observation_id: row.get(1)?,
+                    source_kind: row.get(2)?,
+                    source_revision: row.get(3)?,
+                    lifecycle_agrees: row.get(4)?,
+                    created_commit_seq: row.get(5)?,
+                    source_id: row.get(6)?,
+                    evidence_id: row.get(7)?,
+                    artifact_digest: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(map_sqlite)
 }

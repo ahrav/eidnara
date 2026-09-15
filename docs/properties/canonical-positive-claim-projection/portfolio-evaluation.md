@@ -38,6 +38,15 @@ reviews found and how each finding was dispositioned.
 | `NotAClaim` overstated the check | refinement | fixed: `NotADecision` |
 | The catalog said no summary is returned for an oversized payload while the code returns an identity-only summary | gap | fixed in the record; the code was kept |
 
+A post-commit review of the facts change through the security, business-logic,
+duplication, and dead-code lenses added three findings:
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The occurrence inventory reported `evidence_id`, `artifact_digest`, `payload_id`, and `lineage_id` from the JSON detail while liveness was judged on the joined evidence row; `live_source_descriptors` and `source_export::preflight` refuse that disagreement | gap | fixed: `load_occurrences` compares the detail with the joined columns and the registry with the observation timestamps, `CorruptCanonicalRow` on disagreement; test rewrites each field out of band |
+| The descriptor liveness predicate was restated by hand rather than taken from `Descriptors::LiveAtEnd`, the export's single definition | refinement | fixed: `load_descriptor` formats `Descriptors::LiveAtEnd.predicate` into its statement |
+| `load_decision` compared the decision class with the registry class after `ObjectRow` had decoded an unreadable registry value as `Secret`, so a `secret` decision row masked the unreadable registry row | gap | fixed: the stored class texts are compared, then decoded strictly; test inserts unreadable registry rows |
+
 ## Projection change
 
 | Finding | Class | Disposition |

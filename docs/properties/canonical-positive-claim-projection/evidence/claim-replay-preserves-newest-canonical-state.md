@@ -8,7 +8,7 @@ Specification 'Projection, progress and recovery': duplicate commits and older-a
 
 - `crates/kernel/src/claim_causality.rs`: `record_causality_inner` replaces the live record through `correct_observation_inner`, so one record is live per subject and older snapshots keep theirs.
 - `crates/kernel/src/envelope.rs`: `commit_prepared_with_writer` returns the stored receipt for a repeated intent without running the operation.
-- `crates/kernel/tests/kernel_claim_facts.rs`: `replay_is_effect_free_and_conflicting_or_unsupported_records_are_unknown`.
+- `crates/kernel/tests/kernel_claim_causality.rs`: `replay_is_effect_free_and_conflicting_or_unsupported_records_are_unknown`.
 
 ## Failure scenario
 
