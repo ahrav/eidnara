@@ -41,7 +41,7 @@ pub struct ResourceCharges {
     pub mappings: u64,
     /// File descriptors kept open for the mappings and doorbells.
     pub file_descriptors: u64,
-    /// Local wake handles an endpoint retains beyond its thread: one capacity doorbell end per
+    /// Local wake handles an endpoint retains beyond its thread: both doorbell ends of each
     /// direction, kept alive by outstanding leases.
     pub wake_handles: u64,
     /// Dedicated endpoint workers, per `WorkerTopology`.
@@ -176,7 +176,7 @@ impl TargetProfile {
             file_descriptors: (config.mappings as u64)
                 .checked_add(SETUP_DOORBELL_COUNT as u64)
                 .ok_or(ProfileError::ChargeOverflow)?,
-            wake_handles: SETUP_MAPPING_COUNT as u64,
+            wake_handles: SETUP_DOORBELL_COUNT as u64,
             workers: match config.worker_topology {
                 WorkerTopology::CallerThread => 0,
                 WorkerTopology::SplitDirection => 2,
