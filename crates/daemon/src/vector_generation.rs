@@ -32,10 +32,17 @@ pub const ROWS_FILE: &str = "rows.f32";
 pub const CODES_FILE: &str = "codes.int8";
 pub const SCALES_FILE: &str = "scales.f32";
 pub const ROW_IDS_FILE: &str = "row-ids.json";
+pub const TOMBSTONES_FILE: &str = "tombstones.json";
 pub const SIDECAR_FILE: &str = "vector-sidecar.json";
 pub const SIDECAR_SCHEMA: u32 = 1;
 /// Every file the sidecar inventories, in the order the build writes them.
-const PAYLOAD_FILES: [&str; 4] = [ROWS_FILE, CODES_FILE, SCALES_FILE, ROW_IDS_FILE];
+const PAYLOAD_FILES: [&str; 5] = [
+    ROWS_FILE,
+    CODES_FILE,
+    SCALES_FILE,
+    ROW_IDS_FILE,
+    TOMBSTONES_FILE,
+];
 /// The disk limit the admission manifest names for staged bytes; the vector build charges its whole inventory against it.
 const STAGE_DISK_LIMIT: &str = "capture_disk_bytes";
 
@@ -67,6 +74,7 @@ pub struct VectorSidecar {
     pub checkpoint_commit_seq: i64,
     pub hold_id: String,
     pub rows: u64,
+    pub tombstones: u64,
     pub files: Vec<SidecarFile>,
 }
 
@@ -269,6 +277,10 @@ pub enum VectorRefusal {
     NoRows,
     #[error("row {index} is out of identifier order or repeats a row")]
     RowOrder { index: usize },
+    #[error("tombstone {index} is out of identifier order or repeats a tombstone")]
+    TombstoneOrder { index: usize },
+    #[error("row {index} is both listed and tombstoned by the layer")]
+    ListedAndTombstoned { index: usize },
     #[error("original rows: {0}")]
     Rows(codec::ArtifactRejection),
     #[error("calibration: {0}")]
@@ -315,13 +327,13 @@ impl BuiltVectors {
     }
 }
 
-/// Writes rows, codes, scales, and identifiers under `work_dir` and describes them in a sidecar bound to `expected` and the export's checkpoint.
-/// Rows must arrive in strictly increasing identifier order so the artifact, the codes, and the identifier list agree on row numbering across builds.
+/// Writes rows, codes, scales, identifiers, and tombstones under `work_dir` and describes them in a sidecar bound to `expected` and the export's checkpoint.
+/// Rows and tombstones must arrive in strictly increasing identifier order, and no occurrence may be both, so the artifact, the codes, the identifier list, and the resolver agree on what the layer says across builds.
 /// Files are created exclusively and never synced: the store copies and syncs them when it stages, so the work directory is scratch, and a retry needs a fresh one.
 ///
 /// # Errors
 ///
-/// No rows, rows out of order, a row outside the layout, a calibration refusal, or an I/O failure; nothing is staged.
+/// No rows, rows or tombstones out of order, an occurrence both listed and tombstoned, a row outside the layout, a calibration refusal, or an I/O failure; nothing is staged.
 pub fn build(
     expected: &ExpectedVectors<'_>,
     export: &LiveRows,
@@ -335,6 +347,16 @@ pub fn build(
         (1..rows.len()).find(|i| rows[*i - 1].occurrence_id >= rows[*i].occurrence_id)
     {
         return Err(VectorRefusal::RowOrder { index });
+    }
+    let tombstones = &export.tombstones;
+    if let Some(index) = (1..tombstones.len()).find(|i| tombstones[*i - 1] >= tombstones[*i]) {
+        return Err(VectorRefusal::TombstoneOrder { index });
+    }
+    if let Some(index) = rows
+        .iter()
+        .position(|row| tombstones.binary_search(&row.occurrence_id).is_ok())
+    {
+        return Err(VectorRefusal::ListedAndTombstoned { index });
     }
     if export.checkpoint.snapshot_commit_seq > export.checkpoint.checkpoint_commit_seq {
         return Err(VectorRefusal::Identity {
@@ -360,6 +382,7 @@ pub fn build(
         codes,
         calibration.scales.encode(),
         serde_json::to_vec(&ids).expect("identifier serialization cannot fail"),
+        serde_json::to_vec(tombstones).expect("identifier serialization cannot fail"),
     ];
     let mut inventory = Vec::with_capacity(payloads.len());
     for (path, bytes) in PAYLOAD_FILES.iter().zip(&payloads) {
@@ -387,6 +410,7 @@ pub fn build(
         checkpoint_commit_seq: export.checkpoint.checkpoint_commit_seq,
         hold_id: export.checkpoint.hold_id.clone(),
         rows: rows.len() as u64,
+        tombstones: tombstones.len() as u64,
         files: inventory,
     };
     write_new(&work_dir.join(SIDECAR_FILE), &sidecar.canonical_bytes())?;
@@ -520,6 +544,15 @@ pub fn verify(
         .map_err(|_| fault(ROW_IDS_FILE, FileFault::Identifiers))?;
     if ids.len() != rows.rows.len() || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(fault(ROW_IDS_FILE, FileFault::Identifiers));
+    }
+    let tombstones: Vec<String> =
+        serde_json::from_slice(&generation.read_verified_file(TOMBSTONES_FILE)?)
+            .map_err(|_| fault(TOMBSTONES_FILE, FileFault::Identifiers))?;
+    if tombstones.len() as u64 != sidecar.tombstones
+        || tombstones.windows(2).any(|pair| pair[0] >= pair[1])
+        || ids.iter().any(|id| tombstones.binary_search(id).is_ok())
+    {
+        return Err(fault(TOMBSTONES_FILE, FileFault::Identifiers));
     }
     let codes = encode_all(&layout, &calibration.scales, vectors)
         .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;

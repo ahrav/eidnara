@@ -68,6 +68,7 @@ fn export(seed: u8, checkpoint: i64) -> LiveRows {
             hold_id: "hold-7".to_owned(),
         },
         rows: rows(seed),
+        tombstones: Vec::new(),
     }
 }
 
@@ -146,12 +147,13 @@ impl Fixture {
 
     /// Builds, stages, and verifies one layer.
     fn layer(&self, seed: u8, checkpoint: i64) -> VerifiedVectors {
-        let built = build(
-            &self.expected(),
-            &export(seed, checkpoint),
-            &self.work_dir(),
-        )
-        .unwrap();
+        self.layer_masking(seed, checkpoint, &[])
+    }
+
+    fn layer_masking(&self, seed: u8, checkpoint: i64, tombstones: &[String]) -> VerifiedVectors {
+        let mut export = export(seed, checkpoint);
+        export.tombstones = tombstones.to_vec();
+        let built = build(&self.expected(), &export, &self.work_dir()).unwrap();
         let digest = stage(&built, &self.staging()).unwrap();
         verify(&self.store, &digest, &self.expected()).unwrap()
     }
@@ -393,6 +395,16 @@ fn topology_and_identity_checks_refuse_a_composition_before_anything_is_staged()
         fixture.compose(1, &base, &many).unwrap_err(),
         CompositionRefusal::DeltasOverBound { count: 5, max: 4 }
     );
+    let masking = fixture.layer_masking(7, 13, &["ff".repeat(32)]);
+    assert_eq!(masking.sidecar.tombstones, 1);
+    assert_eq!(
+        fixture.compose(1, &masking, &[]).unwrap_err(),
+        CompositionRefusal::BaseTombstones { tombstones: 1 }
+    );
+    assert!(
+        fixture.compose(1, &base, &[masking]).is_ok(),
+        "a delta may mask"
+    );
 
     let mut other = fixture.generation.clone();
     other.embedding_model = "another-model".to_owned();
@@ -416,7 +428,7 @@ fn topology_and_identity_checks_refuse_a_composition_before_anything_is_staged()
     );
     assert_eq!(
         fixture.generations().len(),
-        before.len() + 6,
+        before.len() + 7,
         "only the layers themselves were staged; no composition record exists"
     );
     assert_eq!(
@@ -1054,6 +1066,7 @@ fn a_forged_record_with_a_repeated_delta_fails_topology_at_verification() {
             hold_id: "hold-7".to_owned(),
         },
         rows: rows(9),
+        tombstones: Vec::new(),
     };
     let built = build(&fixture.expected(), &earlier_snapshot, &fixture.work_dir()).unwrap();
     let staged = stage(&built, &fixture.staging()).unwrap();
@@ -1070,6 +1083,7 @@ fn a_forged_record_with_a_repeated_delta_fails_topology_at_verification() {
             hold_id: "hold-7".to_owned(),
         },
         rows: rows(10),
+        tombstones: Vec::new(),
     };
     assert!(matches!(
         build(&fixture.expected(), &inverted, &fixture.work_dir()),

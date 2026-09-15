@@ -31,6 +31,8 @@ impl std::fmt::Debug for ExportedRow {
 pub struct LiveRows {
     pub checkpoint: ProjectionCheckpoint,
     pub rows: Vec<ExportedRow>,
+    /// Occurrences the layer masks in every older layer, in identifier order; a full export of the live population masks none.
+    pub tombstones: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -119,5 +121,6 @@ pub fn live_rows(
     Ok(LiveRows {
         checkpoint,
         rows: exported,
+        tombstones: Vec::new(),
     })
 }
