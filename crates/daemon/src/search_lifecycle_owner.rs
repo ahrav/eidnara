@@ -152,6 +152,8 @@ pub enum SliceEvent {
     /// The records and identity are read and the manager synced; admission is not yet refreshed.
     Prepared,
     Episode(EpisodeEvent),
+    /// A handed-back supervisor's drain begins under the grace given.
+    Draining(Duration),
 }
 
 /// Puts the manager a disable took back unless the owner shut down meanwhile, whether the disable finished or its future was dropped.
@@ -669,7 +671,10 @@ impl SearchLifecycleOwner {
         &self,
         handle: &MaintenanceHandle,
     ) -> Result<DrainReport, Unresolved> {
-        handle.stop(self.drain_grace()).await
+        let grace = self.drain_grace();
+        #[cfg(feature = "test-support")]
+        self.tap(SliceEvent::Draining(grace));
+        handle.stop(grace).await
     }
 
     /// The supervisor still running on the selected family, if any.

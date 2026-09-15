@@ -2185,15 +2185,29 @@ async fn a_cancelled_loop_leaves_the_drain_to_shutdown() {
     }
     // An emptied roster makes the next slice hand the supervisor back, and the loop begins draining it.
     roster.lock().unwrap().clear();
+    let (draining, drain_started) = std::sync::mpsc::channel();
+    owner.tap_slice_events_for_test(move |event| {
+        if let SliceEvent::Draining(grace) = event {
+            let _ = draining.send(*grace);
+        }
+    });
     let cancel = tokio_util::sync::CancellationToken::new();
     let loop_task = tokio::spawn(daemon::search_lifecycle_owner::run_slices(
         Arc::clone(&owner),
         cancel.clone(),
     ));
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    let grace =
+        tokio::task::spawn_blocking(move || drain_started.recv_timeout(Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .expect("the loop begins draining the handed-back supervisor");
+    assert_eq!(grace, Duration::from_millis(1_500));
     let cancelled = Instant::now();
     cancel.cancel();
-    loop_task.await.unwrap();
+    tokio::time::timeout(Duration::from_millis(500), loop_task)
+        .await
+        .expect("a cancelled loop leaves the drain rather than finishing it")
+        .unwrap();
     let shut = owner.shutdown().await;
     let waited = cancelled.elapsed();
     TestEngine::release(&held);
