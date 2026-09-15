@@ -4475,15 +4475,31 @@ Open questions:
 ### capacity-recheck-after-a-wake-race
 
 Type: liveness
-Reachability: default-production — `reserve_until` is the blocking send path
-for every ring producer (`endpoint.send` from the bridge,
-`crates/host-runtime/src/client.rs:2561-2566`), on the unconditionally built ring
-transport (`crates/host-runtime/src/runtime.rs:792-796`).
+Reachability: default-production — the Rust host and client no longer block in
+`reserve_until`; both arm the capacity doorbell through
+`Ring::arm_capacity_wait` (`ring.rs:903`), whose ladder re-checks the blocked
+reservation after `parked` is set: the client bridge arms it for a blocked
+lane (`crates/host-runtime/src/client.rs:2718`) and the host publisher for its
+blocked head (`crates/host-runtime/src/ring_transport.rs:1229`), on the
+unconditionally built ring transport (`crates/host-runtime/src/runtime.rs:804`).
+`reserve_until` / `reserve_until_in` (`ring.rs:1101`, `:1111`) keep the same
+ladder for the native addon (`packages/shm-native/src/lib.rs:1046`) and the
+test-only `RingClientEndpoint::send` (`ring_transport.rs:1520`).
 Status: active
-Exercised: partial — `two_process_zero_copy_exchange_uses_authenticated_grant`
-(`crates/shm-transport/tests/ring.rs:489-543`) parks a `reserve_until`
+Exercised: partial — `two_process_exchange_holds_a_reuses_b_and_wakes_on_return`
+(`crates/shm-transport/tests/ring.rs:347-439`) parks a `reserve_until`
 behind a child's held lease and converges after the release, exercising the
-block-then-wake path; nothing lands a release inside the arm window itself.
+block-then-wake path. The arm window itself is covered at the API and at both
+producers: `arm_capacity_wait_refuses_to_park_over_a_return_that_landed_before_arming`
+(`ring.rs:2921`) returns capacity between the failed reservation and the arm
+and requires `Ok(false)`; `arming_against_the_blocked_head_refuses_to_park_over_a_return_before_arming`
+(`ring_transport.rs:2235`) does the same for the host publisher; and
+`ring_bridge_capacity_returned_in_the_arm_window_is_not_a_lost_wake`
+(`client.rs:7810-7864`) blocks the bridge in a hook immediately before its arm,
+has the host consume one descriptor there, and requires the blocked frame to
+publish within 2 s of a 30 s deadline. These land the release deterministically
+in the window; no instruction-level interleaving across the generation read
+and the doorbell drain is constructed.
 Guarantee: capacity freed at any point after a producer's failed reservation is
 consumed without waiting out the deadline — before blocking by the in-loop
 rechecks, during blocking by the doorbell. "Consumed" means the freed capacity is
@@ -4524,8 +4540,10 @@ Confidence: medium —
 both publisher orderings were read and the interleaving case analysis is
 recorded, but it is a hand proof over atomics with no loom or Miri backing.
 Existing check: partial —
-`two_process_zero_copy_exchange_uses_authenticated_grant`
-(`tests/ring.rs:489-543`), block-then-wake only; status unaudited.
+`two_process_exchange_holds_a_reuses_b_and_wakes_on_return`
+(`tests/ring.rs:347-439`), block-then-wake; `ring.rs:2921`,
+`ring_transport.rs:2235`, and `client.rs:7810-7864` for a release landed in the
+arm window; status unaudited.
 Impact: `ProducerError::Deadline` on a ring with free capacity — a stranded
 full ring, reported as a transport failure on a channel whose receiver was
 draining correctly. Intermittent, load-dependent, and unreproducible by any
