@@ -256,6 +256,8 @@ impl LocalEmbeddingsInner {
     }
 }
 
+/// Clones share one lane: a shutdown or disablement through any clone is observed by all of them.
+#[derive(Clone)]
 pub struct LocalEmbeddingsComponent {
     inner: Arc<LocalEmbeddingsInner>,
 }

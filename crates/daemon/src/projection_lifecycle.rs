@@ -48,6 +48,14 @@ impl Transition {
             Self::AuthorizedRecovery => ProjectionHook::EmbeddingBackfill,
         }
     }
+
+    /// The manifest limit that bounds the transition's whole episode.
+    pub(crate) fn duration_limit(self) -> &'static str {
+        match self {
+            Self::Rebuilding => "B_recovery_ms",
+            Self::AuthorizedRecovery => "B_authorized_recovery_ms",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,7 +206,7 @@ impl LifecycleIntent {
     }
 
     /// Whether `request` is a replay of this record: the same intent in every field the caller supplies.
-    fn is_replay_of(&self, request: &LifecycleRequest) -> bool {
+    pub(crate) fn is_replay_of(&self, request: &LifecycleRequest) -> bool {
         self.transition == request.transition
             && self.selected_generation == request.selected_generation
             && self.kernel_incarnation_id == request.kernel_incarnation_id
@@ -580,9 +588,24 @@ impl ProjectionLifecycle {
         request: &LifecycleRequest,
         now: i64,
     ) -> Result<Recorded, IntentRefusal> {
+        self.record_at(gate, request, now, EntryPoint::Reload)
+    }
+
+    /// [`Self::record`] with the hook admitted at `entry`: an operator's request is an [`EntryPoint::Explicit`] action.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::record`].
+    pub fn record_at(
+        &self,
+        gate: &HookGate,
+        request: &LifecycleRequest,
+        now: i64,
+        entry: EntryPoint,
+    ) -> Result<Recorded, IntentRefusal> {
         check_request(request, now)?;
         let admission = gate
-            .admit(request.transition.hook(), EntryPoint::Reload)
+            .admit(request.transition.hook(), entry)
             .map_err(IntentRefusal::Denied)?;
         let _lock = self.lock().map_err(io_refusal)?;
         match self.read() {

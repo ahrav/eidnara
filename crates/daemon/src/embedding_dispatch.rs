@@ -11,9 +11,9 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use host_runtime::local_embeddings::{
-    DenseUnavailable, InferenceFailureKind, LaneInfo, LaneUnavailableState,
-    LocalEmbeddingsComponent, LocalEmbeddingsStatus, PollOutcome, SubmitOutcome,
-    failure_is_permanent,
+    AdmittedInput, DenseUnavailable, EmbedTokens, InferenceFailureKind, LaneInfo,
+    LaneUnavailableState, LocalEmbeddingsComponent, LocalEmbeddingsStatus, PollOutcome,
+    SubmitOutcome, failure_is_permanent,
 };
 use kernel::applicability::EvalBudget;
 use kernel::{
@@ -46,6 +46,23 @@ pub struct DispatchBounds {
     pub retry_after: i64,
     /// How long one job's result is awaited before the pass moves on to the next job; monotonic, independent of the logical episode clock, and only ever shortened by the budget's deadline.
     pub result_wait: Duration,
+    /// The manifest's approved input envelope; a job outside it is refused before submission, whatever the lane itself would accept.
+    pub input: InputEnvelope,
+}
+
+/// The largest input the manifest approves for one embedding: `embedding_input_bytes` and `embedding_input_tokens`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputEnvelope {
+    pub bytes: u64,
+    pub tokens: u64,
+}
+
+impl InputEnvelope {
+    /// No bound beyond the lane's own; for callers whose manifest does not apply.
+    pub const UNBOUNDED: Self = Self {
+        bytes: u64::MAX,
+        tokens: u64::MAX,
+    };
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -175,8 +192,9 @@ struct EligibilityCursorBinding {
     destination: kernel::ArtifactDestination,
 }
 
+/// Where a pass over one eligibility binding resumes. A dispatcher built for the next slice takes the previous slice's position through [`EmbeddingDispatcher::resuming`], so a backlog longer than one pass's page bound is walked across slices instead of restarting from the top each time.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ScanPosition {
+pub struct ScanPosition {
     binding: EligibilityCursorBinding,
     cursor: Option<DispatchCursor>,
     revisit_at: Option<i64>,
@@ -257,6 +275,17 @@ impl<'a> EmbeddingDispatcher<'a> {
         }
     }
 
+    /// Continues from `position`; a position for another binding is replaced at the next pass.
+    pub fn resuming(mut self, position: Option<ScanPosition>) -> Self {
+        self.scan_position = position;
+        self
+    }
+
+    /// The position the next pass over the same binding resumes from.
+    pub fn scan_position(&self) -> Option<ScanPosition> {
+        self.scan_position.clone()
+    }
+
     /// Arms `fault` for the next store call it names; each armed fault is consumed when it fires, so several can be armed for one pass.
     #[cfg(feature = "test-support")]
     pub fn inject_fault_for_test(&mut self, fault: DispatchFault) {
@@ -309,6 +338,7 @@ impl<'a> EmbeddingDispatcher<'a> {
         now: i64,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Option<Blocked>, DispatchError> {
+        let pass_started = Instant::now();
         self.check_quarantine()?;
         let cursor_binding = EligibilityCursorBinding {
             project: eligibility.project.clone(),
@@ -341,8 +371,14 @@ impl<'a> EmbeddingDispatcher<'a> {
                 "database is locked".to_owned(),
             )))
         } else {
-            self.projection.write(|conn| bind_lane(conn, &binding, now))
+            // The binding resets rows another incarnation held; it waits for the connection only until the budget's deadline, so a withdrawn grant or an ended slice never rebinds late.
+            self.projection
+                .write_within(deadline, |conn| bind_lane(conn, &binding, now))
         };
+        // The bound is the budget's own deadline, so a connection still held then is the budget ending, with nothing rebound.
+        if let Err(SearchProjectionError::Store(storage::StoreError::Deadline)) = &bound {
+            return Ok(Some(Blocked::BudgetExhausted));
+        }
         match self.before_dispositions(bound)? {
             BindingOutcome::Mismatch => return Ok(Some(Blocked::BindingMismatch)),
             BindingOutcome::Unbuilt => return Ok(Some(Blocked::ProjectionIdentity)),
@@ -371,9 +407,14 @@ impl<'a> EmbeddingDispatcher<'a> {
                     "database is locked".to_owned(),
                 )))
             } else {
-                self.projection
-                    .read(|conn| open_job_candidates(conn, scan_cursor.as_ref(), page_limit, now))
+                self.projection.read_within(deadline, |conn| {
+                    open_job_candidates(conn, scan_cursor.as_ref(), page_limit, now)
+                })
             };
+            // The selection reads end at the budget's deadline, so a held connection ends the pass rather than outliving the slice.
+            if let Err(SearchProjectionError::Store(storage::StoreError::Deadline)) = &page {
+                return Ok(Some(Blocked::BudgetExhausted));
+            }
             let page = self.before_dispositions(page)?;
             if page.is_empty() {
                 let restart_at_beginning = page_index == 0 && scan_cursor.is_some();
@@ -392,14 +433,19 @@ impl<'a> EmbeddingDispatcher<'a> {
             let verdicts = if kernel_candidates.is_empty() {
                 Vec::new()
             } else {
-                self.kernel
-                    .judge_eligibility(
-                        eligibility.project,
-                        eligibility.destination,
-                        &kernel_candidates,
-                    )
-                    .map_err(eligibility_error)?
-                    .verdicts
+                // A read ended by the budget is the pass ending at its budget, as at any other stage; a deadline the kernel reached on its own is retryable.
+                match self.kernel.judge_eligibility_within_budget(
+                    eligibility.project,
+                    eligibility.destination,
+                    &kernel_candidates,
+                    budget,
+                ) {
+                    Ok(batch) => batch.verdicts,
+                    Err(KernelError::Deadline) if budget.is_exhausted() => {
+                        return Ok(Some(Blocked::BudgetExhausted));
+                    }
+                    Err(error) => return Err(eligibility_error(error)),
+                }
             };
             let classifications = classify_candidates(prepared, verdicts)?;
             let mut processed = 0;
@@ -481,6 +527,12 @@ impl<'a> EmbeddingDispatcher<'a> {
                 break;
             }
         }
+        // The position is recorded as soon as the scan ends: a pass blocked or failed while acting on what it selected resumes behind the prefix it already walked, and the selected jobs lie past the safe cursor, so the next pass finds them again.
+        self.scan_position = Some(ScanPosition {
+            binding: cursor_binding,
+            cursor: safe_cursor,
+            revisit_at,
+        });
         if let Some(blocked) = self.obsolete_candidates(&terminal, deadline, now, observer)? {
             return Ok(Some(blocked));
         }
@@ -492,9 +544,17 @@ impl<'a> EmbeddingDispatcher<'a> {
             budget,
             deadline,
             now,
+            started: pass_started,
+            row_deadline: deadline,
+            slice_deadline: deadline,
         };
         for job_id in &selected {
-            let job = self.projection.read(|conn| dispatch_job(conn, job_id, now));
+            let job = self
+                .projection
+                .read_within(deadline, |conn| dispatch_job(conn, job_id, now));
+            if let Err(SearchProjectionError::Store(storage::StoreError::Deadline)) = &job {
+                return Ok(Some(Blocked::BudgetExhausted));
+            }
             let Some(job) = self.before_dispositions(job)? else {
                 continue;
             };
@@ -503,11 +563,6 @@ impl<'a> EmbeddingDispatcher<'a> {
                 return Ok(Some(blocked));
             }
         }
-        self.scan_position = Some(ScanPosition {
-            binding: cursor_binding,
-            cursor: safe_cursor,
-            revisit_at,
-        });
         Ok(None)
     }
 
@@ -547,17 +602,35 @@ impl<'a> EmbeddingDispatcher<'a> {
                 observer,
             );
         }
+        // The row's episode deadline as an instant, measured from the pass's clock reading at its start and never past the pass's own deadline. Admission, polling, re-admission, and publication all end there: a result that lands after it is left for a pass that stops the row, and a host restart during the wait renews the result wait but not this deadline.
+        let remaining = u64::try_from(
+            job.episode_deadline(pass.bounds.grant)
+                .saturating_sub(pass.now),
+        )
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::ZERO);
+        let row_deadline_at = pass.started.checked_add(remaining).unwrap_or(pass.deadline);
+        let deadline_at = row_deadline_at.min(pass.deadline);
+        let pass = &Pass {
+            deadline: deadline_at,
+            row_deadline: row_deadline_at,
+            ..*pass
+        };
         let (mut host_job_id, item_id) = match &job.host_job_id {
             Some(host_job_id) if job.state == "admitted" => {
                 if let Some(reason) = job.completion_refusal(pass.bounds.grant, pass.now) {
-                    return self.stop(job, reason, pass.now, observer);
+                    return self.stop(job, reason, pass, observer);
                 }
                 (host_job_id.clone(), job.item_id())
             }
             _ => {
                 // Refuse the episode before host admission to avoid inference for refused work.
                 if let Some(reason) = job.episode_refusal(pass.bounds.grant, pass.now) {
-                    return self.stop(job, reason, pass.now, observer);
+                    return self.stop(job, reason, pass, observer);
+                }
+                // A row whose deadline passed while the pass reached it is left for a pass whose clock is past the deadline to stop it; no native call starts and no attempt is charged for it.
+                if Instant::now() >= deadline_at {
+                    return Ok(None);
                 }
                 match self.admit(job, pass, observer)? {
                     Ok(admitted) => admitted,
@@ -577,28 +650,34 @@ impl<'a> EmbeddingDispatcher<'a> {
                 PollOutcome::Pending { .. } if pass.budget.is_exhausted() => {
                     return Ok(Some(Blocked::BudgetExhausted));
                 }
-                PollOutcome::Pending { .. } if started.elapsed() < pass.bounds.result_wait => {
+                PollOutcome::Pending { .. }
+                    if started.elapsed() < pass.bounds.result_wait
+                        && Instant::now() < deadline_at =>
+                {
                     std::thread::sleep(POLL_INTERVAL);
                 }
                 // This job's wait is over; the pass moves on and a later pass polls the held job.
                 PollOutcome::Pending { .. } => return Ok(None),
+                // A result ready only after the row's deadline is not published under it; the row stays admitted for a pass whose clock is past the deadline to stop it.
+                PollOutcome::Page(_) if Instant::now() >= deadline_at => return Ok(None),
                 PollOutcome::Page(page) => {
                     let Some((_, _, vector)) =
                         page.vectors.iter().find(|(id, _, _)| id == &item_id)
                     else {
-                        return self.stop(job, "malformed_request", pass.now, observer);
+                        return self.stop(job, "malformed_request", pass, observer);
                     };
-                    // The stored input is judged again before its result is trusted: the exact count is what the completion is charged, and a lane that no longer admits the input cannot complete it.
-                    let admitted = match self
-                        .local_embeddings
-                        .preflight_embedding_for_lane(pass.lane, &job.text)
-                    {
+                    // The stored input is judged again before its result is trusted: the exact count is what the completion is charged, and a lane or a manifest envelope that no longer admits the input cannot complete it.
+                    let admitted = match self.admit_input(job, pass) {
                         Ok(admitted) => admitted,
                         Err(refusal) => {
                             return self.completion_preflight_refusal(job, refusal, pass, observer);
                         }
                     };
                     pass.stage(job, Stage::Publish, observer);
+                    // The stage event is where the supervisor cancels the budget of a withdrawn grant; a vector is not committed under a manifest the grant no longer covers.
+                    if pass.budget.is_exhausted() {
+                        return Ok(Some(Blocked::BudgetExhausted));
+                    }
                     // `page` stays alive through publication so its lease keeps the result bytes counted while the vector is in use.
                     let input = match self.current_input(job, pass)? {
                         Ok(input) => input,
@@ -613,18 +692,26 @@ impl<'a> EmbeddingDispatcher<'a> {
                     };
                     return self.publish(job, &host_job_id, &publication, pass, observer);
                 }
+                // A result past the row's deadline, whatever it says, is not the row's disposition: the row stays admitted for a pass whose clock is past the deadline to stop it.
+                PollOutcome::Failed { .. } | PollOutcome::KeyMismatch | PollOutcome::BadCursor
+                    if Instant::now() >= deadline_at =>
+                {
+                    return Ok(None);
+                }
                 PollOutcome::Failed { code, .. } if !failure_is_permanent(&code) => {
                     return self.retry(job, "execution_failure", pass, observer);
                 }
                 // A worker that found the lane down fails its job with the lane's reason; that is the lane's disposition, not the input's, so the row keeps its admitted state until a serving host reconciles it.
                 PollOutcome::Failed { code, .. } => {
                     return match serving(self.local_embeddings.status()) {
-                        Ok(_) => self.stop(job, &code, pass.now, observer),
+                        Ok(_) => self.stop(job, &code, pass, observer),
                         Err(state) => Ok(Some(Blocked::LaneUnavailable(state))),
                     };
                 }
-                // One re-admission per pass keeps the pass finite.
-                PollOutcome::Restarted if readmitted => return Ok(None),
+                // One re-admission per pass keeps the pass finite, and none happens past the row's deadline: replacement inference for a row about to be stopped is not started.
+                PollOutcome::Restarted if readmitted || Instant::now() >= deadline_at => {
+                    return Ok(None);
+                }
                 PollOutcome::Restarted => {
                     match self.readmit(job, &item_id, &host_job_id, pass, observer)? {
                         Ok(rebound) => {
@@ -638,10 +725,35 @@ impl<'a> EmbeddingDispatcher<'a> {
                     }
                 }
                 PollOutcome::KeyMismatch | PollOutcome::BadCursor => {
-                    return self.stop(job, "malformed_request", pass.now, observer);
+                    return self.stop(job, "malformed_request", pass, observer);
                 }
             }
         }
+    }
+
+    /// Judges the row's input under the manifest's envelope beside the lane's own limits: bytes before the tokenizer runs, tokens once it has counted them. An admission and a completion judge the same way, so a result retained from a larger envelope is not published above the one now approved.
+    fn admit_input<'t>(
+        &self,
+        job: &'t DispatchJob,
+        pass: &Pass<'_>,
+    ) -> Result<AdmittedInput<'t>, DenseUnavailable> {
+        let envelope = pass.bounds.input;
+        if job.text.len() as u64 > envelope.bytes {
+            return Err(DenseUnavailable::ByteOverflow {
+                bytes: job.text.len(),
+                max_bytes: usize::try_from(envelope.bytes).unwrap_or(usize::MAX),
+            });
+        }
+        let admitted = self
+            .local_embeddings
+            .preflight_embedding_for_lane(pass.lane, &job.text)?;
+        if u64::from(admitted.tokens().get()) > envelope.tokens {
+            return Err(DenseUnavailable::TokenOverflow {
+                tokens: admitted.tokens(),
+                max_tokens: EmbedTokens::new(u32::try_from(envelope.tokens).unwrap_or(u32::MAX)),
+            });
+        }
+        Ok(admitted)
     }
 
     fn submit(
@@ -654,14 +766,13 @@ impl<'a> EmbeddingDispatcher<'a> {
             return Err(SubmitFailure::Quarantined(quarantine));
         }
         let admitted = self
-            .local_embeddings
-            .preflight_embedding_for_lane(pass.lane, &job.text)
+            .admit_input(job, pass)
             .map_err(SubmitFailure::Unavailable)?;
         if let Some(quarantine) = self.projection.quarantine() {
             return Err(SubmitFailure::Quarantined(quarantine));
         }
-        // Native work must not start under a budget that already ended; this is the last check before the host owns the call.
-        if pass.budget.is_exhausted() {
+        // Native work must not start under a budget that already ended, nor past the row's deadline the pass carries for this job; this is the last check before the host owns the call.
+        if pass.budget.is_exhausted() || Instant::now() >= pass.deadline {
             return Err(SubmitFailure::BudgetExhausted);
         }
         // The host item is the episode, so a new episode never reuses a job the table retains from a stopped one.
@@ -684,7 +795,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                 return self.retry(job, "admission_full", pass, observer).map(Err);
             }
             Ok(SubmitOutcome::Refused(reason)) => {
-                return self.stop(job, reason, pass.now, observer).map(Err);
+                return self.stop(job, reason, pass, observer).map(Err);
             }
             Ok(SubmitOutcome::Closing) => return Ok(Err(Some(Blocked::HostClosing))),
             Err(SubmitFailure::Unavailable(refusal)) => {
@@ -721,7 +832,8 @@ impl<'a> EmbeddingDispatcher<'a> {
             )))
         } else {
             self.check_quarantine()?;
-            let charged = self.projection.write(charge);
+            // The ledger write waits for the connection until the row's own deadline, past the slice's if need be, since the host owns native work from the submission on; a charge that could not begin by the row's deadline is not made, and the host job runs unowned.
+            let charged = self.projection.write_within(pass.row_deadline, charge);
             if self.take_fault(DispatchFault::LoseChargeReply) && charged.is_ok() {
                 Err(SearchProjectionError::Store(storage::StoreError::Backend(
                     "database is locked".to_owned(),
@@ -732,6 +844,11 @@ impl<'a> EmbeddingDispatcher<'a> {
         };
         let charged = match charged {
             Ok(charged) => charged,
+            // The connection was not acquired by the row's deadline, so nothing was written: the row stays pending for a pass that stops it, the host job it never owned is orphaned, and the pass ends, since the next job's reads would wait on the same holder.
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                self.orphan(job, &host_job_id, observer);
+                return Ok(Err(Some(Blocked::SearchDeadline)));
+            }
             Err(SearchProjectionError::Projection(error))
                 if !matches!(classify(&error), Refusal::Storage) =>
             {
@@ -744,14 +861,32 @@ impl<'a> EmbeddingDispatcher<'a> {
                         "database is locked".to_owned(),
                     )))
                 } else {
-                    self.projection.read(|conn| job_ledger(conn, &job.job_id))
+                    // The read waits for the connection only until the row's deadline, like the charge it reconciles.
+                    self.projection
+                        .read_within(pass.row_deadline, |conn| job_ledger(conn, &job.job_id))
                 };
                 match ledger {
+                    // The outcome stays unknown at the row's deadline: the pass ends without a word about the host job, whose claim stays open for a later pass to reconcile.
+                    Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                        return Ok(Err(Some(Blocked::SearchDeadline)));
+                    }
                     Ok(Some(ledger)) => {
                         match lost_charge_resolution(job.attempts, &host_job_id, &item_id, &ledger)
                         {
                             Some(LostChargeResolution::AlreadyCharged) => Admission::AlreadyCharged,
-                            Some(LostChargeResolution::Retry) => self.write(charge)?,
+                            // The ledger shows nothing charged, so the retry runs under the same row deadline as the first charge and orphans the host job when it cannot begin by then.
+                            Some(LostChargeResolution::Retry) => {
+                                match self.projection.write_within(pass.row_deadline, charge) {
+                                    Ok(charged) => charged,
+                                    Err(SearchProjectionError::Store(
+                                        storage::StoreError::Deadline,
+                                    )) => {
+                                        self.orphan(job, &host_job_id, observer);
+                                        return Ok(Err(Some(Blocked::SearchDeadline)));
+                                    }
+                                    Err(error) => return Err(self.store_failure(error)),
+                                }
+                            }
                             Some(LostChargeResolution::Defer) => return Ok(Err(None)),
                             None => {
                                 return Err(self.enter_quarantine(QuarantineKind::Storage, &lost));
@@ -820,7 +955,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                 return Ok(Err(None));
             }
             Ok(SubmitOutcome::Refused(reason)) => {
-                return self.stop(job, reason, pass.now, observer).map(Err);
+                return self.stop(job, reason, pass, observer).map(Err);
             }
             Ok(SubmitOutcome::Closing) => return Ok(Err(Some(Blocked::HostClosing))),
             Err(SubmitFailure::Unavailable(refusal)) => {
@@ -839,8 +974,28 @@ impl<'a> EmbeddingDispatcher<'a> {
             job_id: job.job_id.clone(),
             host_job_id: host_job_id.clone(),
         });
-        let rebound =
-            self.write(|conn| rebind_host_job(conn, &job.job_id, evicted, &host_job_id, pass.now))?;
+        // The rebind waits for the connection until the row's own deadline, as the charge does; a rebind that could not begin by then is not made, and the replacement job runs unowned.
+        self.check_quarantine()?;
+        let rebound = match self.projection.write_within(pass.row_deadline, |conn| {
+            rebind_host_job(conn, &job.job_id, evicted, &host_job_id, pass.now)
+        }) {
+            Ok(rebound) => rebound,
+            // As for the charge: the replacement job is orphaned and the pass ends at the held connection.
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                self.orphan(job, &host_job_id, observer);
+                return Ok(Err(Some(Blocked::SearchDeadline)));
+            }
+            Err(error) => {
+                return Err(match &error {
+                    SearchProjectionError::Projection(refusal)
+                        if !matches!(classify(refusal), Refusal::Storage) =>
+                    {
+                        self.enter_quarantine(QuarantineKind::Integrity, &error)
+                    }
+                    _ => self.enter_quarantine(QuarantineKind::Storage, &error),
+                });
+            }
+        };
         if !rebound {
             self.orphan(job, &host_job_id, observer);
             return Ok(Err(None));
@@ -912,10 +1067,10 @@ impl<'a> EmbeddingDispatcher<'a> {
                 Ok(None)
             }
             Err(PublicationError::InvalidVector(_)) => {
-                self.stop(job, "invalid_vector", pass.now, observer)
+                self.stop(job, "invalid_vector", pass, observer)
             }
             Err(PublicationError::IdempotencyConflict) => {
-                self.stop(job, "idempotency_conflict", pass.now, observer)
+                self.stop(job, "idempotency_conflict", pass, observer)
             }
             Err(PublicationError::GuardDeadline) => Ok(Some(Blocked::GuardDeadline)),
             Err(PublicationError::WrongScope) => Ok(Some(Blocked::WrongScope)),
@@ -957,13 +1112,13 @@ impl<'a> EmbeddingDispatcher<'a> {
                 self.retry(job, "execution_failure", pass, observer)
             }
             DenseUnavailable::Inference(_) | DenseUnavailable::CountUnavailable(_) => {
-                self.stop(job, "artifact_invalid", pass.now, observer)
+                self.stop(job, "artifact_invalid", pass, observer)
             }
             DenseUnavailable::EmptyInput | DenseUnavailable::ZeroTokens { .. } => {
-                self.stop(job, "input_empty", pass.now, observer)
+                self.stop(job, "input_empty", pass, observer)
             }
             DenseUnavailable::ByteOverflow { .. } | DenseUnavailable::TokenOverflow { .. } => {
-                self.stop(job, "input_over_limit", pass.now, observer)
+                self.stop(job, "input_over_limit", pass, observer)
             }
         }
     }
@@ -994,15 +1149,18 @@ impl<'a> EmbeddingDispatcher<'a> {
         pass: &Pass<'_>,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Option<Blocked>, DispatchError> {
-        let retry_at = pass.now + pass.bounds.retry_after;
+        let retry_at = pass.now.saturating_add(pass.bounds.retry_after);
         let job_id = job.job_id.clone();
-        match self.write(|conn| record_retry(conn, &job.job_id, kind, retry_at, pass.now))? {
-            Disposition::Retry => observer(DispatchEvent::Retried { job_id, kind }),
-            Disposition::Exhausted => observer(DispatchEvent::Stopped {
+        match self.write_disposition(pass, |conn| {
+            record_retry(conn, &job.job_id, kind, retry_at, pass.now)
+        })? {
+            Ok(Disposition::Retry) => observer(DispatchEvent::Retried { job_id, kind }),
+            Ok(Disposition::Exhausted) => observer(DispatchEvent::Stopped {
                 job_id,
                 reason: EXHAUSTED.to_owned(),
             }),
-            Disposition::NotOpen => {}
+            Ok(Disposition::NotOpen) => {}
+            Err(blocked) => return Ok(Some(blocked)),
         }
         Ok(None)
     }
@@ -1011,16 +1169,45 @@ impl<'a> EmbeddingDispatcher<'a> {
         &mut self,
         job: &DispatchJob,
         reason: &str,
-        now: i64,
+        pass: &Pass<'_>,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Option<Blocked>, DispatchError> {
-        if self.write(|conn| stop_job(conn, &job.job_id, reason, now))? {
-            observer(DispatchEvent::Stopped {
+        let now = pass.now;
+        match self.write_disposition(pass, |conn| stop_job(conn, &job.job_id, reason, now))? {
+            Ok(true) => observer(DispatchEvent::Stopped {
                 job_id: job.job_id.clone(),
                 reason: reason.to_owned(),
-            });
+            }),
+            Ok(false) => {}
+            Err(blocked) => return Ok(Some(blocked)),
         }
         Ok(None)
+    }
+
+    /// A retry or stop written within the job's disposition deadline. `Err(blocked)` means nothing was written and the caller ends the pass: the connection was still held at the deadline, or the budget was cancelled while it was awaited, so the transaction is not begun under a withdrawn grant. The row is left as it was for a later pass to judge under its own clock.
+    fn write_disposition<T>(
+        &mut self,
+        pass: &Pass<'_>,
+        f: impl FnOnce(&storage::GuardedConn<'_>) -> Result<T, ProjectionError>,
+    ) -> Result<Result<T, Blocked>, DispatchError> {
+        self.check_quarantine()?;
+        let judged = |conn: &storage::GuardedConn<'_>| {
+            if pass.budget.is_exhausted() {
+                return Ok(None);
+            }
+            f(conn).map(Some)
+        };
+        match self
+            .projection
+            .write_within(pass.disposition_deadline(), judged)
+        {
+            Ok(Some(value)) => Ok(Ok(value)),
+            Ok(None) => Ok(Err(Blocked::BudgetExhausted)),
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                Ok(Err(Blocked::SearchDeadline))
+            }
+            Err(error) => Err(self.store_failure(error)),
+        }
     }
 
     fn obsolete_candidates(
@@ -1079,7 +1266,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
                 Ok(Some(Blocked::SearchDeadline))
             }
-            Err(_) => self.reconcile_obsoletions(candidates),
+            Err(_) => self.reconcile_obsoletions(candidates, deadline),
         }
     }
 
@@ -1107,11 +1294,13 @@ impl<'a> EmbeddingDispatcher<'a> {
         )
     }
 
+    /// Reads the rows after an obsoletion write whose reply was lost, within `deadline` like the write: a connection still held then leaves the outcome unresolved for the next pass, which reads the rows again.
     fn reconcile_obsoletions(
         &mut self,
         candidates: &[PendingObsoletion],
+        deadline: Instant,
     ) -> Result<Option<Blocked>, DispatchError> {
-        let statuses = self.projection.read(|conn| {
+        let statuses = self.projection.read_within(deadline, |conn| {
             candidates
                 .iter()
                 .map(|candidate| {
@@ -1120,6 +1309,9 @@ impl<'a> EmbeddingDispatcher<'a> {
                 .collect::<Result<Vec<_>, _>>()
         });
         match statuses {
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                Ok(Some(Blocked::LocalCommitUnresolved))
+            }
             Ok(statuses) => {
                 if statuses.iter().all(|status| {
                     !matches!(status.job_state.as_deref(), Some("pending" | "admitted"))
@@ -1134,19 +1326,16 @@ impl<'a> EmbeddingDispatcher<'a> {
     }
 
     /// Every disposition write that fails quarantines the projection: a refusal means the row's state no longer describes the work, and a store failure leaves it unknown whether the disposition committed.
-    fn write<T>(
-        &mut self,
-        f: impl FnOnce(&storage::GuardedConn<'_>) -> Result<T, ProjectionError>,
-    ) -> Result<T, DispatchError> {
-        self.check_quarantine()?;
-        self.projection.write(f).map_err(|error| match &error {
+    /// Quarantines the projection for a write's failure: an integrity refusal is the projection's, anything else the store's.
+    fn store_failure(&mut self, error: SearchProjectionError) -> DispatchError {
+        match &error {
             SearchProjectionError::Projection(refusal)
                 if !matches!(classify(refusal), Refusal::Storage) =>
             {
                 self.enter_quarantine(QuarantineKind::Integrity, &error)
             }
             _ => self.enter_quarantine(QuarantineKind::Storage, &error),
-        })
+        }
     }
 
     fn enter_quarantine(
@@ -1174,6 +1363,23 @@ struct Pass<'a> {
     budget: &'a EvalBudget,
     deadline: Instant,
     now: i64,
+    /// When the pass read `now`; the row deadlines it enforces are measured from here.
+    started: Instant,
+    /// The row's own episode deadline as an instant, not shortened by the pass's; the charge that follows a submission may run to it, since the host owns native work from the submission on.
+    row_deadline: Instant,
+    /// The slice's own deadline, kept beside the row-capped `deadline` so a row whose deadline has passed can still be stopped within the slice.
+    slice_deadline: Instant,
+}
+
+impl Pass<'_> {
+    /// Where a retry or stop for this job may still be written. A row whose deadline had already passed at the pass's clock reading is stopped within the slice's deadline, since that pass's clock is past it. Every other row's disposition ends at the row's deadline: a refusal learned after it, as when a token count answered late, is not recorded under the pass's earlier clock, and a later pass stops the row.
+    fn disposition_deadline(&self) -> Instant {
+        if self.row_deadline > self.started {
+            self.deadline
+        } else {
+            self.slice_deadline
+        }
+    }
 }
 
 impl Pass<'_> {
@@ -1270,13 +1476,32 @@ fn exact_verdicts(
     Ok(verdicts)
 }
 
-/// The binding a lane implies: the lane fingerprint is the verified bundle fingerprint the projection identity records as its tokenizer fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneIdentity {
+    pub embedding_model: String,
+    pub tokenizer_fingerprint: String,
+    pub vector_dimension: Option<u32>,
+    pub generation_epoch: u64,
+}
+
+impl From<&LaneInfo> for LaneIdentity {
+    fn from(lane: &LaneInfo) -> Self {
+        Self {
+            embedding_model: lane.model.clone(),
+            tokenizer_fingerprint: lane.fingerprint.clone(),
+            vector_dimension: u32::try_from(lane.dims).ok(),
+            generation_epoch: lane.table_epoch,
+        }
+    }
+}
+
 pub fn lane_binding(lane: &LaneInfo, host_incarnation: &str) -> LaneBinding {
+    let identity = LaneIdentity::from(lane);
     LaneBinding {
-        embedding_model: lane.model.clone(),
-        bundle_fingerprint: lane.fingerprint.clone(),
-        vector_dimension: u32::try_from(lane.dims).unwrap_or(u32::MAX),
-        table_epoch: lane.table_epoch,
+        embedding_model: identity.embedding_model,
+        bundle_fingerprint: identity.tokenizer_fingerprint,
+        vector_dimension: identity.vector_dimension.unwrap_or(u32::MAX),
+        table_epoch: identity.generation_epoch,
         host_incarnation: host_incarnation.to_owned(),
     }
 }

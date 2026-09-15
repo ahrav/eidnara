@@ -629,7 +629,7 @@ impl GateState {
     }
 }
 
-/// The shared gate every hook consults. It starts closed. `install` and `close` cancel the previous grant's token before the new state is visible, and a group of hooks is judged under one state, so no grant spans two manifests.
+/// The shared gate every hook consults. It starts closed. `close`, and `renew` when its evidence withdraws a hook, cancel the previous grant's token before the new state is visible, and a group of hooks is judged under one state, so no grant spans two manifests.
 pub struct HookGate {
     state: Mutex<GateState>,
     data_home: Option<PathBuf>,

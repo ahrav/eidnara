@@ -35,6 +35,9 @@ pub enum SweepError {
     /// Candidate selection failed before anything was decided; the sweep may simply run again.
     #[error(transparent)]
     Read(SearchProjectionError),
+    /// The budget has no deadline, so nothing would bound a wait for the projection connection; the sweep selected nothing.
+    #[error("identity sweep requires a budget with a deadline")]
+    Unbounded,
 }
 
 /// Sweeps one projection against one in-process host. `run_sweep` blocks on the projection and belongs on a blocking thread.
@@ -43,7 +46,7 @@ pub struct IdentitySweeper<'a> {
     local_embeddings: &'a LocalEmbeddingsComponent,
     cursor: Option<String>,
     invalidated: Option<CancellationToken>,
-    lose_reclaim_reply: bool,
+    lose_reclaim_reply: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl<'a> IdentitySweeper<'a> {
@@ -65,7 +68,7 @@ impl<'a> IdentitySweeper<'a> {
             local_embeddings,
             cursor,
             invalidated: None,
-            lose_reclaim_reply: false,
+            lose_reclaim_reply: None,
         }
     }
 
@@ -88,10 +91,10 @@ impl<'a> IdentitySweeper<'a> {
         self.cursor.as_deref()
     }
 
-    /// Makes the next reclamation return as if its COMMIT reply were lost after the store applied it, so the reconciliation path can be exercised.
+    /// Makes the next reclamation return as if its COMMIT reply were lost after the store applied it, so the reconciliation path can be exercised. `then` runs at the loss, before reconciliation reads a row.
     #[cfg(feature = "test-support")]
-    pub fn lose_next_reclaim_reply_for_test(&mut self) {
-        self.lose_reclaim_reply = true;
+    pub fn lose_next_reclaim_reply_for_test(&mut self, then: impl FnOnce() + Send + 'static) {
+        self.lose_reclaim_reply = Some(Box::new(then));
     }
 
     /// Inspects at most `max_jobs` job rows and reclaims finished, unreferenced identities that no holder protects.
@@ -101,7 +104,7 @@ impl<'a> IdentitySweeper<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`SweepError::Read`] when selection fails and [`SweepError::Quarantined`] once a reclamation is refused, its outcome cannot be reconciled, or any writer has quarantined the projection.
+    /// Returns [`SweepError::Unbounded`] when the budget has no deadline, [`SweepError::Read`] when selection fails, and [`SweepError::Quarantined`] once a reclamation is refused, its outcome cannot be reconciled, or any writer has quarantined the projection.
     pub fn run_sweep(
         &mut self,
         max_jobs: NonZeroUsize,
@@ -116,11 +119,23 @@ impl<'a> IdentitySweeper<'a> {
                 ..SweepReport::default()
             });
         }
+        // Both connection acquisitions end at the budget's deadline; a connection still held then leaves the page and cursor for the next sweep. A budget without one could wait on a held connection past any grant or shutdown.
+        let Some(deadline) = budget.deadline() else {
+            return Err(SweepError::Unbounded);
+        };
         let mut report = SweepReport::default();
-        let page = self
-            .projection
-            .read(|conn| candidates(conn, max_jobs, self.cursor.as_deref()))
-            .map_err(SweepError::Read)?;
+        let select =
+            |conn: &storage::GuardedConn<'_>| candidates(conn, max_jobs, self.cursor.as_deref());
+        let page = match self.projection.read_within(deadline, select) {
+            Ok(page) => page,
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                return Ok(SweepReport {
+                    budget_exhausted: true,
+                    ..SweepReport::default()
+                });
+            }
+            Err(error) => return Err(SweepError::Read(error)),
+        };
         report.inspected = page.inspected;
         report.candidates = page.candidates.len();
         // A short page ends one pass over the table; a full page resumes after its last row once this call has judged it.
@@ -146,14 +161,32 @@ impl<'a> IdentitySweeper<'a> {
             report.budget_exhausted = true;
             return Ok(report);
         }
-        self.cursor = next_cursor;
-        let reclaimed = self.projection.write(|conn| reclaim(conn, &free));
-        let reclaimed = if std::mem::take(&mut self.lose_reclaim_reply) && reclaimed.is_ok() {
-            Err(SearchProjectionError::Store(storage::StoreError::Backend(
-                "database is locked".to_owned(),
-            )))
-        } else {
-            reclaimed
+        let prior_cursor = std::mem::replace(&mut self.cursor, next_cursor);
+        // The budget and grant are judged once more inside the transaction, so a cancellation that lands while the connection was awaited commits nothing.
+        let ended = |conn: &storage::GuardedConn<'_>| {
+            if self.ended(budget) {
+                return Ok(None);
+            }
+            reclaim(conn, &free).map(Some)
+        };
+        let reclaimed = match self.projection.write_within(deadline, ended) {
+            Ok(Some(reclaimed)) => Ok(reclaimed),
+            // Nothing was applied: at the deadline the connection was still held, or the budget ended once it was ours. The cursor returns to before this page.
+            Ok(None) | Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                self.cursor = prior_cursor;
+                report.budget_exhausted = true;
+                return Ok(report);
+            }
+            Err(error) => Err(error),
+        };
+        let reclaimed = match self.lose_reclaim_reply.take() {
+            Some(then) if reclaimed.is_ok() => {
+                then();
+                Err(SearchProjectionError::Store(storage::StoreError::Backend(
+                    "database is locked".to_owned(),
+                )))
+            }
+            _ => reclaimed,
         };
         match reclaimed {
             Ok(reclaimed) => {
@@ -165,15 +198,26 @@ impl<'a> IdentitySweeper<'a> {
             Err(SearchProjectionError::Projection(error)) => {
                 return Err(self.enter_quarantine(QuarantineKind::Storage, &error));
             }
-            // A backend reply was lost: the rows, not the error, say what the store applied. A row still present was not reclaimed and stays a candidate for the next sweep.
+            // A backend reply was lost: the rows, not the error, say what the store applied. A row still present was not reclaimed and stays a candidate for the next sweep. The reads end with the budget like the write did; a row not yet read is left to the next sweep's selection, which sees it if it is present.
             Err(lost @ SearchProjectionError::Store(storage::StoreError::Backend(_))) => {
                 for candidate in &free {
-                    match self.projection.read(|conn| presence(conn, candidate)) {
+                    if self.ended(budget) {
+                        report.budget_exhausted = true;
+                        return Ok(report);
+                    }
+                    match self
+                        .projection
+                        .read_within(deadline, |conn| presence(conn, candidate))
+                    {
                         Ok((true, _)) => report.survivors += 1,
                         Ok((false, vector_present)) => {
                             report.jobs_reclaimed += 1;
                             report.vectors_reclaimed +=
                                 usize::from(candidate.has_vector && !vector_present);
+                        }
+                        Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                            report.budget_exhausted = true;
+                            return Ok(report);
                         }
                         Err(_) => {
                             return Err(self.enter_quarantine(QuarantineKind::Storage, &lost));

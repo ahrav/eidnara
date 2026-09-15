@@ -645,6 +645,7 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
     let gate = GateGuard(engine.block_calls());
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let short = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         result_wait: Duration::from_millis(50),
         ..bounds()
     };
@@ -687,6 +688,451 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
     assert_eq!(engine.calls(), 1, "no second inference");
 }
 
+/// A held job is polled only until its episode deadline, the persisted one once the job carries it, rather than for the whole result wait, so a result that lands after the deadline is left for a pass that stops the row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_job_is_polled_only_until_its_episode_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("m0", "held message");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+
+    // The grant ends 300 ms after now while the result wait is five seconds.
+    let near = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
+        grant: grant(3, NOW + 300),
+        ..bounds()
+    };
+    let started = std::time::Instant::now();
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &near, NOW);
+    assert_eq!(end, None);
+    assert_eq!(admitted(&events).len(), 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the poll ran {:?} past a 300 ms deadline",
+        started.elapsed()
+    );
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (held.state.as_str(), held.deadline),
+        ("admitted", Some(NOW + 300))
+    );
+
+    // A later pass under a grant that ends a day out still polls only until the job's own persisted deadline.
+    let started = std::time::Instant::now();
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
+    assert_eq!(end, None);
+    assert!(admitted(&events).is_empty(), "{events:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the poll ran {:?} past the job's 300 ms deadline",
+        started.elapsed()
+    );
+    TestEngine::release(&gate.0);
+}
+
+/// A pass that scans past a long wrong-scope prefix and is then blocked at its first actionable job keeps the scan position it earned, so the next pass does not rescan the prefix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blocked_pass_keeps_the_scan_position_it_reached() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object_b = corpus.publish_scoped("project-b", "project B input", SCOPE_B);
+    let object_a = corpus.publish_scoped("project-a", "project A input", SCOPE);
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence_b = occurrence_of(&rows, &object_b);
+    let _occurrence_a = occurrence_of(&rows, &object_a);
+    insert_wrong_scope_jobs(dir.path(), occurrence_b, 1_024);
+    let project_a = ProjectScope::new(PROJECT).unwrap();
+    let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
+        max_jobs: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    };
+
+    // A pass whose native call returns settles the job and records where the scan stood before it.
+    let settled_engine = TestEngine::new();
+    let settled_lane = component(&settled_engine, LocalEmbeddingsLimits::default());
+    let mut settled = EmbeddingDispatcher::new(&corpus.kernel, &projection, &settled_lane);
+    let end = settled
+        .run_pass(
+            eligibility(&project_a),
+            &one,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(end, None);
+    let expected = settled.scan_position();
+
+    // The same scan on a fresh projection copy, blocked at the job by a held call and a short budget, ends at the same position.
+    let dir2 = tempfile::tempdir().unwrap();
+    let corpus2 = Corpus::open(dir2.path());
+    corpus2.seed();
+    let object_b2 = corpus2.publish_scoped("project-b", "project B input", SCOPE_B);
+    corpus2.publish_scoped("project-a", "project A input", SCOPE);
+    let (projection2, rows2) = corpus2.bootstrap(dir2.path());
+    insert_wrong_scope_jobs(dir2.path(), occurrence_of(&rows2, &object_b2), 1_024);
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let held_lane = component(&engine, LocalEmbeddingsLimits::default());
+    let mut blocked = EmbeddingDispatcher::new(&corpus2.kernel, &projection2, &held_lane);
+    let end = blocked
+        .run_pass(
+            eligibility(&project_a),
+            &one,
+            &budget(Duration::from_millis(500)),
+            NOW,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(end, Some(Blocked::BudgetExhausted));
+    TestEngine::release(&gate.0);
+    assert_eq!(
+        blocked.scan_position(),
+        expected,
+        "a blocked pass keeps the position its scan reached"
+    );
+}
+
+/// One pass whose observer sleeps `delay` at the first poll stage, so the row's deadline passes inside the pass before its result is looked at.
+fn pass_delayed_at_poll(
+    corpus: &Corpus,
+    projection: &SearchProjection,
+    local_embeddings: &LocalEmbeddingsComponent,
+    bounds: &DispatchBounds,
+    now: i64,
+    delay: Duration,
+) -> (Option<Blocked>, Vec<DispatchEvent>) {
+    pass_delayed_at(
+        corpus,
+        projection,
+        local_embeddings,
+        bounds,
+        now,
+        delay,
+        |event| {
+            matches!(
+                event,
+                DispatchEvent::Stage {
+                    stage: Stage::Poll,
+                    ..
+                }
+            )
+        },
+    )
+}
+
+/// One pass whose observer sleeps `delay` at the first event `at` selects.
+fn pass_delayed_at(
+    corpus: &Corpus,
+    projection: &SearchProjection,
+    local_embeddings: &LocalEmbeddingsComponent,
+    bounds: &DispatchBounds,
+    now: i64,
+    delay: Duration,
+    at: impl Fn(&DispatchEvent) -> bool,
+) -> (Option<Blocked>, Vec<DispatchEvent>) {
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut events = Vec::new();
+    let mut delayed = false;
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, projection, local_embeddings);
+    let end = tokio::task::block_in_place(|| {
+        dispatcher
+            .run_pass(
+                eligibility(&project),
+                bounds,
+                &budget(Duration::from_secs(10)),
+                now,
+                &mut |event| {
+                    if !delayed && at(&event) {
+                        delayed = true;
+                        std::thread::sleep(delay);
+                    }
+                    events.push(event);
+                },
+            )
+            .unwrap()
+    });
+    (end, events)
+}
+
+fn stages(events: &[DispatchEvent]) -> Vec<Stage> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            DispatchEvent::Stage { stage, .. } => Some(*stage),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A result that is ready once the row's own deadline has passed inside the pass is not published: the row stays admitted for a pass that stops it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_result_ready_after_the_row_deadline_is_not_published() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let text = "ready too late";
+    let object = corpus.publish("m0", text);
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let near = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
+        grant: grant(3, NOW + 300),
+        ..bounds()
+    };
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &near, NOW);
+    assert_eq!(end, None);
+    assert_eq!(admitted(&events).len(), 1);
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(held.deadline, Some(NOW + 300));
+    drop(gate);
+    let host_job = held.host_job_id.clone().unwrap();
+    assert!(matches!(
+        wait_for_host_result(
+            &local_embeddings,
+            &host_job,
+            &held.episode.clone().unwrap(),
+            text
+        ),
+        PollOutcome::Page(_)
+    ));
+
+    // The pass runs under a day-long grant, but 400 ms pass inside it before the ready result is looked at, past the row's 300 ms.
+    let (end, events) = pass_delayed_at_poll(
+        &corpus,
+        &projection,
+        &local_embeddings,
+        &bounds(),
+        NOW,
+        Duration::from_millis(400),
+    );
+    assert_eq!(end, None, "{events:?}");
+    assert!(published(&events).is_empty(), "{events:?}");
+    let still_held = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (still_held.state.as_str(), still_held.vector.is_none()),
+        ("admitted", true)
+    );
+
+    // A pass whose clock stands past the deadline stops the row.
+    let (_, events) = pass(
+        &corpus,
+        &projection,
+        &local_embeddings,
+        &bounds(),
+        NOW + 301,
+    );
+    assert_eq!(
+        stopped(&events),
+        vec![(held.job_id.clone(), "deadline_expired".to_owned())]
+    );
+}
+
+/// A pending row whose persisted episode deadline passes before the pass reaches it is not admitted: no native call starts and no attempt is charged for a row a later pass stops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_row_past_its_deadline_is_not_admitted() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("m0", "message across restart");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    // The row is admitted under a 300 ms deadline, then a new host incarnation returns it to pending with that episode kept.
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let near = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
+        grant: grant(3, NOW + 300),
+        ..bounds()
+    };
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &near, NOW);
+    assert_eq!(admitted(&events).len(), 1);
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (held.state.as_str(), held.deadline),
+        ("admitted", Some(NOW + 300))
+    );
+    drop(gate);
+
+    // Under a new host and a day-long grant, 400 ms of earlier pass work pass before this row is reached.
+    let restarted_engine = TestEngine::new();
+    let restarted_gate = GateGuard(restarted_engine.block_calls());
+    let restarted_lane = component(&restarted_engine, LocalEmbeddingsLimits::default());
+    let (end, events) = pass_delayed_at(
+        &corpus,
+        &projection,
+        &restarted_lane,
+        &bounds(),
+        NOW,
+        Duration::from_millis(400),
+        |event| matches!(event, DispatchEvent::Bound(_)),
+    );
+    drop(restarted_gate);
+    assert_eq!(end, None, "{events:?}");
+    assert!(admitted(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        restarted_engine.calls(),
+        0,
+        "no native call for an expired row"
+    );
+    let pending = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (pending.state.as_str(), pending.attempts),
+        ("pending", held.attempts),
+        "no attempt is charged"
+    );
+}
+
+/// A job whose result the host evicted is not re-admitted once the row's deadline, measured from the pass's start, has passed: no replacement inference starts for a row about to be stopped, and nothing is waited for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_job_is_not_readmitted_past_the_row_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let text = "evicted before polled";
+    let object = corpus.publish("m0", text);
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let local_embeddings = component(
+        &engine,
+        LocalEmbeddingsLimits {
+            max_retained_jobs: 1,
+            max_queued_jobs: 1,
+            ..LocalEmbeddingsLimits::default()
+        },
+    );
+    // A three-second row deadline: a re-admission with a renewed wait would add three more seconds, which the bound below does not allow.
+    let near = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
+        grant: grant(3, NOW + 3_000),
+        result_wait: Duration::from_millis(50),
+        ..bounds()
+    };
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &near, NOW);
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(admitted(&events), vec![(held.job_id.clone(), 1)]);
+    let evicted_host_job = held.host_job_id.clone().unwrap();
+    let item = held.episode.clone().unwrap();
+    drop(gate);
+    assert!(matches!(
+        wait_for_host_result(&local_embeddings, &evicted_host_job, &item, text),
+        PollOutcome::Page(_)
+    ));
+    // A sentinel evicts the retained result, so the held job polls as restarted.
+    let sentinel = local_embeddings
+        .preflight_embedding_for_lane(&lane(FINGERPRINT), "eviction sentinel")
+        .unwrap();
+    let SubmitOutcome::Queued {
+        job_id: sentinel_host,
+    } = local_embeddings
+        .submit_admitted(&sentinel, "sentinel")
+        .unwrap()
+    else {
+        panic!("sentinel must be admitted");
+    };
+    assert!(matches!(
+        wait_for_host_result(
+            &local_embeddings,
+            &sentinel_host,
+            "sentinel",
+            "eviction sentinel"
+        ),
+        PollOutcome::Page(_)
+    ));
+    assert!(matches!(
+        local_embeddings.poll_admitted(&lane(FINGERPRINT), &evicted_host_job, &item, text),
+        PollOutcome::Restarted
+    ));
+
+    // Any replacement call would be held; 3.1 s pass inside the pass before the restarted poll, past the row's 3 s, so no replacement is admitted or waited for.
+    let gate = GateGuard(engine.block_calls());
+    let started = std::time::Instant::now();
+    let (end, events) = pass_delayed_at_poll(
+        &corpus,
+        &projection,
+        &local_embeddings,
+        &DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
+            result_wait: Duration::from_secs(5),
+            ..bounds()
+        },
+        NOW,
+        Duration::from_millis(3_100),
+    );
+    let elapsed = started.elapsed();
+    drop(gate);
+    assert_eq!(end, None, "{events:?}");
+    assert_eq!(stages(&events), vec![Stage::Poll], "{events:?}");
+    assert!(admitted(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        engine.calls(),
+        2,
+        "one original and one sentinel inference, no replacement"
+    );
+    assert!(
+        elapsed < Duration::from_millis(3_100) + Duration::from_secs(2),
+        "the restarted job was waited for {elapsed:?} past the row's deadline"
+    );
+    assert!(published(&events).is_empty());
+}
+
+/// A pass whose eligibility read finds every kernel reader held returns at its budget rather than waiting the readers out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_eligibility_read_against_held_kernel_readers_ends_at_the_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("m0", "judged text");
+    let (projection, _rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let held = std::sync::Barrier::new(2);
+    let (waited, end) = std::thread::scope(|scope| {
+        let kernel = Arc::clone(&corpus.kernel);
+        let held = &held;
+        scope.spawn(move || kernel.hold_readers_for_test(held, Duration::from_secs(4)));
+        held.wait();
+        let started = std::time::Instant::now();
+        let mut dispatcher =
+            EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
+        let end = tokio::task::block_in_place(|| {
+            dispatcher.run_pass(
+                eligibility(&project),
+                &bounds(),
+                &budget(Duration::from_millis(300)),
+                NOW,
+                &mut |_| {},
+            )
+        });
+        (started.elapsed(), end)
+    });
+    assert!(
+        matches!(
+            end,
+            Err(DispatchError::RetryableKernel(_)) | Ok(Some(Blocked::BudgetExhausted))
+        ),
+        "{end:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(2),
+        "the pass waited {waited:?} for held readers against a 300 ms budget"
+    );
+}
+
 /// AC2, AC4, AC6: a new host incarnation cannot satisfy work the old one admitted; rebinding returns it to pending with its attempt kept, a lane with a different fingerprint blocks admission, and the stored binding follows the host that actually serves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
@@ -700,6 +1146,7 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
     let gate = GateGuard(engine.block_calls());
     let first = component(&engine, LocalEmbeddingsLimits::default());
     let short = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         result_wait: Duration::from_millis(50),
         ..bounds()
     };
@@ -793,6 +1240,33 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
             bound.table_epoch as i64
         )
     );
+}
+
+/// A job outside the manifest's input envelope is refused before submission even when the lane itself would embed it: no inference call, the row stopped as over the limit and never charged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_outside_the_manifest_envelope_stops_without_inference() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let over = corpus.publish("m0", "fifteen bytes!!");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let mut bounds = bounds();
+    bounds.input = daemon::embedding_dispatch::InputEnvelope {
+        bytes: 8,
+        tokens: u64::MAX,
+    };
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds, NOW);
+    assert_eq!(end, None);
+    assert_eq!(engine.calls(), 0, "a refused input reaches no inference");
+    let ledger = ledger(dir.path(), occurrence_of(&rows, &over));
+    assert_eq!(
+        stopped(&events),
+        vec![(ledger.job_id.clone(), "input_over_limit".to_string())]
+    );
+    assert_eq!(ledger.state, "failed");
+    assert_eq!(ledger.attempts, 0);
 }
 
 /// AC3: input the lane cannot embed makes zero inference calls, stops with a reason that names no content, and leaves the lexical occurrence in place; reopening does not resume it.
@@ -898,6 +1372,28 @@ fn scenario(
         events,
         end,
     )
+}
+
+/// A retry delay that would exceed `i64::MAX` saturates `next_attempt_at` at `i64::MAX`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_delay_at_the_clock_limit_saturates() {
+    let mut far = bounds();
+    far.retry_after = i64::MAX;
+    let (dir, _, _, occurrence, _, _, events, end) = scenario(
+        "retry me",
+        LocalEmbeddingsLimits::default(),
+        far,
+        |_, _, engine, _, _| {
+            engine.fail_next(InferenceError::Execution("transient".to_owned()));
+        },
+    );
+    assert_eq!(end, None);
+    let job = ledger(dir.path(), &occurrence);
+    assert_eq!(
+        retried(&events),
+        vec![(job.job_id.clone(), "execution_failure")]
+    );
+    assert_eq!(job.next_attempt_at, Some(i64::MAX));
 }
 
 /// AC5, AC6: a transient failure keeps the row pending under the same episode with its attempt charged, and it is eligible again only when its retry time comes.
@@ -1126,6 +1622,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         "late",
         LocalEmbeddingsLimits::default(),
         DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             grant: grant(3, NOW - 1),
             ..standard
         },
@@ -1145,6 +1642,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
     let tight = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(1, NOW + DAY_MS),
         ..bounds()
     };
@@ -1172,6 +1670,7 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
     let (projection, ledgers) = reopen(dir.path(), projection, &[&occurrence]);
     let after = ledgers.into_iter().next().unwrap();
     let generous = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(9, NOW + 2 * DAY_MS),
         ..tight
     };
@@ -1292,6 +1791,7 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
         },
     );
     let short = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         result_wait: Duration::from_millis(50),
         ..bounds()
     };
@@ -1425,8 +1925,10 @@ async fn charge_rollback_cannot_skip_a_failed_host_attempt() {
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     dispatcher.inject_fault_for_test(DispatchFault::RefuseChargeStatement);
     let mut tight = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(1, NOW + DAY_MS),
         ..DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             result_wait: Duration::ZERO,
             ..bounds()
         }
@@ -1495,6 +1997,190 @@ async fn charge_rollback_cannot_skip_a_failed_host_attempt() {
         .unwrap();
     assert_eq!(ledger(dir.path(), occurrence), stopped_row);
     assert_eq!(engine.calls(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disposition_held_past_its_deadline_ends_the_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let over = corpus.publish("m0", "fifteen bytes!!");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &over);
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut limits = bounds();
+    limits.input = daemon::embedding_dispatch::InputEnvelope {
+        bytes: 8,
+        tokens: u64::MAX,
+    };
+    // The stop for the refused input is the pass's first write after binding; a lock taken at the binding holds it to the deadline.
+    let short_guard = budget(Duration::from_millis(300));
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
+    let mut write_lock = None;
+    let mut events = Vec::new();
+
+    let end = dispatcher
+        .run_pass(
+            eligibility(&project),
+            &limits,
+            &short_guard,
+            NOW,
+            &mut |event| {
+                if matches!(event, DispatchEvent::Bound(_)) {
+                    let conn = Connection::open(search_path(dir.path())).unwrap();
+                    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    write_lock = Some(conn);
+                }
+                events.push(event);
+            },
+        )
+        .unwrap();
+    assert_eq!(end, Some(Blocked::SearchDeadline));
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!((row.state.as_str(), row.attempts), ("pending", 0));
+    assert!(stopped(&events).is_empty());
+    assert_eq!(engine.calls(), 0);
+    assert!(projection.quarantine().is_none());
+
+    drop(write_lock);
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &limits, NOW + 1);
+    assert_eq!(end, None);
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!(
+        stopped(&events),
+        vec![(row.job_id.clone(), "input_over_limit".to_string())]
+    );
+    assert_eq!(row.state, "failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refusal_learned_after_the_row_deadline_is_not_recorded_under_the_pass_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let over = corpus.publish("m0", "two words");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &over);
+    let engine = TestEngine::new();
+    // The token count answers after the row's 300 ms deadline, and its answer refuses the input.
+    engine.delay_counts(Duration::from_millis(500));
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let limits = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope {
+            bytes: u64::MAX,
+            tokens: 1,
+        },
+        grant: grant(3, NOW + 300),
+        ..bounds()
+    };
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &limits, NOW);
+    assert_eq!(end, Some(Blocked::SearchDeadline));
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (row.state.as_str(), row.attempts, row.stop_reason.as_deref()),
+        ("pending", 0, None),
+        "a stop learned after the row deadline is not written under the pass's earlier clock"
+    );
+    assert!(stopped(&events).is_empty());
+    assert_eq!(engine.calls(), 0);
+
+    // A pass whose clock is past the deadline stops the row itself.
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &limits, NOW + 400);
+    assert_eq!(end, None);
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!(stopped(&events).len(), 1, "{events:?}");
+    assert_eq!(row.state, "failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disposition_is_not_written_under_a_budget_cancelled_before_its_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let over = corpus.publish("m0", "fifteen bytes!!");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &over);
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut limits = bounds();
+    limits.input = daemon::embedding_dispatch::InputEnvelope {
+        bytes: 8,
+        tokens: u64::MAX,
+    };
+    // The grant is withdrawn at the admit stage, after the pass's own budget check and before the refused input's stop is written.
+    let guard = budget(Duration::from_secs(10));
+    let withdrawn = guard.clone();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
+    let mut events = Vec::new();
+    let end = dispatcher
+        .run_pass(eligibility(&project), &limits, &guard, NOW, &mut |event| {
+            if matches!(
+                event,
+                DispatchEvent::Stage {
+                    stage: Stage::Admit,
+                    ..
+                }
+            ) {
+                withdrawn.cancel();
+            }
+            events.push(event);
+        })
+        .unwrap();
+    assert_eq!(end, Some(Blocked::BudgetExhausted));
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (row.state.as_str(), row.attempts),
+        ("pending", 0),
+        "no disposition is recorded under a withdrawn grant"
+    );
+    assert!(stopped(&events).is_empty());
+    assert_eq!(engine.calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retained_result_is_not_published_above_the_reloaded_input_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("m0", "held message");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let short = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
+        result_wait: Duration::from_millis(50),
+        ..bounds()
+    };
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &short, NOW);
+    assert_eq!(end, None);
+    assert_eq!(admitted(&events).len(), 1);
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(held.state, "admitted");
+
+    // The result is ready under a manifest that no longer admits the input's bytes: the completion is refused like an admission would be, and no vector is published.
+    TestEngine::release(&gate.0);
+    let lowered = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope {
+            bytes: 8,
+            tokens: u64::MAX,
+        },
+        ..bounds()
+    };
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &lowered, NOW + 1);
+    assert_eq!(end, None);
+    assert!(published(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        stopped(&events),
+        vec![(held.job_id.clone(), "input_over_limit".to_string())]
+    );
+    let row = ledger(dir.path(), occurrence);
+    assert_eq!(row.state, "failed");
+    assert_eq!(row.vector, None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1616,6 +2302,7 @@ async fn actionable_rows_are_repolled_before_later_pending_rows() {
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut limits = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         result_wait: Duration::ZERO,
         ..bounds()
     };
@@ -1779,6 +2466,7 @@ async fn an_unresolved_charge_retry_quarantines_without_resubmission() {
         let result = dispatcher.run_pass(
             eligibility(&project),
             &DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 result_wait: Duration::ZERO,
                 ..bounds()
             },
@@ -2065,8 +2753,10 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
     let gate = GateGuard(engine.block_calls());
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let tight = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         grant: grant(1, NOW + DAY_MS),
         ..DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             result_wait: Duration::from_millis(50),
             ..bounds()
         }
@@ -2113,6 +2803,7 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
         &projection,
         &local_embeddings,
         &DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             grant: grant(1, NOW + DAY_MS),
             ..bounds()
         },
@@ -2147,8 +2838,10 @@ async fn completion_count_lane_failures_preserve_the_final_attempt() {
         let gate = GateGuard(engine.block_calls());
         let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
         let tight = DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             grant: grant(1, NOW + DAY_MS),
             ..DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 result_wait: Duration::from_millis(50),
                 ..bounds()
             }
@@ -2206,8 +2899,10 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
                 },
             );
             let tight = DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 grant: grant(allowance, NOW + DAY_MS),
                 ..DispatchBounds {
+                    input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                     result_wait: Duration::from_millis(50),
                     ..bounds()
                 }
@@ -2306,6 +3001,7 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
                 &projection,
                 &local_embeddings,
                 &DispatchBounds {
+                    input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                     grant: grant(allowance, NOW + DAY_MS),
                     ..bounds()
                 },
@@ -2374,6 +3070,7 @@ async fn project_selection_skips_wrong_scope_without_starving_eligible_work() {
     let engine = TestEngine::new();
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
@@ -2444,6 +3141,7 @@ async fn project_scan_cursor_advances_across_more_than_two_wrong_scope_pages() {
     let engine = TestEngine::new();
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
@@ -2499,6 +3197,7 @@ async fn foreign_retries_do_not_restart_another_projects_scan() {
     let engine = TestEngine::new();
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         retry_after: 1,
         ..bounds()
@@ -2593,8 +3292,10 @@ async fn deferred_row_is_revisited_when_its_retry_becomes_due() {
     let gate = GateGuard(engine.block_calls());
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             result_wait: Duration::ZERO,
             ..bounds()
         }
@@ -2646,6 +3347,7 @@ async fn max_jobs_bounds_terminal_dispositions() {
     let engine = TestEngine::new();
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
@@ -2696,6 +3398,7 @@ async fn malformed_candidate_is_obsoleted_without_poisoning_valid_work() {
     let engine = TestEngine::new();
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let one = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
@@ -2755,6 +3458,7 @@ async fn selected_jobs_are_hydrated_only_when_they_are_driven() {
     let result = dispatcher.run_pass(
         eligibility(&project),
         &DispatchBounds {
+            input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
             max_jobs: NonZeroUsize::new(2).unwrap(),
             ..bounds()
         },
@@ -2854,6 +3558,7 @@ async fn eligible_rows_are_taken_oldest_first_not_by_identifier() {
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
 
     let one_at_a_time = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
@@ -2939,6 +3644,7 @@ fn a_pass_on_a_runtime_worker_yields_the_worker_to_the_inference_it_awaits() {
                 .run_pass(
                     eligibility(&project),
                     &DispatchBounds {
+                        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                         result_wait: Duration::from_millis(300),
                         ..bounds()
                     },

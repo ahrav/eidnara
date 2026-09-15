@@ -44,6 +44,7 @@ fn pass(
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut events = Vec::new();
     let bounds = DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         result_wait: wait,
         ..*bounds
     };
@@ -1167,7 +1168,7 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
     );
 }
 
-/// AC5: a reclamation whose COMMIT reply is lost is reconciled from the rows: the report matches what the store applied, a second sweep has no second effect, and the sweeper is not quarantined.
+/// AC5: a reclamation held off by another writer applies nothing within its budget, and one whose COMMIT reply is lost is reconciled from the rows: the report matches what the store applied, a second sweep has no second effect, and the sweeper is not quarantined.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     let dir = tempfile::tempdir().unwrap();
@@ -1184,14 +1185,14 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     let required = required_vectors(dir.path());
     let before = inventory(dir.path());
 
-    // A reply lost because the write never applied: another writer holds the file, the store gives up, and the rows say nothing changed.
+    // Another writer holds the file for the whole budget: the reclamation's write lock is awaited only until the budget's deadline, nothing is applied, the report says the budget ended it, and the page stays selected for the next sweep.
     let blocker = Connection::open(search_path(dir.path())).unwrap();
     blocker.busy_timeout(Duration::ZERO).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
     let report = tokio::task::block_in_place(|| {
         sweeper
-            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .run_sweep(ten(), &budget(Duration::from_millis(500)))
             .unwrap()
     });
     assert_eq!(
@@ -1199,16 +1200,17 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
             report.candidates,
             report.jobs_reclaimed,
             report.vectors_reclaimed,
-            report.survivors
+            report.survivors,
+            report.budget_exhausted
         ),
-        (1, 0, 0, 1)
+        (1, 0, 0, 0, true)
     );
     assert_eq!(inventory(dir.path()), before, "nothing was reclaimed");
     blocker.execute_batch("COMMIT").unwrap();
 
     // A reply lost after the write applied: the rows say the identity is gone, once.
     let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
-    sweeper.lose_next_reclaim_reply_for_test();
+    sweeper.lose_next_reclaim_reply_for_test(|| {});
     let report = tokio::task::block_in_place(|| {
         sweeper
             .run_sweep(ten(), &budget(Duration::from_secs(30)))
@@ -1300,4 +1302,70 @@ async fn a_sweep_quarantine_stops_a_fresh_writer_of_the_projection() {
         before,
         "a quarantined writer does no work"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unbounded_budget_is_refused_before_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let gone = corpus.publish("gone", "gone text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    assert_eq!(embed_all(&corpus, &projection, &local_embeddings), 1);
+    tombstone(&projection, occurrence_of(&rows, &gone), 50);
+    let before = inventory(dir.path());
+
+    let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
+    let error = tokio::task::block_in_place(|| sweeper.run_sweep(ten(), &EvalBudget::unbounded()))
+        .unwrap_err();
+    assert!(matches!(error, SweepError::Unbounded), "{error:?}");
+    assert_eq!(sweeper.cursor(), None);
+    assert_eq!(
+        inventory(dir.path()),
+        before,
+        "a refused sweep reclaims nothing"
+    );
+    assert!(projection.quarantine().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lost_reply_reconciliation_ends_with_the_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let gone = corpus.publish("gone", "gone text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    assert_eq!(embed_all(&corpus, &projection, &local_embeddings), 1);
+    tombstone(&projection, occurrence_of(&rows, &gone), 50);
+    let expected = predicted(dir.path(), &local_embeddings);
+
+    // The grant is withdrawn at the moment the reply is lost: the reconciliation reads nothing more and the report says the budget ended it, with the rows left to say what was applied.
+    let grant = budget(Duration::from_secs(30));
+    let withdrawn = grant.clone();
+    let mut sweeper = IdentitySweeper::new(&projection, &local_embeddings);
+    sweeper.lose_next_reclaim_reply_for_test(move || withdrawn.cancel());
+    let report = tokio::task::block_in_place(|| sweeper.run_sweep(ten(), &grant).unwrap());
+    assert_eq!(
+        (
+            report.candidates,
+            report.jobs_reclaimed,
+            report.vectors_reclaimed,
+            report.survivors,
+            report.budget_exhausted
+        ),
+        (1, 0, 0, 0, true)
+    );
+    assert_eq!(inventory(dir.path()), expected, "the write itself applied");
+    assert!(projection.quarantine().is_none());
+    // The reclaimed row is gone, so the next sweep finds nothing to inspect or reclaim.
+    let again = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap()
+    });
+    assert_eq!(again, SweepReport::default());
 }
