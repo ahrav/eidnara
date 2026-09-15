@@ -407,9 +407,14 @@ impl<'a> EmbeddingDispatcher<'a> {
                     "database is locked".to_owned(),
                 )))
             } else {
-                self.projection
-                    .read(|conn| open_job_candidates(conn, scan_cursor.as_ref(), page_limit, now))
+                self.projection.read_within(deadline, |conn| {
+                    open_job_candidates(conn, scan_cursor.as_ref(), page_limit, now)
+                })
             };
+            // The selection reads end at the budget's deadline, so a held connection ends the pass rather than outliving the slice.
+            if let Err(SearchProjectionError::Store(storage::StoreError::Deadline)) = &page {
+                return Ok(Some(Blocked::BudgetExhausted));
+            }
             let page = self.before_dispositions(page)?;
             if page.is_empty() {
                 let restart_at_beginning = page_index == 0 && scan_cursor.is_some();
@@ -544,7 +549,12 @@ impl<'a> EmbeddingDispatcher<'a> {
             slice_deadline: deadline,
         };
         for job_id in &selected {
-            let job = self.projection.read(|conn| dispatch_job(conn, job_id, now));
+            let job = self
+                .projection
+                .read_within(deadline, |conn| dispatch_job(conn, job_id, now));
+            if let Err(SearchProjectionError::Store(storage::StoreError::Deadline)) = &job {
+                return Ok(Some(Blocked::BudgetExhausted));
+            }
             let Some(job) = self.before_dispositions(job)? else {
                 continue;
             };
