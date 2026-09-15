@@ -945,22 +945,29 @@ fn owner_with_many_windows(home: &Path, corpus: &Corpus, count: usize) -> Search
     owner
 }
 
-/// Pauses the episode at the second window's first boundary: `reached` fires once, then the episode waits on `release`.
+/// Pauses the episode at the second window's first boundary: the returned receiver fires once, then the episode waits for one message on the returned sender. Both waits are bounded, so a missing window fails the test instead of hanging it.
 fn pause_at_second_window(
     owner: &SearchLifecycleOwner,
-    reached: Arc<std::sync::Barrier>,
-    release: Arc<std::sync::Barrier>,
-) {
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = std::sync::Mutex::new(release_rx);
     let windows = std::sync::atomic::AtomicUsize::new(0);
     owner.tap_episode_events_for_test(move |event| {
         if matches!(event, EpisodeEvent::HoldExtensionRequested { .. })
             && windows.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
         {
-            reached.wait();
-            release.wait();
+            let _ = reached_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
         }
     });
+    (reached_rx, release_tx)
 }
+
+const PAUSE_WAIT: Duration = Duration::from_secs(20);
 
 /// Closing the gate cancels a running catch-up episode before it acknowledges every pending window.
 #[test]
@@ -971,15 +978,15 @@ fn a_revoked_grant_stops_a_running_catch_up_episode() {
     corpus.seed();
     let owner = owner_with_many_windows(home, &corpus, 8);
     let tip = corpus.tip();
-    let reached = Arc::new(std::sync::Barrier::new(2));
-    let release = Arc::new(std::sync::Barrier::new(2));
-    pause_at_second_window(&owner, Arc::clone(&reached), Arc::clone(&release));
+    let (reached, release) = pause_at_second_window(&owner);
 
     let outcome = std::thread::scope(|scope| {
         let slice = scope.spawn(|| owner.run_slice(&slice_budget()));
-        reached.wait();
+        reached
+            .recv_timeout(PAUSE_WAIT)
+            .expect("the episode reached the second window");
         owner.admission().gate().close();
-        release.wait();
+        release.send(()).expect("the paused episode is waiting");
         slice.join().unwrap()
     });
     let SliceOutcome::CaughtUp(report) = outcome else {
@@ -1181,7 +1188,8 @@ async fn a_blocked_catch_up_still_reconciles_maintenance() {
             SliceOutcome::Advanced(_)
         ));
     }
-    drive(&owner, 40, || published(&owner).len() == 1).await;
+    let slices = drive(&owner, 40, || published(&owner).len() == 1).await;
+    assert!(slices < 40, "the supervisor published the row");
     owner.shutdown().await.unwrap();
     drop(owner);
 
@@ -1226,9 +1234,7 @@ fn caller_cancellation_interrupts_a_catch_up_waiting_for_a_kernel_reader() {
     let corpus = Corpus::open(home);
     corpus.seed();
     let owner = owner_with_many_windows(home, &corpus, 8);
-    let reached = Arc::new(std::sync::Barrier::new(2));
-    let release = Arc::new(std::sync::Barrier::new(2));
-    pause_at_second_window(&owner, Arc::clone(&reached), Arc::clone(&release));
+    let (reached, release) = pause_at_second_window(&owner);
 
     let budget = slice_budget();
     let held = std::sync::Barrier::new(2);
@@ -1237,7 +1243,9 @@ fn caller_cancellation_interrupts_a_catch_up_waiting_for_a_kernel_reader() {
             let budget = budget.clone();
             scope.spawn(move || owner.run_slice(&budget))
         };
-        reached.wait();
+        reached
+            .recv_timeout(PAUSE_WAIT)
+            .expect("the episode reached the second window");
         // The readers are held before the episode resumes, so its next kernel read waits on the pool.
         scope.spawn(|| {
             corpus
@@ -1245,7 +1253,7 @@ fn caller_cancellation_interrupts_a_catch_up_waiting_for_a_kernel_reader() {
                 .hold_readers_for_test(&held, Duration::from_secs(3))
         });
         held.wait();
-        release.wait();
+        release.send(()).expect("the paused episode is waiting");
         std::thread::sleep(Duration::from_millis(150));
         let cancelled = Instant::now();
         budget.cancel();
