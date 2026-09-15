@@ -430,13 +430,13 @@ impl SearchLifecycleOwner {
         let blocked = |closed: Closed| SliceOutcome::Blocked(closed.to_string());
         let (intent, completed) = match control {
             ControlState::Absent => {
-                return match self.refresh(&inputs, selection, &identity, &budget) {
+                return match self.refresh(&inputs, Some(selection), &identity, &budget) {
                     Refresh::Installed(_) => SliceOutcome::Unregistered,
                     Refresh::Closed(closed) => blocked(closed),
                 };
             }
             ControlState::Disabled(_) => {
-                return match self.refresh(&inputs, selection, &identity, &budget) {
+                return match self.refresh(&inputs, Some(selection), &identity, &budget) {
                     Refresh::Installed(_) => SliceOutcome::Disabled,
                     Refresh::Closed(closed) => blocked(closed),
                 };
@@ -482,7 +482,8 @@ impl SearchLifecycleOwner {
             }
         };
         // Hooks are judged on this slice's observation before the record decides anything, so an expired or blocked record cannot leave the previous slice's evidence installed.
-        if let Refresh::Closed(closed) = self.refresh(&inputs, selection, &identity, &budget) {
+        if let Refresh::Closed(closed) = self.refresh(&inputs, Some(selection), &identity, &budget)
+        {
             return blocked(closed);
         }
         if completed && selection.holds_operation(&intent) {
@@ -515,7 +516,7 @@ impl SearchLifecycleOwner {
         match progress {
             Ok(progress) => {
                 // The family the slice opened or selected is what later hooks are judged against.
-                let _ = self.refresh(&inputs, selection, &identity, &budget);
+                let _ = self.refresh(&inputs, Some(selection), &identity, &budget);
                 if !(completed && progress == RecoveryProgress::Current) {
                     return SliceOutcome::Advanced(progress);
                 }
@@ -556,7 +557,7 @@ impl SearchLifecycleOwner {
             Err(error) => return SliceOutcome::Blocked(error.to_string()),
         };
         if report.is_some() {
-            let _ = self.refresh(inputs, selection, identity, budget);
+            let _ = self.refresh(inputs, Some(selection), identity, budget);
         }
         match self.maintain(selection, inputs.manifest(), spec, budget) {
             Ok(Some(handle)) => SliceOutcome::RotateMaintenance(handle),
@@ -752,7 +753,7 @@ impl SearchLifecycleOwner {
     fn refresh(
         &self,
         inputs: &AdmissionInputs,
-        selection: &SearchSelection,
+        selection: Option<&SearchSelection>,
         identity: &ProjectionIdentity,
         budget: &EvalBudget,
     ) -> Refresh {
@@ -764,14 +765,15 @@ impl SearchLifecycleOwner {
                 return Refresh::Closed(Closed::NoProjection);
             }
         };
-        // A selection kept under another identity, as after a reload the slice loop has not yet rotated on, is foreign evidence: the new identity has no registered family, so it is judged as unregistered rather than denied on the old family's report.
-        let coverage = if selection.has_selected() && *selection.identity() == *identity {
-            selection
-                .observe_selected(budget)
-                .ok()
-                .map(|report| ProjectionCoverage::unjudged(report, tip))
-        } else {
-            Some(ProjectionCoverage::unregistered(identity, tip))
+        // A selection kept under another identity, as after a reload the slice loop has not yet rotated on, is foreign evidence: the new identity has no registered family, so it is judged as unregistered rather than denied on the old family's report. No manager at all, before the first slice, is judged the same way.
+        let coverage = match selection {
+            Some(selection) if selection.has_selected() && *selection.identity() == *identity => {
+                selection
+                    .observe_selected(budget)
+                    .ok()
+                    .map(|report| ProjectionCoverage::unjudged(report, tip))
+            }
+            _ => Some(ProjectionCoverage::unregistered(identity, tip)),
         };
         self.admission.refresh_with(
             inputs.clone(),
@@ -833,10 +835,12 @@ impl SearchLifecycleOwner {
                 "the request's deadline lies past its transition's bound",
             ));
         }
-        // The gate judges the request on the records just read, not on the evidence the last slice installed.
-        if let Managed::Selection(selection) = &*managed
-            && let Refresh::Closed(closed) = self.refresh(&inputs, selection, &identity, budget)
-        {
+        // The gate judges the request on the records just read, not on the evidence the last slice installed or, before the first slice, on its initial closed state.
+        let selection = match &*managed {
+            Managed::Selection(selection) => Some(&**selection),
+            _ => None,
+        };
+        if let Refresh::Closed(closed) = self.refresh(&inputs, selection, &identity, budget) {
             return Err(BuildError::Invalid(match closed {
                 Closed::ShutDown => "the owner is shut down",
                 _ => "admission is closed",

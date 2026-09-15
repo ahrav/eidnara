@@ -2681,6 +2681,19 @@ async fn a_disable_with_no_family_completes_without_admission_records() {
     assert!(matches!(control(home), ControlState::Disabled(_)));
 }
 
+/// A rebuild requested before any scheduled slice has run is judged on the records just read, not on the gate's initial closed state.
+#[test]
+fn a_request_before_the_first_slice_is_judged_on_the_records() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let outcome = owner.request(&rebuild(home), now(), &slice_budget());
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {

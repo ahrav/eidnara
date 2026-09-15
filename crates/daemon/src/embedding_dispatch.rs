@@ -562,26 +562,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                 observer,
             );
         }
-        let (mut host_job_id, item_id) = match &job.host_job_id {
-            Some(host_job_id) if job.state == "admitted" => {
-                if let Some(reason) = job.completion_refusal(pass.bounds.grant, pass.now) {
-                    return self.stop(job, reason, pass.now, observer);
-                }
-                (host_job_id.clone(), job.item_id())
-            }
-            _ => {
-                // Refuse the episode before host admission to avoid inference for refused work.
-                if let Some(reason) = job.episode_refusal(pass.bounds.grant, pass.now) {
-                    return self.stop(job, reason, pass.now, observer);
-                }
-                match self.admit(job, pass, observer)? {
-                    Ok(admitted) => admitted,
-                    Err(blocked) => return Ok(blocked),
-                }
-            }
-        };
-        pass.stage(job, Stage::Poll, observer);
-        // The row's episode deadline as an instant, measured from the pass's clock reading at its start and never past the pass's own deadline. Polling, re-admission, and publication all end there: a result that lands after it is left for a pass that stops the row, and a host restart during the wait renews the result wait but not this deadline.
+        // The row's episode deadline as an instant, measured from the pass's clock reading at its start and never past the pass's own deadline. Admission, polling, re-admission, and publication all end there: a result that lands after it is left for a pass that stops the row, and a host restart during the wait renews the result wait but not this deadline.
         let remaining = u64::try_from(
             job.episode_deadline(pass.bounds.grant)
                 .saturating_sub(pass.now),
@@ -597,6 +578,29 @@ impl<'a> EmbeddingDispatcher<'a> {
             deadline: deadline_at,
             ..*pass
         };
+        let (mut host_job_id, item_id) = match &job.host_job_id {
+            Some(host_job_id) if job.state == "admitted" => {
+                if let Some(reason) = job.completion_refusal(pass.bounds.grant, pass.now) {
+                    return self.stop(job, reason, pass.now, observer);
+                }
+                (host_job_id.clone(), job.item_id())
+            }
+            _ => {
+                // Refuse the episode before host admission to avoid inference for refused work.
+                if let Some(reason) = job.episode_refusal(pass.bounds.grant, pass.now) {
+                    return self.stop(job, reason, pass.now, observer);
+                }
+                // A row whose deadline passed while the pass reached it is left for a pass whose clock is past the deadline to stop it; no native call starts and no attempt is charged for it.
+                if Instant::now() >= deadline_at {
+                    return Ok(None);
+                }
+                match self.admit(job, pass, observer)? {
+                    Ok(admitted) => admitted,
+                    Err(blocked) => return Ok(blocked),
+                }
+            }
+        };
+        pass.stage(job, Stage::Poll, observer);
         let mut readmitted = false;
         let mut started = Instant::now();
         loop {

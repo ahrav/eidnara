@@ -806,6 +806,35 @@ fn pass_delayed_at_poll(
     now: i64,
     delay: Duration,
 ) -> (Option<Blocked>, Vec<DispatchEvent>) {
+    pass_delayed_at(
+        corpus,
+        projection,
+        local_embeddings,
+        bounds,
+        now,
+        delay,
+        |event| {
+            matches!(
+                event,
+                DispatchEvent::Stage {
+                    stage: Stage::Poll,
+                    ..
+                }
+            )
+        },
+    )
+}
+
+/// One pass whose observer sleeps `delay` at the first event `at` selects.
+fn pass_delayed_at(
+    corpus: &Corpus,
+    projection: &SearchProjection,
+    local_embeddings: &LocalEmbeddingsComponent,
+    bounds: &DispatchBounds,
+    now: i64,
+    delay: Duration,
+    at: impl Fn(&DispatchEvent) -> bool,
+) -> (Option<Blocked>, Vec<DispatchEvent>) {
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut events = Vec::new();
     let mut delayed = false;
@@ -818,14 +847,7 @@ fn pass_delayed_at_poll(
                 &budget(Duration::from_secs(10)),
                 now,
                 &mut |event| {
-                    if matches!(
-                        event,
-                        DispatchEvent::Stage {
-                            stage: Stage::Poll,
-                            ..
-                        }
-                    ) && !delayed
-                    {
+                    if !delayed && at(&event) {
                         delayed = true;
                         std::thread::sleep(delay);
                     }
@@ -909,6 +931,61 @@ async fn a_result_ready_after_the_row_deadline_is_not_published() {
     assert_eq!(
         stopped(&events),
         vec![(held.job_id.clone(), "deadline_expired".to_owned())]
+    );
+}
+
+/// A pending row whose persisted episode deadline passes before the pass reaches it is not admitted: no native call starts and no attempt is charged for a row a later pass stops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_row_past_its_deadline_is_not_admitted() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("m0", "message across restart");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    // The row is admitted under a 300 ms deadline, then a new host incarnation returns it to pending with that episode kept.
+    let engine = TestEngine::new();
+    let gate = GateGuard(engine.block_calls());
+    let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
+    let near = DispatchBounds {
+        grant: grant(3, NOW + 300),
+        ..bounds()
+    };
+    let (_, events) = pass(&corpus, &projection, &local_embeddings, &near, NOW);
+    assert_eq!(admitted(&events).len(), 1);
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (held.state.as_str(), held.deadline),
+        ("admitted", Some(NOW + 300))
+    );
+    drop(gate);
+
+    // Under a new host and a day-long grant, 400 ms of earlier pass work pass before this row is reached.
+    let restarted_engine = TestEngine::new();
+    let restarted_gate = GateGuard(restarted_engine.block_calls());
+    let restarted_lane = component(&restarted_engine, LocalEmbeddingsLimits::default());
+    let (end, events) = pass_delayed_at(
+        &corpus,
+        &projection,
+        &restarted_lane,
+        &bounds(),
+        NOW,
+        Duration::from_millis(400),
+        |event| matches!(event, DispatchEvent::Bound(_)),
+    );
+    drop(restarted_gate);
+    assert_eq!(end, None, "{events:?}");
+    assert!(admitted(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        restarted_engine.calls(),
+        0,
+        "no native call for an expired row"
+    );
+    let pending = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (pending.state.as_str(), pending.attempts),
+        ("pending", held.attempts),
+        "no attempt is charged"
     );
 }
 
