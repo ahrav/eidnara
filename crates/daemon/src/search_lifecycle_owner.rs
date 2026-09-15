@@ -168,6 +168,8 @@ pub enum SliceEvent {
     Episode(EpisodeEvent),
     /// A handed-back supervisor's drain begins under the grace given.
     Draining(Duration),
+    /// The slice loop enters its idle wait, which a recorded request ends early.
+    Idle,
 }
 
 /// Puts the manager a disable took back unless the owner shut down meanwhile, whether the disable finished or its future was dropped.
@@ -1407,6 +1409,8 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
         if advanced {
             continue;
         }
+        #[cfg(feature = "test-support")]
+        owner.tap(SliceEvent::Idle);
         tokio::select! {
             () = cancel.cancelled() => return,
             () = tokio::time::sleep(SLICE_IDLE) => {}

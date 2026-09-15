@@ -3188,43 +3188,55 @@ async fn a_request_wakes_an_idle_slice_loop() {
     corpus.seed();
     records(home);
     let owner = Arc::new(owner(home, &corpus.kernel));
-    let (waiting_tx, waiting) = std::sync::mpsc::channel();
-    owner.tap_slice_events_for_test(move |event| {
-        if matches!(event, SliceEvent::Waiting { .. }) {
-            let _ = waiting_tx.send(());
+    let (events_tx, events) = std::sync::mpsc::channel();
+    owner.tap_slice_events_for_test(move |event| match event {
+        SliceEvent::Idle => {
+            let _ = events_tx.send(("idle", Instant::now()));
         }
+        SliceEvent::Waiting { .. } => {
+            let _ = events_tx.send(("waiting", Instant::now()));
+        }
+        _ => {}
     });
     let cancel = tokio_util::sync::CancellationToken::new();
     let loop_task = tokio::spawn(daemon::search_lifecycle_owner::run_slices(
         Arc::clone(&owner),
         cancel.clone(),
     ));
-    // The first slice finds nothing to do and the loop idles; the request lands inside that idle wait. The slice events are the observation, since reading the record would contend for the lifecycle lock a slice holds.
-    let waiting = tokio::task::spawn_blocking(move || {
-        waiting
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the first slice runs");
-        waiting
+    // The loop's own idle event is the precondition: the first slice has finished and the idle wait has begun before the request is recorded. The slice events are the observation, since reading the record would contend for the lifecycle lock a slice holds.
+    let events = tokio::task::spawn_blocking(move || {
+        loop {
+            let (kind, _) = events
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the loop reaches its idle wait");
+            if kind == "idle" {
+                return events;
+            }
+        }
     })
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_millis(400)).await;
     let requested = Instant::now();
     owner
         .request(&rebuild(home), now(), &slice_budget())
         .unwrap();
-    let next =
-        tokio::task::spawn_blocking(move || waiting.recv_timeout(Duration::from_millis(2_000)))
-            .await
-            .unwrap();
-    let elapsed = requested.elapsed();
+    // The next slice must begin after the request and within its deadline; an event queued from before the request does not count.
+    let began = tokio::task::spawn_blocking(move || {
+        loop {
+            match events.recv_timeout(Duration::from_millis(2_000)) {
+                Ok(("waiting", at)) if at >= requested => return Some(at),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+    })
+    .await
+    .unwrap();
     cancel.cancel();
     loop_task.await.unwrap();
     let _ = owner.shutdown().await;
-    assert!(
-        next.is_ok(),
-        "no slice began within {elapsed:?} of the request; the loop idles for five seconds otherwise"
-    );
+    let began = began.expect("no slice began within two seconds of the request; the loop idles for five seconds otherwise");
+    assert!(began.duration_since(requested) < Duration::from_secs(2));
 }
 
 /// A request made after a reload that changes the identity while the old family's supervisor still runs does not open admission under the new identity over that supervisor: it closes admission, refuses, and leaves the rotation to the next slice.
@@ -3279,10 +3291,21 @@ async fn a_request_over_running_foreign_maintenance_closes_admission_until_rotat
             .is_err(),
         "the running supervisor is admitted under nothing until the rotation"
     );
+    assert!(
+        matches!(control(home), ControlState::Current(done) if done.attempt_id == current.attempt_id),
+        "the refused request recorded nothing"
+    );
     let SliceOutcome::RotateMaintenance(handle) = owner.run_slice(&slice_budget()) else {
         panic!("the next slice hands the foreign supervisor back");
     };
     owner.stop_maintenance(&handle).await.unwrap();
+    // Once the rotation is done, the same request is judged under the new identity and recorded: the closure was for the rotation, not for good.
+    let _ = owner.run_slice(&slice_budget());
+    let outcome = owner.request(&request, now(), &slice_budget());
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(
+        matches!(control(home), ControlState::Intent(intent) if intent.attempt_id == "rebuild-under-limits-v2")
+    );
     owner.shutdown().await.unwrap();
 }
 
