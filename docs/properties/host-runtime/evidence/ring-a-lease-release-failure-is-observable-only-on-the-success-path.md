@@ -247,31 +247,40 @@ the host's handling of it on the drop paths.
 
 ### Q: Does the success path still report a release failure at HEAD?
 
-- Sources examined: `ring_transport.rs:926-1038` (`receive_one`),
-  `:1026-1036` (the lease travels inside `InboundFrame::new`),
-  `frame_channel.rs:103-128` (`InboundFrame::into_private`),
+- Sources examined: `ring_transport.rs:1007-1125` (`receive_one`),
+  `:1119-1123` (the lease travels inside `InboundFrame::new`),
+  `frame_channel.rs:105-131` (`InboundFrame::release` and
+  `InboundFrame::into_private`),
   `crates/shm-transport/src/lease.rs:342-355` (`release` and `return_once`) and
-  `:364-370` (`Drop`), `connection.rs:532-543` (`decode_control_frame`),
-  `dispatch.rs:993-1027` (the routed copy under `WorkLedgers::run_blocking`).
-- Findings: yes, on the success path. `receive_one` does not copy or release
-  on the delivery path; it hands the `PayloadLease` to the connection engine
-  inside the frame. The release happens in `InboundFrame::into_private` as
+  `:364-370` (`Drop`), `connection.rs:405-419` (the pure-header release in
+  `read_loop`) and `:547-553` (`decode_control_frame`),
+  `dispatch.rs:848-858` (`release_before_copy`) and `:1047-1080` (the routed
+  copy under `WorkLedgers::run_blocking`).
+- Findings: yes, on the success path, and on every host exit that holds a
+  frame. `receive_one` does not copy or release on the delivery path; it hands
+  the `PayloadLease` to the connection engine inside the frame. The release
+  happens in `InboundFrame::into_private` as
   `lease.release().map_err(|_| PrivateCopyError::Transport)?`
-  (`frame_channel.rs:118`), so a failed return doorbell is reported to both
-  callers as `PrivateCopyError::Transport` (`:71-78`) and each ends the
-  generation (`connection.rs:419-422`, `dispatch.rs:1006-1011`);
+  (`frame_channel.rs:126`), so a failed return doorbell is reported to both
+  callers as `PrivateCopyError::Transport` and each ends the generation
+  (`connection.rs:553`, `dispatch.rs:1063-1068`);
   `into_private_reports_a_failed_return_wake_as_a_transport_error`
-  (`ring_transport.rs:3240`) drives that failing return. The oversize
-  channel-0 rejection still routes its release error at
-  `ring_transport.rs:986-988`. The paths that drop the lease without a report
-  remain: the `Ok(false)` exits on `read_cancel` and `discard` (`:1032`,
-  `:1034`), the `Overloaded` (`:1029`, `:1039`) and `Cancelled` (`:1048`)
-  returns, and the pre-copy `drop(frame)` branches in `dispatch_request`
-  (`dispatch.rs:963`, `:995`).
+  (`ring_transport.rs:3391`) drives that failing return. The host's pre-copy
+  exits release explicitly as well: `read_loop` calls `InboundFrame::release`
+  on pure-header frames (`connection.rs:414`) and `dispatch_request` calls
+  `release_before_copy` on admission refusal, lost registration, pre-copy
+  cancellation, and the closed-route exit, retiring the generation when the
+  return fails. The oversize channel-0 rejection still routes its release
+  error at `ring_transport.rs:1029-1031`. The paths that drop the lease without
+  a report are now only `receive_one`'s own exits inside the charge wait: the
+  `Ok(false)` returns on `read_cancel` and `discard` (`:1075`, `:1077`), the
+  `Overloaded` returns (`:1072`, `:1082`), and the `Cancelled` return when the
+  sender queue closes (`:1091`).
 - Missing evidence: whether the routed copy running on a blocking worker
-  (`dispatch.rs:1002`) changes what a release failure could mean there; the
-  block returns from a thread that holds no `Ring`.
-- Conclusion: the success path reports again. `into_private` propagates the
-  release failure and a test exercises it, so the `Guarantee:` and `Check:`
-  fields describe a path HEAD has; the failure paths that drop the lease
-  still discard the `Result`, which is the asymmetry the record names.
+  changes what a release failure could mean there; the block returns from a
+  thread that holds no `Ring`.
+- Conclusion: the success path reports again, and so do the host's pre-copy
+  exits. `into_private` propagates the release failure and a test exercises
+  it, so the `Guarantee:` and `Check:` fields describe a path HEAD has; the
+  asymmetry the record names has narrowed to `receive_one`'s charge-wait exits,
+  which drop the lease and discard the `Result`.
