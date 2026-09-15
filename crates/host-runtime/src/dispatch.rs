@@ -968,19 +968,43 @@ pub async fn dispatch_request<H: HostHandler>(
         },
     );
 
-    let (start_tx, start_rx) = oneshot::channel::<()>();
+    // `Ok(None)` starts the request; `Ok(Some(rejection))` settles it without dispatch.
+    let (start_tx, start_rx) = oneshot::channel::<Option<(&'static str, &'static str)>>();
     let shared_task = Arc::clone(shared);
     let gen_task = Arc::clone(generation);
     // The route completion fence covers the handler callback because dropping the outer task only requests callback abort.
     // Without the handler fence, route close could see the tracker empty while request code still runs.
     let handler_fence = route_tracker.clone();
-    let rejection_settlement = Arc::clone(&settlement);
     let outer = shared.spawn_tracked(route_tracker.track_future(async move {
         let _pending_permit = pending_permit;
-        if start_rx.await.is_err() {
-            // Registration lost to route close or frozen admission; the lease returns before the
-            // rejection, and a failed return doorbell ends the generation instead.
-            release_before_copy(frame, &gen_task);
+        let rejection = match start_rx.await {
+            Ok(None) => None,
+            Ok(Some(rejection)) => Some(rejection),
+            Err(_) => {
+                release_before_copy(frame, &gen_task);
+                remove_pending(&gen_task, key);
+                return;
+            }
+        };
+        if let Some((code, message)) = rejection {
+            // Registration lost to route close or frozen admission. The lease returns before the
+            // credited rejection is settled, so a failed return doorbell ends the generation and
+            // no terminal is queued over a transport that cannot be woken.
+            if release_before_copy(frame, &gen_task) {
+                settle(
+                    &settlement,
+                    &shared_task.terminal_budget,
+                    &gen_task,
+                    route,
+                    corr,
+                    Terminal::Error {
+                        code: code.to_owned(),
+                        message: message.to_owned(),
+                        retry_after_ms: None,
+                    },
+                )
+                .await;
+            }
             remove_pending(&gen_task, key);
             return;
         }
@@ -1172,71 +1196,20 @@ pub async fn dispatch_request<H: HostHandler>(
         .register_dispatch(route, generation.id, outer.abort_handle())
         .is_some()
     {
-        let _ = start_tx.send(());
+        let _ = start_tx.send(None);
     } else {
-        drop(start_tx);
-        let (code, message) =
-            if shared.draining.load(Ordering::SeqCst) || shared.shutdown.is_cancelled() {
-                (CODE_SERVER_BUSY, "host is shutting down")
-            } else {
-                (
-                    CODE_UNKNOWN_CHANNEL,
-                    "no live route for this channel and epoch",
-                )
-            };
-        emit_pending_rejection(
-            shared,
-            generation,
-            &rejection_settlement,
-            FrameId::routed(route, corr),
-            code,
-            message,
-        );
-    }
-}
-
-pub(crate) fn emit_pending_rejection<H: HostHandler>(
-    shared: &Arc<HostShared<H>>,
-    generation: &Arc<GenerationCore>,
-    settlement: &Arc<Settlement>,
-    id: FrameId,
-    code: &'static str,
-    message: &'static str,
-) {
-    // The request was admitted with a credit, so this rejection is a credited terminal: `settle`
-    // moves the credit onto the frame and it returns with the block. The reader only schedules
-    // it; awaiting writer-queue capacity here would stall every later frame on this connection.
-    match generation.busy_rejects.clone().try_acquire_owned() {
-        Ok(reject_permit) => {
-            let shared_task = Arc::clone(shared);
-            let gen_task = Arc::clone(generation);
-            let settlement = Arc::clone(settlement);
-            shared.spawn_tracked(generation.read_tasks.track_future(async move {
-                let _reject_permit = reject_permit;
-                settle(
-                    &settlement,
-                    &shared_task.terminal_budget,
-                    &gen_task,
-                    RouteHandle {
-                        channel: id.channel,
-                        epoch: id.epoch,
-                    },
-                    id.corr,
-                    Terminal::Error {
-                        code: code.to_owned(),
-                        message: message.to_owned(),
-                        retry_after_ms: None,
-                    },
-                )
-                .await;
-            }));
-        }
-        Err(_) => {
-            // Same bound as `emit_rejection`: too many rejections blocked on contended egress
-            // retire the generation instead of queueing more work behind them.
-            generation.token.cancel();
-            generation.writer.discard();
-        }
+        // The rejection settles on the dispatch task, off the connection reader, after the lease
+        // returns.
+        let rejection = if shared.draining.load(Ordering::SeqCst) || shared.shutdown.is_cancelled()
+        {
+            (CODE_SERVER_BUSY, "host is shutting down")
+        } else {
+            (
+                CODE_UNKNOWN_CHANNEL,
+                "no live route for this channel and epoch",
+            )
+        };
+        let _ = start_tx.send(Some(rejection));
     }
 }
 
