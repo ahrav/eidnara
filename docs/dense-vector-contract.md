@@ -301,13 +301,14 @@ through the shared store under target `vector-composition`:
 | `composition.json` | Canonical record: schema, publication sequence, model, tokenizer fingerprint, dimension, metric, tolerance, recipe, epoch, kernel incarnation, base digest, delta digests in application order. |
 | `members.json` | `{"schema":1,"members":[base, deltas...]}`; the lifecycle store reads it to retain every member while the composition is selected. |
 
-`compose` refuses a base with tombstones, a duplicate member, more deltas than
+`compose` refuses a duplicate member, more deltas than
 the bound, a member whose sidecar does not carry the expectation's identity,
 and a delta whose checkpoint moves backwards from its predecessor's. This is a
 conservative reading of the base/delta checkpoint relation the owners have not
 yet frozen: every delta's snapshot and checkpoint are at or after the
 checkpoint of the layer before it. Equal-precedence conflicts among members
-are not decided here.
+are not decided here. These layers export live rows only; base/delta tombstone
+semantics belong to the layer-resolution work.
 
 `publish` refuses a sequence at or below the selected composition's, stages
 the composition under the caller's admission, and moves the selector in one
@@ -325,18 +326,29 @@ sequence without a second record.
 
 `verify_composition` checks the record's target, schema, canonical bytes,
 manifest binding, agreement with `members.json`, and identity, verifies every
-member with `vector_generation::verify`, and re-checks the topology under the
-caller's delta bound, so a composition current admission would refuse does
-not verify. `recover` takes the selected composition when it verifies;
-otherwise it reads only the manifests of the other generations to find
-compositions, orders them by descending sequence, fully verifies at most
-`bound` of them, and takes the first that passes, reporting the selector as
-`Stale` or `Absent` rather than repointing it. An acknowledged selection is
-never displaced by a newer composition that was staged but not selected, and
-no verifying composition means explicit unavailability.
+member with `vector_generation::verify`, and re-checks the topology. It refuses
+an excessive delta count before opening any member, so the caller's delta bound
+limits member-verification work as well as the accepted topology.
+`recover` takes the selected composition when it verifies; otherwise it reads
+the manifests of the other generations and, for composition targets, only the
+manifest-listed `composition.json` (hash-checked and capped at 1 MiB). Discovery
+retains the newest `bound` `(sequence, digest)` pairs, not generation descriptors;
+equal sequences use descending digest order. It then fully verifies at most
+those `bound` generations, including inventory and member checks, and takes the
+first that passes. A candidate whose record is readable but whose other files
+are invalid consumes one attempt. Unreadable records are skipped during
+discovery. The directory listing and manifest scan still scale with the store's
+generation count; `bound` is not a bound on that scan or on total bytes in the
+members. Recovery reports the selector as `Stale` or `Absent` rather than
+repointing it. A verifying selection is never displaced by a newer composition
+that was staged but not selected, and no verifying composition within the bound
+means explicit unavailability.
 
 Readers hold a composition the way the store expects: pin the composition
 generation, then open every member, then re-read the selector. While the
 composition record exists, whether pinned or merely not yet reclaimed, its
 members stay retained, so a reader that pinned a superseded composition keeps
-its members after a later publication moves the selector.
+its members after a later publication moves the selector. `recover` does not
+pin the returned composition: its caller must validate and pin the returned
+digest while still holding the lifecycle transaction lock before handing it
+to a reader. Releasing the lock first leaves an unselected fallback reclaimable.

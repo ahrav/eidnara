@@ -639,6 +639,31 @@ impl GenerationStore {
         self.open_manifest(digest).map(|(_, manifest)| manifest)
     }
 
+    /// This is a discovery read, not proof that the complete generation is valid. Call [`Self::validate`] before using it as a generation.
+    ///
+    /// # Errors
+    ///
+    /// Invalid manifest or path, an unlisted file, a file above the metadata limit, or a shape, size, hash, or read failure.
+    pub fn read_manifest_file(
+        &self,
+        digest: &str,
+        rel_path: &str,
+    ) -> Result<Vec<u8>, GenerationError> {
+        validate_rel_path(rel_path)?;
+        let (dir, manifest) = self.open_manifest(digest)?;
+        let entry = manifest
+            .files
+            .iter()
+            .find(|file| file.path == rel_path)
+            .ok_or_else(|| invalid("file is not named by the manifest"))?;
+        if entry.size > MAX_MANIFEST_BYTES as u64 {
+            return Err(invalid("metadata file exceeds size limit"));
+        }
+        let fd = open_rel_file(&dir, rel_path).ok_or_else(|| invalid("file missing"))?;
+        verify_file_against_entry(&fd, entry)?;
+        read_all_fd(&fd, entry.size as usize).map_err(|_| invalid("metadata file read failed"))
+    }
+
     fn open_manifest(
         &self,
         digest: &str,
@@ -2524,6 +2549,53 @@ mod tests {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).expect("read verified file");
         assert_eq!(bytes, b"#binary-bytes");
+    }
+
+    #[test]
+    fn manifest_file_discovery_checks_only_the_named_bounded_file() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        std::fs::write(dir.join("bin/eidnara-host"), b"corrupt").unwrap();
+        assert!(store.validate(&digest).is_err());
+        assert_eq!(
+            store.read_manifest_file(&digest, "notices.txt").unwrap(),
+            b"notice text"
+        );
+        for path in ["missing", "../notices.txt", "/notices.txt"] {
+            assert!(store.read_manifest_file(&digest, path).is_err(), "{path}");
+        }
+        std::fs::write(dir.join("notices.txt"), b"NOTICE TEXT").unwrap();
+        assert!(matches!(
+            store.read_manifest_file(&digest, "notices.txt"),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "file hash diverges from the manifest"
+            })
+        ));
+
+        for size in [MAX_MANIFEST_BYTES, MAX_MANIFEST_BYTES + 1] {
+            let sources = [SourceSpec {
+                rel_path: "metadata".to_owned(),
+                source: write_source(src.path(), "metadata", &vec![b'x'; size]),
+                executable: false,
+                expected_size: None,
+                expected_sha256: None,
+            }];
+            let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+            let result = store.read_manifest_file(&digest, "metadata");
+            if size == MAX_MANIFEST_BYTES {
+                assert_eq!(result.unwrap(), vec![b'x'; size]);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(GenerationError::NativePayloadInvalid {
+                        detail: "metadata file exceeds size limit"
+                    })
+                ));
+            }
+        }
     }
 
     /// Persisted manifest bytes must equal the canonical serialization of the decoded manifest.
