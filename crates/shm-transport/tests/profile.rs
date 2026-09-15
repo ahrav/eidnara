@@ -280,7 +280,7 @@ fn host_payload_pool_profile_names_one_geometry_and_complete_charges() {
     assert_eq!(charges.ledger_bytes, 2 * ledger_bytes(geometry));
     assert_eq!(charges.mappings, 2);
     assert_eq!(charges.file_descriptors, 6);
-    assert_eq!(charges.wake_handles, 2);
+    assert_eq!(charges.wake_handles, 4);
     assert_eq!(charges.workers, 1);
     assert_eq!(charges.client_instances, 1);
     assert!(charges.committed_bytes().unwrap() > charges.mapping_bytes);

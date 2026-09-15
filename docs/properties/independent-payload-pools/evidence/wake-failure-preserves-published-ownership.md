@@ -12,7 +12,7 @@ Resolved against the tree of this catalog's introducing commit:
 
 - `crates/shm-transport/src/backend/ring.rs:1365`
 - `crates/shm-transport/src/backend/retained.rs:628`
-- `crates/shm-transport/src/backend/retained.rs:644`
+- `crates/shm-transport/src/backend/retained.rs:648`
 
 Witness status: yes - publish side: `wake_failure_after_publication_quarantines_but_leaves_the_frame_published`; consumption side: `a_failed_consumption_wake_quarantines_the_consumer_and_returns_the_block`; return side: `a_failed_return_wake_reports_wake_failed_and_keeps_the_completion`, which arms `parked`, closes the producer's doorbell end, asserts `WakeFailed` from `release`, and reads the completion cell and return flag back. All three are in `crates/shm-transport/src/backend/ring.rs`.
 

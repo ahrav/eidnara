@@ -10,10 +10,10 @@ acceptance section and ties it to the requirements and decisions the
 
 Resolved against the tree of this catalog's introducing commit:
 
-- `crates/host-runtime/src/ring_transport.rs:1487`
+- `crates/host-runtime/src/ring_transport.rs:1519`
 - `crates/shm-transport/src/backend/ring.rs:1019`
 
-Witness status: partial - `crates/host-runtime/src/ring_transport.rs:1559` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:3253` retires a host ticket that missed its deadline as `not_sent` with nothing published; `crates/host-runtime/src/client.rs:7727` shows the client's blocked write failing as `Expired`/`Deadline` with zero bytes on the ring, and `daemon_restart_discards_old_rings_and_accepts_fresh_client` in `crates/host-runtime/tests/shm_failure_modes.rs` covers restart. Native/TypeScript stop/restart witnesses belong to #550.
+Witness status: partial - `crates/host-runtime/src/ring_transport.rs:1591` classifies `Deadline`/`Unreserved` as zero-byte and `Reserved` as unknown; `a_client_send_past_its_frame_deadline_publishes_nothing` in crates/host-runtime/src/ring_transport.rs; `crates/host-runtime/src/ring_transport.rs:3360` retires a host ticket that missed its deadline as `not_sent` with nothing published; `crates/host-runtime/src/client.rs:7727` shows the client's blocked write failing as `Expired`/`Deadline` with zero bytes on the ring, and `daemon_restart_discards_old_rings_and_accepts_fresh_client` in `crates/host-runtime/tests/shm_failure_modes.rs` covers restart. Native/TypeScript stop/restart witnesses belong to #550.
 
 ## Failure scenario
 
