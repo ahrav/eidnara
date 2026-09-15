@@ -2799,8 +2799,9 @@ async fn start_ring_bridge(
                     break;
                 }
             }
-            // Clear `parked` before the bridge drops its doorbell fd.
+            // Clear both `parked` markers before the bridge drops its doorbell fds.
             let _ = endpoint.to_host.complete_capacity_wait();
+            let _ = endpoint.from_host.complete_data_wait();
             if let Ok(goodbye) = crate::setup_socket::encoded_goodbye() {
                 let _ = setup.write_all(&goodbye);
             }
@@ -7800,6 +7801,28 @@ mod tests {
             drop(lease);
         }
         assert_eq!(consumed, ordinary);
+
+        // The exited bridge left neither doorbell parked: a host publish after the exit
+        // signals nothing and the host's ring stays out of quarantine.
+        rings
+            .first
+            .try_reserve(
+                0,
+                EnvelopeHeader {
+                    len: 0,
+                    ver: PROTOCOL_VERSION,
+                    ty: FrameType::Response,
+                    flags: response_flags(false, true),
+                    channel: 1,
+                    epoch: 1,
+                    corr: 1,
+                }
+                .encode(),
+            )
+            .expect("reserve after the bridge exited")
+            .commit(0)
+            .expect("a publish after the bridge exited must not quarantine the host ring");
+        assert!(!rings.first.is_quarantined());
     }
 
     /// A host consumption between the exhausted attempt and the capacity arm rings no doorbell,
