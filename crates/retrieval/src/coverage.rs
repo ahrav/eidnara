@@ -101,6 +101,15 @@ impl CoverageBounds {
             .get()
             .saturating_mul(OccurrenceClass::ALL.len())
     }
+
+    /// Rows one observation may read: the live occurrences and the tombstones of every class.
+    pub fn max_rows(self) -> usize {
+        self.max_live().saturating_add(
+            self.max_tombstoned_per_class
+                .get()
+                .saturating_mul(OccurrenceClass::ALL.len()),
+        )
+    }
 }
 
 /// Observes coverage for every class at the projection's checkpoint under `generation`, inside the caller's read transaction.
