@@ -388,6 +388,14 @@ fn the_check_vocabularies_equal_the_rust_enums() {
         check("occurrence_tombstones", "reason"),
         format!("CHECK(reason IN ({}))", list(&reasons))
     );
+    let families: Vec<&str> = retrieval::exact::Family::ALL
+        .iter()
+        .map(|f| f.keyword())
+        .collect();
+    assert_eq!(
+        check("exact_associations", "family"),
+        format!("CHECK(family IN ({}))", list(&families))
+    );
 }
 
 #[test]

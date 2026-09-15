@@ -1,5 +1,6 @@
 //! The fixture fixes key population and collision depth, so each run measures
-//! one parse, equality page, and prefix page at a known size.
+//! one parse, equality page, prefix page, batch write, and resolution at a
+//! known size.
 
 use std::hint::black_box;
 use std::num::NonZeroUsize;
@@ -65,14 +66,7 @@ fn bounds() -> BatchBounds {
     }
 }
 
-fn populate(
-    store: &SqliteStore,
-    kernel_incarnation_id: &str,
-    through: i64,
-    commits: usize,
-    claims: usize,
-    fanout: usize,
-) {
+fn install(store: &SqliteStore, kernel_incarnation_id: &str) {
     store
         .with_conn_fenced(|conn| {
             install_identity(
@@ -94,24 +88,24 @@ fn populate(
             Ok(())
         })
         .unwrap();
-    let oids: Vec<String> = (0..commits).map(|n| format!("ab{n:038x}")).collect();
-    let objects: Vec<String> = (0..claims).map(|n| format!("obj-{n:08}")).collect();
-    let identities: Vec<Vec<(String, String)>> = oids
-        .iter()
-        .map(|oid| {
+}
+
+/// `commits` git commit identities followed by `claims` canonical claim identities.
+fn identities(commits: usize, claims: usize) -> Vec<Vec<(String, String)>> {
+    (0..commits)
+        .map(|n| {
             vec![
                 ("repository_id".to_string(), "repo".to_string()),
                 ("object_format".to_string(), "sha1".to_string()),
-                ("oid".to_string(), oid.clone()),
+                ("oid".to_string(), format!("ab{n:038x}")),
             ]
         })
-        .chain(
-            objects
-                .iter()
-                .map(|object| vec![("object_id".to_string(), object.clone())]),
-        )
-        .collect();
-    let borrowed: Vec<Vec<(&str, &str)>> = identities
+        .chain((0..claims).map(|n| vec![("object_id".to_string(), format!("obj-{n:08}"))]))
+        .collect()
+}
+
+fn borrow(identities: &[Vec<(String, String)>]) -> Vec<Vec<(&str, &str)>> {
+    identities
         .iter()
         .map(|fields| {
             fields
@@ -119,8 +113,11 @@ fn populate(
                 .map(|(n, v)| (n.as_str(), v.as_str()))
                 .collect()
         })
-        .collect();
-    let records: Vec<OccurrenceRecord<'_>> = borrowed
+        .collect()
+}
+
+fn batch<'a>(borrowed: &'a [Vec<(&'a str, &'a str)>], commits: usize) -> ProjectionBatch<'a> {
+    let records = borrowed
         .iter()
         .enumerate()
         .map(|(index, identity)| OccurrenceRecord {
@@ -145,52 +142,27 @@ fn populate(
             source_object_id: identity[identity.len() - 1].1,
             source_evidence_id: "evidence",
             source_artifact_digest: DIGEST,
-            created_commit_seq: through,
+            created_commit_seq: 1,
         })
         .collect();
-    // `fanout` spans of one object share the key `obj-fanout`, so a single
-    // resolve enumerates them across several pages.
-    let fanout_identity = [("object_id", "obj-fanout")];
-    let fanout_text = "x".repeat(fanout + 1);
-    let records: Vec<OccurrenceRecord<'_>> = records
-        .into_iter()
-        .chain((0..fanout).map(|n| OccurrenceRecord {
-            occurrence: Occurrence {
-                class: "canonical_claims",
-                identity: &fanout_identity,
-                revision: "1",
-                representation: "decision_summary",
-                span: Some(Span {
-                    start: n as u64,
-                    end: n as u64 + 1,
-                }),
-            },
-            payload: Payload::Whole(&fanout_text),
-            domain_id: "domain",
-            sensitivity: Sensitivity::Normal,
-            source_object_id: "obj-fanout",
-            source_evidence_id: "evidence",
-            source_artifact_digest: DIGEST,
-            created_commit_seq: through,
-        }))
-        .collect();
-    let batch = ProjectionBatch {
+    ProjectionBatch {
         identity: MutationIdentity {
-            kernel_incarnation_id: kernel_incarnation_id.to_string(),
+            kernel_incarnation_id: KERNEL.to_string(),
             hold_id: "hold".to_string(),
             snapshot_commit_seq: 0,
-            through_commit_seq: through,
+            through_commit_seq: 1,
         },
         records,
         invalidations: vec![],
         generation_id: None,
-    };
+    }
+}
+
+fn apply(store: &SqliteStore, batch: &ProjectionBatch<'_>, through: i64) -> usize {
     store
-        .with_conn_fenced(|conn| {
-            apply_batch(conn, &batch, bounds(), 1).unwrap();
-            Ok(())
-        })
-        .unwrap();
+        .with_conn_fenced(|conn| Ok(apply_batch(conn, batch, bounds(), through).unwrap()))
+        .unwrap()
+        .associations_inserted
 }
 
 fn parse_benches(c: &mut Criterion) {
@@ -228,7 +200,10 @@ fn parse_benches(c: &mut Criterion) {
 fn page_benches(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());
-    populate(&store, KERNEL, 1, 4_096, 4_096, 0);
+    install(&store, KERNEL);
+    let identities = identities(4_096, 4_096);
+    let borrowed = borrow(&identities);
+    apply(&store, &batch(&borrowed, 4_096), 1);
     let budget = EvalBudget::unbounded();
     let mut group = c.benchmark_group("exact_page");
     for page_rows in [16usize, 256] {
@@ -290,6 +265,28 @@ fn page_benches(c: &mut Criterion) {
             },
         );
     }
+    group.finish();
+}
+
+/// One batch of commits and claims into a fresh projection: every record
+/// derives one association, so this is the write cost the index adds.
+fn write_benches(c: &mut Criterion) {
+    let identities = identities(1_024, 1_024);
+    let borrowed = borrow(&identities);
+    let batch = batch(&borrowed, 1_024);
+    let mut group = c.benchmark_group("exact_write");
+    group.bench_function(BenchmarkId::new("apply_batch", batch.records.len()), |b| {
+        b.iter_batched(
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let store = open(dir.path());
+                install(&store, KERNEL);
+                (dir, store)
+            },
+            |(_dir, store)| black_box(apply(&store, &batch, 1)),
+            BatchSize::PerIteration,
+        )
+    });
     group.finish();
 }
 
@@ -380,15 +377,43 @@ fn resolve_benches(c: &mut Criterion) {
     let incarnation = kernel
         .database_incarnation_id_within_budget(&budget)
         .unwrap();
+    let through = kernel.tip().unwrap();
     let store = open(dir.path());
-    populate(
-        &store,
-        &incarnation,
-        kernel.tip().unwrap(),
-        0,
-        256,
-        FANOUT_ROWS,
-    );
+    install(&store, &incarnation);
+    let identities = identities(0, 256);
+    let borrowed = borrow(&identities);
+    // `FANOUT_ROWS` spans of one object share the key `obj-fanout`, so a single
+    // resolve enumerates them across several pages.
+    let fanout_identity = [("object_id", "obj-fanout")];
+    let fanout_text = "x".repeat(FANOUT_ROWS + 1);
+    let mut batch = batch(&borrowed, 0);
+    batch.identity.kernel_incarnation_id = incarnation.clone();
+    batch.identity.through_commit_seq = through;
+    batch
+        .records
+        .extend((0..FANOUT_ROWS).map(|n| OccurrenceRecord {
+            occurrence: Occurrence {
+                class: "canonical_claims",
+                identity: &fanout_identity,
+                revision: "1",
+                representation: "decision_summary",
+                span: Some(Span {
+                    start: n as u64,
+                    end: n as u64 + 1,
+                }),
+            },
+            payload: Payload::Whole(&fanout_text),
+            domain_id: "domain",
+            sensitivity: Sensitivity::Normal,
+            source_object_id: "obj-fanout",
+            source_evidence_id: "evidence",
+            source_artifact_digest: DIGEST,
+            created_commit_seq: through,
+        }));
+    for record in &mut batch.records {
+        record.created_commit_seq = through;
+    }
+    apply(&store, &batch, through);
     let checkpoint = store
         .with_conn(|conn| Ok(read_checkpoint(conn, &incarnation).unwrap().unwrap()))
         .unwrap();
@@ -478,7 +503,7 @@ fn configure() -> Criterion {
 criterion_group! {
     name = benches;
     config = configure();
-    targets = parse_benches, page_benches, resolve_benches
+    targets = parse_benches, page_benches, write_benches, resolve_benches
 }
 
 fn main() {

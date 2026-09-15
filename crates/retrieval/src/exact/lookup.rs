@@ -1,15 +1,18 @@
 use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::OccurrenceClass;
+use kernel::source_identity::{OccurrenceClass, Span, derived_lineage_id, identity_digest};
 use rusqlite::params;
 use storage::GuardedConn;
 
 use crate::batch::{ProjectionCheckpoint, read_checkpoint};
-use crate::exact::association::{CANONICAL_OBJECT_NAMESPACE, EXTRACTION_VERSION, sha_namespace};
+use crate::exact::association::{
+    CANONICAL_OBJECT_NAMESPACE, EXTRACTION_VERSION, derived_target, sha_namespace,
+};
 use crate::exact::selector::{Family, HexPrefix};
-use crate::{ProjectionError, Tombstone, TombstoneReason};
+use crate::{ProjectionError, Tombstone, decode_span, decode_tombstone};
 
+/// Variants correspond one to one with [`kernel::source_identity::OBJECT_FORMATS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ObjectFormat {
     Sha1,
@@ -17,6 +20,8 @@ pub enum ObjectFormat {
 }
 
 impl ObjectFormat {
+    pub const ALL: [ObjectFormat; 2] = [Self::Sha1, Self::Sha256];
+
     pub fn code(self) -> &'static str {
         match self {
             Self::Sha1 => "sha1",
@@ -24,11 +29,13 @@ impl ObjectFormat {
         }
     }
 
+    /// Returns the number of hex digits in a complete object id accepted by the kernel.
     pub fn hex_len(self) -> usize {
-        match self {
-            Self::Sha1 => 40,
-            Self::Sha256 => 64,
-        }
+        kernel::source_identity::OBJECT_FORMATS
+            .iter()
+            .find(|(code, _)| *code == self.code())
+            .map(|(_, len)| *len)
+            .expect("every ObjectFormat code is a kernel object format")
     }
 }
 
@@ -193,8 +200,8 @@ impl From<rusqlite::Error> for LookupRefusal {
 const PAGE_COLUMNS: &str =
     "a.key,a.target_id,a.occurrence_id,a.extraction_version,a.created_commit_seq,
      o.lineage_id,o.class,o.revision,o.representation,o.span_start,o.span_end,o.payload_id,
-     o.source_object_id,o.source_evidence_id,o.source_artifact_digest,
-     t.invalidated_commit_seq,t.reason";
+     o.source_object_id,o.source_evidence_id,o.source_artifact_digest,o.created_commit_seq,
+     t.invalidated_commit_seq,t.reason,o.tuple";
 
 const PAGE_FROM: &str = "FROM exact_associations a
      JOIN occurrences o ON o.occurrence_id=a.occurrence_id
@@ -279,7 +286,7 @@ pub fn page(
                 expected: EXTRACTION_VERSION,
             });
         }
-        let decoded = AssociationRow::decode(row)?;
+        let decoded = AssociationRow::decode(row, range.family)?;
         if previous_key.as_ref() != Some(&decoded.key) {
             page.distinct_keys += 1;
         }
@@ -290,40 +297,45 @@ pub fn page(
 }
 
 impl AssociationRow {
-    fn decode(row: &rusqlite::Row<'_>) -> Result<Self, LookupRefusal> {
+    fn decode(row: &rusqlite::Row<'_>, family: Family) -> Result<Self, LookupRefusal> {
         let corrupt = || ProjectionError::CorruptRow;
-        let span = match (
-            row.get::<_, Option<i64>>(9)?,
-            row.get::<_, Option<i64>>(10)?,
-        ) {
-            (Some(start), Some(end)) => Some((
-                u64::try_from(start).map_err(|_| corrupt())?,
-                u64::try_from(end).map_err(|_| corrupt())?,
-            )),
-            (None, None) => None,
-            _ => return Err(corrupt().into()),
-        };
-        let tombstone = match (
-            row.get::<_, Option<i64>>(15)?,
-            row.get::<_, Option<String>>(16)?,
-        ) {
-            (Some(invalidated_commit_seq), Some(reason)) => Some(Tombstone {
-                invalidated_commit_seq,
-                reason: TombstoneReason::parse(&reason).ok_or_else(corrupt)?,
-            }),
-            (None, None) => None,
-            _ => return Err(corrupt().into()),
-        };
+        let span = decode_span(row.get(9)?, row.get(10)?)?;
+        let occurrence_created_commit_seq: i64 = row.get(15)?;
+        let tombstone = decode_tombstone(
+            row.get(16)?,
+            row.get::<_, Option<String>>(17)?.as_deref(),
+            occurrence_created_commit_seq,
+        )?;
         let class: String = row.get(6)?;
+        let occurrence_id: String = row.get(2)?;
+        let lineage_id: String = row.get(5)?;
+        let revision: i64 = row.get(7)?;
+        let representation: String = row.get(8)?;
+        let tuple: Vec<u8> = row.get(18)?;
+        let lineage = derived_lineage_id(
+            &tuple,
+            &class,
+            revision,
+            &representation,
+            span.map(|(start, end)| Span { start, end }),
+        );
+        if identity_digest(&tuple) != occurrence_id || lineage.as_deref() != Some(&*lineage_id) {
+            return Err(corrupt().into());
+        }
+        let key: Vec<u8> = row.get(0)?;
+        let target_id: String = row.get(1)?;
+        if derived_target(family, &key, &lineage_id) != Some(target_id.as_bytes()) {
+            return Err(corrupt().into());
+        }
         Ok(Self {
-            key: row.get(0)?,
-            target_id: row.get(1)?,
-            occurrence_id: row.get(2)?,
+            key,
+            target_id,
+            occurrence_id,
             created_commit_seq: row.get(4)?,
-            lineage_id: row.get(5)?,
+            lineage_id,
             class: OccurrenceClass::from_code(&class).ok_or_else(corrupt)?,
-            revision: row.get(7)?,
-            representation: row.get(8)?,
+            revision,
+            representation,
             span,
             payload_id: row.get(11)?,
             source_object_id: row.get(12)?,
@@ -481,5 +493,49 @@ mod tests {
             "the algorithm is part of the query identity"
         );
         assert_eq!(ExactQuery::CanonicalObject(b"obj").range().hi, b"obj\0");
+    }
+
+    #[test]
+    fn object_formats_are_exactly_the_kernel_table_so_every_written_sha_key_is_queryable() {
+        use kernel::source_identity::{OBJECT_FORMATS, Occurrence, encode_preserving_span};
+
+        let mut codes: Vec<&str> = ObjectFormat::ALL.iter().map(|f| f.code()).collect();
+        codes.sort_unstable();
+        let mut kernel_codes: Vec<&str> = OBJECT_FORMATS.iter().map(|(code, _)| *code).collect();
+        kernel_codes.sort_unstable();
+        assert_eq!(
+            codes, kernel_codes,
+            "a format on one side only is unreachable"
+        );
+        for format in ObjectFormat::ALL {
+            let oid = "a".repeat(format.hex_len());
+            let identity = [
+                ("repository_id", "repo"),
+                ("object_format", format.code()),
+                ("oid", oid.as_str()),
+            ];
+            let commit = |oid: &str| {
+                encode_preserving_span(&Occurrence {
+                    class: "git_commits",
+                    identity: &[identity[0], identity[1], ("oid", oid)],
+                    revision: "1",
+                    representation: "commit_message",
+                    span: None,
+                })
+                .is_ok()
+            };
+            assert!(
+                commit(&oid),
+                "{format:?}: the kernel accepts a full-width oid"
+            );
+            assert!(
+                !commit(&oid[1..]),
+                "{format:?}: hex_len is the kernel's width"
+            );
+            let prefix = HexPrefix::parse(&oid).unwrap();
+            let query = ShaPrefixQuery::bind("repo", format, &prefix).unwrap();
+            assert!(query.is_full_oid());
+            assert_eq!(query.namespace(), sha_namespace(format.code(), "repo"));
+        }
     }
 }

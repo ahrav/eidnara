@@ -861,6 +861,154 @@ fn bounds_stale_cursors_interruption_and_missing_context_report_incompleteness()
         .unwrap();
 }
 
+#[test]
+fn a_page_refuses_the_same_damaged_rows_as_the_occurrence_reader() {
+    let sources = vec![
+        claim("obj-1", 1, "decision_summary"),
+        claim("obj-1", 1, "rationale"),
+        commit("repo-a", ObjectFormat::Sha1, oid40("abc", '0'), 1),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    apply(&store, &sources, mutation(0, 5), vec![], 10).unwrap();
+    let damaged = occurrence_id(&sources[0]);
+    let query = ExactQuery::CanonicalObject(b"obj-1");
+    let prefix = hex("abc");
+    let sha_query =
+        ExactQuery::Sha(ShaPrefixQuery::bind("repo-a", ObjectFormat::Sha1, &prefix).unwrap());
+    for (name, sql, query) in [
+        (
+            "id target",
+            "UPDATE exact_associations SET target_id='elsewhere' WHERE family='id'",
+            &query,
+        ),
+        (
+            "sha target",
+            "UPDATE exact_associations SET target_id='elsewhere' WHERE family='sha'",
+            &sha_query,
+        ),
+    ] {
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(sql, [])?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    page(conn, &context(8), query, None).unwrap_err(),
+                    LookupRefusal::Projection(ProjectionError::CorruptRow),
+                    "{name}: a target the mapping did not derive is refused"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "UPDATE exact_associations SET target_id='obj-1' WHERE family='id'",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE exact_associations SET target_id=o.lineage_id FROM occurrences o
+                 WHERE o.occurrence_id=exact_associations.occurrence_id AND family='sha'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for (name, invalidated_commit_seq) in [("at creation", 5), ("before creation", 3)] {
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO occurrence_tombstones(
+                         occurrence_id,invalidated_commit_seq,reason,recorded_at
+                     ) VALUES (?1,?2,'retired',1)",
+                    rusqlite::params![damaged, invalidated_commit_seq],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    retrieval::read_occurrence(conn, &damaged).unwrap_err(),
+                    ProjectionError::CorruptRow,
+                    "tombstone {name}: the occurrence reader refuses the row"
+                );
+                assert_eq!(
+                    page(conn, &context(8), &query, None).unwrap_err(),
+                    LookupRefusal::Projection(ProjectionError::CorruptRow),
+                    "tombstone {name}: the page reader applies the same rule"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "DELETE FROM occurrence_tombstones WHERE occurrence_id=?1",
+                [&damaged],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for (name, sql) in [
+        (
+            "lineage",
+            "UPDATE occurrences SET lineage_id='elsewhere' WHERE occurrence_id=?1",
+        ),
+        (
+            "tuple",
+            "UPDATE occurrences SET tuple=x'00' WHERE occurrence_id=?1",
+        ),
+    ] {
+        let original: (String, Vec<u8>) = store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT lineage_id,tuple FROM occurrences WHERE occurrence_id=?1",
+                    [&damaged],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(sql, [&damaged])?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    retrieval::read_occurrence(conn, &damaged).unwrap_err(),
+                    ProjectionError::CorruptRow,
+                    "{name}: the occurrence reader refuses the row"
+                );
+                assert_eq!(
+                    page(conn, &context(8), &query, None).unwrap_err(),
+                    LookupRefusal::Projection(ProjectionError::CorruptRow),
+                    "{name}: the page reader applies the same rule"
+                );
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE occurrences SET lineage_id=?2,tuple=?3 WHERE occurrence_id=?1",
+                    rusqlite::params![damaged, original.0, original.1],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
 fn association_rows(conn: &GuardedConn<'_>) -> Vec<(String, String, Vec<u8>, String, String)> {
     let mut statement = conn
         .prepare(

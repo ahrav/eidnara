@@ -42,7 +42,8 @@ impl Family {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectorBounds {
     pub max_input_bytes: NonZeroUsize,
-    /// Checked on the encoded token and again on the decoded bytes.
+    /// The limit applies to the encoded token; JSON and percent decoding never
+    /// lengthen a value, so the decoded bytes stay within it.
     pub max_value_bytes: NonZeroUsize,
 }
 
@@ -78,16 +79,6 @@ pub enum SelectorValue {
     Text(String),
     Path(Vec<u8>),
     Sha(HexPrefix),
-}
-
-impl SelectorValue {
-    pub fn key_bytes(&self) -> &[u8] {
-        match self {
-            Self::Text(text) => text.as_bytes(),
-            Self::Path(bytes) => bytes,
-            Self::Sha(hex) => hex.as_str().as_bytes(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,10 +152,12 @@ pub fn classify(request: &str, bounds: SelectorBounds) -> Result<Intent, Selecto
     let start = request.len() - request.trim_start_matches(ASCII_TRIM).len();
     let trimmed = request.trim_matches(ASCII_TRIM);
     if let Some((family, value_at)) = selector_head(trimmed, 0) {
-        let token = token_extent(trimmed, value_at).ok_or(SelectorRefusal::MalformedQuote {
-            family,
-            offset: start + value_at,
-        })?;
+        let token = token_extent(trimmed, value_at, &mut BareRun::default()).ok_or(
+            SelectorRefusal::MalformedQuote {
+                family,
+                offset: start + value_at,
+            },
+        )?;
         if token.end == trimmed.len() {
             let selector = decode_value(
                 family,
@@ -184,6 +177,7 @@ const ASCII_TRIM: [char; 4] = [' ', '\t', '\r', '\n'];
 fn mentions(trimmed: &str, start: usize, bounds: SelectorBounds) -> Vec<Mention> {
     let mut found = Vec::new();
     let mut at = 0;
+    let mut run = BareRun::default();
     while at < trimmed.len() {
         if !trimmed.is_char_boundary(at) {
             at += 1;
@@ -193,7 +187,7 @@ fn mentions(trimmed: &str, start: usize, bounds: SelectorBounds) -> Vec<Mention>
             at += 1;
             continue;
         };
-        let Some(token) = token_extent(trimmed, value_at) else {
+        let Some(token) = token_extent(trimmed, value_at, &mut run) else {
             at += 1;
             continue;
         };
@@ -217,14 +211,14 @@ fn mentions(trimmed: &str, start: usize, bounds: SelectorBounds) -> Vec<Mention>
     found
 }
 
-/// The byte before the keyword must not continue an identifier, so `oid:`
-/// never contains `id:`.
+/// A selector head cannot start inside an identifier.
 fn selector_head(text: &str, at: usize) -> Option<(Family, usize)> {
-    if at > 0 {
-        let before = text.as_bytes()[at - 1];
-        if before.is_ascii_alphanumeric() || before == b'_' {
-            return None;
-        }
+    if text[..at]
+        .chars()
+        .next_back()
+        .is_some_and(|before| before.is_alphanumeric() || before == '_')
+    {
+        return None;
     }
     let rest = &text.as_bytes()[at..];
     Family::ALL.into_iter().find_map(|family| {
@@ -239,7 +233,15 @@ struct Token {
     quoted: bool,
 }
 
-fn token_extent(text: &str, value_at: usize) -> Option<Token> {
+/// End of the most recent bare run scanned. Heads in the same bare run reuse
+/// its scanned end: heads are visited in increasing order, and a start at or
+/// before `end` sees only bare characters up to `end`.
+#[derive(Default)]
+struct BareRun {
+    end: usize,
+}
+
+fn token_extent(text: &str, value_at: usize, run: &mut BareRun) -> Option<Token> {
     let rest = &text[value_at..];
     if rest.starts_with('"') {
         let end = json_string_end(rest)?;
@@ -248,17 +250,29 @@ fn token_extent(text: &str, value_at: usize) -> Option<Token> {
             quoted: true,
         });
     }
-    let bare = rest
-        .char_indices()
-        .find(|(_, c)| !bare_char(*c))
-        .map_or(rest.len(), |(index, _)| index);
+    if run.end < value_at {
+        run.end = value_at
+            + rest
+                .char_indices()
+                .find(|(_, c)| !bare_char(*c))
+                .map_or(rest.len(), |(index, _)| index);
+    }
     Some(Token {
-        end: value_at + bare,
+        end: run.end,
         quoted: false,
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Characters examined by bare-token scans on this thread; tests bound it
+    /// to prove each request byte is scanned a constant number of times.
+    static BARE_SCAN_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn bare_char(c: char) -> bool {
+    #[cfg(test)]
+    BARE_SCAN_STEPS.with(|steps| steps.set(steps.get() + 1));
     !(c.is_whitespace() || c.is_control() || matches!(c, '"' | '\'' | '\\' | ',' | ';'))
 }
 
@@ -476,6 +490,16 @@ mod tests {
             hybrid("oid:abc"),
             vec![],
             "a keyword inside an identifier is not a head"
+        );
+        assert_eq!(
+            hybrid("caf\u{e9}id:abc"),
+            vec![],
+            "a Unicode letter before the keyword continues the identifier"
+        );
+        assert_eq!(
+            hybrid("\u{2192}id:abc").len(),
+            1,
+            "a Unicode symbol before the keyword does not"
         );
     }
 
@@ -774,6 +798,36 @@ mod tests {
             classify("see id:abcdefghijk now", loose).unwrap(),
             Intent::Hybrid(vec![]),
             "an over-bound token inside prose is prose"
+        );
+    }
+
+    #[test]
+    fn hybrid_scanning_is_linear_in_the_request_however_many_heads_are_refused() {
+        // Every `sha:` head owns a bare token that runs to the end of the
+        // request, so each one is refused and the next head starts four bytes
+        // later; the scan must not restart from every refused head.
+        let bounds = SelectorBounds {
+            max_input_bytes: NonZeroUsize::new(1 << 20).unwrap(),
+            max_value_bytes: NonZeroUsize::new(64).unwrap(),
+        };
+        let mut steps = Vec::new();
+        for heads in [1_024usize, 4_096] {
+            let request = format!("x {}", "sha:".repeat(heads));
+            BARE_SCAN_STEPS.with(|s| s.set(0));
+            assert_eq!(classify(&request, bounds).unwrap(), Intent::Hybrid(vec![]));
+            steps.push(BARE_SCAN_STEPS.with(std::cell::Cell::get));
+        }
+        assert!(
+            steps[1] <= steps[0] * 8,
+            "a 4x longer request must not cost more than ~4x the scan: {steps:?}"
+        );
+        // A refused head does not hide a later selector inside its token.
+        let mentions = hybrid("see sha:id:abc");
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].span, 8..14);
+        assert_eq!(
+            mentions[0].selector.value,
+            SelectorValue::Text("abc".into())
         );
     }
 }
