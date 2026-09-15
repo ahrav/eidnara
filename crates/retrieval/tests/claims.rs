@@ -213,8 +213,9 @@ fn state_follows_the_documented_precedence() {
             CandidateState::Retracted,
         ),
         (
-            "superseded wins over hidden",
+            "superseded wins over stale and hidden",
             Some(Facts {
+                revision: 2,
                 disposition: Some(Disposition::Superseded),
                 served: served(SurfaceVisibility::Hidden),
                 ..Facts::current()
@@ -226,6 +227,33 @@ fn state_follows_the_documented_precedence() {
             Some(Facts {
                 revision: 2,
                 served: served(SurfaceVisibility::Hidden),
+                ..Facts::current()
+            }),
+            CandidateState::Stale,
+        ),
+        (
+            "stale revision wins over rejected admission",
+            Some(Facts {
+                revision: 2,
+                disposition: Some(Disposition::Rejected),
+                ..Facts::current()
+            }),
+            CandidateState::Stale,
+        ),
+        (
+            "stale revision wins over contradicted admission",
+            Some(Facts {
+                revision: 2,
+                disposition: Some(Disposition::Contradicted),
+                ..Facts::current()
+            }),
+            CandidateState::Stale,
+        ),
+        (
+            "stale revision wins over quarantined admission",
+            Some(Facts {
+                revision: 2,
+                disposition: Some(Disposition::Quarantined),
                 ..Facts::current()
             }),
             CandidateState::Stale,
@@ -436,6 +464,11 @@ mod live_rows {
         let store = open(dir.path());
         seed(&store, 3);
         let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        // Renaming commit_log makes tip reads fail; TooManyClaims must win over Io.
+        let raw = rusqlite::Connection::open(dir.path().join("kernel/kernel.sqlite")).unwrap();
+        raw.execute_batch("ALTER TABLE commit_log RENAME TO unavailable_commit_log")
+            .unwrap();
+        assert_eq!(kernel.tip(), Err(kernel::KernelError::Io));
         let bounds = ClaimCandidateBounds {
             max_rows: bound(8),
             facts: kernel::ClaimFactBounds {
@@ -450,6 +483,21 @@ mod live_rows {
             refused,
             Err(retrieval::claims::ClaimCandidateError::Facts(
                 kernel::ClaimFactsError::TooManyClaims
+            ))
+        ));
+        let at_bound = ClaimCandidateBounds {
+            facts: kernel::ClaimFactBounds {
+                max_claims: bound(3),
+                ..bounds.facts
+            },
+            ..bounds
+        };
+        assert!(matches!(
+            store
+                .with_conn(|conn| Ok(classify_live_claims(conn, &kernel, at_bound)))
+                .unwrap(),
+            Err(retrieval::claims::ClaimCandidateError::Facts(
+                kernel::ClaimFactsError::Kernel(kernel::KernelError::Io)
             ))
         ));
     }

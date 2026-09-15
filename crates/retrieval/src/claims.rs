@@ -218,14 +218,12 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
         .map(|admission| admission.disposition);
     match disposition {
         Some(Disposition::Superseded) => return CandidateState::Superseded,
+        _ if row.revision != facts.object.source_revision => return CandidateState::Stale,
         Some(Disposition::Stale) => return CandidateState::Stale,
         Some(Disposition::Rejected | Disposition::Contradicted | Disposition::Quarantined) => {
             return CandidateState::Hidden;
         }
         Some(Disposition::Active | Disposition::Disputed) | None => {}
-    }
-    if row.revision != facts.object.source_revision {
-        return CandidateState::Stale;
     }
     match &facts.served {
         ServedStanding::Served(served) if served.explicit_search != SurfaceVisibility::Hidden => {
@@ -242,23 +240,26 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
 ///
 /// # Errors
 ///
-/// Projection refusals from [`live_claim_candidates`]; facts refusals from
-/// `claim_facts_as_of`, including `TooManyClaims` when the rows name more
-/// distinct objects than `bounds.facts.max_claims`; kernel errors as
-/// `Facts(Kernel(_))`.
+/// Projection refusals from [`live_claim_candidates`]; `TooManyClaims` before
+/// kernel access when the rows name more distinct objects than
+/// `bounds.facts.max_claims`; other facts refusals from `claim_facts_as_of`;
+/// kernel errors as `Facts(Kernel(_))`.
 pub fn classify_live_claims(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
     bounds: ClaimCandidateBounds,
 ) -> Result<ClaimCandidateBatch, ClaimCandidateError> {
     let rows = live_claim_candidates(conn, bounds.max_rows)?;
+    let mut seen = BTreeSet::new();
     let object_ids: Vec<String> = rows
         .iter()
         .map(|row| row.object_id.as_str())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+        .filter(|id| seen.insert(*id))
         .map(str::to_string)
         .collect();
+    if object_ids.len() > bounds.facts.max_claims.get() {
+        return Err(ClaimFactsError::TooManyClaims.into());
+    }
     let known_as_of = kernel.tip().map_err(ClaimFactsError::from)?;
     let snapshot = kernel.claim_facts_as_of(&object_ids, known_as_of, bounds.facts)?;
     let index: HashMap<&str, usize> = snapshot

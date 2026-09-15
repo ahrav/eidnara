@@ -1733,11 +1733,33 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
             (aging, CandidateState::Stale),
         ])
     );
+    let mut bounds = candidate_bounds();
+    bounds.facts.max_claims = NonZeroUsize::new(3).unwrap();
     let batch = projection
-        .read(|conn| Ok(classify_live_claims(conn, &corpus.kernel, candidate_bounds()).unwrap()))
+        .read(|conn| Ok(classify_live_claims(conn, &corpus.kernel, bounds).unwrap()))
         .unwrap();
     assert_eq!(batch.known_as_of, corpus.kernel.tip().unwrap());
+    assert!(batch.candidates.len() > 3, "multiple rows share an object");
     assert_eq!(batch.claims.len(), 3, "one facts entry per distinct object");
+    let mut first_seen = Vec::new();
+    for candidate in &batch.candidates {
+        let id = candidate.row.object_id.as_str();
+        if !first_seen.contains(&id) {
+            first_seen.push(id);
+        }
+    }
+    assert!(
+        !first_seen.is_sorted(),
+        "fixture must distinguish first-seen order from lexical order"
+    );
+    assert_eq!(
+        batch
+            .claims
+            .iter()
+            .map(|claim| claim.object.object_id.as_str())
+            .collect::<Vec<_>>(),
+        first_seen
+    );
     for candidate in &batch.candidates {
         let facts = batch
             .claim(candidate)
