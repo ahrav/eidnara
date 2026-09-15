@@ -2,19 +2,21 @@
 //! runs one decoder, and asserts the invariants a successful decode promises. None touches a
 //! file descriptor, mapping, or thread, so a fuzzer can call them millions of times.
 //!
-//! Every function also checks that flipping one identity bit makes validation fail. A fixed
-//! sentinel identity could collide with fuzzer-produced input; the flipped identity cannot.
+//! Every function also checks that a related identity change makes validation fail, so the
+//! target cannot pass by accepting everything, and each has a corpus entry that decodes, so it
+//! cannot pass by rejecting everything.
 
-use crate::arena::{ArenaSpan, MAX_FRAME_BYTES};
-use crate::backend::ring::RingGrant;
-use crate::backend::sample::{SAMPLE_PREFIX_BYTES, SamplePrefix};
-use crate::descriptor::{
-    FrameDescriptor, Incarnation, MAX_SPANS, ReleaseIdentity, WIRE_V3_HEADER_BYTES,
-};
+use crate::backend::ring::PoolGrant;
+use crate::descriptor::{CompletionRecord, PoolDescriptor};
+use crate::pool::PoolGeometry;
 
-/// Byte length of the fixed frame-descriptor encoding the fuzz targets decode.
-pub const FRAME_DESCRIPTOR_BYTES: usize =
-    2 + WIRE_V3_HEADER_BYTES + 16 + 4 + 8 + 8 + 8 + 8 + 1 + 32;
+/// Byte length of the fixed descriptor encoding the fuzz targets decode: sequence, block,
+/// generation, and body length, each little-endian `u64`.
+pub const POOL_DESCRIPTOR_BYTES: usize = 4 * 8;
+
+/// Byte length of the fixed completion encoding: block and generation, each little-endian
+/// `u64`, followed by the live generation the producer ledger holds for the block.
+pub const COMPLETION_BYTES: usize = 3 * 8;
 
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     let mut buffer = [0u8; 8];
@@ -22,85 +24,44 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(buffer)
 }
 
-/// Decodes a `FRAME_DESCRIPTOR_BYTES` frame descriptor and validates it against a
-/// `MAX_FRAME_BYTES` arena. On success, asserts the spans stay inside the arena and sum to
-/// the body length. Returns whether the descriptor validated.
-pub fn frame_descriptor(bytes: &[u8]) -> bool {
-    if bytes.len() != FRAME_DESCRIPTOR_BYTES {
+/// Decodes a `POOL_DESCRIPTOR_BYTES` descriptor and validates it against the production
+/// geometry with its own sequence as the expected one. On success, asserts the body fits the
+/// named block and stays within the protocol maximum. Returns whether the descriptor
+/// validated.
+pub fn pool_descriptor(bytes: &[u8]) -> bool {
+    if bytes.len() != POOL_DESCRIPTOR_BYTES {
         return false;
     }
-    let schema = u16::from_le_bytes([bytes[0], bytes[1]]);
-    let mut wire_header = [0u8; WIRE_V3_HEADER_BYTES];
-    wire_header.copy_from_slice(&bytes[2..2 + WIRE_V3_HEADER_BYTES]);
-    let identity_offset = 2 + WIRE_V3_HEADER_BYTES;
-    let mut incarnation = [0u8; 16];
-    incarnation.copy_from_slice(&bytes[identity_offset..identity_offset + 16]);
-    let lane_offset = identity_offset + 16;
-    let lane = u32::from_le_bytes([
-        bytes[lane_offset],
-        bytes[lane_offset + 1],
-        bytes[lane_offset + 2],
-        bytes[lane_offset + 3],
-    ]);
-    let sequence = read_u64(bytes, lane_offset + 4);
-    let body_len = read_u64(bytes, lane_offset + 12);
-    let allocation_start = read_u64(bytes, lane_offset + 20);
-    let allocation_len = read_u64(bytes, lane_offset + 28);
-    let span_count = bytes[lane_offset + 36];
-    let spans_offset = lane_offset + 37;
-    let spans = [
-        ArenaSpan::from_untrusted(
-            read_u64(bytes, spans_offset),
-            read_u64(bytes, spans_offset + 8),
-        ),
-        ArenaSpan::from_untrusted(
-            read_u64(bytes, spans_offset + 16),
-            read_u64(bytes, spans_offset + 24),
-        ),
-    ];
-    let identity = ReleaseIdentity::new(Incarnation::from_bytes(incarnation), lane, sequence);
-    let descriptor = FrameDescriptor::from_untrusted(
-        schema,
-        wire_header,
-        identity,
-        body_len,
-        allocation_start,
-        allocation_len,
-        span_count,
-        spans,
-    );
-
-    let accepted = if let Ok(validated) = descriptor.validate(identity, MAX_FRAME_BYTES) {
-        assert!(validated.body_len() <= MAX_FRAME_BYTES as u64);
-        assert!((1..=MAX_SPANS as u8).contains(&validated.span_count()));
-        let mut summed = 0u64;
-        for index in 0..usize::from(validated.span_count()) {
-            let span = validated.span(index).expect("validated span exists");
-            let end = span
-                .offset()
-                .checked_add(span.len())
-                .expect("validated span cannot overflow");
-            assert!(end <= MAX_FRAME_BYTES as u64, "span crosses arena bound");
-            summed = summed.checked_add(span.len()).expect("span sum overflow");
-        }
-        assert_eq!(summed, validated.body_len(), "spans disagree with body");
+    let geometry = PoolGeometry::host_payload_pool();
+    let sequence = read_u64(bytes, 0);
+    let block = read_u64(bytes, 8);
+    let generation = read_u64(bytes, 16);
+    let body_len = read_u64(bytes, 24);
+    let descriptor = PoolDescriptor::from_untrusted(sequence, block, generation, body_len);
+    let accepted = if let Ok(validated) = descriptor.validate(sequence, &geometry) {
+        assert!(validated.body_len() <= crate::pool::MAX_FRAME_BYTES as u64);
+        assert!(validated.body_len() <= validated.placement().body_capacity());
+        assert!(geometry.contains(validated.block()));
+        assert_ne!(validated.generation(), 0);
         true
     } else {
         false
     };
-
-    let foreign = ReleaseIdentity::new(Incarnation::from_bytes(incarnation), lane ^ 1, sequence);
+    // The same bytes under the next expected sequence must fail: identity is checked before
+    // geometry.
     assert!(
-        descriptor.validate(foreign, MAX_FRAME_BYTES).is_err(),
-        "foreign identity must be rejected"
+        descriptor
+            .validate(sequence.wrapping_add(1), &geometry)
+            .is_err(),
+        "a mismatched sequence must be rejected"
     );
     accepted
 }
 
-/// Decodes `bytes` as a ring grant and asserts the decoder round-trips; returns whether the
+/// Decodes `bytes` as a pool grant and asserts the decoder round-trips; returns whether the
 /// bytes decoded.
 pub fn provider_grant(bytes: &[u8]) -> bool {
-    if let Ok(grant) = RingGrant::decode_slice(bytes) {
+    if let Ok(grant) = PoolGrant::decode_slice(bytes) {
         assert_eq!(
             grant.encode().as_slice(),
             bytes,
@@ -112,35 +73,30 @@ pub fn provider_grant(bytes: &[u8]) -> bool {
     }
 }
 
-/// Snapshots and validates a sample prefix against its own declared identity. On success,
-/// asserts the body range starts at the prefix end and stays inside `bytes`. Returns whether
-/// the sample validated.
-pub fn provider_sample(bytes: &[u8]) -> bool {
-    let Ok(prefix) = SamplePrefix::snapshot(bytes) else {
+/// Decodes a `COMPLETION_BYTES` completion and validates it against the production geometry
+/// and the encoded live generation. On success, asserts the completion names exactly the live
+/// generation. Returns whether the completion validated.
+pub fn payload_completion(bytes: &[u8]) -> bool {
+    if bytes.len() != COMPLETION_BYTES {
         return false;
+    }
+    let geometry = PoolGeometry::host_payload_pool();
+    let block = read_u64(bytes, 0);
+    let generation = read_u64(bytes, 8);
+    let live = read_u64(bytes, 16);
+    let record = CompletionRecord::from_untrusted(block, generation);
+    let accepted = match record.validate(&geometry, (live != 0).then_some(live)) {
+        Ok(freed) => {
+            assert_eq!(u64::from(freed), block);
+            assert_eq!(generation, live);
+            true
+        }
+        Err(_) => false,
     };
-    let accepted = if let Ok(validated) = prefix.validate(bytes.len(), prefix.identity()) {
-        let range = validated.body_range();
-        assert_eq!(range.start, SAMPLE_PREFIX_BYTES);
-        assert!(range.end >= range.start, "body range is inverted");
-        assert!(
-            range.end <= bytes.len(),
-            "validated body range escapes the allocation"
-        );
-        assert_eq!(range.end - range.start, validated.body_len());
-        true
-    } else {
-        false
-    };
-    let identity = prefix.identity();
-    let foreign = ReleaseIdentity::new(
-        identity.incarnation(),
-        identity.lane() ^ 1,
-        identity.sequence(),
-    );
+    // A completion for a block the ledger has not published can never free anything.
     assert!(
-        prefix.validate(bytes.len(), foreign).is_err(),
-        "foreign identity must be rejected"
+        record.validate(&geometry, None).is_err(),
+        "an unpublished block must reject every completion"
     );
     accepted
 }

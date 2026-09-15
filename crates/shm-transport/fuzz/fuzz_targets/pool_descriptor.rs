@@ -3,5 +3,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = shm_transport::harness::frame_descriptor(data);
+    let _ = shm_transport::harness::pool_descriptor(data);
 });

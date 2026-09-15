@@ -3,9 +3,11 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-use crate::descriptor::ReleaseIdentity;
+use crate::backend::retained::Retained;
+use crate::descriptor::PayloadIdentity;
 
 /// Raw view of one arena span, readable for `'lease`. The peer can still write the mapping,
 /// so there is no `&[u8]` accessor: reads go through `read_byte`, `copy_to`, or `checksum`,
@@ -234,167 +236,220 @@ pub(crate) unsafe fn copy_in(source: &[u8], destination: *mut u8) {
     }
 }
 
-/// Receives a frame release from a `ReceiveLease`. The ring that issued the lease implements
-/// it; the lease borrows the sink for `'lease`, so a lease cannot outlive its ring.
-pub(crate) trait ReleaseSink {
-    /// Returns the frame named by `identity` to the producer.
-    fn release(&self, identity: ReleaseIdentity) -> Result<(), LeaseError>;
-}
-
-/// A published frame the receiver holds. The body is visible through `segment` as one or two
-/// raw spans; `to_vec` copies it out. Dropping the lease releases the frame to the producer.
-/// `!Send`: the release callback belongs to the ring that issued the lease, and that ring is
-/// owned by one thread.
-pub struct ReceiveLease<'lease> {
-    spans: [Option<LeaseSpan<'lease>>; 2],
-    span_count: u8,
+/// One received payload, owned by whoever holds it. The lease keeps its backing mapped, exposes
+/// the body as a lexical raw view, and returns the block to the producer exactly once: on
+/// `release` or on drop, whichever comes first.
+///
+/// `PayloadLease` is `Send`: it holds only an `Arc<Retained>` and plain integers, so a
+/// runtime worker may take it across the thread boundary and drop it there. The `Ring` that
+/// received it is not reachable from the lease, and the body view it hands out is `!Send`, so
+/// no Rust slice or endpoint state crosses with it.
+pub struct PayloadLease {
+    retained: Arc<Retained>,
+    block: u32,
+    generation: u64,
     body_len: usize,
     wire_header: [u8; crate::descriptor::WIRE_V3_HEADER_BYTES],
-    identity: ReleaseIdentity,
-    sink: &'lease dyn ReleaseSink,
-    released: bool,
-    _not_send: PhantomData<Rc<()>>,
+    returned: bool,
 }
 
-impl<'lease> ReceiveLease<'lease> {
-    /// Checks that `span_count` agrees with which spans are present. `sink` receives exactly
-    /// one `release` for `identity`, on explicit release or on drop.
+impl PayloadLease {
+    /// Wraps a validated receive. The receiver has already marked `block` live at `generation`
+    /// in `retained`'s records; this lease owns the single return of that mark.
     pub(crate) fn new(
-        spans: [Option<LeaseSpan<'lease>>; 2],
-        span_count: u8,
+        retained: Arc<Retained>,
+        block: u32,
+        generation: u64,
         body_len: usize,
         wire_header: [u8; crate::descriptor::WIRE_V3_HEADER_BYTES],
-        identity: ReleaseIdentity,
-        sink: &'lease dyn ReleaseSink,
-    ) -> Result<Self, LeaseError> {
-        if !(1..=2).contains(&span_count)
-            || spans[0].is_none()
-            || (span_count == 1 && spans[1].is_some())
-            || (span_count == 2 && spans[1].is_none())
-        {
-            return Err(LeaseError::InvalidSpan);
-        }
-        Ok(Self {
-            spans,
-            span_count,
+    ) -> Self {
+        Self {
+            retained,
+            block,
+            generation,
             body_len,
             wire_header,
-            identity,
-            sink,
-            released: false,
-            _not_send: PhantomData,
-        })
+            returned: false,
+        }
     }
 
-    /// Body length across all segments.
+    /// Body length.
     pub const fn len(&self) -> usize {
         self.body_len
     }
 
-    /// Whether `len` is zero.
+    /// Whether the body is empty.
     pub const fn is_empty(&self) -> bool {
         self.body_len == 0
     }
 
-    /// One segment, or two when the body wraps around the arena end.
-    pub const fn segment_count(&self) -> usize {
-        self.span_count as usize
-    }
-
-    /// The segment at `index`, or `None` past `segment_count`.
-    pub fn segment(&self, index: usize) -> Option<LeaseSpan<'_>> {
-        if index >= usize::from(self.span_count) {
-            return None;
-        }
-        self.spans[index]
-    }
-
-    /// Header the producer committed with the body.
+    /// Header the producer committed with the body, captured and validated at receive time.
     pub const fn wire_header(&self) -> [u8; crate::descriptor::WIRE_V3_HEADER_BYTES] {
         self.wire_header
     }
 
-    /// Identity the release carries; the ring matches it against the slot.
-    pub const fn identity(&self) -> ReleaseIdentity {
-        self.identity
+    /// Identity the return carries.
+    pub fn identity(&self) -> PayloadIdentity {
+        PayloadIdentity::new(
+            self.retained.incarnation(),
+            self.retained.lane(),
+            self.block,
+            self.generation,
+        )
     }
 
-    /// Releases the frame and returns the ring's verdict. Drop does the same but discards
-    /// the error.
-    pub fn release(mut self) -> Result<(), LeaseError> {
-        self.release_once()
+    /// The backing this lease keeps alive.
+    pub fn retained(&self) -> &Arc<Retained> {
+        &self.retained
     }
 
-    /// Copies every segment, in order, into one `Vec` of `len` bytes. Fails if the segment
-    /// lengths do not sum to `len`.
+    /// Raw view of the body, valid while the lease is borrowed. The peer can still write the
+    /// mapping, so reads go through atomics; copy before decoding.
+    pub fn body(&self) -> Result<LeaseSpan<'_>, LeaseError> {
+        let ptr = self
+            .retained
+            .body_ptr(self.block, self.body_len)
+            .map_err(|_| LeaseError::InvalidSpan)?;
+        if self.body_len == 0 {
+            // A zero-length view still needs a non-null base; the header pointer is inside the
+            // block and never dereferenced for a zero length.
+            let header = self
+                .retained
+                .header_ptr(self.block)
+                .map_err(|_| LeaseError::InvalidSpan)?;
+            // SAFETY: zero bytes are read through the span; the pointer is inside the retained
+            // mapping, which lives as long as `self`.
+            return unsafe { LeaseSpan::new(header, 0) };
+        }
+        // SAFETY: `body_ptr` checked `[offset, offset + body_len)` against the block's capacity
+        // and the mapping length; the mapping (owned by `retained`) stays mapped for the borrow
+        // of `self`. No `&[u8]` over the arena is ever formed in this crate; access goes through
+        // atomic reads.
+        unsafe { LeaseSpan::new(ptr, self.body_len) }
+    }
+
+    /// Copies the body into one `Vec` of `len` bytes.
     pub fn to_vec(&self) -> Result<Vec<u8>, LeaseError> {
         let mut bytes = vec![0u8; self.body_len];
-        let mut cursor = 0usize;
-        for index in 0..usize::from(self.span_count) {
-            let span = self.spans[index].ok_or(LeaseError::InvalidSpan)?;
-            let end = cursor
-                .checked_add(span.len())
-                .ok_or(LeaseError::LengthMismatch)?;
-            let destination = bytes
-                .get_mut(cursor..end)
-                .ok_or(LeaseError::LengthMismatch)?;
-            span.copy_to(destination)?;
-            cursor = end;
-        }
-        if cursor != self.body_len {
-            return Err(LeaseError::LengthMismatch);
+        if self.body_len != 0 {
+            self.body()?.copy_to(&mut bytes)?;
         }
         Ok(bytes)
     }
 
-    fn release_once(&mut self) -> Result<(), LeaseError> {
-        if self.released {
+    /// Returns the payload and reports whether the producer could be woken. Drop does the same
+    /// but discards the error; either way the block is returned exactly once.
+    pub fn release(mut self) -> Result<(), LeaseError> {
+        self.return_once()
+    }
+
+    fn return_once(&mut self) -> Result<(), LeaseError> {
+        if self.returned {
             return Err(LeaseError::DuplicateRelease);
         }
-        // `released` is set before the sink call so `Drop` cannot retry a failed release.
-        self.released = true;
-        self.sink.release(self.identity)
+        // `returned` is set before the completion so `Drop` cannot publish twice.
+        self.returned = true;
+        self.retained
+            .complete(self.block, self.generation)
+            .map_err(|_| LeaseError::WakeFailed)
     }
 }
 
-impl fmt::Debug for ReceiveLease<'_> {
+impl fmt::Debug for PayloadLease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ReceiveLease(<redacted>)")
+        formatter.write_str("PayloadLease(<redacted>)")
     }
 }
 
-impl Drop for ReceiveLease<'_> {
+impl Drop for PayloadLease {
     fn drop(&mut self) {
-        if !self.released {
-            let _ = self.release_once();
+        if !self.returned {
+            let _ = self.return_once();
         }
     }
 }
 
-/// Why a span, lease, or release was refused.
+/// Test-only observers for the three operations a final drop must never perform: a `Ring`
+/// call, a queue-slot wait, and a free-list mutation. `enter_final_drop` marks the window;
+/// each forbidden entry point calls its observer, which records a violation when the window
+/// is open. Completion-node allocation and the N-API boundary have no code point in this
+/// crate: the pool publishes into a fixed cell, and the boundary lives in the native addon.
+#[cfg(test)]
+pub mod observers {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    thread_local! {
+        static IN_FINAL_DROP: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// `Ring` entry points reached inside a final drop.
+    pub static RING_CALL: AtomicU64 = AtomicU64::new(0);
+    /// Descriptor-slot parks reached inside a final drop.
+    pub static SLOT_WAIT: AtomicU64 = AtomicU64::new(0);
+    /// Free-list pushes or pops reached inside a final drop.
+    pub static FREE_LIST_MUTATION: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn enter_final_drop() {
+        IN_FINAL_DROP.with(|depth| depth.set(depth.get() + 1));
+    }
+
+    pub(crate) fn exit_final_drop() {
+        IN_FINAL_DROP.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+
+    /// Whether the calling thread is inside a final drop.
+    pub fn in_final_drop() -> bool {
+        IN_FINAL_DROP.with(|depth| depth.get() != 0)
+    }
+
+    fn observe(counter: &AtomicU64) {
+        if in_final_drop() {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Called at every `Ring` entry point.
+    pub fn ring_call() {
+        observe(&RING_CALL);
+    }
+
+    /// Called before parking for a descriptor slot.
+    pub fn slot_wait() {
+        observe(&SLOT_WAIT);
+    }
+
+    /// Called at every free-list push or pop.
+    pub fn free_list_mutation() {
+        observe(&FREE_LIST_MUTATION);
+    }
+
+    /// Every counter, in the order above.
+    pub fn snapshot() -> [u64; 3] {
+        [
+            RING_CALL.load(Ordering::Relaxed),
+            SLOT_WAIT.load(Ordering::Relaxed),
+            FREE_LIST_MUTATION.load(Ordering::Relaxed),
+        ]
+    }
+}
+
+/// Why a span, lease, or return was refused.
 #[derive(Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LeaseError {
-    /// Null span pointer, or a span count that disagrees with the spans present.
+    /// Null span pointer, or a body that does not fit its block.
     #[error("receive span is invalid")]
     InvalidSpan,
-    /// A destination or segment length disagrees with the span length.
+    /// A destination length disagrees with the span length.
     #[error("receive span lengths disagree")]
     LengthMismatch,
-    /// The release identity names a different incarnation.
-    #[error("release identity does not match incarnation")]
-    WrongIncarnation,
-    /// The release identity names a different lane.
-    #[error("release identity does not match lane")]
-    WrongLane,
-    /// The release sequence is zero or not the one leased.
-    #[error("release sequence is invalid")]
-    InvalidSequence,
-    /// The same identity was released twice.
+    /// The same payload was returned twice.
     #[error("release is duplicated")]
     DuplicateRelease,
-    /// The transport storage was quarantined; no release can complete.
-    #[error("transport storage is quarantined")]
-    Quarantined,
+    /// The completion was published but the capacity doorbell could not be rung. The block is
+    /// returned regardless; only the wake is lost.
+    #[error("payload completion could not wake the producer")]
+    WakeFailed,
 }
 
 impl fmt::Debug for LeaseError {
@@ -403,72 +458,173 @@ impl fmt::Debug for LeaseError {
     }
 }
 
+/// A tiny pool over an anonymous mapping, so Miri witnesses run without a memfd. Nothing is
+/// parked on the capacity doorbell, so no token is ever sent.
+#[cfg(test)]
+pub(crate) fn retained_fixture() -> Arc<Retained> {
+    use crate::backend::retained::{Mapping, initialize_mapping};
+    use crate::descriptor::Incarnation;
+    use crate::pool::{ClassSpec, MappingLayout, PoolGeometry};
+
+    let geometry = PoolGeometry::new(
+        2,
+        1,
+        [
+            ClassSpec::new(4096, 2),
+            ClassSpec::new(8192, 1),
+            ClassSpec::new(12288, 1),
+            ClassSpec::new(16384, 1),
+            ClassSpec::new(20480, 1),
+        ],
+        ClassSpec::new(4096, 1),
+        ClassSpec::new(8192, 1),
+    )
+    .unwrap();
+    let layout = MappingLayout::new(&geometry, 4096).unwrap();
+    let mapping = Mapping::anonymous(layout.total).unwrap();
+    let incarnation = Incarnation::from_bytes([7; 16]);
+    initialize_mapping(&mapping, &layout, &geometry, incarnation, 3).unwrap();
+    let (data, _data_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (capacity, _capacity_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    // The peer ends are dropped so no reader exists; `send` is never reached because `parked`
+    // stays zero in these tests.
+    Arc::new(Retained::new(
+        mapping,
+        layout,
+        geometry,
+        incarnation,
+        3,
+        data,
+        capacity,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::sync::Arc;
 
     use super::{
-        AccessShape, LeaseError, LeaseSpan, ReceiveLease, ReleaseSink, WORD, copy_in, copy_out,
+        AccessShape, LeaseError, LeaseSpan, PayloadLease, WORD, copy_in, copy_out, observers,
     };
-    use crate::descriptor::{Incarnation, ReleaseIdentity};
+    use crate::backend::retained::Retained;
 
-    struct CallLog {
-        calls: Cell<usize>,
-        verdict: Result<(), LeaseError>,
+    pub(crate) use super::retained_fixture;
+
+    fn lease_over(
+        retained: &Arc<Retained>,
+        block: u32,
+        generation: u64,
+        body: &[u8],
+    ) -> PayloadLease {
+        let ptr = retained.body_ptr(block, body.len()).unwrap();
+        // SAFETY: the pointer is inside the retained anonymous mapping, which no reference
+        // covers; the atomic copy is the only access.
+        unsafe { copy_in(body, ptr) };
+        retained.mark_live(block, generation);
+        let mut header = [0u8; crate::descriptor::WIRE_V3_HEADER_BYTES];
+        header[..4].copy_from_slice(&(body.len() as u32).to_le_bytes());
+        header[4] = crate::descriptor::WIRE_V3_VERSION;
+        PayloadLease::new(Arc::clone(retained), block, generation, body.len(), header)
     }
 
-    impl ReleaseSink for CallLog {
-        fn release(&self, _: ReleaseIdentity) -> Result<(), LeaseError> {
-            self.calls.set(self.calls.get() + 1);
-            self.verdict
-        }
+    fn completion(retained: &Retained, block: u32) -> u64 {
+        retained
+            .completion(block)
+            .unwrap()
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    fn lease<'a>(bytes: &'a [std::sync::atomic::AtomicU8], log: &'a CallLog) -> ReceiveLease<'a> {
-        // SAFETY: `bytes` outlives the returned lease, and the only other view of these
-        // bytes is the `&[AtomicU8]`, so no `&[u8]` or `&mut [u8]` covers them while the
-        // span exists.
-        let span =
-            unsafe { LeaseSpan::new(bytes.as_ptr().cast_mut().cast::<u8>(), bytes.len()) }.unwrap();
-        let identity = ReleaseIdentity::new(Incarnation::from_bytes([7; 16]), 0, 1);
-        ReceiveLease::new(
-            [Some(span), None],
-            1,
-            bytes.len(),
-            [0; crate::descriptor::WIRE_V3_HEADER_BYTES],
-            identity,
-            log,
-        )
-        .unwrap()
-    }
+    const _: () = {
+        fn assert_send<T: Send>() {}
+        let _ = assert_send::<PayloadLease>;
+    };
 
     #[test]
-    fn failed_explicit_release_is_not_retried_by_drop() {
-        let bytes: [std::sync::atomic::AtomicU8; 4] =
-            std::array::from_fn(|_| std::sync::atomic::AtomicU8::new(1));
-        let log = CallLog {
-            calls: Cell::new(0),
-            verdict: Err(LeaseError::Quarantined),
-        };
-        let held = lease(&bytes, &log);
-        assert_eq!(held.release(), Err(LeaseError::Quarantined));
+    fn owned_lease_exposes_exact_bytes_and_returns_exactly_once() {
+        let retained = retained_fixture();
+        let body = [0xabu8, 0xcd, 0xef, 0x01, 0x23];
+        let lease = lease_over(&retained, 1, 5, &body);
+        assert_eq!(lease.len(), 5);
+        assert_eq!(lease.to_vec().unwrap(), body);
+        assert_eq!(lease.body().unwrap().read_byte(4), Some(0x23));
+        assert_eq!(lease.body().unwrap().read_byte(5), None);
+        assert_eq!(lease.identity().block(), 1);
+        assert_eq!(lease.identity().generation(), 5);
+        assert_eq!(retained.live_generation(1), Some(5));
+        assert_eq!(retained.outstanding_returns(), 1);
+        assert_eq!(completion(&retained, 1), 0);
+        lease.release().unwrap();
+        assert_eq!(retained.live_generation(1), Some(0));
+        assert_eq!(retained.outstanding_returns(), 0);
         assert_eq!(
-            log.calls.get(),
+            completion(&retained, 1),
+            5,
+            "the captured generation is published once"
+        );
+        assert_eq!(
+            Arc::strong_count(&retained),
             1,
-            "drop must not call the release callback again"
+            "the lease released its backing"
         );
     }
 
     #[test]
-    fn drop_releases_exactly_once() {
-        let bytes: [std::sync::atomic::AtomicU8; 4] =
-            std::array::from_fn(|_| std::sync::atomic::AtomicU8::new(1));
-        let log = CallLog {
-            calls: Cell::new(0),
-            verdict: Ok(()),
-        };
-        drop(lease(&bytes, &log));
-        assert_eq!(log.calls.get(), 1);
+    fn owned_lease_drop_returns_once_after_moving_to_another_thread() {
+        let retained = retained_fixture();
+        let lease = lease_over(&retained, 2, 9, b"moved");
+        let worker = std::thread::spawn(move || {
+            let copied = lease.to_vec().unwrap();
+            drop(lease);
+            copied
+        });
+        assert_eq!(worker.join().unwrap(), b"moved");
+        assert_eq!(completion(&retained, 2), 9);
+        assert_eq!(retained.live_generation(2), Some(0));
+        assert_eq!(retained.outstanding_returns(), 0);
+    }
+
+    #[test]
+    fn stale_completion_cannot_lower_a_newer_one() {
+        let retained = retained_fixture();
+        let newer = lease_over(&retained, 0, 12, b"new");
+        newer.release().unwrap();
+        assert_eq!(completion(&retained, 0), 12);
+        // A late return from an earlier generation of the same block publishes nothing lower.
+        let stale = PayloadLease::new(
+            Arc::clone(&retained),
+            0,
+            11,
+            0,
+            [0; crate::descriptor::WIRE_V3_HEADER_BYTES],
+        );
+        drop(stale);
+        assert_eq!(completion(&retained, 0), 12);
+    }
+
+    #[test]
+    fn backing_outlives_the_last_endpoint_handle_until_the_lease_returns() {
+        let retained = retained_fixture();
+        let lease = lease_over(&retained, 3, 1, b"held");
+        let weak = Arc::downgrade(&retained);
+        drop(retained);
+        assert!(
+            weak.upgrade().is_some(),
+            "the lease keeps the mapping alive"
+        );
+        assert_eq!(lease.to_vec().unwrap(), b"held");
+        drop(lease);
+        assert!(weak.upgrade().is_none(), "the last owner unmaps");
+    }
+
+    #[test]
+    fn final_drop_reaches_no_forbidden_operation() {
+        let retained = retained_fixture();
+        let before = observers::snapshot();
+        let lease = lease_over(&retained, 4, 2, b"quiet");
+        drop(lease);
+        assert_eq!(observers::snapshot(), before);
+        assert!(!observers::in_final_drop());
     }
 
     #[test]

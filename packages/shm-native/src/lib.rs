@@ -16,15 +16,15 @@ use std::time::{Duration, Instant};
 use napi::bindgen_prelude::{AsyncTask, Buffer, FnArgs, Function, Object};
 use napi::{Env, Error, JsValue, Result, Status, Task, Unknown, ValueType, sys};
 use napi_derive::napi;
-use shm_transport::backend::ring::RingGrant;
+use shm_transport::backend::ring::{HOST_TO_PEER_LANE, PEER_TO_HOST_LANE, PoolGrant};
 use shm_transport::backend::ring::{ProducerError, ProducerReservation, Ring};
 use shm_transport::descriptor::{WIRE_V3_HEADER_BYTES, check_wire_header};
-use shm_transport::lease::ReceiveLease;
-use shm_transport::profile::host_test_ring_profile;
+use shm_transport::lease::PayloadLease;
+use shm_transport::profile::host_payload_pool_profile;
 
 use napi_buffers::ExternalRef;
 
-const PROFILE: &str = shm_transport::profile::HOST_TEST_RING_PROFILE;
+const PROFILE: &str = shm_transport::profile::HOST_PAYLOAD_POOL_PROFILE;
 
 /// The one bounded, redacted failure every malformed raw descriptor maps
 /// to. Grant bytes, pids, fds, and key names never reach error messages.
@@ -34,8 +34,13 @@ const DESCRIPTOR_ERROR: &str = "invalid shared-memory descriptor";
 pub struct NativeTestPair {
     pub first: u32,
     pub second: u32,
+    /// Ordinary descriptor slots per direction: how many frames a producer can publish before
+    /// the consumer acknowledges any.
     pub descriptor_depth: u32,
-    pub arena_bytes: u32,
+    /// Largest body one ordinary block of the smallest class carries.
+    pub smallest_body_capacity: u32,
+    /// Blocks in the smallest ordinary class.
+    pub smallest_class_count: u32,
 }
 
 #[napi(object)]
@@ -48,8 +53,9 @@ pub struct NativeSetupOptions {
 }
 
 struct ActiveLease {
-    // Dropping the lease releases the frame; `release` reports the ring's verdict.
-    lease: ReceiveLease<'static>,
+    // Owned: the lease keeps its backing mapped and returns the block on drop or `release`,
+    // independently of the `Ring` that received it.
+    lease: PayloadLease,
     buffers: Vec<ExternalRef>,
 }
 
@@ -67,8 +73,9 @@ struct PendingChannel {
 
 struct Channel {
     // Field order is load-bearing: Rust drops fields in declaration order, so
-    // every reservation that borrows `to_host` and every lease that borrows
-    // `from_host` is dropped before its ring.
+    // every reservation that borrows `to_host` is dropped before its ring. Leases
+    // own their backing and need no such order; they are dropped first anyway so
+    // their returns publish while the channel still exists.
     producers: HashMap<u32, ActiveProducer>,
     active: HashMap<u32, ActiveLease>,
     // Aliases whose detachment failed; retained so the channel entry (and its
@@ -254,15 +261,22 @@ fn strict_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
 
 /// `Ring::attach` validates a grant against its own mapping, not against `PROFILE`, so two
 /// self-consistent grants with different geometry would otherwise attach as one channel.
-pub(crate) fn grant_matches_profile(grant: RingGrant) -> bool {
-    let Ok(profile) = host_test_ring_profile() else {
+pub(crate) fn grant_matches_profile(grant: PoolGrant) -> bool {
+    let Ok(profile) = host_payload_pool_profile() else {
         return false;
     };
-    let geometry = grant.geometry();
-    let matches = |actual: u64, expected: usize| u64::try_from(expected) == Ok(actual);
-    matches(geometry.descriptor_depth, profile.descriptor_depth())
-        && matches(geometry.arena_bytes, profile.arena_bytes())
-        && matches(geometry.max_leases, profile.max_leases())
+    grant.geometry() == profile.geometry()
+        && grant.mapping_bytes() == profile.mapping_bytes_per_direction()
+}
+
+/// Whether `hex` decodes as a current-layout grant. Test fixtures use this to prove a
+/// descriptor is valid before mutating it, so a rejection they then assert comes from the
+/// mutation rather than from a stale grant encoding.
+#[napi]
+pub fn grant_decodes(hex: String) -> bool {
+    strict_hex::<{ PoolGrant::encoded_len() }>(&hex)
+        .and_then(|bytes| PoolGrant::decode(bytes).ok())
+        .is_some_and(grant_matches_profile)
 }
 
 /// Duplicates caller-supplied descriptor numbers with `fcntl`, which reports `EBADF` for
@@ -283,8 +297,15 @@ fn clone_descriptors(fds: [i32; 3]) -> Result<[OwnedFd; 3]> {
         .map_err(|_| error("shared-memory attachment failed"))
 }
 
-fn attach_ring(descriptors: [OwnedFd; 3], grant: RingGrant) -> Result<Ring> {
-    Ring::attach(descriptors, grant).map_err(|_| error("shared-memory attachment failed"))
+fn attach_ring(descriptors: [OwnedFd; 3], grant: PoolGrant) -> Result<Ring> {
+    let ring =
+        Ring::attach(descriptors, grant).map_err(|_| error("shared-memory attachment failed"))?;
+    // Setup attaches only fresh pools: traffic already in flight means the pool was not created
+    // for this attachment.
+    if !ring.is_fresh() {
+        return Err(error("shared-memory attachment failed"));
+    }
+    Ok(ring)
 }
 
 fn cleanup_created_refs(
@@ -633,7 +654,7 @@ pub fn active_channel_count() -> Result<u32> {
 #[napi]
 pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
     {
-        const GRANT_HEX_LEN: usize = RingGrant::encoded_len() * 2;
+        const GRANT_HEX_LEN: usize = PoolGrant::encoded_len() * 2;
         // The raw descriptor is checked before bindgen narrowing or coercion.
         // Rejected descriptors produce no side effects.
         if descriptor.get_type().map_err(|_| descriptor_error())? != ValueType::Object {
@@ -679,7 +700,7 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
                 f64::from(i32::MAX),
             )? as i32,
         ];
-        let host_to_peer_grant = RingGrant::decode(
+        let host_to_peer_grant = PoolGrant::decode(
             strict_hex(&string_field(
                 env,
                 &object,
@@ -689,7 +710,7 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
             .ok_or_else(descriptor_error)?,
         )
         .map_err(|_| descriptor_error())?;
-        let peer_to_host_grant = RingGrant::decode(
+        let peer_to_host_grant = PoolGrant::decode(
             strict_hex(&string_field(
                 env,
                 &object,
@@ -706,7 +727,8 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
             .chain(peer_to_host_fds)
             .collect::<BTreeSet<_>>();
         if distinct.len() != 6
-            || host_to_peer_grant == peer_to_host_grant
+            || host_to_peer_grant.lane() != HOST_TO_PEER_LANE
+            || peer_to_host_grant.lane() != PEER_TO_HOST_LANE
             || !grant_matches_profile(host_to_peer_grant)
             || !grant_matches_profile(peer_to_host_grant)
         {
@@ -811,16 +833,14 @@ impl Task for BeginSetupTask {
             peer_data,
             peer_capacity,
         ] = pending.take_descriptors().map_err(setup_error)?;
-        let from_host = Ring::attach(
+        let from_host = attach_ring(
             [host_mapping, host_data, host_capacity],
             pending.host_to_peer_grant,
-        )
-        .map_err(|_| error("shared-memory attachment failed"))?;
-        let to_host = Ring::attach(
+        )?;
+        let to_host = attach_ring(
             [peer_mapping, peer_data, peer_capacity],
             pending.peer_to_host_grant,
-        )
-        .map_err(|_| error("shared-memory attachment failed"))?;
+        )?;
         REGISTRY.with(|registry| {
             let mut registry = registry
                 .try_borrow_mut()
@@ -930,14 +950,14 @@ pub fn finish_setup(pending_id: u32) -> Result<AsyncTask<FinishSetupTask>> {
 #[napi]
 pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
     {
-        let profile = host_test_ring_profile().map_err(|_| error("test profile unavailable"))?;
-        let first_to_second = Ring::create(&profile, 1)
+        let profile = host_payload_pool_profile().map_err(|_| error("test profile unavailable"))?;
+        let first_to_second = Ring::create(&profile, HOST_TO_PEER_LANE)
             .map_err(|_| error("shared-memory test pair creation failed"))?;
         let second_from_first = first_to_second
             .attachment()
             .and_then(|attachment| attachment.attach())
             .map_err(|_| error("shared-memory test pair creation failed"))?;
-        let second_to_first = Ring::create(&profile, 2)
+        let second_to_first = Ring::create(&profile, PEER_TO_HOST_LANE)
             .map_err(|_| error("shared-memory test pair creation failed"))?;
         let first_from_second = second_to_first
             .attachment()
@@ -982,13 +1002,15 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
                     _reservation: None,
                 },
             )?;
+            let geometry = profile.geometry();
+            let smallest = geometry.classes()[0];
             Ok(NativeTestPair {
                 first,
                 second,
-                descriptor_depth: u32::try_from(profile.descriptor_depth())
+                descriptor_depth: geometry.ordinary_descriptors(),
+                smallest_body_capacity: u32::try_from(smallest.body_capacity())
                     .map_err(|_| error("test profile unavailable"))?,
-                arena_bytes: u32::try_from(profile.arena_bytes())
-                    .map_err(|_| error("test profile unavailable"))?,
+                smallest_class_count: smallest.count,
             })
         })
     }
@@ -1261,15 +1283,36 @@ mod tests {
     }
 
     #[test]
-    fn profile_geometry_admits_the_test_profile_and_rejects_another_depth() {
-        let profile = host_test_ring_profile().expect("profile");
+    fn profile_geometry_admits_the_pool_profile_and_rejects_another_geometry() {
+        let profile = host_payload_pool_profile().expect("profile");
         let ring = Ring::create(&profile, 1).expect("ring");
         let grant = ring.attachment().expect("attachment").grant();
         assert!(grant_matches_profile(grant));
+        let hex: String = grant.encode().iter().fold(String::new(), |mut text, byte| {
+            use std::fmt::Write;
+            write!(text, "{byte:02x}").unwrap();
+            text
+        });
+        assert!(grant_decodes(hex.clone()));
+        assert!(!grant_decodes(hex[..hex.len() - 2].to_owned()));
 
-        let other = shm_transport::profile::ring_profile(
+        let other = shm_transport::profile::pool_profile(
             shm_transport::descriptor::HardwareProfileId::new("other-geometry-v1")
                 .expect("profile id"),
+            shm_transport::pool::PoolGeometry::new(
+                4,
+                1,
+                [
+                    shm_transport::pool::ClassSpec::new(4096, 2),
+                    shm_transport::pool::ClassSpec::new(8192, 1),
+                    shm_transport::pool::ClassSpec::new(16384, 1),
+                    shm_transport::pool::ClassSpec::new(32768, 1),
+                    shm_transport::pool::ClassSpec::new(64 * 1024 * 1024 + 4096, 1),
+                ],
+                shm_transport::pool::ClassSpec::new(4096, 1),
+                shm_transport::pool::ClassSpec::new(32768, 1),
+            )
+            .expect("geometry"),
         )
         .expect("other profile");
         assert_ne!(other.descriptor_depth(), profile.descriptor_depth());
@@ -1279,8 +1322,60 @@ mod tests {
     }
 
     #[test]
+    fn owned_lease_survives_the_channel_that_received_it() {
+        let profile = host_payload_pool_profile().expect("profile");
+        let producer = Ring::create(&profile, 1).expect("producer ring");
+        let consumer = producer
+            .attachment()
+            .and_then(|attachment| attachment.attach())
+            .expect("consumer ring");
+        let mut reservation = producer
+            .reserve_until(
+                5,
+                shm_transport::backend::ring::wire_v3_header(5).expect("header"),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("reservation");
+        reservation.write(b"owned").expect("write");
+        reservation.commit(5).expect("commit");
+        let lease = consumer.try_receive().expect("receive").expect("frame");
+        let mut active = HashMap::new();
+        active.insert(
+            1,
+            ActiveLease {
+                lease,
+                buffers: Vec::new(),
+            },
+        );
+        let mut channel = Channel {
+            producers: HashMap::new(),
+            active,
+            stranded: Vec::new(),
+            to_host: Box::new(Ring::create(&profile, 2).expect("ring")),
+            from_host: Box::new(consumer),
+            next_producer: 0,
+            next_lease: 1,
+            dispatched_lease: 0,
+            closed: false,
+            setup: None,
+            _reservation: None,
+        };
+        let mut active = std::mem::take(&mut channel.active);
+        drop(channel);
+        let held = active.remove(&1).expect("lease").lease;
+        assert_eq!(
+            std::sync::Arc::strong_count(held.retained()),
+            1,
+            "the consumer ring is gone; only the lease holds the backing"
+        );
+        assert_eq!(held.to_vec().expect("copy"), b"owned");
+        held.release().expect("release");
+        drop(producer);
+    }
+
+    #[test]
     fn channel_drops_borrowing_reservations_before_the_ring() {
-        let profile = host_test_ring_profile().expect("profile");
+        let profile = host_payload_pool_profile().expect("profile");
         let to_host = Box::new(Ring::create(&profile, 1).expect("producer ring"));
         let from_host = Ring::create(&profile, 2).expect("consumer ring");
         let ring_ptr: *const Ring = to_host.as_ref();
@@ -1410,12 +1505,8 @@ pub fn poll(
         if channel.closed {
             return Err(error("native channel is closed"));
         }
-        let ring_ptr: *const Ring = channel.from_host.as_ref();
-        // SAFETY: `from_host` is boxed, so moving `Channel` does not move the
-        // ring. `active` is declared before `from_host`, so every stored lease
-        // drops before the ring on every Channel destruction path.
-        let ring: &'static Ring = unsafe { &*ring_ptr };
-        let Some(lease) = ring
+        let Some(lease) = channel
+            .from_host
             .try_receive()
             .map_err(|_| error("shared-memory receive failed"))?
         else {
@@ -1424,18 +1515,17 @@ pub fn poll(
         let token = allocate_token(&mut channel.next_lease, &channel.active)
             .ok_or_else(|| error("receive lease identity exhausted"))?;
         let header = Buffer::from(lease.wire_header().to_vec());
-        let mut views = Vec::with_capacity(lease.segment_count());
-        let mut refs = Vec::with_capacity(lease.segment_count());
+        let mut views = Vec::with_capacity(1);
+        let mut refs = Vec::with_capacity(1);
         let built = (|| -> Result<()> {
-            for index in 0..lease.segment_count() {
-                let span = lease
-                    .segment(index)
-                    .ok_or_else(|| error("shared-memory receive failed"))?;
-                let (view, reference) =
-                    napi_buffers::create_external_view(env, span.as_mut_ptr(), span.len())?;
-                views.push(view);
-                refs.push(reference);
-            }
+            // One contiguous body per block: exactly one exact-bounds view.
+            let span = lease
+                .body()
+                .map_err(|_| error("shared-memory receive failed"))?;
+            let (view, reference) =
+                napi_buffers::create_external_view(env, span.as_mut_ptr(), span.len())?;
+            views.push(view);
+            refs.push(reference);
             Ok(())
         })();
         if let Err(build_error) = built {

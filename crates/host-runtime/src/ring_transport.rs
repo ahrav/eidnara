@@ -1,7 +1,10 @@
-//! Mandatory shared-memory ring transport.
+//! Mandatory shared-memory payload-pool transport.
 //!
-//! One dedicated OS thread creates and owns both `!Send` ring endpoints. Host
+//! One dedicated OS thread creates and owns both `!Send` pool endpoints. Host
 //! tasks exchange frame tickets and completion notifications with that thread.
+//! The backing charge is shared with every owned lease the endpoint hands out,
+//! so it settles when the last lease returns, while the worker charge settles
+//! when the thread exits.
 
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,8 +14,8 @@ use std::{fmt, io};
 
 use crate::setup_socket::RING_DESCRIPTOR_COUNT;
 use crate::wire::{EnvelopeHeader, FrameType, decode_header};
-use shm_transport::backend::ring::RingGrant;
 use shm_transport::backend::ring::{DuplexRing, ProducerError, ProducerReservation, Ring};
+use shm_transport::backend::ring::{HOST_TO_PEER_LANE, PEER_TO_HOST_LANE, PoolGrant};
 use shm_transport::profile::{
     AdmissionController, HostLimits as ShmHostLimits, ResourceCharges, TargetProfile,
 };
@@ -26,8 +29,8 @@ use crate::frame_channel::{
 };
 use crate::wire::{ByteBudget, MAX_CONTROL_BODY_LEN};
 
-/// Current ring profile accepted by every process in one release.
-pub const RING_PROFILE: &str = shm_transport::profile::HOST_TEST_RING_PROFILE;
+/// Current pool profile accepted by every process in one release.
+pub const RING_PROFILE: &str = shm_transport::profile::HOST_PAYLOAD_POOL_PROFILE;
 
 /// Test-only observer invoked after each successful frame publication with
 /// the published frame's type and channel. It receives no descriptors,
@@ -36,7 +39,8 @@ pub const RING_PROFILE: &str = shm_transport::profile::HOST_TEST_RING_PROFILE;
 pub type PublishHook = Arc<dyn Fn(FrameType, u16) + Send + Sync>;
 
 pub fn ring_profile() -> TargetProfile {
-    shm_transport::profile::host_test_ring_profile().expect("static shared-memory profile is valid")
+    shm_transport::profile::host_payload_pool_profile()
+        .expect("static shared-memory profile is valid")
 }
 
 /// Admission limits sufficient for one connection.
@@ -44,22 +48,32 @@ pub fn per_connection_limits() -> ShmHostLimits {
     let charges = ring_profile().charges();
     ShmHostLimits {
         descriptors: charges.descriptors,
-        arena_bytes: charges.arena_bytes,
+        mapping_bytes: charges.mapping_bytes,
+        ledger_bytes: charges.ledger_bytes,
         leases: charges.leases,
         mappings: charges.mappings,
         file_descriptors: charges.file_descriptors,
+        wake_handles: charges.wake_handles,
         workers: charges.workers,
         client_instances: charges.client_instances,
         pinned_workers: charges.pinned_workers,
     }
 }
 
-/// Ceiling on sparse ring virtual arena bytes this process admits at once.
+/// Maximum committed transport bytes admitted at once, including every pool's mapped bytes
+/// and private ledgers. Pools never return touched pages to the kernel, so the maximum bounds
+/// resident bytes as well as the mapping commitment.
 pub const MAX_RING_RESIDENT_BYTES: u64 = 1 << 30;
 
+/// Connections whose complete checked transport charge fits under
+/// [`MAX_RING_RESIDENT_BYTES`]; never below one.
 pub fn affordable_connections() -> u64 {
+    let committed = ring_profile()
+        .charges()
+        .committed_bytes()
+        .unwrap_or(u64::MAX);
     MAX_RING_RESIDENT_BYTES
-        .checked_div(per_connection_limits().arena_bytes)
+        .checked_div(committed)
         .unwrap_or(1)
         .max(1)
 }
@@ -114,10 +128,12 @@ pub fn process_limits(connections: usize) -> Result<ShmHostLimits, ProcessLimits
     };
     Ok(ShmHostLimits {
         descriptors: scale(one.descriptors)?,
-        arena_bytes: scale(one.arena_bytes)?,
+        mapping_bytes: scale(one.mapping_bytes)?,
+        ledger_bytes: scale(one.ledger_bytes)?,
         leases: scale(one.leases)?,
         mappings: scale(one.mappings)?,
         file_descriptors: scale(one.file_descriptors)?,
+        wake_handles: scale(one.wake_handles)?,
         workers: scale(one.workers)?,
         client_instances: scale(one.client_instances)?,
         pinned_workers: scale(one.pinned_workers)?,
@@ -191,10 +207,12 @@ impl RingTransport {
         let charges = |value: ResourceCharges| {
             serde_json::json!({
                 "descriptors": value.descriptors,
-                "arena_bytes": value.arena_bytes,
+                "mapping_bytes": value.mapping_bytes,
+                "ledger_bytes": value.ledger_bytes,
                 "leases": value.leases,
                 "mappings": value.mappings,
                 "file_descriptors": value.file_descriptors,
+                "wake_handles": value.wake_handles,
                 "workers": value.workers,
                 "client_instances": value.client_instances,
                 "pinned_workers": value.pinned_workers,
@@ -202,10 +220,12 @@ impl RingTransport {
         };
         let limits = serde_json::json!({
             "descriptors": self.limits.descriptors,
-            "arena_bytes": self.limits.arena_bytes,
+            "mapping_bytes": self.limits.mapping_bytes,
+            "ledger_bytes": self.limits.ledger_bytes,
             "leases": self.limits.leases,
             "mappings": self.limits.mappings,
             "file_descriptors": self.limits.file_descriptors,
+            "wake_handles": self.limits.wake_handles,
             "workers": self.limits.workers,
             "client_instances": self.limits.client_instances,
             "pinned_workers": self.limits.pinned_workers,
@@ -232,6 +252,7 @@ impl RingTransport {
                 "profile": RING_PROFILE,
                 "wire_version": crate::wire::PROTOCOL_VERSION,
                 "descriptor_schema": shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
+                "layout_version": shm_transport::backend::retained::LAYOUT_VERSION,
             },
             "bounds": limits,
             "accounting": accounting,
@@ -273,6 +294,10 @@ impl RingTransport {
             self.exhaustions.fetch_add(1, Ordering::Relaxed);
             RingUnavailable
         })?;
+        // The worker charge ends with the endpoint thread; the backing charge ends with the
+        // last owned lease of either direction, or moves to quarantine.
+        let (worker_admission, backing_admission) = admission.split();
+        let backing_admission = Arc::new(backing_admission);
         let root = CancellationToken::new();
         let read_cancel = root.child_token();
         let (sender, queue) = frame_sender(queue_frames, root.clone(), frame_deadline);
@@ -316,10 +341,13 @@ impl RingTransport {
                 let (runtime, rings) = match (runtime, rings) {
                     (Ok(runtime), Ok(rings)) => (runtime, rings),
                     _ => {
+                        // Nothing was exposed to a peer: every charge refunds with the drops.
                         let _ = initialized_tx.send(Err(RingUnavailable));
+                        drop(worker_admission);
                         return;
                     }
                 };
+                rings.retain_charge(Arc::clone(&backing_admission));
                 let transfer = worker_descriptor(&rings);
                 let Ok((descriptor, descriptors)) = transfer else {
                     let _ = initialized_tx.send(Err(RingUnavailable));
@@ -348,18 +376,24 @@ impl RingTransport {
                         .try_send(Err(ReadClose::Corrupt("shared-memory endpoint panicked")));
                 }
                 drop(panic_inbound);
-                // A quarantined ring may remain mapped by its peer, so its charges move to the quarantined bucket rather than being refunded.
-                // A peer that closed its doorbell ends has dropped its attachment, so its ring is reclaimable even though the backend latched quarantine on the closed doorbell.
-                let quarantined = (rings.first.is_quarantined() || rings.second.is_quarantined())
-                    && !peer_released_ring(&rings);
-                drop(rings);
-                if quarantined {
-                    // A failed quarantine drops the consumed `Admission`, which refunds the charges.
-                    let _ = admission.quarantine();
-                } else {
-                    admission.release();
-                }
+                // The endpoint has exited, so `io` completes now; the charges settle below, after
+                // the peer-release wait, without delaying the caller.
                 let _ = done_tx.send(());
+                // The backing refunds only once both doorbells read end-of-file, which proves the
+                // peer dropped its rings and every lease. An orderly peer tears its rings down right
+                // after Goodbye, so the wait is short; a peer that keeps a mapping past the grace
+                // moves the charge to the quarantined bucket rather than refunding storage it holds.
+                let quarantined = !peer_released_ring(&rings, PEER_RELEASE_GRACE);
+                drop(rings);
+                if quarantined && backing_admission.quarantine().is_err() {
+                    // Quarantine accounting failed: the charge stays counted rather than falling
+                    // through to a refund of storage nobody proved released.
+                    backing_admission.retain_uncertain();
+                }
+                // The backing charge refunds when the last lease returns and this clone drops;
+                // the worker charge refunds with the thread.
+                drop(backing_admission);
+                drop(worker_admission);
             });
         if spawned.is_err() {
             return Err(RingUnavailable);
@@ -417,18 +451,49 @@ pub(crate) fn worker_descriptor(
     ))
 }
 
+/// How long a retiring endpoint waits for the peer to drop its rings and leases before the
+/// backing charge is treated as retained by the peer.
+const PEER_RELEASE_GRACE: Duration = Duration::from_secs(2);
+
 /// A stream doorbell reads end-of-file only after its peer end is closed, which is how a peer that exited or dropped its attachment appears to the host.
-fn peer_released_ring(rings: &DuplexRing) -> bool {
-    use std::io::Read;
-    let Ok(doorbell) = rings.second.duplicate_data_ready() else {
+fn peer_released_ring(rings: &DuplexRing, grace: Duration) -> bool {
+    // A lease the peer keeps from the host-to-peer pool holds that pool's doorbell end open, so
+    // both directions must read end-of-file before the backing counts as released.
+    let deadline = StdInstant::now() + grace;
+    loop {
+        if doorbell_at_eof(&rings.first) && doorbell_at_eof(&rings.second) {
+            return true;
+        }
+        if StdInstant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn doorbell_at_eof(ring: &Ring) -> bool {
+    use std::io::{ErrorKind, Read};
+    let Ok(doorbell) = ring.duplicate_data_ready() else {
         return false;
     };
     let mut doorbell = std::os::unix::net::UnixStream::from(doorbell);
     if doorbell.set_nonblocking(true).is_err() {
         return false;
     }
-    // The ring is already retired, so consuming a pending wake token here has no reader to starve.
-    matches!(doorbell.read(&mut [0u8; 1]), Ok(0))
+    // The ring is already retired, so consuming pending wake tokens here has no reader to
+    // starve. A peer that exited with a token unread surfaces as `ECONNRESET` once, then EOF.
+    let mut buffer = [0u8; 64];
+    for _ in 0..1024 {
+        match doorbell.read(&mut buffer) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(error) => match error.kind() {
+                ErrorKind::ConnectionReset | ErrorKind::Interrupted => {}
+                _ => return false,
+            },
+        }
+    }
+    false
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -497,9 +562,9 @@ async fn run_endpoint(
             return;
         }
     };
-    // One ring depth of receives after `read_cancel` covers every frame committed before it.
+    // One descriptor depth of receives after `read_cancel` covers every frame committed before it.
     let post_cancel_depth =
-        usize::try_from(rings.second.grant().geometry().descriptor_depth).unwrap_or(usize::MAX);
+        usize::try_from(rings.second.grant().geometry().descriptor_depth()).unwrap_or(usize::MAX);
     let mut post_cancel_frames: Option<usize> = None;
     let mut finishing = false;
     loop {
@@ -871,13 +936,23 @@ impl RingClientEndpoint {
         ] = descriptors;
         let from_host_grant = decode_grant(&descriptor.host_to_peer_grant)?;
         let to_host_grant = decode_grant(&descriptor.peer_to_host_grant)?;
-        if from_host_grant.geometry() != to_host_grant.geometry() {
+        let expected = ring_profile();
+        if from_host_grant.geometry() != to_host_grant.geometry()
+            || from_host_grant.geometry() != expected.geometry()
+            || from_host_grant.lane() != HOST_TO_PEER_LANE
+            || to_host_grant.lane() != PEER_TO_HOST_LANE
+        {
             return Err(RingClientError);
         }
         let from_host = Ring::attach([from_mapping, from_data, from_capacity], from_host_grant)
             .map_err(|_| RingClientError)?;
         let to_host = Ring::attach([to_mapping, to_data, to_capacity], to_host_grant)
             .map_err(|_| RingClientError)?;
+        // Setup attaches only fresh pools: a pool with traffic already in flight was not created
+        // for this activation.
+        if !from_host.is_fresh() || !to_host.is_fresh() {
+            return Err(RingClientError);
+        }
         Ok(Self { to_host, from_host })
     }
 
@@ -955,8 +1030,8 @@ impl RingClientEndpoint {
     }
 }
 
-fn decode_grant(grant: &str) -> Result<RingGrant, RingClientError> {
-    RingGrant::decode(decode_hex(grant)?).map_err(|_| RingClientError)
+fn decode_grant(grant: &str) -> Result<PoolGrant, RingClientError> {
+    PoolGrant::decode(decode_hex(grant)?).map_err(|_| RingClientError)
 }
 
 fn decode_hex<const N: usize>(text: &str) -> Result<[u8; N], RingClientError> {
@@ -1037,6 +1112,21 @@ mod tests {
     use super::*;
     use crate::wire::{Flags, PROTOCOL_VERSION, Priority};
 
+    /// The backing charge settles after `io` completes, once the peer-release wait ends.
+    async fn settled_accounting(
+        transport: &RingTransport,
+        settled: impl Fn(&shm_transport::profile::AccountingSnapshot) -> bool,
+    ) -> shm_transport::profile::AccountingSnapshot {
+        let deadline = StdInstant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = transport.accounting().unwrap();
+            if settled(&snapshot) || StdInstant::now() >= deadline {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     struct TestCharge {
         used: Arc<std::sync::atomic::AtomicUsize>,
         bytes: usize,
@@ -1049,16 +1139,29 @@ mod tests {
     }
 
     #[test]
+    fn production_profile_affords_five_connections_under_the_byte_ceiling() {
+        let one = per_connection_limits();
+        assert_eq!(one.mapping_bytes, 2 * 95_825_920);
+        assert_eq!(one.ledger_bytes, 2 * 187 * 40);
+        assert_eq!(MAX_RING_RESIDENT_BYTES, 1 << 30);
+        assert_eq!(affordable_connections(), 5);
+        assert_eq!(crate::config::HostLimits::default().max_connections, 5);
+    }
+
+    #[test]
     fn process_limits_reject_counts_above_the_resident_byte_ceiling() {
         let affordable = affordable_connections();
         let one = per_connection_limits();
         assert_eq!(
             affordable,
-            MAX_RING_RESIDENT_BYTES / one.arena_bytes,
-            "affordable count is the arena ceiling divided by one ring's charge"
+            MAX_RING_RESIDENT_BYTES / (one.mapping_bytes + one.ledger_bytes),
+            "affordable count is the byte ceiling divided by one connection's complete charge"
         );
+        assert!(affordable >= 1);
         let exact = process_limits(usize::try_from(affordable).unwrap()).expect("affordable");
-        assert_eq!(exact.arena_bytes, one.arena_bytes * affordable);
+        assert_eq!(exact.mapping_bytes, one.mapping_bytes * affordable);
+        assert_eq!(exact.ledger_bytes, one.ledger_bytes * affordable);
+        assert_eq!(exact.wake_handles, one.wake_handles * affordable);
         assert_eq!(
             process_limits(usize::try_from(affordable + 1).unwrap()),
             Err(ProcessLimitsError::ExceedsResidentBytes {
@@ -1153,15 +1256,22 @@ mod tests {
             diagnostics["artifact"]["descriptor_schema"],
             shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION
         );
-        assert_eq!(diagnostics["bounds"]["arena_bytes"], limits.arena_bytes);
-        assert_eq!(diagnostics["accounting"]["active"]["arena_bytes"], 0);
-        assert_eq!(diagnostics["accounting"]["quarantined"]["arena_bytes"], 0);
+        assert_eq!(
+            diagnostics["artifact"]["layout_version"],
+            shm_transport::backend::retained::LAYOUT_VERSION
+        );
+        assert_eq!(diagnostics["bounds"]["mapping_bytes"], limits.mapping_bytes);
+        assert_eq!(diagnostics["bounds"]["ledger_bytes"], limits.ledger_bytes);
+        assert_eq!(diagnostics["bounds"]["wake_handles"], limits.wake_handles);
+        assert_eq!(diagnostics["accounting"]["active"]["mapping_bytes"], 0);
+        assert_eq!(diagnostics["accounting"]["quarantined"]["mapping_bytes"], 0);
         assert_eq!(diagnostics["activation"]["completed"], 1);
         assert_eq!(diagnostics["peer_death"]["observed"], 1);
         assert_eq!(diagnostics["reclamation"]["completed"], 1);
         assert_eq!(diagnostics["exhaustion"]["observed"], 0);
 
-        let encoded = diagnostics.to_string();
+        // The profile id spells "payload"; only the literal it names is allowed to.
+        let encoded = diagnostics.to_string().replace(RING_PROFILE, "");
         for secret_field in [
             "socket_path",
             "native_handle",
@@ -1182,6 +1292,43 @@ mod tests {
         assert!(decode_hex::<1>("+0").is_err());
         let non_ascii = std::panic::catch_unwind(|| decode_hex::<2>("0é0"));
         assert!(matches!(non_ascii, Ok(Err(_))));
+    }
+
+    #[test]
+    fn setup_rejects_grants_whose_lanes_do_not_match_their_direction() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            mut descriptor,
+            descriptors,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let fields = descriptor.as_object_mut().unwrap();
+        let host_to_peer = fields.remove("host_to_peer_grant").unwrap();
+        let peer_to_host = fields.remove("peer_to_host_grant").unwrap();
+        fields.insert("host_to_peer_grant".to_owned(), peer_to_host);
+        fields.insert("peer_to_host_grant".to_owned(), host_to_peer);
+        let [
+            from_mapping,
+            from_data,
+            from_capacity,
+            to_mapping,
+            to_data,
+            to_capacity,
+        ] = descriptors;
+        let swapped = [
+            to_mapping,
+            to_data,
+            to_capacity,
+            from_mapping,
+            from_data,
+            from_capacity,
+        ];
+        assert!(
+            RingClientEndpoint::attach_with_descriptors(&descriptor, swapped).is_err(),
+            "each grant attaches to its own mapping, but lane 1 is not host-to-peer"
+        );
     }
 
     #[test]
@@ -1230,12 +1377,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn control_frame_body_is_copied_out_of_the_ring() {
         let rings = DuplexRing::create(&ring_profile()).unwrap();
-        let geometry = rings.first.grant().geometry();
-        assert_eq!(geometry.descriptor_depth, 8);
-        assert_eq!(geometry.max_leases, 8);
+        let grant = rings.first.grant();
+        let geometry = grant.geometry();
+        assert_eq!(geometry.descriptor_depth(), 48);
+        assert_eq!(geometry.ordinary_descriptors(), 32);
+        assert_eq!(geometry.block_count(), 187);
         assert_eq!(
-            geometry.mapping_bytes,
-            (shm_transport::MIN_ARENA_BYTES + 8_192) as u64
+            grant.mapping_bytes(),
+            ring_profile().mapping_bytes_per_direction()
         );
         let body = b"copy";
         let header = EnvelopeHeader {
@@ -1402,7 +1551,7 @@ mod tests {
         let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
             .expect("peer attaches");
         let io = tokio::spawn(io);
-        let depth = ring_profile().descriptor_depth();
+        let depth = ring_profile().geometry().ordinary_descriptors() as usize;
         for corr in 1..=depth as u64 {
             peer.send(
                 EnvelopeHeader {
@@ -1465,7 +1614,7 @@ mod tests {
         let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
             .expect("peer attaches");
         let io = tokio::spawn(io);
-        let depth = ring_profile().descriptor_depth();
+        let depth = ring_profile().geometry().ordinary_descriptors() as usize;
         let request = |corr: u64| EnvelopeHeader {
             len: 1,
             ver: PROTOCOL_VERSION,
@@ -1497,9 +1646,11 @@ mod tests {
                 Err(ReadClose::Cancelled) => break,
                 Err(other) => panic!("unexpected close {other:?}"),
             }
+            // Frames the peer filled before cancellation were already forwarded; after it, the
+            // endpoint receives at most one descriptor depth more before reporting Cancelled.
             assert!(
-                forwarded <= depth + 1,
-                "a peer that refills every released slot must not postpone Cancelled past one ring depth"
+                forwarded <= depth + ring_profile().descriptor_depth() as usize + 1,
+                "a peer that refills every released slot must not postpone Cancelled past one descriptor depth"
             );
         }
         assert!(
@@ -1531,7 +1682,7 @@ mod tests {
         let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
             .expect("peer attaches");
         let mut io = tokio::spawn(io);
-        let depth = ring_profile().descriptor_depth();
+        let depth = ring_profile().geometry().ordinary_descriptors() as usize;
         let request = |corr: u64| EnvelopeHeader {
             len: 1,
             ver: PROTOCOL_VERSION,
@@ -1622,10 +1773,15 @@ mod tests {
             .expect("root cancellation must stop an endpoint blocked on a full inbound queue")
             .expect("endpoint task joins");
         drop(receiver);
+        drop(peer);
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.active == ResourceCharges::ZERO
+        })
+        .await;
         assert_eq!(
-            transport.accounting().unwrap().active,
+            accounting.active,
             ResourceCharges::ZERO,
-            "a cancelled endpoint over a healthy ring refunds its admission"
+            "a cancelled endpoint over a healthy ring refunds its admission once the peer releases"
         );
     }
 
@@ -1740,6 +1896,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_peer_still_attached_after_an_orderly_close_keeps_the_backing_charge_in_quarantine() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            io,
+            root,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        // The host retires the generation, as a channel-0 Goodbye does, while the peer keeps
+        // both rings attached.
+        root.cancel();
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits")
+            .expect("endpoint task joins");
+        assert_eq!(
+            transport.accounting().unwrap().active.workers,
+            1,
+            "the worker thread is still alive while it waits for the peer to release"
+        );
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.active == ResourceCharges::ZERO
+        })
+        .await;
+        assert_eq!(accounting.active, ResourceCharges::ZERO);
+        assert_ne!(
+            accounting.quarantined,
+            ResourceCharges::ZERO,
+            "the peer still maps both pools, so nothing is proved released"
+        );
+        drop(peer);
+    }
+
+    #[test]
+    fn a_doorbell_with_a_queued_token_ahead_of_end_of_file_still_reads_as_released() {
+        let rings = DuplexRing::create(&ring_profile()).unwrap();
+        let peer = rings.first.attachment().unwrap().attach().unwrap();
+        assert_eq!(peer.arm_data_wait(), Ok(true), "the peer parks on data");
+        let mut reservation = rings
+            .first
+            .try_reserve(1, shm_transport::backend::ring::wire_v3_header(1).unwrap())
+            .unwrap();
+        reservation.write(&[1]).unwrap();
+        reservation.commit(1).unwrap();
+        // The peer exits with the publication's token unread, which Linux reports to the host's
+        // end as `ECONNRESET` on the first read and end-of-file on the next.
+        drop(peer);
+        assert!(doorbell_at_eof(&rings.first));
+    }
+
+    #[tokio::test]
+    async fn a_lease_the_peer_keeps_after_closing_holds_the_backing_charge_in_quarantine() {
+        let transport = RingTransport::for_ring_profile(per_connection_limits());
+        let PreparedRing {
+            descriptor,
+            descriptors,
+            sender,
+            mut receiver,
+            io,
+            ..
+        } = transport
+            .prepare(ByteBudget::new(1 << 20), 8, Duration::from_secs(1))
+            .expect("ring prepares");
+        let peer = RingClientEndpoint::attach_with_descriptors(&descriptor, descriptors)
+            .expect("peer attaches");
+        let io = tokio::spawn(io);
+        let frame = OutboundFrame {
+            bytes: crate::wire::encode_frame(
+                FrameType::Response,
+                Flags::new(false, Priority::Interactive, false),
+                crate::wire::FrameId {
+                    channel: 7,
+                    epoch: 1,
+                    corr: 1,
+                },
+                &[9],
+            )
+            .expect("frame encodes"),
+            tail: Vec::new(),
+            direct: None,
+            charge: crate::wire::ByteCharge::none(),
+            written: None,
+        };
+        sender.send(frame).await.expect("frame admits");
+        let deadline = StdInstant::now() + Duration::from_secs(1);
+        let held = loop {
+            if let Some(lease) = peer.from_host.try_receive().expect("receive") {
+                break lease;
+            }
+            assert!(
+                peer.from_host.wait_for_data(deadline).expect("wait"),
+                "frame arrives"
+            );
+        };
+        let RingClientEndpoint { to_host, from_host } = peer;
+        drop(to_host);
+        drop(from_host);
+        assert!(matches!(receiver.recv().await, Err(ReadClose::Corrupt(_))));
+        tokio::time::timeout(Duration::from_secs(1), io)
+            .await
+            .expect("endpoint exits after the peer closes")
+            .expect("endpoint task joins");
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.quarantined != ResourceCharges::ZERO
+        })
+        .await;
+        assert_eq!(held.to_vec().expect("copy"), [9]);
+        assert_ne!(
+            accounting.quarantined,
+            ResourceCharges::ZERO,
+            "the peer still maps the host-to-peer pool through its lease"
+        );
+        held.release().expect("release");
+    }
+
+    #[tokio::test]
     async fn peer_close_refunds_admission_although_the_backend_quarantines_the_ring() {
         let transport = RingTransport::for_ring_profile(per_connection_limits());
         let PreparedRing {
@@ -1785,7 +2063,10 @@ mod tests {
             .expect("endpoint task joins");
         assert!(sender.is_retired());
 
-        let accounting = transport.accounting().unwrap();
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.active == ResourceCharges::ZERO
+        })
+        .await;
         assert_eq!(accounting.active, ResourceCharges::ZERO);
         assert_eq!(
             accounting.quarantined,
@@ -1840,10 +2121,12 @@ mod tests {
             .await
             .expect("root cancellation must end a budget wait well before the frame deadline")
             .expect("endpoint task joins");
-        assert_eq!(
-            transport.accounting().unwrap().active,
-            ResourceCharges::ZERO
-        );
+        drop(peer);
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.active == ResourceCharges::ZERO
+        })
+        .await;
+        assert_eq!(accounting.active, ResourceCharges::ZERO);
     }
 
     #[test]
@@ -1939,7 +2222,10 @@ mod tests {
             .expect("endpoint task joins");
         assert!(sender.is_retired());
 
-        let accounting = transport.accounting().unwrap();
+        let accounting = settled_accounting(&transport, |accounting| {
+            accounting.active == ResourceCharges::ZERO
+        })
+        .await;
         assert_eq!(accounting.active, ResourceCharges::ZERO);
         assert_eq!(
             accounting.quarantined,

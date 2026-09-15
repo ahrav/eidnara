@@ -1,10 +1,11 @@
-//! Fixed shared-memory ring transport between the host and one peer process.
+//! Fixed shared-memory payload-pool transport between the host and one peer process.
 //!
-//! The ring carries wire-v2 frames through a memfd-backed arena. Every frame is described by
-//! a descriptor the receiver validates against the identity it expects before any byte of the
-//! body is read, so a peer that writes into shared memory cannot make the receiver decode a
-//! frame it did not admit. The transport has no fallback: an unavailable or corrupt ring is
-//! terminal for that connection.
+//! Each direction carries application frames through fixed blocks in a memfd-backed arena.
+//! Every frame is described by a descriptor the receiver validates against its own geometry
+//! and per-block records before any byte of the body is read, so a peer that writes into
+//! shared memory cannot make the receiver decode a frame it did not admit. Received payloads
+//! are owned leases that return their block exactly once from any thread. The transport has
+//! no fallback: an unavailable or corrupt pool is terminal for that connection.
 #![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
@@ -21,9 +22,7 @@ macro_rules! redacted_debug {
 }
 pub(crate) use redacted_debug;
 
-/// Arena geometry: span arithmetic and the frame size bounds shared by both peers.
-pub mod arena;
-/// Ring and sample backends that publish frames into the arena.
+/// Ring backend and the retained backing it shares with owned leases.
 pub mod backend;
 /// Descriptor schema and validation for frames received from an untrusted peer.
 pub mod descriptor;
@@ -31,15 +30,17 @@ pub mod descriptor;
 pub mod evidence;
 /// Fuzz and corpus-replay entry points for the strict byte decoders.
 pub mod harness;
-/// Receive leases: bounded raw views over the arena that release exactly once.
+/// Receive leases: owned payloads with bounded raw views that return exactly once.
 pub mod lease;
 /// Close-state machine shared by the native addon and the host.
 pub mod lifecycle;
-/// Hardware profiles: the ring geometry a profile id names, and host-wide admission of them.
+/// Pool geometry: block classes, ids, and the mapping layout both peers derive from them.
+pub mod pool;
+/// Hardware profiles: the pool geometry a profile id names, and host-wide admission of them.
 pub mod profile;
 /// Setup-handshake proof transcript shared by both peers.
 pub mod setup_auth;
 
-pub use arena::{MAX_FRAME_BYTES, MIN_ARENA_BYTES};
-pub use descriptor::{Incarnation, ReleaseIdentity, WIRE_V3_HEADER_BYTES};
-pub use lease::{LeaseSpan, ReceiveLease};
+pub use descriptor::{Incarnation, PayloadIdentity, WIRE_V3_HEADER_BYTES};
+pub use lease::{LeaseSpan, PayloadLease};
+pub use pool::MAX_FRAME_BYTES;

@@ -1,429 +1,225 @@
-use shm_transport::arena::{
-    ArenaCounts, ArenaError, ArenaSpan, MAX_FRAME_BYTES, MIN_ARENA_BYTES, SpanPlan,
-};
-use shm_transport::backend::sample::{SAMPLE_PREFIX_BYTES, SamplePrefix};
+//! Contract tests for the strict decoders and the close-state machine: descriptor validation,
+//! completion validation, grant identity, profile identifiers, redaction, and lifecycle edges.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
+use shm_transport::backend::ring::{PoolGrant, Ring, RingError};
 use shm_transport::descriptor::{
-    DESCRIPTOR_SCHEMA_VERSION, DescriptorCounts, DescriptorError, FrameDescriptor,
-    HardwareProfileId, Incarnation, ReleaseIdentity, TransportDescriptor, WIRE_V3_HEADER_BYTES,
-    WIRE_V3_VERSION,
+    CompletionRecord, DESCRIPTOR_SCHEMA_VERSION, DescriptorError, HardwareProfileId, Incarnation,
+    PayloadIdentity, PoolDescriptor, TransportDescriptor, WIRE_V3_HEADER_BYTES, WIRE_V3_VERSION,
+    check_wire_header,
 };
 use shm_transport::lifecycle::{CloseState, Lifecycle, LifecycleError};
+use shm_transport::pool::{BlockClass, ClassSpec, Inventory, MAX_FRAME_BYTES, PoolGeometry};
+use shm_transport::profile::{host_payload_pool_profile, pool_profile};
 
-fn header(len: usize) -> [u8; WIRE_V3_HEADER_BYTES] {
+fn header(body_len: usize) -> [u8; WIRE_V3_HEADER_BYTES] {
     let mut header = [0u8; WIRE_V3_HEADER_BYTES];
-    header[..4].copy_from_slice(&(len as u32).to_le_bytes());
+    header[..4].copy_from_slice(&(body_len as u32).to_le_bytes());
     header[4] = WIRE_V3_VERSION;
     header
 }
 
-fn sample_payload(
-    schema: u16,
-    wire_header: [u8; WIRE_V3_HEADER_BYTES],
-    identity: ReleaseIdentity,
-    declared_body_len: u64,
-    body: &[u8],
-) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(SAMPLE_PREFIX_BYTES + body.len());
-    payload.extend_from_slice(&schema.to_le_bytes());
-    payload.extend_from_slice(&wire_header);
-    payload.extend_from_slice(&identity.incarnation().into_bytes());
-    payload.extend_from_slice(&identity.lane().to_le_bytes());
-    payload.extend_from_slice(&identity.sequence().to_le_bytes());
-    payload.extend_from_slice(&declared_body_len.to_le_bytes());
-    payload.extend_from_slice(body);
-    payload
-}
-
-fn identity() -> ReleaseIdentity {
-    ReleaseIdentity::new(Incarnation::from_bytes([7; 16]), 3, 9)
-}
-
-fn valid_descriptor() -> FrameDescriptor {
-    FrameDescriptor::from_untrusted(
-        DESCRIPTOR_SCHEMA_VERSION,
-        header(8),
-        identity(),
-        8,
-        MAX_FRAME_BYTES as u64 - 4,
-        8,
-        2,
-        [
-            ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
-            ArenaSpan::from_untrusted(0, 4),
-        ],
-    )
+fn geometry() -> PoolGeometry {
+    PoolGeometry::host_payload_pool()
 }
 
 #[test]
-fn descriptor_rejects_every_untrusted_identity_span_and_allocation_failure() {
-    assert!(
-        valid_descriptor()
-            .validate(identity(), MAX_FRAME_BYTES)
-            .is_ok()
-    );
+fn descriptor_rejects_every_untrusted_identity_block_and_length_failure() {
+    let geometry = geometry();
+    let valid = PoolDescriptor::from_untrusted(7, 3, 2, 100);
+    let validated = valid.validate(7, &geometry).unwrap();
+    assert_eq!(validated.sequence(), 7);
+    assert_eq!(validated.block(), 3);
+    assert_eq!(validated.generation(), 2);
+    assert_eq!(validated.body_len(), 100);
+    assert_eq!(validated.placement().class, BlockClass::Ordinary(0));
 
-    let cases = [
+    let cases: [(PoolDescriptor, u64, DescriptorError); 9] = [
         (
-            FrameDescriptor::from_untrusted(
-                99,
-                header(8),
-                identity(),
-                8,
-                MAX_FRAME_BYTES as u64 - 4,
-                8,
-                2,
-                [
-                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
-                    ArenaSpan::from_untrusted(0, 4),
-                ],
-            ),
-            DescriptorError::UnsupportedSchema,
-        ),
-        (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(8),
-                ReleaseIdentity::new(identity().incarnation(), identity().lane(), 0),
-                8,
-                MAX_FRAME_BYTES as u64 - 4,
-                8,
-                2,
-                [
-                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
-                    ArenaSpan::from_untrusted(0, 4),
-                ],
-            ),
+            PoolDescriptor::from_untrusted(0, 3, 2, 100),
+            0,
             DescriptorError::InvalidSequence,
         ),
         (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(8),
-                identity(),
-                8,
-                MAX_FRAME_BYTES as u64 - 3,
-                8,
-                2,
-                [
-                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
-                    ArenaSpan::from_untrusted(0, 4),
-                ],
-            ),
-            DescriptorError::InvalidWrapMetadata,
+            PoolDescriptor::from_untrusted(8, 3, 2, 100),
+            7,
+            DescriptorError::InvalidSequence,
         ),
         (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(8),
-                identity(),
-                8,
-                MAX_FRAME_BYTES as u64 - 4,
-                8,
-                2,
-                [
-                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 5),
-                    ArenaSpan::from_untrusted(0, 3),
-                ],
-            ),
-            DescriptorError::OutOfBounds,
+            PoolDescriptor::from_untrusted(7, u64::from(geometry.block_count()), 2, 100),
+            7,
+            DescriptorError::InvalidBlock,
         ),
         (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(8),
-                identity(),
-                8,
-                MAX_FRAME_BYTES as u64 - 4,
-                8,
-                1,
-                [
-                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 8),
-                    ArenaSpan::default(),
-                ],
-            ),
-            DescriptorError::OutOfBounds,
+            PoolDescriptor::from_untrusted(7, u64::MAX, 2, 100),
+            7,
+            DescriptorError::InvalidBlock,
         ),
         (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(7),
-                identity(),
-                8,
-                MAX_FRAME_BYTES as u64 - 4,
-                8,
-                2,
-                [
-                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
-                    ArenaSpan::from_untrusted(0, 4),
-                ],
-            ),
-            DescriptorError::WireHeaderMismatch,
+            PoolDescriptor::from_untrusted(7, 3, 0, 100),
+            7,
+            DescriptorError::InvalidGeneration,
         ),
         (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(8),
-                identity(),
-                9,
-                MAX_FRAME_BYTES as u64 - 4,
-                9,
-                2,
-                [
-                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 4, 4),
-                    ArenaSpan::from_untrusted(0, 4),
-                ],
-            ),
-            DescriptorError::LengthMismatch,
+            PoolDescriptor::from_untrusted(7, 3, 2, MAX_FRAME_BYTES as u64 + 1),
+            7,
+            DescriptorError::FrameTooLarge,
         ),
         (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(0),
-                identity(),
-                0,
-                u64::MAX,
-                1,
-                1,
-                [
-                    ArenaSpan::from_untrusted(MAX_FRAME_BYTES as u64 - 1, 0),
-                    ArenaSpan::default(),
-                ],
-            ),
-            DescriptorError::Overflow,
+            PoolDescriptor::from_untrusted(7, 3, 2, u64::MAX),
+            7,
+            DescriptorError::FrameTooLarge,
         ),
         (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(8),
-                identity(),
-                8,
-                0,
-                8,
-                0,
-                [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
-            ),
-            DescriptorError::InvalidSpanCount,
+            PoolDescriptor::from_untrusted(7, 3, 2, 4096 - 20),
+            7,
+            DescriptorError::BodyExceedsBlock,
         ),
         (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(8),
-                identity(),
-                8,
-                0,
-                8,
-                3,
-                [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
-            ),
-            DescriptorError::InvalidSpanCount,
-        ),
-        (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(8),
-                identity(),
-                8,
-                0,
-                MAX_FRAME_BYTES as u64 + 1,
-                1,
-                [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
-            ),
-            DescriptorError::InvalidAllocation,
-        ),
-        // An allocation overrun takes precedence over a conflicting wire header.
-        (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(7),
-                identity(),
-                8,
-                0,
-                MAX_FRAME_BYTES as u64 + 1,
-                1,
-                [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
-            ),
-            DescriptorError::InvalidAllocation,
-        ),
-        (
-            FrameDescriptor::from_untrusted(
-                DESCRIPTOR_SCHEMA_VERSION,
-                {
-                    let mut stale_version = header(8);
-                    stale_version[4] = WIRE_V3_VERSION - 1;
-                    stale_version
-                },
-                identity(),
-                8,
-                0,
-                8,
-                1,
-                [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
-            ),
-            DescriptorError::WireHeaderMismatch,
+            PoolDescriptor::from_untrusted(7, 186, 2, 32 * 1024 - 20),
+            7,
+            DescriptorError::BodyExceedsBlock,
         ),
     ];
-    for (descriptor, expected) in cases {
+    for (descriptor, expected_sequence, error) in cases {
         assert_eq!(
-            descriptor.validate(identity(), MAX_FRAME_BYTES),
-            Err(expected)
+            descriptor.validate(expected_sequence, &geometry).err(),
+            Some(error)
+        );
+    }
+    // The largest ordinary class admits exactly the protocol maximum and no more.
+    let largest = geometry.first_block(BlockClass::Ordinary(4));
+    assert!(
+        PoolDescriptor::from_untrusted(1, u64::from(largest), 1, MAX_FRAME_BYTES as u64)
+            .validate(1, &geometry)
+            .is_ok()
+    );
+    assert_eq!(
+        PoolDescriptor::from_untrusted(1, u64::from(largest), 1, MAX_FRAME_BYTES as u64 + 1)
+            .validate(1, &geometry)
+            .err(),
+        Some(DescriptorError::FrameTooLarge)
+    );
+    // A zero-length body is legal on every class.
+    for block in [
+        0,
+        geometry.first_block(BlockClass::Control),
+        geometry.first_block(BlockClass::Terminal),
+    ] {
+        assert!(
+            PoolDescriptor::from_untrusted(1, u64::from(block), 1, 0)
+                .validate(1, &geometry)
+                .is_ok()
+        );
+    }
+}
+
+#[test]
+fn completion_rejects_stale_future_and_wrong_pool_returns() {
+    let geometry = geometry();
+    assert_eq!(
+        CompletionRecord::from_untrusted(5, 3).validate(&geometry, Some(3)),
+        Ok(5)
+    );
+    assert_eq!(
+        CompletionRecord::from_untrusted(5, 2).validate(&geometry, Some(3)),
+        Err(DescriptorError::StaleCompletion)
+    );
+    assert_eq!(
+        CompletionRecord::from_untrusted(5, 4).validate(&geometry, Some(3)),
+        Err(DescriptorError::FutureCompletion)
+    );
+    assert_eq!(
+        CompletionRecord::from_untrusted(5, 3).validate(&geometry, None),
+        Err(DescriptorError::FutureCompletion)
+    );
+    assert_eq!(
+        CompletionRecord::from_untrusted(5, 0).validate(&geometry, Some(3)),
+        Err(DescriptorError::InvalidGeneration)
+    );
+    assert_eq!(
+        CompletionRecord::from_untrusted(u64::from(geometry.block_count()), 3)
+            .validate(&geometry, Some(3)),
+        Err(DescriptorError::InvalidBlock)
+    );
+    assert_eq!(
+        CompletionRecord::from_untrusted(u64::MAX, 3).validate(&geometry, Some(3)),
+        Err(DescriptorError::InvalidBlock)
+    );
+}
+
+#[test]
+fn wire_header_check_is_shared_by_producer_and_consumer() {
+    assert!(check_wire_header(&header(10), 10).is_ok());
+    assert_eq!(
+        check_wire_header(&header(10), 11),
+        Err(DescriptorError::WireHeaderMismatch)
+    );
+    let mut wrong_version = header(0);
+    wrong_version[4] = WIRE_V3_VERSION + 1;
+    assert_eq!(
+        check_wire_header(&wrong_version, 0),
+        Err(DescriptorError::WireHeaderMismatch)
+    );
+}
+
+#[test]
+fn sole_identifiers_are_four_and_the_pool_profile() {
+    assert_eq!(DESCRIPTOR_SCHEMA_VERSION, 4);
+    assert_eq!(shm_transport::backend::retained::LAYOUT_VERSION, 4);
+    let profile = host_payload_pool_profile().unwrap();
+    assert!(
+        profile
+            .descriptor()
+            .hardware_matches("host-payload-pool-v1")
+    );
+    assert!(!profile.descriptor().hardware_matches("host-test-ring-v1"));
+    let ring = Ring::create(&profile, 0).unwrap();
+    let bytes = ring.grant().encode();
+    assert_eq!(u16::from_le_bytes([bytes[0], bytes[1]]), 4);
+    // The one supported layout version: any other value fails before a mapping exists.
+    let mut old = bytes;
+    old[0..2].copy_from_slice(&3u16.to_le_bytes());
+    assert_eq!(PoolGrant::decode(old), Err(RingError::InvalidGrant));
+}
+
+#[test]
+fn class_boundaries_are_full_frame_capacity_minus_the_header() {
+    let geometry = geometry();
+    let boundaries: Vec<u64> = geometry.classes()[..5]
+        .iter()
+        .map(|class| class.body_capacity())
+        .collect();
+    assert_eq!(
+        boundaries,
+        [
+            4096 - 21,
+            64 * 1024 - 21,
+            1024 * 1024 - 21,
+            8 * 1024 * 1024 - 21,
+            64 * 1024 * 1024 + 4096 - 21,
+        ]
+    );
+    for (index, boundary) in boundaries.iter().enumerate().take(4) {
+        assert_eq!(
+            geometry.class_for(Inventory::Ordinary, *boundary),
+            Some(BlockClass::Ordinary(index as u8))
+        );
+        assert_eq!(
+            geometry.class_for(Inventory::Ordinary, boundary + 1),
+            Some(BlockClass::Ordinary(index as u8 + 1))
         );
     }
     assert_eq!(
-        valid_descriptor().validate(identity(), 0),
-        Err(DescriptorError::InvalidAllocation)
+        geometry.class(BlockClass::Terminal).body_capacity(),
+        32 * 1024 - 21
     );
-
-    let wrong_incarnation = ReleaseIdentity::new(Incarnation::from_bytes([8; 16]), 3, 9);
+    assert!(geometry.class(BlockClass::Terminal).body_capacity() >= 25_406);
+    assert!(geometry.class(BlockClass::Terminal).block_bytes >= 25_427);
     assert_eq!(
-        valid_descriptor().validate(wrong_incarnation, MAX_FRAME_BYTES),
-        Err(DescriptorError::WrongIncarnation)
+        geometry.class(BlockClass::Control).body_capacity(),
+        4096 - 21
     );
-    let wrong_lane = ReleaseIdentity::new(identity().incarnation(), 4, 9);
-    assert_eq!(
-        valid_descriptor().validate(wrong_lane, MAX_FRAME_BYTES),
-        Err(DescriptorError::WrongLane)
-    );
-    let wrong_sequence = ReleaseIdentity::new(identity().incarnation(), 3, 10);
-    assert_eq!(
-        valid_descriptor().validate(wrong_sequence, MAX_FRAME_BYTES),
-        Err(DescriptorError::InvalidSequence)
-    );
-}
-
-#[test]
-fn arena_plans_wrap_and_conserves_all_states() {
-    let plan = SpanPlan::reserve(
-        MAX_FRAME_BYTES,
-        MAX_FRAME_BYTES as u64 - 4,
-        MAX_FRAME_BYTES as u64 - 4,
-        8,
-    )
-    .unwrap();
-    assert_eq!(plan.span_count(), 2);
-    assert_eq!(plan.span(0).unwrap().len(), 4);
-    assert_eq!(plan.span(1).unwrap().len(), 4);
-    let prefix = plan.prefix(6).unwrap();
-    assert_eq!(prefix.span(0).unwrap().len(), 4);
-    assert_eq!(prefix.span(1).unwrap().len(), 2);
-    assert!(
-        ArenaCounts {
-            free: 1,
-            producer_reserved: 2,
-            published: 3,
-            receiver_held: 4,
-            receiver_leased: 5,
-            release_pending: 6,
-            pad: 7,
-            quarantined: 8,
-        }
-        .conserves(36)
-    );
-    assert!(
-        DescriptorCounts {
-            free: 1,
-            producer_reserved: 1,
-            published: 1,
-            receiver_held: 1,
-            receiver_leased: 1,
-            release_pending: 1,
-            quarantined: 1,
-        }
-        .conserves(7)
-    );
-}
-
-#[test]
-fn arena_reserve_and_prefix_report_every_failure_mode() {
-    let capacity = MIN_ARENA_BYTES;
-    let full = capacity as u64;
-
-    assert_eq!(
-        SpanPlan::reserve(capacity - 1, 0, 0, 1),
-        Err(ArenaError::BelowMinimumCapacity)
-    );
-    assert_eq!(
-        SpanPlan::reserve(0, 0, 0, 1),
-        Err(ArenaError::BelowMinimumCapacity)
-    );
-    assert_eq!(
-        SpanPlan::reserve(capacity, 0, 0, MAX_FRAME_BYTES + 1),
-        Err(ArenaError::FrameTooLarge)
-    );
-    // `reclaimed` ahead of `write` and a hold larger than the arena are both malformed cursors.
-    assert_eq!(
-        SpanPlan::reserve(capacity, 4, 8, 1),
-        Err(ArenaError::InvalidCursor)
-    );
-    assert_eq!(
-        SpanPlan::reserve(capacity, full + 1, 0, 1),
-        Err(ArenaError::InvalidCursor)
-    );
-    // Holding all but one byte leaves no room for a two-byte frame.
-    assert_eq!(
-        SpanPlan::reserve(capacity, full - 1, 0, 2),
-        Err(ArenaError::Exhausted)
-    );
-    // Holding exactly the full arena still admits nothing but an empty frame.
-    assert_eq!(
-        SpanPlan::reserve(capacity, full, 0, 1),
-        Err(ArenaError::Exhausted)
-    );
-    assert!(SpanPlan::reserve(capacity, full, 0, 0).is_ok());
-    // A write cursor at `u64::MAX` cannot advance without overflowing.
-    assert_eq!(
-        SpanPlan::reserve(capacity, u64::MAX, u64::MAX, 1),
-        Err(ArenaError::ArithmeticOverflow)
-    );
-
-    let plan = SpanPlan::reserve(capacity, 0, 0, 8).unwrap();
-    assert_eq!(plan.prefix(9), Err(ArenaError::ExceedsAllocation));
-    // A narrowed plan cannot widen again, even within the original allocation: the spans no
-    // longer describe the reserved bytes past the committed prefix, so widening would
-    // fabricate a wrap at offset zero.
-    let narrowed = plan.prefix(2).unwrap();
-    assert_eq!(narrowed.prefix(3), Err(ArenaError::ExceedsAllocation));
-    assert_eq!(narrowed.prefix(2).unwrap().span_count(), 1);
-    assert_eq!(narrowed.prefix(1).unwrap().span(0).unwrap().len(), 1);
-    // Narrowing a wrapped plan below the first span drops the second span.
-    let wrapped = SpanPlan::reserve(capacity, full - 4, full - 4, 8).unwrap();
-    let unwrapped = wrapped.prefix(3).unwrap();
-    assert_eq!(unwrapped.span_count(), 1);
-    assert_eq!(unwrapped.span(0).unwrap().len(), 3);
-    assert_eq!(unwrapped.prefix(4), Err(ArenaError::ExceedsAllocation));
-    let shortened = plan.prefix(8).unwrap();
-    assert_eq!(shortened.allocation_len(), 8);
-    assert_eq!(shortened.span(0).unwrap().len(), 8);
-    let empty = plan.prefix(0).unwrap();
-    assert_eq!(empty.allocation_len(), 8);
-    assert_eq!(empty.span_count(), 1);
-    assert!(empty.span(0).unwrap().is_empty());
-}
-
-#[test]
-fn span_accessors_return_none_past_span_count_without_panicking() {
-    let wrapped = SpanPlan::reserve(
-        MAX_FRAME_BYTES,
-        MAX_FRAME_BYTES as u64 - 4,
-        MAX_FRAME_BYTES as u64 - 4,
-        8,
-    )
-    .unwrap();
-    assert!(wrapped.span(1).is_some());
-    assert!(wrapped.span(2).is_none());
-    assert!(wrapped.span(usize::MAX).is_none());
-
-    let single = SpanPlan::reserve(MAX_FRAME_BYTES, 0, 0, 8).unwrap();
-    assert_eq!(single.span_count(), 1);
-    assert!(single.span(0).is_some());
-    assert!(single.span(1).is_none());
-    assert!(single.span(2).is_none());
-
-    let frame = valid_descriptor()
-        .validate(identity(), MAX_FRAME_BYTES)
-        .unwrap();
-    assert!(frame.span(1).is_some());
-    assert!(frame.span(2).is_none());
-    assert!(frame.span(usize::MAX).is_none());
 }
 
 #[test]
@@ -516,218 +312,115 @@ fn lifecycle_accepts_only_diagram_edges_and_quarantine_is_terminal() {
         Err(LifecycleError::Terminal)
     );
 }
+
 #[test]
 fn debug_and_errors_redact_every_sentinel() {
     let sentinel = "SENTINEL_descriptor_token_object_incarnation_address";
     let transport = TransportDescriptor::new(HardwareProfileId::new(sentinel).unwrap());
     let incarnation = Incarnation::from_bytes(*b"SENTINEL-SECRET!");
-    let release = ReleaseIdentity::new(incarnation, 0x5345_4e54, 0x494e_454c);
-    let descriptor = FrameDescriptor::from_untrusted(
-        DESCRIPTOR_SCHEMA_VERSION,
-        header(0),
-        release,
-        0,
-        0,
-        0,
-        1,
-        [ArenaSpan::default(), ArenaSpan::default()],
-    );
+    let identity = PayloadIdentity::new(incarnation, 0x5345_4e54, 0x494e, 0x454c);
+    let descriptor = PoolDescriptor::from_untrusted(0x5345, 0x4e54, 0x494e, 0x454c);
+    let completion = CompletionRecord::from_untrusted(0x5345, 0x4e54);
+    let profile = pool_profile(
+        HardwareProfileId::new(sentinel).unwrap(),
+        PoolGeometry::new(
+            1,
+            1,
+            [
+                ClassSpec::new(4096, 1),
+                ClassSpec::new(8192, 1),
+                ClassSpec::new(16384, 1),
+                ClassSpec::new(32768, 1),
+                ClassSpec::new(64 * 1024 * 1024 + 4096, 1),
+            ],
+            ClassSpec::new(4096, 1),
+            ClassSpec::new(32768, 1),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let ring = Ring::create(&profile, 1).unwrap();
     for formatted in [
         format!("{transport:?}"),
         format!("{incarnation:?}"),
-        format!("{release:?}"),
+        format!("{identity:?}"),
         format!("{descriptor:?}"),
-        format!("{:?}", DescriptorError::WrongIncarnation),
+        format!("{completion:?}"),
+        format!("{:?}", DescriptorError::InvalidBlock),
+        format!("{ring:?}"),
+        format!("{:?}", ring.grant()),
+        format!("{:?}", ring.retained()),
+        format!("{:?}", ring.attachment().unwrap()),
     ] {
-        assert!(!formatted.contains("SENTINEL"));
+        assert!(!formatted.contains("SENTINEL"), "{formatted}");
         assert!(!formatted.contains(sentinel));
         assert!(!formatted.contains("0x"));
     }
 }
 
+/// The protocol document's identifier and geometry tables are wire literals; this test reads
+/// them so the document is a test input and a drift between prose and code fails here.
 #[test]
-fn sample_prefix_rejects_every_truncation_point_and_bounds_the_body() {
-    let body = [1u8, 2, 3, 4];
-    let payload = sample_payload(
-        DESCRIPTOR_SCHEMA_VERSION,
-        header(body.len()),
-        identity(),
-        body.len() as u64,
-        &body,
-    );
-    let validated = SamplePrefix::snapshot(&payload)
-        .unwrap()
-        .validate(payload.len(), identity())
-        .unwrap();
-    assert_eq!(validated.body_range(), SAMPLE_PREFIX_BYTES..payload.len());
-    assert_eq!(&payload[validated.body_range()], &body);
-
-    for cut in 0..SAMPLE_PREFIX_BYTES {
-        assert_eq!(
-            SamplePrefix::snapshot(&payload[..cut]),
-            Err(DescriptorError::Truncated),
-            "prefix truncated at byte {cut} must be rejected"
-        );
-    }
-    for cut in SAMPLE_PREFIX_BYTES..payload.len() {
-        assert_eq!(
-            SamplePrefix::snapshot(&payload[..cut])
-                .unwrap()
-                .validate(cut, identity()),
-            Err(DescriptorError::InvalidAllocation),
-            "body truncated at byte {cut} must be rejected"
-        );
-    }
-
-    // Extra allocation bytes are legal but lie outside the validated body range.
-    let mut slack = payload.clone();
-    slack.extend_from_slice(&[0xEE; 7]);
-    let validated = SamplePrefix::snapshot(&slack)
-        .unwrap()
-        .validate(slack.len(), identity())
-        .unwrap();
-    assert_eq!(validated.body_len(), body.len());
-    assert_eq!(
-        validated.body_range().end,
-        SAMPLE_PREFIX_BYTES + body.len(),
-        "slack bytes must stay outside the validated body range"
-    );
-}
-
-#[test]
-fn sample_prefix_rejects_identity_schema_length_and_wire_failures() {
-    let body = [9u8; 4];
-    let expected = identity();
-    let base = |schema: u16, wire: [u8; WIRE_V3_HEADER_BYTES], id: ReleaseIdentity, len: u64| {
-        sample_payload(schema, wire, id, len, &body)
+fn payload_pool_protocol_document_agrees_with_the_implementation() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/payload-pool-protocol.md");
+    let doc = std::fs::read_to_string(&path).expect("read docs/payload-pool-protocol.md");
+    let row = |needle: &str| {
+        assert!(doc.contains(needle), "protocol document lacks `{needle}`");
     };
-
-    let cases: [(Vec<u8>, ReleaseIdentity, DescriptorError); 8] = [
-        (
-            base(99, header(4), expected, 4),
-            expected,
-            DescriptorError::UnsupportedSchema,
-        ),
-        (
-            base(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(4),
-                ReleaseIdentity::new(expected.incarnation(), expected.lane(), 0),
-                4,
-            ),
-            ReleaseIdentity::new(expected.incarnation(), expected.lane(), 0),
-            DescriptorError::InvalidSequence,
-        ),
-        (
-            base(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(4),
-                ReleaseIdentity::new(Incarnation::from_bytes([8; 16]), expected.lane(), 9),
-                4,
-            ),
-            expected,
-            DescriptorError::WrongIncarnation,
-        ),
-        (
-            base(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(4),
-                ReleaseIdentity::new(expected.incarnation(), 4, 9),
-                4,
-            ),
-            expected,
-            DescriptorError::WrongLane,
-        ),
-        (
-            base(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(4),
-                ReleaseIdentity::new(expected.incarnation(), expected.lane(), 10),
-                4,
-            ),
-            expected,
-            DescriptorError::InvalidSequence,
-        ),
-        (
-            base(
-                DESCRIPTOR_SCHEMA_VERSION,
-                header(4),
-                expected,
-                MAX_FRAME_BYTES as u64 + 1,
-            ),
-            expected,
-            DescriptorError::FrameTooLarge,
-        ),
-        (
-            base(DESCRIPTOR_SCHEMA_VERSION, header(5), expected, 4),
-            expected,
-            DescriptorError::WireHeaderMismatch,
-        ),
-        (
-            {
-                let mut wire = header(4);
-                wire[4] = WIRE_V3_VERSION - 1;
-                base(DESCRIPTOR_SCHEMA_VERSION, wire, expected, 4)
-            },
-            expected,
-            DescriptorError::WireHeaderMismatch,
-        ),
+    row(&format!(
+        "| Descriptor schema | `{DESCRIPTOR_SCHEMA_VERSION}` |"
+    ));
+    row(&format!(
+        "| Mapping layout version | `{}` |",
+        shm_transport::backend::retained::LAYOUT_VERSION
+    ));
+    row(&format!(
+        "| Hardware profile | `{}` |",
+        shm_transport::profile::HOST_PAYLOAD_POOL_PROFILE
+    ));
+    let geometry = PoolGeometry::host_payload_pool();
+    let inventories = [
+        "Ordinary", "Ordinary", "Ordinary", "Ordinary", "Ordinary", "Control", "Terminal",
     ];
-    for (payload, expected_identity, error) in cases {
-        assert_eq!(
-            SamplePrefix::snapshot(&payload)
-                .unwrap()
-                .validate(payload.len(), expected_identity),
-            Err(error)
-        );
+    for (index, (class, inventory)) in geometry.classes().iter().zip(inventories).enumerate() {
+        let bytes = class.block_bytes;
+        let formatted = if bytes == 64 * 1024 * 1024 + 4096 {
+            "67,112,960 (64 MiB + 4 KiB)".to_owned()
+        } else {
+            let digits = bytes.to_string();
+            let mut grouped = String::new();
+            for (position, digit) in digits.chars().enumerate() {
+                if position != 0 && (digits.len() - position).is_multiple_of(3) {
+                    grouped.push(',');
+                }
+                grouped.push(digit);
+            }
+            grouped
+        };
+        row(&format!(
+            "| {inventory} | {index} | {formatted} | {} |",
+            class.count
+        ));
     }
-
-    // Allocation bounds are checked before the wire header, matching
-    // `FrameDescriptor::validate`: a body that overruns the allocation reports
-    // `InvalidAllocation` even when the wire header also disagrees.
-    let overrun_and_mismatch =
-        sample_payload(DESCRIPTOR_SCHEMA_VERSION, header(5), expected, 1024, &body);
+    row(&format!(
+        "Descriptor slots per direction: {} ordinary plus {} reserved, a queue depth\nof {}.",
+        geometry.ordinary_descriptors(),
+        geometry.reserved_descriptors(),
+        geometry.descriptor_depth()
+    ));
+    row(&format!(
+        "`PoolGrant` is {} little-endian bytes",
+        PoolGrant::encoded_len()
+    ));
+    row("Block backing per direction is 95,817,728 bytes");
+    assert_eq!(geometry.arena_bytes().unwrap(), 95_817_728);
+    row("Total at 4 KiB pages: 95,825,920 bytes per direction.");
     assert_eq!(
-        SamplePrefix::snapshot(&overrun_and_mismatch)
+        shm_transport::pool::MappingLayout::new(&geometry, 4096)
             .unwrap()
-            .validate(overrun_and_mismatch.len(), expected),
-        Err(DescriptorError::InvalidAllocation)
+            .total,
+        95_825_920
     );
-
-    // A body declared longer than the allocation holds is rejected.
-    let excessive = sample_payload(
-        DESCRIPTOR_SCHEMA_VERSION,
-        header(1024),
-        expected,
-        1024,
-        &body,
-    );
-    assert_eq!(
-        SamplePrefix::snapshot(&excessive)
-            .unwrap()
-            .validate(excessive.len(), expected),
-        Err(DescriptorError::InvalidAllocation)
-    );
-}
-
-#[test]
-fn sample_errors_redact_every_sentinel() {
-    let sentinel = b"SENTINEL";
-    let mut wire = [0u8; WIRE_V3_HEADER_BYTES];
-    wire[..sentinel.len()].copy_from_slice(sentinel);
-    let incarnation = Incarnation::from_bytes(*b"SENTINEL-SECRET!");
-    let sentinel_identity = ReleaseIdentity::new(incarnation, 0x5345_4e54, 0x494e_454c);
-    let payload = sample_payload(0x4553, wire, sentinel_identity, u64::MAX, b"SENTINEL-BODY");
-
-    let prefix = SamplePrefix::snapshot(&payload).unwrap();
-    let error = prefix.validate(payload.len(), identity()).unwrap_err();
-    for formatted in [
-        format!("{prefix:?}"),
-        format!("{error}"),
-        format!("{error:?}"),
-        format!("{:?}", DescriptorError::Truncated),
-    ] {
-        assert!(!formatted.contains("SENTINEL"));
-        assert!(!formatted.contains("0x"));
-    }
+    row("magic `0x4d43_5348_4d50_3034`");
 }

@@ -165,42 +165,63 @@ function runNativeLifecycle(): void {
     direct.first.close();
     direct.second.close();
 
+    // Descriptor consumption is independent of payload return: holding every ordinary
+    // descriptor's payload does not block publication, because each receive frees its slot.
     const descriptors = NativeChannel.createTestPair();
     const held: NativeReceiveLease[] = [];
     for (let index = 0; index < descriptors.descriptorDepth; index++) {
         fill(descriptors.first, 1, index);
         held.push(receive(descriptors.second));
     }
-    assert.throws(() => fill(descriptors.first, 1, 1, 1));
-    held.shift()?.release();
     fill(descriptors.first, 1, 2, 1);
     receive(descriptors.second).release();
+    // Holding every block of the smallest class does exhaust that class, and only that class.
+    while (held.length < descriptors.smallestClassCount) {
+        fill(descriptors.first, 1, 3);
+        held.push(receive(descriptors.second));
+    }
+    assert.throws(() => fill(descriptors.first, 1, 1, 1));
+    fill(descriptors.first, descriptors.smallestBodyCapacity + 1, 4, 1);
+    receive(descriptors.second).release();
+    // Returning one held block makes exactly that block reusable while the others stay intact.
+    const first = held.shift();
+    const firstSegment = held[0]?.segment(0);
+    assert.ok(firstSegment);
+    first?.release();
+    fill(descriptors.first, 1, 2, 1);
+    receive(descriptors.second).release();
+    assert.equal(firstSegment[0], 1, "an unreleased neighbor keeps its bytes");
     for (const active of held) active.release();
     descriptors.first.close();
     descriptors.second.close();
 
+    // The maximum body has one block; holding it leaves every other class free.
+    const MAX_BODY = 67_108_864;
     const arena = NativeChannel.createTestPair();
-    fill(arena.first, arena.arenaBytes, 1, 1_000);
+    fill(arena.first, MAX_BODY, 1, 1_000);
     const arenaLease = receive(arena.second);
-    assert.throws(() => fill(arena.first, 1, 1, 1));
-    arenaLease.release();
+    assert.equal(arenaLease.byteLength, MAX_BODY);
     fill(arena.first, 1, 2, 1);
+    receive(arena.second).release();
+    assert.throws(() => fill(arena.first, MAX_BODY, 1, 1), /ring is full/);
+    arenaLease.release();
+    // After arenaLease.release(), MAX_BODY + 1 fails the size bound rather than ring exhaustion.
+    assert.throws(() => fill(arena.first, MAX_BODY + 1, 1, 1), /reservation failed/);
+    fill(arena.first, MAX_BODY, 2, 1_000);
     receive(arena.second).release();
     arena.first.close();
     arena.second.close();
 
     const partial = NativeChannel.createTestPair();
-    partial.first.produce(
-        header(partial.arenaBytes - 2),
-        partial.arenaBytes - 2,
-        (cursor) => {
-            cursor.advance(partial.arenaBytes - 2);
-        },
-    );
+    partial.first.produce(header(MAX_BODY - 2), MAX_BODY - 2, (cursor) => {
+        cursor.advance(MAX_BODY - 2);
+    });
     receive(partial.second).release();
     fill(partial.first, 4, 3, 1_000);
     const refsBeforeFailure = activeExternalRefs();
-    setExternalViewCreationFailpoint(2);
+    // One contiguous body means one view per receive; failing that creation must return the
+    // block and leave no reference behind.
+    setExternalViewCreationFailpoint(1);
     try {
         assert.throws(
             () => partial.second.drainOne(() => {}),
@@ -215,8 +236,10 @@ function runNativeLifecycle(): void {
     partial.first.close();
     partial.second.close();
 
+    // Leaked leases pin their blocks: a whole class of them exhausts that class even after
+    // collection, because a finalizer never returns a block.
     const leaked = NativeChannel.createTestPair();
-    for (let index = 0; index < leaked.descriptorDepth; index++) {
+    for (let index = 0; index < leaked.smallestClassCount; index++) {
         fill(leaked.first, 1, index);
         assert.equal(
             leaked.second.drainOne(() => {}),

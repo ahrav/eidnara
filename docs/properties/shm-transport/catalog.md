@@ -1,5 +1,13 @@
 # Part 1 property catalog: shared-memory transport
 
+> Superseded transport. Every record below describes the FIFO ring transport
+> (layout version 3, profile `host-test-ring-v1`), which the payload-pool
+> replacement removed from the tree. Line anchors into `backend/ring.rs`,
+> `arena.rs`, and `backend/sample.rs` no longer resolve. Records that still
+> hold for the replacement are re-authored under
+> [../independent-payload-pools/catalog.md](../independent-payload-pools/catalog.md);
+> treat the rest as `invalidated` history, kept for provenance.
+
 Scope: `crates/shm-transport`, `packages/shm-native`. Boundary context
 from `crates/host-runtime/src/ring_transport.rs` is used where a transport property is
 only observable through the host. The original scope line named

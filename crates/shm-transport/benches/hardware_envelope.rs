@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use shm_transport::backend::ring::{ProducerError, Ring, wire_v3_header};
 use shm_transport::descriptor::HardwareProfileId;
 use shm_transport::evidence::OperationCounters;
-use shm_transport::profile::{TargetProfile, ring_profile as library_ring_profile};
+use shm_transport::pool::PoolGeometry;
+use shm_transport::profile::{TargetProfile, pool_profile};
 
 const PROFILE: &str = "socketpair_sparse_ring";
 
@@ -51,8 +52,8 @@ const UNIMPLEMENTED_ARMS: &[&str] = &[
 ];
 
 /// `syscalls` is `None` when an arm has no syscall counter; otherwise it is
-/// `doorbell_syscalls + other_syscalls`, and `page_removal_syscalls` is the part of
-/// `other_syscalls` the ring spent punching dead arena pages.
+/// `doorbell_syscalls + other_syscalls`. `page_removal_syscalls` stays in the schema for
+/// reader compatibility and is always zero: blocks are reused in place, never punched.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Measurement {
     schema: u32,
@@ -624,7 +625,7 @@ fn run_h0(iterations: u64) -> Result<ArmRun, &'static str> {
 
 fn ring_profile() -> Result<TargetProfile, &'static str> {
     let hardware = HardwareProfileId::new(PROFILE).map_err(|_| "profile")?;
-    library_ring_profile(hardware).map_err(|_| "profile")
+    pool_profile(hardware, PoolGeometry::host_payload_pool()).map_err(|_| "profile")
 }
 
 fn run_ring(
@@ -686,9 +687,9 @@ fn run_ring(
         body_copies: copies + if copied_receiver { iterations } else { 0 },
         native_allocations: if copied_receiver { iterations } else { 0 },
         syscalls: Some(SyscallSplit {
-            doorbell: syscalls.doorbell + peer_syscalls.doorbell,
-            other: syscalls.page_removals + peer_syscalls.other,
-            page_removals: syscalls.page_removals + peer_syscalls.page_removals,
+            doorbell: syscalls.doorbell + syscalls.retained_wakes + peer_syscalls.doorbell,
+            other: peer_syscalls.other,
+            page_removals: 0,
         }),
         park_wakes: syscalls.parks + peer_parks,
         scheduler_handoffs: scheduler_handoffs + report.scheduler_handoffs.load(Ordering::Relaxed),
@@ -761,12 +762,10 @@ fn ring_consumer(ring: &Ring, iterations: u64, copied_receiver: bool, report: &P
                 .iter()
                 .fold(checksum, |sum, byte| sum.wrapping_add(u64::from(*byte)));
         } else {
-            for index in 0..lease.segment_count() {
-                let Some(span) = lease.segment(index) else {
-                    return 4;
-                };
-                checksum = checksum.wrapping_add(span.checksum());
-            }
+            let Ok(span) = lease.body() else {
+                return 4;
+            };
+            checksum = checksum.wrapping_add(span.checksum());
         }
         if lease.release().is_err() {
             return 5;
@@ -778,9 +777,9 @@ fn ring_consumer(ring: &Ring, iterations: u64, copied_receiver: bool, report: &P
         checksum,
         voluntary_switches().saturating_sub(switches_before),
         SyscallSplit {
-            doorbell: syscalls.doorbell,
-            other: syscalls.page_removals,
-            page_removals: syscalls.page_removals,
+            doorbell: syscalls.doorbell + syscalls.retained_wakes,
+            other: 0,
+            page_removals: 0,
         },
         syscalls.parks,
     );

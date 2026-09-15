@@ -5,15 +5,14 @@
 use std::fs;
 use std::path::Path;
 
-use shm_transport::backend::ring::RingGrant;
-use shm_transport::descriptor::HardwareProfileId;
+use shm_transport::backend::ring::PoolGrant;
 use shm_transport::harness;
-use shm_transport::profile::ring_profile;
+use shm_transport::pool::PoolGeometry;
 
 const EXPECTED_SEEDS: [&str; 5] = ["empty", "all-zero", "all-ff", "valid", "near-valid"];
 const REJECTED_SEEDS: [&str; 4] = ["empty", "all-zero", "all-ff", "near-valid"];
 
-/// The grant fixtures freeze a `total_bytes` computed with 4 KiB pages; `RingGrant::decode`
+/// The grant fixtures freeze a `total_bytes` computed with 4 KiB pages; `PoolGrant::decode`
 /// recomputes the layout with the host page size and rejects the fixture on any other size.
 const FIXTURE_PAGE_SIZE: i64 = 4096;
 
@@ -78,21 +77,23 @@ fn replay(target: &str, decoder: fn(&[u8]) -> bool, valid_seed_is_page_size_depe
 #[test]
 fn every_decoder_corpus_replays_without_panic() {
     let targets: [CorpusTarget; 3] = [
-        ("frame_descriptor", harness::frame_descriptor, false),
+        ("pool_descriptor", harness::pool_descriptor, false),
         ("provider_grant", harness::provider_grant, true),
-        ("provider_sample", harness::provider_sample, false),
+        ("payload_completion", harness::payload_completion, false),
     ];
     for (target, decoder, valid_seed_is_page_size_dependent) in targets {
         replay(target, decoder, valid_seed_is_page_size_dependent);
     }
 }
 
-/// The `provider_grant/valid` seed is also the frozen encoding of the depth-32 ring profile,
-/// so a change to grant layout or profile geometry shows up here as a fixture diff.
+/// The `provider_grant/valid` seed is also the frozen encoding of the production pool
+/// profile, so a change to grant layout or profile geometry shows up here as a fixture diff.
 #[test]
-fn golden_grant_fixture_matches_the_frozen_ring_profile_encoding() {
-    const GOLDEN_GRANT_HEX: &str = "0300d489c07ee46333a5fe7901df356f6f460000000020000000000000\
-                                    0000000004000000002000000000000000004000040000000000000000";
+fn golden_grant_fixture_matches_the_frozen_pool_profile_encoding() {
+    const GOLDEN_GRANT_HEX: &str = "0400d489c07ee46333a5fe7901df356f6f460000000020000000100000000010\
+                                    0000000000004000000000000100000000001000000000001000000000000800\
+                                    0000000080000000000002000000001000040000000001000000001000000000\
+                                    0000200000000080000000000000400000000030b6050000000000000000";
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus/provider_grant/valid");
     let bytes = std::fs::read(path).expect("golden grant fixture is readable");
@@ -106,25 +107,25 @@ fn golden_grant_fixture_matches_the_frozen_ring_profile_encoding() {
         GOLDEN_GRANT_HEX.replace(char::is_whitespace, ""),
         "the checked-in fixture bytes moved unexpectedly"
     );
+    assert_eq!(bytes.len(), PoolGrant::encoded_len());
     if fixture_page_size_matches_host() {
-        let grant = RingGrant::decode_slice(&bytes).expect("golden grant fixture decodes");
+        let grant = PoolGrant::decode_slice(&bytes).expect("golden grant fixture decodes");
         assert_eq!(
             grant.encode().as_slice(),
             bytes.as_slice(),
             "golden grant fixture must round-trip byte-exactly"
         );
+        assert_eq!(*grant.geometry(), PoolGeometry::host_payload_pool());
+        assert_eq!(grant.lane(), 0);
     } else {
         eprintln!(
             "host pages are {} bytes; skipping the {FIXTURE_PAGE_SIZE}-byte-page decode check",
             host_page_size()
         );
     }
-    let frozen = ring_profile(HardwareProfileId::new("ring-contract-host").unwrap()).unwrap();
-    let field =
-        |range: std::ops::Range<usize>| u64::from_le_bytes(bytes[range].try_into().unwrap());
     assert_eq!(
         u16::from_le_bytes([bytes[0], bytes[1]]),
-        3,
+        4,
         "layout version"
     );
     assert_eq!(
@@ -135,12 +136,21 @@ fn golden_grant_fixture_matches_the_frozen_ring_profile_encoding() {
         ],
         "incarnation identity"
     );
+    let u32_at = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    let u64_at = |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    assert_eq!(u32_at(18), 0, "host-to-peer lane");
+    assert_eq!(u32_at(22), 32, "ordinary descriptors");
+    assert_eq!(u32_at(26), 16, "reserved descriptors");
+    let geometry = PoolGeometry::host_payload_pool();
+    for (index, class) in geometry.classes().iter().enumerate() {
+        let offset = 30 + index * 12;
+        assert_eq!(u64_at(offset), class.block_bytes, "class {index} bytes");
+        assert_eq!(u32_at(offset + 8), class.count, "class {index} count");
+    }
     assert_eq!(
-        u32::from_le_bytes(bytes[18..22].try_into().unwrap()),
-        0,
-        "host-to-peer lane"
+        u64_at(114),
+        95_825_920,
+        "total mapping bytes at 4 KiB pages"
     );
-    assert_eq!(field(22..30), frozen.descriptor_depth() as u64);
-    assert_eq!(field(30..38), frozen.arena_bytes() as u64);
-    assert_eq!(field(38..46), frozen.max_leases() as u64);
+    assert_eq!(u32_at(122), 0, "reserved tail");
 }
