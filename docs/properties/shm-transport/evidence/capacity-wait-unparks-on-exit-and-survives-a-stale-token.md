@@ -39,9 +39,11 @@ record owned them.
   `parked`, so a marker is non-zero rather than one.
 - Tests: `arm_capacity_wait_refuses_to_park_over_a_return_that_landed_before_arming`
   (`ring.rs:2921`) and `ring_bridge_blocked_write_expires_at_its_deadline_without_publishing`
-  (`client.rs:7728-7826`, host publish after the bridge's exit at `:7824`); the
-  latter observes the data-doorbell marker through the publisher's outcome and
-  says nothing about the capacity marker directly.
+  (`client.rs:7738-7836`); the latter observes the capacity marker through the
+  host's consumption loop after the exit (`:7809-7812`, consumer quarantine at
+  `ring.rs:1497-1500` if the marker is set) and the data marker through a host
+  publish (`:7834`, publisher quarantine in `publish_commit`); neither marker is
+  read directly.
 
 ## Failure scenario
 
@@ -60,12 +62,12 @@ producer deadline bounded to 5 s.
 
 ## What a test must construct
 
-A full ring and an expiring deadline, then a publish from the peer that must
-not fail: present for the client bridge's exit (`client.rs:7728-7826`), on the
-data side. A return before the arm leaving `parked` zero: present
+A full ring and an expiring deadline, then consumption and a publish from the
+peer that must not fail: present for the client bridge's exit
+(`client.rs:7738-7836`). A return before the arm leaving `parked` zero: present
 (`ring.rs:2921`). Missing: a `reserve_until_in` deadline exit asserting
-`parked == 0` directly, the same assertion after the client bridge's exit and
-after the host's frame-deadline exit (the host one would fail today), a queued
+`parked == 0` directly, the same direct assertion after the client bridge's exit
+and after the host's frame-deadline exit (the host one would fail today), a queued
 token plus a release from another thread asserting bounded return, the
 error-exit arm of the guard, and an instruction-scale interleaving.
 
