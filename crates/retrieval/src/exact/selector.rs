@@ -211,13 +211,12 @@ fn mentions(trimmed: &str, start: usize, bounds: SelectorBounds) -> Vec<Mention>
     found
 }
 
-/// A selector head cannot start inside an identifier.
+/// A selector head starts the text or follows whitespace or ASCII punctuation
+/// other than `_`; any other character continues an identifier.
 fn selector_head(text: &str, at: usize) -> Option<(Family, usize)> {
-    if text[..at]
-        .chars()
-        .next_back()
-        .is_some_and(|before| before.is_alphanumeric() || before == '_')
-    {
+    if text[..at].chars().next_back().is_some_and(|before| {
+        !(before.is_whitespace() || (before.is_ascii_punctuation() && before != '_'))
+    }) {
         return None;
     }
     let rest = &text.as_bytes()[at..];
@@ -491,16 +490,21 @@ mod tests {
             vec![],
             "a keyword inside an identifier is not a head"
         );
-        assert_eq!(
-            hybrid("caf\u{e9}id:abc"),
-            vec![],
-            "a Unicode letter before the keyword continues the identifier"
-        );
-        assert_eq!(
-            hybrid("\u{2192}id:abc").len(),
-            1,
-            "a Unicode symbol before the keyword does not"
-        );
+        for glued in [
+            "caf\u{e9}id:abc",
+            "cafe\u{301}id:abc",
+            "\u{2192}id:abc",
+            "_id:abc",
+        ] {
+            assert_eq!(
+                hybrid(glued),
+                vec![],
+                "{glued:?}: only whitespace or ASCII punctuation may precede a head"
+            );
+        }
+        for opened in ["(id:abc", "\u{2003}id:abc", "x;id:abc"] {
+            assert_eq!(hybrid(opened).len(), 1, "{opened:?}");
+        }
     }
 
     #[test]

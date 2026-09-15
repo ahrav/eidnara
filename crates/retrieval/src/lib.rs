@@ -253,7 +253,9 @@ pub enum ProjectionError {
         "occurrence {occurrence_id} already has a tombstone with a different sequence or reason"
     )]
     TombstoneCollision { occurrence_id: String },
-    #[error("occurrence {occurrence_id} already has an exact association with a different target")]
+    #[error(
+        "occurrence {occurrence_id} already has an exact association with different immutable metadata"
+    )]
     AssociationCollision { occurrence_id: String },
     #[error("a stored exact association carries extraction version {stored}, not {expected}")]
     ExtractionVersionMismatch { stored: u32, expected: u32 },

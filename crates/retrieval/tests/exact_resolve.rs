@@ -17,9 +17,9 @@ use retrieval::batch::{
 };
 use retrieval::exact::{
     Authority, CertificateRefusal, CompletenessCertificate, Completion, Disqualification,
-    ExactProof, ExactQuery, HexPrefix, IncompleteReason, ObjectFormat, ProofInvalidation,
-    RequestIntent, Resolution, ResolveBounds, ResolveRefusal, ResolveRequest, ShaPrefixQuery,
-    resolve, validate_for_use, validate_for_use_with_hook_for_test,
+    ExactProof, ExactQuery, HexPrefix, IncompleteReason, LookupRefusal, ObjectFormat,
+    ProofInvalidation, RequestIntent, Resolution, ResolveBounds, ResolveRefusal, ResolveRequest,
+    ShaPrefixQuery, resolve, validate_for_use, validate_for_use_with_hook_for_test,
 };
 use retrieval::{
     OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity, Tombstone,
@@ -1185,7 +1185,9 @@ fn an_association_retargeted_against_its_tuple_refuses_the_attempt() {
     );
     assert_eq!(
         outcome,
-        Err(ResolveRefusal::Projection(ProjectionError::CorruptRow))
+        Err(ResolveRefusal::Lookup(LookupRefusal::Projection(
+            ProjectionError::CorruptRow
+        )))
     );
 }
 

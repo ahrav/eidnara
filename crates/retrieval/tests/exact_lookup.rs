@@ -862,6 +862,144 @@ fn bounds_stale_cursors_interruption_and_missing_context_report_incompleteness()
 }
 
 #[test]
+fn cancellation_after_entry_never_returns_a_complete_or_partial_page() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    for (checkpoint_cancel, cancel_at, page_rows, object) in [
+        (true, 1, 8, "missing"),
+        (true, 1, 8, "obj-1"),
+        (false, 1, 8, "obj-1"),
+        (false, 2, 8, "obj-1"),
+        (false, 2, 1, "obj-1"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        setup(&store);
+        apply(
+            &store,
+            &[
+                claim("obj-1", 1, "decision_summary"),
+                claim("obj-1", 1, "rationale"),
+                Source::Memory { object_id: "obj-1" },
+            ],
+            mutation(0, 3),
+            vec![],
+            1,
+        )
+        .unwrap();
+        let budget = EvalBudget::unbounded();
+        let cancel = budget.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        store.with_conn_unfenced(|conn| {
+            conn.create_scalar_function("cancel_lookup", 1,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                move |ctx| {
+                    if observed.fetch_add(1, Ordering::Relaxed) + 1 == cancel_at {
+                        cancel.cancel();
+                    }
+                    ctx.get::<i64>(0)
+                })?;
+            conn.execute_batch(if checkpoint_cancel {
+                "ALTER TABLE projection_checkpoint RENAME TO original_checkpoint;
+                 CREATE VIEW projection_checkpoint AS SELECT singleton,snapshot_commit_seq,
+                     cancel_lookup(checkpoint_commit_seq) AS checkpoint_commit_seq,hold_id,updated_at
+                 FROM original_checkpoint;"
+            } else {
+                "ALTER TABLE exact_associations RENAME TO original_associations;
+                 CREATE VIEW exact_associations AS SELECT family,namespace,key,occurrence_id,
+                     target_id,extraction_version,cancel_lookup(created_commit_seq) AS created_commit_seq
+                 FROM original_associations;"
+            })
+        }).unwrap();
+        let result = store
+            .with_conn(|conn| {
+                Ok(page(
+                    conn,
+                    &LookupContext {
+                        budget: &budget,
+                        ..context(page_rows)
+                    },
+                    &ExactQuery::CanonicalObject(object.as_bytes()),
+                    None,
+                ))
+            })
+            .unwrap();
+        assert!(budget.is_exhausted(), "the cancellation seam must fire");
+        assert_eq!(result.unwrap_err(), LookupRefusal::BudgetExhausted);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            cancel_at,
+            "no rows are stepped after cancellation is observed"
+        );
+    }
+}
+
+#[test]
+fn association_keys_and_namespaces_must_match_the_occurrence_tuple() {
+    let prefix = hex("ab");
+    let sha = |repo, format| ExactQuery::Sha(ShaPrefixQuery::bind(repo, format, &prefix).unwrap());
+    for (sql, query) in [
+        (
+            "UPDATE exact_associations SET namespace='sha1:repo-b' WHERE family='sha'",
+            sha("repo-b", ObjectFormat::Sha1),
+        ),
+        (
+            "UPDATE exact_associations SET namespace='sha256:repo-a' WHERE family='sha'",
+            sha("repo-a", ObjectFormat::Sha256),
+        ),
+        (
+            "UPDATE exact_associations SET key=CAST('abd0000000000000000000000000000000000000' AS BLOB) WHERE family='sha'",
+            sha("repo-a", ObjectFormat::Sha1),
+        ),
+        (
+            "UPDATE exact_associations SET key=CAST('forged' AS BLOB),target_id='forged' WHERE family='id'",
+            ExactQuery::CanonicalObject(b"forged"),
+        ),
+        (
+            "UPDATE exact_associations SET family='id',namespace='canonical_object',key=CAST('forged' AS BLOB),target_id='forged' WHERE family='sha'",
+            ExactQuery::CanonicalObject(b"forged"),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        setup(&store);
+        apply(
+            &store,
+            &[
+                claim("obj-1", 1, "decision_summary"),
+                Source::Memory { object_id: "obj-1" },
+                commit("repo-a", ObjectFormat::Sha1, oid40("abc", '0'), 1),
+            ],
+            mutation(0, 3),
+            vec![],
+            1,
+        )
+        .unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(sql, [])?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    page(conn, &context(8), &query, None).unwrap_err(),
+                    LookupRefusal::Projection(ProjectionError::CorruptRow),
+                    "{sql}"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
 fn a_page_refuses_the_same_damaged_rows_as_the_occurrence_reader() {
     let sources = vec![
         claim("obj-1", 1, "decision_summary"),
@@ -1119,6 +1257,40 @@ fn associations_replay_revise_and_invalidate_atomically_with_the_checkpoint() {
     let repaired = apply(&store, &first, mutation(0, 2), vec![], 7).unwrap();
     assert_eq!(repaired.associations_inserted, 1);
 
+    for created in [1, 999] {
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE exact_associations SET created_commit_seq=?1",
+                    [created],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(batch_status(conn, &batch).unwrap(), BatchStatus::NotApplied);
+                assert_eq!(
+                    page(conn, &context(8), &query, None).unwrap_err(),
+                    LookupRefusal::Projection(ProjectionError::CorruptRow)
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            apply(&store, &first, mutation(0, 2), vec![], 8).unwrap_err(),
+            ProjectionError::AssociationCollision {
+                occurrence_id: occurrence_id(&first[0])
+            }
+        );
+    }
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute("UPDATE exact_associations SET created_commit_seq=2", [])?;
+            Ok(())
+        })
+        .unwrap();
+
     store
         .with_conn_fenced(|conn| {
             conn.execute(
@@ -1208,6 +1380,28 @@ fn associations_replay_revise_and_invalidate_atomically_with_the_checkpoint() {
             );
             assert_eq!(by_revision[&2], None);
             assert!(page.rows.iter().all(|row| row.target_id == "obj-1"));
+            Ok(())
+        })
+        .unwrap();
+
+    let later_batch = ProjectionBatch {
+        identity: mutation(0, 4),
+        ..batch
+    };
+    store
+        .with_conn_fenced(|conn| {
+            let replay = apply_batch(conn, &later_batch, bounds(), 10).unwrap();
+            assert_eq!(replay.rows_replayed, 3);
+            assert_eq!(replay.associations_inserted, 0);
+            assert_eq!(
+                batch_status(conn, &later_batch).unwrap(),
+                BatchStatus::Applied
+            );
+            let page = page(conn, &context(8), &query, None).unwrap();
+            assert_eq!(page.checkpoint.checkpoint_commit_seq, 4);
+            for row in page.rows {
+                assert_eq!(row.created_commit_seq, row.revision + 1);
+            }
             Ok(())
         })
         .unwrap();

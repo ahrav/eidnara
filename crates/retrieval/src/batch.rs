@@ -255,7 +255,12 @@ pub fn batch_status(
             });
         }
         let keys = crate::exact::extract(record, &stored.lineage_id);
-        if !crate::exact::association::stored(conn, &occurrence_id, &keys)? {
+        if !crate::exact::association::stored(
+            conn,
+            &occurrence_id,
+            &keys,
+            record.created_commit_seq,
+        )? {
             return Ok(BatchStatus::NotApplied);
         }
         if let Some(generation) = batch.generation_id
