@@ -28,11 +28,17 @@ value.
 
 ## Metric
 
-The metric is the inner product (`Metric::InnerProduct`). Rows are
-unit-normalized, so the inner product equals the cosine. No other metric is
-defined; `dense::score::score` matches the metric exhaustively, so a new
-variant cannot fall through to the wrong arithmetic. The persisted encoding of
-the metric belongs to the artifact contract, not to this document.
+The metric is the inner product (`Metric::InnerProduct`) of the stored f32
+coordinates. The generation predicate permits norms within a caller-supplied
+tolerance of one; scoring does not divide by those norms. Inner product and
+cosine agree mathematically when both norms are exactly one, but accepted
+norm differences can change scores and near-tie ordering. The oracle's target
+is stored-value inner product, not exact cosine.
+
+No other metric is defined; `dense::score::score` matches the metric
+exhaustively, so a new variant cannot fall through to the wrong arithmetic.
+The persisted encoding of the metric belongs to the artifact contract, not
+to this document.
 
 ## The generation predicate `N_gen`
 

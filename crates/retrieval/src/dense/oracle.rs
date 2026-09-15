@@ -248,7 +248,9 @@ fn exhaustive_inner(
         };
         if let Some(last) = page.last() {
             after.clone_from(&last.candidate.occurrence_id);
-            let present = decode_page(page, &layout, &mut ranking, &mut hook)?;
+            let Some(present) = decode_page(page, &layout, budget, &mut ranking, &mut hook)? else {
+                return exhausted(ranking);
+            };
             let flow = judge_and_score(
                 kernel,
                 request,
@@ -339,18 +341,24 @@ fn read_page(
     Ok((page, false))
 }
 
+type DecodedPage = (Vec<OccurrenceCandidate>, Vec<Vec<f32>>);
+
 /// Every present vector of the page is decoded and validated before any row of it is judged; a missing vector is counted and its row is neither judged nor scored.
 fn decode_page(
     page: Vec<PageRow>,
     layout: &RowLayout,
+    budget: &EvalBudget,
     ranking: &mut ExhaustiveRanking,
     hook: &mut impl FnMut(Window<'_>),
-) -> Result<(Vec<OccurrenceCandidate>, Vec<Vec<f32>>), OracleRefusal> {
+) -> Result<Option<DecodedPage>, OracleRefusal> {
     ranking.consumed.pages += 1;
     let mut candidates = Vec::with_capacity(page.len());
     let mut vectors = Vec::with_capacity(page.len());
     for row in page {
         hook(Window::Visited(&row.candidate.occurrence_id));
+        if budget.is_exhausted() {
+            return Ok(None);
+        }
         ranking.coverage.required += 1;
         match row.vector {
             Some(bytes) => {
@@ -368,7 +376,7 @@ fn decode_page(
             None => ranking.coverage.missing_without_pending += 1,
         }
     }
-    Ok((candidates, vectors))
+    Ok(Some((candidates, vectors)))
 }
 
 /// Judges the page's present rows in one batch and offers the eligible ones to the top-K.
@@ -377,7 +385,7 @@ fn judge_and_score(
     kernel: &KernelStore,
     request: &ExhaustiveQuery<'_>,
     layout: &RowLayout,
-    (candidates, vectors): (Vec<OccurrenceCandidate>, Vec<Vec<f32>>),
+    (candidates, vectors): DecodedPage,
     budget: &EvalBudget,
     ranking: &mut ExhaustiveRanking,
     top: &mut TopK<OccurrenceCandidate>,
@@ -401,6 +409,9 @@ fn judge_and_score(
     }
     for ((candidate, vector), judged) in candidates.into_iter().zip(vectors).zip(report.occurrences)
     {
+        if budget.is_exhausted() {
+            return Ok(ControlFlow::Break(None));
+        }
         match judged.disposition {
             Disposition::Eligible => {
                 let ranked = Ranked {

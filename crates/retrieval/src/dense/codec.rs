@@ -1,6 +1,5 @@
 //! Little-endian f32 decoding preserves every bit, including signed zero.
 
-/// Rows are unit-normalized, so the inner product is the cosine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Metric {
     InnerProduct,
@@ -76,6 +75,7 @@ pub fn decode_shape(bytes: &[u8], dimension: u32) -> Result<Vec<f32>, RowRejecti
 }
 
 pub fn decode(bytes: &[u8], layout: &RowLayout) -> Result<Vec<f32>, RowRejection> {
+    layout.check()?;
     let row = decode_shape(bytes, layout.dimension)?;
     check_norm(&row, layout.unit_norm_tolerance)?;
     Ok(row)
@@ -87,6 +87,7 @@ pub fn validate_shape(row: &[f32], dimension: u32) -> Result<(), RowRejection> {
 }
 
 pub fn validate(row: &[f32], layout: &RowLayout) -> Result<(), RowRejection> {
+    layout.check()?;
     validate_shape(row, layout.dimension)?;
     check_norm(row, layout.unit_norm_tolerance)
 }
