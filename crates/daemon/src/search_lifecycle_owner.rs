@@ -132,6 +132,8 @@ pub struct SearchLifecycleOwner {
     roster: ProjectRoster,
     /// Woken when a disable hands the manager back, so a shutdown that found the manager disabling can retry.
     disabled: tokio::sync::Notify,
+    /// Woken when a request is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it.
+    requested: tokio::sync::Notify,
     /// The project digest whose supervisor ran last, how many slices it has had, and the bounds it started under; `None` before the first tenure.
     /// The tenant, its slice count, the bounds its supervisor runs under, and the `B_recovery_ms` those bounds were derived from.
     tenure: Mutex<Option<(String, u32, SliceBounds, u64)>>,
@@ -209,6 +211,7 @@ impl SearchLifecycleOwner {
             roster: Arc::new(Vec::new),
             tenure: Mutex::new(None),
             disabled: tokio::sync::Notify::new(),
+            requested: tokio::sync::Notify::new(),
             #[cfg(feature = "test-support")]
             drain_grace_override: Mutex::new(None),
             #[cfg(feature = "test-support")]
@@ -935,15 +938,15 @@ impl SearchLifecycleOwner {
                 "the request's deadline lies past its transition's bound",
             ));
         }
-        match request.transition {
+        let recorded = match request.transition {
             Transition::Rebuilding => {
                 let lifecycle = ProjectionLifecycle::open(&self.home)?;
-                Ok(Some(lifecycle.record_at(
+                Some(lifecycle.record_at(
                     self.admission.gate(),
                     request,
                     now,
                     EntryPoint::Explicit,
-                )?))
+                )?)
             }
             Transition::AuthorizedRecovery => {
                 let Managed::Selection(selection) = &mut *managed else {
@@ -957,9 +960,12 @@ impl SearchLifecycleOwner {
                     request,
                     budget,
                 )?;
-                Ok(None)
+                None
             }
-        }
+        };
+        // The slice loop's idle wait ends now, so the record is not first seen after an idle period has spent its time.
+        self.requested.notify_one();
+        Ok(recorded)
     }
 
     /// Pins the selected family for one reader. Freshness is judged on the coverage the last slice observed, so a reader can trail the kernel by the commits that arrived since that slice on top of `catchup_lag_commits`; the next slice observes the family again.
@@ -1335,7 +1341,7 @@ fn replacement_spec(
     })
 }
 
-/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first. A supervisor a slice hands back is drained here unless `cancel` fires first, in which case the drain is left to [`SearchLifecycleOwner::shutdown`] so one grace covers it. A panicking slice closes admission and ends the loop, since its state is no longer known.
+/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first, and a request recorded during the idle wait ends it. A supervisor a slice hands back is drained here unless `cancel` fires first, in which case the drain is left to [`SearchLifecycleOwner::shutdown`] so one grace covers it. A panicking slice closes admission and ends the loop, since its state is no longer known.
 pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
     let mut reporter = SliceReporter::default();
     loop {
@@ -1390,6 +1396,7 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
         tokio::select! {
             () = cancel.cancelled() => return,
             () = tokio::time::sleep(SLICE_IDLE) => {}
+            () = owner.requested.notified() => {}
         }
     }
 }

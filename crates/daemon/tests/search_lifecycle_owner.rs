@@ -3179,6 +3179,57 @@ fn a_refused_request_over_an_unreadable_record_closes_admission() {
     assert!(owner.pin(&slice_budget()).is_err());
 }
 
+/// A request recorded while the slice loop idles wakes the loop, so the record is observed well within the idle period rather than after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_request_wakes_an_idle_slice_loop() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = Arc::new(owner(home, &corpus.kernel));
+    let (waiting_tx, waiting) = std::sync::mpsc::channel();
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Waiting { .. }) {
+            let _ = waiting_tx.send(());
+        }
+    });
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let loop_task = tokio::spawn(daemon::search_lifecycle_owner::run_slices(
+        Arc::clone(&owner),
+        cancel.clone(),
+    ));
+    // The first slice finds nothing to do and the loop idles; the request lands inside that idle wait.
+    tokio::task::spawn_blocking(move || waiting.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the first slice runs");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let requested = Instant::now();
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let observed = tokio::time::timeout(Duration::from_millis(2_000), async {
+        loop {
+            if matches!(control(home), ControlState::Current(_))
+                || matches!(control(home), ControlState::Intent(intent) if intent.staged_seed_digest.is_some())
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let elapsed = requested.elapsed();
+    cancel.cancel();
+    loop_task.await.unwrap();
+    let _ = owner.shutdown().await;
+    assert!(
+        observed.is_ok(),
+        "the loop did not observe the request within {elapsed:?}; it idles for five seconds otherwise"
+    );
+}
+
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
 #[test]
 fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {
