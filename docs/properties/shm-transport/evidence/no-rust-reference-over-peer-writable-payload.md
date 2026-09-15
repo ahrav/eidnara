@@ -99,6 +99,16 @@ source-level or review-level check; in the source tree this record was written
 against it failed at `lease.rs:71` (source tree; not at HEAD), where `checksum`
 built a slice, and at HEAD every reader passes it.
 
+A separate checklist item is the pointer escape: `LeaseSpan::as_mut_ptr`
+(`lease.rs:55`) hands out a raw `*mut u8` whose doc comment forbids a long-lived
+slice. Its consumers are in `packages/shm-native/src/lib.rs`, where
+`create_external_view(env, span.as_mut_ptr(), span.len())` (`:1061`, `:1143`,
+`:1526`) exposes the span to JavaScript as an external `ArrayBuffer` on the
+producer and receive paths. The audit must trace each of those views for
+lifetime beyond the lease and for reads the peer can race, since no Rust
+reference is formed but the same aliasing hazard reaches the addon boundary.
+This is an audit-scope gap this record now names, not a demonstrated defect.
+
 The impact demonstration needs a peer that writes leased bytes concurrently,
 which is fault class F2 and does not exist. Under Miri or ThreadSanitizer the
 `checksum` race would be reportable, and neither tool is configured anywhere in
@@ -107,7 +117,7 @@ second thread writes it, under `-Zsanitizer=thread`.
 
 ## Investigation log
 
-### Q: Is `checksum` reachable from any non-bench caller? If it is bench-only, gating it removes the finding; if it is part of the intended read API, the slice needs to go.
+### Q: Is `checksum` reachable from any non-bench caller? If it is bench-only, gating it removes the finding; if it is part of the intended read API, the slice needs to go
 
 - Sources examined: `grep -rn "checksum" crates/shm-transport/` and
   `packages/shm-native/`; `grep -rn "\.checksum()" crates/ packages/`

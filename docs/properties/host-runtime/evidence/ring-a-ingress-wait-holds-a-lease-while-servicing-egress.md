@@ -148,10 +148,10 @@ mechanisms are never exercised together:
   connection's sends") was removed with the rewrite; the surviving statement
   of the same intent is `run_endpoint`'s alternation comment at `:416-420`.
   If the arm never runs under real pressure, the claim is unverified. Note
-  that this is the site whose publish failure produces `ReadClose::Corrupt`
-  (`:536`) while the main loop's produces `CleanEof` - the asymmetry in
-  `ring-a-publish-failure-is-reported-as-a-clean-peer-close` - and reaching
-  this state is what makes that asymmetry observable.
+  that this is the site whose publish failure produces `ReadClose::Corrupt`;
+  at HEAD the main loop's publish failure produces `Corrupt` as well, so the
+  `Corrupt`-versus-`CleanEof` asymmetry that
+  `ring-a-publish-failure-is-reported-as-a-clean-peer-close` recorded is gone.
 - The lease's long hold itself, which is the longest any host code holds a
   reference into shared storage, and therefore the widest window for Part 1's
   `quarantine-authority-survives-peer-writes` scenario.
@@ -179,8 +179,9 @@ Dependencies:
 - `ring-a-lease-release-failure-is-observable-only-on-the-success-path` cannot
   be falsified until this state is reached, because its untracked drop-path
   returns are exactly the ones inside this wait (`:525`, `:531`, `:539`).
-- `ring-a-publish-failure-is-reported-as-a-clean-peer-close` needs this state
-  to observe its `Corrupt`-versus-`CleanEof` asymmetry.
+- `ring-a-publish-failure-is-reported-as-a-clean-peer-close` recorded a
+  `Corrupt`-versus-`CleanEof` asymmetry that HEAD no longer has; both paths
+  report `Corrupt`.
 - Part 1 holds `lease-saturation-is-reached-then-drains`,
   `receive-resumes-when-lease-capacity-clears`, and
   `backpressure-converges-in-a-bounded-reclaim-window` at the transport layer,
@@ -214,8 +215,9 @@ but its sender queue is empty (`:1023-1026`), so `:533-540` never runs and the
 test exits through cancellation rather than through the publish arm or the
 success path. Combining them is a small change to an existing test.
 
-Neither runs in CI, since every `-p host-runtime` invocation in `ci.yml` filters to
-an integration binary.
+At HEAD both run in CI: the workspace `--all-targets` jobs execute the
+`host-runtime` library test target, so the filtered-integration-only shape of
+the source workflow no longer applies.
 
 ## Investigation log
 

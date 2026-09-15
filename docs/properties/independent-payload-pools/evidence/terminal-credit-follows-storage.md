@@ -29,7 +29,7 @@ A peer return that lands between one pump's `take_reclaimed` scan and the same
 pump's `try_reserve_in` puts the block on both the free list and the reclaim
 list; the reservation pops it first, so the next terminal publishes into it.
 `try_reserve_in` removes the block from the reclaim list at that point
-(`crates/shm-transport/src/backend/ring.rs:1056`), so the later drain settles
+(`crates/shm-transport/src/backend/ring.rs:1056-1062`), so the later drain settles
 only the new publication's return.
 
 ## What a test must construct

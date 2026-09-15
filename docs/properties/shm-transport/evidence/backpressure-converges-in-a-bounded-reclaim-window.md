@@ -101,9 +101,11 @@ The scenario below was derived against the source tree this record was written f
    frame that outlives `frame_deadline`: `Publisher::pump` returns `Err`
    (`:1168-1171`) or the `sleep_until(publisher.earliest_deadline())` arm fires
    (`:867-877`), `run_endpoint` calls `fail` and returns (`:696-704`,
-   `:884-892`), the endpoint thread joins,
-   and `admission.release()` runs unconditionally (`:360`) — the pre-refactor
-   suspect branch is gone.
+   `:884-892`), the endpoint thread joins, and the admissions settle at
+   `:534-549`: the backing charge refunds when the last lease returns and the
+   admission clone drops, or moves to the quarantined bucket through
+   `backing_admission.quarantine()` when the peer kept its mapping past the
+   release grace — the pre-refactor suspect branch is gone.
 5. The operator-visible symptom is a retired generation attributed to a transport
    fault, on a channel where the peer was draining correctly the entire time.
    At HEAD: `admission.release()` is not unconditional: the endpoint thread calls `admission.quarantine()` instead when either ring latched quarantine and the peer did not release it (`crates/host-runtime/src/ring_transport.rs:353-361`).
