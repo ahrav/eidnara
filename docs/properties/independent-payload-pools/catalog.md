@@ -412,13 +412,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `crates/host-runtime/src/ring_transport.rs:3104` holds a real `into_private` copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once. `crates/host-runtime/tests/dispatch.rs:749` and `crates/host-runtime/tests/dispatch.rs:805` drive the production Cancel and route-close paths against handler blocking work (`blocking_hold`), which starts after `dispatch_request` has already completed the inbound copy; no test pauses the production copy itself under Cancel, route close, or shutdown.
+Exercised: partial - `crates/host-runtime/src/ring_transport.rs:3154` holds a real `into_private` copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once. `crates/host-runtime/tests/dispatch.rs:749` and `crates/host-runtime/tests/dispatch.rs:805` drive the production Cancel and route-close paths against handler blocking work (`blocking_hold`), which starts after `dispatch_request` has already completed the inbound copy; no test pauses the production copy itself under Cancel, route close, or shutdown.
 Guarantee: Cancellation, route close, and shutdown cannot return a block or its charge before the barrier-held copy/decode physically completes.
 Check: `always` - a lease moved into blocking work returns only after that work joins; `Cancel` observed mid-copy leaves `outstanding_returns` unchanged until the join. A pure-header body copies inline in `dispatch_request` (`crates/host-runtime/src/dispatch.rs:993`) with no worker and nothing to read, so no window exists there; a closed route still settles it as cancelled.
 Fault/timing angle: Cancel, route close, and shutdown during copy.
 Required faults and enabling state: A barrier holding copy work while `Cancel` arrives. Markers: marker:`host.cancel_during_barrier_held_copy`.
 Confidence: high - [evidence](evidence/request-conversion-completion-ownership.md). Verified against the tree of this catalog's introducing commit: `crates/host-runtime/src/handler.rs:617`; `crates/host-runtime/src/dispatch.rs:993`.
-Existing check: `crates/host-runtime/src/ring_transport.rs:3104` holds a real `into_private` copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once. `crates/host-runtime/tests/dispatch.rs:749` and `crates/host-runtime/tests/dispatch.rs:805` drive the production Cancel and route-close paths against handler blocking work (`blocking_hold`), which starts after `dispatch_request` has already completed the inbound copy; no test pauses the production copy itself under Cancel, route close, or shutdown.
+Existing check: `crates/host-runtime/src/ring_transport.rs:3154` holds a real `into_private` copy on the blocking barrier while the request, route, and host ledgers close, and shows `outstanding_returns` and the ingress charge unchanged until the copy joins, then each returned once. `crates/host-runtime/tests/dispatch.rs:749` and `crates/host-runtime/tests/dispatch.rs:805` drive the production Cancel and route-close paths against handler blocking work (`blocking_hold`), which starts after `dispatch_request` has already completed the inbound copy; no test pauses the production copy itself under Cancel, route close, or shutdown.
 Impact: An early return would reuse a block a worker is still copying.
 Open questions:
 
@@ -749,7 +749,7 @@ Existing check: `crates/shm-transport/tests/ring.rs:317` records a completed rea
 Impact: A skipped suite counted as passing hides an unexercised layout.
 Open questions:
 
-- Handoff: #548, #552, #550 add daemon-level real-process witnesses; the Rust client's cross-process run is still owed.
+- Handoff: #548, #552, #550 add daemon-level real-process witnesses; the Rust client's cross-process run is still owed under #552 and passes to the last implementation task's combined matrix if #552 closes first.
 
 ### malformed-fixture-valid-baseline
 
