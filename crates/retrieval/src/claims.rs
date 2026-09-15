@@ -312,7 +312,8 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
 }
 
 /// Reads every live claim row, then the kernel's facts for the objects they
-/// name at the kernel tip observed before the facts read, and classifies each.
+/// name at a kernel tip captured with its incarnation before the facts read,
+/// and classifies each.
 /// `kernel_incarnation_id` names the incarnation of `kernel`; a projection
 /// built for another incarnation is refused before any row is read, since a
 /// reused object id there would classify from an unrelated history.
@@ -322,8 +323,9 @@ pub fn classify(row: &ClaimCandidateRow, facts: Option<&ClaimFacts>) -> Candidat
 /// `NoIdentity` and `ForeignKernel` before any row is read; projection
 /// refusals from [`live_claim_candidates`]; `TooManyClaims` before kernel
 /// access when the rows name more distinct objects than
-/// `bounds.facts.max_claims`; other facts refusals from `claim_facts_as_of`;
-/// kernel errors as `Facts(Kernel(_))`.
+/// `bounds.facts.max_claims`; `Facts(IncarnationMismatch)` when the kernel was
+/// restored between the tip capture and the facts read; other facts refusals
+/// from `claim_facts_at`; kernel errors as `Facts(Kernel(_))`.
 pub fn classify_live_claims(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
@@ -347,8 +349,14 @@ pub fn classify_live_claims(
     if object_ids.len() > bounds.facts.max_claims.get() {
         return Err(ClaimFactsError::TooManyClaims.into());
     }
-    let known_as_of = kernel.tip().map_err(ClaimFactsError::from)?;
-    let snapshot = kernel.claim_facts_as_of(&object_ids, known_as_of, bounds.facts)?;
+    // The target carries the tip and the incarnation it was read from; the
+    // facts read refuses a store restored in between, so one history's tip
+    // cannot be paired with another's rows.
+    let target = kernel
+        .capture_commit_read_target()
+        .map_err(ClaimFactsError::from)?;
+    let snapshot = kernel.claim_facts_at(&object_ids, target, bounds.facts)?;
+    let known_as_of = target.through_commit;
     let index: HashMap<&str, usize> = snapshot
         .claims
         .iter()

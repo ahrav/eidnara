@@ -86,6 +86,7 @@ Codex review of the pushed branch added three findings:
 | `classify` never consulted `facts.occurrences`, so a row whose descriptor lost its evidence (an artifact deletion under an active decision) classified `Current` until catch-up tombstoned it | gap | fixed: a row absent from the live descriptor inventory is `Retracted`; `a_row_outside_the_live_descriptor_inventory_is_retracted`; the daemon test's `Current` rows prove the projection ids match the inventory |
 | A second `canonical_object` association on one occurrence would have doubled its candidate rows | gap | covered by the key and tuple check above: the second row's key cannot match the tuple; `a_second_canonical_object_association_on_one_row_is_refused` pins it |
 | `spec-integration.md` attributed the snapshot read to `classify` | refinement | fixed in the record: `classify_live_claims` is the snapshot-bound read, `classify` the mapping over loaded facts |
+| `classify_live_claims` read `kernel.tip()` and then `claim_facts_as_of` as two unguarded calls, so a restore between them paired one history's tip with another's rows; the incarnation check compared only the projection identity with the caller's string | gap | fixed: `KernelStore::claim_facts_at` reads at a `CommitReadTarget` and refuses `IncarnationMismatch` under the reader guard; the classifier captures the target with `capture_commit_read_target`, as the materializer does; `facts_at_a_target_refuse_another_incarnation` |
 
 ## Final-use gate change
 
