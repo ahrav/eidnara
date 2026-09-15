@@ -330,6 +330,11 @@ export class ShmFrameChannel implements SetupFrameChannel {
             this.releasePublication(reservedBytes);
             throw error;
         }
+        // The fill may have closed the channel; the close sweep has already run.
+        if (this.closed) {
+            this.releasePublication(reservedBytes);
+            throw new HostCallError("not_sent", "shared-memory channel closed");
+        }
         const pending: PendingPublication = {
             header,
             body: { byteLength: body.byteLength, fill: (cursor) => cursor.write(snapshot) },

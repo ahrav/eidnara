@@ -1220,6 +1220,36 @@ describe("mandatory shared-memory channel", () => {
         expect(budget.used).toBe(0);
     });
 
+    test("a fill that closes the channel while its frame is being queued leaves nothing queued or charged", () => {
+        const budget = new ByteBudget(1 << 20);
+        const state = { full: true, arm: () => true };
+        const mock = parkingNative(state);
+        const channel = new ShmFrameChannel({
+            nativeChannel: mock.native,
+            budget,
+            maxBodyLen: 1 << 20,
+            handlers: { onFrame: () => {}, onClosed: () => {} },
+        });
+        channel.beginFrames();
+        let refused: unknown;
+        try {
+            channel.produce(responseHeader(FrameType.Request, 1n, 4), {
+                byteLength: 4,
+                fill: (cursor: ProducerCursor) => {
+                    cursor.write(new Uint8Array(4));
+                    channel.close();
+                },
+            });
+        } catch (error) {
+            refused = error;
+        }
+        expect(refused).toBeInstanceOf(HostCallError);
+        expect((refused as HostCallError).kind).toBe("not_sent");
+        expect(channel.isClosed()).toBe(true);
+        expect(channel.stats().queuedDataFrames).toBe(0);
+        expect(budget.used).toBe(0);
+    });
+
     test("cancelling the queue head publishes its successor without a readiness wake", async () => {
         const budget = new ByteBudget(1 << 20);
         const state = { full: true, arm: () => true };
