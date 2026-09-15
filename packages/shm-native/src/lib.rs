@@ -37,8 +37,6 @@ pub struct NativeTestPair {
     /// Ordinary descriptor slots per direction: how many frames a producer can publish before
     /// the consumer acknowledges any.
     pub descriptor_depth: u32,
-    /// Blocks per direction across every class: the bound on live leases.
-    pub block_count: u32,
     /// Largest body one ordinary block of the smallest class carries.
     pub smallest_body_capacity: u32,
     /// Blocks in the smallest ordinary class.
@@ -1009,7 +1007,6 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
                 first,
                 second,
                 descriptor_depth: geometry.ordinary_descriptors(),
-                block_count: geometry.block_count(),
                 smallest_body_capacity: u32::try_from(smallest.body_capacity())
                     .map_err(|_| error("test profile unavailable"))?,
                 smallest_class_count: smallest.count,

@@ -60,9 +60,9 @@ pub fn per_connection_limits() -> ShmHostLimits {
     }
 }
 
-/// Ceiling on committed transport bytes this process admits at once: every mapped byte of
-/// every pool plus its private ledgers. Sparse mappings make this a virtual commitment, not
-/// a residency claim.
+/// Maximum committed transport bytes admitted at once, including every pool's mapped bytes
+/// and private ledgers. Pools never return touched pages to the kernel, so the maximum bounds
+/// resident bytes as well as the mapping commitment.
 pub const MAX_RING_RESIDENT_BYTES: u64 = 1 << 30;
 
 /// Connections whose complete checked transport charge fits under
@@ -1086,6 +1086,16 @@ mod tests {
         fn drop(&mut self) {
             self.used.fetch_sub(self.bytes, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn production_profile_affords_five_connections_under_the_byte_ceiling() {
+        let one = per_connection_limits();
+        assert_eq!(one.mapping_bytes, 2 * 95_825_920);
+        assert_eq!(one.ledger_bytes, 2 * 187 * 40);
+        assert_eq!(MAX_RING_RESIDENT_BYTES, 1 << 30);
+        assert_eq!(affordable_connections(), 5);
+        assert_eq!(crate::config::HostLimits::default().max_connections, 5);
     }
 
     #[test]

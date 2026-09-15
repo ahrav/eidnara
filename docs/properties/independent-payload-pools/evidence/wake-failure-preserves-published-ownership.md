@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-A doorbell failure after publication quarantines or latches `wake_failed` but never rolls back the published descriptor or completion; `WouldBlock` is success (KTD3). The specification (#524) names this record under its
+A doorbell failure after publication quarantines the producer, or surfaces as `WakeFailed` to a lease's explicit `release` caller, but never rolls back the published descriptor or completion; `WouldBlock` is success (KTD3). The specification (#524) names this record under its
 acceptance section and ties it to the requirements and decisions the
 `catalog.md` relationship map lists.
 

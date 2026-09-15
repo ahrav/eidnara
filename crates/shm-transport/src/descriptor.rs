@@ -355,18 +355,6 @@ pub enum DescriptorError {
     /// The profile id is empty, too long, or has a byte outside the allowed set.
     #[error("hardware profile identifier is invalid")]
     InvalidHardwareProfile,
-    /// The byte buffer is shorter than the fixed structure it should hold.
-    #[error("fixed structure is truncated")]
-    Truncated,
-    /// The schema version is not `DESCRIPTOR_SCHEMA_VERSION`.
-    #[error("descriptor schema is unsupported")]
-    UnsupportedSchema,
-    /// The incarnation differs from the expected one.
-    #[error("payload identity does not match incarnation")]
-    WrongIncarnation,
-    /// The lane differs from the expected one.
-    #[error("payload identity does not match lane")]
-    WrongLane,
     /// Sequence is zero or does not match the expected sequence.
     #[error("publication sequence is invalid")]
     InvalidSequence,

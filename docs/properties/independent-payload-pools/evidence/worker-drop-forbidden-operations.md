@@ -14,7 +14,7 @@ Resolved against the tree of this catalog's introducing commit:
 - `crates/shm-transport/src/backend/retained.rs:590`
 - `crates/shm-transport/src/backend/ring.rs:984`
 
-Witness status: yes - `crates/shm-transport/src/lease.rs:640` and `crates/shm-transport/src/backend/ring.rs:2794` assert the five observers stay unreached through saturated drops on worker threads.
+Witness status: yes - `crates/shm-transport/src/lease.rs:640` and `crates/shm-transport/src/backend/ring.rs:2794` assert the three observers stay unreached through saturated drops on worker threads.
 
 ## Failure scenario
 
@@ -33,7 +33,7 @@ Situation markers that must fire independently of the safety check:
 - `lease.drop_during_exhaustion`
 - `lease.drop_after_endpoint_exit`
 
-Check semantics: `unreachable` - the five observer code points in `lease::observers` (`ring_call`, `node_allocation`, `slot_wait`, `napi_call`, `free_list_mutation`) are never entered while `in_final_drop` is set; `unreachable` because each is a specific code location that must not execute.
+Check semantics: `unreachable` - the three observer code points in `lease::observers` (`ring_call`, `slot_wait`, `free_list_mutation`) are never entered while `in_final_drop` is set; `unreachable` because each is a specific code location that must not execute. Completion-node allocation and the N-API boundary have no code point in this crate and are guaranteed by construction, not observed.
 
 ## Investigation log
 

@@ -31,7 +31,7 @@ Situation markers that must fire independently of the safety check:
 
 - `native.environment_exit_with_aliases`
 
-Check semantics: `always` - `cleanup_env` never calls `Ring` methods other than `enter_quarantine`, and the `napi_call` observer stays unreached in a final drop.
+Check semantics: `always` - `cleanup_env` never calls `Ring` methods other than `enter_quarantine`, and a final drop never reaches the N-API boundary; no observer instruments that boundary in `shm-transport`, so the check is on the addon's detach-before-return path.
 
 ## Investigation log
 

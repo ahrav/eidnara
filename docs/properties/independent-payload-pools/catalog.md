@@ -36,17 +36,22 @@ No record is `explicit-config-only`.
 
 ## Forbidden-operation observers
 
-Five code points must never execute inside a lease's final drop. They are
+Three code points must never execute inside a lease's final drop. They are
 implemented as `unreachable` observers in `crates/shm-transport/src/lease.rs`
 (`lease::observers`) and asserted by `worker-drop-forbidden-operations`:
 
 | Observer | Forbidden operation |
 | --- | --- |
 | `ring_call` | any `Ring` entry point |
-| `node_allocation` | allocating a completion node |
 | `slot_wait` | parking for a descriptor slot |
-| `napi_call` | any N-API boundary |
 | `free_list_mutation` | any free-list push or pop |
+
+Two further forbidden operations, allocating a completion node and crossing
+the N-API boundary, have no code point in this crate. The pool publishes a
+completion into a fixed cell, so no node exists to allocate, and the N-API
+boundary lives in the native addon. They are stated as guarantees of the
+design, not observed as code points; `environment-finalizer-confinement`
+covers the addon side.
 
 ## Situation markers
 
@@ -203,13 +208,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `crates/shm-transport/src/lease.rs:640` and `crates/shm-transport/src/backend/ring.rs:2794` assert the five observers stay unreached through saturated drops on worker threads.
+Exercised: yes - `crates/shm-transport/src/lease.rs:640` and `crates/shm-transport/src/backend/ring.rs:2794` assert the three observers stay unreached through saturated drops on worker threads.
 Guarantee: The final drop of a lease performs no `Ring` call, allocates no completion node, waits for no slot, makes no N-API call, and mutates no free list (KTD3).
-Check: `unreachable` - the five observer code points in `lease::observers` (`ring_call`, `node_allocation`, `slot_wait`, `napi_call`, `free_list_mutation`) are never entered while `in_final_drop` is set; `unreachable` because each is a specific code location that must not execute.
+Check: `unreachable` - the three observer code points in `lease::observers` (`ring_call`, `slot_wait`, `free_list_mutation`) are never entered while `in_final_drop` is set; `unreachable` because each is a specific code location that must not execute. Completion-node allocation and the N-API boundary have no code point in this crate and are guaranteed by construction, not observed.
 Fault/timing angle: Drops under class exhaustion, after endpoint exit, and from several worker threads at once.
 Required faults and enabling state: Leases dropped on worker threads while the producer is `Exhausted`; leases dropped after both endpoint handles are gone. Markers: marker:`lease.drop_during_exhaustion`, marker:`lease.drop_after_endpoint_exit`.
 Confidence: high - [evidence](evidence/worker-drop-forbidden-operations.md). Verified against the tree of this catalog's introducing commit: `crates/shm-transport/src/lease.rs:377`; `crates/shm-transport/src/backend/retained.rs:590`; `crates/shm-transport/src/backend/ring.rs:984`.
-Existing check: `crates/shm-transport/src/lease.rs:640` and `crates/shm-transport/src/backend/ring.rs:2794` assert the five observers stay unreached through saturated drops on worker threads.
+Existing check: `crates/shm-transport/src/lease.rs:640` and `crates/shm-transport/src/backend/ring.rs:2794` assert the three observers stay unreached through saturated drops on worker threads.
 Impact: A drop that reached the ring or a free list would race the endpoint thread or need it alive, re-coupling lease lifetime to the endpoint.
 Open questions:
 - Handoff: assertion-guard owner for whether the observers should also exist in release builds.
@@ -236,7 +241,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - `crates/shm-transport/src/backend/ring.rs:2579`; the return-side latch is exercised by `crates/shm-transport/src/backend/ring.rs:2473` whose peer end is closed.
-Guarantee: A doorbell failure after publication quarantines or latches `wake_failed` but never rolls back the published descriptor or completion; `WouldBlock` is success (KTD3).
+Guarantee: A doorbell failure after publication quarantines the producer, or surfaces as `WakeFailed` to a lease's explicit `release` caller, but never rolls back the published descriptor or completion; `WouldBlock` is success (KTD3).
 Check: `always` - after a failed wake, `published` still holds the new sequence or the completion cell still holds the generation, and no free-list mutation followed the failure.
 Fault/timing angle: Peer doorbell end closed before the wake; a full socket buffer (`WouldBlock`).
 Required faults and enabling state: `parked` set with the peer's doorbell end closed so `send` fails with `EPIPE`. Markers: marker:`pool.wake_send_failed_after_publication`, marker:`pool.wake_would_block_token_pending`.
@@ -447,7 +452,7 @@ Reachability: default-production
 Status: active
 Exercised: partial - `packages/shm-native/src/lib.rs:471` closes channels on the environment cleanup hook and `mem::forget`s alias-holding channels; the owned lease's drop is the only finalizer-adjacent return and reaches no N-API (`crates/shm-transport/src/backend/retained.rs:588`).
 Guarantee: Finalizers and cleanup hooks own only their declared context: no ring call, allocator mismatch, unwind across C, or arbitrary N-API; uncertain cleanup quarantines rather than unmapping (KTD6).
-Check: `always` - `cleanup_env` never calls `Ring` methods other than `enter_quarantine`, and the `napi_call` observer stays unreached in a final drop.
+Check: `always` - `cleanup_env` never calls `Ring` methods other than `enter_quarantine`, and a final drop never reaches the N-API boundary; no observer instruments that boundary in `shm-transport`, so the check is on the addon's detach-before-return path.
 Fault/timing angle: Environment teardown with aliases outstanding.
 Required faults and enabling state: An environment exit while a channel holds a stranded alias. Markers: marker:`native.environment_exit_with_aliases`.
 Confidence: medium - [evidence](evidence/environment-finalizer-confinement.md). Verified against the tree of this catalog's introducing commit: `packages/shm-native/src/lib.rs:495`; `crates/shm-transport/src/lease.rs:432`.
