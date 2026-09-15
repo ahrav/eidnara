@@ -932,8 +932,9 @@ async fn a_readmitted_job_keeps_the_row_deadline_from_the_pass_start() {
             ..LocalEmbeddingsLimits::default()
         },
     );
+    // A three-second row deadline: a wait renewed after re-admission would add three more seconds, which the bound below does not allow.
     let near = DispatchBounds {
-        grant: grant(3, NOW + 300),
+        grant: grant(3, NOW + 3_000),
         result_wait: Duration::from_millis(50),
         ..bounds()
     };
@@ -973,7 +974,7 @@ async fn a_readmitted_job_keeps_the_row_deadline_from_the_pass_start() {
         PollOutcome::Restarted
     ));
 
-    // The replacement's call is held; 400 ms pass inside the pass before the restarted poll, past the row's 300 ms, so the re-admitted job is not waited for.
+    // The replacement's call is held; 3.1 s pass inside the pass before the restarted poll, past the row's 3 s, so the re-admitted job is not waited for.
     let gate = GateGuard(engine.block_calls());
     let started = std::time::Instant::now();
     let (end, events) = pass_delayed_at_poll(
@@ -985,7 +986,7 @@ async fn a_readmitted_job_keeps_the_row_deadline_from_the_pass_start() {
             ..bounds()
         },
         NOW,
-        Duration::from_millis(400),
+        Duration::from_millis(3_100),
     );
     let elapsed = started.elapsed();
     drop(gate);
@@ -995,7 +996,7 @@ async fn a_readmitted_job_keeps_the_row_deadline_from_the_pass_start() {
         vec![Stage::Poll, Stage::Admit, Stage::Poll]
     );
     assert!(
-        elapsed < Duration::from_millis(400) + Duration::from_secs(2),
+        elapsed < Duration::from_millis(3_100) + Duration::from_secs(2),
         "the re-admitted job was waited for {elapsed:?} past the row's deadline"
     );
     assert!(published(&events).is_empty());
