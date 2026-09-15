@@ -2070,6 +2070,79 @@ async fn a_drain_bound_read_on_the_rotation_path_is_retained() {
     );
 }
 
+/// A partial reload whose manifest names another identity than the campaign is not an approved grace: a stop keeps the grace the last applicable records approved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_partial_reload_does_not_change_the_drain_grace() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("held-row", "held text");
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("physical_drain_ms", 4_000)],
+        ),
+        &campaign_json(&identity),
+    );
+    let engine = TestEngine::new();
+    let held = engine.block_calls();
+    let _release_on_unwind = support::embedding_fixtures::GateGuard(Arc::clone(&held));
+    let scope = ProjectScope::new(PROJECT).unwrap();
+    let owner = SearchLifecycleOwner::for_home(
+        home,
+        Arc::clone(&corpus.kernel),
+        component(&engine, LocalEmbeddingsLimits::default()),
+    )
+    .with_roster(Arc::new(move || {
+        vec![("project:a".to_owned(), scope.clone())]
+    }));
+    let _ = owner.run_slice(&slice_budget());
+    let mut short = rebuild(home);
+    short.deadline = now() + 4_000;
+    owner.request(&short, now(), &slice_budget()).unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Current), "{outcome:?}");
+    let started = Instant::now();
+    while engine.calls() == 0 {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Only the manifest is reloaded: it names a new protocol version, which the campaign does not, and a much shorter grace.
+    let mut renewed = identity.clone();
+    renewed.limit_manifest_protocol_version = "limits.v2".to_owned();
+    write_records(
+        home,
+        &manifest_json_with(
+            &renewed,
+            &ProjectionHook::ALL,
+            &[("physical_drain_ms", 500)],
+        ),
+        &campaign_json(&identity),
+    );
+    let SliceOutcome::RotateMaintenance(handle) = owner.run_slice(&slice_budget()) else {
+        panic!("a changed identity hands the supervisor back");
+    };
+    let started = Instant::now();
+    let stopped = owner.stop_maintenance(&handle).await;
+    let waited = started.elapsed();
+    TestEngine::release(&held);
+    let _ = owner.shutdown().await;
+    assert!(stopped.is_err(), "{stopped:?}");
+    assert!(
+        waited >= Duration::from_secs(3),
+        "the stop waited {waited:?}, the unapproved 500 ms rather than the approved 4 s"
+    );
+}
+
 /// Stopping a supervisor after the admission records disappear waits the grace the last readable manifest approved, not the scheduler's idle delay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_drain_after_the_records_vanish_keeps_the_approved_grace() {
@@ -2257,6 +2330,52 @@ fn a_request_after_an_identity_change_is_judged_under_the_new_identity() {
     request.attempt_id = "rebuild-under-limits-v2".to_owned();
     let outcome = owner.request(&request, now(), &slice_budget());
     assert!(outcome.is_ok(), "{outcome:?}");
+}
+
+/// A request that finds the manager held by a running slice waits only as long as its own budget allows.
+#[test]
+fn a_request_waiting_for_a_running_slice_ends_with_its_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    // The slice pauses after preparing, holding the manager, until the test releases it.
+    let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared) {
+            let _ = reached_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+        }
+    });
+    let outcome = std::thread::scope(|scope| {
+        let slice = scope.spawn(|| owner.run_slice(&slice_budget()));
+        reached
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the slice reaches its pause");
+        let started = Instant::now();
+        let outcome = owner.request(&rebuild(home), now(), &budget(Duration::from_millis(200)));
+        let waited = started.elapsed();
+        release.send(()).unwrap();
+        let _ = slice.join().unwrap();
+        (outcome, waited)
+    });
+    assert!(
+        matches!(outcome.0, Err(BuildError::Expired)),
+        "{:?}",
+        outcome.0
+    );
+    assert!(
+        outcome.1 < Duration::from_secs(2),
+        "the request waited {:?} on a 200 ms budget",
+        outcome.1
+    );
 }
 
 /// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.

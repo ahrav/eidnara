@@ -238,12 +238,16 @@ impl EvalBudget {
     }
 }
 
-/// `DeadlineWatchdog` raises `budget`'s interrupt when its deadline passes, so
-/// an in-flight gix walk stops at its next poll.
+/// `DeadlineWatchdog` raises `budget`'s interrupt when its deadline passes or,
+/// for a linked budget, when its parent is cancelled, so an in-flight gix walk
+/// stops at its next poll; the walk polls only the budget's own flag.
 ///
 /// The wait is a condvar rather than a sleep: `drop` has to stop this thread
 /// promptly, and a sleeping thread cannot be woken, which would add the
 /// remainder of its nap to every snapshot that finishes early.
+/// How often the watchdog looks at a linked budget's parent flag.
+const PARENT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
 struct DeadlineWatchdog {
     stop: Arc<(Mutex<bool>, Condvar)>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -254,9 +258,11 @@ impl DeadlineWatchdog {
     /// under process or container thread limits, which is a load condition
     /// this request path has to survive.
     fn arm(budget: &EvalBudget) -> Result<Option<Self>, SnapshotError> {
-        let Some(deadline) = budget.deadline else {
+        let parent = budget.parent.clone();
+        if budget.deadline.is_none() && parent.is_none() {
             return Ok(None);
-        };
+        }
+        let deadline = budget.deadline;
         let interrupt = budget.interrupt_flag();
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let signal = Arc::clone(&stop);
@@ -269,14 +275,25 @@ impl DeadlineWatchdog {
                 let mut stop = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 while !*stop {
                     let now = Instant::now();
-                    if now >= deadline {
+                    if deadline.is_some_and(|deadline| now >= deadline)
+                        || parent
+                            .as_ref()
+                            .is_some_and(|parent| parent.load(Ordering::Relaxed))
+                    {
                         interrupt.store(true, Ordering::Relaxed);
                         return;
                     }
+                    // A parent flag has no wakeup of its own, so it is polled; the deadline is waited for exactly.
+                    let until_deadline = deadline.map_or(PARENT_POLL, |deadline| deadline - now);
+                    let wait = if parent.is_some() {
+                        until_deadline.min(PARENT_POLL)
+                    } else {
+                        until_deadline
+                    };
                     // The guard is held across the deadline test, so a `drop`
                     // racing this wait cannot signal into the gap and be missed.
                     stop = woken
-                        .wait_timeout(stop, deadline - now)
+                        .wait_timeout(stop, wait)
                         .unwrap_or_else(PoisonError::into_inner)
                         .0;
                 }
@@ -1592,6 +1609,29 @@ mod tests {
             "the parent's cancellation reaches the link"
         );
         assert!(linked.acquire_limit().should_stop());
+    }
+
+    /// A gix walk polls only the linked budget's own flag, so the watchdog carries the parent's cancellation into it while the walk runs, without waiting for a poll of the budget itself.
+    #[test]
+    fn the_watchdog_forwards_a_parents_cancellation_into_the_linked_flag() {
+        let parent = EvalBudget::unbounded();
+        let linked = parent.linked();
+        let watchdog = DeadlineWatchdog::arm(&linked).unwrap();
+        assert!(
+            watchdog.is_some(),
+            "a linked budget is watched even without a deadline"
+        );
+        let flag = linked.interrupt_flag();
+        parent.cancel();
+        let started = Instant::now();
+        while !flag.load(Ordering::Relaxed) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "the parent's cancellation never reached the flag gix polls"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        drop(watchdog);
     }
 
     #[test]

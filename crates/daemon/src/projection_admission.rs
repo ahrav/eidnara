@@ -75,6 +75,14 @@ impl AdmissionInputs {
         &self.manifest
     }
 
+    /// Whether both records name `identity`, the same check the gate makes before it applies them: the manifest's and the campaign's invalidation identities and the manifest's protocol version all agree with it.
+    pub fn applies_to(&self, identity: &ProjectionIdentity) -> bool {
+        let expected = InvalidationIdentity::from(identity);
+        self.manifest.identity == expected
+            && self.campaign.invalidation_identity == expected
+            && self.manifest.protocol_version == expected.limit_manifest_protocol_version
+    }
+
     /// Reads both records under `<home>/search-admission/`.
     ///
     /// # Errors

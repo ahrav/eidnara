@@ -139,7 +139,8 @@ pub struct SearchLifecycleOwner {
     #[cfg(feature = "test-support")]
     slice_tap: Mutex<Option<SliceTap>>,
     /// The drain grace the last readable manifest approved, kept for a stop whose records are gone.
-    last_grace: Mutex<Option<Duration>>,
+    /// The `physical_drain_ms` last read from records that named the identity they were read under, with that identity.
+    last_grace: Mutex<Option<(ProjectionIdentity, Duration)>>,
 }
 
 #[cfg(feature = "test-support")]
@@ -326,7 +327,7 @@ impl SearchLifecycleOwner {
         };
         let (inputs, identity, bounds, budget) = match prepared {
             Ok(prepared) => {
-                self.remember_grace(prepared.0.manifest());
+                self.remember_grace(&prepared.0, &prepared.1);
                 prepared
             }
             Err(refusal) => {
@@ -639,15 +640,18 @@ impl SearchLifecycleOwner {
         Ok(None)
     }
 
-    /// Keeps the manifest's `physical_drain_ms` for a stop whose records are gone by then.
-    fn remember_grace(&self, manifest: &RuntimeManifest) {
-        if let Ok(grace) = limit(manifest, "physical_drain_ms") {
+    /// Keeps the records' `physical_drain_ms` for a stop whose records are gone or disagree by then. Records that do not both name `identity`, as during a partial reload, are not an approved grace and leave the last one in place.
+    fn remember_grace(&self, inputs: &AdmissionInputs, identity: &ProjectionIdentity) {
+        if !inputs.applies_to(identity) {
+            return;
+        }
+        if let Ok(grace) = limit(inputs.manifest(), "physical_drain_ms") {
             *self.last_grace.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some(Duration::from_millis(grace));
+                Some((identity.clone(), Duration::from_millis(grace)));
         }
     }
 
-    /// The drain grace maintenance stops are given: the manifest's `physical_drain_ms`, the last readable manifest's when the records are gone, or one slice when none was ever read.
+    /// The drain grace maintenance stops are given: the records' `physical_drain_ms` when they still name the identity the last approved grace was read under, otherwise that last approved grace, or one slice when none was ever read.
     fn drain_grace(&self) -> Duration {
         #[cfg(feature = "test-support")]
         if let Some(grace) = *self
@@ -657,13 +661,20 @@ impl SearchLifecycleOwner {
         {
             return grace;
         }
-        if let Ok(inputs) = AdmissionInputs::read(&self.home) {
-            self.remember_grace(inputs.manifest());
+        let remembered = self
+            .last_grace
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let (Ok(inputs), Some((identity, _))) = (AdmissionInputs::read(&self.home), &remembered)
+        {
+            self.remember_grace(&inputs, identity);
         }
         self.last_grace
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .unwrap_or(SLICE_IDLE)
+            .as_ref()
+            .map_or(SLICE_IDLE, |(_, grace)| *grace)
     }
 
     /// Joins the supervisor a slice handed back. A resolved drain frees the slot for the next tenant; an unresolved one leaves the supervisor owned by its task and reported.
@@ -732,7 +743,8 @@ impl SearchLifecycleOwner {
         now: i64,
         budget: &EvalBudget,
     ) -> Result<Option<Recorded>, BuildError> {
-        let mut managed = self.lock();
+        // A slice holds the manager across its whole work, so the wait for it is the request's own budget, like everything after it.
+        let mut managed = self.lock_within(budget)?;
         if self.kernel.database_incarnation_id_within_budget(budget)?
             != request.kernel_incarnation_id
         {
