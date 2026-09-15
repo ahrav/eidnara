@@ -33,7 +33,8 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
-| `final_use_is_judged_per_surface_from_current_canonical_policy` | `crates/daemon/tests/claim_sources.rs` | explicit search permitted with label while AutoInject is `SurfaceHidden` on the same batch `Ok`; genuine and Unknown permitted alike; separate overlapping rejected and Unknown sets; ordered duplicates; two reads agree; quarantine and correction deny at classification and at revalidation of earlier survivors | unaudited |
+| `final_use_is_judged_per_surface_from_current_canonical_policy` | `crates/daemon/tests/claim_sources.rs` | explicit search permitted with label while AutoInject is `SurfaceHidden` on the same batch `Ok`; a foreign project digest denies every candidate `WrongScope`; genuine and Unknown permitted alike; separate overlapping rejected and Unknown sets; ordered duplicates; two reads agree; quarantine and correction deny at classification and at revalidation of earlier survivors | unaudited |
+| `a_purged_representation_splits_row_verdicts_and_both_accounting_sets_keep_the_object` | `crates/daemon/tests/claim_sources.rs` | a purge of one representation's artifact between selection and handoff denies that row and leaves the others permitted; the object is in both the permitted and the rejected set | unaudited |
 
 ## Adjacent kernel checks the records rely on
 

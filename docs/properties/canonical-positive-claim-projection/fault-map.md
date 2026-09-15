@@ -46,10 +46,10 @@
 | `candidate-validation-preserves-surface-policy` | labeled claims validated on two surfaces | yes |
 | `stale-projection-cannot-authorize-current-use` | quarantine and correction between two validations | yes |
 | `eligibility-cache-cannot-change-canonical-verdict` | duplicated ordered candidates, two reads | yes |
-| `u5-rejection-and-unknown-accounting-is-lossless` | rejected Unknown and permitted genuine in one batch | yes |
+| `u5-rejection-and-unknown-accounting-is-lossless` | rejected Unknown and permitted genuine in one batch; one representation purged | yes |
 | `u5-evaluation-keeps-provenance-and-judgment-separate` | equal policy, different classes | yes |
 | `u5-class-transition-situations-are-witnessed` | frozen RP2.9 manifest | partial |
-| `bound-project-scope-cannot-be-widened-by-candidate` | foreign-project claim | kernel tests |
+| `bound-project-scope-cannot-be-widened-by-candidate` | foreign-project digest over the same candidates | yes |
 | `checkout-applicability-is-revalidated-without-relevance-refresh` | checkout change with a wired engine | no |
 | `optional-edits-require-host-capability-and-survival-proof` | harness with and without capability | no |
 

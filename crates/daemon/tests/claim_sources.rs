@@ -14,7 +14,8 @@ use daemon::search_projection::SearchProjection;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
 use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactDestination, CausalClass, CausalEvidence,
+    AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
+    ArtifactDeletionRequest, ArtifactDestination, CausalClass, CausalEvidence,
     ClaimCausalityRequest, ClaimFactBounds, CommitIntent, CommitPageBounds, DecisionPayload,
     DecisionRow, DecisionSpec, Dimension, DomainSpec, EligibilityCandidate, EligibilityVerdict,
     EventKind, ExportWindow, KernelError, KernelStore, ObservationPayload, ObservationSpec,
@@ -1822,7 +1823,8 @@ fn validate(
     )
 }
 
-/// Every representation of an object must share one verdict; the map holds it.
+/// Groups verdicts by object and rejects split verdicts, for fixtures whose
+/// representations share one artifact policy.
 fn verdicts_by_object(validation: &SurfaceValidation) -> BTreeMap<String, UseVerdict> {
     let mut out: BTreeMap<String, UseVerdict> = BTreeMap::new();
     for validated in &validation.candidates {
@@ -2109,4 +2111,90 @@ fn final_use_is_judged_per_surface_from_current_canonical_policy() {
         ])
     );
     assert_eq!(revalidated.accounting.attempted_rows, 6);
+}
+
+/// Each representation has a separate artifact; purging one denies only its row.
+/// Per-row verdicts remain distinct even when accounting sets contain the same
+/// object.
+#[test]
+fn a_purged_representation_splits_row_verdicts_and_both_accounting_sets_keep_the_object() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.decide(Seed::scoped(
+        "rule",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        CONTRACT,
+        "Relied on.",
+    ));
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(dir.path(), &hold);
+    let (batch, before) = validate(&projection, &corpus, Surface::ExplicitSearch);
+    let labeled = UseVerdict::Permitted(kernel::SurfaceVisibility::Labeled);
+    assert_eq!(batch.candidates.len(), 3);
+    assert!(before.candidates.iter().all(|row| row.verdict == labeled));
+    let rationale = batch
+        .candidates
+        .iter()
+        .find(|candidate| candidate.row.representation == "rationale")
+        .unwrap();
+    assert!(
+        batch
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.row.representation != "rationale")
+            .all(|other| other.row.artifact_digest != rationale.row.artifact_digest),
+        "the rationale is retained as its own artifact"
+    );
+
+    corpus
+        .kernel
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("purge:rationale"),
+            identity: ArtifactDeletionIdentity::Digest(rationale.row.artifact_digest.clone()),
+            kind: ArtifactDeletionKind::Purge,
+            operator_id: Some("operator-1".to_string()),
+            target_locator: Some("incident://rationale".to_string()),
+            reason: Some("purged".to_string()),
+            deleted_at: NOW,
+        })
+        .unwrap();
+
+    let after = validate_for_surface(
+        &corpus.kernel,
+        &batch,
+        &batch.candidates,
+        &ProjectScope::new(PROJECT).unwrap(),
+        ArtifactDestination::Local,
+        Surface::ExplicitSearch,
+        &EvalBudget::unbounded(),
+    )
+    .unwrap();
+    assert!(after.snapshot.tip > before.snapshot.tip);
+    for validated in &after.candidates {
+        let expected = if validated.candidate.row.representation == "rationale" {
+            UseVerdict::Denied(UseDenial::Verdict(EligibilityVerdict::ProviderSensitive))
+        } else {
+            labeled
+        };
+        assert_eq!(
+            validated.verdict, expected,
+            "{}",
+            validated.candidate.row.representation
+        );
+    }
+    let rule = BTreeSet::from(["rule".to_string()]);
+    assert_eq!(after.accounting.attempted_rows, 3);
+    assert_eq!(
+        after.accounting.permitted_objects, rule,
+        "the row whose artifact survives keeps the object permitted"
+    );
+    assert_eq!(
+        after.accounting.rejected_objects, rule,
+        "the row whose artifact was purged keeps the object rejected"
+    );
+    assert_eq!(after.accounting.unknown_objects, rule);
 }

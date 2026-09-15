@@ -337,9 +337,12 @@ pub struct ValidatedCandidate {
     pub verdict: UseVerdict,
 }
 
-/// Identity-based counts kept apart: an object may be both rejected and of
-/// unknown lineage, so the two sets may overlap and neither is derived from
-/// the other. Attempts count rows; the sets count objects.
+/// `attempted_rows` counts rows; the object sets count distinct objects.
+/// An object belongs to `permitted_objects` when any row is permitted.
+/// An object belongs to `rejected_objects` when any row is denied.
+/// An object belongs to both sets when its rows receive different verdicts.
+/// `unknown_objects` overlaps either when the lineage is `Unknown`.
+/// No set authorizes a presentation; only each row's `UseVerdict` does.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UseAccounting {
     pub attempted_rows: usize,

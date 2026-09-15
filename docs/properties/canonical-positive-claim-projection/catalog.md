@@ -745,18 +745,22 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: yes - `UseAccounting` keeps permitted, rejected, and Unknown object
-sets apart; the daemon test shows the rejected and Unknown sets overlapping on
-two objects without either absorbing the other, and attempts counted as rows.
+sets apart; the daemon tests show the rejected and Unknown sets overlapping on
+two objects without either absorbing the other, attempts counted as rows, and
+one object held in both the permitted and rejected sets after a purge denies
+one of its representations while the other stays permitted.
 Guarantee: Rejected and Unknown identities are counted in separate sets that
-may overlap; attempts, relevance judgments, and external application outcomes
-are never folded into them.
-Check: `always` - `rejected_objects` and `unknown_objects` are independent
-sets keyed by object id; `attempted_rows` counts rows.
-Fault/timing angle: none.
-Required faults and enabling state: a rejected claim with Unknown lineage and a permitted claim with known lineage in one batch.
+may overlap; an object whose rows receive different verdicts is counted in
+both the permitted and the rejected set; attempts, relevance judgments, and
+external application outcomes are never folded into them.
+Check: `always` - `permitted_objects`, `rejected_objects`, and
+`unknown_objects` are independent sets keyed by object id, each filled from
+its own row-level condition; `attempted_rows` counts rows.
+Fault/timing angle: an artifact purge between selection and handoff.
+Required faults and enabling state: a rejected claim with Unknown lineage and a permitted claim with known lineage in one batch; a purge of one representation's artifact.
 Confidence: high - [evidence](evidence/u5-rejection-and-unknown-accounting-is-lossless.md).
-Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`; status unaudited.
-Impact: merged counts hide how many rejections were also Unknown.
+Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`, `a_purged_representation_splits_row_verdicts_and_both_accounting_sets_keep_the_object`; status unaudited.
+Impact: merged counts hide how many rejections were also Unknown, or hide that a permitted object also had a denied representation.
 Open questions: None.
 
 ### u5-evaluation-keeps-provenance-and-judgment-separate
@@ -806,17 +810,18 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: partial - validation binds the project through `ProjectScope` on
-every kernel call; the kernel's `WrongScope` verdict is covered by the existing
-eligibility tests, and no claim test constructs a foreign-project candidate.
+Exercised: yes - validation binds the project through `ProjectScope` on every
+kernel call; the daemon test validates the same candidate list under a foreign
+project digest and every object is `Denied(Verdict(WrongScope))`, and the
+kernel's own eligibility tests cover the scope-term match.
 Guarantee: A candidate cannot widen the project scope a request is bound to;
 the kernel judges every candidate against the bound project's scope terms.
 Check: `always` - a candidate whose scope does not name the bound project is
 `Denied(Verdict(WrongScope))`.
 Fault/timing angle: none.
 Required faults and enabling state: a claim scoped to another project.
-Confidence: medium - [evidence](evidence/bound-project-scope-cannot-be-widened-by-candidate.md).
-Existing check: `crates/kernel/tests/kernel_eligibility.rs`; status unaudited.
+Confidence: high - [evidence](evidence/bound-project-scope-cannot-be-widened-by-candidate.md).
+Existing check: `crates/daemon/tests/claim_sources.rs` - `final_use_is_judged_per_surface_from_current_canonical_policy`; `crates/kernel/tests/kernel_eligibility.rs`; status unaudited.
 Impact: a request bound to one project delivers another project's claims.
 Open questions: None.
 
