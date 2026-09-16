@@ -187,6 +187,12 @@ pub enum OracleRefusal {
         occurrence_id: String,
         rejection: RowRejection,
     },
+    /// A row source holds a row for the occurrence but could not produce it; the projection's own vectors never raise this.
+    #[error("the vector of occurrence {occurrence_id} could not be read: {detail}")]
+    Unreadable {
+        occurrence_id: String,
+        detail: String,
+    },
     #[error("the request's budget ended before any page was read")]
     BudgetExhausted,
     #[error(transparent)]

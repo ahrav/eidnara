@@ -327,6 +327,32 @@ fn read_members(
     }
 }
 
+/// A shared lock pins the directory; `prune` and `discard_unselected` skip directories they cannot
+/// exclusively lock.
+fn pin_dir(dir: &OwnedFd) -> Result<(), GenerationError> {
+    rustix::fs::flock(dir, rustix::fs::FlockOperation::NonBlockingLockShared)
+        .map_err(|_| invalid("generation is being reclaimed"))
+}
+
+/// The retained descriptor holds the shared lock. `manifest` is decoded canonical content; the
+/// files it lists are unhashed until [`GenerationStore::validate`] runs.
+pub struct PinnedGeneration {
+    pub digest: String,
+    pub manifest: GenerationManifest,
+    dir: OwnedFd,
+}
+
+impl PinnedGeneration {
+    /// Returns the members file's digests verified against the manifest entry; returns an empty vector when the manifest lists no members file.
+    ///
+    /// # Errors
+    ///
+    /// A members file the manifest names but that fails its hash, has an unknown schema, or names a noncanonical digest.
+    pub fn members(&self) -> Result<Vec<String>, GenerationError> {
+        read_members(&self.dir, &self.manifest)
+    }
+}
+
 impl ValidatedGeneration {
     /// The digests this generation requires retained, read through the retained descriptor; empty when the manifest lists no members file.
     ///
@@ -338,8 +364,7 @@ impl ValidatedGeneration {
     }
 
     pub fn pin(&self) -> Result<(), GenerationError> {
-        rustix::fs::flock(&self.dir, rustix::fs::FlockOperation::NonBlockingLockShared)
-            .map_err(|_| invalid("generation is being reclaimed"))
+        pin_dir(&self.dir)
     }
 
     /// In-process loaders may use the descriptor-rooted path only while `ValidatedGeneration` remains alive.
@@ -475,6 +500,10 @@ pub struct PruneReport {
     pub removed_temps: usize,
     pub removed_profile_temps: usize,
     pub quarantined: usize,
+    /// Generations this pass would have removed but for a reader's shared lock; a pinned generation that is also protected is not counted, since protection alone keeps it.
+    pub retained_pinned: usize,
+    /// Manifest-declared bytes of those generations: what this pass could not reclaim because readers hold it.
+    pub retained_bytes: u64,
 }
 
 impl GenerationStore {
@@ -661,6 +690,21 @@ impl GenerationStore {
     /// The manifest alone: its bytes hash to `digest` and are canonical, but the files it lists are not opened. Cheap enough to run on every prune.
     pub fn manifest(&self, digest: &str) -> Result<GenerationManifest, GenerationError> {
         self.open_manifest(digest).map(|(_, manifest)| manifest)
+    }
+
+    /// Reads the manifest as [`Self::manifest`] does, then takes the reader's shared lock on the directory; the listed files are not opened.
+    ///
+    /// # Errors
+    ///
+    /// A noncanonical digest, a directory that is missing or fails its security checks, a manifest that does not hash to `digest`, or a generation another holder has locked for reclamation.
+    pub fn pin(&self, digest: &str) -> Result<PinnedGeneration, GenerationError> {
+        let (dir, manifest) = self.open_manifest(digest)?;
+        pin_dir(&dir)?;
+        Ok(PinnedGeneration {
+            digest: digest.to_owned(),
+            manifest,
+            dir,
+        })
     }
 
     /// This is a discovery read, not proof that the complete generation is valid. Call [`Self::validate`] before using it as a generation.
@@ -1299,7 +1343,18 @@ impl GenerationStore {
             }
             let _pin = match lock_for_reclamation(&self.generations_fd, &name) {
                 Ok(pin) => pin,
-                Err(Reclamation::Pinned) => continue,
+                Err(Reclamation::Pinned) => {
+                    report.retained_pinned += 1;
+                    // A pinned generation's manifest may be unreadable; it is still retained, only its bytes are unknown.
+                    if let Ok(manifest) = self.manifest(&name) {
+                        let declared = manifest
+                            .files
+                            .iter()
+                            .fold(0u64, |total, file| total.saturating_add(file.size));
+                        report.retained_bytes = report.retained_bytes.saturating_add(declared);
+                    }
+                    continue;
+                }
                 Err(Reclamation::Unopenable(err)) => {
                     first_error.get_or_insert(err);
                     continue;
@@ -3173,6 +3228,135 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_only_pin_holds_a_generation_against_prune_without_proving_its_files() {
+        let root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        let member = stage_default(&store, src.path());
+        let members = serde_json::to_vec(&WireMembers {
+            schema: 1,
+            members: vec![member.clone()],
+        })
+        .unwrap();
+        let record = store
+            .stage(
+                &[
+                    SourceSpec {
+                        rel_path: MEMBERS_FILE_NAME.to_owned(),
+                        source: write_source(src.path(), "members", &members),
+                        executable: false,
+                        expected_size: None,
+                        expected_sha256: None,
+                    },
+                    SourceSpec {
+                        rel_path: "record.json".to_owned(),
+                        source: write_source(src.path(), "record", b"{\"record\":true}"),
+                        executable: false,
+                        expected_size: None,
+                        expected_sha256: None,
+                    },
+                ],
+                &meta(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(store.pin("not-a-digest").is_err());
+        assert!(store.pin(&"0".repeat(64)).is_err(), "an absent generation");
+
+        // The pin reads only the manifest: a payload corrupted afterwards is still pinned, and it is `validate` that refuses it.
+        std::fs::write(
+            store
+                .root()
+                .join(GENERATIONS_DIR_NAME)
+                .join(&record)
+                .join("record.json"),
+            b"{\"record\":false}",
+        )
+        .unwrap();
+        let pin = store.pin(&record).unwrap();
+        assert_eq!(pin.digest, record);
+        assert_eq!(pin.members().unwrap(), vec![member.clone()]);
+        assert!(store.validate(&record).is_err());
+        let record_bytes: u64 = pin.manifest.files.iter().map(|file| file.size).sum();
+
+        let report = store.prune(&BTreeSet::new()).unwrap();
+        assert_eq!(
+            (
+                report.removed_generations,
+                report.retained_pinned,
+                report.retained_bytes
+            ),
+            (0, 1, record_bytes)
+        );
+        assert!(
+            rustix::fs::flock(
+                open_child_dir(&store.generations_fd, &record).unwrap(),
+                rustix::fs::FlockOperation::NonBlockingLockExclusive
+            )
+            .is_err(),
+            "a competing exclusive lock fails while the pin lives"
+        );
+        drop(pin);
+        assert_eq!(
+            store.prune(&BTreeSet::new()).unwrap().removed_generations,
+            1
+        );
+    }
+
+    /// A generation holding only a manifest; its declared sizes have no files behind them.
+    fn write_manifest_only(store: &GenerationStore, sizes: &[u64]) -> String {
+        let manifest = GenerationManifest {
+            schema: 1,
+            target: meta().target,
+            release_contract_sha256: meta().release_contract_sha256,
+            inputs_lock_sha256: meta().inputs_lock_sha256,
+            source_payload_manifest_sha256: None,
+            files: sizes
+                .iter()
+                .enumerate()
+                .map(|(index, size)| ManifestFile {
+                    path: format!("file-{index}"),
+                    mode: 0o600,
+                    size: *size,
+                    sha256: "0".repeat(64),
+                })
+                .collect(),
+        };
+        let digest = manifest.digest();
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join(GENERATION_MANIFEST_NAME);
+        std::fs::write(&path, manifest.canonical_bytes()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        digest
+    }
+
+    #[test]
+    fn retained_bytes_saturate_on_manifests_whose_declared_sizes_overflow() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        // One generation overflows on its own; the other two overflow only when added together.
+        let alone = write_manifest_only(&store, &[u64::MAX, 1]);
+        let first = write_manifest_only(&store, &[u64::MAX - 1]);
+        let second = write_manifest_only(&store, &[2, 3]);
+        let pins: Vec<PinnedGeneration> = [&alone, &first, &second]
+            .into_iter()
+            .map(|digest| store.pin(digest).unwrap())
+            .collect();
+
+        let report = store.prune(&BTreeSet::new()).unwrap();
+        assert_eq!(report.removed_generations, 0);
+        assert_eq!(report.retained_pinned, 3);
+        assert_eq!(report.retained_bytes, u64::MAX);
+        drop(pins);
+        assert_eq!(
+            store.prune(&BTreeSet::new()).unwrap().removed_generations,
+            3
+        );
+    }
+
+    #[test]
     fn unknown_search_selector_schema_blocks_selection_and_reclamation() {
         let root = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
@@ -3225,6 +3409,8 @@ mod tests {
                 removed_temps: 1,
                 removed_profile_temps: 1,
                 removed_generations: 0,
+                retained_pinned: 0,
+                retained_bytes: 0,
             }
         );
         assert!(!staging_temp.exists());
@@ -3250,6 +3436,8 @@ mod tests {
                 removed_temps: 0,
                 removed_profile_temps: 0,
                 removed_generations: 0,
+                retained_pinned: 0,
+                retained_bytes: 0,
             }
         );
         store.validate(&other).unwrap();

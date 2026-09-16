@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -267,6 +268,8 @@ pub enum FileFault {
     Identifiers,
     /// The codes are not the rows encoded under the scales.
     Codes,
+    /// The file holds more bytes than its manifest declares.
+    Size,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -496,12 +499,17 @@ pub fn stage(built: &BuiltVectors, staging: &Staging<'_>) -> Result<String, Vect
     })
 }
 
-/// A generation whose files, sidecar, and meaning were all checked.
+/// A generation whose files, sidecar, and meaning were all checked. The row and code artifacts stay open on the descriptors verification read them through, and the tables it decoded stay with it, so a reader takes the files as verified without opening or hashing them again.
 pub struct VerifiedVectors {
     pub digest: String,
     pub sidecar: VectorSidecar,
     /// Retains the directory descriptor and, once pinned, the shared lock.
     pub generation: ValidatedGeneration,
+    pub rows: File,
+    pub codes: File,
+    pub scales: Scales,
+    pub occurrence_ids: Vec<String>,
+    pub tombstones: Vec<String>,
 }
 
 impl std::fmt::Debug for VerifiedVectors {
@@ -511,6 +519,18 @@ impl std::fmt::Debug for VerifiedVectors {
             .field("sidecar", &self.sidecar)
             .finish_non_exhaustive()
     }
+}
+
+/// The files whose decoded contents [`VerifiedVectors`] keeps in memory: `occurrence_ids`, `tombstones`, `scales`, and `sidecar`. Rows and codes stay behind their descriptors.
+pub const RESIDENT_FILES: [&str; 4] = [ROW_IDS_FILE, TOMBSTONES_FILE, SCALES_FILE, SIDECAR_FILE];
+
+/// Returns the manifest-declared bytes of the [`RESIDENT_FILES`], the charge for one generation's decoded tables.
+pub fn resident_bytes(manifest: &GenerationManifest) -> u64 {
+    manifest
+        .files
+        .iter()
+        .filter(|file| RESIDENT_FILES.contains(&file.path.as_str()))
+        .fold(0u64, |total, file| total.saturating_add(file.size))
 }
 
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
@@ -569,8 +589,13 @@ pub fn verify(
         metric: expected.metric,
         unit_norm_tolerance: sidecar.unit_norm_tolerance,
     };
-    let rows = codec::decode_rows(&generation.read_verified_file(ROWS_FILE)?, &layout)
-        .map_err(VectorRefusal::Rows)?;
+    let rows_file = File::from(generation.open_verified_file(ROWS_FILE)?);
+    // The raw artifact is a temporary: only the decoded rows stay while the codes are computed.
+    let rows = codec::decode_rows(
+        &read_all(&rows_file, ROWS_FILE, declared_size(&generation, ROWS_FILE))?,
+        &layout,
+    )
+    .map_err(VectorRefusal::Rows)?;
     let fault = |path, fault| VectorRefusal::File { path, fault };
     if rows.rows.len() as u64 != sidecar.rows {
         return Err(fault(ROWS_FILE, FileFault::RowCount));
@@ -601,14 +626,55 @@ pub fn verify(
     }
     let codes = encode_all(&layout, &calibration.scales, vectors)
         .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
-    if generation.read_verified_file(CODES_FILE)? != codes {
+    let codes_file = File::from(generation.open_verified_file(CODES_FILE)?);
+    if read_all(
+        &codes_file,
+        CODES_FILE,
+        declared_size(&generation, CODES_FILE),
+    )? != codes
+    {
         return Err(fault(CODES_FILE, FileFault::Codes));
     }
     Ok(VerifiedVectors {
         digest: digest.to_owned(),
         sidecar,
         generation,
+        rows: rows_file,
+        codes: codes_file,
+        scales: calibration.scales,
+        occurrence_ids: ids,
+        tombstones,
     })
+}
+
+/// The whole of a verified file, read from its start whatever the descriptor's position and no further than the `size` its manifest declares; more bytes than that refuse as [`FileFault::Size`], as [`ValidatedGeneration::read_verified_file`] refuses them.
+fn read_all(file: &File, path: &'static str, size: u64) -> Result<Vec<u8>, VectorRefusal> {
+    use std::io::Read;
+    let io = |error: io::Error| VectorRefusal::Io(error.kind().to_string());
+    let mut reader = file.try_clone().map_err(io)?;
+    std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(0)).map_err(io)?;
+    let mut bytes = Vec::new();
+    reader
+        .take(size.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+    if bytes.len() as u64 > size {
+        return Err(VectorRefusal::File {
+            path,
+            fault: FileFault::Size,
+        });
+    }
+    Ok(bytes)
+}
+
+/// The manifest-declared size of `path`, which [`ValidatedGeneration::open_verified_file`] checked the file against.
+fn declared_size(generation: &ValidatedGeneration, path: &str) -> u64 {
+    generation
+        .manifest
+        .files
+        .iter()
+        .find(|file| file.path == path)
+        .map_or(0, |file| file.size)
 }
 
 fn check_export(export: &LiveRows, expected: &ExpectedVectors<'_>) -> Result<(), VectorRefusal> {
@@ -642,24 +708,54 @@ fn check_export(export: &LiveRows, expected: &ExpectedVectors<'_>) -> Result<(),
 }
 
 /// Every field is compared, so a different model space is refused even at an equal dimension.
-fn check_identity(
+pub(crate) fn check_identity(
     sidecar: &VectorSidecar,
     expected: &ExpectedVectors<'_>,
 ) -> Result<(), VectorRefusal> {
-    if let Some(field) = VectorIdentity::from_sidecar(sidecar)
-        .first_mismatch(&VectorIdentity::from_expected(expected))
-    {
+    let generation = expected.generation;
+    let checks = [
+        (
+            "embedding_model",
+            sidecar.embedding_model == generation.embedding_model,
+        ),
+        (
+            "tokenizer_fingerprint",
+            sidecar.tokenizer_fingerprint == generation.tokenizer_fingerprint,
+        ),
+        (
+            "vector_dimension",
+            sidecar.vector_dimension == generation.vector_dimension,
+        ),
+        ("metric", sidecar.metric == expected.metric.name()),
+        (
+            "unit_norm_tolerance",
+            sidecar.unit_norm_tolerance.to_bits() == expected.unit_norm_tolerance.to_bits(),
+        ),
+        (
+            "quantizer_recipe",
+            sidecar.quantizer_recipe == expected.recipe.id(),
+        ),
+        (
+            "generation_epoch",
+            sidecar.generation_epoch == generation.generation_epoch,
+        ),
+        (
+            "kernel_incarnation_id",
+            sidecar.kernel_incarnation_id == expected.kernel_incarnation_id,
+        ),
+        (
+            "generation_id",
+            sidecar.generation_id == generation.generation_id,
+        ),
+    ];
+    if let Some((field, _)) = checks.into_iter().find(|(_, holds)| !holds) {
         return Err(VectorRefusal::Identity { field });
     }
-    if sidecar.generation_id != expected.generation.generation_id {
-        return Err(VectorRefusal::Identity {
-            field: "generation_id",
-        });
-    }
-    if expected
-        .checkpoint
-        .is_some_and(|checkpoint| sidecar.checkpoint() != *checkpoint)
-    {
+    if expected.checkpoint.is_some_and(|checkpoint| {
+        sidecar.snapshot_commit_seq != checkpoint.snapshot_commit_seq
+            || sidecar.checkpoint_commit_seq != checkpoint.checkpoint_commit_seq
+            || sidecar.hold_id != checkpoint.hold_id
+    }) {
         return Err(VectorRefusal::Identity {
             field: "checkpoint",
         });
@@ -702,4 +798,53 @@ pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), VectorRefusal> 
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resident_bytes_saturate_on_declared_sizes_that_overflow() {
+        let file = |path: &str, size: u64| ManifestFile {
+            path: path.to_owned(),
+            mode: 0o600,
+            size,
+            sha256: "0".repeat(64),
+        };
+        let manifest = GenerationManifest {
+            schema: 1,
+            target: VECTOR_TARGET.to_owned(),
+            release_contract_sha256: "a".repeat(64),
+            inputs_lock_sha256: "b".repeat(64),
+            source_payload_manifest_sha256: None,
+            files: vec![
+                file(ROWS_FILE, u64::MAX),
+                file(ROW_IDS_FILE, u64::MAX),
+                file(SCALES_FILE, 1),
+            ],
+        };
+        assert_eq!(resident_bytes(&manifest), u64::MAX);
+    }
+
+    #[test]
+    fn a_verified_file_is_read_no_further_than_its_manifest_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ROWS_FILE);
+        fs::write(&path, b"0123456789").unwrap();
+        let file = File::open(&path).unwrap();
+        assert_eq!(read_all(&file, ROWS_FILE, 10).unwrap(), b"0123456789");
+        // The descriptor's position after one read does not change the next.
+        assert_eq!(read_all(&file, ROWS_FILE, 10).unwrap(), b"0123456789");
+
+        // Bytes appended after the hash was taken are refused rather than read to the end.
+        fs::write(&path, b"0123456789ab").unwrap();
+        assert_eq!(
+            read_all(&file, ROWS_FILE, 10).unwrap_err(),
+            VectorRefusal::File {
+                path: ROWS_FILE,
+                fault: FileFault::Size
+            }
+        );
+    }
 }

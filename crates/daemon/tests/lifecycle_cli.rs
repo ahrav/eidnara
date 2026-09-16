@@ -199,15 +199,7 @@ fn daemon_id(root: &Path) -> [u8; 16] {
 
 #[cfg(target_os = "linux")]
 fn try_flock_exclusive(path: &Path) -> bool {
-    use std::os::fd::AsRawFd;
-    let file = std::fs::File::open(path).expect("lock file opens");
-    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-    if locked {
-        unsafe {
-            libc::flock(file.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
-    locked
+    support::flock::try_exclusive(path)
 }
 
 /// Stops an active daemon on drop so failed assertions do not leak it.

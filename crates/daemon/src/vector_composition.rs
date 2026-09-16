@@ -8,10 +8,10 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::Path;
 
-use host_runtime::generation::ValidatedGeneration;
 use host_runtime::generation::{
     CurrentProfile, GenerationError, GenerationManifest, GenerationStore, MAX_MANIFEST_BYTES,
-    MEMBERS_FILE_NAME, ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET, WireMembers,
+    MEMBERS_FILE_NAME, ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET,
+    ValidatedGeneration, WireMembers,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 
@@ -427,10 +427,11 @@ pub fn reconcile(
     }
 }
 
-/// A composition whose generation, record, and every member were verified.
+/// A composition whose generation, record, and every member were verified. `record` retains the composition generation's directory descriptor, so a reader pins the record verification saw.
 pub struct VerifiedComposition {
     pub digest: String,
     pub composition: Composition,
+    pub record: ValidatedGeneration,
     pub base: VerifiedVectors,
     pub deltas: Vec<VerifiedVectors>,
 }
@@ -517,6 +518,7 @@ fn verify_validated(
     Ok(VerifiedComposition {
         digest: generation.digest.clone(),
         composition,
+        record: generation,
         base,
         deltas,
     })
@@ -549,7 +551,64 @@ pub enum Unavailable {
     Store(String),
 }
 
-/// Takes the selected composition when it verifies. After selected-composition verification fails or the selector is absent, retains the newest `bound` candidates and fully verifies them in descending order. Discovery retains no generation descriptors.
+/// One composition recovery may take, with what the selector said about it when it was listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub digest: String,
+    pub selector: SelectorState,
+}
+
+/// The compositions recovery examines, in order: the selected digest when `current` names one, then at most `bound` other records by descending sequence, equal sequences by descending digest. Only manifests and records are read; no member is opened and discovery retains no generation descriptors. An acknowledged selection is never displaced by a newer composition that was staged but not selected.
+///
+/// # Errors
+///
+/// A quarantined selector or a store that cannot list its generations; neither mutates the store.
+pub fn candidates(
+    store: &GenerationStore,
+    current: &CurrentProfile,
+    bound: NonZeroUsize,
+) -> Result<Vec<Candidate>, Unavailable> {
+    let selected = match current {
+        CurrentProfile::Quarantined => return Err(Unavailable::QuarantinedSelector),
+        CurrentProfile::Current(digest) => Some(digest.as_str()),
+        CurrentProfile::Absent => None,
+    };
+    let mut others = BTreeSet::new();
+    for digest in store
+        .digests()
+        .map_err(|error| Unavailable::Store(error.to_string()))?
+    {
+        if selected == Some(digest.as_str()) {
+            continue;
+        }
+        if let Ok(Some(record)) = record(store, &digest) {
+            others.insert((record.sequence, digest));
+            if others.len() > bound.get() {
+                others.pop_first();
+            }
+        }
+    }
+    let fallback = match selected {
+        Some(current) => SelectorState::Stale(current.to_owned()),
+        None => SelectorState::Absent,
+    };
+    Ok(selected
+        .map(|digest| Candidate {
+            digest: digest.to_owned(),
+            selector: SelectorState::Current,
+        })
+        .into_iter()
+        .chain(
+            // Newest first; equal sequences fall back to descending digest order.
+            others.into_iter().rev().map(|(_, digest)| Candidate {
+                digest,
+                selector: fallback.clone(),
+            }),
+        )
+        .collect())
+}
+
+/// Fully verifies the [`candidates`] in order and takes the first that passes. `_transaction` keeps a concurrent mutator from reclaiming what recovery is examining.
 /// `max_deltas` and `max_member_bytes` bound each verification as [`verify_composition`] does.
 ///
 /// # Errors
@@ -563,49 +622,22 @@ pub fn recover(
     max_member_bytes: u64,
     bound: NonZeroUsize,
 ) -> Result<Recovered, Unavailable> {
-    let store_error = |error: GenerationError| Unavailable::Store(error.to_string());
-    let selected = match store.read_vector_current().map_err(store_error)? {
-        CurrentProfile::Quarantined => return Err(Unavailable::QuarantinedSelector),
-        CurrentProfile::Current(digest) => Some(digest),
-        CurrentProfile::Absent => None,
-    };
-    let mut examined = 0;
-    if let Some(current) = &selected {
-        examined += 1;
-        if let Ok(composition) =
-            verify_composition(store, current, expected, max_deltas, max_member_bytes)
-        {
+    let current = store
+        .read_vector_current()
+        .map_err(|error| Unavailable::Store(error.to_string()))?;
+    let candidates = candidates(store, &current, bound)?;
+    let examined = candidates.len();
+    for candidate in candidates {
+        if let Ok(composition) = verify_composition(
+            store,
+            &candidate.digest,
+            expected,
+            max_deltas,
+            max_member_bytes,
+        ) {
             return Ok(Recovered {
                 composition,
-                selector: SelectorState::Current,
-            });
-        }
-    }
-    let mut candidates = BTreeSet::new();
-    for digest in store.digests().map_err(store_error)? {
-        if selected.as_deref() == Some(digest.as_str()) {
-            continue;
-        }
-        if let Ok(Some(record)) = record(store, &digest) {
-            candidates.insert((record.sequence, digest));
-            if candidates.len() > bound.get() {
-                candidates.pop_first();
-            }
-        }
-    }
-    // Newest first; equal sequences fall back to descending digest order.
-    for (_, digest) in candidates.into_iter().rev() {
-        examined += 1;
-        if let Ok(composition) =
-            verify_composition(store, &digest, expected, max_deltas, max_member_bytes)
-        {
-            let selector = match &selected {
-                Some(current) => SelectorState::Stale(current.clone()),
-                None => SelectorState::Absent,
-            };
-            return Ok(Recovered {
-                composition,
-                selector,
+                selector: candidate.selector,
             });
         }
     }

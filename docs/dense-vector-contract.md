@@ -300,6 +300,77 @@ layers, which the daemon verifies before handing them over. Scoring mixed
 recipes on int8 codes with each layer's own scales is not part of this
 ranking; the winners name their layer so that a later scorer can do so.
 
+## The pinned reader
+
+`daemon::vector_reader::acquire` turns the selected composition into a view a
+ranking can run against, all or nothing. It takes the lifecycle's shared
+transaction lock only around manifest reads. Under one hold it observes the
+selector, lists the candidates `vector_composition::candidates` orders (the
+selected composition first, then other records newest first), pins the first
+candidate's record and every member its members file names with a shared lock
+on a directory descriptor opened by a manifest read alone
+(`GenerationStore::pin`), and charges the bytes the view will keep decoded in
+memory (identifiers, tombstones, scales, sidecar, at their manifest-declared
+sizes, the set `vector_generation::RESIDENT_FILES` names) to the caller's
+residency budget. It then releases the lock and verifies the candidate as
+`vector_composition::verify_composition` does, hashing every member under the
+pins alone; a candidate that does not verify gives up its pins and charge and
+the next is pinned the same way. On success the validated descriptors take
+their own shared locks before the manifest-read pins go, the row and code
+artifacts stay open on the descriptors verification hashed them through,
+together with the tables it decoded, and the selector is re-read under one
+more brief hold of the shared lock before the view is handed out. Verification
+already proved each artifact holds exactly one row per identifier, so every
+offset the reader will compute lies inside it. A selector that no longer names
+what acquisition observed, a budget that cannot hold the resident bytes, or
+any store refusal returns nothing, and the pins, descriptors, and charge are
+dropped with the failure.
+
+The lock discipline is the lifecycle's: a shared holder is meant to be a brief
+probe, and a mutator taking the exclusive lock gives up after a bounded wait
+of a few tens of milliseconds. The reader therefore never holds the shared
+lock across hashing, whose duration grows with the corpus; a publisher or
+pruner that runs while a reader verifies is not held off, and the reader
+observes the moved selector at handoff and refuses, leaving its caller to
+acquire again. The same bounded wait applies to the reader's shared
+acquisitions: a mutator that holds the exclusive lock past it refuses the
+reader as `Unprotected`, and the caller retries. Acquisition still hashes every
+member, so it runs on a blocking thread, and a view is acquired once and shared
+rather than taken per query. Once the view exists its pins alone keep the
+record and members in place. `prune` takes no lock of its own; it relies on
+every mutator holding the exclusive transaction lock, and skips a pinned
+generation, reporting the ones it would otherwise have removed and their
+manifest-declared bytes as retained. A pinned generation that is also protected
+is not counted, since protection alone keeps it.
+
+The view's layers map the composition onto the resolver's precedence, the
+base as ordinal zero and each delta by its position, all under the
+composition's generation epoch. Rows and codes stay on disk: a layer answers
+the resolver's row requests by reading one row's bytes at
+`header + index * dimension * 4` in the row artifact into scratch and decoding
+them through the original-row codec, and answers code requests by reading
+`index * dimension` in the code artifact and decoding through the scalar
+recipe, so a winner's codes score with its own layer's scales and no other's.
+An index at or past the declared rows, a short read, or bytes the codec
+refuses fail that row; nothing is reinterpreted. These positioned reads are
+not re-hashed: pins protect lifetime, not contents, and a same-user write
+after verification is outside the cooperative-file threat model.
+
+`vector_reader::rank` checks every layer's sidecar against the request's
+expectation with the same identity check verification uses, charges one page
+of decoded rows plus one raw row of scratch to the caller's scratch budget
+for the walk's duration, and runs `dense::layered::rank_layers` over the
+view's layers inside the caller's projection read transaction; canonical
+eligibility, revalidation, coverage, and completion are the layered
+ranking's. A caller runs it through the request's existing blocking seam
+(`RequestCtx::run_blocking`, which the host's drain joins) with the
+`Arc<PinnedVectors>` moved into the work, so the view, its pins, and its
+charges live until the physical read returns whatever happens to the caller's
+future, its deadline, or its cancellation, and whoever keeps the ranking's
+view keeps its pins until that view is dropped. The reader does not authorize
+anything: physical ownership of the files says which rows exist, and the
+kernel's verdicts say which may be returned.
+
 ## The immutable vector generation
 
 `daemon::vector_generation` builds one generation from a
