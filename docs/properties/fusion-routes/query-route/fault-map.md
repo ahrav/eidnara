@@ -25,3 +25,7 @@ budget rows; `rp27/u2-weighted-rrf` at
 
 Real durations are used because `EvalBudget` reads `std::time::Instant`, which
 virtual time cannot advance.
+| Embedding lane busy, starting, disabled, failing, or faulted | A `QueryEmbedder` installed through `set_query_embedder_for_test`; `DenseLane::Unavailable` at the `execute` level. | route-dense-unavailable-degrades-typed-within-deadline |
+| Deadline lapses during the embedding await | A scripted embedder that sleeps past `remaining_ms`. | route-query-embedding-completes-before-blocking-scan, route-cancellation-is-observed-in-every-phase |
+| Corrupt stored vector | A zero-norm vector stored under the fixture generation. | route-dense-unavailable-degrades-typed-within-deadline |
+| Cancellation inside the dense producer | A `DenseProducer` that cancels the token before delegating to the exhaustive oracle. | route-cancellation-is-observed-in-every-phase |

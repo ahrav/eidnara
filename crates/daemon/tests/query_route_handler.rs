@@ -4,6 +4,8 @@ mod support;
 
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use daemon::dispatch::PreparedOutcome;
@@ -11,7 +13,9 @@ use daemon::projection_gates::ProjectionHook;
 use daemon::projection_lifecycle::{
     Cause, ConsumerBinding, ControlState, LifecycleRequest, ProjectionLifecycle, Transition,
 };
-use daemon::query_route::{LimitsRefusal, QueryRouteLimits};
+use daemon::query_route::{
+    DenseLimits, EmbedFailure, EmbedResult, LimitsRefusal, QueryEmbedder, QueryRouteLimits,
+};
 use kernel::{KernelStore, MAX_ELIGIBILITY_CANDIDATES};
 use retrieval::fusion::{FusionParameters, LaneWeights};
 use serde_json::{Value, json};
@@ -41,6 +45,7 @@ fn limits() -> QueryRouteLimits {
             60.0,
         )
         .unwrap(),
+        dense: None,
     }
 }
 
@@ -173,8 +178,8 @@ fn now() -> i64 {
         .as_millis() as i64
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn the_running_daemon_serves_the_route_from_its_converged_family() {
+/// A daemon whose scheduled slices converged a family over an empty kernel, with the route enabled.
+async fn converged_daemon() -> KernelDaemon {
     let data = tempfile::tempdir().unwrap();
     let home = data.path().to_owned();
     let kernel_root = home.join("eidnara").join("context");
@@ -210,7 +215,6 @@ async fn the_running_daemon_serves_the_route_from_its_converged_family() {
         .unwrap();
 
     let daemon = KernelDaemon::start_in(data, None).await;
-    let project = daemon.project().to_owned();
     daemon
         .handler()
         .set_query_route_limits(Some(limits()))
@@ -229,6 +233,13 @@ async fn the_running_daemon_serves_the_route_from_its_converged_family() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    daemon
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_running_daemon_serves_the_route_from_its_converged_family() {
+    let daemon = converged_daemon().await;
+    let project = daemon.project().to_owned();
     let fused = body(
         daemon
             .outcome(request(&project, "id:rule explicit contract"))
@@ -273,5 +284,116 @@ async fn the_running_daemon_serves_the_route_from_its_converged_family() {
     let mut lapsed = request(&project, "id:rule explicit contract");
     lapsed["remaining_ms"] = json!(0);
     assert_eq!(error_code(daemon.outcome(lapsed).await), "invalid_params");
+    daemon.shutdown().await;
+}
+
+struct ScriptedEmbedder {
+    outcome: EmbedResult,
+    calls: AtomicUsize,
+    delay: Duration,
+}
+
+impl QueryEmbedder for ScriptedEmbedder {
+    fn embed(&self, _text: &str) -> EmbedResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        self.outcome.clone()
+    }
+}
+
+fn dense_limits() -> QueryRouteLimits {
+    let mut limits = limits();
+    limits.dense = Some(DenseLimits {
+        k: NonZeroUsize::new(8).unwrap(),
+        page_rows: NonZeroUsize::new(4).unwrap(),
+        max_rows: NonZeroUsize::new(64).unwrap(),
+        unit_norm_tolerance: 1e-3,
+    });
+    limits
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed() {
+    let daemon = converged_daemon().await;
+    let project = daemon.project().to_owned();
+    daemon
+        .handler()
+        .set_query_route_limits(Some(dense_limits()))
+        .unwrap();
+
+    let answer = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(answer["kind"], "fused", "{answer}");
+    assert_eq!(answer["degraded"], false);
+    assert_eq!(answer["lanes"]["dense"]["status"], "complete");
+
+    for reason in ["busy", "starting", "disabled"] {
+        let embedder = Arc::new(ScriptedEmbedder {
+            outcome: Err(EmbedFailure::Unavailable(reason)),
+            calls: AtomicUsize::new(0),
+            delay: Duration::ZERO,
+        });
+        daemon
+            .handler()
+            .set_query_embedder_for_test(Some(Arc::clone(&embedder) as Arc<dyn QueryEmbedder>));
+        let started = Instant::now();
+        let answer = body(
+            daemon
+                .outcome(request(&project, "id:rule explicit contract"))
+                .await,
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(answer["kind"], "fused", "{answer}");
+        assert_eq!(answer["degraded"], true);
+        assert_eq!(answer["lanes"]["dense"]["status"], "unavailable");
+        assert_eq!(answer["lanes"]["dense"]["reason"], reason);
+        assert_eq!(answer["lanes"]["exact"]["status"], "complete");
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
+    }
+
+    let faulted = Arc::new(ScriptedEmbedder {
+        outcome: Err(EmbedFailure::Faulted),
+        calls: AtomicUsize::new(0),
+        delay: Duration::ZERO,
+    });
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::clone(&faulted) as Arc<dyn QueryEmbedder>));
+    let answer = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(terminal(&answer), "lane_unavailable");
+    assert_eq!(answer["reason"], "embedding_failed");
+
+    let slow = Arc::new(ScriptedEmbedder {
+        outcome: Ok(vec![1.0; 8]),
+        calls: AtomicUsize::new(0),
+        delay: Duration::from_millis(400),
+    });
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::clone(&slow) as Arc<dyn QueryEmbedder>));
+    let mut lapsing = request(&project, "id:rule explicit contract");
+    lapsing["remaining_ms"] = json!(200);
+    let answer = body(daemon.outcome(lapsing).await);
+    assert_eq!(
+        terminal(&answer),
+        "deadline",
+        "a deadline that lapses during the embedding await ends the request before any scan"
+    );
+    assert_eq!(slow.calls.load(Ordering::SeqCst), 1);
+
+    daemon.handler().set_query_embedder_for_test(None);
+    let answer = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(answer["lanes"]["dense"]["status"], "complete");
     daemon.shutdown().await;
 }

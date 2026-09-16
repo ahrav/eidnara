@@ -2999,6 +2999,8 @@ pub struct HandlerCore {
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     query_route: Mutex<Option<Arc<query_route::QueryRouteLimits>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    query_embedder_override: Mutex<Option<Arc<dyn query_route::QueryEmbedder>>>,
     #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
     /// Test-side mirror of a client: full input arrays and applied outputs per session, so wire
@@ -3868,6 +3870,8 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            query_embedder_override: Mutex::new(None),
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
             #[cfg(test)]
@@ -4297,6 +4301,8 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            query_embedder_override: Mutex::new(None),
             guidance_now_ms: Mutex::new(None),
             test_client: Mutex::new(HashMap::new()),
             reduction_injection: Mutex::new(HashMap::new()),

@@ -113,7 +113,15 @@ not mutation.
 
 The exact lane runs over the query's `id:` mentions, the lexical lane over the
 prose outside selector mentions, and both run inside one interruptible
-projection read under the request budget. Fusion runs once, the fused set is
+projection read under the request budget. When a dense limit set is installed
+the query is first embedded in process by the daemon's embedding lane as one
+tracked blocking step awaited in the handler; the dense lane then runs inside
+the same read through `DenseProducer`, whose first implementation is the
+exhaustive f32 oracle. An embedding lane that is busy, starting, disabled,
+failing, or refuses the input leaves the dense lane `unavailable` and the
+answer `degraded`; inference that fails or a stored vector outside the
+generation's layout ends the request as `lane_unavailable` with reason
+`embedding_failed` or `dense_corruption`. Fusion runs once, the fused set is
 revalidated by the kernel's eligibility adapter under the bound scope, and only
 survivors are materialized within `result_rows` and `response_bytes`. No
 payload byte is read by the route.

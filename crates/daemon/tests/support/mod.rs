@@ -8,5 +8,6 @@ pub mod embedding_fixtures;
 pub mod flock;
 pub mod kernel_daemon;
 pub mod projection_gate;
+pub mod query_route;
 pub mod vector_reads;
 pub mod vector_store;

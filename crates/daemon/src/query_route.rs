@@ -2,13 +2,21 @@
 
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use host_runtime::RouteHandle;
+use host_runtime::local_embeddings::inference::InferenceError;
+use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsStatus};
+use kernel::applicability::EvalBudget;
 use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
 use kernel::{ArtifactDestination, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES};
 use retrieval::ProjectionError;
+use retrieval::batch::VectorGeneration;
+use retrieval::dense::{
+    Completion as DenseCompletion, ExhaustiveQuery, IncompleteReason as DenseIncompleteReason,
+    Metric, OracleBounds, OracleRefusal, exhaustive,
+};
 use retrieval::eligibility::{
     Authority, Disposition, judge_occurrences_within_budget, live_candidates_by_id,
 };
@@ -34,6 +42,7 @@ use crate::kernel_routes::RouteScope;
 use crate::request_budget::{
     BlockingFailure, BudgetRefusal, Exhaustion, RequestBudget, SharedBudget,
 };
+use crate::search_lifecycle_owner::SearchLifecycleOwner;
 use crate::search_projection::{SearchProjection, SearchProjectionError};
 use crate::transform_unit::{UnitOutcome, UnitRunner};
 use crate::{HandlerCore, invalid_params_error};
@@ -50,6 +59,19 @@ pub enum LimitsRefusal {
         "lexical_accepted {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
     )]
     LexicalAccepted { value: usize },
+    #[error(
+        "dense {bound} {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
+    )]
+    Dense { bound: &'static str, value: usize },
+}
+
+/// An absent dense limit set leaves the dense lane undeclared; RP2.9 approves the values before it is declared.
+#[derive(Debug, Clone, Copy)]
+pub struct DenseLimits {
+    pub k: NonZeroUsize,
+    pub page_rows: NonZeroUsize,
+    pub max_rows: NonZeroUsize,
+    pub unit_norm_tolerance: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +88,7 @@ pub struct QueryRouteLimits {
     pub response_bytes: NonZeroUsize,
     pub deadline_ceiling: Duration,
     pub fusion: FusionParameters,
+    pub dense: Option<DenseLimits>,
 }
 
 impl QueryRouteLimits {
@@ -80,6 +103,13 @@ impl QueryRouteLimits {
             return Err(LimitsRefusal::LexicalAccepted {
                 value: self.lexical_accepted.get(),
             });
+        }
+        if let Some(dense) = &self.dense {
+            for (bound, value) in [("k", dense.k.get()), ("page_rows", dense.page_rows.get())] {
+                if value > MAX_ELIGIBILITY_CANDIDATES {
+                    return Err(LimitsRefusal::Dense { bound, value });
+                }
+            }
         }
         Ok(())
     }
@@ -175,6 +205,7 @@ pub enum Phase {
     Probes,
     Exact,
     Lexical,
+    Dense,
     Fusion,
     Revalidation,
     Materialization,
@@ -270,6 +301,203 @@ fn lexical_refusal(refusal: &LexicalRefusal) -> &'static str {
     match refusal {
         LexicalRefusal::InputTooLong { .. } => "input_too_long",
         LexicalRefusal::TooManyAtoms { .. } => "too_many_atoms",
+    }
+}
+
+pub struct DenseRequest<'a> {
+    pub generation: &'a VectorGeneration,
+    pub query: &'a [f32],
+    pub authority: Authority<'a>,
+    pub budget: &'a EvalBudget,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DenseRanking {
+    pub hits: Vec<(String, f64)>,
+    pub status: LaneStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenseRefusal {
+    Budget,
+    /// The query vector is not a member of the generation, so the lane cannot run and the answer degrades.
+    QueryShape,
+    /// A stored vector failed the generation's layout; the request ends typed rather than serving a ranking over corrupt rows.
+    Corruption,
+    Unavailable(&'static str),
+}
+
+/// One ranking producer behind the dense lane; the exhaustive f32 oracle is the first.
+pub trait DenseProducer: Send + Sync {
+    fn rank(
+        &self,
+        conn: &GuardedConn<'_>,
+        kernel: &KernelStore,
+        request: DenseRequest<'_>,
+    ) -> Result<DenseRanking, DenseRefusal>;
+}
+
+pub struct ExhaustiveProducer {
+    pub limits: DenseLimits,
+}
+
+impl DenseProducer for ExhaustiveProducer {
+    fn rank(
+        &self,
+        conn: &GuardedConn<'_>,
+        kernel: &KernelStore,
+        request: DenseRequest<'_>,
+    ) -> Result<DenseRanking, DenseRefusal> {
+        let query = ExhaustiveQuery {
+            generation: request.generation,
+            metric: Metric::InnerProduct,
+            unit_norm_tolerance: self.limits.unit_norm_tolerance,
+            query: request.query,
+            authority: request.authority,
+            bounds: OracleBounds {
+                k: self.limits.k,
+                page_rows: self.limits.page_rows,
+                max_rows: self.limits.max_rows,
+            },
+        };
+        let ranking =
+            exhaustive(conn, kernel, &query, request.budget).map_err(|refusal| match refusal {
+                OracleRefusal::BudgetExhausted
+                | OracleRefusal::Projection(ProjectionError::Interrupted)
+                | OracleRefusal::Kernel(KernelError::Deadline) => DenseRefusal::Budget,
+                OracleRefusal::Query(_) => DenseRefusal::QueryShape,
+                OracleRefusal::StoredRow { .. } | OracleRefusal::Unreadable { .. } => {
+                    DenseRefusal::Corruption
+                }
+                OracleRefusal::BatchOverBound { .. } => {
+                    DenseRefusal::Unavailable("batch_over_bound")
+                }
+                OracleRefusal::Projection(error) => {
+                    DenseRefusal::Unavailable(projection_reason(&error))
+                }
+                OracleRefusal::Kernel(_) => DenseRefusal::Unavailable("kernel"),
+            })?;
+        let status = match ranking.completion {
+            DenseCompletion::Complete => LaneStatus::Complete,
+            DenseCompletion::Incomplete(DenseIncompleteReason::BudgetExhausted) => {
+                return Err(DenseRefusal::Budget);
+            }
+            DenseCompletion::Incomplete(DenseIncompleteReason::DenseCoverageShortfall) => {
+                LaneStatus::Incomplete("coverage_shortfall")
+            }
+            DenseCompletion::Incomplete(DenseIncompleteReason::RowBound) => {
+                LaneStatus::Incomplete("row_bound")
+            }
+            DenseCompletion::Incomplete(DenseIncompleteReason::KernelIncarnationChanged) => {
+                return Err(DenseRefusal::Unavailable("kernel_incarnation_changed"));
+            }
+            DenseCompletion::Incomplete(DenseIncompleteReason::SnapshotChanged) => {
+                return Err(DenseRefusal::Unavailable("snapshot_changed"));
+            }
+        };
+        Ok(DenseRanking {
+            hits: ranking
+                .ranked
+                .into_iter()
+                .map(|row| (row.occurrence_id, row.score))
+                .collect(),
+            status,
+        })
+    }
+}
+
+/// What the route learned about the dense lane before the blocking scan was submitted.
+pub enum DenseLane<'a> {
+    Undeclared,
+    /// The embedding lane produced no query vector; the answer degrades to the other lanes.
+    Unavailable(&'static str),
+    Ready {
+        query: &'a [f32],
+        generation_id: &'a str,
+        producer: &'a dyn DenseProducer,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedFailure {
+    /// The lane is starting, disabled, failing, or busy, or it refused the input; the dense lane degrades.
+    Unavailable(&'static str),
+    /// Inference ran and failed or broke an invariant; the request ends typed.
+    Faulted,
+}
+
+pub trait QueryEmbedder: Send + Sync {
+    fn embed(&self, text: &str) -> EmbedResult;
+}
+
+/// Parent Q5: a busy lane degrades at once; the route does not retry inside the deadline.
+impl QueryEmbedder for LocalEmbeddingsComponent {
+    fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedFailure> {
+        match self.status() {
+            LocalEmbeddingsStatus::Ready(_) => {}
+            LocalEmbeddingsStatus::Starting => return Err(EmbedFailure::Unavailable("starting")),
+            LocalEmbeddingsStatus::Disabled { .. } => {
+                return Err(EmbedFailure::Unavailable("disabled"));
+            }
+            LocalEmbeddingsStatus::Failing { .. } => {
+                return Err(EmbedFailure::Unavailable("failing"));
+            }
+        }
+        match self.embed_blocking(&[text]) {
+            Ok(mut vectors) if vectors.len() == 1 => Ok(vectors.swap_remove(0)),
+            Ok(_) => Err(EmbedFailure::Faulted),
+            Err(InferenceError::Artifact(_)) => Err(EmbedFailure::Unavailable("busy")),
+            Err(InferenceError::Input(_)) => Err(EmbedFailure::Unavailable("input")),
+            Err(InferenceError::Execution(_) | InferenceError::Invariant(_)) => {
+                Err(EmbedFailure::Faulted)
+            }
+        }
+    }
+}
+
+fn dense_lane(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    identity: &retrieval::ProjectionIdentity,
+    authority: Authority<'_>,
+    lane: &DenseLane<'_>,
+    budget: &SharedBudget,
+) -> Result<LaneOutput, QueryFailure> {
+    let (query, generation_id, producer) = match lane {
+        DenseLane::Undeclared => return Ok(LaneOutput::undeclared()),
+        DenseLane::Unavailable(reason) => return Ok(LaneOutput::unavailable(reason)),
+        DenseLane::Ready {
+            query,
+            generation_id,
+            producer,
+        } => (*query, *generation_id, *producer),
+    };
+    let generation = VectorGeneration {
+        generation_id: generation_id.to_string(),
+        embedding_model: identity.embedding_model.clone(),
+        tokenizer_fingerprint: identity.tokenizer_fingerprint.clone(),
+        vector_dimension: identity.vector_dimension,
+        generation_epoch: identity.generation_epoch,
+    };
+    let request = DenseRequest {
+        generation: &generation,
+        query,
+        authority,
+        budget: budget.eval(),
+    };
+    match producer.rank(conn, kernel, request) {
+        Ok(ranking) => {
+            let hits = ranking
+                .hits
+                .iter()
+                .filter_map(|(occurrence_id, score)| hit(occurrence_id, RawScore::Dense(*score)))
+                .collect();
+            Ok(LaneOutput::ranked(Lane::Dense, hits, ranking.status))
+        }
+        Err(DenseRefusal::Budget) => Err(exhaustion(budget).into()),
+        Err(DenseRefusal::QueryShape) => Ok(LaneOutput::unavailable("query_shape")),
+        Err(DenseRefusal::Corruption) => Err(QueryFailure::Unavailable("dense_corruption")),
+        Err(DenseRefusal::Unavailable(reason)) => Ok(LaneOutput::unavailable(reason)),
     }
 }
 
@@ -433,6 +661,7 @@ struct Scanned {
     candidates: Vec<retrieval::eligibility::OccurrenceCandidate>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute(
     projection: &SearchProjection,
     kernel: &KernelStore,
@@ -440,6 +669,7 @@ pub fn execute(
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
     query: &str,
+    dense: DenseLane<'_>,
     mut before_phase: impl FnMut(Phase),
 ) -> Result<QueryOutcome, QueryFailure> {
     before_phase(Phase::Probes);
@@ -477,9 +707,14 @@ pub fn execute(
                     QueryFailure::Unavailable("no_lane")
                 });
             }
+            before_phase(Phase::Dense);
+            check(budget)?;
+            let dense = dense_lane(conn, kernel, &identity, authority, &dense, budget)?;
             before_phase(Phase::Fusion);
             check(budget)?;
-            let rankings = [exact.ranking, lexical.ranking].into_iter().flatten();
+            let rankings = [exact.ranking, lexical.ranking, dense.ranking]
+                .into_iter()
+                .flatten();
             let lanes = DeclaredLanes::admit(rankings)
                 .map_err(|_| QueryFailure::Unavailable("duplicate_lane"))?;
             let fused = fuse(lanes, &limits.fusion, limits.fused_union)
@@ -498,7 +733,11 @@ pub fn execute(
                 })?;
             check(budget)?;
             let mut statuses = [const { LaneStatus::Undeclared }; Lane::ORDER.len()];
-            for (lane, status) in [(Lane::Exact, exact.status), (Lane::Lexical, lexical.status)] {
+            for (lane, status) in [
+                (Lane::Exact, exact.status),
+                (Lane::Lexical, lexical.status),
+                (Lane::Dense, dense.status),
+            ] {
                 statuses[lane_slot(lane)] = status;
             }
             Ok(Scanned {
@@ -708,6 +947,41 @@ impl HandlerCore {
             harness: _,
         } = scope;
         let query = parsed.query;
+        let embedded = if limits.dense.is_some() {
+            let embedder = self.query_embedder(&lifecycle);
+            let slot: Arc<Mutex<Option<EmbedResult>>> = Arc::default();
+            let text = query.clone();
+            let written = Arc::clone(&slot);
+            let step = runner.run_step(Box::new(move || {
+                let result = embedder.embed(&text);
+                *written
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+            }));
+            if let Err(failed) = step.await {
+                drop(budget);
+                return blocking_failure(failed);
+            }
+            let result = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            match result {
+                Some(Ok(vector)) => Embedded::Vector(vector),
+                Some(Err(EmbedFailure::Unavailable(reason))) => Embedded::Unavailable(reason),
+                Some(Err(EmbedFailure::Faulted)) | None => {
+                    drop(budget);
+                    return unavailable_response("embedding_failed");
+                }
+            }
+        } else {
+            Embedded::Undeclared
+        };
+        if shared.is_exhausted() {
+            let terminal = exhaustion(&shared);
+            drop(budget);
+            return terminal_response(terminal);
+        }
         let work = runner.run_unit(Box::new(move || {
             let reader = match lifecycle.pin(shared.eval()) {
                 Ok(reader) => reader,
@@ -717,6 +991,18 @@ impl HandlerCore {
                 Err(_) => {
                     return UnitOutcome::Terminal(unavailable_response("no_family"));
                 }
+            };
+            let producer = limits
+                .dense
+                .map(|dense| ExhaustiveProducer { limits: dense });
+            let dense = match (&embedded, &producer) {
+                (Embedded::Vector(vector), Some(producer)) => DenseLane::Ready {
+                    query: vector,
+                    generation_id: &reader.consumer().generation_id,
+                    producer,
+                },
+                (Embedded::Unavailable(reason), _) => DenseLane::Unavailable(reason),
+                (Embedded::Undeclared, _) | (Embedded::Vector(_), None) => DenseLane::Undeclared,
             };
             let outcome = execute(
                 reader.projection(),
@@ -728,6 +1014,7 @@ impl HandlerCore {
                 &limits,
                 &shared,
                 &query,
+                dense,
                 |_| {},
             );
             UnitOutcome::Terminal(match outcome {
@@ -744,15 +1031,49 @@ impl HandlerCore {
         match outcome {
             Ok(UnitOutcome::Terminal(outcome)) => outcome,
             Ok(UnitOutcome::Continue(_)) => unavailable_response("unit_continued"),
-            Err(failed) => match BlockingFailure::from(failed) {
-                BlockingFailure::Panicked => PreparedOutcome::Error {
-                    code: "internal_error".to_string(),
-                    message: "query work failed".to_string(),
-                },
-                BlockingFailure::RuntimeStopped | BlockingFailure::RouteClosing => {
-                    terminal_response(Terminal::Cancelled)
-                }
-            },
+            Err(failed) => blocking_failure(failed),
+        }
+    }
+
+    /// Parent Q6: the query is embedded in process by the lane the family was built under; nothing is routed, so no remaining duration crosses a process boundary.
+    fn query_embedder(&self, lifecycle: &SearchLifecycleOwner) -> Arc<dyn QueryEmbedder> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(embedder) = self
+            .query_embedder_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return embedder;
+        }
+        Arc::new(lifecycle.embeddings().clone())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_query_embedder_for_test(&self, embedder: Option<Arc<dyn QueryEmbedder>>) {
+        *self
+            .query_embedder_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = embedder;
+    }
+}
+
+pub type EmbedResult = Result<Vec<f32>, EmbedFailure>;
+
+enum Embedded {
+    Undeclared,
+    Vector(Vec<f32>),
+    Unavailable(&'static str),
+}
+
+fn blocking_failure(failed: host_runtime::BlockingWorkFailed) -> PreparedOutcome {
+    match BlockingFailure::from(failed) {
+        BlockingFailure::Panicked => PreparedOutcome::Error {
+            code: "internal_error".to_string(),
+            message: "query work failed".to_string(),
+        },
+        BlockingFailure::RuntimeStopped | BlockingFailure::RouteClosing => {
+            terminal_response(Terminal::Cancelled)
         }
     }
 }
