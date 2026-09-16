@@ -20,7 +20,7 @@ A class is declared enabled without a harness proving it.
 
 ## Timing windows and dependencies
 
-A backend answer that changes during a route epoch.
+None: the proof is a harness run, not a race.
 
 ## What a test must construct
 

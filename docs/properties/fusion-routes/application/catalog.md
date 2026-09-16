@@ -289,7 +289,8 @@ while a `pi` route is denied all three and still prepares an append; an
 oversized replace on an undeclared route is denied by the gate, not the
 capacity; a source whose answer changes after bind leaves the bound route
 denied while a second route bound afterwards on the same daemon prepares, and
-the first route cannot apply the second's preparation. `always` because every
+the first route can neither apply nor confirm the second's preparation while
+the second applies and confirms it. `always` because every
 gated request reads the latched declaration.
 Fault/timing angle: The backend answer changes during a route epoch.
 Required faults and enabling state: A mutable capability source; the recorded

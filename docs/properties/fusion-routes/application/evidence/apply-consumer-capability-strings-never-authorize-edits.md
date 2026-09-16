@@ -20,7 +20,7 @@ A plugin claims a class and receives an edit the host cannot account for.
 
 ## Timing windows and dependencies
 
-A backend answer that changes during a route epoch.
+None: the consumer strings are read at bind and the declaration is latched; neither changes within a route epoch.
 
 ## What a test must construct
 

@@ -20,7 +20,7 @@ An edit that fits its own bound overflows the invocation.
 
 ## Timing windows and dependencies
 
-A backend answer that changes during a route epoch.
+None: the invocation bound is checked on one assembled request.
 
 ## What a test must construct
 

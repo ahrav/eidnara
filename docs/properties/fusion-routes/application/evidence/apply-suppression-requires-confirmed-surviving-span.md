@@ -20,7 +20,7 @@ A span the harness no longer shows is suppressed as though visible.
 
 ## Timing windows and dependencies
 
-A backend answer that changes during a route epoch.
+Partial visibility or a replaced slot between the plugin's observation and the prepare.
 
 ## What a test must construct
 

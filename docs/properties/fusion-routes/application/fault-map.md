@@ -19,10 +19,10 @@ System: `/local/home/ahrav/scratch/eidnara`. Base: `rp27/u3c-dense-lane` at
 | Misspelled span field | A `spans` item carrying `spn` instead of `span` on `retrieval.apply`. | apply-stale-preparation-is-rejected-before-edit |
 | Over-capacity edit | `edit_bytes` one over the allowance or capacity. | apply-append-allowance-and-replacement-capacity-are-bound-before-preparation |
 | Outcome outside the set | `outcome: "applied"` or `"unknown"` on confirm. | apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement |
-
-The store takes `now: Instant` on every operation, so the module tests drive
-the time bound with synthetic instants and no sleep.
 | Backend answer changes after bind | A `CapabilitySource` behind a `Mutex` the test rewrites. | apply-context-capabilities-default-closed-per-harness |
 | No declaration | A `KernelDaemon` started without a capability source. | apply-context-capabilities-default-closed-per-harness |
 | Advertising consumer strings | `StartOptions::consumer_capabilities` on a `pi` route. | apply-consumer-capability-strings-never-authorize-edits |
 | Partial or span-level survivors | `survivors` sets on `retrieval.prepare` with action `suppress`. | apply-suppression-requires-confirmed-surviving-span |
+
+The store takes `now: Instant` on every operation, so the module tests drive
+the time bound with synthetic instants and no sleep.

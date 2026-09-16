@@ -314,6 +314,27 @@ async fn the_declaration_is_latched_at_bind_and_reread_by_a_new_bind() {
         forwarded["kind"], "forwarded",
         "the route whose declaration allows the class applies it: {forwarded}"
     );
+    let forwarded_identity = forwarded["forwarded_identity"].as_str().unwrap();
+    let confirm = json!({
+        "method": "retrieval.confirm",
+        "v": 1,
+        "session_id": SESSION,
+        "project_root": project.to_str().unwrap(),
+        "preparation_id": key,
+        "forwarded_identity": forwarded_identity,
+        "applied_identity": forwarded_identity,
+        "outcome": "applied_replacement",
+    });
+    denied(
+        &call(&daemon, confirm.clone()).await,
+        "replacement",
+        "unsupported",
+    );
+    let complete = call_on(&daemon, later, confirm).await;
+    assert_eq!(
+        complete["state"], "complete",
+        "the route whose declaration allows the class confirms it: {complete}"
+    );
     daemon.shutdown().await;
 
     let rebound = KernelDaemon::start_with(StartOptions {
@@ -431,6 +452,13 @@ async fn suppression_needs_whole_message_survivor_proof_for_every_selected_occur
     assert_eq!(
         unknown_selection["reason"], "selection_not_in_spans",
         "a selected occurrence absent from the context's spans is the context's defect, not the survivor proof's: {unknown_selection}"
+    );
+    let mut unknown_selection_no_proof = prepare(&project, "suppress", json!([]));
+    unknown_selection_no_proof["spans"] = json!([whole(OCC_A)]);
+    let unknown_selection_no_proof = call(&daemon, unknown_selection_no_proof).await;
+    assert_eq!(
+        unknown_selection_no_proof["reason"], "selection_not_in_spans",
+        "the context's defect is named even when no survivor proof was sent: {unknown_selection_no_proof}"
     );
 
     let partial = call(
