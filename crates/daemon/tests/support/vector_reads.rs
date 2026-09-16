@@ -177,7 +177,6 @@ pub fn rank_expecting(
                 &projection.kernel,
                 &request,
                 &EvalBudget::unbounded(),
-                &fixture.ledger,
                 &fixture.admission,
             ))
         })
@@ -203,17 +202,9 @@ pub fn map(rows: &[(&str, Vec<f32>)]) -> Vec<(String, Vec<f32>)> {
 pub fn resident_bytes(fixture: &Fixture, members: &[String]) -> u64 {
     members
         .iter()
-        .flat_map(|digest| fixture.store.manifest(digest).unwrap().files)
-        .filter(|file| {
-            [
-                "row-ids.json",
-                "tombstones.json",
-                "scales.f32",
-                "vector-sidecar.json",
-            ]
-            .contains(&file.path.as_str())
+        .map(|digest| {
+            daemon::vector_generation::resident_bytes(&fixture.store.manifest(digest).unwrap())
         })
-        .map(|file| file.size)
         .sum()
 }
 

@@ -2,6 +2,13 @@
 
 mod support;
 
+#[allow(dead_code)]
+#[path = "support/alloc_recorder.rs"]
+mod alloc_recorder;
+
+#[global_allocator]
+static GLOBAL: alloc_recorder::RecordingAlloc = alloc_recorder::RecordingAlloc;
+
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -9,22 +16,25 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use daemon::projection_gates::{Admission, Denial};
-use daemon::vector_admission::{Ledger, RESIDENT_LIMIT, Refusal, ResourceClass};
-use daemon::vector_generation::{ExpectedVectors, ROWS_FILE};
+use daemon::vector_admission::{Pool, RESIDENT_LIMIT, Refusal, ResourceClass};
+use daemon::vector_composition::publish;
+use daemon::vector_generation::{ExpectedVectors, ROWS_FILE, Staging};
 use daemon::vector_reader::{
     AcquireEvent, AcquireRefusal, PinnedVectors, RankRefusal, RankRequest, acquire, rank,
 };
 use host_runtime::generation::{CurrentProfile, GenerationStore, VECTOR_PROFILE_NAME};
+use host_runtime::lifecycle::LifecycleTransactionLock;
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
 use retrieval::dense::scalar;
 use retrieval::dense::{
-    Completion, IncompleteReason, LayerAccount, LayeredRanking, LayeredRefusal, OracleRefusal,
-    RowAccess, RowFault,
+    Completion, IncompleteReason, LayerAccount, LayeredRanking, LayeredRefusal, OracleBounds,
+    OracleRefusal, RowAccess, RowFault,
 };
 use support::dense_projection::{occurrence_id, reference};
 use support::flock::try_exclusive;
 use support::vector_store::{Fixture, unit};
+use tokio_util::sync::CancellationToken;
 
 use support::vector_reads::*;
 
@@ -49,7 +59,7 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
     let digest = fixture.publish(&composition).unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
 
-    assert_eq!(view.digest, digest);
+    assert_eq!(view.digest(), digest);
     assert_eq!(view.members(), composition.members());
     for member in view.members().iter().chain([&digest]) {
         assert!(
@@ -72,9 +82,9 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
     );
 
     // Rows come back bit for bit from their offsets; codes are the rows under this layer's own scales.
-    let layout = view.layout;
+    let layout = view.layout();
     for (layer, expected) in view
-        .layers
+        .layers()
         .iter()
         .zip([&corpus[..], &[("alpha", low.clone())][..]])
     {
@@ -148,8 +158,77 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
 }
 
 #[test]
-fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusal_hands_nothing_out()
- {
+fn identity_handoff_allocation_contract() {
+    let (_, canary) = alloc_recorder::record_window(|| {
+        let bytes = std::hint::black_box(vec![0u8; 123]);
+        drop(std::hint::black_box(bytes));
+    });
+    assert!(!canary.overflow);
+    assert_eq!(canary.allocation_events, 1);
+    assert_eq!(canary.requested_bytes, 123);
+    assert_eq!(canary.live_bytes_at_close, 0);
+
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let checkpoint = base.sidecar.checkpoint();
+    let query = axis(0);
+    let budget = EvalBudget::unbounded();
+    // A revoked grant refuses the page scratch after every identity check and allocates nothing on the way; a limit denial would name the limit in a `String`.
+    let revoked = Admission {
+        invalidated: CancellationToken::new(),
+        ..fixture.admission.clone()
+    };
+    revoked.invalidated.cancel();
+    for checkpoint in [None, Some(&checkpoint)] {
+        let expected = ExpectedVectors {
+            checkpoint,
+            ..fixture.expected()
+        };
+        let request = RankRequest {
+            expected: &expected,
+            query: &query,
+            authority: projection.authority(),
+            bounds: oracle_bounds(8),
+            max_entries: NonZeroUsize::new(64).unwrap(),
+        };
+        let (result, ledger) = projection
+            .store
+            .with_conn(|conn| {
+                Ok(alloc_recorder::record_window(|| {
+                    rank(&view, conn, &projection.kernel, &request, &budget, &revoked)
+                }))
+            })
+            .unwrap();
+        assert_eq!(
+            result.unwrap_err(),
+            RankRefusal::Scratch {
+                bytes: PAGE_SCRATCH,
+                refusal: Refusal::Denied(Denial::Invalidated)
+            }
+        );
+        assert!(!ledger.overflow);
+        assert_eq!(ledger.live_bytes_at_close, 0);
+        eprintln!(
+            "identity checkpoint={}: allocations={} requested={} peak={} live={}",
+            checkpoint.is_some(),
+            ledger.allocation_events,
+            ledger.requested_bytes,
+            ledger.peak_live_bytes,
+            ledger.live_bytes_at_close,
+        );
+        assert_eq!(ledger.allocation_events, 0);
+        assert_eq!(ledger.requested_bytes, 0);
+        assert_eq!(ledger.peak_live_bytes, 0);
+    }
+}
+
+#[test]
+fn acquisition_frees_the_transaction_lock_before_hashing_and_a_late_refusal_hands_nothing_out() {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
     let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
@@ -163,28 +242,35 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
     let refusal = {
         let mut observe = |event: AcquireEvent| {
             seen.push(event);
-            // Every pin and both reservations are held, and a publisher's exclusive lifecycle lock cannot be taken, at both windows.
+            // The transaction lock is free at every window: a reader never holds mutators off while it hashes or hands off; its pins and both reservations are what keep the files.
             assert!(
-                !try_exclusive(&lock),
-                "a competing mutator is refused the transaction lock at {event:?}"
+                try_exclusive(&lock),
+                "a mutator can take the transaction lock at {event:?}"
             );
             for pinned in members.iter().chain([&digest]) {
-                assert!(!try_exclusive(&fixture.generation_dir(pinned)));
+                assert!(
+                    !try_exclusive(&fixture.generation_dir(pinned)),
+                    "{pinned} is pinned at {event:?}"
+                );
             }
             assert!(held(&fixture.ledger, ResourceClass::LayerTables) > 0);
             assert!(fixture.ledger.census().pinned > 0);
-            if event == AcquireEvent::BeforeLastLayer {
-                // An attempted prune reclaims nothing the view needs; the files are witnessed on disk afterwards.
+            if event != AcquireEvent::BeforeSelectorRecheck {
+                // A mutator's exclusive transaction succeeds through the real API, and its prune reclaims nothing the view needs; the files are witnessed on disk afterwards.
+                let transaction =
+                    LifecycleTransactionLock::acquire_exclusive(Some(fixture.root.path()))
+                        .expect("a mutator is not held off by a reader");
                 let report = GenerationStore::open(Some(fixture.root.path()))
                     .unwrap()
                     .prune(&BTreeSet::new())
                     .unwrap();
+                drop(transaction);
                 assert_eq!(report.removed_generations, 0);
                 let present = fixture.generations();
                 assert!(members.iter().chain([&digest]).all(|d| present.contains(d)));
             }
             if event == AcquireEvent::BeforeSelectorRecheck {
-                // The last check before handoff fails: the selector no longer names what recovery observed.
+                // The last check before handoff fails: the selector no longer names what acquisition observed.
                 std::fs::remove_file(&selector).unwrap();
             }
         };
@@ -208,6 +294,7 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
     assert_eq!(
         seen,
         vec![
+            AcquireEvent::BeforeVerification,
             AcquireEvent::BeforeLastLayer,
             AcquireEvent::BeforeSelectorRecheck
         ]
@@ -228,6 +315,77 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
         "no reservation outlives a failed acquisition"
     );
     fixture.reacquire_transaction();
+}
+
+#[test]
+fn a_publisher_that_runs_while_a_reader_verifies_moves_the_selector_and_the_reader_refuses() {
+    let mut fixture = Fixture::new();
+    let corpus = corpus();
+    let old_base = fixture.layer_from(&export(&corpus, &[], 10));
+    let old = fixture.compose(1, &old_base, &[]).unwrap();
+    let old_digest = fixture.publish(&old).unwrap();
+    // The replacement is staged while the fixture still holds the transaction; only its publication waits for the reader's verification window.
+    let mut replaced = corpus.clone();
+    replaced[0].1 = axis(7);
+    let new_base = fixture.layer_from(&export(&replaced, &[], 20));
+    let new = fixture.compose(2, &new_base, &[]).unwrap();
+    let mut published = None;
+    fixture.release_transaction();
+    let refusal = {
+        let mut observe = |event: AcquireEvent| {
+            if event == AcquireEvent::BeforeVerification {
+                let transaction =
+                    LifecycleTransactionLock::acquire_exclusive(Some(fixture.root.path()))
+                        .expect("a publisher is not held off by a verifying reader");
+                let staging = Staging {
+                    store: &fixture.store,
+                    transaction: &transaction,
+                    gate: &fixture.gate,
+                    admission: &fixture.admission,
+                    identity: &fixture.identity,
+                    ledger: &fixture.ledger,
+                    protected: &fixture.protected,
+                };
+                published = Some(
+                    publish(&new, &staging, &fixture.work_dir(), &mut |_| Ok(()))
+                        .map_err(|failure| failure.refusal)
+                        .unwrap(),
+                );
+            }
+        };
+        acquire(
+            Some(fixture.root.path()),
+            &fixture.expected(),
+            bounds(),
+            &fixture.ledger,
+            &fixture.admission,
+            &mut observe,
+        )
+        .unwrap_err()
+    };
+    let new_digest = published.expect("the publisher ran during verification");
+    assert_eq!(
+        refusal,
+        AcquireRefusal::SelectorMoved {
+            observed: daemon::vector_composition::SelectorState::Current,
+            current: CurrentProfile::Current(new_digest.clone())
+        }
+    );
+    assert!(
+        try_exclusive(&fixture.generation_dir(&old_digest)),
+        "the superseded record is not left pinned"
+    );
+    assert_eq!(
+        fixture.ledger.census(),
+        daemon::vector_admission::Census::default(),
+        "no reservation outlives the refused acquisition"
+    );
+    fixture.reacquire_transaction();
+
+    // The retry takes the set the publisher left.
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    assert_eq!(view.digest(), new_digest);
+    assert_eq!(view.members(), vec![new_base.digest.clone()]);
 }
 
 #[test]
@@ -270,7 +428,7 @@ fn no_composition_or_a_short_resident_limit_refuses_before_any_layer_and_a_trunc
     let rows = fixture.generation_dir(&base.digest).join(ROWS_FILE);
     let bytes = std::fs::read(&rows).unwrap();
     std::fs::write(&rows, &bytes[..bytes.len() - 8]).unwrap();
-    let layer = &view.layers[0];
+    let layer = &view.layers()[0];
     assert!(layer.row(3).is_ok());
     assert!(matches!(layer.row(4), Err(RowFault::Unavailable(_))));
     let refusal = rank_view(&fixture, &projection, &view, &axis(0), 8).unwrap_err();
@@ -314,7 +472,7 @@ fn old_readers_keep_their_complete_set_while_a_new_composition_is_published_and_
     assert!(!reconciliation.unaccounted());
 
     let new_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
-    assert_eq!(old_view.digest, old_digest);
+    assert_eq!(old_view.digest(), old_digest);
     assert_eq!(new_view.members(), vec![new_base.digest.clone()]);
     let query = axis(0);
     let old_ranking = rank_view(&fixture, &projection, &old_view, &query, 8).unwrap();
@@ -405,6 +563,44 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
     );
     fixture.set_limit(RESIDENT_LIMIT, u64::MAX);
 
+    for page_rows in [usize::MAX, usize::MAX / (8 * 4)] {
+        let expected = fixture.expected();
+        let request = RankRequest {
+            expected: &expected,
+            query: &query,
+            authority: projection.authority(),
+            bounds: OracleBounds {
+                page_rows: NonZeroUsize::new(page_rows).unwrap(),
+                ..oracle_bounds(8)
+            },
+            max_entries: NonZeroUsize::new(64).unwrap(),
+        };
+        let refusal = projection
+            .store
+            .with_conn(|conn| {
+                Ok(rank(
+                    &view,
+                    conn,
+                    &projection.kernel,
+                    &request,
+                    &EvalBudget::unbounded(),
+                    &fixture.admission,
+                ))
+            })
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            refusal,
+            RankRefusal::Scratch {
+                bytes: u64::MAX,
+                refusal: Refusal::Overflow {
+                    pool: Pool::Resident
+                }
+            }
+        );
+        assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
+    }
+
     // `gamma` is hidden by the kernel, and `alpha` is retired after the view was taken: neither the delta's row nor the base's row for them is returned.
     projection.retire("alpha");
     let ranking = rank_view(&fixture, &projection, &view, &query, 8).unwrap();
@@ -424,7 +620,7 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
     assert_eq!(ranking.ranking.coverage.with_vector, 5);
 }
 
-/// Everything a blocking worker owns for one ranking: the view, the projection, the kernel, the expectation's parts, the ledger, and its grant.
+/// Everything a blocking worker owns for one ranking: the view, the projection, the kernel, the expectation's parts, and its grant.
 struct Work {
     view: Arc<PinnedVectors>,
     projection_store: Arc<storage::SqliteStore>,
@@ -432,7 +628,6 @@ struct Work {
     generation: retrieval::batch::VectorGeneration,
     kernel_incarnation_id: String,
     project: kernel::ProjectScope,
-    ledger: Arc<Ledger>,
     grant: Admission,
 }
 
@@ -465,7 +660,6 @@ impl Work {
                     &self.kernel,
                     &request,
                     budget,
-                    &self.ledger,
                     &self.grant,
                 ))
             })
@@ -483,7 +677,6 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
     let digest = fixture.publish(&composition).unwrap();
     let generation = fixture.generation.clone();
     let kernel_incarnation_id = fixture.identity.kernel_incarnation_id.clone();
-    let ledger = Arc::clone(&fixture.ledger);
     let grant = fixture.admission.clone();
     let work = |view: Arc<PinnedVectors>| Work {
         view,
@@ -492,7 +685,6 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
         generation: generation.clone(),
         kernel_incarnation_id: kernel_incarnation_id.clone(),
         project: projection.project.clone(),
-        ledger: Arc::clone(&ledger),
         grant: grant.clone(),
     };
 
@@ -554,7 +746,7 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
 
     // Completion with retained output: whoever keeps the ranking's view keeps its pins until that view is dropped.
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
-    let new_digest = view.digest.clone();
+    let new_digest = view.digest().to_owned();
     let owned = work(Arc::clone(&view));
     let ranked = tokio::task::spawn_blocking(move || owned.run(&EvalBudget::unbounded()))
         .await

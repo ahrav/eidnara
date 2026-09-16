@@ -6,9 +6,10 @@ use std::sync::Arc;
 use daemon::coverage::ProjectionCoverage;
 use daemon::projection_gates::{
     APPROVED_OBSERVERS, CAPABILITIES, COMPRESSION_CRITERIA, CapabilityDisposition,
-    CapabilityEvidence, CompressionBinding, CompressionEvidence, Evidence, EvidenceEvaluator,
-    FullPathTrace, HARNESSES, HarnessRun, HookGate, InvalidationIdentity, Outcome, ProjectionHook,
-    REQUIRED_LIMITS, ResourceEvidence, RuntimeManifest, TRACE_STAGES, TraceKind, VECTOR_LIMITS,
+    CapabilityEvidence, CompressionBinding, CompressionEvidence, CompressionRecord, Evidence,
+    EvidenceEvaluator, FullPathTrace, HARNESSES, HarnessRun, HookGate, InvalidationIdentity,
+    Outcome, ProjectionHook, REQUIRED_LIMITS, ResourceEvidence, RuntimeManifest, TRACE_STAGES,
+    TraceKind, VECTOR_LIMITS,
 };
 use kernel::EgressSnapshot;
 use kernel::source_identity::OccurrenceClass;
@@ -134,7 +135,7 @@ pub fn passing_evaluator(
                     )
                 })
                 .collect(),
-            compression: Some(passing_compression(&current)),
+            compression: CompressionRecord::Campaign(Box::new(passing_compression(&current))),
         },
         binding: Some(test_binding()),
     }

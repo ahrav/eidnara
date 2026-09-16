@@ -3,8 +3,9 @@
 mod support;
 
 use daemon::projection_gates::{
-    COMPRESSED_ACTIVATION_ID, COMPRESSION_CRITERIA, Denial, EvidenceEvaluator, Gate, HookGate,
-    Outcome, ProjectionHook, Renewal, RuntimeManifest, TRACE_STAGES, TraceKind, VECTOR_LIMITS,
+    COMPRESSED_ACTIVATION_ID, COMPRESSION_CRITERIA, CompressionRecord, Denial, EvidenceEvaluator,
+    Gate, HARNESSES, HookGate, Outcome, ProjectionHook, Renewal, RuntimeManifest, TRACE_STAGES,
+    TraceKind, VECTOR_LIMITS,
 };
 use serde_json::json;
 use support::projection_gate::{identity, passing_evaluator};
@@ -22,7 +23,10 @@ fn judge(mutate: impl FnOnce(&mut EvidenceEvaluator)) -> Result<(), Denial> {
 fn compression(
     evaluator: &mut EvidenceEvaluator,
 ) -> &mut daemon::projection_gates::CompressionEvidence {
-    evaluator.evidence.compression.as_mut().unwrap()
+    match &mut evaluator.evidence.compression {
+        CompressionRecord::Campaign(evidence) => evidence.as_mut(),
+        other => panic!("the passing evaluator carries a campaign, not {other:?}"),
+    }
 }
 
 #[test]
@@ -35,8 +39,16 @@ fn a_correctly_bound_campaign_admits_and_every_broken_dimension_denies_on_its_ow
         Err(Denial::CompressionDisabled)
     );
     assert_eq!(
-        judge(|e| e.evidence.compression = None),
+        judge(|e| e.evidence.compression = CompressionRecord::Absent),
         Err(Denial::Missing(Gate::Compression))
+    );
+    assert_eq!(
+        judge(|e| e.evidence.compression = CompressionRecord::Malformed),
+        Err(Denial::Failed(
+            Gate::Compression,
+            "the compression section is malformed".to_owned()
+        )),
+        "a section the gate cannot read denies activation and nothing else"
     );
     assert_eq!(
         judge(|e| e.binding = None),
@@ -62,6 +74,19 @@ fn a_correctly_bound_campaign_admits_and_every_broken_dimension_denies_on_its_ow
         Err(Denial::EvidenceIdentity),
         "a harness version the daemon does not run under is a mismatch"
     );
+    for harness in HARNESSES {
+        assert_eq!(
+            judge(|e| {
+                e.binding.as_mut().unwrap().harnesses.remove(harness);
+                compression(e).binding.harnesses.remove(harness);
+            }),
+            Err(Denial::Failed(
+                Gate::Compression,
+                "the binding does not name exactly one version per harness".to_owned()
+            )),
+            "a harness version both sides omit is unbound, not matching"
+        );
+    }
     assert_eq!(
         judge(|e| compression(e).revoked = true),
         Err(Denial::Revoked)

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::projection_gate::{identity, passing_evaluator};
 use daemon::projection_gates::{
-    Admission, EntryPoint, HookGate, InvalidationIdentity, ProjectionHook,
+    Admission, CompressionRecord, EntryPoint, HookGate, InvalidationIdentity, ProjectionHook,
 };
 use daemon::vector_admission::Ledger;
 use daemon::vector_composition::{
@@ -124,7 +124,7 @@ impl Fixture {
     pub fn set_limit(&mut self, limit: &str, value: u64) {
         let mut evaluator = passing_evaluator(&self.identity, 0, &ProjectionHook::ALL);
         evaluator.manifest.limits.insert(limit.to_owned(), value);
-        if let Some(compression) = evaluator.evidence.compression.as_mut() {
+        if let CompressionRecord::Campaign(compression) = &mut evaluator.evidence.compression {
             compression.limits.insert(limit.to_owned(), value);
         }
         self.gate.install(evaluator);
@@ -270,11 +270,20 @@ impl Fixture {
     }
 
     pub fn stage_search_seed(&self) -> String {
+        self.stage_foreign(
+            "search-projection-seed",
+            "search.sqlite",
+            b"not really a database",
+        )
+    }
+
+    pub fn stage_foreign(&self, target: &str, rel_path: &str, bytes: &[u8]) -> String {
         let dir = self.work_dir();
-        let path = dir.join("search.sqlite");
-        fs::write(&path, b"not really a database").unwrap();
+        let path = dir.join(rel_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
         let meta = StageMeta {
-            target: "search-projection-seed".to_owned(),
+            target: target.to_owned(),
             release_contract_sha256: "a".repeat(64),
             inputs_lock_sha256: "b".repeat(64),
             source_payload_manifest_sha256: "c".repeat(64),
@@ -282,7 +291,7 @@ impl Fixture {
         self.store
             .stage(
                 &[SourceSpec {
-                    rel_path: "search.sqlite".to_owned(),
+                    rel_path: rel_path.to_owned(),
                     source: path,
                     executable: false,
                     expected_size: None,

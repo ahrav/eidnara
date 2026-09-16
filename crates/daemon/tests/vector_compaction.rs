@@ -138,9 +138,9 @@ fn compaction_keeps_every_effective_row_applies_every_tombstone_and_ranks_to_the
     );
 
     let new_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
-    assert_eq!(new_view.digest, published.digest);
+    assert_eq!(new_view.digest(), published.digest);
     assert_eq!(new_view.members(), vec![published.base.clone()]);
-    let compacted_base = &new_view.layers[0];
+    let compacted_base = &new_view.layers()[0];
     assert_eq!(
         compacted_base.occurrence_ids(),
         expected
@@ -503,8 +503,8 @@ fn reservations_are_taken_before_any_read_released_with_the_output_and_a_short_l
     assert_eq!((limit.as_str(), max), (RESIDENT_LIMIT, resident_before));
     let build_footprint = footprint(
         &fixture.expected(),
-        &view.layers[0].checkpoint,
-        view.layers[0].occurrence_ids().iter().map(String::as_str),
+        &view.layers()[0].checkpoint,
+        view.layers()[0].occurrence_ids().iter().map(String::as_str),
         std::iter::empty(),
     );
     assert!(observed - resident_before >= build_footprint.resident);

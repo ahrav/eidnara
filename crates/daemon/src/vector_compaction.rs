@@ -27,7 +27,7 @@ impl Cut {
     pub fn of(view: &PinnedVectors) -> Self {
         let members = view.members();
         Self {
-            digest: view.digest.clone(),
+            digest: view.digest().to_owned(),
             base: members[0].clone(),
             deltas: members[1..].to_vec(),
         }
@@ -125,7 +125,7 @@ pub fn compact(
     max_entries: NonZeroUsize,
     work_dir: &Path,
 ) -> Result<Compacted, CompactionRefusal> {
-    for layer in &view.layers {
+    for layer in view.layers() {
         vector_generation::check_identity(&layer.sidecar, expected).map_err(|refusal| {
             CompactionRefusal::Identity {
                 digest: layer.digest.clone(),
@@ -139,7 +139,7 @@ pub fn compact(
     let layers = view.resolver_layers();
     let resolved = resolve(&layers, max_entries)?;
     let checkpoint = view
-        .layers
+        .layers()
         .last()
         .expect("a view has a base")
         .checkpoint
@@ -158,7 +158,7 @@ pub fn compact(
         total.saturating_add(winner.occurrence_id.len() as u64)
     });
     let rows = resolved.winners.len() as u64;
-    let dimension = u64::from(view.layout.dimension);
+    let dimension = u64::from(view.layout().dimension);
     let own = identifier_bytes
         .saturating_mul(2)
         .saturating_add(
@@ -178,14 +178,13 @@ pub fn compact(
     )?;
     let mut exported = Vec::with_capacity(resolved.winners.len());
     for winner in &resolved.winners {
-        let vector =
-            view.layers[winner.layer]
-                .row(winner.row)
-                .map_err(|fault| CompactionRefusal::Row {
-                    layer: winner.layer,
-                    row: winner.row,
-                    fault,
-                })?;
+        let vector = view.layers()[winner.layer]
+            .row(winner.row)
+            .map_err(|fault| CompactionRefusal::Row {
+                layer: winner.layer,
+                row: winner.row,
+                fault,
+            })?;
         exported.push(ExportedRow {
             occurrence_id: winner.occurrence_id.clone(),
             vector,

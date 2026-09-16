@@ -270,6 +270,8 @@ pub enum FileFault {
     Identifiers,
     /// The codes are not the rows encoded under the scales.
     Codes,
+    /// The file holds more bytes than its manifest declares.
+    Size,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -580,7 +582,7 @@ pub struct Staging<'a> {
 }
 
 impl Staging<'_> {
-    /// Charges the manifest's whole inventory against the staged-bytes limit, reserves it in the ledger's disk pool on top of what the store already holds unless the store already holds this manifest, then stages the files `resolve` names for each manifest path; a refused admission or reservation stages nothing. The reservation ends with the copy: the bytes then belong to the store, which the next disk reservation counts.
+    /// Charges the manifest's whole inventory against the staged-bytes limit, reserves it plus the `manifest.json` the store writes beside it in the ledger's disk pool on top of what the store already holds, then stages the files `resolve` names for each manifest path; a refused admission or reservation stages nothing. The reservation ends with the copy: the bytes then belong to the store, which the next disk reservation counts. A manifest the store already holds is reserved the same way, because the store copies the inventory into a staging temp before it finds the occupant and publishes nothing twice.
     ///
     /// # Errors
     ///
@@ -599,20 +601,17 @@ impl Staging<'_> {
                 &[(STAGE_DISK_LIMIT, bytes)],
             )
             .map_err(VectorRefusal::Admission)?;
-        // A retry of a staged manifest allocates nothing: the store finds the occupant and publishes nothing twice, so only a missing occupant is charged.
-        let increment = if self.store.manifest(&manifest.digest()).is_ok() {
-            0
-        } else {
-            bytes
-        };
+        // The store's walk counts `manifest.json`, so the reservation covers it or an exact-bound staging would leave the store over the limit.
+        let on_disk = bytes
+            .checked_add(manifest.canonical_bytes().len() as u64)
+            .ok_or(VectorRefusal::Reservation(
+                crate::vector_admission::Refusal::Overflow {
+                    pool: crate::vector_admission::Pool::Disk,
+                },
+            ))?;
         let _staging = self
             .ledger
-            .reserve_disk(
-                self.admission,
-                ResourceClass::Staging,
-                increment,
-                self.store,
-            )
+            .reserve_disk(self.admission, ResourceClass::Staging, on_disk, self.store)
             .map_err(VectorRefusal::Reservation)?;
         let sources = manifest_sources(manifest, |path| Some(resolve(path)))
             .expect("every manifest path resolves under the work directory");
@@ -658,6 +657,19 @@ impl std::fmt::Debug for VerifiedVectors {
     }
 }
 
+/// The files whose decoded contents [`VerifiedVectors`] keeps in memory: `occurrence_ids`, `tombstones`, `scales`, and `sidecar`. Rows and codes stay behind their descriptors.
+pub const RESIDENT_FILES: [&str; 4] = [ROW_IDS_FILE, TOMBSTONES_FILE, SCALES_FILE, SIDECAR_FILE];
+
+/// Returns the manifest-declared bytes of the [`RESIDENT_FILES`], the charge for one generation's decoded tables.
+pub fn resident_bytes(manifest: &GenerationManifest) -> u64 {
+    manifest
+        .files
+        .iter()
+        .filter(|file| RESIDENT_FILES.contains(&file.path.as_str()))
+        .map(|file| file.size)
+        .sum()
+}
+
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
 ///
 /// # Errors
@@ -693,7 +705,8 @@ pub fn verify(
         .layout()
         .ok_or(VectorRefusal::NotVectors("metric"))?;
     let rows_file = File::from(generation.open_verified_file(ROWS_FILE)?);
-    let rows = codec::decode_rows(&read_all(&rows_file)?, &layout).map_err(VectorRefusal::Rows)?;
+    let rows_bytes = read_all(&rows_file, ROWS_FILE, declared_size(&generation, ROWS_FILE))?;
+    let rows = codec::decode_rows(&rows_bytes, &layout).map_err(VectorRefusal::Rows)?;
     let fault = |path, fault| VectorRefusal::File { path, fault };
     if rows.rows.len() as u64 != sidecar.rows {
         return Err(fault(ROWS_FILE, FileFault::RowCount));
@@ -725,7 +738,12 @@ pub fn verify(
     let codes = encode_all(&layout, &calibration.scales, vectors)
         .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
     let codes_file = File::from(generation.open_verified_file(CODES_FILE)?);
-    if read_all(&codes_file)? != codes {
+    if read_all(
+        &codes_file,
+        CODES_FILE,
+        declared_size(&generation, CODES_FILE),
+    )? != codes
+    {
         return Err(fault(CODES_FILE, FileFault::Codes));
     }
     Ok(VerifiedVectors {
@@ -740,19 +758,34 @@ pub fn verify(
     })
 }
 
-/// The whole of a verified file, read from its start whatever the descriptor's position.
-fn read_all(file: &File) -> Result<Vec<u8>, VectorRefusal> {
+/// The whole of a verified file, read from its start whatever the descriptor's position and no further than the `size` its manifest declares; more bytes than that refuse as [`FileFault::Size`], as [`ValidatedGeneration::read_verified_file`] refuses them.
+fn read_all(file: &File, path: &'static str, size: u64) -> Result<Vec<u8>, VectorRefusal> {
     use std::io::Read;
+    let io = |error: io::Error| VectorRefusal::Io(error.kind().to_string());
+    let mut reader = file.try_clone().map_err(io)?;
+    std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(0)).map_err(io)?;
     let mut bytes = Vec::new();
-    let mut reader = file
-        .try_clone()
-        .map_err(|error| VectorRefusal::Io(error.kind().to_string()))?;
-    std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(0))
-        .map_err(|error| VectorRefusal::Io(error.kind().to_string()))?;
     reader
+        .take(size.saturating_add(1))
         .read_to_end(&mut bytes)
-        .map_err(|error| VectorRefusal::Io(error.kind().to_string()))?;
+        .map_err(io)?;
+    if bytes.len() as u64 > size {
+        return Err(VectorRefusal::File {
+            path,
+            fault: FileFault::Size,
+        });
+    }
     Ok(bytes)
+}
+
+/// The manifest-declared size of `path`, which [`ValidatedGeneration::open_verified_file`] checked the file against.
+fn declared_size(generation: &ValidatedGeneration, path: &str) -> u64 {
+    generation
+        .manifest
+        .files
+        .iter()
+        .find(|file| file.path == path)
+        .map_or(0, |file| file.size)
 }
 
 /// Every field is compared, so a different model space is refused even at an equal dimension.
@@ -760,20 +793,50 @@ pub(crate) fn check_identity(
     sidecar: &VectorSidecar,
     expected: &ExpectedVectors<'_>,
 ) -> Result<(), VectorRefusal> {
-    if let Some(field) = VectorIdentity::from_sidecar(sidecar)
-        .first_mismatch(&VectorIdentity::from_expected(expected))
-    {
+    let generation = expected.generation;
+    let checks = [
+        (
+            "embedding_model",
+            sidecar.embedding_model == generation.embedding_model,
+        ),
+        (
+            "tokenizer_fingerprint",
+            sidecar.tokenizer_fingerprint == generation.tokenizer_fingerprint,
+        ),
+        (
+            "vector_dimension",
+            sidecar.vector_dimension == generation.vector_dimension,
+        ),
+        ("metric", sidecar.metric == expected.metric.name()),
+        (
+            "unit_norm_tolerance",
+            sidecar.unit_norm_tolerance.to_bits() == expected.unit_norm_tolerance.to_bits(),
+        ),
+        (
+            "quantizer_recipe",
+            sidecar.quantizer_recipe == expected.recipe.id(),
+        ),
+        (
+            "generation_epoch",
+            sidecar.generation_epoch == generation.generation_epoch,
+        ),
+        (
+            "kernel_incarnation_id",
+            sidecar.kernel_incarnation_id == expected.kernel_incarnation_id,
+        ),
+        (
+            "generation_id",
+            sidecar.generation_id == generation.generation_id,
+        ),
+    ];
+    if let Some((field, _)) = checks.into_iter().find(|(_, holds)| !holds) {
         return Err(VectorRefusal::Identity { field });
     }
-    if sidecar.generation_id != expected.generation.generation_id {
-        return Err(VectorRefusal::Identity {
-            field: "generation_id",
-        });
-    }
-    if expected
-        .checkpoint
-        .is_some_and(|checkpoint| sidecar.checkpoint() != *checkpoint)
-    {
+    if expected.checkpoint.is_some_and(|checkpoint| {
+        sidecar.snapshot_commit_seq != checkpoint.snapshot_commit_seq
+            || sidecar.checkpoint_commit_seq != checkpoint.checkpoint_commit_seq
+            || sidecar.hold_id != checkpoint.hold_id
+    }) {
         return Err(VectorRefusal::Identity {
             field: "checkpoint",
         });
@@ -816,4 +879,30 @@ pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), VectorRefusal> 
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_verified_file_is_read_no_further_than_its_manifest_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ROWS_FILE);
+        fs::write(&path, b"0123456789").unwrap();
+        let file = File::open(&path).unwrap();
+        assert_eq!(read_all(&file, ROWS_FILE, 10).unwrap(), b"0123456789");
+        // The descriptor's position after one read does not change the next.
+        assert_eq!(read_all(&file, ROWS_FILE, 10).unwrap(), b"0123456789");
+
+        // Bytes appended after the hash was taken are refused rather than read to the end.
+        fs::write(&path, b"0123456789ab").unwrap();
+        assert_eq!(
+            read_all(&file, ROWS_FILE, 10).unwrap_err(),
+            VectorRefusal::File {
+                path: ROWS_FILE,
+                fault: FileFault::Size
+            }
+        );
+    }
 }
