@@ -13,9 +13,12 @@ pub trait CapabilitySource: Send + Sync {
 
 impl<T: LlmExecutionBackend + ?Sized> CapabilitySource for T {
     fn declare(&self, harness: &str) -> Result<ContextCapabilities, &'static str> {
-        Harness::parse(harness)
-            .map(|harness| self.context_capabilities(harness))
-            .ok_or("unknown_harness")
+        let harness = Harness::parse(harness).ok_or("unknown_harness")?;
+        // An unavailable backend returns its reason instead of declaring `ContextCapabilities::NONE`.
+        match self.unavailable_reason(harness) {
+            Some(reason) => Err(reason),
+            None => Ok(self.context_capabilities(harness)),
+        }
     }
 }
 

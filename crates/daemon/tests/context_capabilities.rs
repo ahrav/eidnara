@@ -90,6 +90,36 @@ impl LlmExecutionBackend for Nothing {
     }
 }
 
+/// A host build with no working adapter for the harness: the unavailable backend the production host installs for an absent or unavailable snapshot.
+struct Unavailable;
+
+impl LlmExecutionBackend for Unavailable {
+    fn execute(
+        &self,
+        _request: host_runtime::model_execution::backend::BackendRequest,
+        _events: host_runtime::model_execution::backend::EventSink,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> host_runtime::model_execution::backend::BackendFuture {
+        Box::pin(async { unreachable!("the capability test never runs a model") })
+    }
+
+    fn unavailable_reason(&self, _harness: Harness) -> Option<&'static str> {
+        Some("descriptor_absent")
+    }
+}
+
+#[test]
+fn an_unavailable_backend_is_an_unreadable_declaration_not_a_closed_one() {
+    let source = Arc::new(Unavailable) as Arc<dyn CapabilitySource>;
+    for harness in ["opencode", "pi"] {
+        assert_eq!(
+            LatchedCapabilities::read(Some(&source), harness),
+            LatchedCapabilities::Unreadable("descriptor_absent"),
+            "{harness}"
+        );
+    }
+}
+
 /// A source whose answer a test can change after a route has bound.
 struct Mutable {
     answer: Mutex<ContextCapabilities>,
